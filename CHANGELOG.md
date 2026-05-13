@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5c.1 — Egress allowlist mount + router echo (DoD #2 wire)
+
+Wires the controller-published signed egress allowlist into the
+router's L7 enforcement via the same ConfigMap → mount → loader →
+`/internal/policy-status` echo pattern used by ClawMemory (Slice 3a).
+Also strips the decorative, unsigned in-memory mutable allowlist
+surface that had no audit trail and no signing.
+
+**Controller (producer):**
+- `controller/src/egress_allowlist_compile.rs` (new, ~245 lines) —
+  pure compiler from `EgressAllowlistSpec` → canonical JSON +
+  length-prefixed sha256 (`u64-BE(name.len()) || name || u64-BE(body.len()) || body`).
+  Hosts sorted by `(host,port)`, lowercased, dedup, port default 443.
+  Identical wire layout to ClawMemory binding. 12 unit tests.
+- `controller/src/reconciler/mod.rs` — publishes
+  `clawsandbox-{name}-egress-allowlist` ConfigMap, mirrors into
+  sandbox namespace, mounts at `/etc/azureclaw/egress/allowlist.json`,
+  sets `EGRESS_ALLOWLIST_DIR=/etc/azureclaw/egress` env, stamps
+  `azureclaw.azure.com/egress-allowlist-digest` annotation.
+
+**Router (consumer):**
+- `inference-router/src/egress_allowlist_loader.rs` (new, ~480 lines)
+  — `LoadedEgressAllowlist` handle, `load_and_install()` swaps the
+  shared `Blocklist` allowlist on `Loaded`, drains to empty on
+  `NoBinding`, leaves prior state intact on `Error` (transient
+  parse blip must not knock data plane offline). mtime poller
+  mirrors `memory_binding_loader`. ~12 tests.
+- `inference-router/src/blocklist.rs` — new `replace_allowlist`
+  taking `&[(host, port)]`. Atomically swaps the live allowlist.
+- `inference-router/src/main.rs` — watcher spawn parallel to
+  memory binding loader.
+- `inference-router/src/routes/mod.rs` — `AppState.egress_allowlist`
+  handle field; initial install at construction.
+- `PolicyKind::EgressAllowlist` echo on `/internal/policy-status`.
+
+**Decorative surface removal (no signing, no audit ⇒ deleted):**
+- `controller/src/crd.rs` — `NetworkPolicyConfig.approval_required`
+  field gone; `ClawSandboxStatus.pending_approvals` gone.
+- `controller/src/status/mod.rs` — `pendingApprovals` JSON literals
+  gone.
+- `controller/src/mesh_peer/offload.rs` — auto-minted CR no longer
+  sets `approvalRequired`.
+- Router: `/egress/approve|deny|pending|enforce` routes gone;
+  `pending_approvals`, `PendingApproval`, `allow_domain`,
+  `deny_domain`, `get_pending_approvals`, `record_proxy_block` gone
+  from `blocklist.rs`/`forward_proxy.rs`/`egress.rs`.
+- CLI: `cli/src/commands/operator/actions.ts` — `approveDomain` and
+  `denyDomain` removed; `enforceEgress` no longer POSTs to deleted
+  `/egress/enforce`, just CRD-patches.
+- CLI: `cli/src/commands/operator.ts` — `a` and `Shift-A` (approve)
+  key handlers gone; `d` simplified to delete-agent only.
+- CLI: `approvalRequired: true` removed from 7 producer call sites
+  (`add.ts`, `handoff.ts`, `up/sandbox_bringup.ts`,
+  `migrate/from_kagent.ts`, `dev/local-k8s.ts`, `add.test.ts`).
+- CLI panels: phantom `spec.approvalRequired` reads on ToolPolicy
+  removed from `datasource.ts`, `types.ts`, `layout.ts`,
+  `toolpolicy.ts`, `dialogs/agent_detail.ts`, `fixtures.ts` —
+  the field never existed in the ToolPolicy CRD schema (ToolPolicy
+  has per-rule `rules[].approval`, not `spec.approvalRequired`).
+- Headlamp: `pendingApprovals` removed from `OverviewMetrics`,
+  `computeMetrics`, Stat tile, Network Policy table.
+- Helm: `approvalRequired` schema block removed from
+  `crd.yaml`; status `pendingApprovals` removed.
+- Docs/examples: stale `approvalRequired: true` lines stripped from
+  9 example manifests, `docs/security-validation.md`, and
+  `docs/internal/competitive.md`.
+
+**Wire contract:**
+- File: `allowlist.json`, env: `EGRESS_ALLOWLIST_DIR`,
+  mount: `/etc/azureclaw/egress/`,
+  PolicyKind wire string: `"EgressAllowlist"`.
+- Schema: `{"schemaVersion":1,"endpoints":[{"host","port"}]}`.
+
+Verified: 863 router lib tests, 574 controller tests, 692 CLI tests,
+`cargo clippy --workspace --all-targets -D warnings` clean,
+`cargo fmt --check` clean, headlamp build clean.
+
 ### Slice 5f — security.md egress reframe (DoD #6)
 
 Slice 5 DoD #6 is *"docs/architecture.md, docs/security-model.md,

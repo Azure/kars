@@ -466,7 +466,6 @@ export function translate(
     if (endpoints.length > 0) {
       networkPolicy = {
         defaultDeny: true,
-        approvalRequired: true,
         allowedEndpoints: endpoints,
       };
     }

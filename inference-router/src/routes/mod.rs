@@ -141,6 +141,16 @@ pub struct AppState {
     /// no behaviour changes in the data plane (Slice 3b rewires the
     /// `foundry.memory.*` MCP tools through this handle).
     pub memory_binding: crate::memory_binding_loader::LoadedMemoryBindingHandle,
+    /// Slice 5c.1 — currently loaded egress allowlist bundle, if any.
+    /// Populated at startup by
+    /// `egress_allowlist_loader::load_and_install` reading the
+    /// `EGRESS_ALLOWLIST_DIR` mount written by the controller's
+    /// `reconciler::mod` ConfigMap publish path. The loader also
+    /// atomically refreshes `blocklist.allowlist` on every reload so
+    /// the L7 forward-proxy enforces the signed bundle in real time;
+    /// `None` means no bundle was loaded (mount missing or empty —
+    /// fail-closed: zero L7 egress).
+    pub egress_allowlist: crate::egress_allowlist_loader::LoadedEgressAllowlistHandle,
     /// Slice 2d.2 — per-deployment health cache backing the
     /// `modelPreference.fallback[]` failover walk in
     /// [`crate::failover::forward_with_failover`]. Shared across
@@ -280,6 +290,23 @@ impl AppState {
         )
         .await;
 
+        // Slice 5c.1: load the signed egress allowlist bundle. Doing
+        // it here (vs. main.rs only) means tests that construct
+        // `AppState` directly also see the bundle installed onto the
+        // shared `Blocklist`. main.rs additionally spawns the
+        // hot-reload watcher for production.
+        let egress_allowlist = crate::egress_allowlist_loader::empty_handle();
+        let egress_allowlist_dir = std::env::var("EGRESS_ALLOWLIST_DIR").unwrap_or_else(|_| {
+            crate::egress_allowlist_loader::EGRESS_ALLOWLIST_DIR_DEFAULT.into()
+        });
+        let _ = crate::egress_allowlist_loader::load_and_install(
+            &egress_allowlist_dir,
+            &policy_status,
+            &egress_allowlist,
+            &blocklist,
+        )
+        .await;
+
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
             copilot: Arc::new(CopilotTokenCache::from_env()),
@@ -312,6 +339,7 @@ impl AppState {
             policy_status,
             inference_policy,
             memory_binding,
+            egress_allowlist,
             deployment_health: Arc::new(crate::deployment_health::DeploymentHealthRegistry::new()),
         })
     }

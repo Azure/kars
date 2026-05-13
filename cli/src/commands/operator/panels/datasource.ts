@@ -148,7 +148,6 @@ export class KubectlDataSource implements ClusterDataSource {
           mandates: asBool(commerce.requireMandates),
           floorUsd: asNumber(commerce.floorUsd),
         },
-        approvalRequired: asBool(spec.approvalRequired),
         rateLimitPerMin: asNumber(rateLimit.perMinute),
         ruleCount: rules,
       };

@@ -75,6 +75,7 @@ fn test_state() -> AppState {
         policy_status,
         inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
         memory_binding: azureclaw_inference_router::memory_binding_loader::empty_handle(),
+        egress_allowlist: azureclaw_inference_router::egress_allowlist_loader::empty_handle(),
         deployment_health: std::sync::Arc::new(
             azureclaw_inference_router::deployment_health::DeploymentHealthRegistry::new(),
         ),

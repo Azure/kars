@@ -142,6 +142,29 @@ async fn main() -> Result<()> {
             state.policy_status.clone(),
             state.memory_binding.clone(),
         );
+
+        // Slice 5c.1: load the signed egress allowlist bundle once on
+        // startup so the in-memory `Blocklist` allowlist reflects the
+        // controller-published bytes before the forward proxy starts
+        // accepting connections. The watcher then keeps it in sync on
+        // every hot-reload (kubectl edit → ConfigMap mtime bump →
+        // atomic `Blocklist::replace_allowlist`).
+        let egress_dir = std::env::var("EGRESS_ALLOWLIST_DIR").unwrap_or_else(|_| {
+            azureclaw_inference_router::egress_allowlist_loader::EGRESS_ALLOWLIST_DIR_DEFAULT.into()
+        });
+        let _ = azureclaw_inference_router::egress_allowlist_loader::load_and_install(
+            &egress_dir,
+            &state.policy_status,
+            &state.egress_allowlist,
+            &state.blocklist,
+        )
+        .await;
+        azureclaw_inference_router::egress_allowlist_loader::spawn_egress_allowlist_watcher(
+            egress_dir,
+            state.policy_status.clone(),
+            state.egress_allowlist.clone(),
+            state.blocklist.clone(),
+        );
     }
 
     // Clone blocklist for the forward proxy before state is moved into the router.

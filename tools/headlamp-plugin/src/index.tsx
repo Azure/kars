@@ -286,7 +286,6 @@ interface OverviewMetrics {
   channelCounts: Record<string, number>;
   egressLearn: number;
   egressStrict: number;
-  pendingApprovals: number;
   governanceEnabled: number;
   totalRuntime: Record<string, number>;
 }
@@ -321,7 +320,6 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
     channelCounts: {},
     egressLearn: 0,
     egressStrict: 0,
-    pendingApprovals: 0,
     governanceEnabled: 0,
     totalRuntime: {},
   };
@@ -346,8 +344,6 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
     const isLearn = !np || (np.egressMode ?? "Learn") === "Learn";
     if (isLearn) m.egressLearn += 1;
     else m.egressStrict += 1;
-    const pending = Array.isArray(status.pendingApprovals) ? status.pendingApprovals.length : 0;
-    m.pendingApprovals += pending;
 
     if (spec.governance?.enabled) m.governanceEnabled += 1;
 
@@ -434,7 +430,6 @@ function Overview() {
           <Stat label="Total Sandboxes" value={total} />
           <Stat label="Ready" value={metrics.sandboxesByPhase.Ready ?? 0} tone="success" />
           <Stat label="Degraded" value={metrics.sandboxesByPhase.Degraded ?? 0} tone={metrics.sandboxesByPhase.Degraded ? "error" : ""} />
-          <Stat label="Pending Egress Approvals" value={metrics.pendingApprovals} tone={metrics.pendingApprovals ? "warning" : ""} />
           <Stat label="Governance ON" value={`${metrics.governanceEnabled} / ${total}`} />
           <Stat label="Egress: Learn / Strict" value={`${metrics.egressLearn} / ${metrics.egressStrict}`} />
         </div>
@@ -770,9 +765,6 @@ function SandboxExtras({ item }: { item: KubeObject }) {
   const np = npRaw ?? {};
   const isLearn = !npRaw || (np.egressMode ?? "Learn") === "Learn";
   const allowed: Array<{ host?: string; port?: number }> = Array.isArray(np.allowedEndpoints) ? np.allowedEndpoints : [];
-  const pendingApprovals: Array<{ domain?: string; reason?: string }> = Array.isArray(status.pendingApprovals)
-    ? status.pendingApprovals
-    : [];
 
   // Detect channels from secret keys (preferred) and from spec inline.
   const detectedChannels = new Set<string>(channelsFromSecret(credSecret ?? undefined));
@@ -799,10 +791,8 @@ function SandboxExtras({ item }: { item: KubeObject }) {
         <SimpleTable
           data={[
             { k: "Default Deny", v: String(np.defaultDeny ?? false) },
-            { k: "Approval Required", v: String(np.approvalRequired ?? false) },
             { k: "Learn Mode", v: isLearn ? <StatusLabel status="warning">LEARN</StatusLabel> : <StatusLabel status="success">STRICT</StatusLabel> },
             { k: "Allowed Endpoints", v: `${allowed.length}` },
-            { k: "Pending Approvals", v: pendingApprovals.length ? <StatusLabel status="warning">{pendingApprovals.length}</StatusLabel> : "0" },
           ]}
           columns={[
             { label: "Field", getter: (r: any) => r.k },
@@ -817,18 +807,6 @@ function SandboxExtras({ item }: { item: KubeObject }) {
               columns={[
                 { label: "Host", getter: (r: any) => r.host ?? "—" },
                 { label: "Port", getter: (r: any) => r.port ?? "—" },
-              ]}
-            />
-          </div>
-        )}
-        {pendingApprovals.length > 0 && (
-          <div style={{ marginTop: "1rem" }}>
-            <h4>Pending Approvals</h4>
-            <SimpleTable
-              data={pendingApprovals}
-              columns={[
-                { label: "Domain", getter: (r: any) => r.domain ?? "—" },
-                { label: "Reason", getter: (r: any) => r.reason ?? "—" },
               ]}
             />
           </div>

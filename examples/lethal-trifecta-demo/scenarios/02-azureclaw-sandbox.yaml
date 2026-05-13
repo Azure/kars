@@ -61,7 +61,6 @@ spec:
     name: realestate-agent-inference
   networkPolicy:
     defaultDeny: true
-    approvalRequired: true
     allowedEndpoints:
       # The lethal-trifecta lesson, in YAML:
       # the same host the naked-claw agent has wide-open is here

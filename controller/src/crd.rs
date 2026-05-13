@@ -762,8 +762,6 @@ impl Default for SandboxConfig {
 pub struct NetworkPolicyConfig {
     #[serde(default = "default_true")]
     pub default_deny: bool,
-    #[serde(default = "default_true")]
-    pub approval_required: bool,
     pub allowed_endpoints: Option<Vec<EndpointConfig>>,
     /// Egress enforcement mode. `Learn` (default) records every accessed
     /// domain into `BlockedBuffer` without denying; `Strict` denies anything
@@ -807,7 +805,6 @@ impl Default for NetworkPolicyConfig {
     fn default() -> Self {
         Self {
             default_deny: true,
-            approval_required: true,
             allowed_endpoints: None,
             egress_mode: EgressMode::default(),
             allowlist_ref: None,
@@ -996,7 +993,6 @@ pub struct ClawSandboxStatus {
     pub namespace: Option<String>,
     pub inference_endpoint: Option<String>,
     pub tokens_used: Option<TokensUsed>,
-    pub pending_approvals: Option<i32>,
     /// Foundry Agent ID created by the controller.
     pub foundry_agent_id: Option<String>,
     /// The runtime kind the controller observed for the current
@@ -1091,7 +1087,6 @@ mod tests {
     fn default_network_policy_denies_all() {
         let cfg = NetworkPolicyConfig::default();
         assert!(cfg.default_deny);
-        assert!(cfg.approval_required);
         assert!(cfg.allowed_endpoints.is_none());
         assert_eq!(cfg.egress_mode, EgressMode::Learn);
         assert!(cfg.allowlist_ref.is_none());
@@ -1222,7 +1217,6 @@ mod tests {
         assert!(status.namespace.is_none());
         assert!(status.inference_endpoint.is_none());
         assert!(status.tokens_used.is_none());
-        assert!(status.pending_approvals.is_none());
         assert!(status.foundry_agent_id.is_none());
         assert!(status.observed_generation.is_none());
         assert!(status.conditions.is_empty());

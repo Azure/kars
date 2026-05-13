@@ -370,7 +370,6 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       },
       networkPolicy: {
         defaultDeny: true,
-        approvalRequired: true,
         egressMode: "Learn",
       },
       governance: {

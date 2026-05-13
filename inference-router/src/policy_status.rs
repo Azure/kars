@@ -70,6 +70,19 @@ pub enum PolicyKind {
     /// read the store name + scope from this binding instead of the
     /// chart-fed `FOUNDRY_MEMORY_STORE_ID` env.
     Memory,
+    /// Compiled egress allowlist — single JSON file mounted at
+    /// `EGRESS_ALLOWLIST_DIR` (default `/etc/azureclaw/egress`).
+    /// Produced by the `ClawSandbox` reconciler (Slice 5c.1) from the
+    /// resolved `spec.networkPolicy.{allowlistRef,allowedEndpoints}`.
+    /// On every load the router atomically replaces
+    /// `Blocklist.allowlist` (the L7 hostname filter consulted by
+    /// `forward_proxy::handle_connect`) with the file's contents,
+    /// registers the digest here, and echoes it via
+    /// `/internal/policy-status`. Closes the §3 Ready ⇔ router-echo
+    /// loop for egress — the K8s `NetworkPolicy` (L4 ports) remains
+    /// as a defence-in-depth backstop, not the primary enforcement
+    /// point.
+    EgressAllowlist,
 }
 
 impl PolicyKind {
@@ -81,6 +94,7 @@ impl PolicyKind {
             PolicyKind::AgtProfile => "AgtProfile",
             PolicyKind::InferencePolicy => "InferencePolicy",
             PolicyKind::Memory => "Memory",
+            PolicyKind::EgressAllowlist => "EgressAllowlist",
         }
     }
 }
@@ -340,5 +354,14 @@ mod tests {
         let s = serde_json::to_string(&PolicyKind::AgtProfile).unwrap();
         assert_eq!(s, "\"AgtProfile\"");
         assert_eq!(PolicyKind::AgtProfile.as_str(), "AgtProfile");
+    }
+
+    #[test]
+    fn policy_kind_egress_allowlist_round_trips() {
+        // Slice 5c.1: controller's `find_digest("EgressAllowlist")`
+        // must match exactly what we serialize here.
+        let s = serde_json::to_string(&PolicyKind::EgressAllowlist).unwrap();
+        assert_eq!(s, "\"EgressAllowlist\"");
+        assert_eq!(PolicyKind::EgressAllowlist.as_str(), "EgressAllowlist");
     }
 }

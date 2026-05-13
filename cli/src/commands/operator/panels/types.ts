@@ -52,7 +52,6 @@ export interface McpServerItem extends CrdItem {
 export interface ToolPolicyItem extends CrdItem {
   appliesToSandbox?: string;
   commerce?: { mandates?: boolean; floorUsd?: number };
-  approvalRequired?: boolean;
   rateLimitPerMin?: number;
   ruleCount?: number;
 }

@@ -936,6 +936,77 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
+    // Slice 5c.1: publish the compiled egress allowlist as a
+    // ConfigMap in the sandbox namespace + stamp the digest as an
+    // annotation. The inference-router container mounts this CM at
+    // `/etc/azureclaw/egress/allowlist.json`; its
+    // `egress_allowlist_loader` reads the file, seeds
+    // `Blocklist.allowlist` (L7 hostname filter on `forward_proxy`),
+    // and echoes the digest under `PolicyKind::EgressAllowlist` via
+    // `GET /internal/policy-status`.
+    //
+    // Why this matters: prior to Slice 5c.1 the signed allowlist was
+    // ONLY wired into the K8s `NetworkPolicy` egress rules above —
+    // which gate L4 ports, not hostnames. The L7 hostname filter in
+    // the router (`Blocklist.check_egress`) was populated solely from
+    // the now-removed `POST /egress/approve` in-memory endpoint, so
+    // signed bundles had no L7 teeth. This block closes that gap.
+    //
+    // Fail-closed semantics: when `allowlist_resolution.endpoints` is
+    // `None` (verify failed and no LKG cache), we publish an EMPTY
+    // allowlist document. The router then rejects every egress
+    // attempt by hostname at L7, matching the L4 deny encoded above.
+    let egress_allowlist_cm_name = format!("clawsandbox-{}-egress-allowlist", name);
+    {
+        let endpoints_for_compile: Vec<crate::crd::EndpointConfig> = allowlist_resolution
+            .endpoints
+            .as_deref()
+            .unwrap_or(&[])
+            .to_vec();
+        let allowlist_doc = crate::egress_allowlist_compile::compile_to_doc(&endpoints_for_compile);
+        // Compact (no whitespace) so the bytes the router reads from
+        // the mount are byte-for-byte what the controller hashed.
+        let allowlist_body = serde_json::to_string(&allowlist_doc)?;
+        let allowlist_digest =
+            crate::egress_allowlist_compile::egress_allowlist_digest(allowlist_body.as_bytes());
+
+        let mut data: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        data.insert(
+            crate::egress_allowlist_compile::EGRESS_ALLOWLIST_FILENAME.into(),
+            allowlist_body,
+        );
+        let mut annotations: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        annotations.insert(
+            "azureclaw.azure.com/egress-allowlist-digest".into(),
+            allowlist_digest,
+        );
+        let allowlist_cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": egress_allowlist_cm_name,
+                "namespace": sandbox_ns,
+                "labels": {
+                    "app.kubernetes.io/managed-by": "azureclaw-controller",
+                    "azureclaw.azure.com/sandbox": name,
+                    "azureclaw.azure.com/artifact": "egress-allowlist",
+                },
+                "annotations": annotations,
+            },
+            "data": data,
+        }))?;
+        let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
+        cm_api
+            .patch(
+                &egress_allowlist_cm_name,
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                &Patch::Apply(&allowlist_cm),
+            )
+            .await?;
+    }
+
     // S12.e: if the allowlist resolved to fail-closed-no-LKG (verify
     // failed on first reconcile / after controller restart, no
     // last-known-good cached), stamp Degraded with FailedClosed and
@@ -1747,6 +1818,31 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             }
         }
+
+        // Slice 5c.1: egress allowlist mount. The ConfigMap was
+        // published earlier in this reconcile pass directly in the
+        // sandbox namespace (no cross-NS mirror — the data lives
+        // inline on the `ClawSandbox` CR, no separate producer CRD).
+        // Mount only on the inference-router container; the agent
+        // container (UID 1000) has no business reading it.
+        //
+        // The router's `egress_allowlist_loader` reads
+        // `${EGRESS_ALLOWLIST_DIR}/allowlist.json`, atomically
+        // replaces `Blocklist.allowlist` (the L7 hostname filter
+        // consulted by `forward_proxy::handle_connect`), and
+        // registers the digest under `PolicyKind::EgressAllowlist`
+        // on `/internal/policy-status`.
+        governance_mounts::inject_configmap_mount(
+            &mut pod_spec,
+            "inference-router",
+            &egress_allowlist_cm_name,
+            "egress-allowlist",
+            governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
+            Some((
+                "EGRESS_ALLOWLIST_DIR",
+                governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
+            )),
+        );
 
         // McpServer (optional, plural): for each entry in `mcpServerRefs`,
         // mirror its JWKS ConfigMap + signing-key Secret and mount them

@@ -80,7 +80,6 @@ function buildSandboxManifest(name: string, options: AddOptions) {
       },
       networkPolicy: {
         defaultDeny: true,
-        approvalRequired: true,
         allowedEndpoints: [
           { host: "github.com", port: 443 },
           { host: "api.github.com", port: 443 },
