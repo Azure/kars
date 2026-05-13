@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2-/3-hot-reload — InferencePolicy + ClawMemory loaders watch their mount dirs
+
+Closes the long-running gap where the InferencePolicy
+(`inference_policy_loader::load_and_install`) and ClawMemory
+(`memory_binding_loader::load_and_install`) loaders were one-shot at
+router startup. After the initial load, the file on disk could change
+(operator `kubectl edit`s the CR, controller recompiles and rewrites
+the ConfigMap, kubelet refreshes the projected mount) and the router
+would happily keep echoing the **first** digest forever — the
+controller-side `/internal/policy-status` echo loop would never close
+`Compiled → Ready` for any change after the first reconcile.
+
+What this PR adds:
+
+- `inference_policy_loader::spawn_inference_policy_watcher(dir, registry, handle)` —
+  background `tokio` task that polls `dir`'s max-mtime every
+  `INFERENCE_POLICY_WATCH_INTERVAL` seconds (default 5s) and re-invokes
+  `load_and_install` whenever a change is detected.
+- `memory_binding_loader::spawn_memory_binding_watcher(dir, registry, handle)` —
+  same shape; env knob `MEMORY_BINDING_WATCH_INTERVAL`. Closes
+  **Slice 3 DoD #4** ("kubectl edit rotates the digest; router
+  reloads within 5s") explicitly; **Slice 2 DoD #1** ("`Ready` after
+  router echo") implicitly (the echo loop now actually closes on
+  every change, not just the first).
+- `load_and_install` semantics tightened in both loaders:
+  - `Loaded` → handle overwritten with new value (unchanged).
+  - `NoBinding` / `NoPolicy` → handle **cleared**. Removing
+    `spec.memoryRef` / `spec.inferenceRef` from a `ClawSandbox` now
+    actually unbinds the in-memory state on the next tick (instead
+    of the router pretending the policy is still in effect until the
+    pod restarts).
+  - `Error` → handle **left intact**. A transient parse error during
+    a partial mount update must not knock the data plane offline; the
+    registry already captured the error so the echo loop notices the
+    digest is stale.
+- Both watchers wired in `main.rs` after `governance::spawn_policy_watcher`.
+  Best-effort: missing directory is fine (mount may appear later when
+  the operator adds the CR reference).
+- 5 new memory_binding_loader unit tests (clear-on-NoBinding,
+  preserve-prior-on-Error, two `dir_max_mtime` shape tests, and a
+  full watcher integration test that crank-runs the watcher with a
+  1s interval, mutates the file, and asserts the digest in the
+  handle rolls forward).
+- 779 router lib tests (+5 — the new mem-binding tests; the
+  inference_policy_loader changes are exercised by the same
+  watcher pattern and tested at integration level via the
+  policy-status echo route).
+
+No CR shape change. No new env vars required for production (5s
+default ticks at exactly the Slice 3 DoD SLO). Other watchers
+(`Governance::spawn_policy_watcher`) untouched.
+
 ### Slice 3b.5 — `MemoryStoreMissing` Degraded condition for ClawMemory
 
 When the upstream Foundry Memory Store returns HTTP 404 on a

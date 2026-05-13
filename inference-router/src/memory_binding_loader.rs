@@ -248,18 +248,110 @@ pub fn load_memory_binding_from_dir(
 }
 
 /// Load and install into the shared handle in one call. Used at
-/// router startup. Returns the outcome so the caller can log /
+/// router startup **and** by `spawn_memory_binding_watcher`'s
+/// mtime-poll loop. Returns the outcome so the caller can log /
 /// surface in metrics.
+///
+/// Handle-update semantics by outcome:
+/// - [`LoadOutcome::Loaded`] → handle is overwritten with the new
+///   binding. Slice 3b consumers see the rewired `store_name` /
+///   `scope` on the very next read-lock.
+/// - [`LoadOutcome::NoBinding`] → handle is **cleared**
+///   (`*handle = None`). This is what makes hot-reload work when an
+///   operator removes `spec.memoryRef` from a `ClawSandbox`: the
+///   sandbox reconciler unmounts the ConfigMap, the watcher sees an
+///   empty dir, and the router stops claiming a binding exists.
+/// - [`LoadOutcome::Error`] → handle is **left intact**. A transient
+///   parse error during a partial mount update (controller mid-write)
+///   must not knock the data plane offline; the registry already
+///   captured the error so the §3 echo loop notices the digest is
+///   stale.
 pub async fn load_and_install(
     dir: &str,
     policy_status: &PolicyStatusRegistry,
     handle: &LoadedMemoryBindingHandle,
 ) -> LoadOutcome {
     let outcome = load_memory_binding_from_dir(dir, policy_status);
-    if let LoadOutcome::Loaded(ref binding) = outcome {
-        *handle.write().await = Some(binding.clone());
+    match &outcome {
+        LoadOutcome::Loaded(binding) => {
+            *handle.write().await = Some(binding.clone());
+        }
+        LoadOutcome::NoBinding => {
+            *handle.write().await = None;
+        }
+        LoadOutcome::Error(_) => {}
     }
     outcome
+}
+
+/// Default poll interval for `spawn_memory_binding_watcher`. Slice 3
+/// DoD #4 ("router reloads; behaviour changes within 5s of kubectl
+/// edit") is the cap; the watcher itself contributes ≤ this value
+/// plus a single sync `fs::read_dir` + `read` (microsecond scale on a
+/// tmpfs ConfigMap mount).
+pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
+
+/// Env-var override for [`DEFAULT_WATCH_INTERVAL_SECS`]. Same shape
+/// as `AGT_POLICY_WATCH_INTERVAL` (whole seconds, defaults applied
+/// on parse failure).
+pub const WATCH_INTERVAL_ENV: &str = "MEMORY_BINDING_WATCH_INTERVAL";
+
+/// Spawn a background task that polls `dir`'s max-mtime every
+/// `MEMORY_BINDING_WATCH_INTERVAL` seconds (default 5s) and calls
+/// [`load_and_install`] whenever a change is detected. Mirrors the
+/// pattern in `governance::Governance::spawn_policy_watcher` and
+/// closes Slice 3 DoD item 4 (ClawMemory hot-reload).
+///
+/// The watcher is **best-effort**: it never panics, never propagates
+/// errors out of the task, and tolerates the directory not existing
+/// (e.g. sandbox boots before the ConfigMap is mirrored). When the
+/// mount appears later, the next tick reloads from scratch.
+pub fn spawn_memory_binding_watcher(
+    dir: String,
+    policy_status: Arc<PolicyStatusRegistry>,
+    handle: LoadedMemoryBindingHandle,
+) {
+    let interval_secs: u64 = std::env::var(WATCH_INTERVAL_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &u64| *v > 0)
+        .unwrap_or(DEFAULT_WATCH_INTERVAL_SECS);
+
+    tokio::spawn(async move {
+        let mut last_mtime = dir_max_mtime(&dir);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        ticker.tick().await; // skip the immediate first tick
+        loop {
+            ticker.tick().await;
+            let current = dir_max_mtime(&dir);
+            if current != last_mtime {
+                tracing::info!(
+                    target: "memory_binding_watcher",
+                    dir = %dir,
+                    "ClawMemory binding directory changed, reloading"
+                );
+                let _ = load_and_install(&dir, &policy_status, &handle).await;
+                last_mtime = current;
+            }
+        }
+    });
+}
+
+/// Get the max mtime across `*.json` files in `dir` (mirrors
+/// `governance::dir_max_mtime` but scoped to JSON since the
+/// controller publishes the binding as a single
+/// `binding.json`).
+fn dir_max_mtime(dir: &str) -> Option<std::time::SystemTime> {
+    let path = Path::new(dir);
+    if !path.is_dir() {
+        return None;
+    }
+    std::fs::read_dir(path)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .max()
 }
 
 #[cfg(test)]
@@ -437,5 +529,123 @@ mod tests {
         assert_eq!(binding.store_name, "");
         assert_eq!(binding.scope, "");
         assert!(binding.digest.starts_with("sha256:"));
+    }
+
+    /// Hot-reload semantics (Slice 3 DoD #4): when the file disappears
+    /// between reloads, `load_and_install` must clear the in-memory
+    /// handle so downstream consumers (Slice 3b's
+    /// `foundry.memory.{search,update}` rewire) stop returning the
+    /// stale `store_name`.
+    #[tokio::test]
+    async fn load_and_install_clears_handle_on_no_binding() {
+        let dir = tempdir().unwrap();
+        let body = br#"{"storeName":"alpha","scope":"agent:a"}"#;
+        std::fs::write(dir.path().join("binding.json"), body).unwrap();
+        let reg = PolicyStatusRegistry::new();
+        let handle = empty_handle();
+
+        let LoadOutcome::Loaded(_) =
+            load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await
+        else {
+            panic!("expected initial Loaded");
+        };
+        assert!(handle.read().await.is_some(), "handle must be populated");
+
+        std::fs::remove_file(dir.path().join("binding.json")).unwrap();
+        let outcome = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
+        assert!(matches!(outcome, LoadOutcome::NoBinding));
+        assert!(
+            handle.read().await.is_none(),
+            "handle must be cleared after the binding goes away"
+        );
+    }
+
+    /// Transient parse errors during a partial mount update must not
+    /// knock the data plane offline; the registry already captured
+    /// the error so the §3 echo loop notices the digest is stale.
+    #[tokio::test]
+    async fn load_and_install_preserves_prior_handle_on_error() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("binding.json"),
+            br#"{"storeName":"alpha","scope":"agent:a"}"#,
+        )
+        .unwrap();
+        let reg = PolicyStatusRegistry::new();
+        let handle = empty_handle();
+
+        let _ = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
+        let pre = handle.read().await.clone().expect("loaded once");
+
+        std::fs::write(dir.path().join("binding.json"), b"{not json").unwrap();
+        let outcome = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
+        assert!(matches!(outcome, LoadOutcome::Error(_)));
+        let post = handle.read().await.clone().expect("handle still populated");
+        assert_eq!(post.digest, pre.digest, "stale-but-live policy preserved");
+    }
+
+    #[test]
+    fn dir_max_mtime_returns_none_for_missing_dir() {
+        assert!(dir_max_mtime("/nonexistent/azureclaw/memory").is_none());
+    }
+
+    #[test]
+    fn dir_max_mtime_ignores_non_json_files() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.txt"), b"x").unwrap();
+        assert!(dir_max_mtime(dir.path().to_str().unwrap()).is_none());
+        std::fs::write(dir.path().join("binding.json"), b"{}").unwrap();
+        assert!(dir_max_mtime(dir.path().to_str().unwrap()).is_some());
+    }
+
+    /// Black-box smoke test for `spawn_memory_binding_watcher`. We
+    /// can't deterministically race the 5s default ticker in a unit
+    /// test, so this test crank-runs the watcher with a 1s interval
+    /// (env override) and waits 2.5s after touching the file. The
+    /// goal is detect-and-reload, not microsecond timing.
+    #[tokio::test]
+    async fn watcher_reloads_on_mtime_change() {
+        let dir = tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap().to_string();
+        std::fs::write(
+            dir.path().join("binding.json"),
+            br#"{"storeName":"v1","scope":"agent:a"}"#,
+        )
+        .unwrap();
+        let reg = PolicyStatusRegistry::new();
+        let handle = empty_handle();
+        let _ = load_and_install(&dir_path, &reg, &handle).await;
+        let digest_v1 = handle.read().await.as_ref().unwrap().digest.clone();
+
+        // Safety: tests run sequentially within this module; setting
+        // a process-wide env var is fine because no other test in
+        // this file reads it.
+        // SAFETY: see comment above — single-threaded test scope.
+        unsafe {
+            std::env::set_var(WATCH_INTERVAL_ENV, "1");
+        }
+        spawn_memory_binding_watcher(dir_path.clone(), Arc::new(reg), handle.clone());
+        unsafe {
+            std::env::remove_var(WATCH_INTERVAL_ENV);
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        // Re-create the file with new content. tmpfs mtime resolution
+        // is typically 1ms but the >1s sleep above guarantees the
+        // mtime moves forward observably.
+        std::fs::write(
+            dir.path().join("binding.json"),
+            br#"{"storeName":"v2","scope":"agent:a"}"#,
+        )
+        .unwrap();
+
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let current = handle.read().await.as_ref().unwrap().digest.clone();
+            if current != digest_v1 {
+                return; // success — watcher detected the change
+            }
+        }
+        panic!("watcher never picked up the mtime change");
     }
 }

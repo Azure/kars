@@ -360,18 +360,98 @@ pub fn load_inference_policy_from_dir(
 }
 
 /// Load and install into the shared handle in one call. Used at
-/// router startup. Returns the outcome so the caller can log /
-/// surface in metrics.
+/// router startup **and** by `spawn_inference_policy_watcher`'s
+/// mtime-poll loop (Slice 2 hot-reload). Handle-update semantics
+/// mirror `memory_binding_loader::load_and_install`:
+///
+/// - [`LoadOutcome::Loaded`] → handle overwritten with new policy.
+/// - [`LoadOutcome::NoBinding`] → handle cleared. Restores the
+///   chart-fed `BUDGET_PER_REQUEST_TOKENS` / env-driven content
+///   safety paths the second the operator removes the
+///   `InferencePolicy` reference from a `ClawSandbox`.
+/// - [`LoadOutcome::Error`] → handle left intact. The registry
+///   already recorded the parse error and the controller's echo
+///   loop will catch the stale digest; we refuse to knock the
+///   data plane offline on a transient mid-write read.
 pub async fn load_and_install(
     dir: &str,
     policy_status: &PolicyStatusRegistry,
     handle: &LoadedInferencePolicyHandle,
 ) -> LoadOutcome {
     let outcome = load_inference_policy_from_dir(dir, policy_status);
-    if let LoadOutcome::Loaded(ref policy) = outcome {
-        *handle.write().await = Some(policy.clone());
+    match &outcome {
+        LoadOutcome::Loaded(policy) => {
+            *handle.write().await = Some(policy.clone());
+        }
+        LoadOutcome::NoPolicy => {
+            *handle.write().await = None;
+        }
+        LoadOutcome::Error(_) => {}
     }
     outcome
+}
+
+/// Default poll interval for `spawn_inference_policy_watcher`.
+/// Matches `memory_binding_loader::DEFAULT_WATCH_INTERVAL_SECS` so
+/// operators see the same "edit-takes-effect-within-5s" SLO across
+/// every router-enforced CRD.
+pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
+
+/// Env-var override for [`DEFAULT_WATCH_INTERVAL_SECS`].
+pub const WATCH_INTERVAL_ENV: &str = "INFERENCE_POLICY_WATCH_INTERVAL";
+
+/// Spawn a background task that polls `dir`'s max-mtime every
+/// `INFERENCE_POLICY_WATCH_INTERVAL` seconds (default 5s) and calls
+/// [`load_and_install`] whenever a change is detected. Mirrors the
+/// `governance::Governance::spawn_policy_watcher` and
+/// `memory_binding_loader::spawn_memory_binding_watcher` patterns —
+/// closes the long-running gap where `InferencePolicy` reconciler
+/// would happily compile a new digest but the router's loader was
+/// one-shot at startup and never re-read.
+pub fn spawn_inference_policy_watcher(
+    dir: String,
+    policy_status: Arc<PolicyStatusRegistry>,
+    handle: LoadedInferencePolicyHandle,
+) {
+    let interval_secs: u64 = std::env::var(WATCH_INTERVAL_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &u64| *v > 0)
+        .unwrap_or(DEFAULT_WATCH_INTERVAL_SECS);
+
+    tokio::spawn(async move {
+        let mut last_mtime = dir_max_mtime(&dir);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        ticker.tick().await; // skip the immediate first tick
+        loop {
+            ticker.tick().await;
+            let current = dir_max_mtime(&dir);
+            if current != last_mtime {
+                tracing::info!(
+                    target: "inference_policy_watcher",
+                    dir = %dir,
+                    "InferencePolicy directory changed, reloading"
+                );
+                let _ = load_and_install(&dir, &policy_status, &handle).await;
+                last_mtime = current;
+            }
+        }
+    });
+}
+
+/// Get the max mtime across `*.json` files in `dir`. Filter mirrors
+/// the controller-side compile output (`inference-policy.json`).
+fn dir_max_mtime(dir: &str) -> Option<std::time::SystemTime> {
+    let path = Path::new(dir);
+    if !path.is_dir() {
+        return None;
+    }
+    std::fs::read_dir(path)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .max()
 }
 
 /// **Latency-optimised snapshot** of every enforcement axis the
