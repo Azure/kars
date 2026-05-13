@@ -633,6 +633,14 @@ pub async fn collect_sub_agent_snapshots(
 /// `spec.inference`, `governance.toolPolicy: <string>`,
 /// top-level `spec.handoff`/`spec.model` — all rejected by
 /// `additionalProperties: false` at admission).
+///
+/// **No-inherit invariant (Slice 3a/3b)**: the parent's
+/// `spec.memoryRef` is deliberately NOT propagated onto the spawned
+/// sub-agent. ClawMemory bindings are scoped to the agent that
+/// declared them and must not flow through `handoff` or `spawn`. The
+/// contract test `sub_agent_crd_never_inherits_memory_ref` asserts
+/// this by construction — if a future caller adds a `memory_ref`
+/// field to `SpawnRequest`, the test fails before the CRD ships.
 pub(crate) fn build_sub_agent_crd(
     parent_name: &str,
     namespace: &str,
@@ -890,5 +898,46 @@ mod tests {
         // Legacy must still be absent.
         assert!(crd["spec"].get("handoff").is_none());
         assert!(crd["spec"].get("model").is_none());
+    }
+
+    #[test]
+    fn sub_agent_crd_never_inherits_memory_ref() {
+        // No-inherit invariant for ClawMemory (Slice 3a/3b):
+        // a parent's compiled memory binding must NEVER flow through
+        // sub-agent spawn or handoff. The builder takes no
+        // `memory_ref` input from `SpawnRequest`, and `spec.memoryRef`
+        // must be absent on the built CRD — period. This test pins
+        // the invariant so a future field addition can't silently
+        // break it.
+        //
+        // Both the regular spawn path and the handoff path are
+        // exercised.
+        for handoff in [None, Some("predecessor-x")] {
+            let mut req = minimal_req("child");
+            if let Some(predecessor) = handoff {
+                req.handoff = Some(HandoffMeta {
+                    mode: "restore".into(),
+                    predecessor: Some(predecessor.into()),
+                });
+            }
+            let crd = build_sub_agent_crd(
+                "parent-with-memory",
+                "azureclaw-parent",
+                "default",
+                "gpt-5.4",
+                &req,
+            );
+            assert!(
+                crd["spec"].get("memoryRef").is_none(),
+                "spec.memoryRef leaked into spawned sub-agent CRD (handoff={handoff:?}); \
+                 ClawMemory bindings must not inherit (Slice 3a no-inherit rule)"
+            );
+            // Belt-and-suspenders: governance block must also not
+            // carry a memoryRef.
+            assert!(
+                crd["spec"]["governance"].get("memoryRef").is_none(),
+                "memoryRef snuck into spec.governance — same Slice 3a invariant applies"
+            );
+        }
     }
 }

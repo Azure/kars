@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 3b.2 — ClawMemory no-inherit invariant for sub-agent spawn
+
+Pins the design rule that ClawMemory bindings are scoped to the agent
+that declared them: a parent's `spec.memoryRef` MUST NOT propagate
+onto sub-agents created via `inference-router/src/spawn` (regular
+spawn or handoff). Today this holds by construction — `SpawnRequest`
+has no `memory_ref` field and `build_sub_agent_crd` writes no
+`spec.memoryRef` key — but it was an implicit invariant. This slice
+makes it explicit:
+
+- Doc comment above `build_sub_agent_crd` calls out the no-inherit
+  rule and points at the test that enforces it.
+- New test `sub_agent_crd_never_inherits_memory_ref` exercises both
+  the regular spawn path and the handoff path and asserts that
+  `spec.memoryRef` and `spec.governance.memoryRef` are absent on the
+  built CRD. A future field addition can't silently break the
+  invariant.
+
+No producer/consumer behaviour change. Pure invariant-pinning slice.
+
 ### Slice 3b.1 — ClawMemory operator UX (inspect CLI + Headlamp panel)
 
 Operator-facing surface for the §3 echo loop closed in Slice 3a. The
