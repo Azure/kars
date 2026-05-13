@@ -32,7 +32,7 @@
 
 use anyhow::Result;
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{
     Client, ResourceExt,
@@ -44,12 +44,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::crd::ClawSandbox;
 use crate::status::conditions::{self, reason, status as cond_status};
 use crate::status::phase::{PHASE_COMPILED, PHASE_DEGRADED, PHASE_READY, PhaseEventReporter};
-use crate::status::router_confirmation::{
-    self, ConfirmError, fetch_router_policy_status, router_admin_url,
-};
+use crate::status::router_confirmation::{self, ConfirmError};
+use crate::status::router_confirmation_io::{list_sandboxes_matching, poll_referencing_sandboxes};
 use crate::tool_policy::{ToolPolicy, ToolPolicyStatus};
 use crate::tool_policy_compile::{
     AGT_PROFILE_FILENAME, agt_profile_digest, compile_to_profile, version_hash,
@@ -204,95 +202,6 @@ fn decide_enforcement_state(
     }
 }
 
-/// List `ClawSandbox`es in `ns` whose `spec.governance.toolPolicyRef.name`
-/// equals `tool_policy_name`. Returns the bare sandbox names — the
-/// controller convention is one router-service per sandbox at
-/// `{name}.azureclaw-{name}.svc.cluster.local:8443`, so the namespace
-/// of the *router* is `azureclaw-<name>`, not `ns`.
-async fn list_referencing_sandboxes(
-    client: &Client,
-    ns: &str,
-    tool_policy_name: &str,
-) -> Result<Vec<String>, kube::Error> {
-    let api: Api<ClawSandbox> = Api::namespaced(client.clone(), ns);
-    let list = api.list(&ListParams::default()).await?;
-    Ok(list
-        .items
-        .into_iter()
-        .filter(|cs| {
-            cs.spec
-                .governance
-                .as_ref()
-                .map(|g| g.tool_policy_ref.name == tool_policy_name)
-                .unwrap_or(false)
-        })
-        .map(|cs| cs.name_any())
-        .collect())
-}
-
-/// Read the per-sandbox admin token from `Secret
-/// azureclaw-<sandbox>/router-admin-token`. Returns `Ok(None)` when
-/// the secret or key is not yet present — the reconciler treats
-/// that as a transient awaiting-router condition rather than a hard
-/// failure (the sandbox reconciler may not yet have completed its
-/// first pass).
-async fn read_admin_token(client: &Client, sandbox: &str) -> Result<Option<String>, kube::Error> {
-    let secret_ns = format!("azureclaw-{sandbox}");
-    let api: Api<Secret> = Api::namespaced(client.clone(), &secret_ns);
-    let secret = match api.get_opt("router-admin-token").await? {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    Ok(secret
-        .data
-        .as_ref()
-        .and_then(|d| d.get("token"))
-        .and_then(|v| String::from_utf8(v.0.clone()).ok())
-        .filter(|t| !t.is_empty()))
-}
-
-/// Poll every referencing sandbox's router and assemble the per-
-/// sandbox outcome list consumed by [`decide_enforcement_state`].
-///
-/// A sandbox whose admin-token Secret is not yet provisioned counts
-/// as a poll failure with [`ConfirmError::HttpStatus`]`(0)` —
-/// surfaces in the Awaiting message so operators can see *why* the
-/// confirmation hasn't happened.
-async fn poll_referencing_sandboxes(
-    client: &Client,
-    http: &reqwest::Client,
-    sandboxes: &[String],
-) -> Vec<(
-    String,
-    Result<router_confirmation::PolicyStatusResponse, ConfirmError>,
-)> {
-    let mut out = Vec::with_capacity(sandboxes.len());
-    for sandbox in sandboxes {
-        let token = match read_admin_token(client, sandbox).await {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                // Sentinel: 0 means "no token yet" → distinguishable
-                // from real 401/503 in operator logs.
-                out.push((sandbox.clone(), Err(ConfirmError::HttpStatus(0))));
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    sandbox = %sandbox,
-                    error = %e,
-                    "router-admin-token Secret read failed"
-                );
-                out.push((sandbox.clone(), Err(ConfirmError::HttpStatus(0))));
-                continue;
-            }
-        };
-        let url = router_admin_url(sandbox);
-        let r = fetch_router_policy_status(http, &url, &token).await;
-        out.push((sandbox.clone(), r));
-    }
-    out
-}
-
 async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
     let name = tp.name_any();
     let ns = tp.namespace().unwrap_or_else(|| "default".into());
@@ -405,7 +314,14 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     } else {
         match (agt_profile_inline, agt_digest.as_deref()) {
             (Some(_), Some(expected)) => {
-                let referrers = match list_referencing_sandboxes(&ctx.client, &ns, &name).await {
+                let referrers = match list_sandboxes_matching(&ctx.client, &ns, |cs| {
+                    cs.spec
+                        .governance
+                        .as_ref()
+                        .is_some_and(|g| g.tool_policy_ref.name == name)
+                })
+                .await
+                {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(

@@ -77,27 +77,57 @@ pub struct PolicyStatusEntry {
 }
 
 impl PolicyStatusResponse {
+    /// Return the `digest` from the entry whose `kind` matches
+    /// `kind`, if present. Returns `None` when:
+    /// * the response has no entry of that kind (router has not
+    ///   loaded a policy of this kind yet);
+    /// * the entry has `digest: None` (load failed mid-flight, error
+    ///   in `last_error`).
+    ///
+    /// Each `PolicyKind` variant on the router side has a fixed
+    /// string name (`"AgtProfile"`, `"InferencePolicy"`,
+    /// `"ClawMemory"`, …); see `inference-router/src/policy_status.rs`
+    /// for the canonical list. Reconcilers should pass that exact
+    /// string.
+    pub fn find_digest(&self, kind: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|e| e.kind == kind)
+            .and_then(|e| e.digest.as_deref())
+    }
+
+    /// Return the `last_error` from the entry whose `kind` matches
+    /// `kind`, if any. Used by reconcilers to surface a router-side
+    /// parse failure as the Ready=False message instead of a generic
+    /// timeout.
+    pub fn find_last_error(&self, kind: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|e| e.kind == kind)
+            .and_then(|e| e.last_error.as_deref())
+    }
+
     /// Return the `digest` from the `AgtProfile` entry, if present.
     /// Returns `None` when:
     /// * the response has no `AgtProfile` entry (router has not loaded
     ///   any policy yet);
     /// * the entry has `digest: None` (load failed mid-flight, error
     ///   in `last_error`).
+    ///
+    /// Thin wrapper over [`Self::find_digest`] kept for callsite
+    /// readability; new callsites can use `find_digest("AgtProfile")`
+    /// directly.
     pub fn agt_profile_digest(&self) -> Option<&str> {
-        self.entries
-            .iter()
-            .find(|e| e.kind == "AgtProfile")
-            .and_then(|e| e.digest.as_deref())
+        self.find_digest("AgtProfile")
     }
 
     /// Return the `last_error` from the `AgtProfile` entry, if any.
     /// Used by the reconciler to surface a router-side parse failure
     /// as the Ready=False message instead of a generic timeout.
+    ///
+    /// Thin wrapper over [`Self::find_last_error`].
     pub fn agt_profile_last_error(&self) -> Option<&str> {
-        self.entries
-            .iter()
-            .find(|e| e.kind == "AgtProfile")
-            .and_then(|e| e.last_error.as_deref())
+        self.find_last_error("AgtProfile")
     }
 }
 
@@ -244,6 +274,89 @@ mod tests {
         assert_eq!(
             resp.agt_profile_last_error(),
             Some("parse error: unexpected mapping at line 4")
+        );
+    }
+
+    #[test]
+    fn find_digest_generalizes_over_kind() {
+        let resp: PolicyStatusResponse = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "count": 2,
+            "entries": [
+                {
+                    "kind": "AgtProfile",
+                    "digest": "sha256:aaa",
+                    "source_path": "/etc/agt/policies",
+                    "loaded_at": "2026-05-13T09:00:00.000Z",
+                    "last_error": null
+                },
+                {
+                    "kind": "InferencePolicy",
+                    "digest": "sha256:bbb",
+                    "source_path": "/etc/inference/policies",
+                    "loaded_at": "2026-05-13T09:00:01.000Z",
+                    "last_error": null
+                }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(resp.find_digest("AgtProfile"), Some("sha256:aaa"));
+        assert_eq!(resp.find_digest("InferencePolicy"), Some("sha256:bbb"));
+        assert_eq!(resp.find_digest("Nonexistent"), None);
+    }
+
+    #[test]
+    fn find_last_error_isolates_per_kind() {
+        let resp: PolicyStatusResponse = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "count": 2,
+            "entries": [
+                {
+                    "kind": "AgtProfile",
+                    "digest": "sha256:aaa",
+                    "source_path": "/etc/agt/policies",
+                    "loaded_at": "2026-05-13T09:00:00.000Z",
+                    "last_error": null
+                },
+                {
+                    "kind": "InferencePolicy",
+                    "digest": null,
+                    "source_path": "/etc/inference/policies",
+                    "loaded_at": "2026-05-13T09:00:01.000Z",
+                    "last_error": "schema mismatch on v2"
+                }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(resp.find_last_error("AgtProfile"), None);
+        assert_eq!(
+            resp.find_last_error("InferencePolicy"),
+            Some("schema mismatch on v2")
+        );
+    }
+
+    #[test]
+    fn agt_profile_helpers_delegate_to_find_digest() {
+        // Belt-and-braces: the wrappers must agree with the generic
+        // method for the AgtProfile kind on the same payload. If they
+        // diverge, a future refactor that touches one but not the
+        // other will be caught here.
+        let resp: PolicyStatusResponse = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "count": 1,
+            "entries": [{
+                "kind": "AgtProfile",
+                "digest": "sha256:deadbeef",
+                "source_path": "/etc/agt/policies",
+                "loaded_at": "2026-05-13T09:00:00.000Z",
+                "last_error": null
+            }]
+        }))
+        .unwrap();
+        assert_eq!(resp.agt_profile_digest(), resp.find_digest("AgtProfile"));
+        assert_eq!(
+            resp.agt_profile_last_error(),
+            resp.find_last_error("AgtProfile")
         );
     }
 

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2 prep — shared router-confirmation helper extracted
+
+Pre-refactor to unblock Slice 2 (InferencePolicy) and later
+consumers (ClawMemory, McpServer fleet). The k8s I/O helpers
+that drive the "Ready ⇔ router echo" loop were inlined in
+`controller/src/tool_policy_reconciler.rs` after Slice 1c; they
+now live in a shared module so the next reconciler doesn't
+have to duplicate them.
+
+- New `controller/src/status/router_confirmation_io.rs` module:
+  - `list_sandboxes_matching(client, ns, |cs| …)` — generic
+    discovery helper; the caller supplies the
+    `FnMut(&ClawSandbox) -> bool` predicate so each CRD can
+    bind to its own ref field (`spec.governance.toolPolicyRef`,
+    `spec.inferenceRef`, etc.) without baking a CRD-kind enum
+    into the helper. Replaces the ToolPolicy-only
+    `list_referencing_sandboxes` from Slice 1c.
+  - `read_admin_token(client, sandbox)` — verbatim move; reads
+    `Secret azureclaw-<sandbox>/router-admin-token` key
+    `token`. Now reusable from any reconciler.
+  - `poll_referencing_sandboxes(client, http, sandboxes)` —
+    verbatim move; same `Err(ConfirmError::HttpStatus(0))`
+    sentinel for "token Secret not yet present".
+- `PolicyStatusResponse` gains generic
+  `find_digest(&self, kind: &str)` and
+  `find_last_error(&self, kind: &str)` methods. The existing
+  `agt_profile_digest()` / `agt_profile_last_error()` are now
+  one-line wrappers — back-compat preserved, but new
+  reconcilers (InferencePolicy etc.) call `find_digest("…")`
+  with their own `PolicyKind` string. Cross-checked with a
+  belt-and-braces "wrappers must agree with generic method"
+  test so a future refactor that touches one branch but not
+  the other is caught immediately.
+- `tool_policy_reconciler.rs` now imports from the shared
+  module; the three inline functions (~80 LOC) are deleted,
+  not duplicated.
+- Net effect: one production callsite swap, four net-new
+  unit tests, zero behavior change. 522 controller tests
+  pass (+4 from the previous 518), clippy `-D warnings`
+  clean, helm_drift green.
+
 ### Slice 1c — ToolPolicy router-confirmation poller (closes the loop)
 
 Closes the consumer half of the principles.md §3 invariant for
