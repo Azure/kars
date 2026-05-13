@@ -339,7 +339,7 @@ async fn main() -> Result<()> {
             .merge(handoff_mutations)
             .merge(handoff_status)
             .with_state(state)
-            .merge(build_mcp_router())
+            .merge(build_mcp_router().await)
             .merge(build_platform_mcp_router(
                 Some(memory_binding_for_platform),
                 Some(policy_status_for_platform),
@@ -485,9 +485,11 @@ async fn main() -> Result<()> {
 /// falling back to the unauthenticated dev route. Operators see a clear
 /// startup-time error instead of a route that quietly serves
 /// unauthenticated MCP traffic.
-fn build_mcp_router() -> Router {
+async fn build_mcp_router() -> Router {
+    use azureclaw_inference_router::mcp::forwarder::RouterToolDispatcher;
     use azureclaw_inference_router::mcp::oauth::OAuthVerifierConfig;
     use azureclaw_inference_router::mcp::registry;
+    use std::time::Duration;
 
     let production = std::env::var("MCP_PRODUCTION_MODE")
         .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
@@ -495,45 +497,85 @@ fn build_mcp_router() -> Router {
     let jwks_path = std::env::var("MCP_JWKS_PATH").ok();
     let audience = std::env::var("MCP_OAUTH_AUDIENCE").ok();
 
-    let state = routes::McpRouteState::standard();
+    let registry_arc = Arc::new(registry::discover_from_env());
+
+    // Slice 4d.4 — when the registry advertises at least one server
+    // with a usable upstream URL, replace the in-tree EchoDispatcher
+    // with the namespaced forwarder. Discovery is best-effort: per-
+    // server failures are recorded and logged, the router still
+    // starts. If *catalog construction* itself fails (duplicate
+    // namespaced tool names across servers) we honor §3 and refuse
+    // to mount /mcp.
+    let dispatcher_arc: Option<
+        Arc<dyn azureclaw_inference_router::mcp::tools::AsyncToolDispatcher>,
+    > = if !registry_arc.is_empty() {
+        let timeout = std::env::var("MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5);
+        match RouterToolDispatcher::discover(registry_arc.clone(), Duration::from_secs(timeout))
+            .await
+        {
+            Ok(dispatcher) => {
+                tracing::info!(
+                    servers = registry_arc.len(),
+                    tools = dispatcher.len(),
+                    skipped = dispatcher.skipped().len(),
+                    "Mounted /mcp upstream forwarder (Slice 4d.4)"
+                );
+                for (server, reason) in dispatcher.skipped() {
+                    tracing::warn!(server = %server, reason = %reason, "McpServer skipped by forwarder");
+                }
+                Some(Arc::new(dispatcher))
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Forwarder catalog construction failed; refusing to mount /mcp");
+                return Router::new();
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut state = routes::McpRouteState::standard();
+    if let Some(d) = dispatcher_arc {
+        state = state.with_tools(d);
+    }
 
     // Slice 4d.3 — prefer the multi-issuer path when MCP_JWKS_DIR is
     // populated and at least one server contributes `meta.json`. Falls
     // back to legacy single-JWKS path on empty/absent registry.
-    if production {
-        let registry = registry::discover_from_env();
-        if !registry.is_empty() {
-            let default_audience = audience.clone().unwrap_or_default();
-            let required_scopes = std::env::var("MCP_OAUTH_REQUIRED_SCOPES")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
-                .unwrap_or_default();
-            match OAuthVerifierConfig::from_registry(
-                &registry,
-                &default_audience,
-                required_scopes,
-                60,
-            ) {
-                Ok(Some(cfg)) => {
-                    let issuers: Vec<&String> = cfg.trusted_issuers.keys().collect();
-                    tracing::info!(
-                        servers = registry.len(),
-                        issuers = ?issuers,
-                        "Mounting /mcp with multi-issuer OAuth 2.1 verification (Slice 4d.3)"
-                    );
-                    return routes::protected_mcp_route(state, Arc::new(cfg));
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        "MCP_JWKS_DIR populated but no servers carry meta.json — \
-                         falling back to legacy single-issuer MCP_JWKS_PATH path"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Multi-issuer OAuth config build failed; refusing to mount /mcp");
-                    return Router::new();
-                }
+    if production && !registry_arc.is_empty() {
+        let default_audience = audience.clone().unwrap_or_default();
+        let required_scopes = std::env::var("MCP_OAUTH_REQUIRED_SCOPES")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
+            .unwrap_or_default();
+        match OAuthVerifierConfig::from_registry(
+            &registry_arc,
+            &default_audience,
+            required_scopes,
+            60,
+        ) {
+            Ok(Some(cfg)) => {
+                let issuers: Vec<&String> = cfg.trusted_issuers.keys().collect();
+                tracing::info!(
+                    servers = registry_arc.len(),
+                    issuers = ?issuers,
+                    "Mounting /mcp with multi-issuer OAuth 2.1 verification (Slice 4d.3)"
+                );
+                return routes::protected_mcp_route(state, Arc::new(cfg));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "MCP_JWKS_DIR populated but no servers carry meta.json — \
+                     falling back to legacy single-issuer MCP_JWKS_PATH path"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Multi-issuer OAuth config build failed; refusing to mount /mcp");
+                return Router::new();
             }
         }
     }

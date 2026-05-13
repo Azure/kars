@@ -70,14 +70,23 @@ pub struct McpRouteState {
 impl McpRouteState {
     /// Default production state: stock `InitializeConfig`, `OsRng`
     /// session ids, in-tree `EchoDispatcher` (real ping/echo tool).
-    /// Real upstream tools land via a future `RouterToolDispatcher`
-    /// implementation that proxies into `McpServer` CRs.
+    ///
+    /// Slice 4d.4 replaces this dispatcher with [`crate::mcp::forwarder::RouterToolDispatcher`]
+    /// at mount time when the registry advertises at least one usable
+    /// `McpServer.spec.url`; see [`with_tools`].
     pub fn standard() -> Self {
         Self {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
             tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
         }
+    }
+
+    /// Swap the dispatcher (used by Slice 4d.4 to mount the
+    /// namespaced upstream forwarder when the registry is non-empty).
+    pub fn with_tools(mut self, tools: Arc<dyn AsyncToolDispatcher>) -> Self {
+        self.tools = tools;
+        self
     }
 
     /// State for the **platform MCP server** mounted at `/platform/mcp`.
