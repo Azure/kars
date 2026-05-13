@@ -88,11 +88,22 @@ impl McpRouteState {
     /// runtime adapter (OpenClaw, OpenAI Agents Python, Microsoft
     /// Agent Framework, BYO) discovers them through one MCP endpoint.
     /// See `mcp/platform.rs` and `plan.md` S10.B.
-    pub fn platform() -> Self {
+    ///
+    /// Slice 3b.3: takes an optional ClawMemory binding handle so the
+    /// dispatcher's `foundry.memory` calls can prefer the CRD-driven
+    /// `store_name` over the chart-fed env. `None` keeps the legacy
+    /// env-only behaviour (for sandboxes without `spec.memoryRef`).
+    pub fn platform(
+        memory_binding: Option<crate::memory_binding_loader::LoadedMemoryBindingHandle>,
+    ) -> Self {
+        let mut dispatcher = crate::mcp::PlatformDispatcher::standard();
+        if let Some(handle) = memory_binding {
+            dispatcher = dispatcher.with_memory_binding(handle);
+        }
         Self {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
-            tools: Arc::new(crate::mcp::PlatformDispatcher::standard()),
+            tools: Arc::new(dispatcher),
         }
     }
 }
@@ -435,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn platform_state_publishes_nine_foundry_tools() {
-        let s = McpRouteState::platform();
+        let s = McpRouteState::platform(None);
         assert_eq!(
             s.tools.catalog().tools().len(),
             9,

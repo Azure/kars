@@ -277,6 +277,16 @@ pub struct PlatformDispatcher {
     base_url: String,
     sandbox_name: String,
     memory_store_id: String,
+    /// Slice 3b.3: optional handle into the ClawMemory binding loaded
+    /// by `memory_binding_loader`. When `Some` and the handle resolves
+    /// to a binding with a non-empty `store_name`, that value wins
+    /// over the chart-fed `FOUNDRY_MEMORY_STORE_ID` env (i.e. CRD
+    /// trumps env). When `None`, or when the binding is missing/empty
+    /// (mount absent, parse failed), we fall back to
+    /// `memory_store_id`. This is the consumer that closes the Slice
+    /// 3a `MEMORY_STORE_ID` deferred work without changing any other
+    /// behaviour — non-`foundry.memory` tools are unaffected.
+    memory_binding: Option<crate::memory_binding_loader::LoadedMemoryBindingHandle>,
     http: reqwest::Client,
 }
 
@@ -303,6 +313,7 @@ impl PlatformDispatcher {
             base_url,
             sandbox_name,
             memory_store_id,
+            memory_binding: None,
             http,
         }
     }
@@ -326,6 +337,38 @@ impl PlatformDispatcher {
     pub fn with_memory_store_id(mut self, id: impl Into<String>) -> Self {
         self.memory_store_id = id.into();
         self
+    }
+
+    /// Slice 3b.3: attach a `ClawMemory` binding handle. When the
+    /// handle resolves to a binding with a non-empty `store_name`,
+    /// `foundry.memory` calls use that store id instead of the
+    /// env-fed `memory_store_id`. Lets the CRD-driven binding take
+    /// precedence over the legacy chart env without breaking the
+    /// env-only fallback path (sandboxes with no `spec.memoryRef`
+    /// keep working exactly as before).
+    pub fn with_memory_binding(
+        mut self,
+        handle: crate::memory_binding_loader::LoadedMemoryBindingHandle,
+    ) -> Self {
+        self.memory_binding = Some(handle);
+        self
+    }
+
+    /// Resolve the effective Memory Store id for a `foundry.memory`
+    /// call. Returns the ClawMemory binding's `store_name` when one
+    /// is loaded with a non-empty value; otherwise the configured
+    /// env-fed `memory_store_id`. The CRD-driven binding wins.
+    async fn effective_memory_store_id(&self) -> String {
+        if let Some(handle) = self.memory_binding.as_ref() {
+            let guard = handle.read().await;
+            if let Some(binding) = guard.as_ref() {
+                let name = binding.store_name.trim();
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+        self.memory_store_id.clone()
     }
 
     pub fn with_catalog(mut self, catalog: ToolCatalog) -> Self {
@@ -435,7 +478,8 @@ impl PlatformDispatcher {
                 });
             }
         };
-        let path = format!("/memory_stores/{}{}", self.memory_store_id, suffix);
+        let store_id = self.effective_memory_store_id().await;
+        let path = format!("/memory_stores/{store_id}{suffix}");
         self.post_json("foundry.memory", &path, &body).await
     }
 
@@ -950,6 +994,112 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, DispatchError::InvalidArguments { .. }));
+    }
+
+    /// Slice 3b.3: when a ClawMemory binding is attached and carries
+    /// a non-empty `store_name`, that name wins over the env-fed
+    /// `memory_store_id`. The compiled CRD is the source of truth.
+    #[tokio::test]
+    async fn memory_binding_store_name_overrides_env_store_id() {
+        use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/from-crd:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+        let handle = empty_handle();
+        {
+            let mut g = handle.write().await;
+            *g = Some(LoadedMemoryBinding {
+                digest: "sha256:deadbeef".into(),
+                source_path: "/etc/azureclaw/memory/binding.json".into(),
+                store_name: "from-crd".into(),
+                scope: "agent:test".into(),
+                raw: json!({"storeName": "from-crd"}),
+            });
+        }
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("from-env")
+            .with_memory_binding(handle);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        // Mock was registered for the CRD-driven path; if the env id
+        // had won we'd see zero matched requests and the mock would
+        // 404.
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "foundry.memory must route to the CRD-driven store name"
+        );
+    }
+
+    /// Slice 3b.3: when the binding handle resolves to a binding
+    /// whose `store_name` is empty (or whitespace), we fall back to
+    /// the env-fed id. Avoids tripping on a malformed compiled
+    /// binding.
+    #[tokio::test]
+    async fn memory_empty_binding_store_name_falls_back_to_env() {
+        use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/from-env:update_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"updated": 1})))
+            .mount(&server)
+            .await;
+        let handle = empty_handle();
+        {
+            let mut g = handle.write().await;
+            *g = Some(LoadedMemoryBinding {
+                digest: "sha256:deadbeef".into(),
+                source_path: "/etc/azureclaw/memory/binding.json".into(),
+                store_name: "   ".into(),
+                scope: "agent:test".into(),
+                raw: json!({}),
+            });
+        }
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("from-env")
+            .with_memory_binding(handle);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "update", "text": "remember"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "empty store_name in binding must fall back to env"
+        );
+    }
+
+    /// Slice 3b.3: when no binding handle is attached at all, the
+    /// dispatcher behaves exactly as before (env-fed id wins). This
+    /// is the path sandboxes without `spec.memoryRef` follow.
+    #[tokio::test]
+    async fn memory_without_binding_handle_uses_env_store_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/from-env:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+        let d = PlatformDispatcher::with_base_url(server.uri()).with_memory_store_id("from-env");
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
