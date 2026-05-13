@@ -106,29 +106,6 @@ impl PolicyStatusResponse {
             .find(|e| e.kind == kind)
             .and_then(|e| e.last_error.as_deref())
     }
-
-    /// Return the `digest` from the `AgtProfile` entry, if present.
-    /// Returns `None` when:
-    /// * the response has no `AgtProfile` entry (router has not loaded
-    ///   any policy yet);
-    /// * the entry has `digest: None` (load failed mid-flight, error
-    ///   in `last_error`).
-    ///
-    /// Thin wrapper over [`Self::find_digest`] kept for callsite
-    /// readability; new callsites can use `find_digest("AgtProfile")`
-    /// directly.
-    pub fn agt_profile_digest(&self) -> Option<&str> {
-        self.find_digest("AgtProfile")
-    }
-
-    /// Return the `last_error` from the `AgtProfile` entry, if any.
-    /// Used by the reconciler to surface a router-side parse failure
-    /// as the Ready=False message instead of a generic timeout.
-    ///
-    /// Thin wrapper over [`Self::find_last_error`].
-    pub fn agt_profile_last_error(&self) -> Option<&str> {
-        self.find_last_error("AgtProfile")
-    }
 }
 
 /// Failure modes of a single poll attempt.
@@ -198,6 +175,119 @@ pub async fn fetch_router_policy_status(
     Ok(parsed)
 }
 
+/// Outcome of attempting to confirm router-side enforcement for one
+/// `PolicyKind` across every referencing sandbox. Drives both
+/// `status.phase` and the `Ready` condition's reason+message on the
+/// reconciler side.
+///
+/// This is the principles.md §3 binding shared by every CRD that
+/// participates in the "Ready ⇔ router echo" loop (ToolPolicy
+/// in Slice 1c, InferencePolicy in Slice 2a, ClawMemory in Slice 3,
+/// fleet-of-McpServer in Slice 4). Each reconciler's only job after
+/// computing the published digest is to pick one of these states;
+/// everything downstream (phase, conditions, requeue cadence) is a
+/// pure function of this enum.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RouterEnforcementState {
+    /// The CR has no router-observable enforcement surface — there
+    /// is no data-plane observation the controller can make. For
+    /// example, a ToolPolicy with `spec.agtProfile` unset still
+    /// drives the legacy AGT runtime plugin (in-process consumer);
+    /// the router has nothing to echo. Reconcilers stamp `Ready`
+    /// here for back-compat.
+    NotApplicable,
+    /// The CR is ready on the controller side but no sandbox in the
+    /// CR's namespace references it. There is no router that could
+    /// confirm enforcement. Reconcilers stamp `Compiled`.
+    NoSandboxesReferencing,
+    /// At least one referencing sandbox's router failed to respond,
+    /// returned a different digest, or had not yet loaded the new
+    /// policy. `matched`/`total` is surfaced in the Ready message
+    /// so operators can see partial confirmation. Reconcilers stamp
+    /// `Compiled` with reason `AwaitingRouterEnforcement`.
+    Awaiting {
+        total: usize,
+        matched: usize,
+        message: String,
+    },
+    /// Every referencing sandbox's router echoed the exact digest
+    /// the controller published. Promote to `Ready=True /
+    /// reason=RouterEnforcing`. Closes the principles.md §3 loop.
+    Confirmed { total: usize },
+}
+
+/// Pure decision: aggregate per-sandbox poll outcomes into a
+/// [`RouterEnforcementState`]. Factored out of any specific
+/// reconciler so the promotion logic is unit-testable without K8s
+/// or HTTP I/O, and so every CRD-kind shares one implementation.
+///
+/// * `expected_digest` is the controller-side digest published for
+///   the policy (e.g. `find_digest("AgtProfile")` for ToolPolicy,
+///   `find_digest("InferencePolicy")` for InferencePolicy).
+/// * `kind` is the `PolicyKind` string the router uses on the wire
+///   — `"AgtProfile"`, `"InferencePolicy"`, `"ClawMemory"`, … — and
+///   must match `inference-router/src/policy_status.rs` exactly.
+/// * `results` is one entry per referencing sandbox: either the
+///   parsed router response or the network/parse error encountered
+///   while polling.
+pub fn decide_enforcement_state(
+    expected_digest: &str,
+    kind: &str,
+    results: &[(String, Result<PolicyStatusResponse, ConfirmError>)],
+) -> RouterEnforcementState {
+    let total = results.len();
+    if total == 0 {
+        return RouterEnforcementState::NoSandboxesReferencing;
+    }
+    let mut matched = 0usize;
+    let mut messages: Vec<String> = Vec::with_capacity(total);
+    for (sandbox, outcome) in results {
+        match outcome {
+            Ok(resp) => match resp.find_digest(kind) {
+                Some(d) if d == expected_digest => {
+                    matched += 1;
+                }
+                Some(other) => messages.push(format!(
+                    "{sandbox}: router echoed digest mismatch ({other} != {expected_digest})"
+                )),
+                None => {
+                    let err = resp
+                        .find_last_error(kind)
+                        .map(|e| format!(" (last_error: {e})"))
+                        .unwrap_or_default();
+                    messages.push(format!("{sandbox}: router has not yet loaded {kind}{err}"));
+                }
+            },
+            Err(e) => {
+                messages.push(format!("{sandbox}: router unreachable ({e})"));
+            }
+        }
+    }
+    if matched == total {
+        RouterEnforcementState::Confirmed { total }
+    } else {
+        let mut message = format!("{matched}/{total} sandbox routers confirmed digest");
+        if !messages.is_empty() {
+            let detail = messages
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
+            message.push_str("; ");
+            message.push_str(&detail);
+            if messages.len() > 3 {
+                message.push_str(&format!("; (+{} more)", messages.len() - 3));
+            }
+        }
+        RouterEnforcementState::Awaiting {
+            total,
+            matched,
+            message,
+        }
+    }
+}
+
 /// Build the in-cluster router admin URL for a sandbox whose
 /// `metadata.name` is `sandbox_name`. The controller creates per-
 /// sandbox `Service`s in namespace `azureclaw-<sandbox_name>` whose
@@ -241,8 +331,8 @@ mod tests {
     fn parsed_response_finds_agt_profile_digest() {
         let resp: PolicyStatusResponse =
             serde_json::from_value(populated_response()).expect("valid wire contract");
-        assert_eq!(resp.agt_profile_digest(), Some("sha256:abcdef0123"));
-        assert_eq!(resp.agt_profile_last_error(), None);
+        assert_eq!(resp.find_digest("AgtProfile"), Some("sha256:abcdef0123"));
+        assert_eq!(resp.find_last_error("AgtProfile"), None);
     }
 
     #[test]
@@ -253,7 +343,7 @@ mod tests {
             "entries": []
         }))
         .unwrap();
-        assert_eq!(resp.agt_profile_digest(), None);
+        assert_eq!(resp.find_digest("AgtProfile"), None);
     }
 
     #[test]
@@ -270,9 +360,9 @@ mod tests {
             }]
         }))
         .unwrap();
-        assert_eq!(resp.agt_profile_digest(), None);
+        assert_eq!(resp.find_digest("AgtProfile"), None);
         assert_eq!(
-            resp.agt_profile_last_error(),
+            resp.find_last_error("AgtProfile"),
             Some("parse error: unexpected mapping at line 4")
         );
     }
@@ -335,31 +425,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn agt_profile_helpers_delegate_to_find_digest() {
-        // Belt-and-braces: the wrappers must agree with the generic
-        // method for the AgtProfile kind on the same payload. If they
-        // diverge, a future refactor that touches one but not the
-        // other will be caught here.
-        let resp: PolicyStatusResponse = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "count": 1,
-            "entries": [{
-                "kind": "AgtProfile",
-                "digest": "sha256:deadbeef",
-                "source_path": "/etc/agt/policies",
-                "loaded_at": "2026-05-13T09:00:00.000Z",
-                "last_error": null
-            }]
-        }))
-        .unwrap();
-        assert_eq!(resp.agt_profile_digest(), resp.find_digest("AgtProfile"));
-        assert_eq!(
-            resp.agt_profile_last_error(),
-            resp.find_last_error("AgtProfile")
-        );
-    }
-
     #[tokio::test]
     async fn fetch_returns_parsed_response_on_200() {
         let server = MockServer::start().await;
@@ -375,7 +440,7 @@ mod tests {
             .await
             .expect("should succeed");
         assert_eq!(resp.schema_version, 1);
-        assert_eq!(resp.agt_profile_digest(), Some("sha256:abcdef0123"));
+        assert_eq!(resp.find_digest("AgtProfile"), Some("sha256:abcdef0123"));
     }
 
     #[tokio::test]
@@ -474,5 +539,78 @@ mod tests {
         fetch_router_policy_status(&http, &base, "tok")
             .await
             .expect("must succeed despite trailing slash");
+    }
+
+    // ── decide_enforcement_state: generic-kind coverage ──────────────
+    //
+    // Per-CRD reconcilers test their own calling conventions (e.g.
+    // `tool_policy_reconciler::tests` covers `"AgtProfile"`). These
+    // tests pin the generic-over-kind contract so a future reconciler
+    // (InferencePolicy, ClawMemory, McpServer) can pass any kind
+    // string and get the same pure-function behaviour.
+
+    fn mk_resp(kind: &str, digest: Option<&str>, last_error: Option<&str>) -> PolicyStatusResponse {
+        PolicyStatusResponse {
+            schema_version: 1,
+            count: 1,
+            entries: vec![PolicyStatusEntry {
+                kind: kind.into(),
+                digest: digest.map(String::from),
+                source_path: "/etc/azureclaw/policies".into(),
+                loaded_at: "2026-05-13T09:00:00.000Z".into(),
+                last_error: last_error.map(String::from),
+            }],
+        }
+    }
+
+    #[test]
+    fn decide_confirms_per_kind_independently() {
+        // Same digest published, but the router only echoes it under
+        // `InferencePolicy` — a reconciler asking for `"AgtProfile"`
+        // must NOT confirm.
+        let results = vec![(
+            "a".into(),
+            Ok(mk_resp("InferencePolicy", Some("sha256:abc"), None)),
+        )];
+        let agt = decide_enforcement_state("sha256:abc", "AgtProfile", &results);
+        assert!(
+            matches!(agt, RouterEnforcementState::Awaiting { matched: 0, .. }),
+            "AgtProfile must not be confirmed by an InferencePolicy entry: {agt:?}"
+        );
+        let inf = decide_enforcement_state("sha256:abc", "InferencePolicy", &results);
+        assert_eq!(inf, RouterEnforcementState::Confirmed { total: 1 });
+    }
+
+    #[test]
+    fn decide_carries_kind_into_not_yet_loaded_message() {
+        // Router responded but has no entry for the requested kind.
+        // The Awaiting message must mention the kind so operators can
+        // tell which policy bundle the router is still missing.
+        let results = vec![(
+            "a".into(),
+            Ok(mk_resp("AgtProfile", Some("sha256:other"), None)),
+        )];
+        let s = decide_enforcement_state("sha256:abc", "InferencePolicy", &results);
+        let msg = match s {
+            RouterEnforcementState::Awaiting { message, .. } => message,
+            other => panic!("expected Awaiting, got {other:?}"),
+        };
+        assert!(
+            msg.contains("InferencePolicy"),
+            "kind must appear in the message: {msg}"
+        );
+    }
+
+    #[test]
+    fn decide_no_results_yields_no_sandboxes_referencing_regardless_of_kind() {
+        // The empty-results branch is kind-agnostic — verify it.
+        for kind in ["AgtProfile", "InferencePolicy", "ClawMemory"] {
+            let s = decide_enforcement_state("sha256:abc", kind, &[]);
+            assert_eq!(
+                s,
+                RouterEnforcementState::NoSandboxesReferencing,
+                "kind={kind}"
+            );
+        }
     }
 }

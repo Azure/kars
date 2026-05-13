@@ -46,7 +46,7 @@ use std::time::Duration;
 
 use crate::status::conditions::{self, reason, status as cond_status};
 use crate::status::phase::{PHASE_COMPILED, PHASE_DEGRADED, PHASE_READY, PhaseEventReporter};
-use crate::status::router_confirmation::{self, ConfirmError};
+use crate::status::router_confirmation::{self, RouterEnforcementState, decide_enforcement_state};
 use crate::status::router_confirmation_io::{list_sandboxes_matching, poll_referencing_sandboxes};
 use crate::tool_policy::{ToolPolicy, ToolPolicyStatus};
 use crate::tool_policy_compile::{
@@ -90,116 +90,6 @@ struct Ctx {
     client: Client,
     http: reqwest::Client,
     phase_reporter: PhaseEventReporter,
-}
-
-/// Outcome of attempting to confirm router-side enforcement for a
-/// ToolPolicy whose `spec.agtProfile.inline` is set. Drives both
-/// `status.phase` and the `Ready` condition's reason+message.
-///
-/// This is the principles.md §3 binding for ToolPolicy. The
-/// reconciler's only job after computing the published digest is to
-/// pick one of these states; everything downstream (phase, conditions,
-/// requeue cadence) is a pure function of this enum.
-#[derive(Debug, PartialEq, Eq)]
-enum RouterEnforcementState {
-    /// `spec.agtProfile` not set — the controller has no data-plane
-    /// observation to make. The legacy ToolPolicy enforcement surface
-    /// (commerce caps, rate limit, approval) is the AGT runtime
-    /// plugin, which consumes `profile.json` in-process. We stamp
-    /// `Ready` for back-compat (matching pre-Slice-1b behaviour).
-    NotApplicable,
-    /// `spec.agtProfile.inline` is set but no `ClawSandbox` in the
-    /// ToolPolicy's namespace references this policy via
-    /// `spec.governance.toolPolicyRef.name`. There is no router that
-    /// could confirm enforcement. Stamp `Compiled` —
-    /// honest reporting: artifact is ready, but no consumer exists.
-    NoSandboxesReferencing,
-    /// At least one referencing sandbox's router either failed to
-    /// respond, returned the wrong digest, or had not yet loaded the
-    /// new profile. `matched`/`total` is surfaced in the Ready
-    /// message so operators can see partial confirmation. Stamp
-    /// `Compiled` with reason `AwaitingRouterEnforcement`.
-    Awaiting {
-        total: usize,
-        matched: usize,
-        message: String,
-    },
-    /// Every referencing sandbox's router echoed the exact digest the
-    /// controller published. Promote to `Ready=True /
-    /// reason=RouterEnforcing`. This is the "ready ⇔ router echo"
-    /// closure of principles.md §3.
-    Confirmed { total: usize },
-}
-
-/// Pure decision: aggregate per-sandbox poll outcomes into a
-/// [`RouterEnforcementState`]. Factored out of the reconciler so the
-/// promotion logic is unit-testable without K8s or HTTP I/O.
-///
-/// `expected_digest` is the controller-side digest from
-/// `agt_profile_digest()`. `results` is one entry per referencing
-/// sandbox: either the parsed router response, or the network/parse
-/// error encountered while polling.
-fn decide_enforcement_state(
-    expected_digest: &str,
-    results: &[(
-        String,
-        Result<router_confirmation::PolicyStatusResponse, ConfirmError>,
-    )],
-) -> RouterEnforcementState {
-    let total = results.len();
-    if total == 0 {
-        return RouterEnforcementState::NoSandboxesReferencing;
-    }
-    let mut matched = 0usize;
-    let mut messages: Vec<String> = Vec::with_capacity(total);
-    for (sandbox, outcome) in results {
-        match outcome {
-            Ok(resp) => match resp.agt_profile_digest() {
-                Some(d) if d == expected_digest => {
-                    matched += 1;
-                }
-                Some(other) => messages.push(format!(
-                    "{sandbox}: router echoed digest mismatch ({other} != {expected_digest})"
-                )),
-                None => {
-                    let err = resp
-                        .agt_profile_last_error()
-                        .map(|e| format!(" (last_error: {e})"))
-                        .unwrap_or_default();
-                    messages.push(format!(
-                        "{sandbox}: router has not yet loaded agt-profile{err}"
-                    ));
-                }
-            },
-            Err(e) => {
-                messages.push(format!("{sandbox}: router unreachable ({e})"));
-            }
-        }
-    }
-    if matched == total {
-        RouterEnforcementState::Confirmed { total }
-    } else {
-        let mut message = format!("{matched}/{total} sandbox routers confirmed digest");
-        if !messages.is_empty() {
-            // Cap detail messages to keep status size bounded.
-            let detail = messages
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("; ");
-            message.push_str("; ");
-            message.push_str(&detail);
-            if messages.len() > 3 {
-                message.push_str(&format!("; (+{} more)", messages.len() - 3));
-            }
-        }
-        RouterEnforcementState::Awaiting {
-            total,
-            matched,
-            message,
-        }
-    }
 }
 
 async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -334,7 +224,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                     }
                 };
                 let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
-                decide_enforcement_state(expected, &results)
+                decide_enforcement_state(expected, "AgtProfile", &results)
             }
             _ => RouterEnforcementState::NotApplicable,
         }
@@ -758,6 +648,7 @@ pub use crate::mcp_server::LocalObjectRef as ProfileConfigMapRef;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::router_confirmation::ConfirmError;
 
     #[test]
     fn rfc3339_now_is_utc_z_suffixed() {
@@ -983,7 +874,7 @@ mod tests {
 
     #[test]
     fn decide_no_referrers_yields_no_sandboxes_referencing() {
-        let s = decide_enforcement_state("sha256:abc", &[]);
+        let s = decide_enforcement_state("sha256:abc", "AgtProfile", &[]);
         assert_eq!(s, RouterEnforcementState::NoSandboxesReferencing);
     }
 
@@ -993,7 +884,7 @@ mod tests {
             ("a".into(), Ok(mk_response(Some("sha256:abc"), None))),
             ("b".into(), Ok(mk_response(Some("sha256:abc"), None))),
         ];
-        let s = decide_enforcement_state("sha256:abc", &results);
+        let s = decide_enforcement_state("sha256:abc", "AgtProfile", &results);
         assert_eq!(s, RouterEnforcementState::Confirmed { total: 2 });
     }
 
@@ -1003,7 +894,7 @@ mod tests {
             ("a".into(), Ok(mk_response(Some("sha256:abc"), None))),
             ("b".into(), Ok(mk_response(Some("sha256:DIFFERENT"), None))),
         ];
-        let s = decide_enforcement_state("sha256:abc", &results);
+        let s = decide_enforcement_state("sha256:abc", "AgtProfile", &results);
         match s {
             RouterEnforcementState::Awaiting {
                 total,
@@ -1025,7 +916,7 @@ mod tests {
             "a".into(),
             Err::<router_confirmation::PolicyStatusResponse, _>(ConfirmError::HttpStatus(0)),
         )];
-        let s = decide_enforcement_state("sha256:abc", &results);
+        let s = decide_enforcement_state("sha256:abc", "AgtProfile", &results);
         match s {
             RouterEnforcementState::Awaiting {
                 total,
@@ -1046,7 +937,7 @@ mod tests {
     #[test]
     fn decide_router_returned_null_digest_surfaces_last_error() {
         let results = vec![("a".into(), Ok(mk_response(None, Some("bad yaml line 4"))))];
-        let s = decide_enforcement_state("sha256:abc", &results);
+        let s = decide_enforcement_state("sha256:abc", "AgtProfile", &results);
         match s {
             RouterEnforcementState::Awaiting { message, .. } => {
                 assert!(
@@ -1068,7 +959,7 @@ mod tests {
                 )
             })
             .collect();
-        let s = decide_enforcement_state("sha256:abc", &results);
+        let s = decide_enforcement_state("sha256:abc", "AgtProfile", &results);
         match s {
             RouterEnforcementState::Awaiting { message, .. } => {
                 assert!(message.contains("0/10"));
