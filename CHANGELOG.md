@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5 §7 — docs reframe: router is the policy point, NetworkPolicy + egress-guard are safety nets
+
+Closes one of the eight Slice 5 sub-items (the only one in that slice
+that can ship as a no-code-change PR). Reframes user-facing
+documentation so the conceptual model matches what the code actually
+does:
+
+* **Policy point** = `inference-router` — every byte that leaves the
+  pod is matched against the egress allowlist by the router.
+* **Safety nets** = the K8s `NetworkPolicy` generated per sandbox
+  and the `egress-guard` iptables init container. They limit blast
+  radius if the router process is bypassed or compromised. They do
+  not *decide* what is allowed.
+
+Files reframed:
+
+* `README.md` — ASCII diagram caption, "no network of its own"
+  paragraph, dev-vs-prod isolation table row.
+* `docs/architecture.md` — prod-mode bullet list under
+  "Pod shape" + "Isolation"; the data-path-of-one-external-call
+  numbered list.
+* `docs/egress-proxy.md` — "two enforcement points" → "one
+  enforcement point + one safety net"; "Layer 1 (kernel)" and
+  "Layer 2 (application)" relabelled "Layer 1 (safety net)" and
+  "Layer 2 (the policy point)" with admonitions.
+
+Aligns with the framing already locked in
+`docs/internal/crd-well-oiled-machine/principles.md` §7 (the rest of
+Slice 5 — `EgressApproval` CRD, `BlockedBuffer` surfacing CLI/plugin,
+mode unification — remains queued; each needs its own producer→
+consumer loop and doesn't fit a single overnight PR).
+
 ### Slice 1e (phase 1) — `BundledProfileInUse` deprecation condition
 
 Surfaces the deprecated bundled `AGT_POLICY_PROFILE` env-var

@@ -22,13 +22,16 @@ spec:
       digest: sha256:abc123…
 ```
 
-The controller compiles this into **two** enforcement points:
+The controller compiles this into **one enforcement point with one safety net**:
 
-- **Kubernetes `NetworkPolicy`** — L3/L4 egress to peer pods, cluster DNS, and
-  the explicit pod-IP allowlist generated from `allowedEndpoints`.
-- **Router-side allowlist** — L7 host-header / SNI matching for outbound HTTP,
-  served from `inference-router` shared state and reloaded on `ClawSandbox`
-  updates.
+- **Router-side allowlist** (the **policy point**) — L7 host-header / SNI
+  matching on every outbound HTTP request, served from `inference-router`
+  shared state and reloaded on `ClawSandbox` updates. This is where egress
+  policy is actually decided.
+- **Kubernetes `NetworkPolicy`** (a **safety net**) — L3/L4 egress to peer
+  pods, cluster DNS, and the explicit pod-IP allowlist generated from
+  `allowedEndpoints`. Only matters if the router process itself is bypassed
+  or compromised. Don't rely on it as the policy layer.
 
 `allowlistRef` is an _advisory_ second source today (cosign-signed OCI artifact
 for supply-chain integrity); when set, the controller verifies it on every
@@ -55,7 +58,12 @@ The inference-router (UID 1001) runs **two listeners** in the same process:
 All three paths resolve to the **same** `blocklist::check_egress()` decision
 function — there is no policy-bypass route.
 
-## Layer 1: iptables (kernel level)
+## Layer 1: iptables egress-guard (safety net)
+
+> The router is the policy point — see "Layer 2" below. The iptables rules
+> described here are a **safety net** that contains blast radius if the
+> router process is compromised or bypassed. Do not treat them as
+> policy.
 
 An init container (`egress-guard`) runs at pod startup with `NET_ADMIN`/`NET_RAW`
 and installs the rules below for the agent container (UID 1000 / `openclaw`).
@@ -92,7 +100,12 @@ This denies, by construction:
 
 Source: `controller/src/reconciler/mod.rs::1356–1369` (egress-guard init container).
 
-## Layer 2: Forward proxy (application level)
+## Layer 2: Forward proxy (the policy point)
+
+> This is where egress policy is **actually enforced**: every L7 destination
+> is matched against the allowlist before bytes leave the router.
+> The iptables layer above and the K8s `NetworkPolicy` below it are
+> safety nets, not policy.
 
 `inference-router/src/forward_proxy.rs` listens on `:8444` and handles **both**
 paths B and C:
