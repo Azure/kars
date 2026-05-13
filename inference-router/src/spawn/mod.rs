@@ -191,7 +191,34 @@ pub async fn create_sandbox(
     // The legacy top-level `openclaw` and `inference` blocks were removed
     // from the schema in S10.A1 / S13; sending them now triggers
     // `additionalProperties: false` rejection at admission.
-    let crd = build_sub_agent_crd(parent_name, &namespace, isolation, model, req);
+    //
+    // Slice 2 DoD #6 — read parent's labels so user-defined tags
+    // (e.g. `tier=prod`) propagate to the child. Best-effort: a
+    // parent-fetch failure does not block spawn — we fall back to an
+    // empty label map. Rationale: spawn-tracking labels alone are
+    // still enough for the sub-agent to be functional; inherited
+    // tags are a quality-of-life feature for operators, not a
+    // governance gate.
+    let parent_labels: BTreeMap<String, String> = match api.get(parent_name).await {
+        Ok(parent_obj) => parent_obj.metadata.labels.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(
+                parent = %parent_name,
+                child = %req.agent_id,
+                "Could not fetch parent labels for inheritance (non-fatal): {e}"
+            );
+            BTreeMap::new()
+        }
+    };
+
+    let crd = build_sub_agent_crd_with_labels(
+        parent_name,
+        &namespace,
+        isolation,
+        model,
+        req,
+        &parent_labels,
+    );
 
     let obj: kube::api::DynamicObject =
         serde_json::from_value(crd).map_err(|e| format!("Failed to build CRD: {e}"))?;
@@ -641,12 +668,44 @@ pub async fn collect_sub_agent_snapshots(
 /// contract test `sub_agent_crd_never_inherits_memory_ref` asserts
 /// this by construction — if a future caller adds a `memory_ref`
 /// field to `SpawnRequest`, the test fails before the CRD ships.
-pub(crate) fn build_sub_agent_crd(
+/// Slice 2 DoD #6 — parent-label inheritance.
+///
+/// Pure label-merge: filter the parent's `metadata.labels` to drop
+/// azureclaw-controlled keys (anything starting with `azureclaw.`
+/// and the `app.kubernetes.io/*` tracking labels), then start the
+/// child's label map from that filtered set. Spawn-tracking labels
+/// (`parent`, `spawned-by`, `predecessor`) are written last so they
+/// always win if the parent happened to carry a colliding key.
+///
+/// Operators who tag a parent with e.g. `tier=prod` /
+/// `team=payments` / `env=staging` get those same tags on every
+/// sub-agent the parent spawns — so a single `kubectl get
+/// clawsandbox -l tier=prod` returns the parent and every
+/// descendant without the operator having to walk the
+/// `azureclaw.azure.com/parent` graph by hand.
+pub(crate) fn inherit_parent_labels(
+    parent_labels: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (k, v) in parent_labels {
+        // Drop labels we control — they get re-stamped per spawn
+        // based on the *child's* role (handoff vs. agent vs. mesh)
+        // and inheriting them would lie about the child's lineage.
+        if k.starts_with("azureclaw.azure.com/") || k.starts_with("app.kubernetes.io/") {
+            continue;
+        }
+        out.insert(k.clone(), v.clone());
+    }
+    out
+}
+
+pub(crate) fn build_sub_agent_crd_with_labels(
     parent_name: &str,
     namespace: &str,
     isolation: &str,
     model: &str,
     req: &SpawnRequest,
+    parent_labels: &BTreeMap<String, String>,
 ) -> serde_json::Value {
     let mut spec = serde_json::json!({
         "runtime": {
@@ -704,7 +763,7 @@ pub(crate) fn build_sub_agent_crd(
         spec["agent"] = serde_json::json!({ "tools": agent_tools });
     }
 
-    let mut labels = BTreeMap::new();
+    let mut labels = inherit_parent_labels(parent_labels);
     if req.handoff.is_some() {
         labels.insert(
             "azureclaw.azure.com/spawned-by".to_string(),
@@ -831,12 +890,13 @@ mod tests {
         // `additionalProperties: false`, but rejected at admission on
         // strict clusters — surfacing as a 422 at spawn time. This test
         // catches reverts to the legacy shape at `cargo test` time.
-        let crd = build_sub_agent_crd(
+        let crd = build_sub_agent_crd_with_labels(
             "azclaw2",
             "azureclaw-system",
             "enhanced",
             "gpt-5.4",
             &minimal_req("viz"),
+            &BTreeMap::new(),
         );
 
         // 1. Top-level
@@ -881,7 +941,14 @@ mod tests {
             mode: "restore".into(),
             predecessor: Some("azclaw2".into()),
         });
-        let crd = build_sub_agent_crd("azclaw2", "azureclaw-system", "enhanced", "gpt-5.4", &req);
+        let crd = build_sub_agent_crd_with_labels(
+            "azclaw2",
+            "azureclaw-system",
+            "enhanced",
+            "gpt-5.4",
+            &req,
+            &BTreeMap::new(),
+        );
 
         assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
         assert_eq!(
@@ -920,12 +987,13 @@ mod tests {
                     predecessor: Some(predecessor.into()),
                 });
             }
-            let crd = build_sub_agent_crd(
+            let crd = build_sub_agent_crd_with_labels(
                 "parent-with-memory",
                 "azureclaw-parent",
                 "default",
                 "gpt-5.4",
                 &req,
+                &BTreeMap::new(),
             );
             assert!(
                 crd["spec"].get("memoryRef").is_none(),
@@ -939,5 +1007,161 @@ mod tests {
                 "memoryRef snuck into spec.governance — same Slice 3a invariant applies"
             );
         }
+    }
+
+    // ── Slice 2 DoD #6 — parent label inheritance ────────────────────────
+
+    #[test]
+    fn inherit_parent_labels_drops_azureclaw_controlled_keys() {
+        let mut parent = BTreeMap::new();
+        parent.insert("tier".to_string(), "prod".to_string());
+        parent.insert("team".to_string(), "payments".to_string());
+        parent.insert(
+            "azureclaw.azure.com/parent".to_string(),
+            "grandparent".to_string(),
+        );
+        parent.insert(
+            "azureclaw.azure.com/spawned-by".to_string(),
+            "agent".to_string(),
+        );
+        parent.insert(
+            "app.kubernetes.io/managed-by".to_string(),
+            "controller".to_string(),
+        );
+
+        let inherited = inherit_parent_labels(&parent);
+
+        assert_eq!(inherited.get("tier"), Some(&"prod".to_string()));
+        assert_eq!(inherited.get("team"), Some(&"payments".to_string()));
+        assert!(
+            !inherited.contains_key("azureclaw.azure.com/parent"),
+            "azureclaw-controlled label leaked: child must re-stamp its own parent ref"
+        );
+        assert!(
+            !inherited.contains_key("azureclaw.azure.com/spawned-by"),
+            "azureclaw-controlled spawned-by leaked: child role depends on the spawn call, not the parent's"
+        );
+        assert!(
+            !inherited.contains_key("app.kubernetes.io/managed-by"),
+            "k8s tracking label leaked"
+        );
+    }
+
+    #[test]
+    fn child_crd_inherits_user_labels_from_parent() {
+        // The headline DoD #6 case: parent has labels.tier=prod;
+        // child CR must come out with labels.tier=prod even though
+        // the spawn request never mentions it.
+        let mut parent_labels = BTreeMap::new();
+        parent_labels.insert("tier".to_string(), "prod".to_string());
+        parent_labels.insert("env".to_string(), "staging".to_string());
+
+        let crd = build_sub_agent_crd_with_labels(
+            "azclaw-parent",
+            "azureclaw-system",
+            "enhanced",
+            "gpt-5.4",
+            &minimal_req("child"),
+            &parent_labels,
+        );
+
+        let child_labels = &crd["metadata"]["labels"];
+        assert_eq!(child_labels["tier"], "prod");
+        assert_eq!(child_labels["env"], "staging");
+        // Spawn-tracking labels must coexist with inherited ones.
+        assert_eq!(child_labels["azureclaw.azure.com/parent"], "azclaw-parent");
+        assert_eq!(child_labels["azureclaw.azure.com/spawned-by"], "agent");
+    }
+
+    #[test]
+    fn handoff_child_also_inherits_user_labels() {
+        // Handoff path takes a different branch in build_sub_agent_crd_with_labels
+        // (predecessor instead of parent). The label-inheritance
+        // behaviour must hold there too — operators don't care
+        // whether the child arrived via spawn or via handoff; they
+        // want their `tier=prod` tag to follow it.
+        let mut parent_labels = BTreeMap::new();
+        parent_labels.insert("tier".to_string(), "prod".to_string());
+
+        let mut req = minimal_req("cloud-child");
+        req.handoff = Some(HandoffMeta {
+            mode: "restore".into(),
+            predecessor: Some("local-parent".into()),
+        });
+
+        let crd = build_sub_agent_crd_with_labels(
+            "local-parent",
+            "azureclaw-system",
+            "enhanced",
+            "gpt-5.4",
+            &req,
+            &parent_labels,
+        );
+
+        let child_labels = &crd["metadata"]["labels"];
+        assert_eq!(child_labels["tier"], "prod");
+        assert_eq!(child_labels["azureclaw.azure.com/spawned-by"], "handoff");
+        assert_eq!(
+            child_labels["azureclaw.azure.com/predecessor"],
+            "local-parent"
+        );
+        // The handoff path intentionally omits the `parent` label
+        // (predecessor takes its place semantically) — make sure
+        // inheritance does not accidentally restore it.
+        assert!(
+            child_labels.get("azureclaw.azure.com/parent").is_none()
+                || child_labels["azureclaw.azure.com/parent"].is_null(),
+            "handoff path must not stamp the `parent` label"
+        );
+    }
+
+    #[test]
+    fn spawn_tracking_labels_win_over_parent_labels_on_collision() {
+        // Defence-in-depth: if a parent somehow carried
+        // `azureclaw.azure.com/parent=evil` (shouldn't happen — we
+        // filter it — but belt-and-suspenders), the child's
+        // re-stamped value must win. This pins the ordering.
+        let mut parent_labels = BTreeMap::new();
+        parent_labels.insert("azureclaw.azure.com/parent".to_string(), "evil".to_string());
+        parent_labels.insert("tier".to_string(), "prod".to_string());
+
+        let crd = build_sub_agent_crd_with_labels(
+            "real-parent",
+            "azureclaw-system",
+            "enhanced",
+            "gpt-5.4",
+            &minimal_req("child"),
+            &parent_labels,
+        );
+
+        assert_eq!(
+            crd["metadata"]["labels"]["azureclaw.azure.com/parent"], "real-parent",
+            "spawn-tracking label must win on collision"
+        );
+        assert_eq!(crd["metadata"]["labels"]["tier"], "prod");
+    }
+
+    #[test]
+    fn empty_parent_labels_is_a_noop() {
+        // The fallback path when parent fetch fails: empty map in,
+        // child CR comes out with only the spawn-tracking labels.
+        // This pins that the inheritance code path doesn't crash or
+        // add spurious keys on the no-labels case.
+        let crd = build_sub_agent_crd_with_labels(
+            "parent",
+            "azureclaw-system",
+            "enhanced",
+            "gpt-5.4",
+            &minimal_req("child"),
+            &BTreeMap::new(),
+        );
+
+        let labels = crd["metadata"]["labels"]
+            .as_object()
+            .expect("labels must be an object");
+        // Exactly the two spawn-tracking keys, nothing else.
+        assert_eq!(labels.len(), 2);
+        assert!(labels.contains_key("azureclaw.azure.com/parent"));
+        assert!(labels.contains_key("azureclaw.azure.com/spawned-by"));
     }
 }

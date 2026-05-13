@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2 DoD #6 — sub-agent parent-label inheritance
+
+When a parent `ClawSandbox` spawns a sub-agent (via the router's
+`/spawn` endpoint or via `handoff`), the spawned sub-agent now
+inherits the parent's `metadata.labels` so operators can
+`kubectl get clawsandbox -l tier=prod` and see the parent and
+every descendant in one shot — without walking the
+`azureclaw.azure.com/parent` annotation graph by hand. Closes
+Slice 2 DoD #6.
+
+What this PR adds:
+
+- `inference-router/src/spawn/mod.rs`: new pure helper
+  `inherit_parent_labels(&BTreeMap<String,String>) ->
+  BTreeMap<String,String>` filters out azureclaw-controlled label
+  keys (`azureclaw.azure.com/*` and `app.kubernetes.io/*`) before
+  handing the parent's user labels through to the child. The
+  filter is essential — re-stamping `azureclaw.azure.com/parent`
+  from the parent's own labels would lie about the child's
+  lineage.
+- New builder `build_sub_agent_crd_with_labels` takes
+  `parent_labels: &BTreeMap<…>` and seeds the child's label map
+  from `inherit_parent_labels(parent_labels)`. Spawn-tracking
+  labels (`parent`, `spawned-by`, `predecessor`) are stamped
+  *last*, so they always win on collision and the child's lineage
+  cannot be spoofed by the parent's user labels.
+- `create_sandbox()` now `api.get(parent_name).await`s the parent
+  CR, extracts `metadata.labels`, and passes them to the new
+  builder. Best-effort: if the fetch errors (RBAC, transient API
+  hiccup), we log a warn and fall back to an empty map. Spawn
+  always succeeds — inherited labels are operator quality-of-life,
+  not a governance gate.
+- 5 unit tests covering: filter behaviour (azureclaw keys
+  dropped), regular spawn inheritance, handoff-path inheritance
+  (the alternate label-stamping branch in the same builder),
+  collision precedence (spawn-tracking wins), and the
+  empty-labels noop (pinning the exact label count so any future
+  default label addition trips a test).
+
+The old `build_sub_agent_crd` thin wrapper was removed entirely
+— principles.md §5 forbids no-op scaffolding. Test call sites
+now use `build_sub_agent_crd_with_labels(..., &BTreeMap::new())`
+directly.
+
 ### Slice 2 DoD #7 — `inference_policy_digest` on every audit log emission
 
 Every inference-path audit log emitted from the router now carries
