@@ -110,6 +110,34 @@ async fn main() -> Result<()> {
     // Start policy hot-reload watcher (polls AGT_POLICY_DIR for mtime changes).
     governance::Governance::spawn_policy_watcher(state.governance.clone());
 
+    // Slice 2 / Slice 3 hot-reload: poll the InferencePolicy and
+    // ClawMemory mount directories for mtime changes and re-invoke
+    // each loader's `load_and_install`. Without this the router
+    // would happily echo a stale digest for the lifetime of the
+    // pod whenever an operator `kubectl edit`s the CR — the
+    // controller-side echo loop would never close `Compiled → Ready`
+    // after the first change. Each watcher is best-effort: a missing
+    // directory is fine (the mount may appear later when the
+    // operator adds `spec.inferenceRef` / `spec.memoryRef`).
+    {
+        let inference_dir = std::env::var("INFERENCE_POLICY_DIR")
+            .unwrap_or_else(|_| "/etc/azureclaw/inference".into());
+        azureclaw_inference_router::inference_policy_loader::spawn_inference_policy_watcher(
+            inference_dir,
+            state.policy_status.clone(),
+            state.inference_policy.clone(),
+        );
+
+        let memory_dir = std::env::var("MEMORY_BINDING_DIR").unwrap_or_else(|_| {
+            azureclaw_inference_router::memory_binding_loader::MEMORY_BINDING_DIR_DEFAULT.into()
+        });
+        azureclaw_inference_router::memory_binding_loader::spawn_memory_binding_watcher(
+            memory_dir,
+            state.policy_status.clone(),
+            state.memory_binding.clone(),
+        );
+    }
+
     // Clone blocklist for the forward proxy before state is moved into the router.
     let proxy_blocklist = state.blocklist.clone();
     let proxy_blocked_egress = state.blocked_egress.clone();
