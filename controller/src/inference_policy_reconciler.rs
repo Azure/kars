@@ -56,10 +56,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::inference_policy::{InferencePolicy, InferencePolicyStatus};
-use crate::inference_policy_compile::{compile_to_profile, version_hash};
+use crate::inference_policy_compile::{
+    INFERENCE_POLICY_FILENAME, compile_to_profile, inference_policy_digest, version_hash,
+};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
-use crate::status::phase::{PHASE_COMPILED, PHASE_DEGRADED, PhaseEventReporter};
+use crate::status::phase::{PHASE_COMPILED, PHASE_DEGRADED, PHASE_READY, PhaseEventReporter};
+use crate::status::router_confirmation::{self, RouterEnforcementState, decide_enforcement_state};
+use crate::status::router_confirmation_io::{list_sandboxes_matching, poll_referencing_sandboxes};
 
 /// Field manager for SSA patches emitted by this reconciler. Distinct
 /// from S1 `…/mcp`, S2 `…/toolpolicy`, S3 `…/a2aagent` per §10.4 #1
@@ -96,6 +100,7 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    http: reqwest::Client,
     phase_reporter: PhaseEventReporter,
 }
 
@@ -137,16 +142,37 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
 
     let profile = compile_to_profile(&policy.spec);
     let v_hash = version_hash(&profile);
+    // Slice 2a — canonical bytes the router-side
+    // `inference_policy_loader` will sha256 + echo via
+    // `GET /internal/policy-status`. The bytes written into the
+    // ConfigMap must be **exactly** what we hash here so the
+    // controller-emitted digest matches the router-loaded digest;
+    // any reformatting (pretty-print, trailing newline, key
+    // reordering) silently breaks the §3 echo contract.
+    let canonical_bytes = serde_json::to_vec(&profile)?;
+    let canonical_str =
+        String::from_utf8(canonical_bytes.clone()).expect("serde_json::to_vec emits valid UTF-8");
+    let compiled_digest = inference_policy_digest(&canonical_bytes);
 
     let cm_name = format!("inferencepolicy-{name}-profile");
     let mut degraded: Option<(&'static str, String)> = None;
 
-    match ensure_profile_configmap(&configmaps, &cm_name, &name, &profile, &v_hash).await {
+    match ensure_profile_configmap(
+        &configmaps,
+        &cm_name,
+        &name,
+        &canonical_str,
+        &v_hash,
+        &compiled_digest,
+    )
+    .await
+    {
         Ok(()) => {
             tracing::info!(
                 inferencepolicy = %name,
                 ns = %ns,
                 version_hash = %v_hash,
+                compiled_digest = %compiled_digest,
                 generation = observed_generation.unwrap_or(0),
                 has_token_budget = policy.spec.token_budget.is_some(),
                 has_content_safety = policy.spec.content_safety.is_some(),
@@ -164,35 +190,83 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         }
     }
 
+    // Slice 2a — close the §3 "Ready ⇔ router echo" loop. List
+    // ClawSandboxes that reference this InferencePolicy by
+    // `spec.inferenceRef.name`, GET `/internal/policy-status` on
+    // each router, and let the result drive both `phase` and the
+    // Ready condition. The `compiled_digest` we just wrote is the
+    // value every router must echo before we promote to Ready.
+    let enforcement_state = if degraded.is_some() {
+        RouterEnforcementState::NotApplicable
+    } else {
+        let referrers = match list_sandboxes_matching(&ctx.client, &ns, |cs| {
+            cs.spec.inference_ref.name == name
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    inferencepolicy = %name,
+                    ns = %ns,
+                    error = %e,
+                    "ClawSandbox list failed; treating as no referrers"
+                );
+                Vec::new()
+            }
+        };
+        let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
+        decide_enforcement_state(&compiled_digest, "InferencePolicy", &results)
+    };
+
+    // Latest digest echoed by any referring router — surfaced in
+    // status for `kubectl describe` / `azureclaw inspect`. When
+    // every router reports the same value we promote to Ready; in
+    // the Awaiting branch we surface what we actually saw so the
+    // operator can diff against `compiledDigest`.
+    let loaded_digest: Option<String> = match &enforcement_state {
+        RouterEnforcementState::Confirmed { .. } => Some(compiled_digest.clone()),
+        _ => None,
+    };
+
     let new_conditions = build_conditions(
         &prior_conditions,
         observed_generation,
         degraded.as_ref().map(|(r, m)| (*r, m.as_str())),
+        &enforcement_state,
     );
-    // Honesty rule (principles.md §3, slice-0-honesty-events):
-    // The InferencePolicy spec body (`tokenBudget`, `contentSafety`,
-    // `modelPreference`) is parsed and a profile ConfigMap is
-    // written, but the router does not yet consume it — Slice 2
-    // wires the router-side enforcement. Stamping `Ready` here lies
-    // to `kubectl wait --for=condition=Ready`; stamp `Compiled`
-    // instead and publish a `PolicyNotEnforced` Warning Event so the
-    // user can grep `kubectl describe` for the explanation.
+
     let phase = if degraded.is_some() {
         PHASE_DEGRADED
     } else {
-        PHASE_COMPILED
+        match enforcement_state {
+            RouterEnforcementState::Confirmed { .. } | RouterEnforcementState::NotApplicable => {
+                PHASE_READY
+            }
+            RouterEnforcementState::NoSandboxesReferencing
+            | RouterEnforcementState::Awaiting { .. } => PHASE_COMPILED,
+        }
     };
 
-    if degraded.is_none()
+    // Only emit the Warning while truly awaiting router-side
+    // confirmation (mirroring slice-1c ToolPolicy). Once Confirmed
+    // fires we stop shouting — the loop is honestly closed.
+    let publish_warning = degraded.is_none()
+        && matches!(
+            enforcement_state,
+            RouterEnforcementState::Awaiting { .. }
+                | RouterEnforcementState::NoSandboxesReferencing
+        );
+    if publish_warning
         && let Err(e) = ctx
             .phase_reporter
             .warn_policy_not_enforced(
                 policy.as_ref(),
-                "CompileProfile",
-                "InferencePolicy spec is parsed and the profile ConfigMap is written, but the \
-                 router does not yet consume it. Token budget, content safety, and model \
-                 preference are not enforced on model calls until the Slice 2 router-side \
-                 informer lands. Tracking: crd-well-oiled-machine slice-2-inference-policy.",
+                "AwaitingRouterConfirmation",
+                "InferencePolicy compiled and published, but the inference-router has not \
+                 yet echoed the matching digest on /internal/policy-status. \
+                 tokenBudget.perRequestTokens is the only axis enforced today; \
+                 contentSafety / modelPreference still land in later sub-slices.",
             )
             .await
     {
@@ -203,8 +277,6 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         );
     }
 
-    // SSA requires apiVersion + kind in the patch body — without
-    // them, the API server returns "invalid object type: /, Kind=".
     let status_patch = json!({
         "apiVersion": "azureclaw.azure.com/v1alpha1",
         "kind": "InferencePolicy",
@@ -215,6 +287,8 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
             profile_config_map_ref: Some(LocalObjectRef { name: cm_name.clone() }),
             version_hash: Some(v_hash),
             last_compiled_at: Some(rfc3339_now()),
+            compiled_digest: Some(compiled_digest),
+            loaded_digest,
         }
     });
     api.patch_status(
@@ -226,6 +300,9 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
+    } else if matches!(enforcement_state, RouterEnforcementState::Awaiting { .. }) {
+        // Short requeue while awaiting echo — mirrors slice-1c.
+        Ok(Action::requeue(Duration::from_secs(15)))
     } else {
         Ok(Action::requeue(REQUEUE_OK))
     }
@@ -237,11 +314,14 @@ fn rfc3339_now() -> String {
 
 /// Build the Conditions vector preserving prior `lastTransitionTime`
 /// where status hasn't flipped. Always emits `Ready`, `Progressing`,
-/// `Degraded`. Same shape as S1 / S2 / S3.
+/// `Degraded`. Driven by `enforcement` once the compile step
+/// succeeds — Slice 2a closes the §3 echo loop and replaces the
+/// always-`AwaitingRouterEnforcement` branch.
 fn build_conditions(
     prior: &[Condition],
     observed_generation: Option<i64>,
     degraded: Option<(&str, &str)>,
+    enforcement: &RouterEnforcementState,
 ) -> Vec<Condition> {
     let mut out: Vec<Condition> = Vec::with_capacity(3);
     let prior_ready = conditions::find(prior, conditions::TYPE_READY);
@@ -275,44 +355,119 @@ fn build_conditions(
                 observed_generation,
             ));
         }
-        None => {
-            // Honesty rule (crd-well-oiled-machine principles.md §3,
-            // slice-0-honesty-events): the profile ConfigMap is
-            // written but the router does not yet consume it. We
-            // CANNOT report `Ready=True` here — `kubectl wait
-            // --for=condition=Ready` would return immediately for a
-            // policy that is doing nothing. Stamp
-            // `Ready=False` / `AwaitingRouterEnforcement` and keep
-            // `Progressing=True` until Slice 2 wires the router-side
-            // informer; at that point delete this branch's
-            // `AwaitingRouterEnforcement` reason and flip back to
-            // `Ready=True` / `Reconciled` after the router echoes the
-            // loaded digest.
-            out.push(conditions::preserve_transition_time(
-                prior_ready,
-                conditions::TYPE_READY,
-                cond_status::FALSE,
-                reason::AWAITING_ROUTER_ENFORCEMENT,
-                "profile ConfigMap published; router-side enforcement lands in Slice 2",
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_progressing,
-                conditions::TYPE_PROGRESSING,
-                cond_status::TRUE,
-                reason::AWAITING_ROUTER_ENFORCEMENT,
-                "awaiting router-side enforcement",
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_degraded,
-                conditions::TYPE_DEGRADED,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "no errors",
-                observed_generation,
-            ));
-        }
+        None => match enforcement {
+            RouterEnforcementState::NotApplicable => {
+                // Used when degraded — never reached here in the
+                // success branch. Kept for completeness and
+                // build_conditions truth-table symmetry with
+                // tool_policy_reconciler.
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::RECONCILED,
+                    "InferencePolicy compiled and published",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "compile complete",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Confirmed { total } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::ROUTER_ENFORCING,
+                    &format!(
+                        "all {total} referencing sandbox router(s) confirmed \
+                         inference-policy digest"
+                    ),
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "router echo confirmed",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::NoSandboxesReferencing => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "no ClawSandbox references this InferencePolicy; nothing to enforce",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "waiting for a ClawSandbox to reference this policy",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Awaiting { message, .. } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    message,
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    "awaiting router-side enforcement",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+        },
     }
     out
 }
@@ -321,16 +476,24 @@ async fn ensure_profile_configmap(
     api: &Api<ConfigMap>,
     cm_name: &str,
     owner: &str,
-    profile: &serde_json::Value,
+    canonical_body: &str,
     v_hash: &str,
+    compiled_digest: &str,
 ) -> Result<(), ReconcileError> {
-    let json_str = serde_json::to_string_pretty(profile)?;
     let mut data: BTreeMap<String, String> = BTreeMap::new();
-    data.insert("profile.json".into(), json_str);
+    // Canonical key: the router-side `inference_policy_loader`
+    // reads this filename from the mount directory and sha256s the
+    // exact bytes, so it must match
+    // `inference_policy_compile::INFERENCE_POLICY_FILENAME`.
+    data.insert(INFERENCE_POLICY_FILENAME.into(), canonical_body.into());
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
         "azureclaw.azure.com/inferencepolicy-version-hash".into(),
         v_hash.into(),
+    );
+    annotations.insert(
+        "azureclaw.azure.com/inference-policy-digest".into(),
+        compiled_digest.into(),
     );
     let cm = ConfigMap {
         metadata: ObjectMeta {
@@ -426,8 +589,13 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
+    let http = reqwest::Client::builder()
+        .timeout(router_confirmation::DEFAULT_TIMEOUT)
+        .build()
+        .expect("default reqwest client builds with infallible config");
     let ctx = Arc::new(Ctx {
         client: client.clone(),
+        http,
         phase_reporter: PhaseEventReporter::new(client, "InferencePolicy"),
     });
     Controller::new(policies, kube::runtime::watcher::Config::default())
@@ -473,12 +641,16 @@ mod tests {
     }
 
     #[test]
-    fn build_conditions_emits_all_three_types_on_success() {
-        // Slice 0 honesty rule: until Slice 2 wires the router-side
-        // informer, success means `Ready=False` /
-        // `AwaitingRouterEnforcement` because the profile ConfigMap
-        // is written but the router does not yet consume it.
-        let conds = build_conditions(&[], Some(1), None);
+    fn build_conditions_no_referrers_is_compiled_not_ready() {
+        // Slice 2a: when no ClawSandbox references this
+        // InferencePolicy there's nothing to enforce — Ready=False
+        // with reason `NoSandboxesReferencing`, no Degraded.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::NoSandboxesReferencing,
+        );
         assert_eq!(conds.len(), 3);
         let types: Vec<&str> = conds.iter().map(|c| c.type_.as_str()).collect();
         assert!(types.contains(&conditions::TYPE_READY));
@@ -489,7 +661,7 @@ mod tests {
             .find(|c| c.type_ == conditions::TYPE_READY)
             .unwrap();
         assert_eq!(ready.status, cond_status::FALSE);
-        assert_eq!(ready.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+        assert_eq!(ready.reason, reason::NO_SANDBOXES_REFERENCING);
         let progressing = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
@@ -503,8 +675,69 @@ mod tests {
     }
 
     #[test]
+    fn build_conditions_awaiting_branch_is_ready_false_with_reason() {
+        // Slice 2a: router has not yet echoed our digest — keep
+        // Progressing=True and surface the awaiting message on
+        // Ready.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Awaiting {
+                total: 2,
+                matched: 1,
+                message: "1/2 routers confirmed".into(),
+            },
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+        assert!(ready.message.contains("1/2"));
+        let progressing = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
+            .unwrap();
+        assert_eq!(progressing.status, cond_status::TRUE);
+    }
+
+    #[test]
+    fn build_conditions_confirmed_is_ready_true_router_enforcing() {
+        // Slice 2a: every referring router echoes the digest — this
+        // is the only path that promotes Ready=True. Reason must be
+        // `RouterEnforcing`, never the legacy `Reconciled` (which
+        // historically meant "controller stamped it" — Slice 2a
+        // redirects that meaning to the router echo).
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 3 },
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::TRUE);
+        assert_eq!(ready.reason, reason::ROUTER_ENFORCING);
+        assert!(ready.message.contains("3"));
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::FALSE);
+    }
+
+    #[test]
     fn build_conditions_emits_all_three_types_on_failure() {
-        let conds = build_conditions(&[], Some(1), Some(("ProfileWriteFailed", "boom")));
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some(("ProfileWriteFailed", "boom")),
+            &RouterEnforcementState::NotApplicable,
+        );
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
@@ -521,8 +754,18 @@ mod tests {
 
     #[test]
     fn build_conditions_preserves_transition_time_when_status_unchanged() {
-        let first = build_conditions(&[], Some(1), None);
-        let second = build_conditions(&first, Some(2), None);
+        let first = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 1 },
+        );
+        let second = build_conditions(
+            &first,
+            Some(2),
+            None,
+            &RouterEnforcementState::Confirmed { total: 1 },
+        );
         let r1 = first
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)

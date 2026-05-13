@@ -73,6 +73,7 @@ fn test_state() -> AppState {
         drain_state: DrainState::new(),
         pending_handoff: PendingHandoffStore::new(),
         policy_status,
+        inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
     }
 }
 

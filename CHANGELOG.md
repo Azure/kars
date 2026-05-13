@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2a — InferencePolicy `tokenBudget.perRequestTokens` enforcement + router-echo
+
+First end-to-end closure of principles.md §3 ("Ready ⇔ router echo")
+for `InferencePolicy`. The `tokenBudget.perRequestTokens` axis is now
+**actually enforced**: the controller compiles, the router loads + 429s
+on over-request, and the controller only promotes
+`phase=Compiled → Ready` once every referencing sandbox router echoes
+the matching digest on `GET /internal/policy-status`. Other
+InferencePolicy axes (`contentSafety`, `modelPreference`, daily/monthly
+budgets) remain compile-only and stay honest with `Ready=False /
+AwaitingRouterEnforcement` — they land in Slices 2b/2c/2d.
+
+**Router (new wire-contract consumer):**
+- `inference-router/src/inference_policy_loader.rs` (new, ~340 LOC):
+  reads `inference-policy.json` from the mount dir, parses
+  `tokenBudget.perRequestTokens`, computes a `sha256:<full hex>` over
+  length-prefixed canonical bytes
+  (`u64-BE(filename.len()) || filename || u64-BE(body.len()) || body`),
+  registers the digest into `PolicyStatusRegistry`, exposes
+  `Arc<RwLock<Option<LoadedInferencePolicy>>>` to handler code. 8 unit
+  tests.
+- `PolicyKind::InferencePolicy` variant added (closed-set enum — doc
+  notes that adding a variant is a public-API change requiring
+  controller-side wiring in the same PR; Slice 2a satisfies that).
+- `AppState.inference_policy` field; loaded at startup from
+  `INFERENCE_POLICY_DIR` env (default `/etc/azureclaw/inference`).
+- `chat_completions` preflight gate: pure `decide_per_request_gate(cap,
+  requested) -> PerRequestGate` + `extract_requested_max_tokens(body)`
+  (prefers `max_completion_tokens` over legacy `max_tokens`). 9 unit
+  tests. Over-cap requests return HTTP 429 with body
+  `{"code":"per_request_tokens_exceeded", ...}`. Defence-in-depth
+  fast-fail only — does not estimate prompt tokens; the post-response
+  warn-only check remains for the `max_tokens=null` path.
+- Three integration-test fixtures updated to populate the new
+  AppState field via `empty_handle()`.
+- 696 lib tests pass (was 679; +17 new). clippy `-D warnings` clean.
+
+**Controller (producer + echo poller):**
+- `inference_policy_compile`: new `INFERENCE_POLICY_FILENAME`,
+  `canonical_bytes_for_digest`, `inference_policy_digest` (full
+  `sha256:<hex>`). Kept the legacy 16-byte `version_hash` for
+  `PolicyEntry.version` change-detection back-compat. 5 new unit tests
+  (golden-vector cross-validates the router-side layout byte-for-byte).
+- `InferencePolicyStatus`: new `compiledDigest` + `loadedDigest` fields
+  with doc comments tying back to §3.
+- `inference_policy_reconciler`: now lists `ClawSandbox`es by
+  `spec.inferenceRef.name == name`, polls each router's
+  `/internal/policy-status`, runs the shared
+  `decide_enforcement_state(&digest, "InferencePolicy", &results)`
+  aggregator, and only stamps `phase=Ready / reason=RouterEnforcing`
+  when every router echoes the digest. While awaiting, stays at
+  `phase=Compiled / Ready=False / AwaitingRouterEnforcement` and emits
+  a `PolicyNotEnforced` Warning event each pass — the warn stops the
+  moment Confirmed fires, mirroring Slice 1c.
+- Compiled ConfigMap now uses canonical key `inference-policy.json`
+  (was: pretty-printed `profile.json`). Annotation
+  `azureclaw.azure.com/inference-policy-digest` on the CM stamps the
+  digest for human inspection. The bytes written are **exactly** what
+  the digest covers — any reformatting silently breaks the §3 echo
+  contract.
+- Requeue cadence: 15s while Awaiting, 300s once Ready.
+- New `build_conditions` truth-table tests cover all four
+  `RouterEnforcementState` branches (Confirmed → Ready=True, Awaiting
+  → Ready=False with awaiting reason, NoSandboxesReferencing →
+  Ready=False with that reason, degraded → unchanged).
+- Helm CRD `crd-inferencepolicy.yaml` regenerated with the two new
+  status fields.
+
+**Sandbox pod-spec assembly:**
+- `reconciler::mod.rs` mirrors the `inferencepolicy-{name}-profile`
+  ConfigMap from the user namespace into the sandbox namespace and
+  injects an `inject_configmap_mount` against the inference-router
+  container at `/etc/azureclaw/inference` with env
+  `INFERENCE_POLICY_DIR`. Mount path constant added to
+  `governance_mounts::paths`.
+- Failure mode is fail-open at the mount layer (router boots without
+  the loader populated, gate becomes a no-op, env-driven warn-only
+  `TOKEN_BUDGET_PER_REQUEST` stays as a safety net) — mirrors how
+  ToolPolicy degrades when its mirror skips.
+
+All clean: 531 controller tests (was 524; +7), 696 router lib tests,
+clippy `-D warnings` both crates, fmt, helm_drift.
+
 ### Slice 2a prep — lift `RouterEnforcementState` + `decide_enforcement_state` shared
 
 Second pure refactor in the Slice 2a runway. Slice 1c put the

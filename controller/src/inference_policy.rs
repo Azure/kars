@@ -219,4 +219,32 @@ pub struct InferencePolicyStatus {
     /// Last time the policy was compiled and pushed.
     #[serde(default)]
     pub last_compiled_at: Option<String>,
+
+    /// `sha256:<full hex>` digest the controller wrote to the
+    /// compiled-profile ConfigMap and the annotation
+    /// `azureclaw.azure.com/inference-policy-digest`. Computed by
+    /// `inference_policy_compile::inference_policy_digest` from the
+    /// canonical bytes of `inference-policy.json`. Distinct from
+    /// `version_hash` (16-byte legacy short-hash kept for
+    /// `PolicyEntry.version` change-detection): this full digest is
+    /// the **wire-contract value** the router echoes back via
+    /// `GET /internal/policy-status`.
+    ///
+    /// `phase=Ready` is only stamped when this matches
+    /// `loaded_digest` on every sandbox that references the policy.
+    /// (Slice 2a of `crd-well-oiled-machine`.)
+    #[serde(default)]
+    pub compiled_digest: Option<String>,
+
+    /// Digest most recently echoed by referencing sandbox routers
+    /// via `GET /internal/policy-status`. When this equals
+    /// `compiled_digest` for every referencing sandbox, the
+    /// reconciler promotes `phase=Compiled → Ready` with reason
+    /// `RouterEnforcing`. While mismatched (or while no sandbox
+    /// references the policy), the reconciler stamps
+    /// `Ready=False / AwaitingRouterEnforcement` and emits a
+    /// `PolicyNotEnforced` Warning Event. (Slice 2a of
+    /// `crd-well-oiled-machine`.)
+    #[serde(default)]
+    pub loaded_digest: Option<String>,
 }

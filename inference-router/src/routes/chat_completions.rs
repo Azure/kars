@@ -88,6 +88,57 @@ pub(super) async fn chat_completions(
             .into_response();
     }
 
+    // Slice 2a — `InferencePolicy.tokenBudget.perRequestTokens`
+    // enforcement. Reject pre-forward when the client explicitly
+    // asks for more output tokens than the policy permits. This is
+    // a **defence-in-depth fast-fail**: it does not estimate prompt
+    // tokens (that's deferred to 2c when contentSafety / token
+    // counting backends land), it only catches the obvious case
+    // where `max_tokens > policy.perRequestTokens`. The post-response
+    // `record_usage` + warn-only check at the bottom of this handler
+    // remains in place for the implicit `max_tokens=null` path
+    // (router does not yet reject mid-stream).
+    //
+    // Wire contract: `InferencePolicy` is loaded once at startup
+    // from the controller-mirrored ConfigMap and cached in
+    // `state.inference_policy`. The handle is `Option<…>` so
+    // sandboxes without a policy reference fall through to no
+    // enforcement (back-compat). Slice 2b will add daily/monthly
+    // budgets; Slice 2d will revisit pre-flight estimation.
+    let policy_cap = state
+        .inference_policy
+        .read()
+        .await
+        .as_ref()
+        .and_then(|p| p.per_request_tokens.map(|c| (c, p.digest.clone())));
+    if let Some((cap, digest)) = policy_cap
+        && let Some(requested) = extract_requested_max_tokens(&body)
+        && let PerRequestGate::Reject { requested, cap } =
+            decide_per_request_gate(Some(cap), Some(requested))
+    {
+        tracing::warn!(
+            sandbox = %sandbox_name,
+            requested,
+            cap,
+            digest = %digest,
+            "InferencePolicy perRequestTokens exceeded — rejecting"
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!(
+                        "Requested max_tokens={requested} exceeds InferencePolicy \
+                         tokenBudget.perRequestTokens={cap}"
+                    ),
+                    "type": "token_budget_exceeded",
+                    "code": "per_request_tokens_exceeded"
+                }
+            })),
+        )
+            .into_response();
+    }
+
     // Forward to Foundry
     let upstream = state.upstream_config(sandbox_name);
 
@@ -611,4 +662,137 @@ pub(super) async fn chat_completions(
             }
         } // end else (buffered)
     } // end if is_stream
+}
+
+/// Slice 2a — outcome of the per-request token cap gate. Returning an
+/// enum (rather than `bool`) keeps the call site explicit about the
+/// rejection path and makes the unit tests symmetric across the
+/// allow / reject branches.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PerRequestGate {
+    /// Either no policy is loaded, the policy doesn't set a cap, or
+    /// the client did not specify `max_tokens` / `max_completion_tokens`
+    /// — let the request through. The post-response budget tracker
+    /// still observes usage.
+    Allow,
+    /// Client explicitly requested more output tokens than the policy
+    /// allows. Both values surface in the 429 body so the caller can
+    /// adjust without inspecting CRDs.
+    Reject { requested: u64, cap: u64 },
+}
+
+/// Pure decision used by `chat_completions` to gate
+/// `tokenBudget.perRequestTokens`. Kept free of `AppState` so unit
+/// tests can exhaust the truth table without spinning up a full
+/// router fixture.
+pub(super) fn decide_per_request_gate(cap: Option<u64>, requested: Option<u64>) -> PerRequestGate {
+    match (cap, requested) {
+        (Some(c), Some(r)) if r > c => PerRequestGate::Reject {
+            requested: r,
+            cap: c,
+        },
+        _ => PerRequestGate::Allow,
+    }
+}
+
+/// Extract the requested completion-tokens budget from the chat
+/// completions request body. Both `max_tokens` (legacy) and
+/// `max_completion_tokens` (o-series models) are honoured —
+/// `max_completion_tokens` wins when both are set, matching upstream
+/// OpenAI semantics. Returns `None` when the body is unparseable or
+/// neither field is present (in which case the gate defaults to
+/// Allow — pre-flight cannot estimate prompt tokens in Slice 2a).
+pub(super) fn extract_requested_max_tokens(body: &[u8]) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    v.get("max_completion_tokens")
+        .and_then(|x| x.as_u64())
+        .or_else(|| v.get("max_tokens").and_then(|x| x.as_u64()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_allow_when_no_policy_cap() {
+        assert_eq!(
+            decide_per_request_gate(None, Some(10_000)),
+            PerRequestGate::Allow
+        );
+    }
+
+    #[test]
+    fn gate_allow_when_request_omits_max_tokens() {
+        assert_eq!(
+            decide_per_request_gate(Some(4_096), None),
+            PerRequestGate::Allow
+        );
+    }
+
+    #[test]
+    fn gate_allow_when_requested_under_cap() {
+        assert_eq!(
+            decide_per_request_gate(Some(4_096), Some(4_096)),
+            PerRequestGate::Allow
+        );
+        assert_eq!(
+            decide_per_request_gate(Some(4_096), Some(1_000)),
+            PerRequestGate::Allow
+        );
+    }
+
+    #[test]
+    fn gate_reject_when_requested_over_cap() {
+        assert_eq!(
+            decide_per_request_gate(Some(4_096), Some(4_097)),
+            PerRequestGate::Reject {
+                requested: 4_097,
+                cap: 4_096,
+            }
+        );
+        assert_eq!(
+            decide_per_request_gate(Some(100), Some(1_000_000)),
+            PerRequestGate::Reject {
+                requested: 1_000_000,
+                cap: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn extract_max_tokens_prefers_max_completion_tokens() {
+        // OpenAI o-series semantics: max_completion_tokens supersedes
+        // max_tokens. If both are present, the newer field wins so we
+        // do not under-gate.
+        let body = br#"{"max_tokens": 100, "max_completion_tokens": 9999}"#;
+        assert_eq!(extract_requested_max_tokens(body), Some(9_999));
+    }
+
+    #[test]
+    fn extract_max_tokens_falls_back_to_legacy_field() {
+        let body = br#"{"max_tokens": 2048}"#;
+        assert_eq!(extract_requested_max_tokens(body), Some(2_048));
+    }
+
+    #[test]
+    fn extract_max_tokens_handles_absent_field() {
+        let body = br#"{"messages": []}"#;
+        assert_eq!(extract_requested_max_tokens(body), None);
+    }
+
+    #[test]
+    fn extract_max_tokens_handles_unparseable_body() {
+        assert_eq!(extract_requested_max_tokens(b"not json"), None);
+    }
+
+    #[test]
+    fn extract_max_tokens_ignores_non_integer_values() {
+        // Defensive: a stringified or float value should not crash.
+        let body = br#"{"max_tokens": "1024"}"#;
+        assert_eq!(extract_requested_max_tokens(body), None);
+        let body2 = br#"{"max_tokens": 1024.5}"#;
+        // serde_json::Value::as_u64 returns None for non-integer
+        // numbers, so we fall through to Allow.
+        assert_eq!(extract_requested_max_tokens(body2), None);
+    }
 }
