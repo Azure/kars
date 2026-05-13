@@ -84,6 +84,9 @@ fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
         pending_handoff: PendingHandoffStore::new(),
         policy_status: policy_status.clone(),
         inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
+        deployment_health: std::sync::Arc::new(
+            azureclaw_inference_router::deployment_health::DeploymentHealthRegistry::new(),
+        ),
     };
     (state, policy_status)
 }
@@ -212,4 +215,44 @@ async fn governance_load_of_missing_dir_records_error() {
         err.to_lowercase().contains("not found"),
         "expected 'not found' in error, got {err}",
     );
+}
+
+#[tokio::test]
+async fn deployment_health_surfaces_via_route() {
+    // Slice 2d.2: the failover walker records per-deployment health
+    // into the registry; `/internal/policy-status` echoes the snapshot
+    // so the controller can see fallback activity without scraping
+    // request logs.
+    let (state, _reg) = test_state();
+    state.deployment_health.record_failure("gpt-4o-primary");
+    state.deployment_health.record_success("gpt-4o-fallback");
+
+    let app = app(state);
+    let (status, body) = get(&app, "/internal/policy-status").await;
+    assert_eq!(status, StatusCode::OK);
+    let health = body["deployment_health"]
+        .as_array()
+        .expect("deployment_health is always an array");
+    assert_eq!(health.len(), 2, "two deployments observed");
+    let names: Vec<&str> = health
+        .iter()
+        .map(|v| v["deployment"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"gpt-4o-primary"));
+    assert!(names.contains(&"gpt-4o-fallback"));
+    for entry in health {
+        // Single failure below default threshold (3) keeps primary healthy.
+        assert_eq!(entry["healthy"].as_bool(), Some(true));
+    }
+}
+
+#[tokio::test]
+async fn empty_deployment_health_serializes_as_empty_array() {
+    let (state, _reg) = test_state();
+    let app = app(state);
+    let (_, body) = get(&app, "/internal/policy-status").await;
+    let health = body["deployment_health"]
+        .as_array()
+        .expect("deployment_health is always an array, even when empty");
+    assert!(health.is_empty());
 }

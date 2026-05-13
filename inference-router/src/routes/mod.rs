@@ -132,6 +132,13 @@ pub struct AppState {
     /// enforced; later sub-slices add daily/monthly budgets,
     /// content-safety floors, and model failover.
     pub inference_policy: crate::inference_policy_loader::LoadedInferencePolicyHandle,
+    /// Slice 2d.2 — per-deployment health cache backing the
+    /// `modelPreference.fallback[]` failover walk in
+    /// [`crate::failover::forward_with_failover`]. Shared across
+    /// every inference handler so a 5xx on `chat/completions`
+    /// against deployment `gpt-4o` also informs the `responses`
+    /// handler's next request.
+    pub deployment_health: Arc<crate::deployment_health::DeploymentHealthRegistry>,
 }
 
 impl AppState {
@@ -276,6 +283,7 @@ impl AppState {
             pending_handoff: PendingHandoffStore::new(),
             policy_status,
             inference_policy,
+            deployment_health: Arc::new(crate::deployment_health::DeploymentHealthRegistry::new()),
         })
     }
 

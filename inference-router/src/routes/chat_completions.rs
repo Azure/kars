@@ -521,12 +521,19 @@ pub(super) async fn chat_completions(
             }
         }
     } else {
-        // Buffered — extract token usage for budget tracking
-        let result = proxy::forward(
+        // Buffered — extract token usage for budget tracking.
+        // Slice 2d.2: route through the health-aware failover walker
+        // so a 5xx/429 against `primary.deployment` transparently
+        // retries against `fallback[N].deployment`. The 400-→-
+        // Responses-API recovery further down still runs against the
+        // *successful* upstream's deployment.
+        let result = crate::failover::forward_with_failover(
             &state.auth,
             Some(&state.copilot),
             &state.client,
+            &state.deployment_health,
             &upstream,
+            &policy,
             axum::http::Method::POST,
             "chat/completions",
             &headers,

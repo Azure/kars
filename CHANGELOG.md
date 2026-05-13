@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2d.2 — health-aware `modelPreference.fallback[]` failover
+
+Slice 2d.1 added the single-shot deployment override. Slice 2d.2 closes
+the loop: when the primary deployment returns 5xx / 429, the router now
+walks `policy.modelPreference.fallback[]` in order, skipping deployments
+already marked unhealthy, and returns the first 2xx response. All
+within the same Foundry/AOAI client at process start — same-provider,
+deployment-swap only. Cross-provider failover is intentionally
+deferred (one inference provider per process today).
+
+**Router (`inference-router`)**
+
+* `deployment_health.rs` (new) — `DeploymentHealthRegistry` with
+  per-deployment atomic streak counters. 3-strike default with a 60s
+  window: three consecutive failures within 60s mark a deployment
+  unhealthy; a single success resets. Sticky `first_failure_at_ms`
+  anchor + saturating `u8` increment keep the streak well-defined
+  under sustained outages. `RwLock<HashMap>` read path + `Arc<DeploymentHealth>`
+  with atomics — no `dashmap` dep.
+* `failover.rs` (new) — `forward_with_failover` walker. Builds the
+  candidate list (`primary, fallback[…], upstream-default`, dedup,
+  empty-skip, always non-empty), tries each in order, calls
+  `proxy::forward` per attempt, records success/failure into the
+  registry. Returns the first non-retry-worthy result (2xx, 4xx
+  non-429, or transport error after all candidates exhausted).
+  When every candidate is currently marked unhealthy, the walker
+  punches through with the first one anyway so the agent receives a
+  real upstream response rather than a synthetic 503.
+* `routes/inference.rs` (Responses handler) and
+  `routes/chat_completions.rs` (buffered branch) — refactored to call
+  `forward_with_failover` instead of the Slice 2d.1
+  `apply_model_preference_override` + `proxy::forward` pair. Streaming
+  + anthropic_messages + embeddings + images_generations remain on the
+  single-shot override (failover for streaming requires status-gated
+  retry before first SSE byte — deferred to Slice 2d.3).
+* `routes/mod.rs` — new `AppState.deployment_health: Arc<DeploymentHealthRegistry>`
+  field, single instance per process.
+* `routes/internal.rs` — `GET /internal/policy-status` response gains
+  an additive `deployment_health: Vec<DeploymentHealthSnapshot>` field
+  (additive within `schema_version: 1`; clients ignoring it work
+  unchanged). Lets the controller, `azureclaw inspect`, and the
+  Headlamp panel see fallback activity without scraping request logs.
+* Audit logging: a single `tracing::warn!` per failover transition
+  (`from`, `to`, `status`, `digest`, `sandbox`) keeps activity visible
+  in router stdout without flooding on healthy hot paths.
+
+**Tests**
+
+* `deployment_health.rs` — 9 unit tests (unknown / below-threshold /
+  threshold / recovery / window-expiry / isolation / saturation /
+  anchor-stickiness / snapshot).
+* `failover.rs` — 9 unit tests covering the 5xx/429 classifier and
+  candidate-list construction (dedup, empty-skip, primary-first
+  ordering, fallback safety net).
+* `tests/failover_walk.rs` (new) — 3 integration tests with a branching
+  axum upstream that dispatches on the `model` field per request:
+  primary-503-falls-through-to-fallback-200; pre-unhealthy primary is
+  skipped; all-unhealthy still punches through.
+* `tests/policy_status_endpoint.rs` — 2 new tests assert the
+  `deployment_health` field surfaces correctly (populated + empty).
+* `tests/agt_governance_integration.rs`, `tests/egress_blocked_endpoint.rs`,
+  `tests/policy_status_endpoint.rs` — `AppState` initializers gain the
+  new `deployment_health` field.
+
+**Producer→consumer wire (principles.md §3)**
+
+Slice 2a's `InferencePolicy` digest already covers the
+`modelPreference` block byte-for-byte, so the existing
+Compiled → Ready echo gate remains the authoritative correctness
+signal. Slice 2d.2 only *adds* runtime health snapshots to the response
+envelope — the digest contract is untouched.
+
+**Deferred (Slice 2d.3 candidate)**
+
+* Streaming + anthropic_messages failover. Needs status-gated retry
+  before the first SSE byte hits the wire; non-trivial in the current
+  `forward_stream` shape.
+* Cross-provider client registry (one Foundry + one AOAI client at
+  process start today). Out of scope until a real consumer requests it.
+
+---
+
 ### Slice 1e §2 — remove bundled `AGT_POLICY_PROFILE` env-var fallback
 
 Phase 2 of Slice 1e closes the deprecation window opened in phase 1 and

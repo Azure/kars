@@ -293,20 +293,23 @@ async fn responses(
         .into_response();
     }
 
-    let mut upstream = state.upstream_config(sandbox_name);
-    // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
-    // Embeddings (body-driven model) and images_generations (path-driven
-    // deployment) deliberately skip this override — the caller already
-    // chose a concrete model in those flows and round-tripping it
-    // through the policy override would change the URL contract.
-    crate::routes::apply_model_preference_override(&mut upstream, &policy);
+    let upstream = state.upstream_config(sandbox_name);
+    // Slice 2d.2: walk `modelPreference.primary → fallback[]` with
+    // per-deployment health awareness. The override that 2d.1 did via
+    // `apply_model_preference_override` is now part of
+    // `forward_with_failover`'s candidate construction
+    // (`build_candidates` starts with `primary.deployment` and walks
+    // outward), so this single call subsumes the override + the
+    // retry loop in one place.
     tracing::info!(sandbox = %sandbox_name, model = %upstream.deployment, "Responses API request");
 
-    match proxy::forward(
+    match crate::failover::forward_with_failover(
         &state.auth,
         Some(&state.copilot),
         &state.client,
+        &state.deployment_health,
         &upstream,
+        &policy,
         axum::http::Method::POST,
         "responses",
         &headers,

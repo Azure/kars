@@ -28,6 +28,7 @@ use axum::routing::get;
 use serde::Serialize;
 
 use super::AppState;
+use crate::deployment_health::DeploymentHealthSnapshot;
 use crate::policy_status::PolicyStatusEntry;
 
 pub fn internal_routes() -> Router<AppState> {
@@ -45,6 +46,14 @@ struct PolicyStatusResponse {
     schema_version: u32,
     count: usize,
     entries: Vec<EntryDto>,
+    /// Per-deployment health snapshot — additive in schema_version 1
+    /// (always present, may be empty). Populated by the Slice 2d.2
+    /// `forward_with_failover` walker as it observes upstream
+    /// responses. Clients that don't care can ignore it; the
+    /// controller and `azureclaw inspect` consume it for surfacing
+    /// `modelPreference.fallback[]` activity.
+    #[serde(default)]
+    deployment_health: Vec<DeploymentHealthSnapshot>,
 }
 
 /// Wire DTO. We deliberately don't `#[derive(Serialize)]` on
@@ -136,10 +145,12 @@ async fn policy_status(State(state): State<AppState>) -> impl IntoResponse {
         .into_iter()
         .map(EntryDto::from)
         .collect();
+    let deployment_health = state.deployment_health.snapshot();
     Json(PolicyStatusResponse {
         schema_version: 1,
         count: entries.len(),
         entries,
+        deployment_health,
     })
 }
 
@@ -198,12 +209,14 @@ mod tests {
             schema_version: 1,
             count: entries.len(),
             entries,
+            deployment_health: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["schema_version"].as_u64(), Some(1));
         assert_eq!(json["count"].as_u64(), Some(1));
         assert_eq!(json["entries"].as_array().unwrap().len(), 1);
         assert_eq!(json["entries"][0]["kind"].as_str(), Some("AgtProfile"));
+        assert_eq!(json["deployment_health"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -214,9 +227,11 @@ mod tests {
             schema_version: 1,
             count: entries.len(),
             entries,
+            deployment_health: Vec::new(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["count"].as_u64(), Some(0));
         assert_eq!(json["entries"].as_array().unwrap().len(), 0);
+        assert_eq!(json["deployment_health"].as_array().unwrap().len(), 0);
     }
 }
