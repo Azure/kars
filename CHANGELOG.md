@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2d.1 — InferencePolicy `modelPreference.primary.deployment` deployment override
+
+First wire of `modelPreference` end-to-end. When an `InferencePolicy`
+sets `modelPreference.primary.deployment`, every chat-completions /
+responses / anthropic-messages forwarder now overrides the
+env-driven default deployment with the policy-declared deployment
+before reaching out to the upstream. Operators can pin a sandbox to
+e.g. `gpt-5.4-eu` purely through the CR without touching helm
+values.
+
+Latency: the override is applied off the same `InferencePolicySnapshot`
+the Slice 2c handlers already take once per request — zero extra
+lock acquisitions, single-byte `String` clone when (and only when)
+the deployment actually changes.
+
+**Slice 2d.1 deliberately ignores `primary.provider`.** Cross-provider
+routing (`azure-openai` → `anthropic` → `bedrock` failover) requires
+a per-provider client registry the router doesn't carry today;
+Slice 2d.2 will pick it up. Until then `primary.provider` is
+informational-only — the override always flows through the existing
+Foundry / Azure-OpenAI / Copilot endpoint resolved at process start.
+
+**`fallback[]` is captured but not yet consumed.** Slice 2d.2 will
+add health-aware primary → fallback failover (60s TTL health cache,
+mark unhealthy after 3 consecutive 5xx/429); 2d.1 only honours the
+primary so we ship a real bytes-move slice without dragging in
+multi-week infrastructure.
+
+Defence-in-depth:
+
+* Empty-string `primary.deployment` ⇒ no-op (even though the
+  controller schema rejects it).
+* Same-deployment override ⇒ no-op + no audit-log spam.
+* Embeddings (body-driven model) and images-generations (path-driven
+  deployment) deliberately skip the override — the caller already
+  chose a concrete model in those flows.
+* Audit log: `tracing::info!(... from = ..., to = ..., provider, digest, "InferencePolicy modelPreference: overriding deployment")`
+  fires exactly once per effective override per request.
+
+Controller untouched — Slice 2a's digest already hashed the
+`modelPreference` bytes byte-for-byte, so the §3 echo loop
+(Compiled → Ready on router-confirmed digest) is already
+authoritative; no schema or reconciler change required.
+
 ### Slice 2c — InferencePolicy `contentSafety` floors + `requirePromptShields` fail-closed
 
 Third axis of `InferencePolicy` now actually enforced. The router

@@ -260,7 +260,9 @@ pub(super) async fn anthropic_messages(
         .unwrap_or("")
         .to_string();
 
-    let upstream = state.upstream_config(sandbox_name);
+    let mut upstream = state.upstream_config(sandbox_name);
+    // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
+    crate::routes::apply_model_preference_override(&mut upstream, &policy);
 
     // Copilot exposes a native Anthropic Messages endpoint at /v1/messages.
     // Skip translation entirely and forward the body as-is, preserving the

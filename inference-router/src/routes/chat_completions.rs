@@ -143,7 +143,9 @@ pub(super) async fn chat_completions(
     }
 
     // Forward to Foundry
-    let upstream = state.upstream_config(sandbox_name);
+    let mut upstream = state.upstream_config(sandbox_name);
+    // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
+    crate::routes::apply_model_preference_override(&mut upstream, &policy);
 
     // Check if this model is known to require Responses API (cached from prior 400s)
     let model_name = serde_json::from_slice::<serde_json::Value>(&body)

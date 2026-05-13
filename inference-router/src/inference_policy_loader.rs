@@ -58,6 +58,62 @@ pub const INFERENCE_POLICY_FILENAME: &str = "inference-policy.json";
 /// `perRequestTokens` without re-reading the file.
 pub type LoadedInferencePolicyHandle = Arc<RwLock<Option<LoadedInferencePolicy>>>;
 
+/// Reference to a Foundry/AOAI route as it travels through the
+/// compiled policy JSON. Mirrors `controller::inference_policy::ModelRef`
+/// byte-for-byte (provider tag + deployment name) so the router can
+/// honour the same `{provider, deployment}` pair the operator wrote
+/// in their YAML.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelRef {
+    pub provider: String,
+    pub deployment: String,
+}
+
+/// `spec.modelPreference` — primary + ordered fallback chain.
+/// Today the router only consumes `primary.deployment` as a
+/// deployment override (Slice 2d.1). The `fallback` chain is
+/// captured here so Slice 2d.2 can wire health-aware failover
+/// without re-touching the loader or the snapshot type.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelPreference {
+    pub primary: ModelRef,
+    pub fallback: Vec<ModelRef>,
+}
+
+impl ModelPreference {
+    /// Parse a single `{"provider": "...", "deployment": "..."}` value.
+    /// Returns `None` when either field is missing or non-string so
+    /// the router never crashes on schema drift.
+    fn parse_ref(v: &serde_json::Value) -> Option<ModelRef> {
+        let provider = v.get("provider").and_then(|x| x.as_str())?;
+        let deployment = v.get("deployment").and_then(|x| x.as_str())?;
+        if deployment.is_empty() {
+            return None;
+        }
+        Some(ModelRef {
+            provider: provider.to_string(),
+            deployment: deployment.to_string(),
+        })
+    }
+
+    /// Parse the compiled `modelPreference` block. Returns `None`
+    /// when the block is `null`/absent **or** when `primary` cannot
+    /// be parsed (a malformed fallback entry is silently dropped to
+    /// keep the rest of the chain usable).
+    pub fn from_compiled_json(v: &serde_json::Value) -> Option<Self> {
+        if v.is_null() {
+            return None;
+        }
+        let primary = Self::parse_ref(v.get("primary")?)?;
+        let fallback = v
+            .get("fallback")
+            .and_then(|f| f.as_array())
+            .map(|arr| arr.iter().filter_map(Self::parse_ref).collect::<Vec<_>>())
+            .unwrap_or_default();
+        Some(Self { primary, fallback })
+    }
+}
+
 /// Parsed `InferencePolicy` profile cached in memory. The `raw` field
 /// preserves the JSON for later sub-slices that consume more axes
 /// (`contentSafety`, `modelPreference`); 2a only consumes
@@ -99,6 +155,15 @@ pub struct LoadedInferencePolicy {
     /// unchanged.
     pub content_safety: crate::safety::ContentSafetyFloor,
 
+    /// `spec.modelPreference` — first-touch wiring in Slice 2d.1:
+    /// when present, the handlers override the default deployment
+    /// with `primary.deployment` before forwarding. Provider-tag
+    /// failover + health probing across `fallback[]` is deferred
+    /// to Slice 2d.2 (requires a per-provider client registry the
+    /// router doesn't carry today). `None` means the router falls
+    /// back to the env-driven default deployment (back-compat).
+    pub model_preference: Option<ModelPreference>,
+
     /// Whole profile JSON, kept so subsequent sub-slices can pick up
     /// other axes without a new loader.
     pub raw: serde_json::Value,
@@ -131,7 +196,15 @@ pub fn canonical_bytes_for_digest(filename: &str, body: &[u8]) -> Vec<u8> {
 /// Outcome of [`load_inference_policy_from_dir`]. Kept separate from a
 /// generic `Result<…, anyhow::Error>` so the caller can pattern-match
 /// on the "nothing mounted yet" case without log spam.
+///
+/// The `Loaded` variant carries `LoadedInferencePolicy` directly — a
+/// few hundred bytes once `modelPreference` + `contentSafety` are
+/// parsed. `large_enum_variant` would push us to `Box`, but the
+/// outcome is constructed in exactly one call site and is moved
+/// straight into `install_into` without round-tripping through any
+/// hot path, so the unboxed shape is preferable.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum LoadOutcome {
     /// File present and parsed successfully. `loaded.digest` was
     /// registered with `PolicyStatusRegistry::record_success`.
@@ -242,6 +315,17 @@ pub fn load_inference_policy_from_dir(
             .unwrap_or(&serde_json::Value::Null),
     );
 
+    // Slice 2d.1: `modelPreference` parsed to `ModelPreference`.
+    // `None` falls through to the env-driven default deployment in
+    // `routes::mod::AppState::upstream_config`. Malformed schema
+    // (missing `primary.deployment`) also yields `None` rather than
+    // crashing the router — see `from_compiled_json` docs.
+    let model_preference = ModelPreference::from_compiled_json(
+        parsed
+            .get("modelPreference")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+
     // Digest layout matches controller `inference_policy_digest`:
     // length-prefixed (name, body) hashed with sha256.
     let canonical = canonical_bytes_for_digest(INFERENCE_POLICY_FILENAME, &body);
@@ -257,6 +341,8 @@ pub fn load_inference_policy_from_dir(
         daily_tokens = ?daily_tokens,
         monthly_tokens = ?monthly_tokens,
         content_safety_active = content_safety.is_active(),
+        primary_deployment = ?model_preference.as_ref().map(|m| m.primary.deployment.as_str()),
+        fallback_count = model_preference.as_ref().map(|m| m.fallback.len()).unwrap_or(0),
         digest = %digest,
         "InferencePolicy loaded"
     );
@@ -268,6 +354,7 @@ pub fn load_inference_policy_from_dir(
         daily_tokens,
         monthly_tokens,
         content_safety,
+        model_preference,
         raw: parsed,
     })
 }
@@ -311,6 +398,12 @@ pub struct InferencePolicySnapshot {
     pub daily_tokens: Option<u64>,
     pub monthly_tokens: Option<u64>,
     pub content_safety: crate::safety::ContentSafetyFloor,
+    /// `spec.modelPreference` — Slice 2d.1. `None` ⇒ handlers use
+    /// the env-driven default deployment (back-compat). When
+    /// `Some`, handlers override `upstream.deployment` with
+    /// `primary.deployment`; the `fallback` chain is captured for
+    /// Slice 2d.2's health-aware failover.
+    pub model_preference: Option<ModelPreference>,
 }
 
 /// Take a single read-lock snapshot of the currently-loaded policy.
@@ -332,6 +425,7 @@ pub async fn current_snapshot(handle: &LoadedInferencePolicyHandle) -> Inference
             daily_tokens: p.daily_tokens,
             monthly_tokens: p.monthly_tokens,
             content_safety: p.content_safety.clone(),
+            model_preference: p.model_preference.clone(),
         })
         .unwrap_or_default()
 }
@@ -456,6 +550,8 @@ mod tests {
         // contentSafety:null → inactive floor (preserves Slice 2a/2b
         // behaviour for policies that don't opt into 2c).
         assert!(!loaded.content_safety.is_active());
+        // modelPreference:null → None (preserves env-driven deployment).
+        assert!(loaded.model_preference.is_none());
     }
 
     #[test]
@@ -494,6 +590,7 @@ mod tests {
         assert_eq!(floor.sexual, Some(crate::safety::SeverityLevel::High));
         assert_eq!(floor.violence, Some(crate::safety::SeverityLevel::Low));
         assert!(floor.require_prompt_shields);
+        assert!(loaded.model_preference.is_none());
     }
 
     #[tokio::test]
@@ -511,6 +608,7 @@ mod tests {
         assert!(snap.daily_tokens.is_none());
         assert!(snap.monthly_tokens.is_none());
         assert!(!snap.content_safety.is_active());
+        assert!(snap.model_preference.is_none());
     }
 
     #[tokio::test]
@@ -532,6 +630,16 @@ mod tests {
                 violence: None,
                 require_prompt_shields: true,
             },
+            model_preference: Some(ModelPreference {
+                primary: ModelRef {
+                    provider: "azure-openai".into(),
+                    deployment: "gpt-5.4-eu".into(),
+                },
+                fallback: vec![ModelRef {
+                    provider: "azure-openai".into(),
+                    deployment: "gpt-5.4-us".into(),
+                }],
+            }),
             raw: serde_json::Value::Null,
         };
         let handle: LoadedInferencePolicyHandle =
@@ -546,6 +654,10 @@ mod tests {
             snap.content_safety.hate,
             Some(crate::safety::SeverityLevel::Medium)
         );
+        let mp = snap.model_preference.expect("model_preference");
+        assert_eq!(mp.primary.deployment, "gpt-5.4-eu");
+        assert_eq!(mp.fallback.len(), 1);
+        assert_eq!(mp.fallback[0].deployment, "gpt-5.4-us");
     }
 
     #[test]
@@ -637,5 +749,98 @@ mod tests {
         assert!(matches!(outcome, LoadOutcome::Loaded(_)));
         let guard = handle.read().await;
         assert_eq!(guard.as_ref().unwrap().per_request_tokens, Some(2048));
+    }
+
+    #[test]
+    fn model_preference_parses_primary_and_fallback() {
+        // Slice 2d.1 wire-contract: compiled JSON shape mirrors the
+        // controller's `ModelPreference` schema. Walking both primary
+        // and the full fallback chain keeps the wire compatibility
+        // explicit so 2d.2 can swap consumers without retouching the
+        // parser.
+        let v = serde_json::json!({
+            "primary": { "provider": "azure-openai", "deployment": "gpt-5.4-eu" },
+            "fallback": [
+                { "provider": "azure-openai", "deployment": "gpt-5.4-us" },
+                { "provider": "anthropic", "deployment": "claude-opus-4.7" }
+            ]
+        });
+        let pref = ModelPreference::from_compiled_json(&v).expect("parses");
+        assert_eq!(pref.primary.provider, "azure-openai");
+        assert_eq!(pref.primary.deployment, "gpt-5.4-eu");
+        assert_eq!(pref.fallback.len(), 2);
+        assert_eq!(pref.fallback[1].provider, "anthropic");
+        assert_eq!(pref.fallback[1].deployment, "claude-opus-4.7");
+    }
+
+    #[test]
+    fn model_preference_rejects_missing_primary_deployment() {
+        // Defence-in-depth: the controller schema is supposed to
+        // enforce non-empty `primary.deployment`, but the router
+        // refuses to trust that — an empty string short-circuits to
+        // `None` so handlers fall back to the env-driven deployment
+        // instead of forwarding to "" upstream.
+        let v = serde_json::json!({
+            "primary": { "provider": "azure-openai", "deployment": "" },
+            "fallback": []
+        });
+        assert!(ModelPreference::from_compiled_json(&v).is_none());
+
+        let v = serde_json::json!({
+            "fallback": [{ "provider": "azure-openai", "deployment": "x" }]
+        });
+        assert!(ModelPreference::from_compiled_json(&v).is_none());
+    }
+
+    #[test]
+    fn model_preference_drops_malformed_fallback_entries() {
+        // A single bad fallback entry shouldn't take down the rest
+        // of the chain — Slice 2d.2 will consume `fallback` to do
+        // health-aware failover, so partial chains are still useful.
+        let v = serde_json::json!({
+            "primary": { "provider": "azure-openai", "deployment": "p1" },
+            "fallback": [
+                { "provider": "azure-openai" },
+                { "provider": "azure-openai", "deployment": "good" },
+                "not-an-object"
+            ]
+        });
+        let pref = ModelPreference::from_compiled_json(&v).expect("parses");
+        assert_eq!(pref.fallback.len(), 1);
+        assert_eq!(pref.fallback[0].deployment, "good");
+    }
+
+    #[test]
+    fn loads_model_preference_when_present() {
+        // End-to-end shim: compiled JSON on disk → `LoadedInferencePolicy`
+        // carries the parsed `model_preference`. This guards both the
+        // parser call site and the field plumbing on
+        // `LoadedInferencePolicy` so adding fields downstream doesn't
+        // silently regress the wire mapping.
+        let tmp = TempDir::new().unwrap();
+        let profile = serde_json::json!({
+            "appliesTo": { "sandboxName": "agent-x", "sandboxMatchLabels": {}, "action": null },
+            "tokenBudget": null,
+            "contentSafety": null,
+            "modelPreference": {
+                "primary": { "provider": "azure-openai", "deployment": "gpt-5.4-eu" },
+                "fallback": [
+                    { "provider": "azure-openai", "deployment": "gpt-5.4-us" }
+                ]
+            },
+            "displayName": null
+        });
+        write_profile(tmp.path(), INFERENCE_POLICY_FILENAME, &profile);
+
+        let reg = registry();
+        let outcome = load_inference_policy_from_dir(tmp.path().to_str().unwrap(), &reg);
+        let loaded = match outcome {
+            LoadOutcome::Loaded(p) => p,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        let pref = loaded.model_preference.expect("model_preference present");
+        assert_eq!(pref.primary.deployment, "gpt-5.4-eu");
+        assert_eq!(pref.fallback.len(), 1);
+        assert_eq!(pref.fallback[0].deployment, "gpt-5.4-us");
     }
 }

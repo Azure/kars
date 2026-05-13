@@ -306,6 +306,48 @@ impl AppState {
     }
 }
 
+/// Slice 2d.1 — apply `modelPreference.primary.deployment` from a
+/// loaded `InferencePolicy` snapshot as a deployment override.
+///
+/// Mutates `upstream.deployment` in place when the policy carries a
+/// non-empty `primary.deployment` that differs from the current
+/// deployment. Logs an `info!` event on every effective override so
+/// operators can correlate router-level traffic shaping against the
+/// policy bytes (digest is included).
+///
+/// Fail-open by design:
+/// * `None` snapshot ⇒ no-op (back-compat for sandboxes without an
+///   `InferencePolicy`).
+/// * Empty-string `primary.deployment` ⇒ no-op (defence-in-depth even
+///   though the controller schema rejects empty strings).
+/// * Same-deployment override ⇒ no-op + no log spam.
+///
+/// **Slice 2d.1 deliberately ignores `primary.provider`** — provider-
+/// tagged routing requires a per-provider client registry the router
+/// doesn't carry today; Slice 2d.2 will pick that up. Until then the
+/// provider tag is informational-only.
+pub(crate) fn apply_model_preference_override(
+    upstream: &mut UpstreamConfig,
+    policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+) {
+    let Some(ref pref) = policy.model_preference else {
+        return;
+    };
+    let target = pref.primary.deployment.as_str();
+    if target.is_empty() || target == upstream.deployment {
+        return;
+    }
+    tracing::info!(
+        sandbox = %upstream.sandbox_name,
+        from = %upstream.deployment,
+        to = %target,
+        provider = %pref.primary.provider,
+        digest = %policy.digest,
+        "InferencePolicy modelPreference: overriding deployment"
+    );
+    upstream.deployment = target.to_string();
+}
+
 /// Extract the admin bearer token from either `Authorization: Bearer <token>`
 /// (canonical) or the legacy `x-azureclaw-admin: <token>` header.
 ///
