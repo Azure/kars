@@ -27,7 +27,10 @@ const POLICY_KIND_LABEL: Record<string, string> = {
   AgtProfile: "AGT profile",
   InferencePolicy: "InferencePolicy",
   Egress: "Egress",
-  MemoryStore: "ClawMemory",
+  // Slice 3a: router emits `PolicyKind::Memory` (as_str="Memory") for
+  // the compiled ClawMemory binding at /etc/azureclaw/memory/binding.json.
+  // Display as the user-facing CRD name.
+  Memory: "ClawMemory",
 };
 
 interface PolicyStatusEntry {

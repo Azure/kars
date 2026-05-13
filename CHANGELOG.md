@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 3b.1 — ClawMemory operator UX (inspect CLI + Headlamp panel)
+
+Operator-facing surface for the §3 echo loop closed in Slice 3a. The
+producer-side facts (`compiledDigest`, `loadedDigest`, `Ready` reason)
+now light up where operators already look:
+
+* `azureclaw inspect <sandbox>` — the `Memory` wire kind now maps to
+  the user-facing display label `ClawMemory` (was the stale planning
+  name `MemoryStore`). The tree groups Memory entries under their own
+  header next to `ToolPolicy` and `InferencePolicy`.
+* Headlamp plugin `RouterPolicyStatusPanel` — now renders for
+  `clawmemories` (in addition to `toolpolicies` + `inferencepolicies`),
+  surfacing the compiled/loaded digest pair and the `Ready` reason
+  chip. Zero new API traffic — pure read of fields the controller
+  already writes in Slice 3a.
+
 ### Slice 3a — ClawMemory router-echo
 
 Closes principles.md §3 ("Ready ⇔ router echo") for the third CRD
