@@ -302,7 +302,9 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 let cm_name = format!("mcp-{name}-jwks");
                 match ctx.jwks_fetcher.fetch(&issuer).await {
                     Ok(fetched) => {
-                        ensure_jwks_configmap(&configmaps, &cm_name, &name, &fetched.raw).await?;
+                        let meta = McpServerMeta::from_spec(&mcp.spec);
+                        ensure_jwks_configmap(&configmaps, &cm_name, &name, &fetched.raw, &meta)
+                            .await?;
                         jwks_ref = Some(LocalObjectRef {
                             name: cm_name.clone(),
                         });
@@ -568,18 +570,71 @@ fn kid_from_public_bytes(public: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..16])
 }
 
+/// Slice 4d.3 — per-server OAuth metadata.
+///
+/// Written by the controller into the `mcp-{name}-jwks` ConfigMap under
+/// the `meta.json` key so the router's `McpServerRegistry` can build a
+/// multi-issuer `OAuthVerifierConfig` keyed by `issuer`. Plural
+/// `audiences` because some IdPs (e.g. Entra) issue tokens whose `aud`
+/// claim is a list; we accept whichever audience matches the server's
+/// configured `audience` (validator handles list-vs-string).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerMeta {
+    /// OAuth 2.1 issuer URL.
+    pub issuer: String,
+    /// Single audience the validator pins on for this server. Optional
+    /// because some self-managed MCP servers omit the `aud` claim
+    /// (RFC 6749 silence). When absent, the router treats this server's
+    /// JWKS as audience-agnostic (the global `MCP_OAUTH_AUDIENCE`
+    /// env-var still applies as a floor for the dev-mode legacy path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// OAuth 2.1 scopes the router uses to gate fronted calls. Empty =
+    /// no scope requirement at the OAuth layer (per-tool gating lives
+    /// in ToolPolicy).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+}
+
+impl McpServerMeta {
+    /// Build the meta record from a reconciled `McpServerSpec`.
+    pub fn from_spec(spec: &crate::mcp_server::McpServerSpec) -> Self {
+        let (issuer, audience) = match spec.oauth.as_ref() {
+            Some(o) => (
+                o.issuer.clone(),
+                o.audience.clone().filter(|a| !a.is_empty()),
+            ),
+            None => (String::new(), None),
+        };
+        Self {
+            issuer,
+            audience,
+            scopes: spec.scopes.clone(),
+        }
+    }
+}
+
 async fn ensure_jwks_configmap(
     api: &Api<ConfigMap>,
     cm_name: &str,
     owner: &str,
     raw_jwks: &[u8],
+    meta: &McpServerMeta,
 ) -> Result<(), ReconcileError> {
     let s = match std::str::from_utf8(raw_jwks) {
         Ok(s) => s.to_string(),
         Err(_) => return Ok(()), // skip — invalid_jwks_format already classified
     };
+    let meta_json = serde_json::to_string(meta).unwrap_or_else(|_| "{}".to_string());
     let mut data: BTreeMap<String, String> = BTreeMap::new();
     data.insert("jwks.json".into(), s);
+    // Slice 4d.3 — per-server OAuth metadata consumed by the router's
+    // `McpServerRegistry`. Keys: `issuer`, `audience`, `scopes`. The
+    // router builds a multi-issuer `OAuthVerifierConfig` from these
+    // mirrored ConfigMaps so each McpServer's tokens are validated
+    // against that server's JWKS + audience.
+    data.insert("meta.json".into(), meta_json);
     let cm = ConfigMap {
         metadata: ObjectMeta {
             name: Some(cm_name.into()),

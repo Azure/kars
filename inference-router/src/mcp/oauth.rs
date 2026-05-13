@@ -65,9 +65,17 @@ use std::collections::{HashMap, HashSet};
 pub struct OAuthVerifierConfig {
     /// Map from issuer URL to that issuer's JWK set.
     pub trusted_issuers: HashMap<String, JwkSet>,
-    /// Required `aud` claim value. Tokens whose `aud` does not include
-    /// this exact string are rejected.
+    /// Required `aud` claim value used as a fallback when no per-issuer
+    /// audience is configured for the token's issuer. Tokens whose `aud`
+    /// does not include this exact string are rejected unless a
+    /// per-issuer override matches first.
     pub expected_audience: String,
+    /// Slice 4d.3 — per-issuer audience override. When the token's
+    /// issuer maps to an entry here, that entry's audience is used
+    /// instead of the global `expected_audience`. This is how the
+    /// router supports multiple McpServers each pinning a different
+    /// `aud` claim against their own JWKS.
+    pub per_issuer_audience: HashMap<String, String>,
     /// Allow-list of acceptable JWS algorithms. `Algorithm::HS256` etc.
     /// (symmetric algs) MUST NOT be configured here for an MCP
     /// resource server — we only accept asymmetric (RS256, ES256,
@@ -76,10 +84,12 @@ pub struct OAuthVerifierConfig {
     /// Acceptable clock skew in seconds. RFC 8725 §3.8 recommends a
     /// small but non-zero value. Default: 60 s.
     pub leeway_seconds: u64,
-    /// Scopes the caller's request requires. The verified `scope`
-    /// claim must contain every entry, space-separated per RFC 6749
-    /// §3.3.
+    /// Scopes the caller's request requires when no per-issuer scope
+    /// override applies. The verified `scope` claim must contain every
+    /// entry, space-separated per RFC 6749 §3.3.
     pub required_scopes: Vec<String>,
+    /// Slice 4d.3 — per-issuer required scopes override.
+    pub per_issuer_scopes: HashMap<String, Vec<String>>,
 }
 
 impl OAuthVerifierConfig {
@@ -90,6 +100,7 @@ impl OAuthVerifierConfig {
         Self {
             trusted_issuers: HashMap::new(),
             expected_audience: String::new(),
+            per_issuer_audience: HashMap::new(),
             allowed_algorithms: vec![
                 Algorithm::EdDSA,
                 Algorithm::ES256,
@@ -98,6 +109,7 @@ impl OAuthVerifierConfig {
             ],
             leeway_seconds: 60,
             required_scopes: Vec::new(),
+            per_issuer_scopes: HashMap::new(),
         }
     }
 }
@@ -135,6 +147,7 @@ impl OAuthVerifierConfig {
         Ok(Self {
             trusted_issuers: trusted,
             expected_audience: audience.to_string(),
+            per_issuer_audience: HashMap::new(),
             allowed_algorithms: vec![
                 Algorithm::EdDSA,
                 Algorithm::ES256,
@@ -143,7 +156,92 @@ impl OAuthVerifierConfig {
             ],
             leeway_seconds: 60,
             required_scopes,
+            per_issuer_scopes: HashMap::new(),
         })
+    }
+
+    /// Slice 4d.3 — build a multi-issuer verifier from a scanned
+    /// `McpServerRegistry`. Each discovered server with a `meta.json`
+    /// contributes one trusted issuer + optional per-issuer audience +
+    /// per-issuer scopes. Servers without `meta.json` are skipped — the
+    /// legacy single-issuer path (`from_jwks_file`) still applies via
+    /// `MCP_JWKS_PATH` as a fallback when this returns an empty config.
+    ///
+    /// `default_audience` is used as the floor (`expected_audience`)
+    /// for tokens whose issuer has no per-issuer audience override.
+    /// `default_scopes` is the floor scope set for issuers without
+    /// per-issuer scopes.
+    ///
+    /// Returns `None` when the registry contains no servers with meta —
+    /// caller should fall back to the legacy path in that case so the
+    /// router never silently mounts an unauthenticated route.
+    pub fn from_registry(
+        registry: &crate::mcp::registry::McpServerRegistry,
+        default_audience: &str,
+        default_scopes: Vec<String>,
+        leeway_seconds: u64,
+    ) -> Result<Option<Self>, String> {
+        let mut trusted_issuers: HashMap<String, JwkSet> = HashMap::new();
+        let mut per_issuer_audience: HashMap<String, String> = HashMap::new();
+        let mut per_issuer_scopes: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (name, server) in &registry.servers {
+            let Some(meta) = server.meta.as_ref() else {
+                tracing::warn!(
+                    server = %name,
+                    "McpServer has no meta.json — skipping OAuth registration \
+                     (legacy MCP_JWKS_PATH path still in effect for unmatched issuers)"
+                );
+                continue;
+            };
+            let raw = std::fs::read(&server.jwks_path).map_err(|e| {
+                format!(
+                    "cannot read JWKS for {name} at {}: {e}",
+                    server.jwks_path.display()
+                )
+            })?;
+            let jwks: JwkSet = serde_json::from_slice(&raw).map_err(|e| {
+                format!(
+                    "JWKS for {name} at {} is not valid: {e}",
+                    server.jwks_path.display()
+                )
+            })?;
+            if let Some(existing) = trusted_issuers.get(&meta.issuer) {
+                if existing != &jwks {
+                    return Err(format!(
+                        "issuer {} appears in two McpServer entries with conflicting JWKS",
+                        meta.issuer
+                    ));
+                }
+            } else {
+                trusted_issuers.insert(meta.issuer.clone(), jwks);
+            }
+            if let Some(aud) = meta.audience.as_ref().filter(|a| !a.is_empty()) {
+                per_issuer_audience.insert(meta.issuer.clone(), aud.clone());
+            }
+            if !meta.scopes.is_empty() {
+                per_issuer_scopes.insert(meta.issuer.clone(), meta.scopes.clone());
+            }
+        }
+
+        if trusted_issuers.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
+            trusted_issuers,
+            expected_audience: default_audience.to_string(),
+            per_issuer_audience,
+            allowed_algorithms: vec![
+                Algorithm::EdDSA,
+                Algorithm::ES256,
+                Algorithm::RS256,
+                Algorithm::PS256,
+            ],
+            leeway_seconds,
+            required_scopes: default_scopes,
+            per_issuer_scopes,
+        }))
     }
 }
 
@@ -288,9 +386,14 @@ pub fn verify_access_token(
         build_decoding_key(jwk).map_err(|e| OAuthError::DecodingKey(e.to_string()))?;
 
     // 4. Build Validation and run the verified decode.
+    let effective_audience = config
+        .per_issuer_audience
+        .get(&unverified_iss)
+        .map(String::as_str)
+        .unwrap_or(config.expected_audience.as_str());
     let mut validation = Validation::new(header.alg);
     validation.leeway = config.leeway_seconds;
-    validation.set_audience(&[&config.expected_audience]);
+    validation.set_audience(&[effective_audience]);
     validation.set_issuer(&[&unverified_iss]);
     validation.set_required_spec_claims(&["iss", "sub", "aud", "exp"]);
     validation.algorithms = config.allowed_algorithms.clone();
@@ -312,12 +415,16 @@ pub fn verify_access_token(
     }
     let matched_aud = typed
         .aud
-        .matched(&config.expected_audience)
+        .matched(effective_audience)
         .ok_or(OAuthError::MissingClaim("aud"))?;
 
     // 6. Scope check.
     let scopes = collect_scopes(&typed);
-    for required in &config.required_scopes {
+    let effective_scopes = config
+        .per_issuer_scopes
+        .get(&unverified_iss)
+        .unwrap_or(&config.required_scopes);
+    for required in effective_scopes {
         if !scopes.contains(required) {
             return Err(OAuthError::MissingScope(required.clone()));
         }
@@ -524,9 +631,11 @@ mod tests {
         OAuthVerifierConfig {
             trusted_issuers: trusted,
             expected_audience: TEST_AUDIENCE.into(),
+            per_issuer_audience: HashMap::new(),
             allowed_algorithms: vec![Algorithm::EdDSA],
             leeway_seconds: 30,
             required_scopes: scopes,
+            per_issuer_scopes: HashMap::new(),
         }
     }
 
@@ -856,9 +965,11 @@ mod tests {
         let config = OAuthVerifierConfig {
             trusted_issuers: trusted,
             expected_audience: TEST_AUDIENCE.into(),
+            per_issuer_audience: HashMap::new(),
             allowed_algorithms: vec![Algorithm::EdDSA],
             leeway_seconds: 30,
             required_scopes: vec![],
+            per_issuer_scopes: HashMap::new(),
         };
 
         // Token claims iss=other-trusted, signed with `legit`'s key,
@@ -905,5 +1016,285 @@ mod tests {
             curve: jsonwebtoken::jwk::EllipticCurve::Ed25519,
             x: String::new(),
         })
+    }
+
+    // ----- Slice 4d.3 — multi-issuer per-server audience/scopes -----
+
+    /// Per-issuer audience override: a token issued by `iss_a` carrying
+    /// `aud_a` must be accepted, while a token from `iss_b` must carry
+    /// `aud_b` — even though both share the same router process.
+    #[test]
+    fn per_issuer_audience_overrides_global_default() {
+        let (sk_a, vk_a) = ed_keypair();
+        let (sk_b, vk_b) = ed_keypair();
+        let iss_a = "https://idp-a.example";
+        let iss_b = "https://idp-b.example";
+        let aud_a = "api://server-a";
+        let aud_b = "api://server-b";
+
+        let mut trusted = HashMap::new();
+        trusted.insert(iss_a.to_string(), jwks_with(&vk_a, "kid-a"));
+        trusted.insert(iss_b.to_string(), jwks_with(&vk_b, "kid-b"));
+        let mut per_aud = HashMap::new();
+        per_aud.insert(iss_a.to_string(), aud_a.to_string());
+        per_aud.insert(iss_b.to_string(), aud_b.to_string());
+        let config = OAuthVerifierConfig {
+            trusted_issuers: trusted,
+            expected_audience: "api://fallback".into(),
+            per_issuer_audience: per_aud,
+            allowed_algorithms: vec![Algorithm::EdDSA],
+            leeway_seconds: 30,
+            required_scopes: vec![],
+            per_issuer_scopes: HashMap::new(),
+        };
+
+        let token_a = make_token(
+            &signing_key_pem(&sk_a),
+            "kid-a",
+            iss_a,
+            json!(aud_a),
+            300,
+            None,
+        );
+        let token_b = make_token(
+            &signing_key_pem(&sk_b),
+            "kid-b",
+            iss_b,
+            json!(aud_b),
+            300,
+            None,
+        );
+        verify_access_token(&format!("Bearer {token_a}"), &config).unwrap();
+        verify_access_token(&format!("Bearer {token_b}"), &config).unwrap();
+    }
+
+    /// A token from `iss_a` carrying `iss_b`'s audience must be
+    /// rejected — even though both audiences are listed somewhere in
+    /// `per_issuer_audience`, only the entry keyed to the token's iss
+    /// is honored.
+    #[test]
+    fn per_issuer_audience_pins_correctly() {
+        let (sk_a, vk_a) = ed_keypair();
+        let (_sk_b, vk_b) = ed_keypair();
+        let iss_a = "https://idp-a.example";
+        let iss_b = "https://idp-b.example";
+        let aud_a = "api://server-a";
+        let aud_b = "api://server-b";
+
+        let mut trusted = HashMap::new();
+        trusted.insert(iss_a.to_string(), jwks_with(&vk_a, "kid-a"));
+        trusted.insert(iss_b.to_string(), jwks_with(&vk_b, "kid-b"));
+        let mut per_aud = HashMap::new();
+        per_aud.insert(iss_a.to_string(), aud_a.to_string());
+        per_aud.insert(iss_b.to_string(), aud_b.to_string());
+        let config = OAuthVerifierConfig {
+            trusted_issuers: trusted,
+            expected_audience: "api://fallback".into(),
+            per_issuer_audience: per_aud,
+            allowed_algorithms: vec![Algorithm::EdDSA],
+            leeway_seconds: 30,
+            required_scopes: vec![],
+            per_issuer_scopes: HashMap::new(),
+        };
+
+        // Cross-aud: iss_a token claims aud_b.
+        let token = make_token(
+            &signing_key_pem(&sk_a),
+            "kid-a",
+            iss_a,
+            json!(aud_b),
+            300,
+            None,
+        );
+        let err = verify_access_token(&format!("Bearer {token}"), &config).unwrap_err();
+        assert!(
+            matches!(err, OAuthError::ValidationFailed(_)),
+            "expected aud validation failure, got {err:?}"
+        );
+    }
+
+    /// Per-issuer scopes override: server-A requires `tools.invoke`,
+    /// server-B requires `data.read`. A token from `iss_a` must carry
+    /// the A scope but not the B scope.
+    #[test]
+    fn per_issuer_scopes_apply_per_token() {
+        let (sk_a, vk_a) = ed_keypair();
+        let iss_a = "https://idp-a.example";
+        let aud_a = "api://server-a";
+
+        let mut trusted = HashMap::new();
+        trusted.insert(iss_a.to_string(), jwks_with(&vk_a, "kid-a"));
+        let mut per_aud = HashMap::new();
+        per_aud.insert(iss_a.to_string(), aud_a.to_string());
+        let mut per_scopes = HashMap::new();
+        per_scopes.insert(iss_a.to_string(), vec!["tools.invoke".to_string()]);
+        let config = OAuthVerifierConfig {
+            trusted_issuers: trusted,
+            expected_audience: "api://fallback".into(),
+            per_issuer_audience: per_aud,
+            allowed_algorithms: vec![Algorithm::EdDSA],
+            leeway_seconds: 30,
+            // Global requires data.read — but the per-issuer override
+            // should drop that requirement for tokens from iss_a.
+            required_scopes: vec!["data.read".to_string()],
+            per_issuer_scopes: per_scopes,
+        };
+
+        let token = make_token(
+            &signing_key_pem(&sk_a),
+            "kid-a",
+            iss_a,
+            json!(aud_a),
+            300,
+            Some("tools.invoke"),
+        );
+        verify_access_token(&format!("Bearer {token}"), &config).unwrap();
+
+        // Token without the per-issuer-required scope must fail.
+        let token_no_scope = make_token(
+            &signing_key_pem(&sk_a),
+            "kid-a",
+            iss_a,
+            json!(aud_a),
+            300,
+            None,
+        );
+        let err = verify_access_token(&format!("Bearer {token_no_scope}"), &config).unwrap_err();
+        assert!(matches!(err, OAuthError::MissingScope(s) if s == "tools.invoke"));
+    }
+
+    /// `from_registry` returns `None` when the registry contains no
+    /// servers with meta — caller must fall back to legacy path.
+    #[test]
+    fn from_registry_returns_none_when_no_meta() {
+        let registry = crate::mcp::registry::McpServerRegistry::default();
+        let cfg = OAuthVerifierConfig::from_registry(&registry, "api://fb", vec![], 30).unwrap();
+        assert!(cfg.is_none());
+    }
+
+    /// `from_registry` materialises a multi-issuer config from a
+    /// scanned registry with two servers carrying disjoint meta.
+    #[test]
+    fn from_registry_builds_multi_issuer_config() {
+        use crate::mcp::registry::{
+            DiscoveredMcpServer, DiscoveredMcpServerMeta, McpServerRegistry,
+        };
+        use std::collections::BTreeMap;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_sk_a, vk_a) = ed_keypair();
+        let (_sk_b, vk_b) = ed_keypair();
+        let jwks_a = serde_json::to_vec(&jwks_with(&vk_a, "kid-a")).unwrap();
+        let jwks_b = serde_json::to_vec(&jwks_with(&vk_b, "kid-b")).unwrap();
+        let path_a = tmp.path().join("server-a.jwks.json");
+        let path_b = tmp.path().join("server-b.jwks.json");
+        std::fs::write(&path_a, jwks_a).unwrap();
+        std::fs::write(&path_b, jwks_b).unwrap();
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "server-a".to_string(),
+            DiscoveredMcpServer {
+                name: "server-a".to_string(),
+                jwks_path: path_a,
+                meta: Some(DiscoveredMcpServerMeta {
+                    issuer: "https://idp-a.example".to_string(),
+                    audience: Some("api://server-a".to_string()),
+                    scopes: vec!["tools.invoke".to_string()],
+                }),
+            },
+        );
+        servers.insert(
+            "server-b".to_string(),
+            DiscoveredMcpServer {
+                name: "server-b".to_string(),
+                jwks_path: path_b,
+                meta: Some(DiscoveredMcpServerMeta {
+                    issuer: "https://idp-b.example".to_string(),
+                    audience: Some("api://server-b".to_string()),
+                    scopes: vec![],
+                }),
+            },
+        );
+        let registry = McpServerRegistry {
+            servers,
+            skipped: vec![],
+        };
+
+        let cfg = OAuthVerifierConfig::from_registry(&registry, "api://fb", vec![], 30)
+            .unwrap()
+            .expect("two servers with meta → Some");
+        assert_eq!(cfg.trusted_issuers.len(), 2);
+        assert!(cfg.trusted_issuers.contains_key("https://idp-a.example"));
+        assert!(cfg.trusted_issuers.contains_key("https://idp-b.example"));
+        assert_eq!(
+            cfg.per_issuer_audience.get("https://idp-a.example"),
+            Some(&"api://server-a".to_string())
+        );
+        assert_eq!(
+            cfg.per_issuer_audience.get("https://idp-b.example"),
+            Some(&"api://server-b".to_string())
+        );
+        assert_eq!(
+            cfg.per_issuer_scopes.get("https://idp-a.example"),
+            Some(&vec!["tools.invoke".to_string()])
+        );
+        // server-b's empty scopes should NOT be recorded as an override.
+        assert!(!cfg.per_issuer_scopes.contains_key("https://idp-b.example"));
+        assert_eq!(cfg.expected_audience, "api://fb");
+    }
+
+    /// Conflicting JWKS for the same issuer across two servers must
+    /// surface as a hard error — never silently overwrite, never
+    /// merge unrelated key sets.
+    #[test]
+    fn from_registry_rejects_conflicting_jwks_for_same_issuer() {
+        use crate::mcp::registry::{
+            DiscoveredMcpServer, DiscoveredMcpServerMeta, McpServerRegistry,
+        };
+        use std::collections::BTreeMap;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_sk_a, vk_a) = ed_keypair();
+        let (_sk_b, vk_b) = ed_keypair();
+        let jwks_a = serde_json::to_vec(&jwks_with(&vk_a, "kid-a")).unwrap();
+        let jwks_b = serde_json::to_vec(&jwks_with(&vk_b, "kid-b")).unwrap();
+        let path_a = tmp.path().join("a.jwks.json");
+        let path_b = tmp.path().join("b.jwks.json");
+        std::fs::write(&path_a, jwks_a).unwrap();
+        std::fs::write(&path_b, jwks_b).unwrap();
+
+        let issuer = "https://shared.example".to_string();
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "a".to_string(),
+            DiscoveredMcpServer {
+                name: "a".to_string(),
+                jwks_path: path_a,
+                meta: Some(DiscoveredMcpServerMeta {
+                    issuer: issuer.clone(),
+                    audience: Some("api://a".to_string()),
+                    scopes: vec![],
+                }),
+            },
+        );
+        servers.insert(
+            "b".to_string(),
+            DiscoveredMcpServer {
+                name: "b".to_string(),
+                jwks_path: path_b,
+                meta: Some(DiscoveredMcpServerMeta {
+                    issuer: issuer.clone(),
+                    audience: Some("api://b".to_string()),
+                    scopes: vec![],
+                }),
+            },
+        );
+        let registry = McpServerRegistry {
+            servers,
+            skipped: vec![],
+        };
+
+        let err =
+            OAuthVerifierConfig::from_registry(&registry, "api://fb", vec![], 30).unwrap_err();
+        assert!(err.contains("conflicting JWKS"));
     }
 }

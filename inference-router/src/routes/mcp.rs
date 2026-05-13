@@ -669,9 +669,11 @@ mod tests {
         Arc::new(OAuthVerifierConfig {
             trusted_issuers: trusted,
             expected_audience: ROUTE_TEST_AUD.into(),
+            per_issuer_audience: HashMap::new(),
             allowed_algorithms: vec![Algorithm::EdDSA],
             leeway_seconds: 30,
             required_scopes: vec![],
+            per_issuer_scopes: HashMap::new(),
         })
     }
 

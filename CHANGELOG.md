@@ -7,7 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
-<<<<<<< HEAD
+### Slice 4d.3 — multi-issuer OAuth verification (DoD #3 — OAuth half)
+
+Closes the OAuth half of Slice 4 DoD #3 (*"each McpServer has its own
+JWKS"*). Each McpServer now has its OAuth tokens validated against
+*its own* JWKS, with a per-issuer `audience` and `scopes` override —
+all driven by a `meta.json` file the controller writes alongside
+`jwks.json` into the per-server ConfigMap mounted at
+`/etc/azureclaw/mcp/<name>/`.
+
+What this PR adds:
+
+- **Controller — `McpServerMeta` producer.**
+  `mcp_server_reconciler.rs` now writes a second key, `meta.json`, into
+  the `mcp-<name>-jwks` ConfigMap alongside `jwks.json`. The
+  serialized shape carries `{ issuer, audience?, scopes[] }` —
+  serialized in camelCase, with optional/empty fields skipped for
+  forward-compat. The struct + helper `McpServerMeta::from_spec`
+  centralise the wire contract.
+- **Router — `DiscoveredMcpServerMeta`.** `mcp::registry` gains a
+  matching deserialize-side struct and reads `meta.json` adjacent to
+  each `jwks.json` during `scan()`. Missing files are silently
+  back-compat (pre-4d.3 layouts → `meta = None`); malformed or
+  empty-issuer files are *recorded in `skipped`* so operators see
+  the gap honestly (principles §3 — no silent failure).
+- **Router — multi-issuer `OAuthVerifierConfig`.**
+  - `expected_audience` is now a per-issuer floor; new
+    `per_issuer_audience: HashMap<String, String>` overrides on a
+    per-token basis (keyed by the token's `iss` claim).
+  - `required_scopes` is now a per-issuer floor; new
+    `per_issuer_scopes: HashMap<String, Vec<String>>` overrides.
+  - New `OAuthVerifierConfig::from_registry(&McpServerRegistry,
+    default_audience, default_scopes, leeway) -> Result<Option<Self>>`
+    materialises a multi-issuer config from a scanned registry.
+    Returns `Ok(None)` when no servers carry meta — the caller
+    (`build_mcp_router`) then falls back to the legacy single-JWKS
+    `from_jwks_file` path. Conflicting JWKS for the same issuer
+    across two servers surface as a hard error rather than silently
+    overwriting.
+- **Router — `build_mcp_router` wires the registry-first path.**
+  When `MCP_PRODUCTION_MODE=true` and the registry is non-empty, the
+  router prefers the multi-issuer path. Empty registry / no-meta
+  fallback to the legacy `MCP_JWKS_PATH` path. Refusal to mount on
+  hard error remains intact (operators see a clear startup-time
+  error instead of an unauthenticated `/mcp`).
+
+The per-issuer pin works because `verify_access_token` already keys
+JWKS lookup off the token's claimed `iss` (which is then re-validated
+by `Validation::set_issuer`). Slice 4d.3 simply lifts the audience and
+scope checks onto the same per-issuer key — so a token from server-A
+carrying server-B's audience fails closed even though both audiences
+are listed in the same config.
+
+Verified: 820 router lib tests pass (+10 new for multi-issuer aud,
+multi-issuer scopes, `from_registry` happy/none/conflict paths, meta
+load happy/skip paths), 559 controller tests pass, `cargo clippy
+--all-targets -- -D warnings` clean across workspace, `cargo fmt
+--check` clean.
+
+Out of scope for 4d.3 (queued for 4d.4):
+
+- Namespaced tool dispatch (`/mcp/<server>/...`) — needs a real
+  upstream MCP forwarder backend; until one lands, dispatch
+  namespacing would be scaffolding (principles §5).
+
 ### Slice 4d.2 — per-server McpServer mount scheme + router discovery (DoD #1 + #6)
 
 Closes Slice 4 DoD #1 (*"≥ 3 plural McpServers reachable e2e"*) at the
@@ -101,8 +164,6 @@ scaffolding) even though OAuth verification is single-JWKS today.
 Verified: 559 controller + 804 router tests pass, clippy
 `-D warnings` clean across workspace, `cargo fmt --check` clean.
 
-=======
->>>>>>> origin/dev
 ### Slice 4d.1 — `mcpServerRefs` plural (DoD #2 deprecation)
 
 Slice 4 DoD #2 says: *"`mcpServerRef` (singular) emits a Warning event
@@ -157,10 +218,7 @@ Out of scope for 4d.1 (queued for 4d.2):
 - Router-side `McpServerRegistry` for namespaced tool dispatch.
 - Stale-file sweep (DoD #6).
 - e2e fixture with ≥ 3 servers (DoD #1).
-<<<<<<< HEAD
-=======
 
->>>>>>> origin/dev
 ### Slice 4c — Azure Monitor remote audit sink (DoD #5)
 
 Slice 4a (PR #287) shipped the sandbox-local JSONL audit log. Slice 4b

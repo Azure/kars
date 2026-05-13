@@ -32,6 +32,24 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Per-server OAuth metadata mirrored from the controller-side
+/// `McpServerMeta` struct. Written to `meta.json` adjacent to
+/// `jwks.json` inside each per-server subdirectory.
+///
+/// Slice 4d.3 consumes this to build a multi-issuer
+/// `OAuthVerifierConfig` — `trusted_issuers` keyed by `issuer`,
+/// `expected_audiences` aggregated from all servers' optional
+/// audience fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredMcpServerMeta {
+    pub issuer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+}
+
 /// A single McpServer discovered under `MCP_JWKS_DIR`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredMcpServer {
@@ -40,6 +58,11 @@ pub struct DiscoveredMcpServer {
     pub name: String,
     /// Absolute path to the discovered `jwks.json` file.
     pub jwks_path: PathBuf,
+    /// Slice 4d.3 — OAuth metadata when `meta.json` is present and
+    /// parses cleanly. `None` for servers mirrored before 4d.3 (pure
+    /// jwks-only layout) or when the meta file is unreadable; those
+    /// servers fall back to the legacy single-issuer behaviour.
+    pub meta: Option<DiscoveredMcpServerMeta>,
 }
 
 /// Outcome of a single `MCP_JWKS_DIR` scan.
@@ -163,13 +186,56 @@ pub fn scan(dir: impl AsRef<Path>) -> McpServerRegistry {
         registry.servers.insert(
             file_name.clone(),
             DiscoveredMcpServer {
-                name: file_name,
+                name: file_name.clone(),
                 jwks_path,
+                meta: load_meta(&path, &file_name, &mut registry.skipped),
             },
         );
     }
 
     registry
+}
+
+/// Try to load `meta.json` adjacent to `jwks.json`. Missing file is OK
+/// (returns `None` silently — back-compat with pre-4d.3 mirrors). Any
+/// other error (read failure, parse failure, missing `issuer`) is
+/// recorded in `skipped` so operators see the gap honestly.
+fn load_meta(
+    server_dir: &Path,
+    server_name: &str,
+    skipped: &mut Vec<(String, String)>,
+) -> Option<DiscoveredMcpServerMeta> {
+    let meta_path = server_dir.join("meta.json");
+    if !meta_path.is_file() {
+        return None;
+    }
+    let contents = match fs::read_to_string(&meta_path) {
+        Ok(c) => c,
+        Err(e) => {
+            skipped.push((
+                server_name.to_string(),
+                format!("meta.json read failed: {e}"),
+            ));
+            return None;
+        }
+    };
+    match serde_json::from_str::<DiscoveredMcpServerMeta>(&contents) {
+        Ok(m) if m.issuer.is_empty() => {
+            skipped.push((
+                server_name.to_string(),
+                "meta.json has empty issuer".to_string(),
+            ));
+            None
+        }
+        Ok(m) => Some(m),
+        Err(e) => {
+            skipped.push((
+                server_name.to_string(),
+                format!("meta.json parse failed: {e}"),
+            ));
+            None
+        }
+    }
 }
 
 /// Discover McpServers from the `MCP_JWKS_DIR` env var, logging the
@@ -316,5 +382,55 @@ mod tests {
         let alpha = &registry.servers["alpha"];
         assert_eq!(alpha.name, "alpha");
         assert!(alpha.jwks_path.ends_with("alpha/jwks.json"));
+        assert!(alpha.meta.is_none(), "no meta.json → meta should be None");
+    }
+
+    #[test]
+    fn scan_loads_meta_json_when_present() {
+        let tmp = TempDir::new().unwrap();
+        write_jwks(tmp.path(), "github", VALID_JWKS);
+        fs::write(
+            tmp.path().join("github").join("meta.json"),
+            r#"{"issuer":"https://idp.example/o","audience":"api://github","scopes":["mcp.tools.invoke"]}"#,
+        )
+        .unwrap();
+
+        let registry = scan(tmp.path());
+        let github = &registry.servers["github"];
+        let meta = github.meta.as_ref().expect("meta.json should load");
+        assert_eq!(meta.issuer, "https://idp.example/o");
+        assert_eq!(meta.audience.as_deref(), Some("api://github"));
+        assert_eq!(meta.scopes, vec!["mcp.tools.invoke".to_string()]);
+        assert!(registry.skipped.is_empty());
+    }
+
+    #[test]
+    fn scan_records_skip_for_meta_with_empty_issuer() {
+        let tmp = TempDir::new().unwrap();
+        write_jwks(tmp.path(), "broken", VALID_JWKS);
+        fs::write(
+            tmp.path().join("broken").join("meta.json"),
+            r#"{"issuer":"","audience":"api://x"}"#,
+        )
+        .unwrap();
+
+        let registry = scan(tmp.path());
+        assert!(registry.servers.contains_key("broken"));
+        assert!(registry.servers["broken"].meta.is_none());
+        assert_eq!(registry.skipped.len(), 1);
+        assert!(registry.skipped[0].1.contains("empty issuer"));
+    }
+
+    #[test]
+    fn scan_records_skip_for_malformed_meta_json() {
+        let tmp = TempDir::new().unwrap();
+        write_jwks(tmp.path(), "borked", VALID_JWKS);
+        fs::write(tmp.path().join("borked").join("meta.json"), "{not json").unwrap();
+
+        let registry = scan(tmp.path());
+        assert!(registry.servers.contains_key("borked"));
+        assert!(registry.servers["borked"].meta.is_none());
+        assert_eq!(registry.skipped.len(), 1);
+        assert!(registry.skipped[0].1.contains("meta.json parse failed"));
     }
 }

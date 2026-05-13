@@ -487,6 +487,7 @@ async fn main() -> Result<()> {
 /// unauthenticated MCP traffic.
 fn build_mcp_router() -> Router {
     use azureclaw_inference_router::mcp::oauth::OAuthVerifierConfig;
+    use azureclaw_inference_router::mcp::registry;
 
     let production = std::env::var("MCP_PRODUCTION_MODE")
         .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
@@ -495,6 +496,47 @@ fn build_mcp_router() -> Router {
     let audience = std::env::var("MCP_OAUTH_AUDIENCE").ok();
 
     let state = routes::McpRouteState::standard();
+
+    // Slice 4d.3 — prefer the multi-issuer path when MCP_JWKS_DIR is
+    // populated and at least one server contributes `meta.json`. Falls
+    // back to legacy single-JWKS path on empty/absent registry.
+    if production {
+        let registry = registry::discover_from_env();
+        if !registry.is_empty() {
+            let default_audience = audience.clone().unwrap_or_default();
+            let required_scopes = std::env::var("MCP_OAUTH_REQUIRED_SCOPES")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
+                .unwrap_or_default();
+            match OAuthVerifierConfig::from_registry(
+                &registry,
+                &default_audience,
+                required_scopes,
+                60,
+            ) {
+                Ok(Some(cfg)) => {
+                    let issuers: Vec<&String> = cfg.trusted_issuers.keys().collect();
+                    tracing::info!(
+                        servers = registry.len(),
+                        issuers = ?issuers,
+                        "Mounting /mcp with multi-issuer OAuth 2.1 verification (Slice 4d.3)"
+                    );
+                    return routes::protected_mcp_route(state, Arc::new(cfg));
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "MCP_JWKS_DIR populated but no servers carry meta.json — \
+                         falling back to legacy single-issuer MCP_JWKS_PATH path"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Multi-issuer OAuth config build failed; refusing to mount /mcp");
+                    return Router::new();
+                }
+            }
+        }
+    }
 
     if production && jwks_path.is_some() && audience.is_some() {
         let path = std::path::PathBuf::from(jwks_path.unwrap());
