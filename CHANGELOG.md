@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2c — InferencePolicy `contentSafety` floors + `requirePromptShields` fail-closed
+
+Third axis of `InferencePolicy` now actually enforced. The router
+now compares every Foundry-reported severity (`hate`, `selfHarm`,
+`sexual`, `violence`) against the per-policy ceiling and returns
+`403 content_policy_violation` with the distinct code
+`inference_policy_content_safety_exceeded` when **any** category
+exceeds its floor. When `requirePromptShields: true` is set, the
+router **fail-closes** with code `inference_policy_prompt_shields_required`
+on any response that ships without prompt-filter annotations —
+catching deployments that have silently lost their shield config.
+
+Both the buffered (non-streaming) and streaming branches of
+`chat/completions` enforce identical decisions: a streamed first
+chunk containing a violating `prompt_filter_results` block is
+rewritten into a single SSE `error` frame followed by `data: [DONE]`,
+and every subsequent chunk is swallowed. That parity prevents
+attackers from probing `stream=true` vs `stream=false` to pick the
+laxer evaluation path.
+
+**Latency optimisation** (carried out alongside the new axis):
+the chat / inference / anthropic handlers previously took up to
+**three** `RwLock::read().await`s per request to pull
+daily/monthly limits, `perRequestTokens`, and the content-safety
+floor independently. Slice 2c consolidates those into a single
+`InferencePolicySnapshot` taken once at the top of each handler;
+all downstream branches (budget gate, perRequest gate, streaming
+floor closure, post-response floor enforcement) read from the
+local struct. The snapshot is `<200` bytes (4 × `Option<u64>` +
+4 × `Option<SeverityLevel>` + `bool` + small `String` digest) and
+all-`Copy` / trivially-`Clone`, so handler-internal use is
+allocation-free.
+
+**Router:**
+- `inference-router/src/safety.rs` — new types + enforcement
+  (~270 LOC + 11 unit tests + 1 proptest):
+  - `SeverityLevel { Safe, Low, Medium, High }` with strict
+    ordering (`Safe < Low < Medium < High`) and case-insensitive
+    parsing (controller emits PascalCase `"Medium"`, Foundry emits
+    lowercase `"medium"` — both accepted; unknown strings drop to
+    `None` for defence-in-depth as Azure extends the ladder).
+  - `ContentSafetyFloor { hate, self_harm, sexual, violence:
+    Option<SeverityLevel>, require_prompt_shields: bool }` parsed
+    from compiled JSON via `from_compiled_json`; `is_active()`
+    short-circuits the hot path when no ceilings are configured.
+  - `FloorViolation::{ SeverityExceeded { category, observed, floor },
+    PromptShieldsMissing }` with stable `code()` strings.
+  - `enforce_floor(body_json, &floor) -> Option<FloorViolation>`
+    walks both the 200-shape (`prompt_filter_results[].
+    content_filter_results.<category>.severity`) and the 400-shape
+    (`error.innererror.content_filter_result.<category>.severity`)
+    in a single pass with deterministic category order
+    `hate → self_harm → sexual → violence`. Identical 400/200
+    handling means attackers cannot trigger 400s to bypass the
+    floor.
+  - `first_data_line_violation(chunk_text, &floor)` — streaming
+    counterpart that strips `data: ` prefixes, skips `[DONE]`,
+    parses each line as JSON, and delegates to `enforce_floor`.
+    Cross-validated with `enforce_floor_parity` test so streaming
+    and buffered branches always agree.
+- `inference-router/src/inference_policy_loader.rs`:
+  - `LoadedInferencePolicy` gains `content_safety: ContentSafetyFloor`
+    parsed from `spec.contentSafety`. Digest layout unchanged — the
+    controller already hashed the whole compiled policy in Slice 2a,
+    so existing digests stay byte-stable.
+  - New `InferencePolicySnapshot` struct + `current_snapshot(handle)`
+    helper that returns every enforcement axis under **one** read
+    lock. Replaces the per-axis `current_daily_monthly_limits` /
+    `current_content_safety_floor` helpers removed in this slice.
+- `routes/chat_completions.rs`:
+  - Both the non-streaming and streaming branches take **one**
+    snapshot at the top of the handler and reuse it for every gate.
+  - Non-streaming post-response branch calls `enforce_floor`
+    after the existing Foundry `content_filter` check; returns 403
+    with the new `inference_policy_*` codes on violation.
+  - Streaming branch resolves the floor before wrapping the upstream
+    `Stream` (the `Bytes -> Result<Bytes, _>` map closure must stay
+    sync). A per-stream `Arc<AtomicBool>` short-circuits all bytes
+    after a violation; the first violating chunk is replaced with a
+    single SSE `error` frame so clients see a structured failure
+    rather than a silently-truncated stream.
+- `routes/inference.rs` + `routes/anthropic_messages.rs`:
+  - Switched to the same single-snapshot pattern (one
+    `current_snapshot()` call per request) for parity. Neither
+    handler parses content-safety annotations today; floor
+    enforcement on the Responses-API and Anthropic-Messages paths
+    is queued for a follow-up slice.
+
+**Controller:** untouched. The Slice 2a digest already covered the
+`contentSafety` bytes byte-for-byte — the `Compiled → Ready`
+echo-confirmation loop from Slice 2a remains the authoritative
+gate. The router started honouring those bytes in Slice 2c; no
+schema, no reconciler, no status-condition changes were needed.
+
+**Tests:** 730 router lib tests (+22 from Slice 2b's 708),
+all 3 integration suites green, clippy `-D warnings` clean on
+both crates, fmt + helm_drift green. Controller test count
+unchanged at 531.
+
 ### Slice 2b — InferencePolicy `tokenBudget.dailyTokens` / `monthlyTokens` enforcement + UTC-calendar persistence
 
 Second axis of `InferencePolicy` now actually enforced. Combined with

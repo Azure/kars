@@ -243,11 +243,11 @@ pub(super) async fn anthropic_messages(
 
     // Token budget check — daily/monthly limits sourced from the
     // loaded `InferencePolicy` (Slice 2b); env-default fallback.
-    let (daily, monthly) =
-        crate::inference_policy_loader::current_daily_monthly_limits(&state.inference_policy).await;
+    // Latency: one snapshot read per request (mirrors chat_completions).
+    let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
     if let Err(msg) = state
         .budget
-        .check_budget(sandbox_name, daily, monthly)
+        .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
         .await
     {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded (anthropic): {msg}");

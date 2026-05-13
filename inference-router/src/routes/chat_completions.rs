@@ -72,14 +72,22 @@ pub(super) async fn chat_completions(
         }
     }
 
+    // Slice 2c latency optimisation: take **one** snapshot of the
+    // loaded `InferencePolicy` at the top of the handler and reuse
+    // it for every downstream enforcement axis (daily/monthly tokens,
+    // perRequestTokens cap, contentSafety floor — both buffered and
+    // streaming branches). Previously the handler took three
+    // independent `RwLock::read().await`s per request; this
+    // consolidates them to one, removing two awaits from every
+    // forwarded request on the hot path.
+    let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+
     // Check token budget before forwarding — daily/monthly limits
     // come from the loaded `InferencePolicy` (Slice 2b) with the
     // env-driven `TOKEN_BUDGET_DAILY` as fallback.
-    let (daily, monthly) =
-        crate::inference_policy_loader::current_daily_monthly_limits(&state.inference_policy).await;
     if let Err(msg) = state
         .budget
-        .check_budget(sandbox_name, daily, monthly)
+        .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
         .await
     {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded: {msg}");
@@ -106,20 +114,7 @@ pub(super) async fn chat_completions(
     // `record_usage` + warn-only check at the bottom of this handler
     // remains in place for the implicit `max_tokens=null` path
     // (router does not yet reject mid-stream).
-    //
-    // Wire contract: `InferencePolicy` is loaded once at startup
-    // from the controller-mirrored ConfigMap and cached in
-    // `state.inference_policy`. The handle is `Option<…>` so
-    // sandboxes without a policy reference fall through to no
-    // enforcement (back-compat). Slice 2b will add daily/monthly
-    // budgets; Slice 2d will revisit pre-flight estimation.
-    let policy_cap = state
-        .inference_policy
-        .read()
-        .await
-        .as_ref()
-        .and_then(|p| p.per_request_tokens.map(|c| (c, p.digest.clone())));
-    if let Some((cap, digest)) = policy_cap
+    if let Some(cap) = policy.per_request_tokens
         && let Some(requested) = extract_requested_max_tokens(&body)
         && let PerRequestGate::Reject { requested, cap } =
             decide_per_request_gate(Some(cap), Some(requested))
@@ -128,7 +123,7 @@ pub(super) async fn chat_completions(
             sandbox = %sandbox_name,
             requested,
             cap,
-            digest = %digest,
+            digest = %policy.digest,
             "InferencePolicy perRequestTokens exceeded — rejecting"
         );
         return (
@@ -306,6 +301,16 @@ pub(super) async fn chat_completions(
         // SSE streaming — wrap stream to capture token usage from final [DONE] chunk
         let sandbox_owned = sandbox_name.to_string();
         let budget = state.budget.clone();
+        // Slice 2c: clone the contentSafety floor out of the snapshot
+        // taken at the top of the handler so the inner `.map` closure
+        // stays sync (the `Bytes -> Result<Bytes,_>` map cannot
+        // `.await` an `RwLock::read()`). The snapshot was already
+        // taken once at the top of the handler — no extra lock here.
+        // Snapshotting at the start of the call means a controller
+        // mirror landing a new ConfigMap mid-stream is not honoured
+        // for the in-flight request; acceptable since policies change
+        // rarely vs. single-request lifetime.
+        let stream_floor = policy.content_safety.clone();
         match proxy::forward_stream(
             state.auth.clone(),
             Some(state.copilot.clone()),
@@ -402,14 +407,30 @@ pub(super) async fn chat_completions(
                 let governance_for_stream = state.governance.clone();
                 let sandbox_for_flags = sandbox_owned.clone();
                 let checked_flags = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                // Slice 2c: once a floor violation is detected in the
+                // first chunk, all subsequent chunks are replaced
+                // with empty bytes so the model's actual content
+                // never reaches the client. The first chunk itself
+                // is rewritten into an SSE `error` frame followed by
+                // `data: [DONE]` so the streaming client sees a
+                // structured failure rather than a silently truncated
+                // stream.
+                let stream_blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let floor_for_stream = stream_floor.clone();
                 let wrapped = stream.map(move |chunk| {
+                    use std::sync::atomic::Ordering;
+                    if stream_blocked.load(Ordering::Relaxed) {
+                        // A previous chunk tripped the floor — swallow
+                        // every byte that follows.
+                        return Ok::<Bytes, _>(Bytes::new());
+                    }
                     if let Ok(ref bytes) = chunk {
                         if let Ok(text) = std::str::from_utf8(bytes) {
                             // Check first chunk for Foundry guardrail annotations
-                            if !checked_flags.load(std::sync::atomic::Ordering::Relaxed)
+                            if !checked_flags.load(Ordering::Relaxed)
                                 && text.contains("prompt_filter_results")
                             {
-                                checked_flags.store(true, std::sync::atomic::Ordering::Relaxed);
+                                checked_flags.store(true, Ordering::Relaxed);
                                 let flags = safety::parse_streaming_prompt_filter(text);
                                 if flags.any_detected() {
                                     tracing::warn!(
@@ -423,6 +444,37 @@ pub(super) async fn chat_completions(
                                         safety::report_content_flags_to_agt(&gov, &sb, &flags)
                                             .await;
                                     });
+                                }
+                                // Slice 2c floor enforcement on the
+                                // first chunk: extract the embedded
+                                // `data: { ... }` JSON and run the
+                                // same `enforce_floor` used on the
+                                // non-streaming path. Identical
+                                // decision logic on both paths means
+                                // attackers cannot probe streaming
+                                // vs. buffered to bypass the floor.
+                                if floor_for_stream.is_active()
+                                    && let Some(violation) =
+                                        safety::first_data_line_violation(text, &floor_for_stream)
+                                {
+                                    stream_blocked.store(true, Ordering::Relaxed);
+                                    tracing::warn!(
+                                        sandbox = %sandbox_for_flags,
+                                        code = violation.code(),
+                                        "InferencePolicy contentSafety floor (stream): {}",
+                                        violation.message()
+                                    );
+                                    let sse_err = format!(
+                                        "data: {}\n\ndata: [DONE]\n\n",
+                                        serde_json::json!({
+                                            "error": {
+                                                "message": violation.message(),
+                                                "type": "content_policy_violation",
+                                                "code": violation.code()
+                                            }
+                                        })
+                                    );
+                                    return Ok::<Bytes, _>(Bytes::from(sse_err));
                                 }
                             }
 
@@ -582,6 +634,47 @@ pub(super) async fn chat_completions(
                             tokio::spawn(async move {
                                 safety::report_content_flags_to_agt(&gov, &sandbox, &flags).await;
                             });
+                        }
+
+                        // Slice 2c: InferencePolicy contentSafety floor.
+                        // Compare every parsed severity against the
+                        // policy ceiling and fail-closed when Prompt
+                        // Shields are required but unannotated. The
+                        // `is_active` short-circuit inside
+                        // `enforce_floor` keeps the hot path free when
+                        // no floor is configured. The 403 carries a
+                        // distinct `code` so operators can tell
+                        // InferencePolicy-blocked apart from
+                        // Foundry-blocked (`content_filter`) in audit
+                        // logs and client error handlers.
+                        //
+                        // Latency: the floor came from the single
+                        // `current_snapshot()` read taken at the top
+                        // of the handler — no extra lock acquisition
+                        // here.
+                        if let Some(violation) =
+                            safety::enforce_floor(&body_json, &policy.content_safety)
+                        {
+                            tracing::warn!(
+                                sandbox = %sandbox_name,
+                                code = violation.code(),
+                                "InferencePolicy contentSafety floor: {}",
+                                violation.message()
+                            );
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                Body::from(
+                                    serde_json::json!({
+                                        "error": {
+                                            "message": violation.message(),
+                                            "type": "content_policy_violation",
+                                            "code": violation.code()
+                                        }
+                                    })
+                                    .to_string(),
+                                ),
+                            )
+                                .into_response();
                         }
 
                         // AGT output pipeline: redact → scan → policy check (blocking)
