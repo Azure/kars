@@ -450,6 +450,28 @@ spec:
                     - rule: "!has(self.trustThreshold) || (self.trustThreshold >= 0 && self.trustThreshold <= 1000)"
                       message: "spec.governance.trustThreshold must be in the range [0, 1000]"
                       reason: "FieldValueInvalid"
+                    # Slice 4d.1: singular `mcpServerRef` and plural
+                    # `mcpServerRefs` are mutually exclusive — picking
+                    # both is almost always a copy-paste mistake and
+                    # we'd silently drop the singular. Refuse at
+                    # admission.
+                    - rule: "!(has(self.mcpServerRef) && has(self.mcpServerRefs) && self.mcpServerRefs.size() > 0)"
+                      message: "spec.governance.mcpServerRef (singular, deprecated) and spec.governance.mcpServerRefs (plural) are mutually exclusive — use only one"
+                      reason: "FieldValueInvalid"
+                    # Slice 4d.1: cap plural list length at 8 — the
+                    # router-side per-server file scheme (Slice 4d.2)
+                    # is sized for this; beyond that we want operators
+                    # to use the registry-mode federation pattern.
+                    - rule: "!has(self.mcpServerRefs) || self.mcpServerRefs.size() <= 8"
+                      message: "spec.governance.mcpServerRefs may not exceed 8 entries"
+                      reason: "FieldValueInvalid"
+                    # Slice 4d.1: entries must be unique by name —
+                    # duplicates collapse to the same JWKS/signing
+                    # ConfigMap mount path and are almost certainly a
+                    # mistake.
+                    - rule: "!has(self.mcpServerRefs) || self.mcpServerRefs.all(r, self.mcpServerRefs.exists_one(s, s.name == r.name))"
+                      message: "spec.governance.mcpServerRefs entries must be unique by name"
+                      reason: "FieldValueInvalid"
                   properties:
                     enabled:
                       type: boolean
@@ -492,19 +514,44 @@ spec:
                     mcpServerRef:
                       type: object
                       description: |
+                        DEPRECATED (Slice 4d.1): use `mcpServerRefs` instead.
                         Same-namespace reference to an `McpServer` CR.
                         When set, the controller mirrors the
                         `mcp-{name}-jwks` ConfigMap and
                         `mcp-{name}-signing` Secret from the user namespace
                         into the sandbox namespace and mounts them into
                         the inference-router so the sandbox can serve
-                        the customer-facing MCP endpoint.
+                        the customer-facing MCP endpoint. Honored as a
+                        length-1 alias for `mcpServerRefs`; emits a
+                        Warning event `McpSingularDeprecated` each
+                        reconcile until migrated.
                       properties:
                         name:
                           type: string
                           description: "Name of a sibling McpServer CR in the same namespace as this ClawSandbox."
                           maxLength: 253
                           pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                    mcpServerRefs:
+                      type: array
+                      maxItems: 8
+                      description: |
+                        Slice 4d.1: plural same-namespace references to
+                        `McpServer` CRs. Supersedes the singular
+                        `mcpServerRef` field. Slice 4d.1 mirrors only
+                        the first entry (and emits Degraded with reason
+                        `PluralMcpServersUnsupportedYet` when more than
+                        one is declared) while the router-side
+                        per-server file scheme lands in Slice 4d.2.
+                        Mutually exclusive with `mcpServerRef`; entries
+                        must be unique by name.
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                            description: "Name of a sibling McpServer CR in the same namespace as this ClawSandbox."
+                            maxLength: 253
+                            pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
                 azureServices:
                   type: array
                   description: "Azure services the sandbox can access via Managed Identity"

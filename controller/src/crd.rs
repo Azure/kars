@@ -890,6 +890,8 @@ pub struct GovernanceConfig {
     /// Registry mode: "global" or "local" (default: "local").
     /// Global mode enables cross-cluster mesh communication and handoff tools.
     pub registry_mode: Option<String>,
+    /// **Deprecated.** Use `mcpServerRefs` (plural) instead.
+    ///
     /// Reference to an `McpServer` CR in the **same namespace** that
     /// publishes the OAuth-protected MCP endpoint this sandbox should
     /// expose. When set, the controller mirrors the
@@ -900,8 +902,63 @@ pub struct GovernanceConfig {
     /// Phase 3 S7 — wires the consumer side of the McpServer CRD.
     /// Optional: when omitted, the sandbox does not expose a
     /// customer-facing MCP endpoint.
+    ///
+    /// **Slice 4d.1 deprecation:** when set, the controller emits a
+    /// `McpSingularDeprecated` Warning event on every reconcile.
+    /// `effective_mcp_server_refs()` lifts the singular value into the
+    /// unified plural list internally. A future release will remove this
+    /// field; new manifests must use `mcpServerRefs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server_ref: Option<LocalObjectRef>,
+    /// Plural references to `McpServer` CRs in the **same namespace**.
+    ///
+    /// Ordered list; entries must be unique by `name`. Length cap = 8
+    /// (enforced via admission CEL). Mutually exclusive with the
+    /// deprecated singular `mcpServerRef`.
+    ///
+    /// **Slice 4d.1** introduces the typed field. The controller's
+    /// reconciler iterates `effective_mcp_server_refs()` when mirroring
+    /// JWKS + signing ConfigMaps + Secrets. Plural lengths > 1 are
+    /// recognised at admission but flagged at reconcile time with a
+    /// `PluralMcpServersUnsupportedYet` Degraded condition until
+    /// **Slice 4d.2** ships per-server file scheme + router-side
+    /// `McpServerRegistry` + stale-file sweep (DoD #1 + #3 + #6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_server_refs: Vec<LocalObjectRef>,
+}
+
+impl GovernanceConfig {
+    /// Return the unified plural list of `McpServer` references this
+    /// sandbox uses, honoring the singular→plural backward-compat shim.
+    ///
+    /// Rules (mirrored in admission CEL):
+    ///
+    /// 1. If `mcp_server_refs` is non-empty, return its entries verbatim.
+    /// 2. Otherwise, if `mcp_server_ref` (singular, deprecated) is set,
+    ///    return a length-1 list wrapping it.
+    /// 3. Otherwise, return an empty list.
+    ///
+    /// Slice 4d.1 — gateway for the post-singular plural world. Every
+    /// downstream consumer (reconciler mirror loop, future router-side
+    /// `McpServerRegistry`) goes through this helper, so the singular
+    /// alias survives without scattering the shim across the codebase.
+    pub fn effective_mcp_server_refs(&self) -> Vec<&LocalObjectRef> {
+        if !self.mcp_server_refs.is_empty() {
+            return self.mcp_server_refs.iter().collect();
+        }
+        match &self.mcp_server_ref {
+            Some(r) => vec![r],
+            None => Vec::new(),
+        }
+    }
+
+    /// True iff the caller is using the deprecated singular field.
+    ///
+    /// Used by the reconciler to emit `McpSingularDeprecated` Warning
+    /// events on every reconcile that observes the legacy shape.
+    pub fn uses_singular_mcp_server_ref(&self) -> bool {
+        self.mcp_server_ref.is_some() && self.mcp_server_refs.is_empty()
+    }
 }
 
 fn default_trust_threshold() -> i32 {
@@ -1164,6 +1221,7 @@ mod tests {
             trusted_peers: None,
             registry_mode: None,
             mcp_server_ref: None,
+            mcp_server_refs: Vec::new(),
         };
         let v = serde_json::to_value(&g).unwrap();
         assert!(
@@ -1402,5 +1460,101 @@ mod tests {
             "None runtimeKind must be absent (would wipe a real value via merge patch)"
         );
         assert!(status.runtime_kind.is_none());
+    }
+
+    // ── Slice 4d.1: mcpServerRefs plural/singular shim ──────────────
+
+    #[test]
+    fn effective_mcp_server_refs_empty_when_neither_set() {
+        let gov = GovernanceConfig::default();
+        assert!(gov.effective_mcp_server_refs().is_empty());
+        assert!(!gov.uses_singular_mcp_server_ref());
+    }
+
+    #[test]
+    fn effective_mcp_server_refs_returns_singular_as_len_1() {
+        let gov = GovernanceConfig {
+            mcp_server_ref: Some(LocalObjectRef {
+                name: "legacy-mcp".to_string(),
+            }),
+            ..Default::default()
+        };
+        let refs = gov.effective_mcp_server_refs();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "legacy-mcp");
+        assert!(gov.uses_singular_mcp_server_ref());
+    }
+
+    #[test]
+    fn effective_mcp_server_refs_returns_plural_entries_verbatim() {
+        let gov = GovernanceConfig {
+            mcp_server_refs: vec![
+                LocalObjectRef {
+                    name: "first".to_string(),
+                },
+                LocalObjectRef {
+                    name: "second".to_string(),
+                },
+                LocalObjectRef {
+                    name: "third".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let refs = gov.effective_mcp_server_refs();
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0].name, "first");
+        assert_eq!(refs[2].name, "third");
+        assert!(!gov.uses_singular_mcp_server_ref());
+    }
+
+    #[test]
+    fn effective_mcp_server_refs_plural_wins_when_both_set() {
+        // Admission CEL refuses this combo, but if it slips past
+        // (e.g. existing CR mutated post-upgrade) the plural list
+        // is authoritative and `uses_singular_mcp_server_ref()`
+        // returns false (no deprecation warning would mask the
+        // real plural authority).
+        let gov = GovernanceConfig {
+            mcp_server_ref: Some(LocalObjectRef {
+                name: "old".to_string(),
+            }),
+            mcp_server_refs: vec![LocalObjectRef {
+                name: "new".to_string(),
+            }],
+            ..Default::default()
+        };
+        let refs = gov.effective_mcp_server_refs();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "new");
+        assert!(!gov.uses_singular_mcp_server_ref());
+    }
+
+    #[test]
+    fn mcp_server_refs_serializes_with_camel_case_key() {
+        let gov = GovernanceConfig {
+            mcp_server_refs: vec![LocalObjectRef {
+                name: "srv".to_string(),
+            }],
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&gov).unwrap();
+        assert!(
+            v.as_object().unwrap().contains_key("mcpServerRefs"),
+            "field must serialize as `mcpServerRefs` (camelCase) for K8s API"
+        );
+    }
+
+    #[test]
+    fn mcp_server_refs_omitted_when_empty() {
+        // Empty Vec must not appear in the serialized payload —
+        // otherwise the CR shows up with `mcpServerRefs: []` even
+        // when the operator never set it.
+        let gov = GovernanceConfig::default();
+        let v = serde_json::to_value(&gov).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("mcpServerRefs"),
+            "empty mcpServerRefs must be omitted from serialized output"
+        );
     }
 }

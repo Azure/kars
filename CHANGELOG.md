@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 4d.1 — `mcpServerRefs` plural (DoD #2 deprecation)
+
+Slice 4 DoD #2 says: *"`mcpServerRef` (singular) emits a Warning event
+deprecating in favor of `mcpServerRefs`."* This slice ships the plural
+CRD field + a backward-compat shim that keeps the singular working
+as a length-1 alias, alongside admission-CEL guard rails for the
+plural form. The router-side per-server file scheme (DoD #1, #3, #6)
+lands in **Slice 4d.2**.
+
+What this PR adds:
+
+- `controller/src/crd.rs` — new `GovernanceConfig.mcp_server_refs:
+  Vec<LocalObjectRef>` field with `#[serde(default,
+  skip_serializing_if = "Vec::is_empty")]` so empty lists don't
+  pollute serialized CRs. The legacy singular `mcp_server_ref`
+  carries a deprecation doc-comment but remains honored.
+- `controller/src/crd.rs::GovernanceConfig` — two new helpers:
+  `effective_mcp_server_refs()` returns the unified list (plural
+  wins; singular degrades to length-1; both empty → empty list),
+  and `uses_singular_mcp_server_ref()` is true iff the deprecated
+  path is being used. Every downstream consumer goes through this
+  pair so the shim doesn't scatter.
+- `controller/src/status/conditions.rs::reason` — two new constants:
+  `McpSingularDeprecated` (Warning surface for singular use) and
+  `PluralMcpServersUnsupportedYet` (Degraded reason emitted when
+  `mcpServerRefs.len() > 1` until 4d.2 wires per-server addressing).
+- `controller/src/reconciler/mod.rs` — refactored the
+  McpServer mirror loop to iterate `effective_mcp_server_refs()`.
+  When the singular field is in use, emits a `tracing::warn` with
+  `reason = McpSingularDeprecated` every reconcile. When the list
+  length exceeds 1, short-circuits via the existing `degrade!`
+  macro with `reason=PluralMcpServersUnsupportedYet` — refusing to
+  reconcile is the most honest surface until Slice 4d.2 lands
+  (principles §3: typed contract with truthful
+  "not-yet-enforced" signal; never silently drop entries 2..N).
+- `deploy/helm/azureclaw/templates/crd.yaml` — admission CEL:
+  mutex between singular and plural (`!(has(self.mcpServerRef) &&
+  size(self.mcpServerRefs) > 0)`), `maxItems: 8` (router-side
+  scheme is sized for this; beyond that operators should use
+  registry-mode federation), and per-name uniqueness
+  (`all(r, exists_one(s, s.name == r.name))`) to catch
+  copy-paste duplicates at admission instead of at mount-time.
+
+Tests: 6 new unit tests on the helpers + serialization shape (omit-
+when-empty, camelCase wire key, three precedence cases). Controller
+suite: **555 passing** (549 prior + 6 new). `cargo clippy
+--all-targets -- -D warnings` clean, `cargo fmt --check` clean.
+
+Out of scope for 4d.1 (queued for 4d.2):
+
+- Per-server `jwks-{name}.json` / `tools-{name}.json` file scheme.
+- Router-side `McpServerRegistry` for namespaced tool dispatch.
+- Stale-file sweep (DoD #6).
+- e2e fixture with ≥ 3 servers (DoD #1).
+
 ### Slice 4c — Azure Monitor remote audit sink (DoD #5)
 
 Slice 4a (PR #287) shipped the sandbox-local JSONL audit log. Slice 4b
@@ -65,8 +120,6 @@ Wire shape (one JSON object per row in the array body):
 The typed `McpServer.spec.auditSink` CRD field (replacing env-var
 bootstrap) is deferred to **Slice 4d** alongside the plural McpServer
 migration so the CRD shape and the plural namespacing land together.
-
-### Slice 4a — durable JSONL audit sink (DoD #4)
 
 ### Slice 4b — `azureclaw audit tail` CLI (DoD #7)
 
