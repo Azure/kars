@@ -32,7 +32,10 @@ use crate::deployment_health::DeploymentHealthSnapshot;
 use crate::policy_status::PolicyStatusEntry;
 
 pub fn internal_routes() -> Router<AppState> {
-    Router::new().route("/internal/policy-status", get(policy_status))
+    Router::new()
+        .route("/internal/policy-status", get(policy_status))
+        .route("/internal/egress/blocked", get(egress_blocked))
+        .route("/internal/egress/blocked/top", get(egress_blocked_top))
 }
 
 /// JSON envelope returned by `GET /internal/policy-status`. Each
@@ -154,6 +157,268 @@ async fn policy_status(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Slice 5a — surfaced egress blocked buffer
+//
+// Operator-facing companion to the existing `/egress/learned/blocked`
+// endpoint (which keeps its old shape for the
+// `azureclaw egress … --pending`/`--approve` workflow). The `/internal`
+// variants are the canonical surface the `azureclaw egress blocked` CLI
+// and the headlamp plugin consume:
+//
+//   GET /internal/egress/blocked?since=<rfc3339>
+//   GET /internal/egress/blocked/top?window=<go-duration>&n=<int>
+//
+// Both routes are mounted on the `protected` axum router (admin-token +
+// `ADMIN_ALLOW_IPS` gated), and they read from the same in-process
+// `BlockedBuffer` the forward-proxy enforcement path already populates.
+// ---------------------------------------------------------------------------
+
+/// Wire DTO for a single blocked-attempt entry. Mirrors
+/// [`crate::egress_blocked::BlockedEntry`] but renames timestamp fields
+/// to the suffix-stripped form preferred by the JSON wire surface and
+/// adds RFC 3339 strings alongside the raw Unix seconds for human eyes
+/// (controller / CLI parses both).
+#[derive(Debug, Serialize)]
+struct BlockedEntryDto {
+    host: String,
+    port: u16,
+    source_sandbox: String,
+    count: u32,
+    first_seen_unix: u64,
+    last_seen_unix: u64,
+    first_seen: String,
+    last_seen: String,
+}
+
+impl From<crate::egress_blocked::BlockedEntry> for BlockedEntryDto {
+    fn from(e: crate::egress_blocked::BlockedEntry) -> Self {
+        let first_seen = format_rfc3339_unix(e.first_seen_unix);
+        let last_seen = format_rfc3339_unix(e.last_seen_unix);
+        Self {
+            host: e.host,
+            port: e.port,
+            source_sandbox: e.source_sandbox,
+            count: e.count,
+            first_seen_unix: e.first_seen_unix,
+            last_seen_unix: e.last_seen_unix,
+            first_seen,
+            last_seen,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct BlockedResponse {
+    schema_version: u32,
+    total: usize,
+    count: usize,
+    /// Echo of the resolved `since` filter as Unix seconds. `0` when the
+    /// caller passed no filter or the input parsed as the epoch.
+    since_unix: u64,
+    entries: Vec<BlockedEntryDto>,
+}
+
+#[derive(Debug, Serialize)]
+struct TopHost {
+    host: String,
+    count: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct BlockedTopResponse {
+    schema_version: u32,
+    /// Echo of the resolved window start as Unix seconds.
+    since_unix: u64,
+    /// Original window string from the request, normalized lowercase.
+    window: String,
+    n: usize,
+    top: Vec<TopHost>,
+}
+
+/// `GET /internal/egress/blocked?since=<rfc3339>` — list of every blocked
+/// host the router has observed whose `last_seen_unix >= since`. Newest
+/// first. The buffer is bounded (default 1024 distinct keys) so this is
+/// safe to call frequently from the CLI's `--watch` loop.
+///
+/// Missing or unparseable `since` collapses to `0` (return everything).
+async fn egress_blocked(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let since_unix = params
+        .get("since")
+        .map(|s| s.as_str())
+        .map(parse_since_or_zero)
+        .unwrap_or(0);
+    let entries: Vec<BlockedEntryDto> = state
+        .blocked_egress
+        .snapshot_since(since_unix)
+        .into_iter()
+        .map(BlockedEntryDto::from)
+        .collect();
+    Json(BlockedResponse {
+        schema_version: 1,
+        total: state.blocked_egress.len(),
+        count: entries.len(),
+        since_unix,
+        entries,
+    })
+}
+
+/// `GET /internal/egress/blocked/top?window=5m&n=10` — top-N
+/// most-attempted blocked hosts in the rolling window. Aggregates across
+/// source sandboxes + ports by hostname. Used by the plugin sidebar and
+/// the rate-limited `EgressBlockedSeen` k8s event (planned for Slice 5b).
+///
+/// Accepted `window` formats: bare seconds (`300`), or Go-style duration
+/// (`5m`, `1h`, `30s`). Default 5m. `n` defaults to 10, capped at 100.
+async fn egress_blocked_top(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let window_raw = params
+        .get("window")
+        .cloned()
+        .unwrap_or_else(|| "5m".to_string());
+    let window_secs = parse_duration_secs(&window_raw).unwrap_or(300);
+    let n: usize = params
+        .get("n")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(10)
+        .min(100);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let since_unix = now.saturating_sub(window_secs);
+    let top: Vec<TopHost> = state
+        .blocked_egress
+        .top_hosts(since_unix, n)
+        .into_iter()
+        .map(|(host, count)| TopHost { host, count })
+        .collect();
+    Json(BlockedTopResponse {
+        schema_version: 1,
+        since_unix,
+        window: window_raw.to_lowercase(),
+        n,
+        top,
+    })
+}
+
+/// Parse a Go-style duration string into seconds. Accepts integer
+/// seconds (`"300"`), or `Nm` / `Nh` / `Ns` (single-unit suffix). Returns
+/// `None` on parse failure so the caller can supply a default.
+///
+/// Intentionally narrow — operators paste these strings into URLs; we
+/// don't want surprises from compound forms like `1h30m`.
+fn parse_duration_secs(raw: &str) -> Option<u64> {
+    let s = raw.trim().to_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    let (num, mul) = if let Some(rest) = s.strip_suffix("ms") {
+        // milliseconds — round to a 1-second floor so we never accept
+        // a window that would inflate to "everything" via underflow.
+        (rest, 0u64)
+    } else if let Some(rest) = s.strip_suffix('s') {
+        (rest, 1)
+    } else if let Some(rest) = s.strip_suffix('m') {
+        (rest, 60)
+    } else if let Some(rest) = s.strip_suffix('h') {
+        (rest, 3_600)
+    } else if let Some(rest) = s.strip_suffix('d') {
+        (rest, 86_400)
+    } else {
+        return None;
+    };
+    let n: u64 = num.trim().parse().ok()?;
+    Some(n.saturating_mul(mul).max(if mul == 0 { 0 } else { 1 }))
+}
+
+/// Parse the `since` query parameter. Accepts:
+/// - integer Unix seconds (`"1705314645"`)
+/// - RFC 3339 / ISO 8601 (`"2024-01-15T10:30:45Z"`)
+/// - Go-style relative duration prefixed with `-` (`"-10m"`)
+///
+/// On failure → `0` (return everything). Loud failure isn't useful here
+/// because the CLI does its own parsing; the router is the second line.
+fn parse_since_or_zero(raw: &str) -> u64 {
+    let s = raw.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    if let Ok(n) = s.parse::<u64>() {
+        return n;
+    }
+    // Relative `-Nm` form → "now minus duration".
+    if let Some(stripped) = s.strip_prefix('-') {
+        if let Some(secs) = parse_duration_secs(stripped) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            return now.saturating_sub(secs);
+        }
+    }
+    parse_rfc3339_to_unix(s).unwrap_or(0)
+}
+
+/// RFC 3339 → Unix seconds. Hand-rolled to avoid pulling in `chrono`
+/// just for the inverse of [`format_rfc3339`]. Accepts the
+/// `YYYY-MM-DDTHH:MM:SS(.fff)?(Z|±HH:MM)` shape produced by the rest of
+/// the router. Returns `None` on malformed input — callers fall back to
+/// `0` (return-everything).
+fn parse_rfc3339_to_unix(s: &str) -> Option<u64> {
+    // Strip trailing `Z` or `+00:00`/`-00:00` offsets. We don't support
+    // non-zero offsets — every callsite in the router emits UTC.
+    let body = s
+        .strip_suffix('Z')
+        .or_else(|| s.strip_suffix("+00:00"))
+        .or_else(|| s.strip_suffix("-00:00"))
+        .unwrap_or(s);
+    // Drop any subsecond suffix.
+    let body = body.split('.').next()?;
+    // Expect `YYYY-MM-DDTHH:MM:SS`.
+    let (date, time) = body.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let y: i32 = date_parts.next()?.parse().ok()?;
+    let mo: u32 = date_parts.next()?.parse().ok()?;
+    let d: u32 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let h: u32 = time_parts.next()?.parse().ok()?;
+    let mi: u32 = time_parts.next()?.parse().ok()?;
+    let se: u32 = time_parts.next()?.parse().ok()?;
+    // Civil → days-from-epoch using the inverse of `days_to_ymd`.
+    let yp = if mo <= 2 { y - 1 } else { y };
+    let era = if yp >= 0 { yp } else { yp - 399 } / 400;
+    let yoe = (yp - era * 400) as u64;
+    let mp = if mo > 2 { mo - 3 } else { mo + 9 };
+    let doy = (153 * mp as u64 + 2) / 5 + d as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era as i64 * 146_097 + doe as i64 - 719_468;
+    let secs = days
+        .checked_mul(86_400)?
+        .checked_add(h as i64 * 3_600)?
+        .checked_add(mi as i64 * 60)?
+        .checked_add(se as i64)?;
+    if secs < 0 {
+        return None;
+    }
+    Some(secs as u64)
+}
+
+/// Render Unix seconds in the same `format_rfc3339` shape used by
+/// `policy-status`. The blocked-buffer entries are stored as `u64`
+/// epoch seconds (no nanosecond precision) so we always emit `.000`.
+fn format_rfc3339_unix(unix_secs: u64) -> String {
+    format_rfc3339(std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +498,78 @@ mod tests {
         assert_eq!(json["count"].as_u64(), Some(0));
         assert_eq!(json["entries"].as_array().unwrap().len(), 0);
         assert_eq!(json["deployment_health"].as_array().unwrap().len(), 0);
+    }
+
+    // ---- Slice 5a helpers ------------------------------------------------
+
+    #[test]
+    fn parse_duration_secs_bare_seconds() {
+        assert_eq!(parse_duration_secs("300"), Some(300));
+        assert_eq!(parse_duration_secs("0"), Some(0));
+    }
+
+    #[test]
+    fn parse_duration_secs_suffixes() {
+        assert_eq!(parse_duration_secs("5s"), Some(5));
+        assert_eq!(parse_duration_secs("5m"), Some(300));
+        assert_eq!(parse_duration_secs("1h"), Some(3_600));
+        assert_eq!(parse_duration_secs("2d"), Some(172_800));
+        // Case-insensitive.
+        assert_eq!(parse_duration_secs("5M"), Some(300));
+    }
+
+    #[test]
+    fn parse_duration_secs_invalid() {
+        assert_eq!(parse_duration_secs(""), None);
+        assert_eq!(parse_duration_secs("abc"), None);
+        assert_eq!(parse_duration_secs("5y"), None);
+        // Compound forms intentionally not supported.
+        assert_eq!(parse_duration_secs("1h30m"), None);
+    }
+
+    #[test]
+    fn parse_since_or_zero_unix_integer() {
+        assert_eq!(parse_since_or_zero("1705314645"), 1_705_314_645);
+        assert_eq!(parse_since_or_zero(""), 0);
+        assert_eq!(parse_since_or_zero("garbage"), 0);
+    }
+
+    #[test]
+    fn parse_since_or_zero_rfc3339_roundtrips_with_formatter() {
+        // 2024-01-15T10:30:45Z = 1705314645.
+        let n = parse_since_or_zero("2024-01-15T10:30:45Z");
+        assert_eq!(n, 1_705_314_645);
+        // Subseconds dropped (we round down to nearest second).
+        let n2 = parse_since_or_zero("2024-01-15T10:30:45.500Z");
+        assert_eq!(n2, 1_705_314_645);
+    }
+
+    #[test]
+    fn parse_since_relative_minus_form() {
+        // -1h should be roughly `now - 3600`. We can't assert exact value
+        // without freezing the clock; just check it's monotonically less
+        // than the current epoch and within 5s of the expected delta.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let result = parse_since_or_zero("-1h");
+        let expected = now.saturating_sub(3600);
+        assert!(result <= now);
+        assert!(result.abs_diff(expected) <= 5);
+    }
+
+    #[test]
+    fn format_rfc3339_unix_zero_is_epoch() {
+        assert_eq!(format_rfc3339_unix(0), "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn format_rfc3339_unix_known_timestamp() {
+        // 2024-01-15T10:30:45Z
+        assert_eq!(
+            format_rfc3339_unix(1_705_314_645),
+            "2024-01-15T10:30:45.000Z"
+        );
     }
 }
