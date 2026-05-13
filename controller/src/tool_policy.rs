@@ -64,6 +64,37 @@ pub struct ToolPolicySpec {
 
     /// Optional human-readable label.
     pub display_name: Option<String>,
+
+    /// Customer-supplied AGT policy profile. When present, the
+    /// controller writes the raw profile bytes into the compiled
+    /// ConfigMap under key `agt-profile.yaml` and the sandbox
+    /// inference-router loads it via the AGT policy engine. Replaces
+    /// the bundled `AGT_POLICY_PROFILE` env-var path (deprecated).
+    ///
+    /// Slice 1b ships **inline** only; `bundleRef` (signed OCI
+    /// artifact fetch) lands in Slice 1c. The wire contract between
+    /// controller and router is the length-prefixed sha256 digest
+    /// produced by [`crate::tool_policy_compile::agt_profile_digest`],
+    /// echoed back by the router via `GET /internal/policy-status`.
+    ///
+    /// Per principles.md §3: when `agtProfile` is set, the controller
+    /// stamps `phase=Compiled` and `Ready=False /
+    /// reason=AwaitingRouterEnforcement` until the router-confirmation
+    /// poller (Slice 1c) closes the loop.
+    pub agt_profile: Option<AgtProfileSource>,
+}
+
+/// AGT policy profile source. Slice 1b: `inline` only — the raw YAML
+/// body is carried in the spec. Slice 1c will add `bundleRef` for OCI
+/// pull paths. The two variants are mutually exclusive (admission CEL
+/// enforces exactly-one).
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgtProfileSource {
+    /// Inline AGT policy YAML body. Plain string — admission validates
+    /// it is non-empty; the router parses it at load time and surfaces
+    /// any syntax error via `GET /internal/policy-status`.
+    pub inline: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -149,4 +180,14 @@ pub struct ToolPolicyStatus {
     /// Last time the policy was compiled to an AGT profile and pushed.
     #[serde(default)]
     pub last_compiled_at: Option<String>,
+
+    /// Length-prefixed sha256 digest (Slice 1a aggregate canonical
+    /// format) of the AGT profile bytes the controller published to
+    /// the compiled ConfigMap. Set only when
+    /// `spec.agtProfile.inline` is present. The router echoes this
+    /// digest on `GET /internal/policy-status` once it has loaded the
+    /// profile; the controller-side confirmation poller (Slice 1c)
+    /// uses it to promote `Compiled → Ready`.
+    #[serde(default)]
+    pub agt_profile_digest: Option<String>,
 }
