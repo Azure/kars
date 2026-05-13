@@ -222,7 +222,34 @@ pub mod reason {
     /// policy, the reconciler retries and (on success) promotes to
     /// `Ready` / `RouterEnforcing`.
     pub const NO_SANDBOXES_REFERENCING: &str = "NoSandboxesReferencing";
+
+    /// `crd-well-oiled-machine` Slice 3b.4 — `AuthMisconfigured`: at
+    /// least one referencing sandbox's router reported an upstream
+    /// authentication failure while consuming the compiled policy
+    /// (today: Foundry Memory Store returning 403 on the
+    /// `foundry.memory` MCP tool). This is *not* a transient network
+    /// error; it indicates a misconfigured project-MI or wrong
+    /// `Azure AI User` role assignment (see the
+    /// `azureclaw-deployment` skill notes on the project-MI
+    /// gotcha). The controller stamps `Ready=False` / `Degraded=True`
+    /// with this reason so operators don't waste time chasing
+    /// transient digest mismatches when the real problem is RBAC.
+    ///
+    /// Wire contract: the router records auth failures via
+    /// `PolicyStatusRegistry::record_error` with an
+    /// `AuthMisconfigured:` prefix on the message; the controller
+    /// matches that exact prefix on the `last_error` returned in
+    /// `/internal/policy-status` to elevate the condition.
+    pub const AUTH_MISCONFIGURED: &str = "AuthMisconfigured";
 }
+
+/// Slice 3b.4 wire-contract prefix routers attach to
+/// `PolicyStatusRegistry::record_error` messages when the upstream
+/// (Foundry Memory Store, today) rejected auth. The controller scans
+/// for this prefix to elevate the Degraded condition with
+/// `reason=AuthMisconfigured`. Kept here in `conditions` so producer
+/// and consumer share one source of truth.
+pub const AUTH_MISCONFIGURED_PREFIX: &str = "AuthMisconfigured:";
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.
 ///
