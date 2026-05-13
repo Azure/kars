@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1d — `azureclaw inspect <sandbox>` CLI
+
+Operator-facing data-plane view of the policy CRDs a sandbox's
+router is actually enforcing. Hits the router's
+`/internal/policy-status` endpoint (Slice 1a) over a `kubectl exec`
+in-pod curl tunnel — **no `kubectl port-forward` lifecycle**, so the
+command never collides with another agent already bound to 18789
+or any other local port.
+
+Three operator pain points solved at once:
+
+* **No port collisions.** Single-shot `kubectl exec` to the
+  `openclaw` container, curls `127.0.0.1:8443` over loopback, exits.
+  No background tunnel, no port-forward retries.
+* **Admin token never crosses argv.** The token is resolved either
+  from the `router-admin-token` Secret (fast path, same pattern as
+  `azureclaw handoff`'s `getAksAdminToken`) or — when RBAC blocks
+  the secret read — from the `/etc/azureclaw/secrets/admin-token`
+  file inside the pod. It then flows to the in-pod curl on **stdin**
+  (`read -r AZURECLAW_ADMIN_TOKEN <&0`), never `ps`-visible.
+* **Latency-free.** Zero new server-side work — every byte the
+  command renders was already produced by the router's
+  `PolicyStatusRegistry` snapshot. The CLI is a pure consumer.
+
+Default render is a grouped tree: one section per policy kind
+(`AGT profile`, `InferencePolicy`, `ToolPolicy`, …), each row showing
+the source file basename, the 12-hex truncated sha256 digest, and
+the relative load age (`5m ago`, `3h ago`, never-loaded marker for
+the loader's `UNIX_EPOCH` sentinel). `--json` emits the raw
+schema-version-1 envelope for scripting + JQ.
+
+The Headlamp plugin panel — the second deliverable in the Slice 1d
+spec — is deferred to Slice 1d.2; the CLI alone is independently
+shippable and the panel can land against the same wire contract
+without a second round-trip.
+
 ### Slice 2d.1 — InferencePolicy `modelPreference.primary.deployment` deployment override
 
 First wire of `modelPreference` end-to-end. When an `InferencePolicy`

@@ -30,6 +30,7 @@ import { toolPolicyCommand } from "./commands/toolpolicy.js";
 import { inferencePolicyCommand } from "./commands/inferencepolicy.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { memoryCommand } from "./commands/memory.js";
+import { inspectCommand } from "./commands/inspect.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -53,6 +54,7 @@ export function createCli(): Command {
   program.addCommand(statusCommand());
   program.addCommand(listCommand());
   program.addCommand(logsCommand());
+  program.addCommand(inspectCommand());
 
   // Configuration
   program.addCommand(credentialsCommand());
@@ -89,7 +91,7 @@ export function createCli(): Command {
   program.addHelpText("after", `
 Command groups:
   Lifecycle       up, dev, add, push, destroy
-  Operations      connect, status, list, logs
+  Operations      connect, status, list, logs, inspect
   Configuration   credentials, model, policy, egress
   Observability   trace, eval, operator
   Agent mobility  handoff, mesh, pair
