@@ -474,7 +474,7 @@ export function handoffCommand(): Command {
               networkPolicy: {
                 defaultDeny: true,
                 approvalRequired: true,
-                learnEgress: sourceLearnEgress,
+                egressMode: sourceLearnEgress ? "Learn" : "Strict",
               },
               sandbox: {
                 isolation: sourceIsolation,

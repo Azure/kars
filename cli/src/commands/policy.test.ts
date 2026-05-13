@@ -40,7 +40,7 @@ function buildLearnApplyPatch(domains: string[]) {
     spec: {
       networkPolicy: {
         allowedEndpoints: endpoints,
-        learnEgress: false,
+        egressMode: "Strict",
       },
     },
   };
@@ -167,15 +167,15 @@ describe("policy learn — apply patch", () => {
     ]);
   });
 
-  it("disables learnEgress when applying", () => {
+  it("sets egressMode=Strict when applying", () => {
     const patch = buildLearnApplyPatch(["example.com"]);
-    expect(patch.spec.networkPolicy.learnEgress).toBe(false);
+    expect(patch.spec.networkPolicy.egressMode).toBe("Strict");
   });
 
   it("produces empty endpoints for empty domain list", () => {
     const patch = buildLearnApplyPatch([]);
     expect(patch.spec.networkPolicy.allowedEndpoints).toEqual([]);
-    expect(patch.spec.networkPolicy.learnEgress).toBe(false);
+    expect(patch.spec.networkPolicy.egressMode).toBe("Strict");
   });
 });
 

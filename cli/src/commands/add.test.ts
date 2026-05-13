@@ -111,7 +111,7 @@ function buildSandboxManifest(name: string, options: AddOptions) {
 
   if (options.learnEgress) {
     const np = (sandbox.spec as Record<string, unknown>).networkPolicy as Record<string, unknown>;
-    np.learnEgress = true;
+    np.egressMode = "Learn";
   }
 
   return sandbox;
@@ -263,10 +263,10 @@ describe("ClawSandbox manifest generation", () => {
     ]);
   });
 
-  it("enables learnEgress when flag is set", () => {
+  it("sets egressMode=Learn when --learn-egress flag is set (Slice 5b)", () => {
     const manifest = buildSandboxManifest("a", defaultOptions({ learnEgress: true }));
     const spec = manifest.spec as any;
-    expect(spec.networkPolicy.learnEgress).toBe(true);
+    expect(spec.networkPolicy.egressMode).toBe("Learn");
   });
 
   it("adds governance config when enabled (S13: toolPolicyRef)", () => {

@@ -123,7 +123,7 @@ spec:
     trustThreshold: 500
   networkPolicy:
     defaultDeny: true
-    learnEgress: false
+    egressMode: Strict
     allowlistRef:
       registry: azureclawacr.azurecr.io
       repository: policy/egress-allowlist/research-bot

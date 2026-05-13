@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5b — `egressMode` enum replaces `learnEgress` bool (DoD #3)
+
+Replaces `ClawSandbox.spec.networkPolicy.learnEgress: bool` with
+`egressMode: Strict | Learn` enum across the controller, router,
+CLI, Headlamp plugin, helm CRD schema, and docs. Default = `Learn`.
+The `Approval` variant is deferred to Slice 5c (no consumer yet
+per principles §5). No back-compat shim: the repo has no live
+deployments, so the legacy field was removed cleanly rather than
+deprecated.
+
+- `controller/src/crd.rs`: new `EgressMode` enum (`#[derive(Default)]`
+  with `#[default]` on `Learn`); replaces `NetworkPolicyConfig.learn_egress`.
+  Tests cover default + wire-format round-trip in PascalCase.
+- `controller/src/reconciler/mod.rs`: emits `EGRESS_MODE=strict|learn`
+  on the sandbox pod env. No back-compat `EGRESS_LEARN_MODE`.
+- `inference-router/src/routes/mod.rs`: consumes `EGRESS_MODE`, defaults
+  to Learn when unset.
+- `inference-router/src/spawn/mod.rs`: sub-agent CR builder reads
+  `networkPolicy.egressMode` and emits the new field on respawn.
+  Internal `SpawnRequest.learn_egress: bool` retained (not wire).
+- `deploy/helm/azureclaw/templates/crd.yaml`: `learnEgress` removed
+  from the schema; `egressMode` enum-validated.
+- `cli/src/commands/{add,policy,handoff,handoff/helpers,up/sandbox_bringup,
+  dev/local-k8s,operator/actions}.ts`: every CR producer/reader migrated.
+- `tools/headlamp-plugin/src/index.tsx`: all 4 egress readers consume
+  `egressMode` directly. Phase chips + dashboard counters honour the
+  new enum.
+- `docs/use-cases.md`, `docs/egress-proxy.md`: doc samples updated.
+
 ### Slice 5a — Surface blocked egress attempts (DoD #1)
 
 First slice in the Slice 5 "egress polish + observability" sequence.

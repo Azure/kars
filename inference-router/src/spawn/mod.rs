@@ -589,9 +589,10 @@ pub async fn collect_sub_agent_snapshots(
 
         let learn_egress = spec
             .get("networkPolicy")
-            .and_then(|n| n.get("learnEgress"))
-            .and_then(|l| l.as_bool())
-            .unwrap_or(false);
+            .and_then(|n| n.get("egressMode"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("Learn"))
+            .unwrap_or(true); // CRD default = Learn
 
         let isolation = spec
             .get("sandbox")
@@ -724,7 +725,7 @@ pub(crate) fn build_sub_agent_crd_with_labels(
         "networkPolicy": {
             "defaultDeny": true,
             "approvalRequired": true,
-            "learnEgress": req.learn_egress,
+            "egressMode": if req.learn_egress { "Learn" } else { "Strict" },
         },
     });
 

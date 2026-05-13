@@ -1803,7 +1803,7 @@ async function autoCreateSandbox(
     "  networkPolicy:",
     "    defaultDeny: true",
     "    approvalRequired: false",
-    "    learnEgress: true",
+    "    egressMode: Learn",
     "    allowedEndpoints: []",
     "",
   ].join("\n");

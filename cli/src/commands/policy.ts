@@ -192,7 +192,7 @@ export function policyCommand(): Command {
               spec: {
                 networkPolicy: {
                   allowedEndpoints: endpoints,
-                  learnEgress: false,
+                  egressMode: "Strict",
                 },
               },
             }),

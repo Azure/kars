@@ -579,10 +579,18 @@ spec:
                     approvalRequired:
                       type: boolean
                       default: true
-                    learnEgress:
-                      type: boolean
-                      default: false
-                      description: "Enable egress learn mode: observe all accessed domains (blocklist still enforced)"
+                    egressMode:
+                      type: string
+                      enum: [Strict, Learn]
+                      default: Learn
+                      description: |
+                        Egress enforcement mode (Slice 5b):
+                        - `Learn` (default): allow + record every host.
+                          Blocklist still applied.
+                        - `Strict`: deny anything outside the resolved
+                          allowlist. Blocklist still applied.
+                        Reserved future variant `Approval` lands together
+                        with the EgressApproval CRD.
                     allowedEndpoints:
                       type: array
                       items:

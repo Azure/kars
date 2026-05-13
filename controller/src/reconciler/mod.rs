@@ -1341,15 +1341,21 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}),
         );
 
-        // Egress learn mode — enabled by default so operators can discover required domains.
-        // Blocklist (threat intelligence) is still enforced. Disable with network_policy.learn_egress=false.
-        let learn_egress = spec
+        // Egress mode — Slice 5b: `spec.networkPolicy.egressMode` drives the
+        // router's enforcement strategy. Default = `Learn` so manifests
+        // without an explicit choice keep observing instead of denying.
+        // Router contract: `EGRESS_MODE=strict|learn`.
+        // Blocklist (threat intelligence) is enforced in every mode.
+        let egress_mode = spec
             .network_policy
             .as_ref()
-            .is_none_or(|np| np.learn_egress);
-        if learn_egress {
-            router_env.push(json!({"name": "EGRESS_LEARN_MODE", "value": "true"}));
-        }
+            .map(|np| np.egress_mode)
+            .unwrap_or(crate::crd::EgressMode::Learn);
+        let egress_mode_str = match egress_mode {
+            crate::crd::EgressMode::Strict => "strict",
+            crate::crd::EgressMode::Learn => "learn",
+        };
+        router_env.push(json!({"name": "EGRESS_MODE", "value": egress_mode_str}));
 
         // ── Agent container ──────────────────────────────────────────
         // S10.A2.b: branch the agent container shape on the runtime
