@@ -1590,6 +1590,65 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
+        // InferencePolicy (always — `spec.inferenceRef` is required by
+        // the CRD): mirror the compiled profile ConfigMap and mount it
+        // into the router. The router's `inference_policy_loader`
+        // sha256s the bytes and echoes the digest via
+        // `/internal/policy-status`; the controller's
+        // `inference_policy_reconciler` polls that endpoint to
+        // close the §3 Ready ⇔ router-echo loop (Slice 2a).
+        //
+        // Failure mode: source missing → mount omitted, router boots
+        // with no InferencePolicy loaded (per-request token budget
+        // cap is None, defence-in-depth gate becomes a no-op). The
+        // existing env-driven `TOKEN_BUDGET_PER_REQUEST` warn-only
+        // path stays in place as a safety net.
+        if !inference_ref_name.is_empty() {
+            let ip_cm = format!("inferencepolicy-{}-profile", &inference_ref_name);
+            match governance_mounts::mirror_configmap(
+                client,
+                &ip_cm,
+                &sandbox_self_ns,
+                &sandbox_ns,
+                &name,
+                "InferencePolicy",
+            )
+            .await
+            {
+                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                    governance_mounts::inject_configmap_mount(
+                        &mut pod_spec,
+                        "inference-router",
+                        &ip_cm,
+                        "inference-policy",
+                        governance_mounts::paths::INFERENCE_POLICY_DIR,
+                        Some((
+                            "INFERENCE_POLICY_DIR",
+                            governance_mounts::paths::INFERENCE_POLICY_DIR,
+                        )),
+                    );
+                }
+                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        cm = %ip_cm,
+                        reason = %reason,
+                        "InferencePolicy profile ConfigMap not mirrored; \
+                         router will start without InferencePolicy enforcement",
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        sandbox = %name,
+                        cm = %ip_cm,
+                        "InferencePolicy ConfigMap mirror failed",
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
+            }
+        }
+
         // McpServer (optional): if the sandbox references one, mirror its
         // JWKS ConfigMap + signing-key Secret and mount them.
         if let Some(mcp_ref) = governance_config.mcp_server_ref.as_ref() {

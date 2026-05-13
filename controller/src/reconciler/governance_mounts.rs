@@ -64,6 +64,13 @@ pub mod paths {
     /// ToolPolicy compiled profile (JSON). Loaded by the AGT policy
     /// engine on startup and on hot-reload.
     pub const TOOL_POLICY_DIR: &str = "/etc/agt/policies";
+    /// InferencePolicy compiled profile (JSON). Loaded by the
+    /// inference-router's `inference_policy_loader` on startup; the
+    /// digest is echoed via `/internal/policy-status` so the
+    /// controller can close the §3 Ready ⇔ router-echo loop. Must
+    /// match the router-side default in
+    /// `inference-router/src/inference_policy_loader.rs::INFERENCE_POLICY_DIR_DEFAULT`.
+    pub const INFERENCE_POLICY_DIR: &str = "/etc/azureclaw/inference";
     /// McpServer JWKS (used by the customer-MCP OAuth verifier).
     pub const MCP_JWKS_DIR: &str = "/etc/azureclaw/mcp";
     /// A2AAgent compiled signed AgentCard.

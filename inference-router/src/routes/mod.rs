@@ -121,6 +121,17 @@ pub struct AppState {
     /// controller polls to confirm `Compiled → Ready` transitions
     /// (Slice 1 of `crd-well-oiled-machine`).
     pub policy_status: Arc<PolicyStatusRegistry>,
+    /// Currently loaded `InferencePolicy` compiled profile, if any.
+    /// Populated at startup by
+    /// `inference_policy_loader::load_and_install` reading the
+    /// `INFERENCE_POLICY_DIR` mount written by the controller's
+    /// `inference_policy_reconciler` + `governance_mounts`. `None`
+    /// means no policy was loaded (no mount, empty mount, or parse
+    /// error — the loader records errors against
+    /// `PolicyStatusRegistry`). Today only `perRequestTokens` is
+    /// enforced; later sub-slices add daily/monthly budgets,
+    /// content-safety floors, and model failover.
+    pub inference_policy: crate::inference_policy_loader::LoadedInferencePolicyHandle,
 }
 
 impl AppState {
@@ -191,6 +202,23 @@ impl AppState {
             blocklist.set_learn_mode(true);
         }
 
+        // Load the compiled InferencePolicy (Slice 2a). Single JSON
+        // file under `INFERENCE_POLICY_DIR` written by the controller
+        // via `governance_mounts`. Only `perRequestTokens` is consumed
+        // today; the rest of the spec stays parked until later sub-
+        // slices. The loader self-reports through `PolicyStatusRegistry`
+        // so the controller can echo-confirm via
+        // `GET /internal/policy-status`.
+        let inference_policy = crate::inference_policy_loader::empty_handle();
+        let inference_policy_dir = std::env::var("INFERENCE_POLICY_DIR")
+            .unwrap_or_else(|_| "/etc/azureclaw/inference".into());
+        let _ = crate::inference_policy_loader::load_and_install(
+            &inference_policy_dir,
+            &policy_status,
+            &inference_policy,
+        )
+        .await;
+
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
             copilot: Arc::new(CopilotTokenCache::from_env()),
@@ -221,6 +249,7 @@ impl AppState {
             drain_state: DrainState::new(),
             pending_handoff: PendingHandoffStore::new(),
             policy_status,
+            inference_policy,
         })
     }
 

@@ -137,6 +137,60 @@ pub fn version_hash(profile: &Value) -> String {
     hex::encode(&digest[..16])
 }
 
+/// Canonical filename the controller writes into the
+/// `inferencepolicy-<name>-profile` ConfigMap. Kept in lockstep with
+/// `inference-router::inference_policy_loader::INFERENCE_POLICY_FILENAME`
+/// — the byte layout of `canonical_bytes_for_digest` includes this
+/// string, so any drift breaks the principles.md §3 "Ready ⇔ router
+/// echo" contract.
+pub const INFERENCE_POLICY_FILENAME: &str = "inference-policy.json";
+
+/// Length-prefixed canonical bytes used by both controller and router
+/// to compute the same `sha256:<hex>` digest for a single
+/// `inference-policy.json` file. Layout:
+///
+/// ```text
+/// u64-BE(filename.len()) || filename || u64-BE(body.len()) || body
+/// ```
+///
+/// Matches the router-side
+/// `inference_policy_loader::canonical_bytes_for_digest`. Exposed so
+/// the reconciler can stamp the same digest on the ConfigMap
+/// annotation as the router will echo back through
+/// `GET /internal/policy-status`.
+#[must_use]
+pub fn canonical_bytes_for_digest(filename: &str, body: &[u8]) -> Vec<u8> {
+    let name = filename.as_bytes();
+    let mut canonical: Vec<u8> = Vec::with_capacity(16 + name.len() + body.len());
+    canonical.extend_from_slice(&(name.len() as u64).to_be_bytes());
+    canonical.extend_from_slice(name);
+    canonical.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    canonical.extend_from_slice(body);
+    canonical
+}
+
+/// `sha256:<full hex>` digest over the canonical bytes (see
+/// `canonical_bytes_for_digest`) for the supplied compiled
+/// `inference-policy.json` body. This is the digest the
+/// `InferencePolicy` reconciler stamps in `status.compiledDigest`
+/// and the ConfigMap annotation
+/// `azureclaw.azure.com/inference-policy-digest`. The router echoes
+/// the same value via `GET /internal/policy-status` once it loads
+/// the file; matching values let `decide_enforcement_state` promote
+/// the CRD from `phase=Compiled` to `phase=Ready`.
+///
+/// **Wire contract — DO NOT CHANGE** without a coordinated router-
+/// side update. Distinct from [`version_hash`] which keeps a short
+/// 32-char identifier for `PolicyEntry.version` change-detection;
+/// the two co-exist because `version_hash` is also recorded in
+/// `status.versionHash` for backward compatibility.
+#[must_use]
+pub fn inference_policy_digest(body: &[u8]) -> String {
+    let canonical = canonical_bytes_for_digest(INFERENCE_POLICY_FILENAME, body);
+    let digest = Sha256::digest(&canonical);
+    format!("sha256:{}", hex::encode(digest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +313,58 @@ mod tests {
         let h = version_hash(&compile_to_profile(&full_spec()));
         assert_eq!(h.len(), 32, "16 bytes = 32 hex chars");
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn inference_policy_digest_uses_sha256_prefix_and_64_hex() {
+        let body = b"{}";
+        let d = inference_policy_digest(body);
+        let rest = d.strip_prefix("sha256:").expect("sha256: prefix");
+        assert_eq!(rest.len(), 64, "32 bytes = 64 hex chars");
+        assert!(rest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn inference_policy_digest_matches_canonical_layout() {
+        // Belt-and-braces: the controller digest must equal sha256
+        // over `u64-BE(name.len()) || name || u64-BE(body.len()) ||
+        // body` for the *exact* filename string. Router-side
+        // `inference_policy_loader::canonical_bytes_for_digest` uses
+        // the same layout; if either side drifts, the §3 echo
+        // contract silently breaks.
+        let body = br#"{"tokenBudget":{"perRequestTokens":4096}}"#;
+        let name = INFERENCE_POLICY_FILENAME.as_bytes();
+        let mut canonical: Vec<u8> = Vec::new();
+        canonical.extend_from_slice(&(name.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(name);
+        canonical.extend_from_slice(&(body.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(body);
+        let expected = format!("sha256:{}", hex::encode(Sha256::digest(&canonical)));
+        assert_eq!(inference_policy_digest(body), expected);
+    }
+
+    #[test]
+    fn inference_policy_digest_changes_with_body() {
+        let a = inference_policy_digest(b"{\"a\":1}");
+        let b = inference_policy_digest(b"{\"a\":2}");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn inference_policy_digest_is_deterministic() {
+        let body = b"{\"tokenBudget\":{\"perRequestTokens\":2048}}";
+        assert_eq!(inference_policy_digest(body), inference_policy_digest(body));
+    }
+
+    #[test]
+    fn canonical_bytes_for_digest_layout_is_length_prefixed() {
+        let bytes = canonical_bytes_for_digest("a", b"bc");
+        // u64-BE(1) || "a" || u64-BE(2) || "bc"
+        assert_eq!(
+            bytes,
+            vec![
+                0, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 0, 0, 0, 2, b'b', b'c'
+            ]
+        );
     }
 }

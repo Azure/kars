@@ -53,6 +53,13 @@ pub enum PolicyKind {
     /// by `ToolPolicy` reconciler (Slice 1) and by the built-in
     /// `agt-profiles/*.yaml` shipped in the sandbox image as a fallback.
     AgtProfile,
+    /// `InferencePolicy` compiled profile — single JSON file mounted at
+    /// `INFERENCE_POLICY_DIR` (default `/etc/azureclaw/inference`).
+    /// Produced by the `InferencePolicy` reconciler (Slice 2a).
+    /// Today only the `tokenBudget.perRequestTokens` axis is enforced
+    /// by the router; later sub-slices add daily/monthly budgets,
+    /// content-safety floors, and model failover.
+    InferencePolicy,
 }
 
 impl PolicyKind {
@@ -62,6 +69,7 @@ impl PolicyKind {
     pub fn as_str(self) -> &'static str {
         match self {
             PolicyKind::AgtProfile => "AgtProfile",
+            PolicyKind::InferencePolicy => "InferencePolicy",
         }
     }
 }

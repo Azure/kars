@@ -83,6 +83,7 @@ fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
         drain_state: DrainState::new(),
         pending_handoff: PendingHandoffStore::new(),
         policy_status: policy_status.clone(),
+        inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
     };
     (state, policy_status)
 }
