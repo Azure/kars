@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1c — ToolPolicy router-confirmation poller (closes the loop)
+
+Closes the consumer half of the principles.md §3 invariant for
+ToolPolicy: the controller now polls every referencing
+`ClawSandbox`'s inference-router on `GET /internal/policy-status`
+(the endpoint Slice 1a shipped), compares the echoed digest to
+the one the controller published (Slice 1b), and only promotes
+`phase=Compiled → Ready` when every referencing router echoes
+the exact bytes. This is the first complete end-to-end closure
+of "Ready ⇔ router echo" for any AzureClaw CRD.
+
+- New `controller/src/status/router_confirmation.rs` module:
+  `PolicyStatusResponse` / `PolicyStatusEntry` mirror the
+  router's wire contract; `fetch_router_policy_status` performs
+  the HTTP GET with `Authorization: Bearer <admin-token>` and a
+  5s default timeout; `router_admin_url` derives the in-cluster
+  DNS name. Schema-version aware — refuses unknown versions
+  with `ConfirmError::UnknownSchemaVersion` (fail-closed). 11
+  unit + wiremock tests cover happy path, 401/503, malformed
+  body, trailing-slash base URL, unknown schema, missing entry,
+  and null-digest with `last_error` plumbing.
+- New `RouterEnforcementState` enum in
+  `tool_policy_reconciler`:
+  - `NotApplicable` (no `agtProfile`) → back-compat `Ready`.
+  - `NoSandboxesReferencing` (agtProfile set but no sandbox
+    refs it) → `Compiled` + new reason `NoSandboxesReferencing`.
+  - `Awaiting { total, matched, message }` (partial /
+    unreachable / mismatch) → `Compiled` + reason
+    `AwaitingRouterEnforcement`. Message surfaces the
+    `matched/total` count and up to three failing sandboxes'
+    reasons.
+  - `Confirmed { total }` (every referencing router echoes the
+    expected digest) → `Ready` + new reason `RouterEnforcing`.
+- New pure `decide_enforcement_state(expected_digest, results)`
+  function factors out the aggregation logic. 6 unit tests
+  cover all four state transitions, multi-sandbox mismatch,
+  unreachable sandbox, and `last_error` propagation.
+- `list_referencing_sandboxes` lists all `ClawSandbox`es in the
+  ToolPolicy's namespace and filters by
+  `spec.governance.toolPolicyRef.name`.
+- `read_admin_token` reads `Secret
+  azureclaw-<sandbox>/router-admin-token` key `token`; a
+  missing Secret counts as a transient awaiting-router
+  condition (the per-sandbox reconciler may not yet have
+  completed).
+- `poll_referencing_sandboxes` aggregates per-sandbox poll
+  outcomes for the pure decision function.
+- New reason constants in
+  `controller/src/status/conditions.rs::reason`:
+  `ROUTER_ENFORCING`, `NO_SANDBOXES_REFERENCING`.
+- `Ctx` gains a shared `reqwest::Client` built with the
+  poller's default timeout, constructed once at reconciler
+  bootstrap.
+- `build_conditions` now takes a `&RouterEnforcementState`
+  instead of the previous `awaiting_router: bool`. The
+  `Confirmed` branch emits the new `RouterEnforcing` reason
+  with the sandbox count in the message;
+  `NoSandboxesReferencing` emits a dedicated reason so
+  operators can distinguish "nothing to enforce" from
+  "router not responding".
+- `PolicyNotEnforced` Warning event now fires only while the
+  state is actually `Awaiting` or `NoSandboxesReferencing` —
+  the moment a router confirms, the event stops being emitted
+  (instead of forever, as in Slice 1b).
+- Requeue cadence: 15s while Awaiting / NoSandboxesReferencing,
+  default `REQUEUE_OK` once Confirmed.
+- No CRD schema changes — the new behaviour is entirely
+  controller-side. Slice 1b's `status.agtProfileDigest` field
+  is the wire contract; Slice 1c reads it back from the router
+  and matches.
+
 ### Slice 1b — `ToolPolicy.spec.agtProfile.inline` (producer side)
 
 Closes the producer half of the principles.md §3 invariant for

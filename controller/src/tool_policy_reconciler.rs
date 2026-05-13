@@ -32,7 +32,7 @@
 
 use anyhow::Result;
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::ConfigMap;
+use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{
     Client, ResourceExt,
@@ -44,8 +44,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::crd::ClawSandbox;
 use crate::status::conditions::{self, reason, status as cond_status};
 use crate::status::phase::{PHASE_COMPILED, PHASE_DEGRADED, PHASE_READY, PhaseEventReporter};
+use crate::status::router_confirmation::{
+    self, ConfirmError, fetch_router_policy_status, router_admin_url,
+};
 use crate::tool_policy::{ToolPolicy, ToolPolicyStatus};
 use crate::tool_policy_compile::{
     AGT_PROFILE_FILENAME, agt_profile_digest, compile_to_profile, version_hash,
@@ -86,7 +90,207 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    http: reqwest::Client,
     phase_reporter: PhaseEventReporter,
+}
+
+/// Outcome of attempting to confirm router-side enforcement for a
+/// ToolPolicy whose `spec.agtProfile.inline` is set. Drives both
+/// `status.phase` and the `Ready` condition's reason+message.
+///
+/// This is the principles.md §3 binding for ToolPolicy. The
+/// reconciler's only job after computing the published digest is to
+/// pick one of these states; everything downstream (phase, conditions,
+/// requeue cadence) is a pure function of this enum.
+#[derive(Debug, PartialEq, Eq)]
+enum RouterEnforcementState {
+    /// `spec.agtProfile` not set — the controller has no data-plane
+    /// observation to make. The legacy ToolPolicy enforcement surface
+    /// (commerce caps, rate limit, approval) is the AGT runtime
+    /// plugin, which consumes `profile.json` in-process. We stamp
+    /// `Ready` for back-compat (matching pre-Slice-1b behaviour).
+    NotApplicable,
+    /// `spec.agtProfile.inline` is set but no `ClawSandbox` in the
+    /// ToolPolicy's namespace references this policy via
+    /// `spec.governance.toolPolicyRef.name`. There is no router that
+    /// could confirm enforcement. Stamp `Compiled` —
+    /// honest reporting: artifact is ready, but no consumer exists.
+    NoSandboxesReferencing,
+    /// At least one referencing sandbox's router either failed to
+    /// respond, returned the wrong digest, or had not yet loaded the
+    /// new profile. `matched`/`total` is surfaced in the Ready
+    /// message so operators can see partial confirmation. Stamp
+    /// `Compiled` with reason `AwaitingRouterEnforcement`.
+    Awaiting {
+        total: usize,
+        matched: usize,
+        message: String,
+    },
+    /// Every referencing sandbox's router echoed the exact digest the
+    /// controller published. Promote to `Ready=True /
+    /// reason=RouterEnforcing`. This is the "ready ⇔ router echo"
+    /// closure of principles.md §3.
+    Confirmed { total: usize },
+}
+
+/// Pure decision: aggregate per-sandbox poll outcomes into a
+/// [`RouterEnforcementState`]. Factored out of the reconciler so the
+/// promotion logic is unit-testable without K8s or HTTP I/O.
+///
+/// `expected_digest` is the controller-side digest from
+/// `agt_profile_digest()`. `results` is one entry per referencing
+/// sandbox: either the parsed router response, or the network/parse
+/// error encountered while polling.
+fn decide_enforcement_state(
+    expected_digest: &str,
+    results: &[(
+        String,
+        Result<router_confirmation::PolicyStatusResponse, ConfirmError>,
+    )],
+) -> RouterEnforcementState {
+    let total = results.len();
+    if total == 0 {
+        return RouterEnforcementState::NoSandboxesReferencing;
+    }
+    let mut matched = 0usize;
+    let mut messages: Vec<String> = Vec::with_capacity(total);
+    for (sandbox, outcome) in results {
+        match outcome {
+            Ok(resp) => match resp.agt_profile_digest() {
+                Some(d) if d == expected_digest => {
+                    matched += 1;
+                }
+                Some(other) => messages.push(format!(
+                    "{sandbox}: router echoed digest mismatch ({other} != {expected_digest})"
+                )),
+                None => {
+                    let err = resp
+                        .agt_profile_last_error()
+                        .map(|e| format!(" (last_error: {e})"))
+                        .unwrap_or_default();
+                    messages.push(format!(
+                        "{sandbox}: router has not yet loaded agt-profile{err}"
+                    ));
+                }
+            },
+            Err(e) => {
+                messages.push(format!("{sandbox}: router unreachable ({e})"));
+            }
+        }
+    }
+    if matched == total {
+        RouterEnforcementState::Confirmed { total }
+    } else {
+        let mut message = format!("{matched}/{total} sandbox routers confirmed digest");
+        if !messages.is_empty() {
+            // Cap detail messages to keep status size bounded.
+            let detail = messages
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
+            message.push_str("; ");
+            message.push_str(&detail);
+            if messages.len() > 3 {
+                message.push_str(&format!("; (+{} more)", messages.len() - 3));
+            }
+        }
+        RouterEnforcementState::Awaiting {
+            total,
+            matched,
+            message,
+        }
+    }
+}
+
+/// List `ClawSandbox`es in `ns` whose `spec.governance.toolPolicyRef.name`
+/// equals `tool_policy_name`. Returns the bare sandbox names — the
+/// controller convention is one router-service per sandbox at
+/// `{name}.azureclaw-{name}.svc.cluster.local:8443`, so the namespace
+/// of the *router* is `azureclaw-<name>`, not `ns`.
+async fn list_referencing_sandboxes(
+    client: &Client,
+    ns: &str,
+    tool_policy_name: &str,
+) -> Result<Vec<String>, kube::Error> {
+    let api: Api<ClawSandbox> = Api::namespaced(client.clone(), ns);
+    let list = api.list(&ListParams::default()).await?;
+    Ok(list
+        .items
+        .into_iter()
+        .filter(|cs| {
+            cs.spec
+                .governance
+                .as_ref()
+                .map(|g| g.tool_policy_ref.name == tool_policy_name)
+                .unwrap_or(false)
+        })
+        .map(|cs| cs.name_any())
+        .collect())
+}
+
+/// Read the per-sandbox admin token from `Secret
+/// azureclaw-<sandbox>/router-admin-token`. Returns `Ok(None)` when
+/// the secret or key is not yet present — the reconciler treats
+/// that as a transient awaiting-router condition rather than a hard
+/// failure (the sandbox reconciler may not yet have completed its
+/// first pass).
+async fn read_admin_token(client: &Client, sandbox: &str) -> Result<Option<String>, kube::Error> {
+    let secret_ns = format!("azureclaw-{sandbox}");
+    let api: Api<Secret> = Api::namespaced(client.clone(), &secret_ns);
+    let secret = match api.get_opt("router-admin-token").await? {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    Ok(secret
+        .data
+        .as_ref()
+        .and_then(|d| d.get("token"))
+        .and_then(|v| String::from_utf8(v.0.clone()).ok())
+        .filter(|t| !t.is_empty()))
+}
+
+/// Poll every referencing sandbox's router and assemble the per-
+/// sandbox outcome list consumed by [`decide_enforcement_state`].
+///
+/// A sandbox whose admin-token Secret is not yet provisioned counts
+/// as a poll failure with [`ConfirmError::HttpStatus`]`(0)` —
+/// surfaces in the Awaiting message so operators can see *why* the
+/// confirmation hasn't happened.
+async fn poll_referencing_sandboxes(
+    client: &Client,
+    http: &reqwest::Client,
+    sandboxes: &[String],
+) -> Vec<(
+    String,
+    Result<router_confirmation::PolicyStatusResponse, ConfirmError>,
+)> {
+    let mut out = Vec::with_capacity(sandboxes.len());
+    for sandbox in sandboxes {
+        let token = match read_admin_token(client, sandbox).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                // Sentinel: 0 means "no token yet" → distinguishable
+                // from real 401/503 in operator logs.
+                out.push((sandbox.clone(), Err(ConfirmError::HttpStatus(0))));
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sandbox = %sandbox,
+                    error = %e,
+                    "router-admin-token Secret read failed"
+                );
+                out.push((sandbox.clone(), Err(ConfirmError::HttpStatus(0))));
+                continue;
+            }
+        };
+        let url = router_admin_url(sandbox);
+        let r = fetch_router_policy_status(http, &url, &token).await;
+        out.push((sandbox.clone(), r));
+    }
+    out
 }
 
 async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -187,46 +391,79 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     }
 
     // 3. Build & write status.
+    //
+    // Slice 1c: when `agt_profile_inline` is set, poll every
+    // referencing sandbox's inference-router for digest confirmation
+    // and let the result drive both `phase` and the Ready condition.
+    // When `agt_profile_inline` is None, the back-compat path
+    // (NotApplicable) stamps `Ready` directly.
+    let enforcement_state = if degraded.is_some() {
+        // On compile failure, the state machine doesn't apply —
+        // `degraded` short-circuits below. Use NotApplicable as a
+        // placeholder; `build_conditions` ignores it under degraded.
+        RouterEnforcementState::NotApplicable
+    } else {
+        match (agt_profile_inline, agt_digest.as_deref()) {
+            (Some(_), Some(expected)) => {
+                let referrers = match list_referencing_sandboxes(&ctx.client, &ns, &name).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            toolpolicy = %name,
+                            ns = %ns,
+                            error = %e,
+                            "ClawSandbox list failed; treating as no referrers"
+                        );
+                        Vec::new()
+                    }
+                };
+                let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
+                decide_enforcement_state(expected, &results)
+            }
+            _ => RouterEnforcementState::NotApplicable,
+        }
+    };
+
     let new_conditions = build_conditions(
         &prior_conditions,
         observed_generation,
         degraded
             .as_ref()
             .map(|(reason, msg)| (*reason, msg.as_str())),
-        agt_profile_inline.is_some(),
+        &enforcement_state,
     );
     let phase = if degraded.is_some() {
         PHASE_DEGRADED
-    } else if agt_profile_inline.is_some() {
-        // Slice 1b honesty rule: when the customer supplies an AGT
-        // profile via `spec.agtProfile.inline`, the artifact is
-        // mounted into the inference-router but the controller
-        // cannot yet observe that the router has loaded it (the
-        // Slice 1c router-confirmation poller closes that loop).
-        // Stamp `Compiled` + `Ready=False /
-        // AwaitingRouterEnforcement` per principles.md §3.
-        PHASE_COMPILED
     } else {
-        // Back-compat: ToolPolicies without `agtProfile` continue to
-        // stamp `Ready` — their enforcement surface (commerce caps,
-        // rate limit, approval) is the AGT runtime plugin
-        // already consuming `profile.json` in-process, and the
-        // ConfigMap write is the data-plane action.
-        PHASE_READY
+        match enforcement_state {
+            RouterEnforcementState::Confirmed { .. } | RouterEnforcementState::NotApplicable => {
+                PHASE_READY
+            }
+            RouterEnforcementState::NoSandboxesReferencing
+            | RouterEnforcementState::Awaiting { .. } => PHASE_COMPILED,
+        }
     };
 
-    if degraded.is_none()
-        && agt_profile_inline.is_some()
+    // Only emit a Warning event while we are *actually* awaiting
+    // router-side confirmation (or starved of consumers). Once the
+    // router echoes the digest, the Compiled→Ready transition fires
+    // and the loop has been honestly closed — no need to keep
+    // shouting.
+    let publish_warning = degraded.is_none()
+        && matches!(
+            enforcement_state,
+            RouterEnforcementState::Awaiting { .. }
+                | RouterEnforcementState::NoSandboxesReferencing
+        );
+    if publish_warning
         && let Err(e) = ctx
             .phase_reporter
             .warn_policy_not_enforced(
                 tp.as_ref(),
-                "CompileAgtProfile",
-                "ToolPolicy.spec.agtProfile.inline parsed and published to the compiled \
-                 ConfigMap, but the controller has not yet polled the inference-router \
-                 to confirm it loaded the digest. Ready=False/AwaitingRouterEnforcement \
-                 until the Slice 1c router-confirmation poller lands. Tracking: \
-                 crd-well-oiled-machine slice-1c-router-confirmation.",
+                "AwaitingRouterConfirmation",
+                "ToolPolicy.spec.agtProfile.inline parsed and published, but the \
+                 inference-router has not yet echoed the matching digest on \
+                 /internal/policy-status. Ready=False until confirmation.",
             )
             .await
     {
@@ -259,12 +496,19 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
-    } else if agt_profile_inline.is_some() {
-        // Short cadence while awaiting router-side echo so Slice 1c's
-        // poller (when it lands) sees recent state.
-        Ok(Action::requeue(Duration::from_secs(15)))
     } else {
-        Ok(Action::requeue(REQUEUE_OK))
+        match enforcement_state {
+            RouterEnforcementState::Confirmed { .. } | RouterEnforcementState::NotApplicable => {
+                Ok(Action::requeue(REQUEUE_OK))
+            }
+            // Short cadence while awaiting confirmation so the
+            // Compiled→Ready transition fires quickly once the
+            // router catches up.
+            RouterEnforcementState::Awaiting { .. }
+            | RouterEnforcementState::NoSandboxesReferencing => {
+                Ok(Action::requeue(Duration::from_secs(15)))
+            }
+        }
     }
 }
 
@@ -283,11 +527,16 @@ fn rfc3339_now() -> String {
 /// reason=AwaitingRouterEnforcement` rather than the optimistic
 /// `Ready=True` we still stamp for the back-compat (no-agtProfile)
 /// path.
+/// Slice 1c expands the previous `awaiting_router: bool` to a richer
+/// [`RouterEnforcementState`] so the Ready condition can carry the
+/// specific reason — `NoSandboxesReferencing` /
+/// `AwaitingRouterEnforcement` / `RouterEnforcing` — that operators
+/// see in `kubectl describe toolpolicy …`.
 fn build_conditions(
     prior: &[Condition],
     observed_generation: Option<i64>,
     degraded: Option<(&str, &str)>,
-    awaiting_router: bool,
+    enforcement: &RouterEnforcementState,
 ) -> Vec<Condition> {
     let mut out: Vec<Condition> = Vec::with_capacity(3);
     let prior_ready = conditions::find(prior, conditions::TYPE_READY);
@@ -321,59 +570,114 @@ fn build_conditions(
                 observed_generation,
             ));
         }
-        None if awaiting_router => {
-            out.push(conditions::preserve_transition_time(
-                prior_ready,
-                conditions::TYPE_READY,
-                cond_status::FALSE,
-                reason::AWAITING_ROUTER_ENFORCEMENT,
-                "agt-profile.yaml published to compiled ConfigMap; \
-                 router-side digest confirmation lands in Slice 1c",
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_progressing,
-                conditions::TYPE_PROGRESSING,
-                cond_status::TRUE,
-                reason::AWAITING_ROUTER_ENFORCEMENT,
-                "awaiting router-side enforcement",
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_degraded,
-                conditions::TYPE_DEGRADED,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "no errors",
-                observed_generation,
-            ));
-        }
-        None => {
-            out.push(conditions::preserve_transition_time(
-                prior_ready,
-                conditions::TYPE_READY,
-                cond_status::TRUE,
-                reason::RECONCILED,
-                "ToolPolicy compiled and published",
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_progressing,
-                conditions::TYPE_PROGRESSING,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "compile complete",
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_degraded,
-                conditions::TYPE_DEGRADED,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "no errors",
-                observed_generation,
-            ));
-        }
+        None => match enforcement {
+            RouterEnforcementState::NotApplicable => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::RECONCILED,
+                    "ToolPolicy compiled and published",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "compile complete",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Confirmed { total } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::ROUTER_ENFORCING,
+                    &format!(
+                        "all {total} referencing sandbox router(s) confirmed agt-profile digest"
+                    ),
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "router echo confirmed",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::NoSandboxesReferencing => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "no ClawSandbox references this ToolPolicy; nothing to enforce",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "waiting for a ClawSandbox to reference this policy",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Awaiting { message, .. } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    message,
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    "awaiting router-side enforcement",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+        },
     }
     out
 }
@@ -502,8 +806,13 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
+    let http = reqwest::Client::builder()
+        .timeout(router_confirmation::DEFAULT_TIMEOUT)
+        .build()
+        .expect("default reqwest client builds with infallible config");
     let ctx = Arc::new(Ctx {
         client: client.clone(),
+        http,
         phase_reporter: PhaseEventReporter::new(client, "ToolPolicy"),
     });
     Controller::new(tps, kube::runtime::watcher::Config::default())
@@ -562,7 +871,7 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_all_three_types_on_success() {
-        let conds = build_conditions(&[], Some(1), None, false);
+        let conds = build_conditions(&[], Some(1), None, &RouterEnforcementState::NotApplicable);
         assert_eq!(conds.len(), 3);
         let types: Vec<&str> = conds.iter().map(|c| c.type_.as_str()).collect();
         assert!(types.contains(&conditions::TYPE_READY));
@@ -584,7 +893,12 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_all_three_types_on_failure() {
-        let conds = build_conditions(&[], Some(1), Some(("ProfileWriteFailed", "boom")), false);
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some(("ProfileWriteFailed", "boom")),
+            &RouterEnforcementState::NotApplicable,
+        );
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
@@ -601,8 +915,13 @@ mod tests {
 
     #[test]
     fn build_conditions_preserves_transition_time_when_status_unchanged() {
-        let first = build_conditions(&[], Some(1), None, false);
-        let second = build_conditions(&first, Some(2), None, false);
+        let first = build_conditions(&[], Some(1), None, &RouterEnforcementState::NotApplicable);
+        let second = build_conditions(
+            &first,
+            Some(2),
+            None,
+            &RouterEnforcementState::NotApplicable,
+        );
         let r1 = first
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
@@ -618,8 +937,17 @@ mod tests {
     }
 
     #[test]
-    fn build_conditions_awaiting_router_branch_is_ready_false_with_reason() {
-        let conds = build_conditions(&[], Some(1), None, true);
+    fn build_conditions_awaiting_branch_is_ready_false_with_reason() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Awaiting {
+                total: 2,
+                matched: 1,
+                message: "1/2 sandbox routers confirmed digest".into(),
+            },
+        );
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
@@ -627,6 +955,10 @@ mod tests {
             .unwrap();
         assert_eq!(ready.status, cond_status::FALSE);
         assert_eq!(ready.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+        assert!(
+            ready.message.contains("1/2"),
+            "message should surface match counts"
+        );
         let progressing = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
@@ -641,11 +973,58 @@ mod tests {
     }
 
     #[test]
+    fn build_conditions_no_sandboxes_referencing_is_ready_false() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::NoSandboxesReferencing,
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::NO_SANDBOXES_REFERENCING);
+        let progressing = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
+            .unwrap();
+        assert_eq!(progressing.status, cond_status::TRUE);
+    }
+
+    #[test]
+    fn build_conditions_confirmed_is_ready_true_with_router_enforcing() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 3 },
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::TRUE);
+        assert_eq!(ready.reason, reason::ROUTER_ENFORCING);
+        assert!(
+            ready.message.contains("3"),
+            "should mention how many routers confirmed"
+        );
+    }
+
+    #[test]
     fn build_conditions_degraded_overrides_awaiting_router() {
-        // A ConfigMap write failure must surface as Degraded even
-        // when the spec carries an agtProfile — the data plane
-        // could not have loaded what we failed to publish.
-        let conds = build_conditions(&[], Some(1), Some(("ProfileWriteFailed", "boom")), true);
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some(("ProfileWriteFailed", "boom")),
+            &RouterEnforcementState::Awaiting {
+                total: 1,
+                matched: 0,
+                message: "0/1".into(),
+            },
+        );
         let ready = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
@@ -657,6 +1036,131 @@ mod tests {
             .find(|c| c.type_ == conditions::TYPE_DEGRADED)
             .unwrap();
         assert_eq!(degraded.status, cond_status::TRUE);
+    }
+
+    // ── decide_enforcement_state ─────────────────────────────────────
+
+    fn mk_response(
+        digest: Option<&str>,
+        last_error: Option<&str>,
+    ) -> router_confirmation::PolicyStatusResponse {
+        router_confirmation::PolicyStatusResponse {
+            schema_version: 1,
+            count: if digest.is_some() || last_error.is_some() {
+                1
+            } else {
+                0
+            },
+            entries: if digest.is_some() || last_error.is_some() {
+                vec![router_confirmation::PolicyStatusEntry {
+                    kind: "AgtProfile".into(),
+                    digest: digest.map(String::from),
+                    source_path: "/etc/agt/policies".into(),
+                    loaded_at: "2026-05-13T09:00:00.000Z".into(),
+                    last_error: last_error.map(String::from),
+                }]
+            } else {
+                vec![]
+            },
+        }
+    }
+
+    #[test]
+    fn decide_no_referrers_yields_no_sandboxes_referencing() {
+        let s = decide_enforcement_state("sha256:abc", &[]);
+        assert_eq!(s, RouterEnforcementState::NoSandboxesReferencing);
+    }
+
+    #[test]
+    fn decide_all_match_yields_confirmed() {
+        let results = vec![
+            ("a".into(), Ok(mk_response(Some("sha256:abc"), None))),
+            ("b".into(), Ok(mk_response(Some("sha256:abc"), None))),
+        ];
+        let s = decide_enforcement_state("sha256:abc", &results);
+        assert_eq!(s, RouterEnforcementState::Confirmed { total: 2 });
+    }
+
+    #[test]
+    fn decide_partial_match_yields_awaiting_with_count() {
+        let results = vec![
+            ("a".into(), Ok(mk_response(Some("sha256:abc"), None))),
+            ("b".into(), Ok(mk_response(Some("sha256:DIFFERENT"), None))),
+        ];
+        let s = decide_enforcement_state("sha256:abc", &results);
+        match s {
+            RouterEnforcementState::Awaiting {
+                total,
+                matched,
+                message,
+            } => {
+                assert_eq!(total, 2);
+                assert_eq!(matched, 1);
+                assert!(message.contains("1/2"));
+                assert!(message.contains("mismatch"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_unreachable_yields_awaiting_with_zero_matched() {
+        let results = vec![(
+            "a".into(),
+            Err::<router_confirmation::PolicyStatusResponse, _>(ConfirmError::HttpStatus(0)),
+        )];
+        let s = decide_enforcement_state("sha256:abc", &results);
+        match s {
+            RouterEnforcementState::Awaiting {
+                total,
+                matched,
+                message,
+            } => {
+                assert_eq!(total, 1);
+                assert_eq!(matched, 0);
+                assert!(
+                    message.contains("unreachable"),
+                    "expected 'unreachable' in {message:?}"
+                );
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_router_returned_null_digest_surfaces_last_error() {
+        let results = vec![("a".into(), Ok(mk_response(None, Some("bad yaml line 4"))))];
+        let s = decide_enforcement_state("sha256:abc", &results);
+        match s {
+            RouterEnforcementState::Awaiting { message, .. } => {
+                assert!(
+                    message.contains("not yet loaded") && message.contains("bad yaml"),
+                    "expected last_error in message: {message:?}"
+                );
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_caps_detail_messages_at_three() {
+        let results: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    format!("sandbox-{i}"),
+                    Ok(mk_response(Some("sha256:DIFFERENT"), None)),
+                )
+            })
+            .collect();
+        let s = decide_enforcement_state("sha256:abc", &results);
+        match s {
+            RouterEnforcementState::Awaiting { message, .. } => {
+                assert!(message.contains("0/10"));
+                // Three details + " (+7 more)" suffix.
+                assert!(message.contains("(+7 more)"), "got: {message}");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]
