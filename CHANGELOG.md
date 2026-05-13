@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 3c.1 — Router-side auto-provision Foundry Memory Store on 404
+
+When a `foundry.memory.{search,update}` MCP call hits a Foundry
+Memory Store that does not exist yet, the router now auto-provisions
+it transparently and retries the original call exactly once. This
+closes Slice 3 DoD #2 ("Router auto-provisions on 404") and turns
+the common "fresh ClawMemory CR, no store created yet" case from a
+Degraded condition into a self-healing first request.
+
+What this PR adds:
+
+- `PlatformDispatcher::ensure_memory_store(&self, store_id) -> EnsureOutcome` —
+  POSTs `/memory_stores` with the same body shape the openclaw runtime
+  uses in `ensureMemoryStore` (kind `default`, chat_model from
+  `OPENCLAW_MODEL` env default `gpt-4.1`, embedding_model
+  `text-embedding-3-small`, full options block enabled).
+- `EnsureOutcome { Ready, AuthFailed(u16), Failed }` — internal enum
+  pinning the three observable provisioning outcomes.
+- `memory()` 404 branch restructured: on `Some(404)`,
+  - `Ready` (2xx or 409 idempotent-exists) → retry original call;
+    on non-404 retry, return that envelope and do not record any
+    error on `PolicyKind::Memory`.
+  - `AuthFailed(401|403)` → record `AuthMisconfigured:` against the
+    POST `/memory_stores` path (controller pre-scan elevates
+    `Degraded=True / reason=AuthMisconfigured`).
+  - `Failed` (transport, 5xx, other 4xx) → fall through to existing
+    `MemoryStoreMissing:` record path so the operator still gets a
+    signal.
+
+Five new tests in `mcp/platform.rs::tests` cover: 404 → 201 → retry
+success, 404 → 409 → retry success, 404 → 403 → AuthMisconfigured,
+404 → 500 → MemoryStoreMissing fallthrough, and an initial 200
+skipping the ensure path entirely. Total router lib tests: 784 (+5).
+
+The wire contract back to the controller is unchanged: same prefix
+strings (`AuthMisconfigured:`, `MemoryStoreMissing:`) on the same
+`PolicyKind::Memory` entry. The `claw_memory_reconciler` pre-scan
+keeps working without modification. The new path is **transparent**
+— successful auto-provision leaves no trail on the CRD, which is
+the correct surface (the store now exists; nothing for the operator
+to fix).
+
 ### Slice 2-/3-hot-reload — InferencePolicy + ClawMemory loaders watch their mount dirs
 
 Closes the long-running gap where the InferencePolicy
