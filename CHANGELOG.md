@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2 DoD #7 — `inference_policy_digest` on every audit log emission
+
+Every inference-path audit log emitted from the router now carries
+`inference_policy_digest = <hex>` as a structured tracing field, so
+forensics can map a denial / budget-reject / content-safety-floor
+violation back to the exact `InferencePolicy` snapshot the router
+was operating on at the time. Closes Slice 2 DoD #7.
+
+What this PR adds:
+
+- `routes/chat_completions.rs`: snapshot `InferencePolicy` moved
+  above the AGT denial check (was below), so the AGT deny warn,
+  the budget-exceeded warn, the perRequestTokens reject warn, the
+  buffered `contentSafety` floor warn, the streaming `contentSafety`
+  floor warn (digest cloned into the `move` closure), the
+  post-response per-request-limit warn, and the output-policy deny
+  warn all carry `inference_policy_digest` alongside `decision`
+  and `gate` fields under `target: "inference.audit"`.
+- `routes/inference.rs`: same treatment for `responses()`. Snapshot
+  hoisted above the AGT denial branch; the new budget-exceeded
+  audit warn (was previously silent — the handler returned 429
+  without a tracing line) and the per-request "Responses API
+  request" info line both carry the digest.
+- No new dependency on `tracing-test`. The fields are emitted to
+  every subscriber attached to the `inference.audit` target —
+  asserted indirectly by the existing 784 router lib tests + 3
+  failover walk integration tests staying green.
+
+What this PR intentionally does not do:
+
+- No change to the wire format of any handler response — only
+  observability surface.
+- No new structured-log subscriber config in the Helm chart. The
+  `inference.audit` target is reachable from the default
+  tracing-subscriber pipeline (env-filter `info,inference.audit=info`
+  works out of the box); operators wanting to ship audit JSON to a
+  separate sink can add a per-target layer in a follow-up slice.
+- No change to the governance hash-chain `audit.log()` path —
+  that's a separate audit surface (handoff routes only) and is
+  already tamper-evident.
+
 ### Slice 3c.1 — Router-side auto-provision Foundry Memory Store on 404
 
 When a `foundry.memory.{search,update}` MCP call hits a Foundry
