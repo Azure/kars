@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 2a prep — lift `RouterEnforcementState` + `decide_enforcement_state` shared
+
+Second pure refactor in the Slice 2a runway. Slice 1c put the
+"aggregate per-sandbox poll outcomes → phase decision" pure
+function (`decide_enforcement_state`) inline in
+`tool_policy_reconciler.rs`, hard-coded to the `AgtProfile`
+PolicyKind. Now lifted into `controller/src/status/router_confirmation.rs`
+and generalized over `kind: &str`, so the upcoming
+`InferencePolicy` reconciler can call the same aggregator with
+`"InferencePolicy"` instead of duplicating ~110 LOC of
+state machine + message formatting.
+
+- `RouterEnforcementState` enum moved verbatim into
+  `router_confirmation` module; doc-rewritten to describe the
+  generic contract rather than ToolPolicy specifics.
+- `decide_enforcement_state(expected_digest, kind, results)`
+  now takes the `PolicyKind` string explicitly and routes
+  through `PolicyStatusResponse::find_digest(kind)` /
+  `find_last_error(kind)` (already generalized in the
+  preceding refactor). The "router has not yet loaded …"
+  Awaiting message now carries the kind so operators can
+  tell which bundle a router is missing.
+- `tool_policy_reconciler.rs` loses ~110 LOC of inline enum
+  + function. Sole production call site passes `"AgtProfile"`.
+- The dead `agt_profile_digest()` / `agt_profile_last_error()`
+  one-line wrappers on `PolicyStatusResponse` (kept as
+  back-compat in the previous PR) are now genuinely unused;
+  removed per principles.md §5. All callsites use
+  `find_digest("AgtProfile")` directly.
+- Three new generic-kind tests in `router_confirmation::tests`
+  prove the aggregator confirms only when kind matches, that
+  the kind appears in the "not yet loaded" message, and that
+  the empty-results branch is kind-agnostic.
+
+Net effect: one call site swap, zero behavior change for
+ToolPolicy. 524 controller tests pass (was 522; +3 generic
+tests, -1 deleted wrapper test). clippy `-D warnings` clean.
+
 ### Slice 2 prep — shared router-confirmation helper extracted
 
 Pre-refactor to unblock Slice 2 (InferencePolicy) and later
