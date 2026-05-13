@@ -91,6 +91,14 @@ pub struct LoadedInferencePolicy {
     /// cap).
     pub monthly_tokens: Option<u64>,
 
+    /// `spec.contentSafety` — enforced in Slice 2c by
+    /// [`crate::safety::enforce_floor`] inside the chat-completions
+    /// post-response pipeline. Inactive default (all `None`,
+    /// `require_prompt_shields=false`) when the CR omits the block —
+    /// the floor short-circuits, leaving Slice 2a/2b behaviour
+    /// unchanged.
+    pub content_safety: crate::safety::ContentSafetyFloor,
+
     /// Whole profile JSON, kept so subsequent sub-slices can pick up
     /// other axes without a new loader.
     pub raw: serde_json::Value,
@@ -222,6 +230,18 @@ pub fn load_inference_policy_from_dir(
         .and_then(|tb| tb.get("monthlyTokens"))
         .and_then(|v| v.as_u64());
 
+    // Slice 2c: `contentSafety` may be a JSON object, `null`, or
+    // entirely absent. `from_compiled_json` accepts all three and
+    // returns the always-permissive default for the latter two —
+    // unknown severity strings are dropped without crashing the
+    // router (defence-in-depth: a future Azure-side ladder extension
+    // must not brick the data plane).
+    let content_safety = crate::safety::ContentSafetyFloor::from_compiled_json(
+        parsed
+            .get("contentSafety")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+
     // Digest layout matches controller `inference_policy_digest`:
     // length-prefixed (name, body) hashed with sha256.
     let canonical = canonical_bytes_for_digest(INFERENCE_POLICY_FILENAME, &body);
@@ -236,6 +256,7 @@ pub fn load_inference_policy_from_dir(
         per_request_tokens = ?per_request_tokens,
         daily_tokens = ?daily_tokens,
         monthly_tokens = ?monthly_tokens,
+        content_safety_active = content_safety.is_active(),
         digest = %digest,
         "InferencePolicy loaded"
     );
@@ -246,6 +267,7 @@ pub fn load_inference_policy_from_dir(
         per_request_tokens,
         daily_tokens,
         monthly_tokens,
+        content_safety,
         raw: parsed,
     })
 }
@@ -265,23 +287,53 @@ pub async fn load_and_install(
     outcome
 }
 
-/// Convenience accessor used by the inference handlers in
-/// `routes/*` to derive `(daily, monthly)` token limits from the
-/// currently-loaded `InferencePolicy`. Returns `(None, None)` when
-/// no policy is loaded — the legacy env-driven `TOKEN_BUDGET_DAILY`
-/// path then applies via `TokenBudgetTracker::daily_default`. This
-/// lets the chat / inference / anthropic handlers share one
-/// lookup without each of them carrying the `state.inference_policy`
-/// read-lock boilerplate.
-pub async fn current_daily_monthly_limits(
-    handle: &LoadedInferencePolicyHandle,
-) -> (Option<u64>, Option<u64>) {
+/// **Latency-optimised snapshot** of every enforcement axis the
+/// inference handlers consume per request (Slice 2a/2b/2c). Acquired
+/// with a **single** `RwLock::read().await` and then passed around
+/// by value — all fields are `Copy` or trivially `Clone` (the
+/// embedded `ContentSafetyFloor` is 4 × `Option<SeverityLevel>` + a
+/// `bool` + a small `String` digest), so handler-internal use is
+/// allocation-free after construction.
+///
+/// Replaces the previous per-axis helpers (one for daily/monthly
+/// tokens, one for the content-safety floor, plus a manual
+/// `state.inference_policy.read()` call for the perRequestTokens
+/// cap). Each helper took its own lock; on the chat-completions
+/// hot path that meant **three** awaits per request just to read
+/// the loaded policy. With the snapshot, one await suffices and
+/// every downstream branch reads from the local struct.
+#[derive(Debug, Clone, Default)]
+pub struct InferencePolicySnapshot {
+    /// `sha256:<hex>` digest of the loaded policy, for audit logs.
+    /// Empty when no policy is loaded.
+    pub digest: String,
+    pub per_request_tokens: Option<u64>,
+    pub daily_tokens: Option<u64>,
+    pub monthly_tokens: Option<u64>,
+    pub content_safety: crate::safety::ContentSafetyFloor,
+}
+
+/// Take a single read-lock snapshot of the currently-loaded policy.
+/// Cheap to call on every request — `RwLock::read().await` is
+/// uncontended in steady state (only the startup loader writes the
+/// `Option<…>`), and the snapshot itself is tiny (<200 bytes).
+///
+/// Use this in handlers *instead of* the per-axis helpers above for
+/// any hot-path consumer. Tests targeting only one axis can keep
+/// using the focused helpers for clarity.
+pub async fn current_snapshot(handle: &LoadedInferencePolicyHandle) -> InferencePolicySnapshot {
     handle
         .read()
         .await
         .as_ref()
-        .map(|p| (p.daily_tokens, p.monthly_tokens))
-        .unwrap_or((None, None))
+        .map(|p| InferencePolicySnapshot {
+            digest: p.digest.clone(),
+            per_request_tokens: p.per_request_tokens,
+            daily_tokens: p.daily_tokens,
+            monthly_tokens: p.monthly_tokens,
+            content_safety: p.content_safety.clone(),
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -401,6 +453,99 @@ mod tests {
         assert_eq!(loaded.per_request_tokens, Some(8192));
         assert_eq!(loaded.daily_tokens, Some(100_000));
         assert_eq!(loaded.monthly_tokens, Some(2_000_000));
+        // contentSafety:null → inactive floor (preserves Slice 2a/2b
+        // behaviour for policies that don't opt into 2c).
+        assert!(!loaded.content_safety.is_active());
+    }
+
+    #[test]
+    fn loads_content_safety_floor_when_present() {
+        // Slice 2c additive parse: the loader maps the compiled
+        // `contentSafety` block onto `safety::ContentSafetyFloor`.
+        // Severity strings travel as the controller's PascalCase
+        // form; the loader's `SeverityLevel::parse` accepts both
+        // cases so the same constants flow end-to-end.
+        let tmp = TempDir::new().unwrap();
+        let profile = serde_json::json!({
+            "appliesTo": { "sandboxName": "agent-x", "sandboxMatchLabels": {}, "action": null },
+            "tokenBudget": null,
+            "contentSafety": {
+                "hate": "Medium",
+                "selfHarm": "Low",
+                "sexual": "High",
+                "violence": "Low",
+                "requirePromptShields": true
+            },
+            "modelPreference": null,
+            "displayName": null
+        });
+        write_profile(tmp.path(), INFERENCE_POLICY_FILENAME, &profile);
+
+        let reg = registry();
+        let outcome = load_inference_policy_from_dir(tmp.path().to_str().unwrap(), &reg);
+        let loaded = match outcome {
+            LoadOutcome::Loaded(p) => p,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        let floor = &loaded.content_safety;
+        assert!(floor.is_active());
+        assert_eq!(floor.hate, Some(crate::safety::SeverityLevel::Medium));
+        assert_eq!(floor.self_harm, Some(crate::safety::SeverityLevel::Low));
+        assert_eq!(floor.sexual, Some(crate::safety::SeverityLevel::High));
+        assert_eq!(floor.violence, Some(crate::safety::SeverityLevel::Low));
+        assert!(floor.require_prompt_shields);
+    }
+
+    #[tokio::test]
+    async fn current_snapshot_returns_default_when_handle_empty() {
+        // Slice 2c latency optimisation: handlers call
+        // `current_snapshot` once per request. The empty-handle path
+        // must short-circuit to the all-permissive default so
+        // sandboxes without a loaded `InferencePolicy` keep the
+        // legacy env-fallback behaviour with zero extra cost.
+        let handle: LoadedInferencePolicyHandle =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let snap = current_snapshot(&handle).await;
+        assert!(snap.digest.is_empty());
+        assert!(snap.per_request_tokens.is_none());
+        assert!(snap.daily_tokens.is_none());
+        assert!(snap.monthly_tokens.is_none());
+        assert!(!snap.content_safety.is_active());
+    }
+
+    #[tokio::test]
+    async fn current_snapshot_mirrors_loaded_policy() {
+        // Every enforcement axis the handlers read must travel
+        // through the snapshot. Catching a missing field here is
+        // cheaper than chasing a regression in production where
+        // (e.g.) `daily_tokens` silently drops to `None`.
+        let policy = LoadedInferencePolicy {
+            digest: "sha256:dead".into(),
+            source_path: "/tmp".into(),
+            per_request_tokens: Some(2000),
+            daily_tokens: Some(100_000),
+            monthly_tokens: Some(1_000_000),
+            content_safety: crate::safety::ContentSafetyFloor {
+                hate: Some(crate::safety::SeverityLevel::Medium),
+                self_harm: None,
+                sexual: None,
+                violence: None,
+                require_prompt_shields: true,
+            },
+            raw: serde_json::Value::Null,
+        };
+        let handle: LoadedInferencePolicyHandle =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Some(policy)));
+        let snap = current_snapshot(&handle).await;
+        assert_eq!(snap.digest, "sha256:dead");
+        assert_eq!(snap.per_request_tokens, Some(2000));
+        assert_eq!(snap.daily_tokens, Some(100_000));
+        assert_eq!(snap.monthly_tokens, Some(1_000_000));
+        assert!(snap.content_safety.require_prompt_shields);
+        assert_eq!(
+            snap.content_safety.hate,
+            Some(crate::safety::SeverityLevel::Medium)
+        );
     }
 
     #[test]
