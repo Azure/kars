@@ -72,8 +72,16 @@ pub(super) async fn chat_completions(
         }
     }
 
-    // Check token budget before forwarding
-    if let Err(msg) = state.budget.check_budget(sandbox_name).await {
+    // Check token budget before forwarding — daily/monthly limits
+    // come from the loaded `InferencePolicy` (Slice 2b) with the
+    // env-driven `TOKEN_BUDGET_DAILY` as fallback.
+    let (daily, monthly) =
+        crate::inference_policy_loader::current_daily_monthly_limits(&state.inference_policy).await;
+    if let Err(msg) = state
+        .budget
+        .check_budget(sandbox_name, daily, monthly)
+        .await
+    {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded: {msg}");
         return (
             StatusCode::TOO_MANY_REQUESTS,

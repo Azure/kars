@@ -23,6 +23,10 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# UTC calendar math for token budget tracker (daily / monthly reset
+# on UTC boundary). Used by `budget.rs` only.
+chrono.workspace = true
+
 # Azure identity (Workload Identity → token exchange via REST)
 jsonwebtoken.workspace = true
 

@@ -275,8 +275,16 @@ async fn responses(
         }
     }
 
-    // Budget check
-    if let Err(msg) = state.budget.check_budget(sandbox_name).await {
+    // Budget check — daily/monthly limits sourced from the loaded
+    // `InferencePolicy` (Slice 2b); falls back to the env-driven
+    // `TOKEN_BUDGET_DAILY` default when no policy is loaded.
+    let (daily, monthly) =
+        crate::inference_policy_loader::current_daily_monthly_limits(&state.inference_policy).await;
+    if let Err(msg) = state
+        .budget
+        .check_budget(sandbox_name, daily, monthly)
+        .await
+    {
         return errors::openai(
             StatusCode::TOO_MANY_REQUESTS,
             msg,

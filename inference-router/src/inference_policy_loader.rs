@@ -73,10 +73,23 @@ pub struct LoadedInferencePolicy {
     /// `PolicyStatusEntry.source_path`.
     pub source_path: String,
 
-    /// `spec.tokenBudget.perRequestTokens` — the only axis enforced
-    /// in Slice 2a. `None` means the policy did not set a per-request
-    /// cap; the router falls back to no enforcement on that axis.
+    /// `spec.tokenBudget.perRequestTokens` — enforced in Slice 2a
+    /// via [`crate::routes::chat_completions::decide_per_request_gate`].
+    /// `None` means the policy did not set a per-request cap; the
+    /// router falls back to no enforcement on that axis.
     pub per_request_tokens: Option<u64>,
+
+    /// `spec.tokenBudget.dailyTokens` — enforced in Slice 2b by the
+    /// UTC-calendar `TokenBudgetTracker`. `None` falls back to the
+    /// env-driven `TOKEN_BUDGET_DAILY` safety-net cap (or unlimited
+    /// when that env is also unset).
+    pub daily_tokens: Option<u64>,
+
+    /// `spec.tokenBudget.monthlyTokens` — enforced in Slice 2b by the
+    /// UTC-calendar `TokenBudgetTracker`. `None` means no monthly
+    /// enforcement (the env-driven legacy path never had a monthly
+    /// cap).
+    pub monthly_tokens: Option<u64>,
 
     /// Whole profile JSON, kept so subsequent sub-slices can pick up
     /// other axes without a new loader.
@@ -200,6 +213,14 @@ pub fn load_inference_policy_from_dir(
         .get("tokenBudget")
         .and_then(|tb| tb.get("perRequestTokens"))
         .and_then(|v| v.as_u64());
+    let daily_tokens = parsed
+        .get("tokenBudget")
+        .and_then(|tb| tb.get("dailyTokens"))
+        .and_then(|v| v.as_u64());
+    let monthly_tokens = parsed
+        .get("tokenBudget")
+        .and_then(|tb| tb.get("monthlyTokens"))
+        .and_then(|v| v.as_u64());
 
     // Digest layout matches controller `inference_policy_digest`:
     // length-prefixed (name, body) hashed with sha256.
@@ -213,6 +234,8 @@ pub fn load_inference_policy_from_dir(
     tracing::info!(
         file = %file.display(),
         per_request_tokens = ?per_request_tokens,
+        daily_tokens = ?daily_tokens,
+        monthly_tokens = ?monthly_tokens,
         digest = %digest,
         "InferencePolicy loaded"
     );
@@ -221,6 +244,8 @@ pub fn load_inference_policy_from_dir(
         digest,
         source_path: file_str,
         per_request_tokens,
+        daily_tokens,
+        monthly_tokens,
         raw: parsed,
     })
 }
@@ -238,6 +263,25 @@ pub async fn load_and_install(
         *handle.write().await = Some(policy.clone());
     }
     outcome
+}
+
+/// Convenience accessor used by the inference handlers in
+/// `routes/*` to derive `(daily, monthly)` token limits from the
+/// currently-loaded `InferencePolicy`. Returns `(None, None)` when
+/// no policy is loaded — the legacy env-driven `TOKEN_BUDGET_DAILY`
+/// path then applies via `TokenBudgetTracker::daily_default`. This
+/// lets the chat / inference / anthropic handlers share one
+/// lookup without each of them carrying the `state.inference_policy`
+/// read-lock boilerplate.
+pub async fn current_daily_monthly_limits(
+    handle: &LoadedInferencePolicyHandle,
+) -> (Option<u64>, Option<u64>) {
+    handle
+        .read()
+        .await
+        .as_ref()
+        .map(|p| (p.daily_tokens, p.monthly_tokens))
+        .unwrap_or((None, None))
 }
 
 #[cfg(test)]
@@ -318,10 +362,45 @@ mod tests {
         match outcome {
             LoadOutcome::Loaded(p) => {
                 assert_eq!(p.per_request_tokens, None);
+                assert_eq!(p.daily_tokens, None);
+                assert_eq!(p.monthly_tokens, None);
                 assert!(p.digest.starts_with("sha256:"));
             }
             other => panic!("expected Loaded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn loads_daily_and_monthly_tokens_when_present() {
+        // Slice 2b additive parse: `dailyTokens` / `monthlyTokens`
+        // travel side-by-side with `perRequestTokens`. The
+        // post-budget tracker reads them via
+        // `state.inference_policy.read().await`. The digest is
+        // unchanged from Slice 2a because the controller already
+        // hashed the whole `tokenBudget` block.
+        let tmp = TempDir::new().unwrap();
+        let profile = serde_json::json!({
+            "appliesTo": { "sandboxName": "agent-x", "sandboxMatchLabels": {}, "action": null },
+            "tokenBudget": {
+                "perRequestTokens": 8192,
+                "dailyTokens": 100_000,
+                "monthlyTokens": 2_000_000
+            },
+            "contentSafety": null,
+            "modelPreference": null,
+            "displayName": null
+        });
+        write_profile(tmp.path(), INFERENCE_POLICY_FILENAME, &profile);
+
+        let reg = registry();
+        let outcome = load_inference_policy_from_dir(tmp.path().to_str().unwrap(), &reg);
+        let loaded = match outcome {
+            LoadOutcome::Loaded(p) => p,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        assert_eq!(loaded.per_request_tokens, Some(8192));
+        assert_eq!(loaded.daily_tokens, Some(100_000));
+        assert_eq!(loaded.monthly_tokens, Some(2_000_000));
     }
 
     #[test]

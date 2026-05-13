@@ -463,6 +463,7 @@ dependencies = [
  "azureclaw-a2a-core",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "criterion",
  "ed25519-dalek",
  "flate2",

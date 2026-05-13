@@ -142,8 +142,34 @@ impl AppState {
             .build()?;
 
         let config = Config::from_env()?;
-        let budget =
-            TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request);
+        // Slice 2b: persist counters across router restarts so a
+        // crash-loop or rollout doesn't reset daily / monthly
+        // tracking. Default location is under the sandbox state
+        // mount; override with `TOKEN_BUDGET_PERSIST_PATH=` to point
+        // somewhere writable in your dev box. Empty string disables
+        // persistence (in-memory only) — used by integration tests.
+        let persist_path = std::env::var("TOKEN_BUDGET_PERSIST_PATH")
+            .unwrap_or_else(|_| "/var/lib/azureclaw/token-budgets.json".into());
+        let budget = if persist_path.is_empty() {
+            TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
+        } else {
+            if let Some(parent) = std::path::Path::new(&persist_path).parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::warn!(
+                    path = %parent.display(),
+                    error = %e,
+                    "Could not create token-budget persistence dir — falling back to in-memory"
+                );
+                TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
+            } else {
+                TokenBudgetTracker::with_persistence(
+                    config.token_budget_daily,
+                    config.token_budget_per_request,
+                    &persist_path,
+                )
+            }
+        };
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
 
