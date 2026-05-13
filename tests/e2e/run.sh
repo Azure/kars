@@ -367,12 +367,28 @@ EOF
         dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
         fail "InferencePolicy: profile ConfigMap not created"
     fi
-    if wait_for_ready inferencepolicy e2e-inferencepolicy azureclaw-system 30; then
-        pass "InferencePolicy: status.conditions Ready=True"
-    else
-        dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
-        fail "InferencePolicy: Ready=True not observed"
-    fi
+    # InferencePolicy uses the §3 echo loop (Slice 2a): without a
+    # router pod actually loading the profile and echoing the digest
+    # back to /internal/policy-status, the CR stays in phase=Compiled
+    # with Ready=False / reason=AwaitingRouterEnforcement (or
+    # NoSandboxesReferencing if the e2e-test sandbox's router isn't
+    # reachable). Asserting Ready=True here would be a §3 violation —
+    # the controller *correctly* refuses to lie. The compiled
+    # ConfigMap check above is the controller's complete output;
+    # router enforcement is exercised in unit + integration tests.
+    local ip_phase ip_ready ip_reason
+    ip_phase=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    ip_ready=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    ip_reason=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    case "$ip_phase|$ip_ready|$ip_reason" in
+        Compiled\|False\|AwaitingRouterEnforcement|Compiled\|False\|NoSandboxesReferencing|Ready\|True\|RouterEnforcing|Ready\|True\|*)
+            pass "InferencePolicy: phase=$ip_phase ready=$ip_ready reason=$ip_reason (§3 honest state)"
+            ;;
+        *)
+            dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
+            fail "InferencePolicy: unexpected honest-state — phase=$ip_phase ready=$ip_ready reason=$ip_reason"
+            ;;
+    esac
     kubectl delete inferencepolicy e2e-inferencepolicy -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
 
@@ -441,22 +457,25 @@ EOF
         dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
         fail "ClawMemory: binding ConfigMap not created"
     fi
-    # ClawMemory intentionally reports phase=Pending / Ready=False with
-    # reason=AwaitingFoundryProvisioning until the upstream Foundry
-    # Memory Store is created lazily by the runtime path on first use
-    # (see commit 825daff). The binding ConfigMap is the controller's
-    # complete output; reporting Ready=True here would mislead anyone
-    # using `kubectl wait --for=condition=Ready`. Assert the honest state.
+    # ClawMemory uses the §3 echo loop (Slice 3a). Without a router
+    # pod actually loading the binding and echoing the digest back
+    # to /internal/policy-status, the CR stays in phase=Compiled
+    # with Ready=False / reason=NoSandboxesReferencing or
+    # AwaitingRouterEnforcement. Asserting the legacy
+    # Pending/AwaitingFoundryProvisioning is incorrect after Slice 3a.
     local mem_phase mem_ready mem_reason
     mem_phase=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
     mem_ready=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
     mem_reason=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
-    if [ "$mem_phase" = "Pending" ] && [ "$mem_ready" = "False" ] && [ "$mem_reason" = "AwaitingFoundryProvisioning" ]; then
-        pass "ClawMemory: phase=Pending, Ready=False reason=AwaitingFoundryProvisioning (binding-only reconcile, honest report)"
-    else
-        dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
-        fail "ClawMemory: expected phase=Pending/Ready=False/AwaitingFoundryProvisioning, got phase=$mem_phase ready=$mem_ready reason=$mem_reason"
-    fi
+    case "$mem_phase|$mem_ready|$mem_reason" in
+        Compiled\|False\|NoSandboxesReferencing|Compiled\|False\|AwaitingRouterEnforcement|Ready\|True\|RouterEnforcing)
+            pass "ClawMemory: phase=$mem_phase ready=$mem_ready reason=$mem_reason (§3 honest state, Slice 3a)"
+            ;;
+        *)
+            dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
+            fail "ClawMemory: unexpected honest-state — phase=$mem_phase ready=$mem_ready reason=$mem_reason"
+            ;;
+    esac
     kubectl delete clawmemory e2e-clawmemory -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
 
