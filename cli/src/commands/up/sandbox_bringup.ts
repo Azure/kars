@@ -371,7 +371,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       networkPolicy: {
         defaultDeny: true,
         approvalRequired: true,
-        learnEgress: true,
+        egressMode: "Learn",
       },
       governance: {
         enabled: true,

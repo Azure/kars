@@ -346,7 +346,12 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
 
       return {
         model: model || defaults.model,
-        learnEgress: spec.networkPolicy?.learnEgress ?? defaults.learnEgress,
+        learnEgress: (() => {
+          const mode = spec.networkPolicy?.egressMode;
+          return typeof mode === "string"
+            ? mode === "Learn"
+            : defaults.learnEgress;
+        })(),
         isolation: spec.sandbox?.isolation || defaults.isolation,
         trustThreshold: spec.governance?.trustThreshold || defaults.trustThreshold,
       };

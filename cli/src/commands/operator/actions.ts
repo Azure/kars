@@ -84,7 +84,7 @@ export function createActions(ctx: ActionContext): OperatorActions {
       await execa("kubectl", kctl([
         "patch", "clawsandbox", sb.name, "-n", "azureclaw-system",
         "--type", "merge", "-p",
-        JSON.stringify({ spec: { networkPolicy: { learnEgress: false } } }),
+        JSON.stringify({ spec: { networkPolicy: { egressMode: "Strict" } } }),
       ], kubeContext), { stdio: "pipe" }).catch(() => {});
       activityLog.log(`{green-fg}🔒 Enforced{/} ${sb.name}`);
       activityLog.log(`{gray-fg}   ↳ saved to CRD — may trigger pod restart{/}`);
@@ -106,7 +106,7 @@ export function createActions(ctx: ActionContext): OperatorActions {
       await execa("kubectl", kctl([
         "patch", "clawsandbox", sb.name, "-n", "azureclaw-system",
         "--type", "merge", "-p",
-        JSON.stringify({ spec: { networkPolicy: { learnEgress: true } } }),
+        JSON.stringify({ spec: { networkPolicy: { egressMode: "Learn" } } }),
       ], kubeContext), { stdio: "pipe" }).catch(() => {});
       activityLog.log(`{yellow-fg}📖 Learning{/} ${sb.name}`);
       activityLog.log(`{gray-fg}   ↳ saved to CRD — may trigger pod restart{/}`);

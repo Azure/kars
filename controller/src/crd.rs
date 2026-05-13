@@ -765,10 +765,14 @@ pub struct NetworkPolicyConfig {
     #[serde(default = "default_true")]
     pub approval_required: bool,
     pub allowed_endpoints: Option<Vec<EndpointConfig>>,
-    /// Enable egress learn mode: observe all accessed domains (blocklist still enforced).
-    /// Use `azureclaw policy learn <name>` to export the learned allowlist.
+    /// Egress enforcement mode. `Learn` (default) records every accessed
+    /// domain into `BlockedBuffer` without denying; `Strict` denies anything
+    /// outside the resolved allowlist. The Slice 5 spec also reserves
+    /// `Approval` (deny-with-approval-request) — wired in a later sub-slice
+    /// when `EgressApproval` CRD lands as its real consumer (§5 no
+    /// scaffolding).
     #[serde(default)]
-    pub learn_egress: bool,
+    pub egress_mode: EgressMode,
     /// Reference to a signed OCI artifact containing the canonical egress
     /// allowlist. Populated by `azureclaw egress … --sign` (S12.c).
     /// **Authoritative** in S12.e — when set, the controller derives
@@ -781,13 +785,31 @@ pub struct NetworkPolicyConfig {
     pub allowlist_ref: Option<OciArtifactRef>,
 }
 
+/// Egress enforcement mode.
+///
+/// Default = `Learn` because operators typically need to discover required
+/// domains during early integration; flip to `Strict` once the allowlist is
+/// established.
+///
+/// `Approval` is reserved for Slice 5c — it lands together with the
+/// `EgressApproval` CRD so the slice ships with a real consumer (per
+/// principles §5 no scaffolding).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
+pub enum EgressMode {
+    /// Deny any host not in the resolved allowlist. Blocklist still applied.
+    Strict,
+    /// Allow + record every host (default). Blocklist still applied.
+    #[default]
+    Learn,
+}
+
 impl Default for NetworkPolicyConfig {
     fn default() -> Self {
         Self {
             default_deny: true,
             approval_required: true,
             allowed_endpoints: None,
-            learn_egress: false,
+            egress_mode: EgressMode::default(),
             allowlist_ref: None,
         }
     }
@@ -1071,8 +1093,39 @@ mod tests {
         assert!(cfg.default_deny);
         assert!(cfg.approval_required);
         assert!(cfg.allowed_endpoints.is_none());
-        assert!(!cfg.learn_egress);
+        assert_eq!(cfg.egress_mode, EgressMode::Learn);
         assert!(cfg.allowlist_ref.is_none());
+    }
+
+    #[test]
+    fn egress_mode_default_is_learn() {
+        // Slice 5b: default egress mode is `Learn` so manifests that omit
+        // the field keep observing instead of denying.
+        let cfg = NetworkPolicyConfig::default();
+        assert_eq!(cfg.egress_mode, EgressMode::Learn);
+    }
+
+    #[test]
+    fn egress_mode_wire_format_is_pascal_case() {
+        // Match CRD enum convention (capitalised variants, like ClawSandbox phases).
+        let strict = serde_json::to_string(&EgressMode::Strict).unwrap();
+        let learn = serde_json::to_string(&EgressMode::Learn).unwrap();
+        assert_eq!(strict, "\"Strict\"");
+        assert_eq!(learn, "\"Learn\"");
+        let parsed: EgressMode = serde_json::from_str("\"Strict\"").unwrap();
+        assert_eq!(parsed, EgressMode::Strict);
+    }
+
+    #[test]
+    fn egress_mode_strict_round_trips() {
+        let cfg = NetworkPolicyConfig {
+            egress_mode: EgressMode::Strict,
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(v.get("egressMode").and_then(|s| s.as_str()), Some("Strict"));
+        let back: NetworkPolicyConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back.egress_mode, EgressMode::Strict);
     }
 
     #[test]

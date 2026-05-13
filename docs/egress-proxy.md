@@ -12,7 +12,7 @@ metadata:
   name: my-agent
 spec:
   networkPolicy:
-    learnEgress: true                # learn ↔ enforce toggle (default: learn)
+    egressMode: Learn                # Learn | Strict (default: Learn)
     allowedEndpoints:                # inline allowlist (current source of truth)
       - api.telegram.org
       - api.openai.com

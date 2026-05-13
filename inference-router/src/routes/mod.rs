@@ -235,11 +235,13 @@ impl AppState {
             Blocklist::disabled()
         };
 
-        // Learn mode: observe all egress domains (blocklist still enforced)
-        let learn_mode = std::env::var("EGRESS_LEARN_MODE")
-            .unwrap_or_else(|_| "false".into())
-            .parse::<bool>()
-            .unwrap_or(false);
+        // Egress mode (Slice 5b): the controller emits `EGRESS_MODE=strict|learn`.
+        // Default = `learn` when unset so a fresh router started without
+        // the controller wiring (e.g. local dev) keeps observing.
+        let learn_mode = match std::env::var("EGRESS_MODE").ok().as_deref() {
+            Some(v) if v.eq_ignore_ascii_case("strict") => false,
+            _ => true,
+        };
         if learn_mode {
             blocklist.set_learn_mode(true);
         }

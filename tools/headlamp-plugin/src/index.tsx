@@ -343,7 +343,7 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
 
     const np = spec.networkPolicy ?? null;
     // Same default semantics as the controller — absent block ⇒ Learn.
-    const isLearn = !np || np.learnEgress !== false;
+    const isLearn = !np || (np.egressMode ?? "Learn") === "Learn";
     if (isLearn) m.egressLearn += 1;
     else m.egressStrict += 1;
     const pending = Array.isArray(status.pendingApprovals) ? status.pendingApprovals.length : 0;
@@ -507,7 +507,7 @@ function Overview() {
               label: "Egress",
               getter: (r: KubeObject) => {
                 const np = getSpec(r).networkPolicy;
-                const isLearn = !np || np.learnEgress !== false;
+                const isLearn = !np || (np.egressMode ?? "Learn") === "Learn";
                 return isLearn ? "Learn" : "Strict";
               },
             },
@@ -625,9 +625,9 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
         label: "Egress",
         getter: (r: KubeObject) => {
           const np = getSpec(r).networkPolicy;
-          // Controller default: NetworkPolicy block absent OR learnEgress
-          // unset → Learn mode. Only explicit `learnEgress: false` → Strict.
-          const isLearn = !np || np.learnEgress !== false;
+          // Controller default: NetworkPolicy block absent OR egressMode
+          // unset → Learn mode. Only explicit `egressMode: Strict` → Strict.
+          const isLearn = !np || (np.egressMode ?? "Learn") === "Learn";
           return isLearn ? (
             <StatusLabel status="warning">Learn</StatusLabel>
           ) : (
@@ -768,7 +768,7 @@ function SandboxExtras({ item }: { item: KubeObject }) {
 
   const npRaw = spec.networkPolicy ?? null;
   const np = npRaw ?? {};
-  const isLearn = !npRaw || np.learnEgress !== false;
+  const isLearn = !npRaw || (np.egressMode ?? "Learn") === "Learn";
   const allowed: Array<{ host?: string; port?: number }> = Array.isArray(np.allowedEndpoints) ? np.allowedEndpoints : [];
   const pendingApprovals: Array<{ domain?: string; reason?: string }> = Array.isArray(status.pendingApprovals)
     ? status.pendingApprovals
