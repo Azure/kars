@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+<<<<<<< HEAD
 ### Slice 4d.2 — per-server McpServer mount scheme + router discovery (DoD #1 + #6)
 
 Closes Slice 4 DoD #1 (*"≥ 3 plural McpServers reachable e2e"*) at the
@@ -100,6 +101,8 @@ scaffolding) even though OAuth verification is single-JWKS today.
 Verified: 559 controller + 804 router tests pass, clippy
 `-D warnings` clean across workspace, `cargo fmt --check` clean.
 
+=======
+>>>>>>> origin/dev
 ### Slice 4d.1 — `mcpServerRefs` plural (DoD #2 deprecation)
 
 Slice 4 DoD #2 says: *"`mcpServerRef` (singular) emits a Warning event
@@ -154,6 +157,10 @@ Out of scope for 4d.1 (queued for 4d.2):
 - Router-side `McpServerRegistry` for namespaced tool dispatch.
 - Stale-file sweep (DoD #6).
 - e2e fixture with ≥ 3 servers (DoD #1).
+<<<<<<< HEAD
+=======
+
+>>>>>>> origin/dev
 ### Slice 4c — Azure Monitor remote audit sink (DoD #5)
 
 Slice 4a (PR #287) shipped the sandbox-local JSONL audit log. Slice 4b
