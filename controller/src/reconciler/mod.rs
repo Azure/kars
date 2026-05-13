@@ -1679,6 +1679,69 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
+        // ClawMemory (optional, Slice 3a): if the sandbox references
+        // one via `spec.memoryRef`, mirror its compiled binding
+        // ConfigMap and mount it into the inference-router. The
+        // router's `memory_binding_loader` reads the file, registers
+        // the digest under `PolicyKind::Memory`, and echoes it via
+        // `/internal/policy-status` so the `claw_memory_reconciler`
+        // can close the §3 Ready ⇔ router-echo loop.
+        //
+        // Failure mode: source missing → mount omitted, router boots
+        // without a binding loaded (digest absent in
+        // `/internal/policy-status`, ClawMemory stays `Compiled`).
+        // Memory consumption today still runs through the existing
+        // env-driven `FOUNDRY_MEMORY_STORE_ID` path (Slice 3b will
+        // rewire to the binding).
+        if let Some(memory_ref) = spec.memory_ref.as_ref() {
+            let memory_name = memory_ref.name.trim();
+            if !memory_name.is_empty() {
+                let mem_cm = format!("clawmemory-{memory_name}-binding");
+                match governance_mounts::mirror_configmap(
+                    client,
+                    &mem_cm,
+                    &sandbox_self_ns,
+                    &sandbox_ns,
+                    &name,
+                    "ClawMemory",
+                )
+                .await
+                {
+                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                        governance_mounts::inject_configmap_mount(
+                            &mut pod_spec,
+                            "inference-router",
+                            &mem_cm,
+                            "claw-memory-binding",
+                            governance_mounts::paths::MEMORY_BINDING_DIR,
+                            Some((
+                                "MEMORY_BINDING_DIR",
+                                governance_mounts::paths::MEMORY_BINDING_DIR,
+                            )),
+                        );
+                    }
+                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                        tracing::warn!(
+                            sandbox = %name,
+                            cm = %mem_cm,
+                            reason = %reason,
+                            "ClawMemory binding ConfigMap not mirrored; \
+                             router will start without ClawMemory binding loaded",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            sandbox = %name,
+                            cm = %mem_cm,
+                            "ClawMemory ConfigMap mirror failed",
+                        );
+                        return Ok(Action::requeue(Duration::from_secs(15)));
+                    }
+                }
+            }
+        }
+
         // McpServer (optional): if the sandbox references one, mirror its
         // JWKS ConfigMap + signing-key Secret and mount them.
         if let Some(mcp_ref) = governance_config.mcp_server_ref.as_ref() {

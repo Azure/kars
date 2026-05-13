@@ -85,10 +85,9 @@ impl PolicyStatusResponse {
     ///   in `last_error`).
     ///
     /// Each `PolicyKind` variant on the router side has a fixed
-    /// string name (`"AgtProfile"`, `"InferencePolicy"`,
-    /// `"ClawMemory"`, …); see `inference-router/src/policy_status.rs`
-    /// for the canonical list. Reconcilers should pass that exact
-    /// string.
+    /// string name (`"AgtProfile"`, `"InferencePolicy"`, `"Memory"`,
+    /// …); see `inference-router/src/policy_status.rs` for the
+    /// canonical list. Reconcilers should pass that exact string.
     pub fn find_digest(&self, kind: &str) -> Option<&str> {
         self.entries
             .iter()

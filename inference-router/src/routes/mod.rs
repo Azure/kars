@@ -132,6 +132,15 @@ pub struct AppState {
     /// enforced; later sub-slices add daily/monthly budgets,
     /// content-safety floors, and model failover.
     pub inference_policy: crate::inference_policy_loader::LoadedInferencePolicyHandle,
+    /// Currently loaded `ClawMemory` binding, if any. Populated at
+    /// startup by `memory_binding_loader::load_and_install` reading
+    /// the `MEMORY_BINDING_DIR` mount written by the controller's
+    /// `claw_memory_reconciler` + `governance_mounts`. Slice 3a is
+    /// digest-echo only — the binding loads and the digest shows up
+    /// under `GET /internal/policy-status` with `kind: Memory`, but
+    /// no behaviour changes in the data plane (Slice 3b rewires the
+    /// `foundry.memory.*` MCP tools through this handle).
+    pub memory_binding: crate::memory_binding_loader::LoadedMemoryBindingHandle,
     /// Slice 2d.2 — per-deployment health cache backing the
     /// `modelPreference.fallback[]` failover walk in
     /// [`crate::failover::forward_with_failover`]. Shared across
@@ -252,6 +261,23 @@ impl AppState {
         )
         .await;
 
+        // Slice 3a: ClawMemory compiled binding. Single file mounted
+        // by `governance_mounts` when `ClawSandbox.spec.memoryRef` is
+        // set. The loader registers the canonical digest under
+        // `PolicyKind::Memory` so the controller's
+        // `claw_memory_reconciler` can close the §3 echo loop;
+        // nothing in the data plane consumes the binding yet
+        // (Slice 3b rewires `foundry.memory.*`).
+        let memory_binding = crate::memory_binding_loader::empty_handle();
+        let memory_binding_dir = std::env::var("MEMORY_BINDING_DIR")
+            .unwrap_or_else(|_| crate::memory_binding_loader::MEMORY_BINDING_DIR_DEFAULT.into());
+        let _ = crate::memory_binding_loader::load_and_install(
+            &memory_binding_dir,
+            &policy_status,
+            &memory_binding,
+        )
+        .await;
+
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
             copilot: Arc::new(CopilotTokenCache::from_env()),
@@ -283,6 +309,7 @@ impl AppState {
             pending_handoff: PendingHandoffStore::new(),
             policy_status,
             inference_policy,
+            memory_binding,
             deployment_health: Arc::new(crate::deployment_health::DeploymentHealthRegistry::new()),
         })
     }

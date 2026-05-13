@@ -28,6 +28,14 @@ use sha2::{Digest, Sha256};
 
 use crate::claw_memory::ClawMemorySpec;
 
+/// Canonical filename the controller writes into the
+/// `clawmemory-<name>-binding` ConfigMap. Kept in lockstep with
+/// `inference-router::memory_binding_loader::MEMORY_BINDING_FILENAME`
+/// — the byte layout of `canonical_bytes_for_digest` includes this
+/// string, so any drift breaks the principles.md §3 "Ready ⇔ router
+/// echo" contract.
+pub const MEMORY_BINDING_FILENAME: &str = "binding.json";
+
 /// Compile a `ClawMemorySpec` into the binding JSON the controller
 /// publishes as a `ConfigMap`.
 ///
@@ -62,6 +70,48 @@ pub fn version_hash(binding: &Value) -> String {
     let bytes = serde_json::to_vec(binding).expect("serde_json::Value always serialises");
     let digest = Sha256::digest(&bytes);
     hex::encode(&digest[..16])
+}
+
+/// Length-prefixed canonical bytes used by both controller and router
+/// to compute the same `sha256:<hex>` digest for a single
+/// `binding.json` file. Layout:
+///
+/// ```text
+/// u64-BE(filename.len()) || filename || u64-BE(body.len()) || body
+/// ```
+///
+/// Matches the router-side
+/// `memory_binding_loader::canonical_bytes_for_digest`. Exposed so
+/// the reconciler can stamp the same digest on the ConfigMap
+/// annotation as the router will echo back through
+/// `GET /internal/policy-status`.
+#[must_use]
+pub fn canonical_bytes_for_digest(filename: &str, body: &[u8]) -> Vec<u8> {
+    let name = filename.as_bytes();
+    let mut canonical: Vec<u8> = Vec::with_capacity(16 + name.len() + body.len());
+    canonical.extend_from_slice(&(name.len() as u64).to_be_bytes());
+    canonical.extend_from_slice(name);
+    canonical.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    canonical.extend_from_slice(body);
+    canonical
+}
+
+/// `sha256:<full hex>` digest over the canonical bytes (see
+/// [`canonical_bytes_for_digest`]) for the supplied compiled
+/// `binding.json` body. This is the digest the `ClawMemory`
+/// reconciler stamps in `status.compiledDigest` and the ConfigMap
+/// annotation `azureclaw.azure.com/claw-memory-digest`. The router
+/// echoes the same value via `GET /internal/policy-status` once it
+/// loads the file; matching values let `decide_enforcement_state`
+/// promote the CR from `phase=Compiled` to `phase=Ready`.
+///
+/// **Wire contract — DO NOT CHANGE** without a coordinated router-
+/// side update.
+#[must_use]
+pub fn claw_memory_digest(body: &[u8]) -> String {
+    let canonical = canonical_bytes_for_digest(MEMORY_BINDING_FILENAME, body);
+    let digest = Sha256::digest(&canonical);
+    format!("sha256:{}", hex::encode(digest))
 }
 
 #[cfg(test)]
@@ -152,5 +202,44 @@ mod tests {
         let h = version_hash(&compile_to_binding(&full_spec()));
         assert_eq!(h.len(), 32);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn claw_memory_digest_uses_sha256_prefix_and_64_hex() {
+        let body = br#"{"storeName":"x","scope":"agent:x"}"#;
+        let d = claw_memory_digest(body);
+        assert!(d.starts_with("sha256:"));
+        assert_eq!(d.len(), "sha256:".len() + 64);
+        assert!(d["sha256:".len()..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn claw_memory_digest_matches_canonical_layout() {
+        let body = br#"{"storeName":"x"}"#;
+        // Recompute the canonical bytes manually and verify the
+        // sha256 matches: the contract is identical to the router
+        // side `memory_binding_loader::canonical_bytes_for_digest`.
+        let canonical = canonical_bytes_for_digest(MEMORY_BINDING_FILENAME, body);
+        let expected = format!("sha256:{}", hex::encode(Sha256::digest(&canonical)));
+        assert_eq!(claw_memory_digest(body), expected);
+    }
+
+    #[test]
+    fn canonical_bytes_length_prefixed_layout() {
+        let body = b"hello";
+        let bytes = canonical_bytes_for_digest("binding.json", body);
+        // u64-BE("binding.json".len()=12) = 0x000000000000000c, then
+        // "binding.json", then u64-BE(5) = 0x0000000000000005, then "hello".
+        assert_eq!(&bytes[..8], &(12u64).to_be_bytes());
+        assert_eq!(&bytes[8..20], b"binding.json");
+        assert_eq!(&bytes[20..28], &(5u64).to_be_bytes());
+        assert_eq!(&bytes[28..], b"hello");
+    }
+
+    #[test]
+    fn memory_binding_filename_is_binding_json() {
+        // Wire contract: keep in lockstep with the router-side
+        // `memory_binding_loader::MEMORY_BINDING_FILENAME`.
+        assert_eq!(MEMORY_BINDING_FILENAME, "binding.json");
     }
 }

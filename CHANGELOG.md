@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 3a — ClawMemory router-echo
+
+Closes principles.md §3 ("Ready ⇔ router echo") for the third CRD
+(after ToolPolicy in 1c and InferencePolicy in 2a). Same shape: the
+controller compiles the binding to a ConfigMap, mirrors it into each
+referencing sandbox namespace, mounts it onto the inference-router at
+`/etc/azureclaw/memory/binding.json`, and only promotes
+`phase=Compiled → Ready` once every router echoes the matching digest
+via `GET /internal/policy-status`. Digest-echo only — Foundry Memory
+Store auto-provision + AuthMisconfigured + no-inherit + signed
+`bundleRef` are deferred to Slice 3b/3c.
+
+**Controller (`azureclaw-controller`)**
+
+* `crd.rs` — new `spec.memoryRef: Option<LocalObjectRef>` on
+  `ClawSandboxSpec`; sibling reference, same-namespace only.
+* `claw_memory_compile.rs` — new `MEMORY_BINDING_FILENAME = "binding.json"`
+  + `canonical_bytes_for_digest` + `claw_memory_digest` (length-prefixed
+  sha256 matching the router byte-for-byte; cross-validated by golden
+  vectors). The ConfigMap data key is `binding.json` and the bytes are
+  exactly what the digest covers.
+* `claw_memory.rs` — `ClawMemoryStatus` gains `compiledDigest` and
+  `loadedDigest` (`Option<String>`). The former is the digest the
+  controller published; the latter is what the router last echoed —
+  populated only in the `Confirmed` branch.
+* `claw_memory_reconciler.rs` — full rewrite around the
+  `RouterEnforcementState` enum (`NotApplicable`, `NoSandboxesReferencing`,
+  `Awaiting`, `Confirmed`). `decide_enforcement_state(&compiled, "Memory", &results)`
+  drives phase + conditions; `Compiled→Ready` only fires on `Confirmed`.
+  ConfigMap write stamps annotation `azureclaw.azure.com/claw-memory-digest`.
+  `PolicyNotEnforced` Warning event now fires only while truly awaiting
+  (stops the moment confirmed — no more eternal noise; matches Slice 1c
+  honesty bar). 8 new unit tests.
+* `reconciler/mod.rs` — new ClawMemory mirror+mount block after the
+  InferencePolicy block, gated by `spec.memoryRef`. Mirrors the compiled
+  ConfigMap into the sandbox namespace, mounts onto the
+  `inference-router` container at `paths::MEMORY_BINDING_DIR`, sets env
+  `MEMORY_BINDING_DIR`. Fail-open at mount layer (mount is optional).
+* `reconciler/governance_mounts.rs::paths` — new `MEMORY_BINDING_DIR = "/etc/azureclaw/memory"`
+  constant (matches router default).
+
+**Router (`inference-router`)**
+
+* `policy_status.rs` — new `PolicyKind::Memory` variant
+  (`as_str() = "Memory"`).
+* `memory_binding_loader.rs` (new, ~340 lines) — mirror of
+  `inference_policy_loader.rs` stripped to digest-echo. Reads
+  `/etc/azureclaw/memory/binding.json`, parses optional `storeName` +
+  `scope`, registers digest under `PolicyKind::Memory`. Hot-reload via
+  the existing 5-second mtime poller. 11 unit tests (tempfile fixtures
+  + golden-vector cross-validation against the controller's
+  `claw_memory_digest`).
+* `routes/mod.rs` — `AppState.memory_binding: LoadedMemoryBindingHandle`
+  field; loader installed at startup right after the InferencePolicy
+  loader.
+
+**Helm**
+
+* `crd-clawmemory.yaml` regenerated to include the new
+  `compiledDigest` + `loadedDigest` status fields.
+* `crd.yaml` (hand-maintained) — added `spec.memoryRef` schema with
+  same-namespace CEL validation matching `spec.inferenceRef`.
+
+**Tests**
+
+* 8 new controller unit tests (build_conditions truth table, error
+  classification, RFC3339, field manager).
+* 11 new router unit tests (loader happy path, missing file, malformed
+  JSON, byte-identical digest cross-validation with controller).
+* 2 new integration tests in `tests/policy_status_endpoint.rs`
+  exercising the `PolicyKind::Memory` variant end-to-end through the
+  axum stack.
+* 14 helm_drift tests green (including the new `compiledDigest` /
+  `loadedDigest` shapes).
+
+**Deferred to Slice 3b/3c** (per principles.md §5):
+
+* Foundry Memory Store auto-provision on first reconcile.
+* `AuthMisconfigured` condition for 403 from Memory Store (the
+  project-MI vs AI-Services-MI dance documented in the repo skill).
+* Sub-agent no-inherit rule (memory bindings must not flow through
+  `handoff` spawn).
+* Signed `bundleRef` path (needs the Slice 1c signing infra
+  generalised).
+* MCP `foundry.memory.*` tool rewire from env-fed
+  `FOUNDRY_MEMORY_STORE_ID` to per-policy lookup.
+* `azureclaw inspect` panel + Headlamp UI panel for ClawMemory (mirrors
+  Slice 1d / 1d.2 for ToolPolicy + InferencePolicy).
+
 ### Slice 2d.2 — health-aware `modelPreference.fallback[]` failover
 
 Slice 2d.1 added the single-shot deployment override. Slice 2d.2 closes

@@ -84,6 +84,7 @@ fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
         pending_handoff: PendingHandoffStore::new(),
         policy_status: policy_status.clone(),
         inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
+        memory_binding: azureclaw_inference_router::memory_binding_loader::empty_handle(),
         deployment_health: std::sync::Arc::new(
             azureclaw_inference_router::deployment_health::DeploymentHealthRegistry::new(),
         ),
@@ -255,4 +256,86 @@ async fn empty_deployment_health_serializes_as_empty_array() {
         .as_array()
         .expect("deployment_health is always an array, even when empty");
     assert!(health.is_empty());
+}
+
+#[tokio::test]
+async fn memory_kind_digest_surfaces_via_route() {
+    // Slice 3a: the ClawMemory binding loader registers its digest
+    // under PolicyKind::Memory so the controller's
+    // `claw_memory_reconciler` poller can confirm the §3 echo loop.
+    // This test simulates the loader having run successfully on
+    // startup and asserts the /internal/policy-status envelope
+    // surfaces the new kind verbatim — same shape as AgtProfile /
+    // InferencePolicy.
+    let (state, reg) = test_state();
+    let canonical = azureclaw_inference_router::memory_binding_loader::canonical_bytes_for_digest(
+        azureclaw_inference_router::memory_binding_loader::MEMORY_BINDING_FILENAME,
+        br#"{"storeName":"abc","scope":"agent:demo"}"#,
+    );
+    reg.record_success(
+        azureclaw_inference_router::policy_status::PolicyKind::Memory,
+        "/etc/azureclaw/memory/binding.json",
+        &canonical,
+    );
+
+    let app = app(state);
+    let (status, body) = get(&app, "/internal/policy-status").await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = body["entries"]
+        .as_array()
+        .expect("entries is always an array");
+    let memory = entries
+        .iter()
+        .find(|e| e["kind"].as_str() == Some("Memory"))
+        .expect("expected a Memory entry");
+    let digest = memory["digest"]
+        .as_str()
+        .expect("digest set after record_success");
+    assert!(
+        digest.starts_with("sha256:") && digest.len() == 71,
+        "expected sha256 hex digest, got {digest}"
+    );
+    assert!(memory["last_error"].is_null());
+    assert_eq!(
+        memory["source_path"].as_str(),
+        Some("/etc/azureclaw/memory/binding.json")
+    );
+}
+
+#[tokio::test]
+async fn memory_binding_loader_digest_matches_canonical_layout() {
+    // Cross-validation: the bytes the router hashes for a Memory
+    // binding must be byte-identical to the controller-side
+    // `claw_memory_compile::canonical_bytes_for_digest`. Asserts the
+    // wire contract end-to-end (controller writes ConfigMap bytes →
+    // router loads + hashes → controller's poller compares digest).
+    use sha2::{Digest, Sha256};
+    let body = br#"{"storeName":"abc","scope":"agent:demo"}"#;
+    let canonical = azureclaw_inference_router::memory_binding_loader::canonical_bytes_for_digest(
+        azureclaw_inference_router::memory_binding_loader::MEMORY_BINDING_FILENAME,
+        body,
+    );
+    let raw = Sha256::digest(&canonical);
+    let mut hexstr = String::with_capacity(raw.len() * 2);
+    for b in raw {
+        use std::fmt::Write;
+        let _ = write!(hexstr, "{b:02x}");
+    }
+    let expected = format!("sha256:{hexstr}");
+
+    let (state, reg) = test_state();
+    reg.record_success(
+        azureclaw_inference_router::policy_status::PolicyKind::Memory,
+        "/tmp/binding.json",
+        &canonical,
+    );
+    let app = app(state);
+    let (_, body_json) = get(&app, "/internal/policy-status").await;
+    let memory = body_json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"].as_str() == Some("Memory"))
+        .unwrap();
+    assert_eq!(memory["digest"].as_str(), Some(expected.as_str()));
 }

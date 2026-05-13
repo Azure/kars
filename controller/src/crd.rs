@@ -60,6 +60,19 @@ pub struct ClawSandboxSpec {
     /// privilege-escalation vector. See `docs/crd-precedence.md`.
     pub inference_ref: LocalObjectRef,
 
+    /// Optional reference to a `ClawMemory` CR in the **same namespace**
+    /// as this `ClawSandbox`. When set, the controller mirrors the
+    /// compiled binding `ConfigMap` (`clawmemory-{name}-binding`) into
+    /// the sandbox namespace and mounts it into the inference-router
+    /// at [`crate::reconciler::governance_mounts::paths::MEMORY_BINDING_DIR`].
+    /// The router's `memory_binding_loader` reads the file, registers
+    /// the digest under `PolicyKind::Memory`, and echoes it via
+    /// `GET /internal/policy-status` so the `ClawMemory` reconciler
+    /// can close the principles.md §3 "Ready ⇔ router echo" loop
+    /// (Slice 3a). Cross-namespace refs are deliberately not supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ref: Option<LocalObjectRef>,
+
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
 

@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `ClawMemory` reconciler — Phase 2 §8 entry 5 (S5).
+//! `ClawMemory` reconciler — Phase 2 §8 entry 5 (S5), upgraded in
+//! Slice 3a of `crd-well-oiled-machine` to close the principles.md §3
+//! "Ready ⇔ router echo" loop.
 //!
 //! Watches `ClawMemory` CRs and, for each:
 //!
@@ -9,48 +11,57 @@
 //! 2. Compiles the binding via
 //!    [`crate::claw_memory_compile::compile_to_binding`].
 //! 3. Persists as `ConfigMap` (`clawmemory-{name}-binding`,
-//!    key `binding.json`).
-//! 4. Sets full status (phase, observedGeneration, conditions,
-//!    bindingConfigMapRef, versionHash, lastReconciledAt).
+//!    key `binding.json`), with the canonical compile digest stamped
+//!    in an annotation for diff debugging.
+//! 4. Polls every referencing `ClawSandbox`'s inference router via
+//!    `GET /internal/policy-status` for `PolicyKind::Memory` and only
+//!    promotes `phase=Compiled → Ready` when every router echoes the
+//!    same digest.
+//! 5. Sets full status (phase, observedGeneration, conditions,
+//!    bindingConfigMapRef, versionHash, lastReconciledAt,
+//!    compiledDigest, loadedDigest).
 //!
-//! ## Honesty rule (status reporting)
+//! ## Honesty rule (Slice 3a)
 //!
-//! The controller does **not** create the upstream Azure AI Foundry
-//! Memory Store — that happens runtime-side via the CLI plugin and
-//! the router's `/memory_stores/*` proxy on first use (Slice 3
-//! wiring). Therefore, on a successful binding compile, the
-//! controller reports:
+//! Up to Slice 0 the reconciler stamped `Compiled` unconditionally
+//! and emitted a `PolicyNotEnforced` Warning Event because the
+//! data-plane consumer did not exist yet. Slice 3a wires the
+//! router-side `memory_binding_loader` consumer; the controller
+//! therefore now distinguishes three success states:
 //!
-//! - `phase = "Compiled"` (not `"Ready"`)
-//! - `Ready = False` / reason `AwaitingFoundryProvisioning`
-//! - `Progressing = True` / reason `AwaitingFoundryProvisioning`
-//! - A `Warning` Event with reason `PolicyNotEnforced` pointing at
-//!   the Slice 3 tracking issue (see
-//!   `crate::status::phase::PhaseEventReporter::warn_policy_not_enforced`).
+//! * `Compiled` + `Ready=False / AwaitingRouterEnforcement` — binding
+//!   published, no router has echoed the matching digest yet
+//!   (also the `NoSandboxesReferencing` branch).
+//! * `Compiled` + `Ready=False / NoSandboxesReferencing` — binding
+//!   published but no `ClawSandbox` currently references this
+//!   `ClawMemory` via `spec.memoryRef`.
+//! * `Ready` + `Ready=True / RouterEnforcing` — every referencing
+//!   sandbox's router has confirmed the digest.
 //!
-//! Reporting `Ready=True` after only writing the binding ConfigMap is
-//! a lie: the router will still 404 on `/memory_stores/<name>` until
-//! the runtime path provisions the store. `kubectl wait
-//! --for=condition=Ready` must block here — flipping it `True`
-//! prematurely was the bug this module guards against. The new
-//! `Compiled` phase (introduced by Slice 0 of
-//! `crd-well-oiled-machine`) is the canonical signal for "spec parsed
-//! but data plane not yet enforcing" and replaces the previous
-//! `Pending`-forever apology.
+//! When binding write fails, `phase=Failed`, `Ready=False`,
+//! `Degraded=True`.
 //!
-//! When binding write itself fails, phase is `Failed` (not
-//! `Degraded`), `Ready=False`, `Degraded=True`.
+//! ## What is *still* deferred (Slice 3b+)
+//!
+//! - Auto-provisioning of the upstream Foundry Memory Store on first
+//!   use (today the CLI plugin path / chart env still drive this).
+//! - `AuthMisconfigured` condition emission on 403 from Memory Store.
+//! - Memory MCP tool rewire to read from the binding (instead of the
+//!   chart-fed `FOUNDRY_MEMORY_STORE_ID` env). Slice 3a is additive —
+//!   the binding loads and the digest echoes, but no behavior
+//!   changes in the data plane yet.
 //!
 //! ## Reuse map (no-duplication rule, §0.2/§0.3)
 //!
-//! Same shape as S2 (ToolPolicy), S3 (A2AAgent), S4 (InferencePolicy).
+//! Mirror of the Slice 2a (`InferencePolicy`) reconciler shape:
 //! - Conditions vocabulary + transition-time helpers from
 //!   [`crate::status::conditions`].
+//! - `RouterEnforcementState` + `decide_enforcement_state` from
+//!   [`crate::status::router_confirmation`].
+//! - `list_sandboxes_matching` + `poll_referencing_sandboxes` from
+//!   [`crate::status::router_confirmation_io`].
 //! - Compile module is single-purpose and reconciler does no JSON
 //!   shaping itself.
-//! - **No Foundry calls** — Foundry interaction stays in the runtime
-//!   path (`cli/src/plugin.ts::ensureMemoryStore` + the router's
-//!   `/memory_stores/*` proxy). The S7 informer wires the consumer.
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -67,10 +78,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::claw_memory::{ClawMemory, ClawMemoryStatus};
-use crate::claw_memory_compile::{compile_to_binding, version_hash};
+use crate::claw_memory_compile::{
+    MEMORY_BINDING_FILENAME, claw_memory_digest, compile_to_binding, version_hash,
+};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
-use crate::status::phase::{PHASE_COMPILED, PHASE_FAILED, PhaseEventReporter};
+use crate::status::phase::{PHASE_COMPILED, PHASE_FAILED, PHASE_READY, PhaseEventReporter};
+use crate::status::router_confirmation::{self, RouterEnforcementState, decide_enforcement_state};
+use crate::status::router_confirmation_io::{list_sandboxes_matching, poll_referencing_sandboxes};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_MEMORY;
 const FINALIZER: &str = "azureclaw.azure.com/clawmemory-cleanup";
@@ -97,6 +112,7 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    http: reqwest::Client,
     phase_reporter: PhaseEventReporter,
 }
 
@@ -138,20 +154,39 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
 
     let binding = compile_to_binding(&memory.spec);
     let v_hash = version_hash(&binding);
+    // Slice 3a — canonical bytes the router-side `memory_binding_loader`
+    // will sha256 + echo via `GET /internal/policy-status`. The bytes
+    // written into the ConfigMap MUST equal what we hash here, byte
+    // for byte; any reformatting (pretty-print, trailing newline, key
+    // reordering) silently breaks the §3 echo contract.
+    let canonical_bytes = serde_json::to_vec(&binding)?;
+    let canonical_str =
+        String::from_utf8(canonical_bytes.clone()).expect("serde_json::to_vec emits valid UTF-8");
+    let compiled_digest = claw_memory_digest(&canonical_bytes);
 
     let cm_name = format!("clawmemory-{name}-binding");
     let mut degraded: Option<(&'static str, String)> = None;
 
-    match ensure_binding_configmap(&configmaps, &cm_name, &name, &binding, &v_hash).await {
+    match ensure_binding_configmap(
+        &configmaps,
+        &cm_name,
+        &name,
+        &canonical_str,
+        &v_hash,
+        &compiled_digest,
+    )
+    .await
+    {
         Ok(()) => {
             tracing::info!(
                 clawmemory = %name,
                 ns = %ns,
                 version_hash = %v_hash,
+                compiled_digest = %compiled_digest,
                 generation = observed_generation.unwrap_or(0),
                 store_name = %memory.spec.store_name,
                 scope = %memory.spec.scope,
-                "ClawMemoryReconciled"
+                "ClawMemoryCompiled"
             );
         }
         Err(e) => {
@@ -164,50 +199,87 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
         }
     }
 
+    // Slice 3a — close the §3 "Ready ⇔ router echo" loop. List
+    // ClawSandboxes that reference this ClawMemory by
+    // `spec.memoryRef.name`, GET `/internal/policy-status` on each
+    // router, and let the result drive both `phase` and the `Ready`
+    // condition. The `compiled_digest` we just wrote is the value
+    // every router must echo before we promote to Ready.
+    let enforcement_state = if degraded.is_some() {
+        RouterEnforcementState::NotApplicable
+    } else {
+        let referrers = match list_sandboxes_matching(&ctx.client, &ns, |cs| {
+            cs.spec.memory_ref.as_ref().is_some_and(|r| r.name == name)
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    clawmemory = %name,
+                    ns = %ns,
+                    error = %e,
+                    "ClawSandbox list failed; treating as no referrers"
+                );
+                Vec::new()
+            }
+        };
+        let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
+        decide_enforcement_state(&compiled_digest, "Memory", &results)
+    };
+
+    let loaded_digest: Option<String> = match &enforcement_state {
+        RouterEnforcementState::Confirmed { .. } => Some(compiled_digest.clone()),
+        _ => None,
+    };
+
     let new_conditions = build_conditions(
         &prior_conditions,
         observed_generation,
         degraded.as_ref().map(|(r, m)| (*r, m.as_str())),
+        &enforcement_state,
     );
-    // Honesty rule (principles.md §3, slice-0-honesty-events):
-    // The controller only compiles a binding ConfigMap. Creating the
-    // upstream Azure AI Foundry Memory Store is the runtime path's job
-    // (CLI plugin → router `/memory_stores/*` proxy), and is not wired
-    // in this slice. Until Slice 3 lands a sandbox-side informer that
-    // confirms the upstream store exists and stamps `foundryStoreId`,
-    // we MUST NOT report `phase=Ready` / `Ready=True` — doing so makes
-    // operators believe the store is provisioned when the router will
-    // still 404 on `/memory_stores/<name>`. Report `Compiled` instead
-    // and publish a `PolicyNotEnforced` Warning Event so the user sees
-    // *why* in `kubectl describe`. `kubectl wait
-    // --for=condition=Ready` continues to block.
+
     let phase = if degraded.is_some() {
         PHASE_FAILED
     } else {
-        PHASE_COMPILED
+        match enforcement_state {
+            RouterEnforcementState::Confirmed { .. } | RouterEnforcementState::NotApplicable => {
+                PHASE_READY
+            }
+            RouterEnforcementState::NoSandboxesReferencing
+            | RouterEnforcementState::Awaiting { .. } => PHASE_COMPILED,
+        }
     };
 
-    if degraded.is_none() {
-        // Slice 0: surface the gap loudly. Slice 3 will delete this
-        // call site when ClawMemory becomes router-echoed.
-        if let Err(e) = ctx
+    // Only emit the Warning while truly awaiting router-side
+    // confirmation (mirrors slice-1c ToolPolicy + slice-2a
+    // InferencePolicy). Once Confirmed fires we stop shouting — the
+    // loop is honestly closed.
+    let publish_warning = degraded.is_none()
+        && matches!(
+            enforcement_state,
+            RouterEnforcementState::Awaiting { .. }
+                | RouterEnforcementState::NoSandboxesReferencing
+        );
+    if publish_warning
+        && let Err(e) = ctx
             .phase_reporter
             .warn_policy_not_enforced(
                 memory.as_ref(),
-                "CompileBinding",
-                "ClawMemory binding ConfigMap is compiled but the upstream Azure AI Foundry \
-                 Memory Store has not been provisioned yet. The router will 404 on \
-                 /memory_stores/<name> until the runtime path (Slice 3) creates the store. \
-                 Tracking: crd-well-oiled-machine slice-3-claw-memory.",
+                "AwaitingRouterConfirmation",
+                "ClawMemory binding compiled and published, but the inference-router has \
+                 not yet echoed the matching digest on /internal/policy-status. \
+                 Memory MCP tools today still authenticate via the chart-fed \
+                 FOUNDRY_MEMORY_STORE_ID env; Slice 3b will rewire them through the binding.",
             )
             .await
-        {
-            tracing::warn!(
-                clawmemory = %name,
-                error = %e,
-                "ClawMemoryEventPublishFailed",
-            );
-        }
+    {
+        tracing::warn!(
+            clawmemory = %name,
+            error = %e,
+            "ClawMemoryEventPublishFailed",
+        );
     }
 
     // SSA requires apiVersion + kind in the patch body — without
@@ -222,6 +294,8 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
             binding_config_map_ref: Some(LocalObjectRef { name: cm_name.clone() }),
             version_hash: Some(v_hash),
             last_reconciled_at: Some(rfc3339_now()),
+            compiled_digest: Some(compiled_digest),
+            loaded_digest,
         }
     });
     api.patch_status(
@@ -233,6 +307,9 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
+    } else if matches!(enforcement_state, RouterEnforcementState::Awaiting { .. }) {
+        // Short requeue while awaiting echo — mirrors slice-1c / 2a.
+        Ok(Action::requeue(Duration::from_secs(15)))
     } else {
         Ok(Action::requeue(REQUEUE_OK))
     }
@@ -246,6 +323,7 @@ fn build_conditions(
     prior: &[Condition],
     observed_generation: Option<i64>,
     degraded: Option<(&str, &str)>,
+    enforcement: &RouterEnforcementState,
 ) -> Vec<Condition> {
     let mut out: Vec<Condition> = Vec::with_capacity(3);
     let prior_ready = conditions::find(prior, conditions::TYPE_READY);
@@ -279,40 +357,119 @@ fn build_conditions(
                 observed_generation,
             ));
         }
-        None => {
-            // Binding compiled OK, but the upstream Foundry Memory
-            // Store is provisioned by the runtime path (S7+), not by
-            // the controller. Report this honestly: `Ready=False` with
-            // `Progressing=True` until upstream confirmation lands.
-            // Operators / `kubectl wait --for=condition=Ready` should
-            // block here, not race ahead to talk to a store the router
-            // will 404 on.
-            const AWAITING_MSG: &str = "binding ConfigMap compiled; awaiting upstream Foundry memory store provisioning by runtime path (router proxy on first use)";
-            out.push(conditions::preserve_transition_time(
-                prior_ready,
-                conditions::TYPE_READY,
-                cond_status::FALSE,
-                reason::AWAITING_FOUNDRY_PROVISIONING,
-                AWAITING_MSG,
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_progressing,
-                conditions::TYPE_PROGRESSING,
-                cond_status::TRUE,
-                reason::AWAITING_FOUNDRY_PROVISIONING,
-                AWAITING_MSG,
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_degraded,
-                conditions::TYPE_DEGRADED,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "no errors",
-                observed_generation,
-            ));
-        }
+        None => match enforcement {
+            RouterEnforcementState::NotApplicable => {
+                // Not reached today (the success branch maps
+                // degraded=None → one of the three states below).
+                // Kept for build_conditions truth-table symmetry
+                // with the other reconcilers.
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::RECONCILED,
+                    "ClawMemory binding compiled and published",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "compile complete",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Confirmed { total } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::ROUTER_ENFORCING,
+                    &format!(
+                        "all {total} referencing sandbox router(s) confirmed \
+                         claw-memory binding digest"
+                    ),
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "router echo confirmed",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::NoSandboxesReferencing => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "no ClawSandbox references this ClawMemory; nothing to enforce",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "waiting for a ClawSandbox to reference this binding",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Awaiting { message, .. } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    message,
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    "awaiting router-side enforcement",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+        },
     }
     out
 }
@@ -321,16 +478,24 @@ async fn ensure_binding_configmap(
     api: &Api<ConfigMap>,
     cm_name: &str,
     owner: &str,
-    binding: &serde_json::Value,
+    canonical_body: &str,
     v_hash: &str,
+    compiled_digest: &str,
 ) -> Result<(), ReconcileError> {
-    let json_str = serde_json::to_string_pretty(binding)?;
     let mut data: BTreeMap<String, String> = BTreeMap::new();
-    data.insert("binding.json".into(), json_str);
+    // Canonical key: the router-side `memory_binding_loader` reads
+    // this filename from the mount directory and sha256s the exact
+    // bytes, so it MUST match
+    // `claw_memory_compile::MEMORY_BINDING_FILENAME`.
+    data.insert(MEMORY_BINDING_FILENAME.into(), canonical_body.into());
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
         "azureclaw.azure.com/clawmemory-version-hash".into(),
         v_hash.into(),
+    );
+    annotations.insert(
+        "azureclaw.azure.com/claw-memory-digest".into(),
+        compiled_digest.into(),
     );
     let cm = ConfigMap {
         metadata: ObjectMeta {
@@ -414,18 +579,18 @@ pub async fn run(client: Client) -> Result<()> {
         Ok(_) => tracing::info!("ClawMemory CRD found — starting controller"),
         Err(e) => {
             tracing::warn!("ClawMemory CRD not installed — reconciler disabled: {e}");
-            // Park forever so the tokio::select! in main() does not see
-            // this reconciler exit cleanly and tear the whole controller
-            // down. The CRD is only optional from the controller's
-            // perspective; its absence is operator config, not a fatal
-            // condition.
             std::future::pending::<()>().await;
             #[allow(unreachable_code)]
             return Ok(());
         }
     }
+    let http = reqwest::Client::builder()
+        .timeout(router_confirmation::DEFAULT_TIMEOUT)
+        .build()
+        .expect("default reqwest client builds with infallible config");
     let ctx = Arc::new(Ctx {
         client: client.clone(),
+        http,
         phase_reporter: PhaseEventReporter::new(client, "ClawMemory"),
     });
     Controller::new(memories, kube::runtime::watcher::Config::default())
@@ -471,24 +636,29 @@ mod tests {
     }
 
     #[test]
-    fn build_conditions_emits_all_three_types_on_success() {
-        // "Success" here = binding ConfigMap published. Upstream Foundry
-        // store provisioning is runtime-path; controller intentionally
-        // reports Ready=False / Progressing=True until S7 confirmation.
-        let conds = build_conditions(&[], Some(1), None);
+    fn build_conditions_confirmed_promotes_ready_true() {
+        // Slice 3a: every referencing router echoed the matching
+        // digest → Ready=True / reason=RouterEnforcing. This is the
+        // §3 honest-Ready transition that replaces the old
+        // unconditional AwaitingFoundryProvisioning stamp.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 2 },
+        );
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
             .unwrap();
-        assert_eq!(ready.status, cond_status::FALSE);
-        assert_eq!(ready.reason, reason::AWAITING_FOUNDRY_PROVISIONING);
+        assert_eq!(ready.status, cond_status::TRUE);
+        assert_eq!(ready.reason, reason::ROUTER_ENFORCING);
         let progressing = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
             .unwrap();
-        assert_eq!(progressing.status, cond_status::TRUE);
-        assert_eq!(progressing.reason, reason::AWAITING_FOUNDRY_PROVISIONING);
+        assert_eq!(progressing.status, cond_status::FALSE);
         let degraded = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_DEGRADED)
@@ -497,8 +667,54 @@ mod tests {
     }
 
     #[test]
-    fn build_conditions_emits_all_three_types_on_failure() {
-        let conds = build_conditions(&[], Some(1), Some(("BindingWriteFailed", "boom")));
+    fn build_conditions_awaiting_keeps_ready_false() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Awaiting {
+                total: 1,
+                matched: 0,
+                message: "1/1 awaiting".into(),
+            },
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+    }
+
+    #[test]
+    fn build_conditions_no_sandboxes_referencing_keeps_ready_false() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::NoSandboxesReferencing,
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::NO_SANDBOXES_REFERENCING);
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::FALSE);
+    }
+
+    #[test]
+    fn build_conditions_failure_branch_sets_degraded_true() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some(("BindingWriteFailed", "boom")),
+            &RouterEnforcementState::NotApplicable,
+        );
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
@@ -515,8 +731,18 @@ mod tests {
 
     #[test]
     fn build_conditions_preserves_transition_time_when_status_unchanged() {
-        let first = build_conditions(&[], Some(1), None);
-        let second = build_conditions(&first, Some(2), None);
+        let first = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 1 },
+        );
+        let second = build_conditions(
+            &first,
+            Some(2),
+            None,
+            &RouterEnforcementState::Confirmed { total: 1 },
+        );
         let r1 = first
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)

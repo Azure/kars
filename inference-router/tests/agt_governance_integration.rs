@@ -78,6 +78,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         pending_handoff: PendingHandoffStore::new(),
         policy_status,
         inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
+        memory_binding: azureclaw_inference_router::memory_binding_loader::empty_handle(),
         deployment_health: std::sync::Arc::new(
             azureclaw_inference_router::deployment_health::DeploymentHealthRegistry::new(),
         ),

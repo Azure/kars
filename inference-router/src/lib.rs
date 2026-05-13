@@ -31,6 +31,7 @@ pub mod governance;
 pub mod handoff;
 pub mod inference_policy_loader;
 pub mod mcp;
+pub mod memory_binding_loader;
 pub mod mesh;
 pub mod metrics;
 pub mod policy_envelope;
