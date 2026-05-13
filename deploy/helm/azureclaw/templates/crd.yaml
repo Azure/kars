@@ -398,6 +398,28 @@ spec:
                   x-kubernetes-validations:
                     - rule: "self.name.size() > 0"
                       message: "spec.inferenceRef.name must not be empty"
+                memoryRef:
+                  type: object
+                  description: |
+                    Optional same-namespace reference to a `ClawMemory` CR
+                    (Slice 3a). When present, the controller mirrors the
+                    compiled memory binding into the sandbox namespace and
+                    mounts it onto the inference-router at
+                    `/etc/azureclaw/memory/binding.json`. The router echoes
+                    the digest via `GET /internal/policy-status` so the
+                    controller can promote the referenced `ClawMemory` to
+                    `phase=Ready` (principles.md §3). Cross-namespace refs
+                    are not supported.
+                  required: ["name"]
+                  properties:
+                    name:
+                      type: string
+                      description: "Name of a sibling ClawMemory CR in the same namespace as this ClawSandbox."
+                      maxLength: 253
+                      pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                  x-kubernetes-validations:
+                    - rule: "self.name.size() > 0"
+                      message: "spec.memoryRef.name must not be empty"
                 agent:
                   type: object
                   description: "Foundry Agent Service configuration — controller creates a prompt agent on reconcile"

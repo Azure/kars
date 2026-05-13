@@ -71,6 +71,13 @@ pub mod paths {
     /// match the router-side default in
     /// `inference-router/src/inference_policy_loader.rs::INFERENCE_POLICY_DIR_DEFAULT`.
     pub const INFERENCE_POLICY_DIR: &str = "/etc/azureclaw/inference";
+    /// `ClawMemory` compiled binding (JSON). Loaded by the
+    /// inference-router's `memory_binding_loader` on startup; the
+    /// digest is echoed via `/internal/policy-status` so the
+    /// controller can close the §3 Ready ⇔ router-echo loop
+    /// (Slice 3a). Must match the router-side default in
+    /// `inference-router/src/memory_binding_loader.rs::MEMORY_BINDING_DIR_DEFAULT`.
+    pub const MEMORY_BINDING_DIR: &str = "/etc/azureclaw/memory";
     /// McpServer JWKS (used by the customer-MCP OAuth verifier).
     pub const MCP_JWKS_DIR: &str = "/etc/azureclaw/mcp";
     /// A2AAgent compiled signed AgentCard.

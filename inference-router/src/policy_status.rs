@@ -60,6 +60,16 @@ pub enum PolicyKind {
     /// by the router; later sub-slices add daily/monthly budgets,
     /// content-safety floors, and model failover.
     InferencePolicy,
+    /// `ClawMemory` compiled binding — single JSON file mounted at
+    /// `MEMORY_BINDING_DIR` (default `/etc/azureclaw/memory`).
+    /// Produced by the `ClawMemory` reconciler (Slice 3a). Slice 3a
+    /// is digest-echo only: the router loads the binding, registers
+    /// the digest, and exposes it via `/internal/policy-status` so
+    /// the controller can close the §3 Ready ⇔ router-echo loop.
+    /// Slice 3b will rewire the Foundry Memory Store MCP tools to
+    /// read the store name + scope from this binding instead of the
+    /// chart-fed `FOUNDRY_MEMORY_STORE_ID` env.
+    Memory,
 }
 
 impl PolicyKind {
@@ -70,6 +80,7 @@ impl PolicyKind {
         match self {
             PolicyKind::AgtProfile => "AgtProfile",
             PolicyKind::InferencePolicy => "InferencePolicy",
+            PolicyKind::Memory => "Memory",
         }
     }
 }

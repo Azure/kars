@@ -160,8 +160,29 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              compiledDigest:
+                description: |-
+                  `sha256:<hex>` digest of the canonical binding JSON the
+                  controller published — the value every referencing sandbox's
+                  router must echo via `GET /internal/policy-status` before the
+                  CR is promoted to `phase=Ready` (principles.md §3, Slice 3a).
+                  Stays unset on `phase=Failed`.
+                nullable: true
+                type: string
               lastReconciledAt:
                 description: Last time the binding was compiled and pushed.
+                nullable: true
+                type: string
+              loadedDigest:
+                description: |-
+                  `sha256:<hex>` digest the inference-router last echoed for
+                  this CR's compiled binding. Populated only in the
+                  `RouterEnforcementState::Confirmed` branch — when every
+                  referencing sandbox returns the matching digest, this equals
+                  [`Self::compiled_digest`]. `None` otherwise (awaiting echo,
+                  no sandboxes referencing, or transient poll failure). The
+                  CLI / `kubectl describe` operator diffs against
+                  `compiledDigest` here.
                 nullable: true
                 type: string
               observedGeneration:
