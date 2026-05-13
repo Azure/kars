@@ -241,6 +241,27 @@ pub mod reason {
     /// matches that exact prefix on the `last_error` returned in
     /// `/internal/policy-status` to elevate the condition.
     pub const AUTH_MISCONFIGURED: &str = "AuthMisconfigured";
+
+    /// `crd-well-oiled-machine` Slice 3b.5 — `MemoryStoreMissing`: at
+    /// least one referencing sandbox's router observed an HTTP 404
+    /// from the upstream Foundry Memory Store on a
+    /// `foundry.memory.{search,update,...}` call. The store the
+    /// compiled `ClawMemory` binding points at does not exist (yet)
+    /// on the Foundry side. Today the openclaw runtime lazily
+    /// auto-creates stores via `ensureMemoryStore` on first sync, so
+    /// 404 is operator-visible up to the first runtime sync. Slice
+    /// 3c (router-side auto-provision at binding install) eliminates
+    /// the 404 path entirely.
+    ///
+    /// Wire contract: the router records 404s via
+    /// `PolicyStatusRegistry::record_error` with a
+    /// `MemoryStoreMissing:` prefix on the message; the controller
+    /// matches the exact prefix to elevate `Degraded=True`.
+    ///
+    /// Precedence: `AuthMisconfigured` outranks `MemoryStoreMissing`
+    /// — a 403 means the operator can't even check whether the
+    /// store exists, so RBAC dominates.
+    pub const MEMORY_STORE_MISSING: &str = "MemoryStoreMissing";
 }
 
 /// Slice 3b.4 wire-contract prefix routers attach to
@@ -250,6 +271,15 @@ pub mod reason {
 /// `reason=AuthMisconfigured`. Kept here in `conditions` so producer
 /// and consumer share one source of truth.
 pub const AUTH_MISCONFIGURED_PREFIX: &str = "AuthMisconfigured:";
+
+/// Slice 3b.5 wire-contract prefix routers attach to
+/// `PolicyStatusRegistry::record_error` messages when the upstream
+/// Foundry Memory Store returned HTTP 404 for the bound store. The
+/// controller scans for this prefix to elevate the Degraded
+/// condition with `reason=MemoryStoreMissing`. Lives next to
+/// `AUTH_MISCONFIGURED_PREFIX` so producer and consumer share one
+/// source of truth.
+pub const MEMORY_STORE_MISSING_PREFIX: &str = "MemoryStoreMissing:";
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.
 ///

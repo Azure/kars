@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 3b.5 — `MemoryStoreMissing` Degraded condition for ClawMemory
+
+When the upstream Foundry Memory Store returns HTTP 404 on a
+`foundry.memory.{search,update}` call — the bound store does not
+exist on the Foundry account yet — the controller now elevates the
+ClawMemory status to `Degraded=True / reason=MemoryStoreMissing /
+Ready=False`. Today the openclaw runtime auto-creates stores lazily
+on first sync via `ensureMemoryStore`, but until that fires any
+direct router-side `foundry.memory.*` call against a fresh
+ClawMemory will 404, and operators need to know. Slice 3c.1 will
+ship router-side auto-provision at binding install, retiring this
+surface.
+
+- New reason constant `reason::MEMORY_STORE_MISSING` + shared wire
+  prefix `MEMORY_STORE_MISSING_PREFIX = "MemoryStoreMissing:"` in
+  `controller/src/status/conditions.rs`. Lives next to the Slice
+  3b.4 `AuthMisconfigured` siblings.
+- `claw_memory_reconciler` factors the auth-misconfigured detector
+  and the new missing-store detector through a shared
+  `first_prefixed_memory_error` helper. Both pre-scan
+  `find_last_error("Memory")` for the prefix and emit a
+  deterministic `"<sandbox>: <error>"` message with multi-hit tail.
+- Precedence in the reconcile pre-scan: `AuthMisconfigured` first,
+  `MemoryStoreMissing` second. RBAC dominates — if we can't read
+  the store, a 404 is not trustworthy as a "missing" signal.
+- Router-side producer in `inference-router/src/mcp/platform.rs::memory()`:
+  on `Some(404)` from the upstream, records
+  `MemoryStoreMissing:` prefixed `last_error` against
+  `PolicyKind::Memory`. 5xx/429 remain unrecorded (transient).
+  `record_error` preserves the prior digest as before.
+- 6 new controller tests (5 detector + 1 build_conditions) and 3
+  new router wiremock tests covering the 404 producer hook and the
+  no-handle legacy path. Controller 549 (+6), router lib 774 (+3).
+
 ### Slice 3b.4-producer — router records `AuthMisconfigured:` on Foundry Memory Store 401/403
 
 Closes the wire contract opened in Slice 3b.4. The inference router's
