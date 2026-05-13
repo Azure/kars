@@ -65,11 +65,11 @@ The strict profile is installed on every node via a DaemonSet that writes `azure
 
 ### Layer 5 — Network segmentation
 
-Three independent layers, by design.
+**The router is THE policy enforcement point for egress.** The router runs as a different process under a different UID inside the same pod, with credentials the agent never sees and a CRD-driven allowlist applied to every outbound HTTPS CONNECT. The two layers below are **safety nets** — they fail closed only if the router is bypassed or compromised. They are not the policy layer.
 
-1. **iptables UID-based egress guard** — the `init: egress-guard` container installs rules so that UID 1000 (agent) reaches only `localhost` + DNS, while UID 1001 (router) is unrestricted within the pod's NetworkPolicy. Even a kernel-level escape inside the agent container cannot reach arbitrary hosts.
-2. **Kubernetes NetworkPolicy** — namespaced default-deny egress. Allowlist managed via `azureclaw policy allow/deny` (CRD merge patch → controller reconcile). DNS always allowed. IMDS (`169.254.169.254`) allowed for the router only.
-3. **Inference-as-network-policy** — the router is the *only* code path for AI model calls. Even if the agent could reach Foundry directly (it cannot), it has no credentials. iptables + NetworkPolicy + zero credentials = three independent locks.
+1. **iptables UID-based egress guard (safety net #1)** — the `init: egress-guard` container installs rules so that UID 1000 (agent) reaches only `localhost` + DNS, while UID 1001 (router) is unrestricted within the pod's NetworkPolicy. If an agent process tries to bypass the router (e.g., a kernel-level escape from the agent container), iptables drops it. The agent has no path to the network except through the router.
+2. **Kubernetes NetworkPolicy (safety net #2)** — namespaced default-deny egress. Pins the *pod-level* egress to DNS, Foundry, the AgentMesh relay, and the A2A gateway. If the router itself were ever compromised and tried to reach an unrelated destination, the cluster CNI drops it. Allowlist managed via `azureclaw policy allow/deny` (CRD merge patch → controller reconcile) but this is *only* about which destinations the safety net permits; the *enforcement decisions* (which hosts the agent gets to actually reach) come from the router consuming `EgressAllowlist` + `EgressApproval` CRs.
+3. **Inference-as-network-policy** — the router is the *only* code path for AI model calls. Even if the agent could reach Foundry directly (it cannot), it has no credentials. iptables + NetworkPolicy + zero credentials = three independent locks, with the router as the policy point and the other two as containment.
 
 In addition, an auto-refreshing **domain blocklist** (OISD + URLhaus, refreshed every 6 h) blocks known-malicious destinations even from the router. Bare IP egress and high-risk TLDs (`.tk`, `.ml`, `.ga`, `.cf`, `.gq`) are blocked by default. See **[Egress proxy](egress-proxy.md)**.
 
