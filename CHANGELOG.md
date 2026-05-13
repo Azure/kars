@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5f — security.md egress reframe (DoD #6)
+
+Slice 5 DoD #6 is *"docs/architecture.md, docs/security-model.md,
+README.md reframed"* — saying explicitly that the router is THE
+enforcement point for egress and that the K8s NetworkPolicy +
+iptables `egress-guard` are **safety nets** that fail closed only
+if the router is bypassed or compromised.
+
+- `docs/architecture.md` and `README.md` were already correctly
+  reframed in earlier slices.
+- `docs/security.md` (the project's security-model doc; the
+  principles.md reference to `docs/security-model.md` resolves here)
+  Layer 5 section rewritten: explicit "router is THE policy
+  enforcement point", iptables/NetworkPolicy labelled "safety net #1"
+  and "safety net #2" with prose explaining the failure modes each
+  catches.
+
 ### Slice 5b — `egressMode` enum replaces `learnEgress` bool (DoD #3)
 
 Replaces `ClawSandbox.spec.networkPolicy.learnEgress: bool` with
