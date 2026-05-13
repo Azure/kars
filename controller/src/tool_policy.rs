@@ -65,11 +65,13 @@ pub struct ToolPolicySpec {
     /// Optional human-readable label.
     pub display_name: Option<String>,
 
-    /// Customer-supplied AGT policy profile. When present, the
-    /// controller writes the raw profile bytes into the compiled
-    /// ConfigMap under key `agt-profile.yaml` and the sandbox
-    /// inference-router loads it via the AGT policy engine. Replaces
-    /// the bundled `AGT_POLICY_PROFILE` env-var path (deprecated).
+    /// Customer-supplied AGT policy profile. The controller writes the
+    /// raw profile bytes into the compiled ConfigMap under key
+    /// `agt-profile.yaml` and the sandbox inference-router loads it via
+    /// the AGT policy engine. This is the **sole** source of AGT policy
+    /// profiles post-Slice-1e — the bundled
+    /// `/opt/azureclaw-plugin/policies/*.yaml` fallback that older
+    /// releases shipped has been removed.
     ///
     /// Slice 1b ships **inline** only; `bundleRef` (signed OCI
     /// artifact fetch) lands in Slice 1c. The wire contract between

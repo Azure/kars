@@ -442,10 +442,13 @@ spec:
                         resolves the target at reconcile time; missing
                         target → status `Degraded` with reason
                         `ToolPolicyNotFound`. The resolved CR's
-                        `metadata.name` doubles as the AGT policy
-                        profile name carried into the sandbox via
-                        `AGT_POLICY_PROFILE`. Cross-namespace refs are
-                        not supported.
+                        `metadata.name` is used as the ConfigMap name
+                        suffix (`toolpolicy-<name>-profile`) mounted
+                        into the sandbox at `/etc/agt/policies`; AGT
+                        reads only from that mount post-Slice-1e (the
+                        legacy `AGT_POLICY_PROFILE` env-var path has
+                        been removed). Cross-namespace refs are not
+                        supported.
                       properties:
                         name:
                           type: string

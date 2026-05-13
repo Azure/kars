@@ -552,12 +552,14 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // the AGT policy profile name carried into the sandbox.
     //
     // Slice 1e (phase 1): also detect the bundled-profile fallback path
-    // — governance enabled, toolPolicyRef set, but the referenced
-    // ToolPolicy has no `spec.agtProfile.inline`. That sandbox will run
-    // off `/opt/azureclaw-plugin/policies/azureclaw-<profile>.yaml`
-    // inside the image. We surface the condition so operators see the
-    // deprecation in `kubectl describe`, not just in entrypoint logs.
-    let mut bundled_profile_in_use = false;
+    // ── Resolve the ToolPolicy referenced by `spec.governance` ────────
+    // Slice 1e (phase 2): the bundled `/opt/azureclaw-plugin/policies/`
+    // fallback is gone. When governance is enabled and the referenced
+    // ToolPolicy lacks `spec.agtProfile.inline`, fail-closed with
+    // `SpecInvalid` so the operator cannot start a sandbox whose AGT
+    // engine would silently come up empty. Phase 1 surfaced this as a
+    // `BundledProfileInUse` condition during the deprecation window;
+    // that surface is now dead and removed.
     let tool_policy_profile: String = if governance_config.enabled {
         let tp_ref_name = governance_config.tool_policy_ref.name.clone();
         if tp_ref_name.is_empty() {
@@ -578,12 +580,19 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                     .and_then(|p| p.inline.as_deref())
                     .map(|s| s.trim().is_empty())
                     .unwrap_or(true);
-                bundled_profile_in_use = inline_empty;
                 if inline_empty {
-                    tracing::warn!(
+                    tracing::error!(
                         sandbox = %name,
                         tool_policy = %tp_ref_name,
-                        "ToolPolicy has no agtProfile.inline; sandbox will use deprecated bundled AGT profile path (Slice 1e: migrate to ToolPolicy.spec.agtProfile.inline)",
+                        "ToolPolicy has no agtProfile.inline; bundled fallback was removed in Slice 1e phase 2",
+                    );
+                    degrade!(
+                        SPEC_INVALID,
+                        format!(
+                            "ToolPolicy `{tp_ref_name}` has no `spec.agtProfile.inline`. \
+                             The bundled `/opt/azureclaw-plugin/policies/` fallback was removed in \
+                             Slice 1e phase 2. Set `spec.agtProfile.inline` on the ToolPolicy CR."
+                        )
                     );
                 }
                 tp_ref_name
@@ -1135,8 +1144,6 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-            openclaw_env
-                .push(json!({"name": "AGT_POLICY_PROFILE", "value": tool_policy_profile.clone()}));
             openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
             // Validate and propagate trusted peers (format: "name:AMID,name:AMID,...")
             let valid_peers = governance_config.trusted_peers.as_deref().filter(|p| {
@@ -1180,8 +1187,6 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
             // Router needs governance vars too (handoff auth, policy enforcement)
             router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-            router_agt_env
-                .push(json!({"name": "AGT_POLICY_PROFILE", "value": &tool_policy_profile}));
             router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
             // Behavior-monitor burst threshold: offload workers run long
             // research loops that make many tool/inference calls in short
@@ -2026,12 +2031,18 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // S7 wiring: the per-CR ToolPolicy compiled-profile ConfigMap is
         // owned by the ToolPolicy reconciler in the user namespace; the
         // sandbox reconciler mirrors it into the sandbox namespace
-        // (above, in the pod-spec assembly block). The previous
-        // implementation baked `cli/policies/azureclaw-default.yaml` /
-        // `cli/policies/azureclaw-offload.yaml` into the controller
-        // binary and wrote it to a static `agt-policy-{profile}`
-        // ConfigMap; that path is removed because it bypassed the
-        // ToolPolicy CRD entirely (changes required a controller rebuild).
+        // (above, in the pod-spec assembly block). Two earlier
+        // implementations have been removed:
+        //   - pre-S7: baked `cli/policies/azureclaw-default.yaml` /
+        //     `cli/policies/azureclaw-offload.yaml` into the controller
+        //     binary and wrote a static `agt-policy-{profile}` ConfigMap,
+        //     which bypassed the ToolPolicy CRD entirely.
+        //   - pre-Slice-1e-phase-2: kept the bundled YAMLs in the
+        //     sandbox image as an `AGT_POLICY_PROFILE` env-var fallback
+        //     when the ToolPolicy lacked `spec.agtProfile.inline`.
+        // Today the ToolPolicy CR is the sole source; sandboxes whose
+        // ToolPolicy has no inline profile are degraded with
+        // `SpecInvalid` before they reach this point.
         let cm_name = format!("toolpolicy-{}-profile", &tool_policy_profile);
 
         // Patch NetworkPolicy to allow ingress on port 8443 for mesh messages
@@ -2256,33 +2267,6 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // empty list when `networkPolicy` itself is unset). The
         // fetcher itself short-circuits before any network IO.
         let mut extras: Vec<_> = allowlist_resolution.conditions.clone();
-
-        // Slice 1e (phase 1): surface the bundled AGT profile fallback as
-        // a status condition so operators see the deprecation in
-        // `kubectl describe`. Only stamped when the fallback is actually
-        // active — once the operator adds `agtProfile.inline` to the
-        // referenced ToolPolicy, the condition is dropped (not stamped
-        // False) on the next reconcile so dashboards don't accumulate
-        // stale-but-resolved deprecation noise.
-        if bundled_profile_in_use {
-            let prior_conditions_for_bundled = sandbox
-                .status
-                .as_ref()
-                .map(|s| s.conditions.as_slice())
-                .unwrap_or(&[]);
-            let prior_bundled = crate::status::conditions::find(
-                prior_conditions_for_bundled,
-                crate::status::conditions::TYPE_BUNDLED_PROFILE_IN_USE,
-            );
-            extras.push(crate::status::conditions::preserve_transition_time(
-                prior_bundled,
-                crate::status::conditions::TYPE_BUNDLED_PROFILE_IN_USE,
-                crate::status::conditions::status::TRUE,
-                crate::status::conditions::reason::BUNDLED_PROFILE_FALLBACK,
-                "ToolPolicy lacks spec.agtProfile.inline; sandbox is using the deprecated bundled AGT profile path (/opt/azureclaw-plugin/policies/). Migrate to ToolPolicy.spec.agtProfile.inline before the bundled path is removed.",
-                sandbox.metadata.generation,
-            ));
-        }
 
         // Phase G P1 #4: stamp Suspended condition when spec.suspended
         // is true, or surface Suspended=False/Active when there is a

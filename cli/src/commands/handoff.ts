@@ -4,6 +4,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
+import { loadAgtProfile } from "../refs.js";
 
 /**
  * azureclaw handoff — live agent migration between local and cloud.
@@ -442,6 +443,12 @@ export function handoffCommand(): Command {
                   "azureclaw.azure.com/sandbox": targetName,
                 },
               },
+              // Slice 1e (phase 2): controller hard-fails ToolPolicies
+              // that lack `spec.agtProfile.inline`. Handoff-restored
+              // sandboxes inherit the `default` AGT profile — operators
+              // can edit the ToolPolicy CR post-restore if they need a
+              // tighter profile (e.g. `offload`).
+              agtProfile: { inline: loadAgtProfile("default") },
             },
           });
 

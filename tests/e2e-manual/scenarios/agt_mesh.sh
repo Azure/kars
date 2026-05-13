@@ -71,6 +71,15 @@ metadata:
     azureclaw.azure.com/test-suite: manual-e2e
 spec:
   appliesTo: {}
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: e2e-allow-all
+      policies:
+        - name: allow-all
+          type: capability
+          allowed_actions: ["*"]
+          priority: 1
 YAML
 
     cr_dispatch openclaw "$name" "$cr_ns" \

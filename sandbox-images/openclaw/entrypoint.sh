@@ -1217,47 +1217,20 @@ if [ -d /opt/azureclaw-plugin ]; then
   export AZURECLAW_MESH_PROVIDER
   # Locate the AGT policy directory when governance is enabled.
   #
-  # Two sources, in priority order:
-  #   1. /etc/agt/policies/agt-profile.yaml — controller-mounted,
-  #      published from `ToolPolicy.spec.agtProfile.inline`
-  #      (crd-well-oiled-machine Slice 1b). When the customer ships
-  #      a real ToolPolicy CR, this is the authoritative policy.
-  #   2. /opt/azureclaw-plugin/policies/azureclaw-<profile>.yaml —
-  #      bundled fallback for legacy `AGT_POLICY_PROFILE` env-var
-  #      flow. Deprecated; emits a warning. Removed in Slice 1e.
+  # Post-Slice-1e (phase 2): the ToolPolicy mount at
+  # `/etc/agt/policies/agt-profile.yaml` is the **sole** source of AGT
+  # policy bytes. The bundled `/opt/azureclaw-plugin/policies/` fallback
+  # path was removed; the controller now hard-fails (Degraded /
+  # SpecInvalid) any sandbox whose referenced ToolPolicy lacks
+  # `spec.agtProfile.inline`. If the mount is somehow missing here, the
+  # AGT engine starts with an empty policy set and fails closed at the
+  # policy layer (see comment near AGT_POLICY_DIR default below).
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ]; then
     if [ -f /etc/agt/policies/agt-profile.yaml ]; then
       export AGT_POLICY_DIR=/etc/agt/policies
       echo "[azureclaw] AGT governance enabled (source: ToolPolicy mount /etc/agt/policies, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
-    elif [ -d /opt/azureclaw-plugin/policies ]; then
-      echo "[azureclaw] WARN: AGT_POLICY_PROFILE env-var / bundled profile path is deprecated; supply ToolPolicy.spec.agtProfile.inline instead. Removed in Slice 1e."
-      mkdir -p "$OPENCLAW_DIR/policies"
-      # Copy only the profile that matches AGT_POLICY_PROFILE. The router loads
-      # and unions rules from ALL *.yaml files in AGT_POLICY_DIR, so copying
-      # every profile would leak (e.g.) offload's "no-spawn" deny into the
-      # default dev profile. Default → azureclaw-default.yaml. Offload →
-      # azureclaw-offload.yaml. Anything else → <profile>.yaml if it exists,
-      # otherwise fall back to default.
-      POLICY_PROFILE="${AGT_POLICY_PROFILE:-default}"
-      POLICY_SRC="/opt/azureclaw-plugin/policies/azureclaw-${POLICY_PROFILE}.yaml"
-      if [ ! -f "$POLICY_SRC" ]; then
-        echo "[azureclaw] WARN: policy profile '${POLICY_PROFILE}' not found, falling back to default"
-        POLICY_SRC="/opt/azureclaw-plugin/policies/azureclaw-default.yaml"
-      fi
-      # Policies live in /etc/azureclaw/policies/ — outside OpenClaw's data dir.
-      # OpenClaw 2026.4.x re-locks ~/.openclaw/ to mode 0700 (UID 1000 only) at
-      # config-write time, which silently breaks the inference router (UID 1001)
-      # policy hot-reload because read_dir on the policies subdir returns EACCES.
-      # /etc/azureclaw/ is root-owned and world-readable — same pattern already
-      # used for the egress blocklist (/etc/azureclaw/blocklist/).
-      mkdir -p /etc/azureclaw/policies 2>/dev/null || true
-      rm -f /etc/azureclaw/policies/*.yaml 2>/dev/null || true
-      cp --no-preserve=mode "$POLICY_SRC" /etc/azureclaw/policies/ 2>/dev/null || true
-      chown -R root:root /etc/azureclaw/policies 2>/dev/null || true
-      chmod 755 /etc/azureclaw/policies 2>/dev/null || true
-      chmod 444 /etc/azureclaw/policies/*.yaml 2>/dev/null || true
-      export AGT_POLICY_DIR=/etc/azureclaw/policies
-      echo "[azureclaw] AGT governance enabled (source: bundled profile '${POLICY_PROFILE}' [deprecated], trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
+    else
+      echo "[azureclaw] WARN: AGT governance enabled but no ToolPolicy mount at /etc/agt/policies/agt-profile.yaml; AGT engine will start with an empty policy set and fail closed."
     fi
   fi
   cd /sandbox
