@@ -22,6 +22,7 @@ COPY a2a-gateway/ a2a-gateway/
 COPY azureclaw-a2a-core/ azureclaw-a2a-core/
 COPY tests/ tests/
 COPY cli/blocklists/ cli/blocklists/
+COPY cli/profiles/agt/ cli/profiles/agt/
 
 RUN cargo build --release --package azureclaw-controller
 
