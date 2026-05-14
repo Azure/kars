@@ -175,7 +175,7 @@ azureclaw up --name prod-agent --location swedencentral
 | **`InferencePolicy`** | Per-tenant model routing, token budgets, region pinning, cost caps. |
 | **`ClawMemory`** | Memory-store binding (Foundry Memory Store) with project-MI auth. |
 | **`ClawEval`** | Reproducible evaluation runs against a sandbox spec. |
-| **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. |
+| **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. *(v1alpha1 — reconciler-only; router-side KNOCK gating tracked for v1.1.)* |
 
 Full schema in **[`docs/api/crd-reference.md`](docs/api/crd-reference.md)**.
 

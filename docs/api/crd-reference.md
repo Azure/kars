@@ -193,11 +193,19 @@ spec:
 
 `InferencePolicy` is a separate CRD (rather than fields on `ClawSandbox`) so that one policy can govern many sandboxes — typical for multi-tenant fleets.
 
+> **Budget scope today.** The router enforces `tokenBudget.perRequestTokens`
+> on every model call. Aggregate counters across requests
+> (`tokensPerHour`, monthly/daily windows) are **not yet persisted**;
+> the field is accepted and surfaced in status for forward compatibility
+> but `rejectOnExceed` only fires on the per-request limit. Aggregate
+> enforcement is a post-1.0 item — see
+> [`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades).
+
 ---
 
 ## `ClawMemory` — memory store binding
 
-Binds a sandbox to a Foundry Memory Store with the correct project-managed-identity wiring (the gotcha is documented in `docs/internal/foundry-memory-store-auth.md` and the inline `azure-prepare` skill — Memory Store uses the project MI for internal model calls, not the AI Services account MI).
+Binds a sandbox to a Foundry Memory Store with the correct project-managed-identity wiring. Memory Store internally authenticates as the **project's** managed identity for model calls (not the AI Services account MI) — so the project MI needs `Azure AI User` on the **resource group**, and the token audience must be `https://ai.azure.com/`. See the [Provisioning](#provisioning-is-operator-driven-today) note below.
 
 ```yaml
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -211,6 +219,17 @@ spec:
   retention:
     days: 30
 ```
+
+> **Provisioning is operator-driven today.** The CRD reconciler compiles
+> the binding into `/etc/azureclaw/memory/binding.json` and confirms the
+> router loaded it (`Ready ⇔ router echo`), but it does **not** create
+> the Foundry Memory Store, assign RBAC, or probe auth. You are
+> responsible for:
+> 1. Creating the Memory Store on the project (Portal or `azure-prepare`).
+> 2. Enabling system-assigned MI on the **project** (not the AI Services account).
+> 3. Granting `Azure AI User` to the project MI on the **resource group**.
+>
+> Auto-provisioning is a Slice 7 item.
 
 ---
 
@@ -240,6 +259,18 @@ status:
 ## `TrustGraph` — mesh trust topology
 
 Cluster-scoped. Declares which mesh peers are trusted at which trust score, what the threshold is for KNOCK accept, and how trust scores roll up across namespaces / clusters.
+
+> **Status — v1alpha1 (reconciler-only).** The controller validates the
+> graph and projects it to `/etc/azureclaw/trustgraph/graph.json` in every
+> sandbox that references it. The **router does not yet read the projected
+> graph**; trust scores are managed in-router from KNOCK accept/deny
+> outcomes and persisted to `/tmp/agt/trust_scores.json`. Live edge
+> updates require a sandbox roll. Closing this loop (router-side reload
+> on graph mutation + KNOCK gate using the projected graph) is tracked
+> as **v1.1** in [`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades).
+> Today this CRD is useful as a declarative source-of-record for trust
+> intent and as a static projection at sandbox creation time; **it is
+> not yet a runtime enforcement surface**.
 
 ```yaml
 apiVersion: azureclaw.azure.com/v1alpha1

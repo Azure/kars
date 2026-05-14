@@ -28,7 +28,8 @@ Documented v1.0 gaps (tracked in source as `// v1.1:` comments):
 Targets:
 
 - **CRD `v1alpha2` + conversion webhook** — see [`docs/architecture/crd-versioning.md`](architecture/crd-versioning.md). Converts in both directions; existing `v1alpha1` objects continue to round-trip.
-- **TrustGraph dynamic projection** — controller watches mesh edges and patches the in-pod projection without a sandbox restart.
+- **TrustGraph dynamic projection** — controller watches mesh edges and patches the in-pod projection without a sandbox restart, **and** the router reloads the projected graph for KNOCK gating instead of relying on in-memory KNOCK-outcome trust state.
+- **InferencePolicy aggregate budgets** — persisted token counters across requests (per-hour / per-day windows) with `rejectOnExceed` enforced at the router. Today only `tokenBudget.perRequestTokens` is enforced; aggregate counters are accepted on the spec and surfaced in status but not yet metered.
 - **Cosign-on-admission** — ValidatingAdmissionPolicy that rejects sandboxes whose images lack a cosign signature matching configured identity / issuer.
 - **A2A gateway in-binary JWS verifier** — opt-in axum layer in `azureclaw-a2a-gateway` that calls `azureclaw_a2a_core::verify_inbound_card`, removes reliance on upstream Gateway-API mTLS for the trust decision, and lets the gateway run in non-AGC topologies.
 - **CrewAI runtime adapter** — first-class.

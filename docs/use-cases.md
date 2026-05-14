@@ -19,7 +19,7 @@ All use cases share the same trust boundary:
 - All external traffic flows through the per-sandbox **inference router** (UID 1001).
 - All inter-agent traffic flows through the **AgentMesh relay** (Signal Protocol — X3DH + Double Ratchet); the relay sees only ciphertext.
 - Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture.md#four-seam-provider-architecture).
-- All 8 CRDs (`ClawSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `ClawMemory`, `ClawEval`, `TrustGraph`) are first-class and visible in the operator TUI.
+- All 8 CRDs (`ClawSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `ClawMemory`, `ClawEval`, `TrustGraph`) are first-class and visible in the operator TUI. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
 
 ---
 
