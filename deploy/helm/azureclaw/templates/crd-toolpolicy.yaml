@@ -1,17 +1,3 @@
-# AzureClaw ToolPolicy CRD
-#
-# DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
-# schema in `controller/src/tool_policy.rs` plus the CEL rules in
-# `controller/src/crd_validations.rs::tool_policy_validations`.
-#
-# Drift between this file and the Rust schema is caught at `cargo test`
-# time by `controller/src/helm_drift.rs::helm_toolpolicy_crd_matches_rust_schema`.
-# To regenerate after schema changes, run:
-#
-#   DUMP_TOOLPOLICY_CRD_YAML=1 cargo test --bin azureclaw-controller \
-#       helm_drift::tests::dump_toolpolicy_crd_yaml -- --nocapture
-#
-# and replace the body below with the captured YAML.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -65,18 +51,73 @@ spec:
                   `/opt/azureclaw-plugin/policies/*.yaml` fallback that older
                   releases shipped has been removed.
 
-                  Slice 1b ships **inline** only; `bundleRef` (signed OCI
-                  artifact fetch) lands in Slice 1c. The wire contract between
-                  controller and router is the length-prefixed sha256 digest
-                  produced by [`crate::tool_policy_compile::agt_profile_digest`],
-                  echoed back by the router via `GET /internal/policy-status`.
+                  Two sources are supported (mutually exclusive):
+                  - `inline`: raw YAML carried in the spec (Slice 1b)
+                  - `bundleRef`: signed OCI artifact (Slice 1c.2) — the controller
+                    pulls + cosign-verifies via
+                    [`crate::policy_fetcher::fetch_and_verify_generic`] with
+                    [`crate::policy_canonical::tools::ToolsKind`] and writes the
+                    verified bytes into the same ConfigMap key. The wire contract
+                    with the router is identical to the inline path — the router
+                    doesn't know (or need to know) which source produced the bytes.
+
+                  Mutual exclusion: admission CEL (in the Helm CRD) enforces
+                  `has(inline) != has(bundleRef)`. The reconciler also checks this
+                  at runtime as a defense-in-depth measure (older clusters without
+                  the latest CRD).
 
                   Per principles.md §3: when `agtProfile` is set, the controller
                   stamps `phase=Compiled` and `Ready=False /
                   reason=AwaitingRouterEnforcement` until the router-confirmation
-                  poller (Slice 1c) closes the loop.
+                  poller closes the loop. Fetch failures (signature, ACR, parse)
+                  surface as `Ready=False / reason=AllowlistMissing|…` — reusing
+                  the egress error taxonomy via [`crate::policy_fetcher::FetchError`].
                 nullable: true
                 properties:
+                  bundleRef:
+                    description: |-
+                      Signed OCI artifact reference. The controller pulls the artifact
+                      from `<registry>/<repository>@<digest>`, verifies the cosign
+                      signature against the active [`crate::signer_policy::SignerPolicy`],
+                      re-validates the AGT YAML structure
+                      ([`crate::policy_canonical::tools::ToolsKind`]), and writes the
+                      bytes into the compiled-profile ConfigMap under
+                      `agt-profile.yaml`. On any verification failure the controller
+                      stamps `Ready=False / reason=AllowlistMissing|AllowlistMalformed|
+                      AllowlistUnauthorized|AllowlistSignatureVerifyFailed` (the same
+                      `FetchError` variants used by egress — one error taxonomy
+                      across all signed-policy kinds).
+
+                      Artifact `artifactType` MUST be
+                      `application/vnd.azureclaw.agt-profile.v1+yaml`; a mismatch
+                      surfaces as `Ready=False / reason=InvalidRef`.
+                    nullable: true
+                    properties:
+                      artifactType:
+                        description: |-
+                          OCI artifactType media-type, e.g.
+                          `application/vnd.azureclaw.egress-allowlist.v1+yaml`. Consumers MUST
+                          reject artifacts whose pulled `artifactType` doesn't match.
+                        type: string
+                      digest:
+                        description: |-
+                          Content-addressed digest, including the algorithm prefix
+                          (`sha256:abc…`). The digest covers the canonical artifact bytes —
+                          see `docs/internal/policy-canonical-format.md` for the egress-allowlist
+                          canonicalization rules.
+                        type: string
+                      registry:
+                        description: Registry hostname (e.g. `myacr.azurecr.io`, `ghcr.io`).
+                        type: string
+                      repository:
+                        description: Repository path (e.g. `azureclaw/policies/sandbox-foo`).
+                        type: string
+                    required:
+                    - artifactType
+                    - digest
+                    - registry
+                    - repository
+                    type: object
                   inline:
                     description: |-
                       Inline AGT policy YAML body. Plain string — admission validates
@@ -192,18 +233,32 @@ spec:
             - message: spec.appliesTo.sandboxMatchLabels must contain at least one label
               reason: FieldValueInvalid
               rule: has(self.appliesTo.sandboxMatchLabels) && size(self.appliesTo.sandboxMatchLabels) > 0
+            - message: spec.agtProfile.inline and spec.agtProfile.bundleRef are mutually exclusive
+              reason: FieldValueInvalid
+              rule: '!has(self.agtProfile) || !(has(self.agtProfile.inline) && has(self.agtProfile.bundleRef))'
           status:
             nullable: true
             properties:
+              agtProfileBundleDigest:
+                description: |-
+                  Verified OCI manifest digest when the AGT profile was sourced
+                  from `spec.agtProfile.bundleRef`. Distinct from
+                  [`Self::agt_profile_digest`]: that one is the length-prefixed
+                  hash over the *content* (wire contract with the router); this
+                  one is the *OCI manifest digest* re-validated against
+                  `bundleRef.digest` after cosign verification (the supply-chain
+                  attestation). `None` when the profile came from `inline`.
+                nullable: true
+                type: string
               agtProfileDigest:
                 description: |-
                   Length-prefixed sha256 digest (Slice 1a aggregate canonical
                   format) of the AGT profile bytes the controller published to
-                  the compiled ConfigMap. Set only when
-                  `spec.agtProfile.inline` is present. The router echoes this
-                  digest on `GET /internal/policy-status` once it has loaded the
-                  profile; the controller-side confirmation poller (Slice 1c)
-                  uses it to promote `Compiled → Ready`.
+                  the compiled ConfigMap. Set when `spec.agtProfile.inline` OR
+                  `spec.agtProfile.bundleRef` produces a profile. The router
+                  echoes this digest on `GET /internal/policy-status` once it
+                  has loaded the profile; the controller-side confirmation
+                  poller uses it to promote `Compiled → Ready`.
                 nullable: true
                 type: string
               conditions:
@@ -260,4 +315,3 @@ spec:
     storage: true
     subresources:
       status: {}
-

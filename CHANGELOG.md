@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1c.2 — `ToolPolicy.spec.agtProfile.bundleRef` (signed OCI artifact)
+
+Continues the Slice 1c-real signing-generalization arc started in
+1c.1 (`PolicyKind` trait + `policy_canonical` module). 1c.2 wires
+the first per-kind consumer: `ToolPolicy.spec.agtProfile` now
+accepts a signed OCI artifact as an alternative to inline YAML.
+
+- **`AgtProfileSource.bundleRef`** — new field on `ToolPolicy.spec.agtProfile`,
+  mutually exclusive with `inline`. The controller pulls the artifact
+  via `policy_fetcher::fetch_and_verify_generic::<ToolsKind>`, cosign-
+  verifies against the active `SignerPolicy`, parses the bytes through
+  `policy_canonical::tools::parse` (UTF-8 + YAML mapping + required
+  fields `version` / `agent` / `policies`), and writes the verified
+  bytes into the compiled-profile `ConfigMap` under
+  `agt-profile.yaml`. The wire contract with the router is **identical
+  to the inline path** — the router doesn't know which source produced
+  the bytes; the length-prefixed content digest (Slice 1b) closes the
+  echo loop the same way either way.
+- **OCI artifact media type:**
+  `application/vnd.azureclaw.agt-profile.v1+yaml`. Mismatches surface
+  as `Ready=False / reason=InvalidRef`.
+- **`ToolPolicyStatus.agtProfileBundleDigest`** — new status field
+  carrying the verified OCI manifest digest (distinct from
+  `agtProfileDigest`, which is the length-prefixed content digest the
+  router echoes). `None` for the inline path. Populated only after
+  cosign verification succeeds.
+- **Mutual exclusion** — admission CEL
+  (`!has(self.agtProfile) || !(has(self.agtProfile.inline) && has(self.agtProfile.bundleRef))`)
+  rejects specs that set both at apply time. The reconciler also
+  performs a runtime defense-in-depth check (`reason=InvalidSpec`) for
+  older clusters lacking the latest CRD.
+- **Error taxonomy** — fetch/verify failures reuse the egress
+  `FetchError` vocabulary verbatim via `reason_for_error`:
+  `SignerPolicyMissing` / `SignerPolicyMalformed` / `InvalidRef` /
+  `Unauthorized` / `NotFound` / `SignatureVerifyFailed` /
+  `IdentityMismatch` / `CanonicalFormViolation` / `Transient`. One
+  vocabulary across all signed-policy kinds — operator docs stay
+  minimal as 1c.3 / 1c.4 / 1c.5 land.
+- **Canonical form for AGT YAML** intentionally permits comments
+  (operator-authored YAML profiles); the OCI digest pins the bytes
+  loaded into the router, so the byte-frozen "no comments" rule that
+  the egress allowlist applies for semantic-deduplication does not
+  apply here. Validation is structural (UTF-8 + parseable YAML mapping
+  + required top-level fields).
+- **TODO comments removed** in `controller/src/tool_policy.rs` —
+  the long-deferred *"Slice 1c will add bundleRef"* §5 violation is
+  now closed (the field is shipped).
+
+`controller/src/policy_canonical/tools.rs` — new ~300 LOC module
+with the `ToolsKind` `PolicyKind` impl, per-kind cache, and 15
+unit tests (minimal/with-policies/with-comments parse, all
+required-field rejection paths, non-UTF8/non-mapping rejection,
+finalize/cache roundtrip, cross-kind cache isolation).
+
+`controller/src/tool_policy_reconciler.rs` — new
+`resolve_agt_profile_source` helper unifies the inline / bundleRef /
+none / both-set cases into a single
+`(bytes, oci_digest, degraded)` triple consumed by the existing
+`ensure_profile_configmap` flow. 5 new unit tests covering all four
+spec-shape cases + a tripwire test pinning the `fetch_error_to_degraded`
+mapping to the shared `reason_for_error` taxonomy.
+
+CRD schema regenerated; 14 helm_drift tests pass. 619 controller
+tests (was 597 at 1c.1), clippy `-D warnings` clean, fmt clean.
+
 ### Slice 5d — `AllowlistDrift` structured diff + Headlamp banner
 
 Closes Slice 5 DoD #5. The `AllowlistDrift=True` condition already

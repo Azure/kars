@@ -73,23 +73,33 @@ pub struct ToolPolicySpec {
     /// `/opt/azureclaw-plugin/policies/*.yaml` fallback that older
     /// releases shipped has been removed.
     ///
-    /// Slice 1b ships **inline** only; `bundleRef` (signed OCI
-    /// artifact fetch) lands in Slice 1c. The wire contract between
-    /// controller and router is the length-prefixed sha256 digest
-    /// produced by [`crate::tool_policy_compile::agt_profile_digest`],
-    /// echoed back by the router via `GET /internal/policy-status`.
+    /// Two sources are supported (mutually exclusive):
+    /// - `inline`: raw YAML carried in the spec (Slice 1b)
+    /// - `bundleRef`: signed OCI artifact (Slice 1c.2) — the controller
+    ///   pulls + cosign-verifies via
+    ///   [`crate::policy_fetcher::fetch_and_verify_generic`] with
+    ///   [`crate::policy_canonical::tools::ToolsKind`] and writes the
+    ///   verified bytes into the same ConfigMap key. The wire contract
+    ///   with the router is identical to the inline path — the router
+    ///   doesn't know (or need to know) which source produced the bytes.
+    ///
+    /// Mutual exclusion: admission CEL (in the Helm CRD) enforces
+    /// `has(inline) != has(bundleRef)`. The reconciler also checks this
+    /// at runtime as a defense-in-depth measure (older clusters without
+    /// the latest CRD).
     ///
     /// Per principles.md §3: when `agtProfile` is set, the controller
     /// stamps `phase=Compiled` and `Ready=False /
     /// reason=AwaitingRouterEnforcement` until the router-confirmation
-    /// poller (Slice 1c) closes the loop.
+    /// poller closes the loop. Fetch failures (signature, ACR, parse)
+    /// surface as `Ready=False / reason=AllowlistMissing|…` — reusing
+    /// the egress error taxonomy via [`crate::policy_fetcher::FetchError`].
     pub agt_profile: Option<AgtProfileSource>,
 }
 
-/// AGT policy profile source. Slice 1b: `inline` only — the raw YAML
-/// body is carried in the spec. Slice 1c will add `bundleRef` for OCI
-/// pull paths. The two variants are mutually exclusive (admission CEL
-/// enforces exactly-one).
+/// AGT policy profile source. Exactly one of `inline` or `bundleRef`
+/// must be set (admission CEL + runtime check enforce); both being
+/// absent is treated as "no AGT profile" (back-compat path).
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgtProfileSource {
@@ -97,6 +107,23 @@ pub struct AgtProfileSource {
     /// it is non-empty; the router parses it at load time and surfaces
     /// any syntax error via `GET /internal/policy-status`.
     pub inline: Option<String>,
+
+    /// Signed OCI artifact reference. The controller pulls the artifact
+    /// from `<registry>/<repository>@<digest>`, verifies the cosign
+    /// signature against the active [`crate::signer_policy::SignerPolicy`],
+    /// re-validates the AGT YAML structure
+    /// ([`crate::policy_canonical::tools::ToolsKind`]), and writes the
+    /// bytes into the compiled-profile ConfigMap under
+    /// `agt-profile.yaml`. On any verification failure the controller
+    /// stamps `Ready=False / reason=AllowlistMissing|AllowlistMalformed|
+    /// AllowlistUnauthorized|AllowlistSignatureVerifyFailed` (the same
+    /// `FetchError` variants used by egress — one error taxonomy
+    /// across all signed-policy kinds).
+    ///
+    /// Artifact `artifactType` MUST be
+    /// `application/vnd.azureclaw.agt-profile.v1+yaml`; a mismatch
+    /// surfaces as `Ready=False / reason=InvalidRef`.
+    pub bundle_ref: Option<crate::crd::OciArtifactRef>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -185,11 +212,21 @@ pub struct ToolPolicyStatus {
 
     /// Length-prefixed sha256 digest (Slice 1a aggregate canonical
     /// format) of the AGT profile bytes the controller published to
-    /// the compiled ConfigMap. Set only when
-    /// `spec.agtProfile.inline` is present. The router echoes this
-    /// digest on `GET /internal/policy-status` once it has loaded the
-    /// profile; the controller-side confirmation poller (Slice 1c)
-    /// uses it to promote `Compiled → Ready`.
+    /// the compiled ConfigMap. Set when `spec.agtProfile.inline` OR
+    /// `spec.agtProfile.bundleRef` produces a profile. The router
+    /// echoes this digest on `GET /internal/policy-status` once it
+    /// has loaded the profile; the controller-side confirmation
+    /// poller uses it to promote `Compiled → Ready`.
     #[serde(default)]
     pub agt_profile_digest: Option<String>,
+
+    /// Verified OCI manifest digest when the AGT profile was sourced
+    /// from `spec.agtProfile.bundleRef`. Distinct from
+    /// [`Self::agt_profile_digest`]: that one is the length-prefixed
+    /// hash over the *content* (wire contract with the router); this
+    /// one is the *OCI manifest digest* re-validated against
+    /// `bundleRef.digest` after cosign verification (the supply-chain
+    /// attestation). `None` when the profile came from `inline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agt_profile_bundle_digest: Option<String>,
 }

@@ -104,16 +104,32 @@ pub fn mcp_server_validations() -> Vec<ValidationRule> {
 ///    nothing is almost always an authoring mistake; if truly
 ///    intended, an explicit `disabled: true` field is the right
 ///    escape hatch — not silently empty selectors).
+/// 2. `agtProfile.inline` and `agtProfile.bundleRef` are mutually
+///    exclusive — at most one may be set. Both absent is permitted
+///    (back-compat: no AGT profile attached); both present is an
+///    authoring error.
 #[must_use]
 pub fn tool_policy_validations() -> Vec<ValidationRule> {
-    vec![ValidationRule {
-        rule:
-            "has(self.appliesTo.sandboxMatchLabels) && size(self.appliesTo.sandboxMatchLabels) > 0"
-                .into(),
-        message: Some("spec.appliesTo.sandboxMatchLabels must contain at least one label".into()),
-        reason: Some("FieldValueInvalid".into()),
-        ..ValidationRule::default()
-    }]
+    vec![
+        ValidationRule {
+            rule:
+                "has(self.appliesTo.sandboxMatchLabels) && size(self.appliesTo.sandboxMatchLabels) > 0"
+                    .into(),
+            message: Some("spec.appliesTo.sandboxMatchLabels must contain at least one label".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule:
+                "!has(self.agtProfile) || !(has(self.agtProfile.inline) && has(self.agtProfile.bundleRef))"
+                    .into(),
+            message: Some(
+                "spec.agtProfile.inline and spec.agtProfile.bundleRef are mutually exclusive".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
 }
 
 /// Inject CEL rules onto the `spec` schema node of a generated CRD.
