@@ -332,9 +332,9 @@ pub fn inference_policy_crd() -> CustomResourceDefinition {
 pub fn claw_memory_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule: "size(self.storeName) > 0 && size(self.storeName) <= 63 && self.storeName.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')".into(),
+            rule: "has(self.bundleRef) || (has(self.storeName) && size(self.storeName) > 0 && size(self.storeName) <= 63 && self.storeName.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))".into(),
             message: Some(
-                "spec.storeName must be a DNS-label (1-63 chars, lowercase alphanumeric + dashes)".into(),
+                "spec.storeName must be a DNS-label (1-63 chars, lowercase alphanumeric + dashes) when spec.bundleRef is not set".into(),
             ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
@@ -346,8 +346,8 @@ pub fn claw_memory_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "size(self.scope) > 0 && size(self.scope) <= 256".into(),
-            message: Some("spec.scope must be 1-256 characters".into()),
+            rule: "has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256)".into(),
+            message: Some("spec.scope must be 1-256 characters when spec.bundleRef is not set".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -355,6 +355,18 @@ pub fn claw_memory_validations() -> Vec<ValidationRule> {
             rule: "!has(self.retentionDays) || self.retentionDays > 0".into(),
             message: Some(
                 "spec.retentionDays must be > 0 when set (use delete_scope for immediate deletion)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        // Slice 1c.4 mutex: bundleRef is mutually exclusive with the
+        // inline content fields (storeName, scope, retentionDays,
+        // deleteOnSandboxDelete, displayName). sandboxRef stays in
+        // the CR in either branch.
+        ValidationRule {
+            rule: "!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))".into(),
+            message: Some(
+                "spec.bundleRef is mutually exclusive with spec.storeName, spec.scope, spec.retentionDays, spec.deleteOnSandboxDelete, and spec.displayName".into(),
             ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()

@@ -152,7 +152,16 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
         .unwrap_or_default();
     let observed_generation = memory.metadata.generation;
 
-    let binding = compile_to_binding(&memory.spec);
+    // Slice 1c.4 — resolve bundleRef (if set) into an effective spec
+    // before compile. The bundle carries content (storeName, scope,
+    // retentionDays, deleteOnSandboxDelete, displayName); `sandboxRef`
+    // always stays in the CR. When `bundleRef` is unset the path is
+    // a no-op and returns the CR's spec verbatim.
+    let (effective_spec, bundle_ref_digest, bundle_degraded) =
+        resolve_memory_source(memory.as_ref()).await;
+    let mut degraded: Option<(&'static str, String)> = bundle_degraded;
+
+    let binding = compile_to_binding(&effective_spec);
     let v_hash = version_hash(&binding);
     // Slice 3a — canonical bytes the router-side `memory_binding_loader`
     // will sha256 + echo via `GET /internal/policy-status`. The bytes
@@ -165,37 +174,45 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
     let compiled_digest = claw_memory_digest(&canonical_bytes);
 
     let cm_name = format!("clawmemory-{name}-binding");
-    let mut degraded: Option<(&'static str, String)> = None;
 
-    match ensure_binding_configmap(
-        &configmaps,
-        &cm_name,
-        &name,
-        &canonical_str,
-        &v_hash,
-        &compiled_digest,
-    )
-    .await
-    {
-        Ok(()) => {
-            tracing::info!(
-                clawmemory = %name,
-                ns = %ns,
-                version_hash = %v_hash,
-                compiled_digest = %compiled_digest,
-                generation = observed_generation.unwrap_or(0),
-                store_name = %memory.spec.store_name,
-                scope = %memory.spec.scope,
-                "ClawMemoryCompiled"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                clawmemory = %name,
-                error_class = e.class(),
-                "ClawMemoryBindingWriteFailed"
-            );
-            degraded = Some(("BindingWriteFailed", e.to_string()));
+    // If bundleRef resolution already marked us Degraded
+    // (InvalidSpec mutex / fetch / verify failure), skip the
+    // ConfigMap write — `effective_spec` is the selector-only
+    // sentinel and compiling it would publish empty bytes that
+    // every router would reject anyway. Mirrors the 1c.3
+    // InferencePolicy path.
+    if degraded.is_none() {
+        match ensure_binding_configmap(
+            &configmaps,
+            &cm_name,
+            &name,
+            &canonical_str,
+            &v_hash,
+            &compiled_digest,
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    clawmemory = %name,
+                    ns = %ns,
+                    version_hash = %v_hash,
+                    compiled_digest = %compiled_digest,
+                    generation = observed_generation.unwrap_or(0),
+                    store_name = effective_spec.store_name.as_deref().unwrap_or(""),
+                    scope = effective_spec.scope.as_deref().unwrap_or(""),
+                    bundle_ref_digest = bundle_ref_digest.as_deref().unwrap_or(""),
+                    "ClawMemoryCompiled"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    clawmemory = %name,
+                    error_class = e.class(),
+                    "ClawMemoryBindingWriteFailed"
+                );
+                degraded = Some(("BindingWriteFailed", e.to_string()));
+            }
         }
     }
 
@@ -322,6 +339,7 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
             last_reconciled_at: Some(rfc3339_now()),
             compiled_digest: Some(compiled_digest),
             loaded_digest,
+            bundle_ref_digest,
         }
     });
     api.patch_status(
@@ -343,6 +361,145 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
 
 fn rfc3339_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Slice 1c.4 — resolve `spec.bundleRef` (if set) into an effective
+/// [`crate::claw_memory::ClawMemorySpec`] for [`compile_to_binding`].
+///
+/// Returns a 3-tuple `(effective_spec, bundle_ref_digest, degraded)`:
+/// - `effective_spec` is what compile_to_binding will see. When
+///   `bundleRef` is unset, this is the CR's spec verbatim (the
+///   inline path). When `bundleRef` is set and the fetch + cosign
+///   verification succeed, the bundle's content fields are merged
+///   onto the CR's `sandboxRef`. On any error this is a
+///   selector-only sentinel that won't be compiled.
+/// - `bundle_ref_digest` is the verified bundle's
+///   `sha256:...` (stamped into `status.bundleRefDigest`) when the
+///   bundle path succeeded; `None` otherwise.
+/// - `degraded`, when `Some`, carries the `(reason, message)` for
+///   the `Degraded=True` condition the reconciler will surface.
+///
+/// The bundle path goes through
+/// [`crate::policy_fetcher::fetch_and_verify_generic`] with
+/// [`crate::policy_canonical::memory::MemoryKind`], so this function
+/// inherits the same cosign trust-root, ACR auth, and `FetchError`
+/// taxonomy as the egress, tools, and inference paths.
+async fn resolve_memory_source(
+    memory: &ClawMemory,
+) -> (
+    crate::claw_memory::ClawMemorySpec,
+    Option<String>,
+    Option<(&'static str, String)>,
+) {
+    let spec = &memory.spec;
+    let inline_any = spec.store_name.is_some()
+        || spec.scope.is_some()
+        || spec.retention_days.is_some()
+        || spec.delete_on_sandbox_delete.is_some()
+        || spec.display_name.is_some();
+    let bundle_set = spec.bundle_ref.is_some();
+
+    if inline_any && bundle_set {
+        return (
+            crate::claw_memory::ClawMemorySpec {
+                sandbox_ref: spec.sandbox_ref.clone(),
+                ..Default::default()
+            },
+            None,
+            Some((
+                "InvalidSpec",
+                "spec.bundleRef is mutually exclusive with spec.storeName, \
+                 spec.scope, spec.retentionDays, spec.deleteOnSandboxDelete, \
+                 and spec.displayName"
+                    .into(),
+            )),
+        );
+    }
+
+    if !bundle_set {
+        return (spec.clone(), None, None);
+    }
+
+    let bundle_ref = spec
+        .bundle_ref
+        .as_ref()
+        .expect("bundle_set implies Some")
+        .clone();
+
+    let signer_policy_handle = crate::signer_policy::global();
+    let verify_result = match signer_policy_handle.snapshot() {
+        crate::signer_policy::SignerPolicyState::FromConfigMap(p) => {
+            let cfg: crate::policy_fetcher::SignerPolicyConfig = p.into();
+            crate::policy_fetcher::fetch_and_verify_generic::<
+                crate::policy_canonical::memory::MemoryKind,
+            >(&bundle_ref, &cfg)
+            .await
+        }
+        crate::signer_policy::SignerPolicyState::Malformed(msg) => Err(
+            crate::policy_fetcher::FetchError::SignerPolicyMalformed(msg),
+        ),
+        crate::signer_policy::SignerPolicyState::Absent => {
+            let cfg = crate::policy_fetcher::SignerPolicyConfig::from_env();
+            crate::policy_fetcher::fetch_and_verify_generic::<
+                crate::policy_canonical::memory::MemoryKind,
+            >(&bundle_ref, &cfg)
+            .await
+        }
+    };
+
+    match verify_result {
+        Ok(verified) => {
+            let effective = merge_bundle_with_selector(&spec.sandbox_ref, &verified);
+            (effective, Some(verified.digest), None)
+        }
+        Err(e) => {
+            let (reason, msg) = fetch_error_to_degraded(&e);
+            tracing::warn!(
+                clawmemory = %memory.name_any(),
+                registry = %bundle_ref.registry,
+                repository = %bundle_ref.repository,
+                digest = %bundle_ref.digest,
+                reason,
+                "ClawMemory bundleRef fetch/verify failed: {msg}"
+            );
+            (
+                crate::claw_memory::ClawMemorySpec {
+                    sandbox_ref: spec.sandbox_ref.clone(),
+                    ..Default::default()
+                },
+                None,
+                Some((reason, msg)),
+            )
+        }
+    }
+}
+
+/// Merge the verified-bundle content fields onto the CR's
+/// `sandboxRef` to produce the effective spec for
+/// [`compile_to_binding`]. The bundle owns content; the CR owns the
+/// sandbox the binding applies to.
+fn merge_bundle_with_selector(
+    sandbox_ref: &crate::claw_memory::SandboxRef,
+    verified: &crate::policy_canonical::memory::VerifiedMemoryBinding,
+) -> crate::claw_memory::ClawMemorySpec {
+    crate::claw_memory::ClawMemorySpec {
+        store_name: verified.store_name.clone(),
+        sandbox_ref: sandbox_ref.clone(),
+        scope: verified.scope.clone(),
+        retention_days: verified.retention_days,
+        delete_on_sandbox_delete: verified.delete_on_sandbox_delete,
+        display_name: verified.display_name.clone(),
+        bundle_ref: None,
+    }
+}
+
+/// Map [`crate::policy_fetcher::FetchError`] to the `(reason,
+/// message)` pair surfaced as a `Degraded=True` condition. Shares
+/// the one vocabulary [`crate::policy_fetcher::reason_for_error`]
+/// owns across all signed-policy kinds.
+fn fetch_error_to_degraded(e: &crate::policy_fetcher::FetchError) -> (&'static str, String) {
+    let reason = crate::policy_fetcher::reason_for_error(e).unwrap_or("Transient");
+    (reason, e.to_string())
 }
 
 /// Slice 3b.4 — scan the per-sandbox poll outcomes for a router-side

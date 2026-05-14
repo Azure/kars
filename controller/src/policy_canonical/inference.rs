@@ -113,7 +113,7 @@ impl PolicyKind for InferenceKind {
         }
         match &entry.verified {
             CachedValue::Inference(v) => Some(v.clone()),
-            CachedValue::Egress(_) | CachedValue::Tools(_) => None,
+            CachedValue::Egress(_) | CachedValue::Memory(_) | CachedValue::Tools(_) => None,
         }
     }
 

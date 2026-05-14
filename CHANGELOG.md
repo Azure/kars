@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1c.4 — `ClawMemory.spec.bundleRef` (signed OCI artifact)
+
+Fourth step in the Slice 1c-real signing-generalization arc.
+`ClawMemory` now joins `EgressAllowlist` (1c.1), `ToolPolicy` (1c.2),
+and `InferencePolicy` (1c.3) on the unified
+`policy_fetcher::fetch_and_verify_generic` pipeline.
+
+**Producer side (controller)**
+
+- New `controller/src/policy_canonical/memory.rs` —
+  `MemoryKind: PolicyKind` impl. Bundle carries `storeName`, `scope`,
+  `retentionDays`, `deleteOnSandboxDelete`, `displayName`. The
+  `sandboxRef` selector stays in the CR — the parser explicitly
+  rejects it inside a bundle so one signed artifact can be referenced
+  by multiple `ClawMemory` CRs targeting different sandboxes.
+  Structural validation: DNS-label `storeName` (1-63), non-empty
+  `scope`, `retentionDays > 0`, type-checked `deleteOnSandboxDelete`
+  / `displayName`. Media type
+  `application/vnd.azureclaw.memory-binding.v1+json`. Per-kind cache
+  slot via `OnceLock<CachedValue::Memory(...)>` on the shared
+  `policy_canonical` cache. 18 unit tests covering every rejection
+  path.
+- `ClawMemorySpec.bundleRef: Option<OciArtifactRef>` added; the
+  inline content fields (`storeName`, `scope`, `retentionDays`,
+  `deleteOnSandboxDelete`, `displayName`) are now `Option`-typed and
+  required only on the inline path.
+- `ClawMemoryStatus.bundleRefDigest: Option<String>` surfaces the
+  verified OCI manifest digest after a successful
+  `fetch_and_verify_generic::<MemoryKind>` call.
+- `claw_memory_reconciler::resolve_memory_source` — 4-way match
+  (no inline / inline only / bundle only / both) mirroring
+  `inference_policy_reconciler::resolve_inference_source`. On the
+  bundle path, merges the verified content onto the CR's
+  `sandboxRef` selector to produce the effective spec for
+  `compile_to_binding`. `FetchError` variants map through the shared
+  `policy_fetcher::reason_for_error` vocabulary. On any degraded
+  branch (mutex / fetch / verify) the binding ConfigMap write is
+  skipped so the router's last-good binding remains in force until
+  the operator fixes the spec.
+- `claw_memory_compile::compile_to_binding` now tolerates the new
+  Optional spec fields, applying the same defaults the inline path
+  always implied (`deleteOnSandboxDelete` defaults to `true`, others
+  to empty / `None`).
+
+**Admission**
+
+- CEL rule on `ClawMemorySpec`:
+  `!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))`
+  — rejects mixed shapes at apply-time. The pre-existing `storeName`
+  and `scope` rules are wrapped in `has(self.bundleRef) || …` so the
+  inline-path validations only fire when the bundle path is unused.
+
+**Schema**
+
+- Regenerated `deploy/helm/azureclaw/templates/crd-clawmemory.yaml`
+  via `DUMP_CLAWMEMORY_CRD_YAML=1 cargo test …
+  helm_drift::tests::dump_clawmemory_crd_yaml`. Adds the
+  `spec.bundleRef` block, relaxes `required: [storeName, scope]` on
+  the spec to `required: [sandboxRef]`, and adds the new CEL mutex
+  rule + `status.bundleRefDigest`. CNCF C10 labels preserved.
+
+**Out of scope (deferred)**
+
+- CLI dispatch `azureclaw policy sign --kind memory-binding` — lands
+  with the unified CLI in Slice 1c.6.
+- McpServer `bundleRef` — Slice 1c.5.
+
+Test deltas: controller 636 → 654 (+18 memory parser tests).
+clippy `-D warnings` clean, fmt clean, helm_drift clean, CNCF
+conformance clean. Router untouched — wire contract unchanged
+(`compile_to_binding` produces identical bytes from the effective
+spec regardless of provenance).
+
 ### Slice 1c.3 — `InferencePolicy.spec.bundleRef` (signed OCI artifact)
 
 Third step in the Slice 1c-real signing-generalization arc.
@@ -69,7 +142,6 @@ that the controller pulls by digest and validates per
 
 - CLI dispatch `azureclaw policy sign --kind inference-policy`
   — lands with the unified CLI in Slice 1c.6.
-- ClawMemory `bundleRef` — Slice 1c.4.
 - McpServer `bundleRef` — Slice 1c.5.
 
 Test deltas: controller 619 → 636 (+17 inference parser tests).
