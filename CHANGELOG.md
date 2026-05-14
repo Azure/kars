@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1c.5 — `McpServer.spec.bundleRef` (signed OCI artifact)
+
+Fifth and final per-kind step in the Slice 1c-real
+signing-generalization arc. `McpServer` now joins `EgressAllowlist`
+(1c.1), `ToolPolicy` (1c.2), `InferencePolicy` (1c.3), and
+`ClawMemory` (1c.4) on the unified
+`policy_fetcher::fetch_and_verify_generic` pipeline.
+
+**Producer side (controller)**
+
+- New `controller/src/policy_canonical/mcp_server.rs` —
+  `McpServerKind: PolicyKind` impl. Bundle carries the server
+  identity + tool surface: `url`, `oauth` (issuer / audience /
+  resource / pkce), `productionMode`, `scopes`, `allowedTools`,
+  `displayName`. The `allowedSandboxes` selector stays on the CR
+  — the parser explicitly rejects it inside a bundle so one signed
+  artifact can be referenced by multiple `McpServer` CRs with
+  different sandbox selectors (the multi-tenant fan-out pattern
+  established in 1c.4). Structural validation: type-checked
+  scalars, non-empty string arrays, RFC 7636 PKCE constraint
+  surfaced via the canonical-form parser too. Media type
+  `application/vnd.azureclaw.mcp-server-bundle.v1+json`. Per-kind
+  cache slot via `OnceLock<CachedValue::McpServer(...)>` on the
+  shared `policy_canonical` cache. 22 unit tests covering every
+  rejection path.
+- `McpServerSpec.bundleRef: Option<OciArtifactRef>` added; the
+  inline content fields (`url`, `oauth`, `productionMode`,
+  `scopes`, `allowedTools`, `displayName`) are now `Option`-typed
+  and required only on the inline path.
+- `McpServerStatus.bundleRefDigest: Option<String>` surfaces the
+  verified OCI manifest digest after a successful
+  `fetch_and_verify_generic::<McpServerKind>` call.
+- `mcp_server_reconciler::resolve_mcp_source` — 4-way match
+  (no inline / inline only / bundle only / both) mirroring
+  `inference_policy_reconciler::resolve_inference_source` and
+  `claw_memory_reconciler::resolve_memory_source`. On the bundle
+  path, merges the verified content onto the CR's
+  `allowedSandboxes` selector to produce the effective spec
+  consumed by the rest of the reconcile loop (JWKS write,
+  productionMode guard, signing secret, ConfigMap mirror).
+  `FetchError` variants map through the shared
+  `policy_fetcher::reason_for_error` vocabulary. On any degraded
+  branch (mutex / fetch / verify) the per-server JWKS ConfigMap
+  write is skipped so the router's last-good server registry
+  remains in force until the operator fixes the spec.
+
+**Admission**
+
+- CEL rules on `McpServerSpec` rewritten:
+  - The pre-existing `productionMode → oauth.issuer` rule and the
+    `productionMode → url https://` rule are now wrapped in
+    `has(self.bundleRef) || !has(self.productionMode) || …` so
+    the inline-path validations only fire when the bundle path is
+    unused (and `productionMode` is set + true).
+  - New mutex rule:
+    `!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.allowedTools) && !has(self.displayName))`
+    — rejects mixed shapes at apply-time.
+
+**Schema**
+
+- Regenerated `deploy/helm/azureclaw/templates/crd-mcpserver.yaml`
+  via `DUMP_MCP_CRD_YAML=1 cargo test …
+  helm_drift::tests::dump_mcp_crd_yaml`. Adds the `spec.bundleRef`
+  block, makes the content fields optional in the schema, and adds
+  the new CEL mutex rule + `status.bundleRefDigest`. CNCF C10
+  labels preserved.
+
+**Out of scope (deferred)**
+
+- CLI dispatch `azureclaw policy sign --kind mcp-server-bundle`
+  — lands with the unified CLI in Slice 1c.6.
+- `SignerPolicy.ed25519Keys[]` forward-compat for the grant lane
+  — Slice 1c.6.
+- `EgressApproval` CRD — Slice 5e-thin (independent code path).
+
+Test deltas: controller 654 → 677 (+22 mcp_server parser tests +
++1 mcp_server_validations injection). clippy `-D warnings` clean,
+fmt clean, helm_drift clean, workspace tests clean. Router
+untouched — wire contract unchanged (per-server JWKS bytes are
+identical whether the spec is inline or merged from a verified
+bundle).
+
 ### Slice 1c.4 — `ClawMemory.spec.bundleRef` (signed OCI artifact)
 
 Fourth step in the Slice 1c-real signing-generalization arc.
@@ -72,7 +154,6 @@ and `InferencePolicy` (1c.3) on the unified
 
 - CLI dispatch `azureclaw policy sign --kind memory-binding` — lands
   with the unified CLI in Slice 1c.6.
-- McpServer `bundleRef` — Slice 1c.5.
 
 Test deltas: controller 636 → 654 (+18 memory parser tests).
 clippy `-D warnings` clean, fmt clean, helm_drift clean, CNCF
@@ -142,7 +223,6 @@ that the controller pulls by digest and validates per
 
 - CLI dispatch `azureclaw policy sign --kind inference-policy`
   — lands with the unified CLI in Slice 1c.6.
-- McpServer `bundleRef` — Slice 1c.5.
 
 Test deltas: controller 619 → 636 (+17 inference parser tests).
 clippy `-D warnings` clean, fmt clean, helm_drift clean, CNCF

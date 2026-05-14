@@ -31,6 +31,7 @@ use std::time::{Instant, SystemTime};
 
 pub mod egress;
 pub mod inference;
+pub mod mcp_server;
 pub mod memory;
 pub mod tools;
 
@@ -39,6 +40,8 @@ pub mod tools;
 pub use egress::EgressKind;
 #[allow(unused_imports)]
 pub use inference::InferenceKind;
+#[allow(unused_imports)]
+pub use mcp_server::McpServerKind;
 #[allow(unused_imports)]
 pub use memory::MemoryKind;
 #[allow(unused_imports)]
@@ -56,10 +59,11 @@ pub use tools::ToolsKind;
 /// is the implementation detail of how
 /// [`PolicyKind::cache_get`] / [`PolicyKind::cache_put`] are wired, not
 /// a public extension point.
-#[allow(dead_code)] // future kinds will add variants in 1c.5
+#[allow(dead_code)] // future kinds (eval-corpus) will add variants
 pub(crate) enum CachedValue {
     Egress(egress::VerifiedAllowlist),
     Inference(inference::VerifiedInferencePolicy),
+    McpServer(mcp_server::VerifiedMcpServerBundle),
     Memory(memory::VerifiedMemoryBinding),
     Tools(tools::VerifiedAgtProfile),
 }
