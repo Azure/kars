@@ -272,6 +272,21 @@ pub mod reason {
     /// to Ready. Slice 4d.2 wires the per-server file scheme that the
     /// plural form unlocks; Slice 4-final removes the singular field.
     pub const MCP_SINGULAR_DEPRECATED: &str = "McpSingularDeprecated";
+
+    /// `crd-well-oiled-machine` Slice 5c.2 — `Unsigned`:
+    /// `AllowlistVerified=False` reason for sandboxes that use
+    /// `spec.networkPolicy.allowedEndpoints` (inline) without a
+    /// signed `spec.networkPolicy.allowlistRef`. Default behaviour
+    /// is *allow with warning* — the sandbox still reconciles to
+    /// `Ready=True` and the inline endpoints are programmed into the
+    /// L4 NetworkPolicy and the L7 router allowlist mount. When the
+    /// controller is configured with `REQUIRE_SIGNED_ALLOWLIST=true`
+    /// (helm value `egress.requireSigned: true`), the resolver
+    /// fail-closes instead: endpoints = None,
+    /// `AllowlistAuthoritative=False/FailedClosed`,
+    /// `fail_closed_no_lkg = true`, and the reconciler elevates
+    /// `Degraded=True/Unsigned`.
+    pub const UNSIGNED: &str = "Unsigned";
 }
 
 /// Slice 3b.4 wire-contract prefix routers attach to

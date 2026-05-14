@@ -214,6 +214,25 @@ fn split_csv_env(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Slice 5c.2: `REQUIRE_SIGNED_ALLOWLIST=true` flips the inline-only
+/// (no `allowlistRef`) path from *allow with `Unsigned` warning* to
+/// fail-closed. Default `false`. Sourced via helm value
+/// `egress.requireSigned` → controller deployment env.
+///
+/// Accepts `true|1|yes|on` (case-insensitive) as truthy; anything else
+/// is falsy. Read on every reconcile so operators can toggle without a
+/// controller restart by editing the Deployment env.
+pub(crate) fn require_signed_allowlist() -> bool {
+    matches!(
+        std::env::var("REQUIRE_SIGNED_ALLOWLIST")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
 // ─────────────────────────── cache ───────────────────────────
 
 #[derive(Debug, Clone)]
@@ -1188,6 +1207,49 @@ pub async fn resolve_allowlist_with_handle(
                 "no allowlistRef set; using inline allowedEndpoints",
                 generation,
             ));
+            // Slice 5c.2: surface inline-only as `AllowlistVerified=False/Unsigned`.
+            // Default behaviour is *allow with warning* — leave
+            // `endpoints` set and let the reconciler still program the
+            // L4 NetworkPolicy + L7 router mount. Operators flip
+            // `egress.requireSigned: true` (helm) to fail-closed; see
+            // below.
+            conditions.push(preserve_transition_time(
+                prior_verified,
+                TYPE_ALLOWLIST_VERIFIED,
+                cond_status::FALSE,
+                cond_reason::UNSIGNED,
+                "inline allowedEndpoints have no cosign attestation \
+                 (set spec.networkPolicy.allowlistRef to sign the bundle)",
+                generation,
+            ));
+        }
+        let require_signed = require_signed_allowlist();
+        if require_signed && inline_present {
+            // Fail-closed: drop the endpoints + flip authoritative to
+            // FailedClosed so the reconciler stamps Degraded.
+            return AllowlistResolution {
+                endpoints: None,
+                conditions: vec![
+                    preserve_transition_time(
+                        prior_authoritative,
+                        TYPE_ALLOWLIST_AUTHORITATIVE,
+                        cond_status::FALSE,
+                        cond_reason::FAILED_CLOSED,
+                        "REQUIRE_SIGNED_ALLOWLIST=true and inline allowedEndpoints \
+                         have no allowlistRef; refusing to program user egress",
+                        generation,
+                    ),
+                    preserve_transition_time(
+                        prior_verified,
+                        TYPE_ALLOWLIST_VERIFIED,
+                        cond_status::FALSE,
+                        cond_reason::UNSIGNED,
+                        "REQUIRE_SIGNED_ALLOWLIST=true: inline allowedEndpoints rejected",
+                        generation,
+                    ),
+                ],
+                fail_closed_no_lkg: true,
+            };
         }
         return AllowlistResolution {
             endpoints: if inline_present { Some(inline) } else { None },
@@ -2057,6 +2119,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_inline_only_emits_authoritative_inline() {
         let _g = env_lock().lock().unwrap();
+        let _r = EnvGuard::unset("REQUIRE_SIGNED_ALLOWLIST");
         let sb = sandbox_with_inline_only(vec![ep("api.example.com", None)]);
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
         let res = resolve_allowlist_with_handle(&sb, &h).await;
@@ -2066,9 +2129,74 @@ mod tests {
             .expect("AllowlistAuthoritative emitted");
         assert_eq!(auth.status, "False");
         assert_eq!(auth.reason, "Inline");
-        assert!(cond_by_type(&res.conditions, "AllowlistVerified").is_none());
+        // Slice 5c.2: inline-only now also surfaces an Unsigned
+        // warning condition so operators see the gap.
+        let verified = cond_by_type(&res.conditions, "AllowlistVerified")
+            .expect("AllowlistVerified emitted with Unsigned reason");
+        assert_eq!(verified.status, "False");
+        assert_eq!(verified.reason, "Unsigned");
         assert!(cond_by_type(&res.conditions, "AllowlistDrift").is_none());
         assert!(!res.fail_closed_no_lkg);
+    }
+
+    /// Slice 5c.2: with `REQUIRE_SIGNED_ALLOWLIST=true`, inline-only
+    /// allowlists fail-closed (endpoints=None, fail_closed_no_lkg=true,
+    /// Authoritative=False/FailedClosed, Verified=False/Unsigned).
+    #[tokio::test]
+    async fn resolve_inline_only_with_require_signed_fails_closed() {
+        let _g = env_lock().lock().unwrap();
+        let _r = EnvGuard::set("REQUIRE_SIGNED_ALLOWLIST", "true");
+        let sb = sandbox_with_inline_only(vec![ep("api.example.com", None)]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(
+            res.endpoints.is_none(),
+            "require-signed must drop inline endpoints"
+        );
+        assert!(res.fail_closed_no_lkg, "must signal fail-closed");
+        let auth =
+            cond_by_type(&res.conditions, "AllowlistAuthoritative").expect("Authoritative emitted");
+        assert_eq!(auth.status, "False");
+        assert_eq!(auth.reason, "FailedClosed");
+        let verified =
+            cond_by_type(&res.conditions, "AllowlistVerified").expect("Verified emitted");
+        assert_eq!(verified.status, "False");
+        assert_eq!(verified.reason, "Unsigned");
+    }
+
+    /// Slice 5c.2: `REQUIRE_SIGNED_ALLOWLIST=true` with an EMPTY inline
+    /// list is a no-op (nothing to reject) — still no conditions, no
+    /// fail-closed marker.
+    #[tokio::test]
+    async fn resolve_inline_empty_with_require_signed_is_noop() {
+        let _g = env_lock().lock().unwrap();
+        let _r = EnvGuard::set("REQUIRE_SIGNED_ALLOWLIST", "true");
+        let sb = sandbox_with_inline_only(vec![]);
+        let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
+        let res = resolve_allowlist_with_handle(&sb, &h).await;
+        assert!(res.endpoints.is_none());
+        assert!(res.conditions.is_empty());
+        assert!(!res.fail_closed_no_lkg);
+    }
+
+    /// Slice 5c.2: `require_signed_allowlist()` parses common truthy
+    /// values + treats anything else as `false`.
+    #[test]
+    fn require_signed_allowlist_parses_truthy_values() {
+        let _g = env_lock().lock().unwrap();
+        for v in ["true", "TRUE", "1", "yes", "on", "On"] {
+            let _e = EnvGuard::set("REQUIRE_SIGNED_ALLOWLIST", v);
+            assert!(require_signed_allowlist(), "expected truthy: {v}");
+        }
+        for v in ["false", "0", "no", "off", "", "garbage"] {
+            let _e = EnvGuard::set("REQUIRE_SIGNED_ALLOWLIST", v);
+            assert!(!require_signed_allowlist(), "expected falsy: {v}");
+        }
+        let _u = EnvGuard::unset("REQUIRE_SIGNED_ALLOWLIST");
+        assert!(
+            !require_signed_allowlist(),
+            "unset env defaults to falsy / allow-with-warning"
+        );
     }
 
     #[tokio::test]

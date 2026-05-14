@@ -1017,19 +1017,39 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // failure mode that should be visible to operators, not papered
     // over.
     if allowlist_resolution.fail_closed_no_lkg {
+        // Distinguish the two fail-closed reasons so the Degraded
+        // condition is actionable: verify-fail + no-LKG vs.
+        // Slice 5c.2 unsigned-rejection (REQUIRE_SIGNED_ALLOWLIST=true
+        // and inline-only allowlist).
+        let unsigned_rejected = allowlist_resolution.conditions.iter().any(|c| {
+            c.type_ == crate::status::conditions::TYPE_ALLOWLIST_VERIFIED
+                && c.reason == crate::status::conditions::reason::UNSIGNED
+        });
+        let (deg_reason, deg_msg): (&str, &str) = if unsigned_rejected {
+            (
+                crate::status::conditions::reason::UNSIGNED,
+                "REQUIRE_SIGNED_ALLOWLIST=true and inline allowedEndpoints \
+                 have no allowlistRef; refusing to broaden egress (fail-closed). \
+                 Either set spec.networkPolicy.allowlistRef to a signed OCI \
+                 artifact, or set helm value egress.requireSigned=false.",
+            )
+        } else {
+            (
+                crate::status::conditions::reason::FAILED_CLOSED,
+                "egress allowlist verify failed and no last-known-good cached; \
+                 refusing to broaden egress (fail-closed)",
+            )
+        };
         tracing::warn!(
             sandbox = %name,
-            "AllowlistAuthoritative=False/FailedClosed: verify failed and no last-known-good; \
-             refusing to deploy sandbox pod with broad egress"
+            unsigned_rejected,
+            "AllowlistAuthoritative=False/FailedClosed: {}",
+            deg_reason,
         );
         let sandbox_api: Api<ClawSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-        let mut status_obj = crate::status::build_degraded_status_patch(
-            &sandbox,
-            crate::status::conditions::reason::FAILED_CLOSED,
-            "egress allowlist verify failed and no last-known-good cached; \
-             refusing to broaden egress (fail-closed)",
-        );
+        let mut status_obj =
+            crate::status::build_degraded_status_patch(&sandbox, deg_reason, deg_msg);
         // Preserve the resolution's three conditions so operators see
         // the verify-fail reason alongside the Degraded marker.
         if let Some(arr) = status_obj["status"]["conditions"].as_array_mut() {

@@ -51,6 +51,15 @@ spec:
             - name: BYO_STRICT_MODE
               value: "1"
             {{- end }}
+            {{- if .Values.egress.requireSigned }}
+            # Slice 5c.2: when true, the controller rejects sandboxes
+            # whose `spec.networkPolicy.allowedEndpoints` is set without
+            # a signed `spec.networkPolicy.allowlistRef`. Default
+            # `false` — inline-only allowlists are allowed but stamped
+            # `AllowlistVerified=False/Unsigned` as a warning.
+            - name: REQUIRE_SIGNED_ALLOWLIST
+              value: "true"
+            {{- end }}
             - name: INFERENCE_ROUTER_IMAGE
               value: "{{ .Values.inferenceRouter.image.repository }}:{{ .Values.inferenceRouter.image.tag }}"
             - name: SANDBOX_IMAGE
