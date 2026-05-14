@@ -635,7 +635,7 @@ EOF
     local fin
     fin=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
     case "$fin" in
-        *azureclaw.azure.com/egressapproval*)
+        *azureclaw.azure.com/egress-approval-cleanup*)
             pass "EgressApproval: finalizer present"
             ;;
         *)
