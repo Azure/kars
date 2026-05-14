@@ -409,44 +409,55 @@ pub fn claw_memory_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on ClawMemory")
 }
 
-/// `ClawEval.spec` CEL rules. Phase 2 §8 entry 6 (S6).
+/// `ClawEval.spec` CEL rules. Slice 6.3 of `crd-well-oiled-machine`.
 ///
-/// `ClawEval` is a binding/provisioning resource over Azure AI
-/// Foundry Evals (per `docs/implementation-plan.md` §10.5 #6). The CRD
-/// is shape-only — Foundry availability and runtime trigger semantics
-/// are out of admission scope. Rules:
+/// `ClawEval` declares a policy-conformance run against a target
+/// `ClawSandbox`. The reconciler spawns a Kubernetes `Job`/`CronJob`
+/// running the `azureclaw-conformance-runner` image.
 ///
-/// - `sandboxRef.name` non-empty (1-253 chars; same length cap as
-///   K8s object names).
-/// - `evaluators`: each entry 1-256 chars; required (`size >= 1`)
-///   when `suite == "foundry-evals"`. Other suites accept empty.
-/// - `schedule`, when set, looks like a 5-or-6-token cron line. We do
-///   not parse cron at admission (defer to runtime), but we reject
-///   empty strings and impossible token counts.
-/// - `threshold.score`, when set, in `[0.0, 1.0]`.
-/// - `dataset`: at most one of `configMapRef` / `inline` (mutually
-///   exclusive). `inline` capped at 64 entries to keep the CR small.
+/// Rules:
+///
+/// - `targetSandboxRef.name`: non-empty, 1-253 chars (K8s object-name
+///   length cap).
+/// - `corpus`: exactly one of `builtin` / `bundleRef` (mutex).
+/// - `corpus.builtin`, when set, 1-253 chars (corpus names follow
+///   DNS-1123 label conventions but we accept any short token at
+///   admission — the reconciler rejects unknown names with
+///   `CorpusBuiltinMissing`).
+/// - `schedule`, when set, looks like a 5-or-6-token cron expression.
+///   The reconciler does the authoritative parse via
+///   `kube-rs`/`cron` at apply-time; here we just reject empty/long
+///   strings.
 /// - `displayName`, when set, 1-256 chars.
+/// - `runnerImage`, when set, 1-512 chars (room for digest-pinned
+///   `registry.example.com/foo/bar@sha256:...` URIs).
 #[must_use]
 pub fn claw_eval_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule: "size(self.sandboxRef.name) > 0 && size(self.sandboxRef.name) <= 253".into(),
-            message: Some("spec.sandboxRef.name must be 1-253 characters".into()),
+            rule: "size(self.targetSandboxRef.name) > 0 && size(self.targetSandboxRef.name) <= 253"
+                .into(),
+            message: Some("spec.targetSandboxRef.name must be 1-253 characters".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "self.suite != 'foundry-evals' || (has(self.evaluators) && size(self.evaluators) >= 1)".into(),
+            rule:
+                "has(self.corpus.builtin) != has(self.corpus.bundleRef)"
+                    .into(),
             message: Some(
-                "spec.evaluators must contain at least one entry when spec.suite is 'foundry-evals'".into(),
+                "spec.corpus must set exactly one of `builtin` or `bundleRef` (mutually exclusive)".into(),
             ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "!has(self.evaluators) || self.evaluators.all(e, size(e) > 0 && size(e) <= 256)".into(),
-            message: Some("each spec.evaluators entry must be 1-256 characters".into()),
+            rule:
+                "!has(self.corpus.builtin) || (size(self.corpus.builtin) > 0 && size(self.corpus.builtin) <= 253)"
+                    .into(),
+            message: Some(
+                "spec.corpus.builtin, when set, must be 1-253 characters".into(),
+            ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -459,30 +470,14 @@ pub fn claw_eval_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "!has(self.threshold) || (self.threshold.score >= 0.0 && self.threshold.score <= 1.0)".into(),
-            message: Some("spec.threshold.score must be in [0.0, 1.0] when set".into()),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-        ValidationRule {
-            rule: "!has(self.dataset) || !(has(self.dataset.configMapRef) && has(self.dataset.inline) && size(self.dataset.inline) > 0)".into(),
-            message: Some(
-                "spec.dataset.configMapRef and spec.dataset.inline are mutually exclusive".into(),
-            ),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-        ValidationRule {
-            rule: "!has(self.dataset) || !has(self.dataset.inline) || size(self.dataset.inline) <= 64".into(),
-            message: Some(
-                "spec.dataset.inline is capped at 64 entries; use a ConfigMap for larger datasets".into(),
-            ),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-        ValidationRule {
             rule: "!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 256)".into(),
             message: Some("spec.displayName, when set, must be 1-256 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.runnerImage) || (size(self.runnerImage) > 0 && size(self.runnerImage) <= 512)".into(),
+            message: Some("spec.runnerImage, when set, must be 1-512 characters".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -997,14 +992,14 @@ mod tests {
             .map(|r| r.rule)
             .collect();
         assert!(
-            rules.iter().any(|r| r.contains("sandboxRef.name")),
-            "must validate sandboxRef.name; got rules: {rules:?}"
+            rules.iter().any(|r| r.contains("targetSandboxRef.name")),
+            "must validate targetSandboxRef.name; got rules: {rules:?}"
         );
         assert!(
             rules
                 .iter()
-                .any(|r| r.contains("foundry-evals") && r.contains("evaluators")),
-            "must require evaluators for foundry-evals suite; got rules: {rules:?}"
+                .any(|r| r.contains("corpus.builtin") && r.contains("corpus.bundleRef")),
+            "must enforce corpus builtin/bundleRef mutex; got rules: {rules:?}"
         );
         assert!(
             rules
@@ -1013,16 +1008,8 @@ mod tests {
             "must validate schedule cron shape; got rules: {rules:?}"
         );
         assert!(
-            rules
-                .iter()
-                .any(|r| r.contains("threshold.score") && r.contains("1.0")),
-            "must bound threshold.score to [0,1]; got rules: {rules:?}"
-        );
-        assert!(
-            rules
-                .iter()
-                .any(|r| r.contains("configMapRef") && r.contains("inline")),
-            "must enforce dataset configMapRef/inline mutual exclusion; got rules: {rules:?}"
+            rules.iter().any(|r| r.contains("runnerImage")),
+            "must validate runnerImage length; got rules: {rules:?}"
         );
     }
 
@@ -1031,9 +1018,8 @@ mod tests {
         let crd = claw_eval_crd();
         let y = serde_yaml::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
-        assert!(y.contains("sandboxRef"));
-        assert!(y.contains("evaluators"));
-        assert!(y.contains("threshold"));
+        assert!(y.contains("targetSandboxRef"));
+        assert!(y.contains("corpus"));
     }
 
     // ---- EgressApproval (5e-thin) --------------------------------------

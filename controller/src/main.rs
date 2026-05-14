@@ -19,7 +19,6 @@ mod a2a_agent_compile;
 mod a2a_agent_reconciler;
 mod backoff;
 mod claw_eval;
-mod claw_eval_compile;
 mod claw_eval_reconciler;
 mod claw_memory;
 mod claw_memory_compile;

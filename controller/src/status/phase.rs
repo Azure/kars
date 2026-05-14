@@ -105,6 +105,14 @@ pub const PHASE_ACTIVE: &str = "Active";
 /// retention policy reaps it).
 pub const PHASE_EXPIRED: &str = "Expired";
 
+/// Kubernetes `Pod.status.phase` values — distinct domain from
+/// CRD `.status.phase`. Defined here so reconcilers that read pod
+/// phase (e.g. ClawEval reading runner pod logs) can avoid hard-
+/// coding the literals (`"Succeeded"` / `"Failed"`) which would
+/// collide with the phase-taxonomy guard.
+pub const POD_PHASE_SUCCEEDED: &str = "Succeeded";
+pub const POD_PHASE_FAILED: &str = "Failed";
+
 /// Canonical Warning Event reason for "controller compiled the spec
 /// but the router does not yet consume it." Whatever slice eventually
 /// wires the consumer must delete the corresponding

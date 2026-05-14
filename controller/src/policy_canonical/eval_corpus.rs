@@ -19,12 +19,9 @@
 // Slice 6.1 shipped the parser, PolicyKind impl, and cache for the
 // eval-corpus signing pipeline. The bundleRef consumer (the `ClawEval`
 // reconciler that calls `fetch_and_verify_generic::<EvalCorpusKind>`)
-// lands in slice 6.3. Until then, the items below are reachable only
-// from this module's tests; `dead_code` is silenced here, not at each
-// item, to keep the public surface a single block. Note: the
-// `Corpus`/`parse`/`judge` parts of the library are NOT dead — they
-// are consumed by the `conformance-runner` workspace crate (slice 6.2).
-#![allow(dead_code)]
+// lands in slice 6.3. Note: the `Corpus`/`parse`/`judge` parts of the
+// library are NOT dead — they are consumed by the `conformance-runner`
+// workspace crate (slice 6.2) and the `claw_eval_reconciler` (slice 6.3).
 
 use super::{CachedValue, PolicyKind};
 use crate::policy_fetcher::{CACHE_TTL, FetchError};

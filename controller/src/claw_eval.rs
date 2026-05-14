@@ -1,78 +1,76 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `ClawEval` CRD — Phase 2 §8 entry 6 (S6).
+//! `ClawEval` CRD — Slice 6 (`crd-well-oiled-machine`).
 //!
-//! Per `docs/implementation-plan.md` §10.5 #6, `ClawEval` is **a binding
-//! resource over Azure AI Foundry Evals + future suite adapters**. It
-//! declares an evaluation workflow over a sandbox; it is **not** an
-//! in-cluster eval engine and the controller does **not** run evals.
+//! `ClawEval` declares an **automated policy-conformance run** against a
+//! target [`crate::crd::ClawSandbox`]. The reconciler spawns a Kubernetes
+//! `Job` (or `CronJob`, when a schedule is set) running the
+//! [`azureclaw-conformance-runner`](https://crates.io/crates/azureclaw-conformance-runner)
+//! image; the runner replays a curated **eval corpus** of attacks against
+//! the sandbox's inference router and emits a JSON `RunReport` to its pod
+//! log. The reconciler reads the log back, parses the report, and stamps
+//! per-case verdicts onto `status`.
 //!
-//! ## Scope (S6)
+//! This replaces the pre-Slice-6 `ClawEval` shape (an unimplemented Foundry
+//! Evals binding). The new shape is a real, end-to-end producer-consumer
+//! loop: corpus → runner Job → log → status patch → optional sandbox
+//! Degraded + signed webhook.
 //!
-//! This slice ships:
+//! ## Spec
 //!
-//! 1. The CRD schema (`ClawEval.spec`).
-//! 2. The reconciler that compiles the spec to a binding JSON and
-//!    publishes it as a `ConfigMap` (`claweval-{name}-binding`).
-//! 3. CEL admission rules for shape invariants.
-//! 4. Helm CRD with drift-checked schema.
+//! - [`target_sandbox_ref`](ClawEvalSpec::target_sandbox_ref) — the sandbox
+//!   under test. Must live in the same namespace.
+//! - [`corpus`](ClawEvalSpec::corpus) — either a `Builtin{name}` reference
+//!   to one of the 5 corpora shipped in
+//!   [`azureclaw_eval_corpus::builtin`](https://docs.rs/azureclaw-eval-corpus),
+//!   or a signed `Bundle{bundle_ref}` pulled via
+//!   [`crate::policy_fetcher::fetch_and_verify_generic`] with
+//!   [`crate::policy_canonical::eval_corpus::EvalCorpusKind`].
+//! - [`schedule`](ClawEvalSpec::schedule) — optional cron expression. When
+//!   set, the reconciler ensures a `CronJob`. When unset, runs only when an
+//!   operator adds the `azureclaw.azure.com/run-now=true` annotation.
+//! - [`fail_sandbox_on_drift`](ClawEvalSpec::fail_sandbox_on_drift) — when
+//!   true, a failing report patches the target sandbox to `Degraded` via a
+//!   distinct field manager (`azureclaw-controller/claweval-drift`).
 //!
-//! What this slice **does NOT** do (and why):
+//! Webhook delivery and operator-driven CLI surfaces (`azureclaw eval run`)
+//! ship in Slice 6.4.
 //!
-//! - **Does NOT call Foundry directly from the controller.** The Foundry
-//!   Evals API is reached from the existing CLI path
-//!   (`cli/src/commands/eval.ts`) and the router proxy
-//!   (`/openai/evals`, `/evaluators` in
-//!   `inference-router/src/routes/inference.rs`). The controller has
-//!   no Foundry credential and we explicitly do not want one.
-//! - **Does NOT run a CronJob** to trigger evals. The `schedule` field
-//!   is preserved verbatim in the binding; S7 wires the trigger
-//!   (sandbox-side timer or router-side scheduler).
-//! - **Does NOT enforce regression actions.** `regressionAction` is
-//!   declared in spec; runtime path (S7) reads the binding, observes
-//!   the eval result, and patches the `ClawSandbox` status / spec
-//!   accordingly (e.g., `suspend=true`).
-//! - **Does NOT compute pass/fail.** The threshold is preserved in the
-//!   binding; the runtime path compares the observed score against it
-//!   and writes `lastPass`, `lastScore`, and an `EvalsPassed` condition
-//!   to status using its own field manager
-//!   (`azureclaw-router/claweval`). The controller never touches those
-//!   fields.
+//! ## Status
 //!
-//! ## Reuse map (no-duplication rule, §0.2/§0.3)
-//!
-//! - **CRD-derive shape**: mirrors S2/S3/S4/S5.
-//! - **`LocalObjectRef`** for `bindingConfigMapRef`: re-used from
-//!   [`crate::mcp_server`] — 6th semantic client.
-//! - **`Condition`** vocabulary: re-used from
-//!   [`crate::status::conditions`] via the reconciler module.
-//! - **Foundry Evals API surface**: existing
-//!   `inference-router/src/routes/inference.rs` proxy and
-//!   `cli/src/commands/eval.ts` flow. **Not modified in this slice.**
-//!
-//! ## Field-manager split (S7 forward-compat)
-//!
-//! Status fields owned by the **controller** (this slice):
-//! `phase`, `observedGeneration`, `conditions` (Ready / Progressing /
-//! Degraded), `bindingConfigMapRef`, `versionHash`, `lastReconciledAt`.
-//!
-//! Status fields reserved for the **runtime** (S7):
-//! `lastRunAt`, `lastScore`, `lastPass`, plus an additional
-//! `EvalsPassed` condition appended via SSA with a distinct field
-//! manager. Both sides use `Patch::Apply` so SSA arbitrates ownership.
+//! - [`last_run_at`](ClawEvalStatus::last_run_at) — RFC 3339 timestamp of
+//!   the last completed run.
+//! - [`last_result`](ClawEvalStatus::last_result) — the most recent
+//!   verdict (pass/fail counts + drift summary).
+//! - [`history`](ClawEvalStatus::history) — bounded to the last
+//!   [`MAX_HISTORY`] runs, newest-first.
+//! - [`conditions`](ClawEvalStatus::conditions) — Ready / Progressing /
+//!   Degraded / `ConformanceDrift`.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::crd::OciArtifactRef;
 use crate::mcp_server::LocalObjectRef;
 
-/// `ClawEval.spec` — declares an evaluation workflow over a sandbox.
+/// Maximum number of `EvalResultSummary` entries the controller will keep
+/// in `status.history`. Older entries are dropped (FIFO from the tail).
 ///
-/// Resolution rule: a sandbox can have multiple `ClawEval` CRs (one
-/// per suite or schedule). The runtime path indexes them by name.
+/// 20 is large enough to see weekly drift across a 4-month window of
+/// daily runs, small enough that the entire status fits in etcd's default
+/// 1 MiB object cap with thousands of bytes to spare for evidence text.
+pub const MAX_HISTORY: usize = 20;
+
+/// Annotation operators add to a `ClawEval` CR to trigger an immediate
+/// run, in addition to (or instead of) the scheduled run. The controller
+/// clears the annotation once it has spawned the corresponding Job, so
+/// the annotation is idempotent (re-setting it triggers another run).
+pub const ANNOTATION_RUN_NOW: &str = "azureclaw.azure.com/run-now";
+
+/// `ClawEval.spec` — declares a conformance run over a sandbox.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
     group = "azureclaw.azure.com",
@@ -81,203 +79,415 @@ use crate::mcp_server::LocalObjectRef;
     namespaced,
     status = "ClawEvalStatus",
     shortname = "ceval",
-    printcolumn = r#"{"name":"Sandbox","type":"string","jsonPath":".spec.sandboxRef.name"}"#,
-    printcolumn = r#"{"name":"Suite","type":"string","jsonPath":".spec.suite"}"#,
+    printcolumn = r#"{"name":"Sandbox","type":"string","jsonPath":".spec.targetSandboxRef.name"}"#,
     printcolumn = r#"{"name":"Schedule","type":"string","jsonPath":".spec.schedule"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
-    printcolumn = r#"{"name":"LastScore","type":"string","jsonPath":".status.lastScore"}"#,
+    printcolumn = r#"{"name":"LastRun","type":"date","jsonPath":".status.lastRunAt"}"#,
+    printcolumn = r#"{"name":"Passed","type":"integer","jsonPath":".status.lastResult.passed"}"#,
+    printcolumn = r#"{"name":"Failed","type":"integer","jsonPath":".status.lastResult.failed"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ClawEvalSpec {
-    /// Sandbox this eval applies to.
-    pub sandbox_ref: SandboxRef,
+    /// Sandbox this eval applies to. Must live in the same namespace.
+    pub target_sandbox_ref: SandboxRef,
 
-    /// Eval suite. `foundry-evals` is the only suite with a runtime
-    /// path today; `promptfoo` and `inspect-ai` are reserved for
-    /// future runtime adapters and are accepted by admission so
-    /// operators can pre-author manifests.
-    pub suite: ClawEvalSuite,
+    /// Source of the corpus to replay. Exactly one variant must be set;
+    /// CEL admission enforces the mutex.
+    pub corpus: CorpusSource,
 
-    /// Foundry evaluator IDs (e.g., `relevance`, `coherence`,
-    /// `fluency`). Required when `suite=foundry-evals`. Other suites
-    /// ignore this list.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evaluators: Vec<String>,
-
-    /// Model identifier the runtime path should evaluate against.
-    /// Optional; runtime defaults to the sandbox's primary model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-
-    /// Optional dataset reference. The runtime path resolves either
-    /// `configMapRef` (operator-managed JSONL) or `inline` (small
-    /// inline list). Mutually exclusive — admission enforces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dataset: Option<ClawEvalDataset>,
-
-    /// Cron schedule (5 or 6 space-separated tokens). When absent,
-    /// the eval is manual-trigger only (`azureclaw eval <name>`).
+    /// Optional cron schedule (5-token form, K8s `CronJob.spec.schedule`
+    /// shape). When empty/absent, the eval runs only when an operator
+    /// adds the `azureclaw.azure.com/run-now=true` annotation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
 
-    /// Pass/fail threshold. When absent, the runtime records the
-    /// score but never marks the eval failed.
+    /// When `true`, a failing run patches the target `ClawSandbox`'s
+    /// `Degraded` condition (reason `ConformanceDrift`) via a distinct
+    /// field manager. The sandbox reconciler will then refuse to admit
+    /// new agent sessions until the next successful eval clears the
+    /// condition.
+    ///
+    /// Defaults to `false` so first-time operators can adopt the CRD
+    /// without immediately taking sandboxes offline on a corpus update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threshold: Option<ClawEvalThreshold>,
+    pub fail_sandbox_on_drift: Option<bool>,
 
-    /// Action to take when an eval run fails the threshold.
-    /// Defaults to `Suspend`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub regression_action: Option<ClawEvalRegressionAction>,
-
-    /// Optional human-readable label.
+    /// Optional human-readable label surfaced in CLI output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-}
 
-/// Eval suite identifier.
-#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
-pub enum ClawEvalSuite {
-    /// Azure AI Foundry built-in evaluators (the only suite with a
-    /// runtime path today). Routed through `/openai/evals` +
-    /// `/evaluators` Foundry endpoints.
-    #[default]
-    #[serde(rename = "foundry-evals")]
-    FoundryEvals,
-    /// Reserved for a future `promptfoo` adapter.
-    #[serde(rename = "promptfoo")]
-    Promptfoo,
-    /// Reserved for a future `inspect-ai` adapter.
-    #[serde(rename = "inspect-ai")]
-    InspectAi,
-}
-
-/// Dataset reference. Either a `ConfigMap` containing JSONL or an
-/// inline list. Mutually exclusive — CEL enforces.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ClawEvalDataset {
-    /// Reference to a `ConfigMap` whose `dataset.jsonl` key contains
-    /// the eval cases.
+    /// Optional override of the conformance-runner container image. When
+    /// absent the controller falls back to the Helm-configured default
+    /// (`AZURECLAW_CONFORMANCE_RUNNER_IMAGE` env). Setting this on a CR
+    /// is an escape hatch for in-cluster development; production should
+    /// pin the image globally via the Helm chart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_map_ref: Option<LocalObjectRef>,
-
-    /// Inline list of eval cases. Each entry is a free-form JSON
-    /// object the runtime path passes through to the suite. Bounded
-    /// to 64 entries by CEL to keep the CR small.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(schema_with = "inline_dataset_schema")]
-    pub inline: Vec<serde_json::Value>,
+    pub runner_image: Option<String>,
 }
 
-/// Schemars override: emit `items: { type: object,
-/// x-kubernetes-preserve-unknown-fields: true }` so the resulting CRD
-/// passes Kubernetes 1.25+ validation (which rejects empty `items: {}`).
-fn inline_dataset_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::Schema::try_from(serde_json::json!({
-        "type": "array",
-        "items": {
-            "type": "object",
-            "x-kubernetes-preserve-unknown-fields": true
-        }
-    }))
-    .expect("static inline-dataset schema")
-}
-
-/// Pass/fail threshold over the suite's primary score.
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ClawEvalThreshold {
-    /// Numeric pass threshold, in `[0.0, 1.0]`.
-    pub score: f64,
-
-    /// Comparison operator. Defaults to `Gte`.
-    #[serde(default)]
-    pub op: ClawEvalThresholdOp,
-}
-
-/// Threshold comparison operator.
+/// Reference to the sandbox under test. Always same-namespace (no
+/// cross-namespace `namespace` field is permitted today; cross-namespace
+/// evals would require a separate RBAC story).
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
-pub enum ClawEvalThresholdOp {
-    /// `score >= threshold` → pass.
-    #[default]
-    #[serde(rename = "Gte")]
-    Gte,
-    /// `score > threshold` → pass.
-    #[serde(rename = "Gt")]
-    Gt,
-}
-
-/// Action to take when an eval run fails the threshold.
-#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
-pub enum ClawEvalRegressionAction {
-    /// Set `ClawSandbox.spec.suspend = true` (default). Wired by S7.
-    #[default]
-    #[serde(rename = "Suspend")]
-    Suspend,
-    /// Record the failure in conditions but take no action.
-    #[serde(rename = "None")]
-    None,
-}
-
-/// Reference to a sandbox by name (within the same namespace as the
-/// `ClawEval` CR).
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxRef {
     /// Sandbox name (`ClawSandbox.metadata.name`).
     pub name: String,
 }
 
-/// Status of a `ClawEval` reconcile.
+/// Source of the eval corpus. Mutually exclusive.
 ///
-/// **Field ownership** (see module docstring): the controller owns
-/// `phase`, `observedGeneration`, `conditions`, `bindingConfigMapRef`,
-/// `versionHash`, `lastReconciledAt`. The runtime (S7) owns
-/// `lastRunAt`, `lastScore`, `lastPass`. Both sides use SSA with
-/// distinct field managers so updates do not race.
+/// `Builtin` references one of the corpora compiled into the controller
+/// binary via [`azureclaw_eval_corpus::builtin::load`]. `Bundle` pulls a
+/// signed corpus from an OCI registry; bytes are verified against the
+/// kind's media type and parsed via [`crate::policy_canonical::eval_corpus`].
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CorpusSource {
+    /// Name of a builtin corpus shipped with the controller. See
+    /// `azureclaw_eval_corpus::builtin::ALL_NAMES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
+
+    /// Reference to a signed OCI artifact carrying a corpus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_ref: Option<OciArtifactRef>,
+}
+
+impl Default for CorpusSource {
+    fn default() -> Self {
+        Self {
+            builtin: Some("jailbreak-baseline".into()),
+            bundle_ref: None,
+        }
+    }
+}
+
+/// `ClawEval.status`.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClawEvalStatus {
+    /// One of: `Pending`, `Running`, `Ready`, `Degraded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
 
-    /// `metadata.generation` last successfully reconciled. KEP-1623.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
 
+    /// Standard K8s conditions. Includes `Ready`, `Progressing`,
+    /// `Degraded`, plus the eval-specific `ConformanceDrift` condition
+    /// (`True` when the most recent run reported any failed case).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,
 
-    /// Pointer to the binding `ConfigMap` produced by the reconciler.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding_config_map_ref: Option<LocalObjectRef>,
-
-    /// Hex-encoded sha256 prefix of the compiled binding JSON.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version_hash: Option<String>,
-
-    /// Last time the binding was compiled and pushed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_reconciled_at: Option<String>,
-
-    // ---------------------------------------------------------------
-    // Runtime-owned fields (S7). Declared in schema so the API server
-    // accepts them; the controller never sets these.
-    // ---------------------------------------------------------------
-    /// RFC3339 timestamp of the last completed eval run, written by
-    /// the runtime path.
+    /// RFC 3339 timestamp of the last completed run, written when the
+    /// reconciler successfully reads the runner pod log and parses the
+    /// `RunReport`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<String>,
 
-    /// Score of the last completed eval run, written by the runtime
-    /// path. Range `[0.0, 1.0]`.
+    /// Detailed result of the most recent run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_score: Option<f64>,
+    pub last_result: Option<EvalResult>,
 
-    /// Whether the last completed eval run passed `spec.threshold`,
-    /// written by the runtime path.
+    /// Summaries of the previous [`MAX_HISTORY`] runs, newest-first. The
+    /// entry at index 0 is also reflected in `last_result`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<EvalResultSummary>,
+
+    /// Pointer to the corpus `ConfigMap` produced by the reconciler.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_pass: Option<bool>,
+    pub corpus_config_map_ref: Option<LocalObjectRef>,
+
+    /// Hex `sha256:` digest of the resolved corpus bytes (matches the
+    /// digest computed by `eval_corpus::parse_corpus`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_digest: Option<String>,
+
+    /// When `spec.schedule` is set, name of the controller-owned
+    /// `CronJob` that fires periodic runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_job_name: Option<String>,
+}
+
+/// Full result of one eval run. Mirrors the runner's `RunReport` plus the
+/// per-case verdict counts. Bounded in shape — the controller never
+/// stamps the entire per-case detail vector (which can be huge) on
+/// status; instead it stores a compact summary plus references to the
+/// runner Job/Pod for replay.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalResult {
+    /// Schema version of the runner `RunReport` consumed. Matches
+    /// `azureclaw_conformance_runner::report::REPORT_SCHEMA_VERSION`.
+    pub schema_version: String,
+
+    /// Hex `sha256:` digest of the corpus that produced this run.
+    pub corpus_digest: String,
+
+    /// Total cases the runner attempted.
+    pub total: u32,
+
+    /// Cases whose actual decision matched the expected verdict.
+    pub passed: u32,
+
+    /// Cases whose actual decision did NOT match the expected verdict.
+    pub failed: u32,
+
+    /// Cases the runner could not exercise (transport error, timeout).
+    pub errored: u32,
+
+    /// Name of the corpus (`builtin` name, or the `repository@digest`
+    /// of the bundle).
+    pub corpus_label: String,
+
+    /// Name of the K8s `Job` that produced this run. Operators use this
+    /// to fetch the full runner log via `kubectl logs`.
+    pub job_name: String,
+
+    /// Up to 5 first-failing case IDs surfaced for at-a-glance triage.
+    /// The full per-case detail lives in the runner log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_failing_cases: Vec<String>,
+}
+
+/// Compact summary kept in `status.history`. The most-recent entry
+/// matches `last_result.{schema_version, corpus_digest, total, passed,
+/// failed, errored, last_run_at}`.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalResultSummary {
+    /// RFC 3339 completion timestamp.
+    pub at: String,
+    pub corpus_digest: String,
+    pub total: u32,
+    pub passed: u32,
+    pub failed: u32,
+    pub errored: u32,
+    pub job_name: String,
+}
+
+/// Helper: prepend `summary` to `history`, capping at [`MAX_HISTORY`].
+///
+/// The vector is treated as a deque: newest entry at index 0, older
+/// entries trail behind. Returns the new vector (functional shape so
+/// callers can use it inside `serde_json::json!` literals).
+#[must_use]
+pub fn push_history_bounded(
+    mut history: Vec<EvalResultSummary>,
+    summary: EvalResultSummary,
+) -> Vec<EvalResultSummary> {
+    history.insert(0, summary);
+    history.truncate(MAX_HISTORY);
+    history
+}
+
+/// Condition type for the eval-specific "any case in the most recent run
+/// failed its expectation" signal. `True` means drift detected; `False`
+/// means the last run was clean. Distinct from the standard `Degraded`
+/// condition because the controller itself may still be healthy when a
+/// run reports drift.
+pub const TYPE_CONFORMANCE_DRIFT: &str = "ConformanceDrift";
+
+/// Stable reason strings for `ClawEval` conditions. Operators grep on
+/// these in their alerting pipelines, so they must not change without a
+/// CRD version bump.
+pub mod reason {
+    // Forward-compat taxonomy: a handful of reasons are not yet wired
+    // by the reconciler but are part of the public API surface and
+    // alerting contract. `#[allow(dead_code)]` is local-scope to this
+    // module and does not relax warnings elsewhere.
+    #![allow(dead_code)]
+
+    pub const RECONCILED: &str = "Reconciled";
+    pub const CORPUS_RESOLVED: &str = "CorpusResolved";
+    pub const CORPUS_FETCH_FAILED: &str = "CorpusFetchFailed";
+    pub const CORPUS_PARSE_FAILED: &str = "CorpusParseFailed";
+    pub const CORPUS_BUILTIN_MISSING: &str = "CorpusBuiltinMissing";
+    pub const SCHEDULED: &str = "Scheduled";
+    pub const RUN_TRIGGERED: &str = "RunTriggered";
+    pub const RUN_REPORT_READ: &str = "RunReportRead";
+    pub const RUN_REPORT_PARSE_FAILED: &str = "RunReportParseFailed";
+    pub const DRIFT_DETECTED: &str = "DriftDetected";
+    pub const ALL_PASSED: &str = "AllPassed";
+    pub const SPEC_INVALID: &str = "SpecInvalid";
+    pub const TARGET_SANDBOX_MISSING: &str = "TargetSandboxMissing";
+    pub const TARGET_SANDBOX_NOT_READY: &str = "TargetSandboxNotReady";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spec_roundtrip_builtin() {
+        let spec = ClawEvalSpec {
+            target_sandbox_ref: SandboxRef {
+                name: "agent-001".into(),
+            },
+            corpus: CorpusSource {
+                builtin: Some("jailbreak-baseline".into()),
+                bundle_ref: None,
+            },
+            schedule: Some("0 */6 * * *".into()),
+            fail_sandbox_on_drift: Some(true),
+            display_name: Some("Daily jailbreak check".into()),
+            runner_image: None,
+        };
+        let yaml = serde_yaml::to_string(&spec).unwrap();
+        let parsed: ClawEvalSpec = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.target_sandbox_ref.name, "agent-001");
+        assert_eq!(parsed.corpus.builtin.as_deref(), Some("jailbreak-baseline"));
+        assert!(parsed.corpus.bundle_ref.is_none());
+        assert_eq!(parsed.schedule.as_deref(), Some("0 */6 * * *"));
+        assert_eq!(parsed.fail_sandbox_on_drift, Some(true));
+    }
+
+    #[test]
+    fn spec_roundtrip_bundle() {
+        let spec = ClawEvalSpec {
+            target_sandbox_ref: SandboxRef {
+                name: "agent-002".into(),
+            },
+            corpus: CorpusSource {
+                builtin: None,
+                bundle_ref: Some(OciArtifactRef {
+                    registry: "myacr.azurecr.io".into(),
+                    repository: "corpora/prompt-injection".into(),
+                    digest: "sha256:abc123".into(),
+                    artifact_type: "application/vnd.azureclaw.eval-corpus.v1+json".into(),
+                }),
+            },
+            schedule: None,
+            fail_sandbox_on_drift: None,
+            display_name: None,
+            runner_image: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: ClawEvalSpec = serde_json::from_str(&json).unwrap();
+        let bundle = parsed.corpus.bundle_ref.unwrap();
+        assert_eq!(bundle.digest, "sha256:abc123");
+        assert_eq!(parsed.target_sandbox_ref.name, "agent-002");
+    }
+
+    #[test]
+    fn history_caps_at_max() {
+        let mut history: Vec<EvalResultSummary> = Vec::new();
+        for i in 0..(MAX_HISTORY + 5) {
+            history = push_history_bounded(
+                history,
+                EvalResultSummary {
+                    at: format!("2026-01-01T00:{:02}:00Z", i),
+                    corpus_digest: "sha256:zz".into(),
+                    total: 10,
+                    passed: 10,
+                    failed: 0,
+                    errored: 0,
+                    job_name: format!("eval-{i}"),
+                },
+            );
+        }
+        assert_eq!(history.len(), MAX_HISTORY);
+        // Newest entry is at index 0 (highest `i`).
+        assert_eq!(history[0].job_name, format!("eval-{}", MAX_HISTORY + 4));
+        // Oldest kept entry is index MAX_HISTORY-1.
+        assert_eq!(history[MAX_HISTORY - 1].job_name, "eval-5");
+    }
+
+    #[test]
+    fn history_newest_first_invariant() {
+        let mut history = vec![];
+        history = push_history_bounded(
+            history,
+            EvalResultSummary {
+                at: "2026-01-01T00:00:00Z".into(),
+                corpus_digest: "sha256:a".into(),
+                total: 1,
+                passed: 1,
+                failed: 0,
+                errored: 0,
+                job_name: "first".into(),
+            },
+        );
+        history = push_history_bounded(
+            history,
+            EvalResultSummary {
+                at: "2026-01-02T00:00:00Z".into(),
+                corpus_digest: "sha256:b".into(),
+                total: 1,
+                passed: 0,
+                failed: 1,
+                errored: 0,
+                job_name: "second".into(),
+            },
+        );
+        assert_eq!(history[0].job_name, "second");
+        assert_eq!(history[1].job_name, "first");
+    }
+
+    #[test]
+    fn corpus_source_default_is_jailbreak_baseline() {
+        let c = CorpusSource::default();
+        assert_eq!(c.builtin.as_deref(), Some("jailbreak-baseline"));
+        assert!(c.bundle_ref.is_none());
+    }
+
+    #[test]
+    fn annotation_constant_is_dns_subdomain() {
+        assert!(ANNOTATION_RUN_NOW.contains('/'));
+        let (domain, key) = ANNOTATION_RUN_NOW.split_once('/').unwrap();
+        assert_eq!(domain, "azureclaw.azure.com");
+        assert_eq!(key, "run-now");
+    }
+
+    #[test]
+    fn conformance_drift_type_name_is_stable() {
+        // The condition type is part of the operator-facing CRD contract;
+        // alerting pipelines grep on this string. Changing it requires a
+        // CRD version bump.
+        assert_eq!(TYPE_CONFORMANCE_DRIFT, "ConformanceDrift");
+    }
+
+    #[test]
+    fn reasons_are_distinct() {
+        let set = [
+            reason::RECONCILED,
+            reason::CORPUS_RESOLVED,
+            reason::CORPUS_FETCH_FAILED,
+            reason::CORPUS_PARSE_FAILED,
+            reason::CORPUS_BUILTIN_MISSING,
+            reason::SCHEDULED,
+            reason::RUN_TRIGGERED,
+            reason::RUN_REPORT_READ,
+            reason::RUN_REPORT_PARSE_FAILED,
+            reason::DRIFT_DETECTED,
+            reason::ALL_PASSED,
+            reason::SPEC_INVALID,
+            reason::TARGET_SANDBOX_MISSING,
+            reason::TARGET_SANDBOX_NOT_READY,
+        ];
+        let unique: std::collections::HashSet<&str> = set.iter().copied().collect();
+        assert_eq!(set.len(), unique.len(), "duplicate reason string");
+    }
+
+    #[test]
+    fn eval_result_serde_keeps_camel_case() {
+        let r = EvalResult {
+            schema_version: "v1".into(),
+            corpus_digest: "sha256:x".into(),
+            total: 10,
+            passed: 7,
+            failed: 3,
+            errored: 0,
+            corpus_label: "builtin:jailbreak-baseline".into(),
+            job_name: "claweval-foo-runnow-abc".into(),
+            first_failing_cases: vec!["jb-007".into(), "jb-011".into()],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("schemaVersion").is_some());
+        assert!(v.get("corpusDigest").is_some());
+        assert!(v.get("firstFailingCases").is_some());
+        assert!(v.get("schema_version").is_none());
+    }
 }
