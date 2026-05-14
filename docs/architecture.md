@@ -221,8 +221,8 @@ Three properties fall out of treating these as separate CRDs:
 ### When this design would be wrong
 
 If AzureClaw only ever ran one agent per cluster, with one model, no policy,
-no peers, no memory, and no eval — eight CRDs would be cargo-culting. We
-believe a single CRD with eight optional sub-objects would be worse for
+no peers, no memory, and no eval — nine CRDs would be cargo-culting. We
+believe a single CRD with nine optional sub-objects would be worse for
 real-world deployments because you'd lose the rate-of-change separation
 above. But this is a judgement call, and we re-evaluate it every minor
 release. If your deployment never references a CRD other than `ClawSandbox`,
