@@ -21,6 +21,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Shared key so audit, deny, chaos, bench, and e2e all hit the same
+          # `target/` cache that rust-build populates. Saves ~3-5min per job
+          # compared to per-job cache keys (which made each one rebuild deps).
+          shared-key: rust-build
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo build --release
@@ -36,6 +41,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-build
+          # Audit/deny don't compile our code, but `cargo install --locked`
+          # populates ~/.cargo/bin which Swatinem caches. Sharing the key
+          # avoids reinstalling cargo-audit on every run.
+          save-if: false
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
@@ -52,6 +63,9 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-build
+          save-if: false
       - name: Install cargo-deny
         run: cargo install --locked cargo-deny
       - name: Run cargo deny check
@@ -293,7 +307,13 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test --workspace --tests --features chaos --no-fail-fast
+        with:
+          shared-key: rust-build
+      # Scope to the chaos crate only. `--workspace --features chaos` would
+      # re-execute the full ~1800-test suite already run by `rust-build` and
+      # only add 22 chaos tests on top — wasting ~95% of the job's runtime.
+      # The fault-injection tests live exclusively in `tests/chaos/`.
+      - run: cargo test --package azureclaw-chaos-tests --features chaos --tests --no-fail-fast
 
   e2e-kind:
     name: E2E (Kind)
@@ -336,6 +356,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.paths.outputs.run == 'true'
+        with:
+          shared-key: rust-build
+          # E2E builds via Docker (cargo runs inside the image, not on host),
+          # so host target/ isn't hit. Keep the cache restore for the
+          # occasional cargo invocation in the harness but don't pay the
+          # save cost.
+          save-if: false
 
       - name: Install kind
         if: steps.paths.outputs.run == 'true'
@@ -407,6 +434,9 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-build
+          save-if: false
       - name: Build benches (compile-only on every PR)
         run: cargo bench --no-run --workspace
       - name: Run controller bench + compare to baseline

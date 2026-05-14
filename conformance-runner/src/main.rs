@@ -86,8 +86,31 @@ async fn run(cli: Cli) -> Result<bool> {
         "starting conformance run",
     );
 
-    let transport =
+    let mut transport =
         Transport::new(cli.router_base.clone(), cli.timeout()).context("build router transport")?;
+
+    let needs_forward_proxy = corpus.cases.iter().any(|c| {
+        matches!(
+            c.scenario,
+            azureclaw_eval_corpus::Scenario::EgressConnect { .. }
+        )
+    });
+    let forward_proxy_addr = cli.forward_proxy.clone().or_else(|| {
+        if needs_forward_proxy {
+            derive_default_forward_proxy(&cli.router_base)
+        } else {
+            None
+        }
+    });
+    if let Some(addr) = forward_proxy_addr {
+        tracing::info!(forward_proxy = %addr, "EgressConnect cases will tunnel through this forward proxy");
+        transport = transport.with_forward_proxy(addr);
+    } else if needs_forward_proxy {
+        anyhow::bail!(
+            "corpus contains EgressConnect scenarios but no --forward-proxy was given and router_base ({}) could not be transformed into a proxy address",
+            cli.router_base
+        );
+    }
 
     let mut results: Vec<CaseReport> = Vec::with_capacity(corpus.cases.len());
     let mut passed: usize = 0;
@@ -256,6 +279,17 @@ fn synthetic_transport_failure_report(
     build_case_report(case, &actual, &verdict, duration_ms)
 }
 
+/// Derive a sensible default forward-proxy address from `router_base`
+/// by swapping the URL's port to `8444` (the inference router's
+/// hard-coded forward-proxy port — see `inference-router/src/main.rs`
+/// where `FORWARD_PROXY_PORT` defaults to 8444). Returns `None` if the
+/// URL is malformed; the caller bails with a clear error in that case.
+fn derive_default_forward_proxy(router_base: &str) -> Option<String> {
+    let url = url::Url::parse(router_base).ok()?;
+    let host = url.host_str()?;
+    Some(format!("{host}:8444"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +307,26 @@ mod tests {
     #[test]
     fn corpus_digest_differs_for_different_bytes() {
         assert_ne!(corpus_digest_hex(b"a"), corpus_digest_hex(b"b"));
+    }
+
+    #[test]
+    fn forward_proxy_derivation_swaps_port() {
+        assert_eq!(
+            derive_default_forward_proxy("http://router.svc:8443"),
+            Some("router.svc:8444".to_string())
+        );
+        assert_eq!(
+            derive_default_forward_proxy("https://192.0.2.10:8443"),
+            Some("192.0.2.10:8444".to_string())
+        );
+        assert_eq!(
+            derive_default_forward_proxy("http://localhost"),
+            Some("localhost:8444".to_string())
+        );
+    }
+
+    #[test]
+    fn forward_proxy_derivation_rejects_garbage() {
+        assert_eq!(derive_default_forward_proxy("not a url"), None);
     }
 }

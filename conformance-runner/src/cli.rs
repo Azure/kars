@@ -24,6 +24,14 @@ pub struct Cli {
     #[arg(long, value_name = "URL")]
     pub router_base: String,
 
+    /// `host:port` of the inference router's forward proxy (default
+    /// `:8444` on the same pod) used to drive `EgressConnect`
+    /// scenarios via HTTP CONNECT — the only real egress entrypoint.
+    /// When unset and the corpus contains `EgressConnect` scenarios,
+    /// the runner derives `<router-host>:8444` from `--router-base`.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub forward_proxy: Option<String>,
+
     /// Path to write the [`crate::report::RunReport`] JSON to.
     #[arg(long, value_name = "FILE")]
     pub output: PathBuf,
@@ -108,6 +116,7 @@ mod tests {
         let cli = Cli {
             corpus: "builtin:x".into(),
             router_base: "http://x".into(),
+            forward_proxy: None,
             output: PathBuf::from("/tmp/out.json"),
             timeout_ms: 2500,
             auth_header: None,

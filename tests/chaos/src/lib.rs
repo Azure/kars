@@ -11,7 +11,7 @@
 //! Run the chaos tier with:
 //!
 //! ```bash
-//! cargo test --workspace --tests --features chaos
+//! cargo test --package azureclaw-chaos-tests --features chaos --tests
 //! ```
 //!
 //! See `tests/chaos/README.md` for tier composition and operational notes.

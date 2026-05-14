@@ -36,6 +36,9 @@ chrono = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
+# URL parsing (forward-proxy derivation in main.rs)
+url = "2"
+
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
