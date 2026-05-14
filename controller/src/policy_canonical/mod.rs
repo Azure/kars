@@ -30,11 +30,14 @@ use crate::policy_fetcher::FetchError;
 use std::time::{Instant, SystemTime};
 
 pub mod egress;
+pub mod inference;
 pub mod tools;
 
 #[allow(unused_imports)]
-// re-exported for downstream sub-slices (1c.3+); tests use the full path
+// re-exported for downstream sub-slices (1c.4+); tests use the full path
 pub use egress::EgressKind;
+#[allow(unused_imports)]
+pub use inference::InferenceKind;
 #[allow(unused_imports)]
 pub use tools::ToolsKind;
 
@@ -50,9 +53,10 @@ pub use tools::ToolsKind;
 /// is the implementation detail of how
 /// [`PolicyKind::cache_get`] / [`PolicyKind::cache_put`] are wired, not
 /// a public extension point.
-#[allow(dead_code)] // future kinds will add variants in 1c.3 - 1c.5
+#[allow(dead_code)] // future kinds will add variants in 1c.4 - 1c.5
 pub(crate) enum CachedValue {
     Egress(egress::VerifiedAllowlist),
+    Inference(inference::VerifiedInferencePolicy),
     Tools(tools::VerifiedAgtProfile),
 }
 

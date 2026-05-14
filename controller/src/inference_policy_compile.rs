@@ -231,6 +231,7 @@ mod tests {
                 }],
             }),
             display_name: Some("Prod chat policy".into()),
+            bundle_ref: None,
         }
     }
 
