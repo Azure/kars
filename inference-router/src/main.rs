@@ -152,15 +152,29 @@ async fn main() -> Result<()> {
         let egress_dir = std::env::var("EGRESS_ALLOWLIST_DIR").unwrap_or_else(|_| {
             azureclaw_inference_router::egress_allowlist_loader::EGRESS_ALLOWLIST_DIR_DEFAULT.into()
         });
-        let _ = azureclaw_inference_router::egress_allowlist_loader::load_and_install(
-            &egress_dir,
-            &state.policy_status,
-            &state.egress_allowlist,
-            &state.blocklist,
+        // Slice 5e: per-sandbox `EgressApproval` files (one
+        // `approval-{name}.json` per CR pointing at this sandbox) live
+        // in a sibling ConfigMap mounted at `EGRESS_APPROVAL_DIR`. The
+        // loader UNIONs them with the baseline allowlist and registers
+        // the merged-set digest under `PolicyKind::EgressApproval`.
+        let approvals_dir = std::env::var(
+            azureclaw_inference_router::egress_allowlist_loader::EGRESS_APPROVAL_DIR_ENV,
         )
-        .await;
-        azureclaw_inference_router::egress_allowlist_loader::spawn_egress_allowlist_watcher(
+        .unwrap_or_else(|_| {
+            azureclaw_inference_router::egress_allowlist_loader::EGRESS_APPROVAL_DIR_DEFAULT.into()
+        });
+        let _ =
+            azureclaw_inference_router::egress_allowlist_loader::load_and_install_with_approvals(
+                &egress_dir,
+                Some(approvals_dir.as_str()),
+                &state.policy_status,
+                &state.egress_allowlist,
+                &state.blocklist,
+            )
+            .await;
+        azureclaw_inference_router::egress_allowlist_loader::spawn_egress_allowlist_watcher_with_approvals(
             egress_dir,
+            Some(approvals_dir),
             state.policy_status.clone(),
             state.egress_allowlist.clone(),
             state.blocklist.clone(),

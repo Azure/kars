@@ -45,9 +45,10 @@
 //!   `allowlistRef`), (b) verified-from-artifact, or (c) LKG cache.
 //!   The consumer (router) doesn't re-verify — it trusts the
 //!   controller's k8s-mediated channel + the per-container mount.
-//! - **Not** an approval merger. `EgressApproval` CRD lands in Slice
-//!   5c.2 as a separate mount (`approvals/*.json`); the router merges
-//!   `bundle ∪ approvals` at request time, not in the bundle JSON.
+//! - **Not** an approval merger. `EgressApproval` CRD (Slice 5e) lives
+//!   in a separate mount (`approvals/*.json`); the router merges
+//!   `bundle ∪ approvals` at load time in `egress_allowlist_loader`,
+//!   not in this bundle JSON.
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

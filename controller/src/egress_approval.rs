@@ -205,9 +205,11 @@ pub mod condition_reasons {
 }
 
 impl EgressApproval {
-    /// Convenience: hostname canonicalization used by canonical-form
-    /// merge + audit log. Mirrors
-    /// `policy_canonical::egress::CanonicalEndpoint` shape.
+    /// Hostname count used by the reconciler when stamping
+    /// `status.hostCount`. Wraps `spec.hosts.len()` so future
+    /// canonicalization (e.g., dedup-after-normalize) has a single
+    /// chokepoint. Mirrors the count `egress_approval_compile` lays
+    /// down in the per-approval ConfigMap payload.
     pub fn merged_host_count(&self) -> usize {
         self.spec.hosts.len()
     }

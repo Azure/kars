@@ -7,7 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
-### Slice 5e.1 — `EgressApproval` CRD shape + CEL + Helm install
+### Slice 5e.2 — `EgressApproval` reconciler + router consumer wired end-to-end
+
+Closes the consumer half of Slice 5e: `EgressApproval` CRs now drive a real
+data-plane change. The reconciler computes a merged-allowlist digest, writes
+per-approval files into a sibling ConfigMap mounted into the sandbox router,
+and only promotes `phase=Pending→Active` once the router echoes the digest
+on `/internal/policy-status` under `PolicyKind::EgressApproval`. On TTL
+expiry the reconciler drops the file, removes the finalizer, and stamps
+`phase=Expired` (terminal). This is the first full producer↔consumer loop
+for the grant lane of `principles.md §2.4` / `signing-model.md §6` —
+principles.md §3 (`Ready ⇔ router echo`) and §5 (no scaffolding) are both
+satisfied.
+
+**Producer side (controller)**
+
+- `controller/src/egress_approval_compile.rs` (new, ~360 LOC including
+  tests): `approvals_configmap_name(sandbox) → clawsandbox-{sandbox}-egress-approvals`,
+  `approval_file_key(name) → approval-{name}.json`, `compile_approval_file`
+  (canonical JSON: name, sandbox, hosts (sorted, deduped), reason, ticket,
+  effectiveAt, expiresAt), and `merged_allowlist_digest` — the
+  length-prefixed sha256 over the UNION of baseline allowlist + approval
+  hosts. Cross-binary parity with the router-side digest in
+  `egress_allowlist_loader::compile_merged_endpoints_body`.
+- `controller/src/egress_approval_reconciler.rs` (new, ~870 LOC, 28 unit
+  tests): the full state machine.
+  - **Validate**: `parse_iso8601_duration_secs` (hand-rolled grammar; accepts
+    `PT15M`, `PT4H`, `P1D`, `PT1H30M`, `PT30S`; rejects `P1W/Y`, `P1H` with
+    `H` before `T`, `PT1D` with `D` after `T`, `PT0M`); `validate_reason`
+    rejects empty / >512 bytes / ASCII control bytes (except \t\n\r).
+    TTL is clamped to `min(env_ceiling, 604800s)` (1 week hard ceiling).
+  - **Sibling sandbox**: requires `phase=Ready` else stamps
+    `Pending(BlockedOnSandbox)` and requeues at 5s.
+  - **Idempotency**: `effective_at` is stamped only on first transition;
+    re-reconciles preserve the prior value. `expires_at = effective_at + ttl`.
+  - **Expiry**: at `now ≥ expires_at` the reconciler drops the per-approval
+    CM key (SSA empty `data: {}` from the per-approval field manager +
+    JSON-merge `null` defense-in-depth), stamps `phase=Expired`, and
+    removes the finalizer.
+  - **CM write**: SSA-apply under per-approval field manager
+    `azureclaw-controller/egressapproval/{approval_name}` so siblings on
+    the same ConfigMap don't trample each other.
+  - **Router poll**: `poll_referencing_sandboxes` against the merged
+    digest under `PolicyKind::EgressApproval`. `Confirmed → Active`;
+    `Awaiting → Pending(AwaitingRouterEcho)` + 5s requeue.
+  - **Finalizer**: `azureclaw.azure.com/egress-approval-cleanup`.
+  - **Env knob**: `EGRESS_APPROVAL_MAX_TTL_SECONDS` (default 86400 / 1d via
+    Helm; capped at one week absolute).
+- `controller/src/main.rs` spawns the reconciler in its own `select!` arm
+  next to the existing CRDs.
+- `controller/src/reconciler/mod.rs` injects an optional ConfigMap mount
+  for the per-sandbox approvals CM into the `inference-router` container
+  at `/etc/azureclaw/egress-approvals`, with `EGRESS_APPROVAL_DIR` env
+  pushed alongside.
+- `controller/src/reconciler/governance_mounts.rs` adds the
+  `EGRESS_APPROVAL_DIR` path constant.
+- `controller/src/status/phase.rs` adds `PHASE_ACTIVE` + `PHASE_EXPIRED`
+  with phase-taxonomy-guard coverage.
+- `controller/src/field_managers.rs` adds the `EGRESS_APPROVAL` field
+  manager (the per-approval scoping is layered on top by the reconciler).
+
+**Consumer side (inference-router)**
+
+- `inference-router/src/policy_status.rs` adds the `PolicyKind::EgressApproval`
+  variant (wire string `"EgressApproval"`).
+- `inference-router/src/egress_allowlist_loader.rs` gains the
+  `_with_approvals` variants — `load_and_install_with_approvals` and
+  `spawn_egress_allowlist_watcher_with_approvals` — which scan an
+  optional approvals directory, UNION every `approval-*.json` host
+  with the baseline allowlist, register the digest under
+  `PolicyKind::EgressApproval`, and rebuild the L7 blocklist
+  accordingly. The watcher reacts to mtime changes in either directory.
+- `inference-router/src/main.rs` boot now wires the approvals dir via
+  `EGRESS_APPROVAL_DIR` env (default `/etc/azureclaw/egress-approvals`).
+
+**Helm / RBAC**
+
+- `deploy/helm/azureclaw/values.yaml`: new `egressApproval.maxTtlSeconds: 86400`.
+- `deploy/helm/azureclaw/templates/controller-deployment.yaml`: pushes
+  `EGRESS_APPROVAL_MAX_TTL_SECONDS` env onto the controller pod.
+
+**Test coverage**
+
+Controller: +28 reconciler tests (ISO 8601 parser corners, reason validation,
+TTL ceiling env parsing, status-patch shape for all 5 transitions including
+prior-`effective_at` preservation, field-manager scoping, finalizer DNS
+format, cross-binary digest parity with the compile module, policy-kind
+wire-string parity with the router). +1 phase taxonomy guard run.
+Router: +0 net new (the `_with_approvals` extension landed in Slice 5e.0;
+21 tests there cover the merge + watcher paths).
+Helm drift: green (egressapproval CRD unchanged from 5e.1).
+
+
 
 Opens the **grant lane** of `principles.md §2.4` /
 `signing-model.md §6`: a namespaced, short-TTL, attributable widening

@@ -60,6 +60,12 @@ spec:
             - name: REQUIRE_SIGNED_ALLOWLIST
               value: "true"
             {{- end }}
+            # Slice 5e: TTL ceiling for EgressApproval CRs. The
+            # reconciler clamps `spec.ttl` to `min(this, 604800s)` (1
+            # week hard ceiling). Operators can lower this further to
+            # match their policy posture.
+            - name: EGRESS_APPROVAL_MAX_TTL_SECONDS
+              value: {{ .Values.egressApproval.maxTtlSeconds | default 86400 | quote }}
             - name: INFERENCE_ROUTER_IMAGE
               value: "{{ .Values.inferenceRouter.image.repository }}:{{ .Values.inferenceRouter.image.tag }}"
             - name: SANDBOX_IMAGE

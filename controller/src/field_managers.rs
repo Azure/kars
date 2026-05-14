@@ -81,6 +81,13 @@ pub const MESH: &str = "azureclaw-controller/mesh";
 /// the pre-S7 `providers::field_managers` callers.
 pub const RECONCILER: &str = "azureclaw-controller/reconciler";
 
+/// `EgressApproval` reconciler — Slice 5e.2. Owns
+/// `status.{phase,conditions,expiresAt,mergedHostCount,observedGeneration}`
+/// and the `azureclaw.azure.com/egress-approval-cleanup` finalizer.
+/// Distinct from the policy-lane reconcilers because the grant lane
+/// has a fundamentally different lifecycle (short-TTL, auto-expires).
+pub const EGRESS_APPROVAL: &str = "azureclaw-controller/egressapproval";
+
 /// All managers the controller emits. The §0.2 #8 "no duplication"
 /// invariant is asserted in the test below: every entry here must be a
 /// distinct string. Adding a constant requires extending this slice.
@@ -101,6 +108,7 @@ pub const ALL_FIELD_MANAGERS: &[&str] = &[
     PROVIDER_BRIDGE,
     MESH,
     RECONCILER,
+    EGRESS_APPROVAL,
 ];
 
 #[cfg(test)]

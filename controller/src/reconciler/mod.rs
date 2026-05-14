@@ -957,6 +957,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // allowlist document. The router then rejects every egress
     // attempt by hostname at L7, matching the L4 deny encoded above.
     let egress_allowlist_cm_name = format!("clawsandbox-{}-egress-allowlist", name);
+    let egress_approvals_cm_name = crate::egress_approval_compile::approvals_configmap_name(&name);
     {
         let endpoints_for_compile: Vec<crate::crd::EndpointConfig> = allowlist_resolution
             .endpoints
@@ -1861,6 +1862,25 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             Some((
                 "EGRESS_ALLOWLIST_DIR",
                 governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
+            )),
+        );
+
+        // EgressApproval (Slice 5e): per-approval allowlist deltas live in
+        // a sibling ConfigMap owned by `egress_approval_reconciler`. The
+        // router UNIONs them with the baseline `EGRESS_ALLOWLIST_DIR`
+        // contents and echoes a merged-set digest under
+        // `PolicyKind::EgressApproval`. Optional mount — empty/missing
+        // when no approvals are active; the router treats absence as
+        // "no extra hosts" and falls back to the baseline digest.
+        governance_mounts::inject_configmap_mount(
+            &mut pod_spec,
+            "inference-router",
+            &egress_approvals_cm_name,
+            "egress-approvals",
+            governance_mounts::paths::EGRESS_APPROVAL_DIR,
+            Some((
+                "EGRESS_APPROVAL_DIR",
+                governance_mounts::paths::EGRESS_APPROVAL_DIR,
             )),
         );
 

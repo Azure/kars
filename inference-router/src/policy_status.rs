@@ -83,6 +83,28 @@ pub enum PolicyKind {
     /// as a defence-in-depth backstop, not the primary enforcement
     /// point.
     EgressAllowlist,
+
+    /// Merged egress allowlist after applying ephemeral `EgressApproval`
+    /// grants (Slice 5e). Distinct from [`PolicyKind::EgressAllowlist`]
+    /// because the two echoes track different surfaces:
+    ///
+    /// - `EgressAllowlist` echoes the **baseline** the operator signed
+    ///   and shipped via `spec.networkPolicy.allowlistRef`. This is
+    ///   the long-lived policy lane; its digest changes only when the
+    ///   operator publishes a new signed artifact.
+    /// - `EgressApproval` echoes the **merged** host set
+    ///   `(baseline ∪ all active approvals)`. This is the grant lane;
+    ///   the digest changes every time an `EgressApproval` CR lands
+    ///   or expires on the sandbox.
+    ///
+    /// The router loader (Slice 5e — `egress_allowlist_loader`)
+    /// computes both digests on every reload and registers each
+    /// under its own variant. The `EgressApproval` reconciler polls
+    /// `/internal/policy-status` looking for this kind specifically;
+    /// its digest matches the controller's expected merged digest
+    /// only when every contributing approval file has actually
+    /// reached the router.
+    EgressApproval,
 }
 
 impl PolicyKind {
@@ -95,6 +117,7 @@ impl PolicyKind {
             PolicyKind::InferencePolicy => "InferencePolicy",
             PolicyKind::Memory => "Memory",
             PolicyKind::EgressAllowlist => "EgressAllowlist",
+            PolicyKind::EgressApproval => "EgressApproval",
         }
     }
 }

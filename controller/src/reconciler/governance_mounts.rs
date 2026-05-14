@@ -88,6 +88,18 @@ pub mod paths {
     /// match the router-side default in
     /// `inference-router/src/egress_allowlist_loader.rs::EGRESS_ALLOWLIST_DIR_DEFAULT`.
     pub const EGRESS_ALLOWLIST_DIR: &str = "/etc/azureclaw/egress";
+    /// Per-sandbox `EgressApproval` files (one `approval-{name}.json`
+    /// per CR pointing at this sandbox). Owned by the
+    /// `egress_approval_reconciler`; consumed by the inference-router's
+    /// `egress_allowlist_loader` which UNIONs them with the baseline
+    /// allowlist and echoes the merged-set digest via
+    /// `/internal/policy-status` under `PolicyKind::EgressApproval`.
+    /// Mounted with `optional: true` so sandbox pods start before any
+    /// approval has landed. Must match the router-side default in
+    /// `inference-router/src/egress_allowlist_loader.rs`
+    /// (`EGRESS_APPROVAL_DIR_DEFAULT` in
+    /// `inference-router/src/egress_allowlist_loader.rs`).
+    pub const EGRESS_APPROVAL_DIR: &str = "/etc/azureclaw/egress-approvals";
     /// McpServer JWKS (used by the customer-MCP OAuth verifier).
     pub const MCP_JWKS_DIR: &str = "/etc/azureclaw/mcp";
     /// A2AAgent compiled signed AgentCard.
