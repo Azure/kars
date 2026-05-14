@@ -73,7 +73,7 @@ jobs:
       # Prebuilt binary (~2s) instead of `cargo install --locked` (~2-3 min).
       - name: Install cargo-audit
         if: steps.paths.outputs.run == 'true'
-        uses: taiki-e/install-action@b9f4710fdf45550ddc7c9e83cb7b6724aac20a4d # v2.62.16
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: cargo-audit
       - name: Run cargo audit
@@ -110,7 +110,7 @@ jobs:
 
       - name: Install cargo-deny
         if: steps.paths.outputs.run == 'true'
-        uses: taiki-e/install-action@b9f4710fdf45550ddc7c9e83cb7b6724aac20a4d # v2.62.16
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: cargo-deny
       - name: Run cargo deny check
