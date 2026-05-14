@@ -475,3 +475,150 @@ Both must be in `$PATH`. See `docs/internal/security-audits/` for the full threa
 | `cli/src/commands/egress/sign.ts` | Producer: `buildCanonicalAllowlist`, `buildOrasPushArgv`, `buildCosignSignArgv`, `buildPatchArgv`, `buildEmitManifestYaml`, `autoDetectSignMode` |
 | `controller/src/signer_policy.rs` | `SignerPolicy` ConfigMap watcher, `SharedSignerPolicy` state, `SignerPolicyState` |
 | `controller/src/policy_fetcher.rs` | `AllowlistVerified` / `AllowlistDrift` conditions, fail-closed logic |
+
+## Ephemeral approvals — `EgressApproval` CR
+
+Sometimes an agent needs to reach a host *just once* — debugging, a
+short-lived API key validation, a one-shot data import. Editing the
+baseline `ClawSandbox.spec.networkPolicy.allowedEndpoints` for these is
+poor hygiene: the change persists indefinitely, ripples through GitOps,
+and pollutes audit history. **`EgressApproval`** is the explicit, ephemeral,
+auditable grant lane.
+
+### Shape
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: debug-stripe-2026-05-14
+  namespace: azureclaw-system   # same namespace as the sandbox
+spec:
+  sandbox: my-agent             # name of the sibling ClawSandbox
+  hosts:                        # 1..16 entries (small scoped grants only)
+    - host: api.stripe.com
+      port: 443
+    - host: hooks.stripe.com
+  reason: "INC-4421 debug pipe"  # 1..512 chars, no ASCII control bytes
+  ticket: "INC-4421"             # optional, 1..128 chars
+  ttl: PT2H                      # ISO 8601, ≤ 7 days (helm-tunable ceiling)
+```
+
+### Lifecycle
+
+```
+                           ┌──────────────────┐
+                           │     Pending      │
+                           │ BlockedOnSandbox │  ← sibling sandbox not Ready yet
+                           └────────┬─────────┘
+                                    │ sandbox reaches phase=Ready
+                                    ▼
+                           ┌──────────────────┐
+                           │     Pending      │
+                           │ AwaitingRouter   │  ← merged-allowlist CM written,
+                           └────────┬─────────┘    router hasn't echoed digest yet
+                                    │ router POSTs loaded digest matching merged
+                                    ▼
+                           ┌──────────────────┐
+                           │      Active      │   ← grant is LIVE on data plane
+                           │ RouterConfirmed  │
+                           └────────┬─────────┘
+                                    │ now ≥ status.expiresAt
+                                    ▼
+                           ┌──────────────────┐
+                           │     Expired      │   ← terminal; CM file removed,
+                           │     Expired      │      finalizer dropped
+                           └──────────────────┘
+```
+
+The controller computes a merged-allowlist sha256 digest (baseline
+`allowedEndpoints` ∪ all approval hosts, length-prefixed canonical
+encoding) and writes per-approval files into a sibling ConfigMap
+`clawsandbox-<sandbox>-egress-approvals`. The inference-router mounts
+this CM, unions the entries with the baseline allowlist, and POSTs the
+loaded digest back to `controller/internal/policy-status`. **The
+controller only promotes `phase=Pending → Active` when the loaded digest
+exactly matches the compiled merged digest** — the same §3 `Ready ⇔
+router echo` invariant used by `ToolPolicy`, `InferencePolicy`, and
+`ClawMemory`.
+
+On TTL expiry the reconciler:
+
+1. removes the per-approval file from the sibling CM,
+2. recomputes the merged digest,
+3. stamps `phase=Expired` (terminal),
+4. drops the finalizer so the API server can garbage-collect the CR.
+
+### CLI (operator surface)
+
+```bash
+# Grant
+azureclaw egress allow-extra <sandbox> \
+  --host api.stripe.com:443 \
+  --host hooks.stripe.com \
+  --reason "INC-4421 debug pipe" \
+  --ticket INC-4421 \
+  --ttl PT2H
+
+# List active + pending grants for a sandbox
+azureclaw egress approvals <sandbox>
+
+# Revoke early (before TTL elapses)
+azureclaw egress revoke debug-stripe-2026-05-14
+```
+
+`allow-extra` builds an `EgressApproval` CR and applies it via `kubectl
+apply -f -`. `approvals` filters by `spec.sandbox`. `revoke` deletes the
+CR — the finalizer takes care of tearing down the merged-allowlist file
+and recomputing the digest.
+
+### Headlamp panel
+
+The AzureClaw Headlamp plugin registers `EgressApproval` in the sidebar
+(list view, CR detail page). Every `ClawSandbox` detail page also renders
+an **Egress Approvals** card listing all approvals scoped to that sandbox
+with columns: NAME, PHASE, HOSTS, TTL, EXPIRES, REASON, MERGED-DIGEST.
+
+### Why a separate CRD instead of a `ClawSandbox` field?
+
+| Concern | Inline field | Separate CR |
+|---------|--------------|-------------|
+| TTL / expiry | Operator-tracked, error-prone | Built into reconciler |
+| Audit trail | Mixed with baseline edits in Git | Standalone resource, distinct audit events |
+| Finalizer cleanup on expiry | n/a | Reconciler removes file, drops finalizer |
+| Cross-team review | Touching the agent spec | Touching just the grant |
+| Revoke | Edit + apply baseline | `kubectl delete egressapproval <name>` |
+| Multi-grant composition | Manual list management | Each grant is an independent resource |
+
+Inline `allowedEndpoints` remains the durable baseline. `EgressApproval`
+is the short-lived overlay. The router computes the union and enforces
+that on every outbound request.
+
+### Status conditions
+
+| Type | Status | Reason | Meaning |
+|------|--------|--------|---------|
+| `Ready` | `True` | `RouterConfirmed` | Grant is live on the data plane. |
+| `Ready` | `False` | `BlockedOnSandbox` | Sibling `ClawSandbox` is not yet `phase=Ready`. |
+| `Ready` | `False` | `AwaitingRouterEcho` | Merged CM written; router hasn't echoed digest yet. |
+| `Ready` | `False` | `ReasonInvalid` | `spec.reason` violated server-side validation. |
+| `Ready` | `False` | `Expired` | Terminal — TTL elapsed; grant is no longer in effect. |
+| `Progressing` | `False` | `Active` / `Expired` | Reconciler is idle. |
+| `Progressing` | `True` | (other) | Reconciler is currently working toward the goal. |
+
+`status` also exposes `effectiveAt`, `expiresAt`, `mergedDigest`,
+`hostCount`, and `usageCount` for operator visibility.
+
+### TTL ceiling
+
+Hard ceiling is 7 days (`604800s`). Helm chart defaults to 24h via
+`EGRESS_APPROVAL_MAX_TTL_SECONDS` on the controller deployment. Set
+`controller.egressApproval.maxTtlSeconds` to tighten.
+
+### Audit
+
+Every approval emits a Kubernetes Event on each phase transition. For
+production audit, watch the controller's structured logs for
+`event=egress_approval_state_change` (includes `sandbox`, `name`,
+`phase`, `reason`, `mergedDigest`, `hostCount`, `ttlSeconds`,
+`ticket?`, `effectiveAt`, `expiresAt`).

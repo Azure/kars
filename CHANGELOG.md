@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5e.4 — `EgressApproval` E2E coverage + docs
+
+Closes the Slice 5e arc with operator-facing documentation and Kind-based
+E2E coverage. No controller, router, CLI, or Headlamp code touched.
+
+**E2E (`tests/e2e/run.sh`, +180 LOC, 2 new test functions)**
+
+- `test_crd_egress_approval` applies a valid `EgressApproval` scoped to
+  the existing `e2e-test` sandbox, polls `status.observedGeneration` to
+  confirm the reconciler ran, asserts `status.hostCount == 2`, accepts
+  the §3 honest-state triple `(phase, Ready, reason)` ∈
+  `{(Pending,False,BlockedOnSandbox), (Pending,False,AwaitingRouterEcho), (Active,True,RouterConfirmed)}`,
+  confirms the finalizer is set, and exercises delete-with-finalizer.
+  Pattern mirrors `test_crd_claw_memory` (§3 honest-state acceptance
+  set) since the sibling sandbox doesn't reliably reach `Ready` in Kind.
+- `test_crd_egress_approval_cel_rejects` confirms the four most
+  operator-facing CEL gates reject malformed CRs at the apiserver:
+  empty `hosts`, `ttl: PT0S`, reason with control byte, malformed `ttl`
+  string. Each test attempts `kubectl apply` and fails if it succeeds.
+- Both wired into `main()` after `test_crd_admission_rejects_invalid`,
+  before `test_cleanup_sandbox`.
+
+**Docs**
+
+- `docs/egress-proxy.md` — new section **Ephemeral approvals —
+  `EgressApproval` CR**: shape, lifecycle diagram (Pending→Active→Expired),
+  CLI invocations, status-condition table, TTL ceiling, audit signal,
+  and a "Why a separate CRD?" comparison table.
+- `docs/api/crd-reference.md` — new `EgressApproval` section + at-a-glance
+  row; spec validation table; status field reference; cross-link to
+  `docs/egress-proxy.md`.
+
+**Verify**
+
+- `bash -n tests/e2e/run.sh` clean.
+- `shellcheck -S warning tests/e2e/run.sh` clean on new code.
+- No code changes outside docs + e2e harness.
+
 ### Slice 5e.3 — `azureclaw egress allow-extra/approvals/revoke` CLI + Headlamp panel
 
 Operator surface for the producer-consumer loop landed in Slice 5e.2. Three
