@@ -1,0 +1,55 @@
+# Demo scenario step 1 — minimal governed sandbox.
+#
+# Applies an InferencePolicy + ClawSandbox, expects router echo Ready.
+# Shared by tools/demo/run-demo.sh across dev / kind / aks modes.
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: demo-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: demo-agent
+spec:
+  appliesTo:
+    sandboxName: demo-agent
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    perRequestTokens: 32000
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: demo-agent
+  namespace: azureclaw-system
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+  sandbox:
+    isolation: enhanced
+    seccompProfile: azureclaw-strict
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    writablePaths: [/sandbox, /tmp]
+  inferenceRef:
+    name: demo-inference
+  networkPolicy:
+    defaultDeny: true
+    allowedEndpoints:
+      - host: github.com
+        port: 443
+  azureServices:
+    - service: ai-foundry
+      permissions: [inference]
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits:   { cpu: "2",    memory: "4Gi" }
