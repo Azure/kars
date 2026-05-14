@@ -30,6 +30,12 @@ mod crd;
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
 mod crd_validations;
 mod egress_allowlist_compile;
+#[allow(dead_code)]
+// Slice 5e.1 lands the CRD shape + CEL + Helm install; the reconciler
+// (consumer of condition_reasons + merged_host_count) ships in Slice
+// 5e.2. The dead_code allowance is the explicit marker for the
+// unread-today surface.
+mod egress_approval;
 mod fedcred;
 mod fedcred_reaper;
 mod field_managers;

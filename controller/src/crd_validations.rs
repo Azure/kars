@@ -51,6 +51,7 @@ use kube::CustomResourceExt;
 use crate::a2a_agent::A2AAgent;
 use crate::claw_eval::ClawEval;
 use crate::claw_memory::ClawMemory;
+use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
@@ -555,6 +556,131 @@ pub fn trust_graph_crd() -> CustomResourceDefinition {
     .expect("kube-rs derive must produce a spec property on TrustGraph")
 }
 
+/// `EgressApproval.spec` CEL rules. Slice 5e-thin of
+/// `crd-well-oiled-machine`.
+///
+/// `EgressApproval` is an ephemeral, scoped, attributable widening of a
+/// sandbox's baseline egress allowlist. The CRD is shape-only — the
+/// authority decision is K8s RBAC on the `create` verb, and the
+/// reconciler is the runtime enforcer of TTL semantics.
+///
+/// Admission CEL covers what we can verify *without* a cluster
+/// lookup; the reconciler re-checks every rule plus the cluster
+/// invariants (sibling sandbox Ready, TTL ceiling) for
+/// defense-in-depth.
+///
+/// Rules:
+///
+/// - `sandbox`: non-empty, 1–253 chars (k8s object-name length cap).
+/// - `hosts`: 1–16 entries; each `host` non-empty + 1–253 chars; each
+///   `port`, when set, ∈ `[1, 65535]`. The router's egress matcher
+///   defaults missing ports to 443 — `EndpointConfig.port` is
+///   `Option<u16>` upstream so we don't force operators to spell out
+///   the obvious HTTPS case.
+/// - `reason`: 1–512 chars; must not contain ASCII control bytes
+///   (rejected to keep audit log + CLI output safe to render).
+/// - `ticket`: when set, 1–128 chars (loose — no shape constraint
+///   beyond length).
+/// - `ttl`: matches an ISO 8601 positive-duration regex. The
+///   regex is intentionally permissive — the reconciler does the
+///   authoritative parse, including the cluster ceiling check; here
+///   we just reject obviously malformed inputs (`""`, `"forever"`,
+///   negative). Form: `P[<n>D]T[<n>H][<n>M][<n>S]` or `P<n>D` etc.
+#[must_use]
+pub fn egress_approval_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.sandbox) > 0 && size(self.sandbox) <= 253".into(),
+            message: Some("spec.sandbox must be 1-253 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.hosts) >= 1 && size(self.hosts) <= 16".into(),
+            message: Some(
+                "spec.hosts must contain between 1 and 16 entries (small, scoped grants only)"
+                    .into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.hosts.all(h, size(h.host) > 0 && size(h.host) <= 253)".into(),
+            message: Some("each spec.hosts[*].host must be 1-253 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.hosts.all(h, !has(h.port) || (h.port >= 1 && h.port <= 65535))".into(),
+            message: Some("each spec.hosts[*].port, when set, must be 1-65535".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.reason) >= 1 && size(self.reason) <= 512".into(),
+            message: Some("spec.reason must be 1-512 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        // ASCII control byte guard. The regex covers C0 controls
+        // (0x00-0x1F) except tab (0x09), newline (0x0A), and
+        // carriage return (0x0D) — those three are common in
+        // operator-written prose; DEL (0x7F) is also rejected.
+        // The CEL `matches` operator uses RE2 syntax.
+        ValidationRule {
+            rule: "!self.reason.matches('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]')".into(),
+            message: Some(
+                "spec.reason must not contain ASCII control bytes (audit-log injection guard)"
+                    .into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.ticket) || (size(self.ticket) >= 1 && size(self.ticket) <= 128)"
+                .into(),
+            message: Some("spec.ticket, when set, must be 1-128 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        // ISO 8601 positive-duration regex.
+        //
+        // Accepts: P<n>D, P<n>W, P<n>Y[<n>M[<n>D]], PT<n>H[<n>M[<n>S]],
+        // P<n>D T<n>H..., where n ∈ [0-9]+ (no fractional, no
+        // negative). At least one numeric component must be present.
+        // The reconciler does the authoritative parse-and-clamp.
+        //
+        // We disallow the zero-only form (`PT0S`, `P0D`) by requiring
+        // that at least one digit is non-zero — implemented as a
+        // negative-lookahead-free rule: the duration must contain a
+        // digit '1'-'9' somewhere. RE2 supports that as a separate
+        // `matches`.
+        ValidationRule {
+            rule: "self.ttl.matches('^P(\\\\d+Y)?(\\\\d+M)?(\\\\d+W)?(\\\\d+D)?(T(\\\\d+H)?(\\\\d+M)?(\\\\d+S)?)?$')".into(),
+            message: Some(
+                "spec.ttl must be a positive ISO 8601 duration (e.g. PT15M, PT4H, P1D)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.ttl.matches('[1-9]')".into(),
+            message: Some("spec.ttl must be > 0 (e.g. PT15M, not PT0S)".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `EgressApproval` CRD with [`egress_approval_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn egress_approval_crd() -> CustomResourceDefinition {
+    inject_spec_validations(EgressApproval::crd(), egress_approval_validations())
+        .expect("kube-rs derive must produce a spec property on EgressApproval")
+}
+
 /// `ClawSandbox` CRD as produced by the kube-rs derive.
 ///
 /// Currently no `claw_sandbox_validations()` helper exists — `ClawSandbox`
@@ -908,6 +1034,84 @@ mod tests {
         assert!(y.contains("sandboxRef"));
         assert!(y.contains("evaluators"));
         assert!(y.contains("threshold"));
+    }
+
+    // ---- EgressApproval (5e-thin) --------------------------------------
+
+    #[test]
+    fn egress_approval_validations_are_non_empty() {
+        assert!(!egress_approval_validations().is_empty());
+    }
+
+    #[test]
+    fn every_egress_approval_rule_has_message_and_rule() {
+        for rule in egress_approval_validations() {
+            assert!(!rule.rule.is_empty(), "rule body must not be empty");
+            let msg = rule.message.as_deref().unwrap_or("");
+            assert!(!msg.is_empty(), "rule '{}' missing message", rule.rule);
+        }
+    }
+
+    #[test]
+    fn egress_approval_crd_has_spec_validations_after_injection() {
+        let crd = egress_approval_crd();
+        let v = spec_validations(&crd);
+        assert_eq!(v.len(), egress_approval_validations().len());
+    }
+
+    #[test]
+    fn egress_approval_rules_cover_core_invariants() {
+        let rules: Vec<String> = egress_approval_validations()
+            .into_iter()
+            .map(|r| r.rule)
+            .collect();
+        assert!(
+            rules.iter().any(|r| r.contains("self.sandbox")),
+            "must validate sandbox name; got: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("self.hosts") && r.contains("16")),
+            "must cap hosts at 16; got: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.contains("h.port")),
+            "must validate per-host port range; got: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("self.reason") && r.contains("512")),
+            "must cap reason length; got: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("\\x00") || r.contains("control")),
+            "must guard against ASCII control bytes in reason; got: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.contains("self.ticket")),
+            "must validate ticket length; got: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("self.ttl") && r.contains("^P")),
+            "must validate ISO 8601 duration shape; got: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn egress_approval_crd_is_serde_round_trippable() {
+        let crd = egress_approval_crd();
+        let y = serde_yaml::to_string(&crd).expect("serializes");
+        assert!(y.contains("x-kubernetes-validations"));
+        assert!(y.contains("sandbox"));
+        assert!(y.contains("hosts"));
+        assert!(y.contains("reason"));
+        assert!(y.contains("ttl"));
     }
 
     #[test]

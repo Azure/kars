@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5e.1 — `EgressApproval` CRD shape + CEL + Helm install
+
+Opens the **grant lane** of `principles.md §2.4` /
+`signing-model.md §6`: a namespaced, short-TTL, attributable widening
+of a sandbox's baseline egress allowlist. The CRD shape, admission
+CEL, Helm manifest, and `azureclaw:egress-approver` ClusterRole all
+land here; the reconciler + router merge + CLI ship in Slices 5e.2 →
+5e.4.
+
+The slice is intentionally **additive-only** — no consumer paths run
+yet. The CRD installs cleanly, admission rejects malformed approvals,
+and operators can experiment by `kubectl apply`-ing fixtures without
+any side effect on running sandboxes.
+
+**Producer side (controller)**
+
+- `controller/src/egress_approval.rs` (new, ~370 LOC including tests)
+  defines `EgressApprovalSpec { sandbox, hosts, reason, ticket, ttl }`
+  and `EgressApprovalStatus { phase, observedGeneration, effectiveAt,
+  expiresAt, mergedDigest, hostCount, usageCount, conditions }` plus
+  a `condition_reasons` module pinning the seven stable reason strings
+  (`BlockedOnSandbox`, `RouterConfirmed`, `AwaitingRouterEcho`,
+  `TtlExceedsCeiling`, `TtlInvalid`, `ReasonInvalid`, `Expired`).
+  Group `azureclaw.azure.com`, version `v1alpha1`, shortname `eappr`,
+  five printer columns (Sandbox / Phase / Expires / Hosts / Age).
+  `hosts` reuses the existing `crd::EndpointConfig` — no parallel
+  endpoint type.
+- `controller/src/crd_validations.rs` gains `egress_approval_validations()`
+  (9 CEL rules: sandbox length cap, host-count 1–16, per-host port
+  range, reason length cap + ASCII control-byte guard, ticket length
+  cap, ISO 8601 positive-duration regex + non-zero guard) and
+  `egress_approval_crd()` injecting them.
+- `controller/src/main.rs` declares `mod egress_approval` behind an
+  `#[allow(dead_code)]` (the explicit marker for the unread-today
+  reconciler surface, matching the Slice 1c.6 pattern).
+- `controller/src/helm_drift.rs` extends the drift-detection suite
+  with the new `crd-egressapproval.yaml` manifest and a one-shot
+  dumper.
+
+**Forward-compatible to Slice 5e+ (deferred, demand-gated)**: the
+cryptographic-attestation field (`spec.attestation: Option<Attestation>`)
+adds without a schema break. The 1c.6 `SignerPolicy.spec.ed25519Keys[]`
+registry is the future verification anchor.
+
+**Helm**
+
+- `deploy/helm/azureclaw/templates/crd-egressapproval.yaml` (new) —
+  the helm-installed CRD manifest. Schema generated via the standard
+  `DUMP_EGRESSAPPROVAL_CRD_YAML=1 cargo test` workflow + helm labels
+  applied. Helm-drift test passes byte-for-byte.
+- `deploy/helm/azureclaw/templates/rbac.yaml` —
+  - extends the existing `azureclaw-controller` ClusterRole with
+    `egressapprovals` / `egressapprovals/status` /
+    `egressapprovals/finalizers` (the reconciler in 5e.2 needs all
+    three);
+  - adds a new `azureclaw:egress-approver` ClusterRole carrying
+    `get/list` on `clawsandboxes` (so an approver can verify the
+    target before granting) and `get/list/watch/create/delete` on
+    `egressapprovals` (`update` intentionally excluded — approvals
+    are immutable; revocation is `delete`). Aggregation labels
+    (`aggregate-to-admin`, `aggregate-to-edit`) wire it into the
+    standard k8s composite roles cleanly. Not bound by default —
+    operators bind explicitly per cluster convention.
+
+**Tests**
+
+- 11 new tests in `egress_approval` module: spec round-trip with/
+  without optional fields, camelCase wire-shape pin, status round-trip,
+  status defaults, `merged_host_count` correctness,
+  condition_reasons string-stability pin, CRD shape + printcolumn
+  shape pins.
+- 5 new tests in `crd_validations` covering the CEL rule list:
+  non-empty, message + rule populated on every rule, schema-injection
+  count matches, core-invariant coverage (sandbox / hosts cap / port
+  / reason / control-byte guard / ticket / TTL ISO-8601 regex),
+  serde round-trip.
+- helm-drift suite reports 16 passing tests (was 14): the new dumper
+  + the new drift assertion.
+- Total controller suite **697 → 713** (+16 new). `cargo clippy
+  --all-targets -- -D warnings` clean across the workspace,
+  `cargo fmt --check` clean.
+
+**Out of scope (deferred to subsequent 5e sub-slices)**
+
+- Reconciler (Pending → Active → Expired state machine, finalizer,
+  expiry tick, sibling-sandbox-Ready gate, TTL ceiling enforcement
+  beyond CEL) — Slice 5e.2.
+- Router-side merge logic + per-approval usage counter +
+  `/internal/policy-status` echo extension — Slice 5e.3.
+- CLI surface (`azureclaw egress approve / revoke / approvals`) —
+  Slice 5e.4.
+- Cryptographic attestation (ed25519 signature over canonical
+  approval bytes, verified against `SignerPolicy.spec.ed25519Keys[]`)
+  — Slice 5e+ (demand-gated; the registration half landed in 1c.6).
+- Headlamp panel — Slice 5e.6 (deferable, mirrors the 1c.6 chip
+  deferral pattern).
+
 ### Slice 1c.6 — `SignerPolicy.spec.ed25519Keys[]` + unified `azureclaw policy sign --kind X`
 
 Wraps the Slice 1c-real signing-generalization arc with two
