@@ -3,13 +3,12 @@
 
 //! `ClawEval` policy-conformance corpus library.
 //!
-//! Slice 6.1 — pure library. Future sub-slices wire consumers:
-//! - 6.2: in-cluster runner image consumes [`Corpus`] + [`judge`] +
-//!   [`load_builtin`] to replay [`Case`]s against the router and stamp
-//!   per-case [`CaseOutcome`]s on a `ClawEval` CR.
-//! - 6.3: `ClawEval` CRD rewrite consuming `bundle_ref` corpora through
-//!   the [`policy_canonical::eval_corpus`](crate::policy_canonical::eval_corpus)
-//!   `PolicyKind` impl.
+//! Slice 6.1 shipped the parser + verdict function + built-in corpora.
+//! Slice 6.2 (this slice) makes those types load-bearing: the
+//! `azureclaw-conformance-runner` binary depends on this crate to
+//! load corpora and judge replay results. The controller depends on
+//! this crate from its `policy_canonical::eval_corpus` module for the
+//! `EvalCorpusKind` `PolicyKind` impl (signed-bundle lane).
 //!
 //! ## Wire shape
 //!
@@ -31,36 +30,29 @@
 //! }
 //! ```
 //!
-//! ## Why a library, not a reconciler
-//!
-//! The corpus format is **input** to the conformance runner — it's
-//! parsed once at runner start, applied case-by-case against the
-//! router's enforcement surface, and the runner emits per-case
-//! [`CaseOutcome`]s. Neither the controller nor the router holds long-
-//! lived `Corpus` state, so there is no reconciler in this slice; that
-//! lands when `ClawEval` learns to schedule runner pods (6.3+).
-//!
 //! ## What this library guarantees
 //!
 //! - **Parse:** strict JSON allowlist; reject unknown fields with a
-//!   precise [`FetchError`] so signed-bundle pulls fail closed.
+//!   precise [`ParseError`] so signed-bundle pulls fail closed and
+//!   runner pods refuse malformed builtins at startup.
 //! - **Judge:** total function over (`Expect`, `ActualDecision`) →
 //!   [`Verdict`]. No I/O, no allocation beyond the verdict struct.
 //! - **Built-ins:** five starter corpora embedded via `include_str!`
-//!   under `controller/src/eval_corpora/`. They parse, are non-empty,
+//!   under `eval-corpus/src/eval_corpora/`. They parse, are non-empty,
 //!   and survive a round-trip back through [`parse`].
 
-// Slice 6.1 ships the library; the runner binary (6.2) and the
-// `ClawEval` reconciler (6.3) are the consumers. Until those land,
-// the public API below is reachable only from this module's tests.
-// `dead_code` is silenced at the module level to keep the surface as
-// a single coherent block; `principles.md §5` permits this when a
-// library lands ahead of its named consumer in a follow-up slice.
-#![allow(dead_code)]
-
-use crate::policy_fetcher::FetchError;
 use serde_json::Value;
 use std::collections::BTreeSet;
+
+/// Parse-error variant. Held intentionally minimal: every malformed
+/// corpus bytes path produces the same `Invalid(msg)` so the controller
+/// can fold it into `FetchError::CanonicalFormViolation` and runner
+/// startup logs surface the precise message verbatim.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("corpus is invalid: {0}")]
+    Invalid(String),
+}
 
 /// Frozen schema version for v1 corpora. Forward-compat: a v2 corpus
 /// SHALL change this token; v1 consumers MUST refuse v2 documents.
@@ -194,13 +186,13 @@ impl Decision {
         }
     }
 
-    fn from_wire(s: &str) -> Result<Self, FetchError> {
+    fn from_wire(s: &str) -> Result<Self, ParseError> {
         match s {
             "Allowed" => Ok(Self::Allowed),
             "Blocked" => Ok(Self::Blocked),
             "RateLimited" => Ok(Self::RateLimited),
             "BudgetExceeded" => Ok(Self::BudgetExceeded),
-            other => Err(FetchError::CanonicalFormViolation(format!(
+            other => Err(ParseError::Invalid(format!(
                 "decision `{other}` not one of Allowed|Blocked|RateLimited|BudgetExceeded"
             ))),
         }
@@ -232,14 +224,14 @@ impl PolicyKindRef {
         }
     }
 
-    fn from_wire(s: &str) -> Result<Self, FetchError> {
+    fn from_wire(s: &str) -> Result<Self, ParseError> {
         match s {
             "EgressAllowlist" => Ok(Self::EgressAllowlist),
             "InferencePolicy" => Ok(Self::InferencePolicy),
             "ToolPolicy" => Ok(Self::ToolPolicy),
             "ClawMemory" => Ok(Self::ClawMemory),
             "McpServer" => Ok(Self::McpServer),
-            other => Err(FetchError::CanonicalFormViolation(format!(
+            other => Err(ParseError::Invalid(format!(
                 "byPolicyKind `{other}` not one of EgressAllowlist|InferencePolicy|\
                  ToolPolicy|ClawMemory|McpServer"
             ))),
@@ -375,23 +367,21 @@ pub fn judge(expect: &Expect, actual: &ActualDecision) -> Verdict {
 
 /// Parse signed-bundle bytes into a [`Corpus`].
 ///
-/// This is the canonical-form parser the
-/// [`policy_canonical::eval_corpus`](crate::policy_canonical::eval_corpus)
-/// `PolicyKind` impl delegates to. Strict allowlist on every key —
-/// unknown fields fail closed so a v2 corpus cannot be silently
-/// downgraded into v1 consumers.
-pub fn parse(bytes: &[u8]) -> Result<Corpus, FetchError> {
-    let s = std::str::from_utf8(bytes)
-        .map_err(|e| FetchError::CanonicalFormViolation(format!("utf-8: {e}")))?;
-    let doc: Value = serde_json::from_str(s)
-        .map_err(|e| FetchError::CanonicalFormViolation(format!("json parse: {e}")))?;
-    let map = doc.as_object().ok_or_else(|| {
-        FetchError::CanonicalFormViolation("top-level must be a JSON object".into())
-    })?;
+/// This is the canonical-form parser the controller's
+/// `EvalCorpusKind` `PolicyKind` impl delegates to. Strict allowlist
+/// on every key — unknown fields fail closed so a v2 corpus cannot be
+/// silently downgraded into v1 consumers.
+pub fn parse(bytes: &[u8]) -> Result<Corpus, ParseError> {
+    let s = std::str::from_utf8(bytes).map_err(|e| ParseError::Invalid(format!("utf-8: {e}")))?;
+    let doc: Value =
+        serde_json::from_str(s).map_err(|e| ParseError::Invalid(format!("json parse: {e}")))?;
+    let map = doc
+        .as_object()
+        .ok_or_else(|| ParseError::Invalid("top-level must be a JSON object".into()))?;
 
     for key in map.keys() {
         if !CORPUS_KEYS.contains(&key.as_str()) {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "unrecognised top-level key `{key}`; allowed: schemaVersion, name, cases"
             )));
         }
@@ -399,7 +389,7 @@ pub fn parse(bytes: &[u8]) -> Result<Corpus, FetchError> {
 
     let schema_version = require_string(map, "schemaVersion")?;
     if schema_version != SCHEMA_VERSION_V1 {
-        return Err(FetchError::CanonicalFormViolation(format!(
+        return Err(ParseError::Invalid(format!(
             "schemaVersion `{schema_version}` not supported by v1 parser \
              (expected `{SCHEMA_VERSION_V1}`)"
         )));
@@ -407,19 +397,17 @@ pub fn parse(bytes: &[u8]) -> Result<Corpus, FetchError> {
 
     let name = require_string(map, "name")?;
     if name.is_empty() {
-        return Err(FetchError::CanonicalFormViolation(
-            "name must be non-empty".into(),
-        ));
+        return Err(ParseError::Invalid("name must be non-empty".into()));
     }
 
-    let cases_val = map.get("cases").ok_or_else(|| {
-        FetchError::CanonicalFormViolation("required key `cases` is missing".into())
-    })?;
+    let cases_val = map
+        .get("cases")
+        .ok_or_else(|| ParseError::Invalid("required key `cases` is missing".into()))?;
     let cases_arr = cases_val
         .as_array()
-        .ok_or_else(|| FetchError::CanonicalFormViolation("`cases` must be a JSON array".into()))?;
+        .ok_or_else(|| ParseError::Invalid("`cases` must be a JSON array".into()))?;
     if cases_arr.is_empty() {
-        return Err(FetchError::CanonicalFormViolation(
+        return Err(ParseError::Invalid(
             "`cases` must be non-empty — empty corpora carry no signal".into(),
         ));
     }
@@ -429,7 +417,7 @@ pub fn parse(bytes: &[u8]) -> Result<Corpus, FetchError> {
     for (idx, raw) in cases_arr.iter().enumerate() {
         let case = parse_case(raw, idx)?;
         if !seen_ids.insert(case.id.clone()) {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "duplicate case id `{}` (cases must have unique ids within a corpus)",
                 case.id
             )));
@@ -444,14 +432,14 @@ pub fn parse(bytes: &[u8]) -> Result<Corpus, FetchError> {
     })
 }
 
-fn parse_case(raw: &Value, idx: usize) -> Result<Case, FetchError> {
-    let map = raw.as_object().ok_or_else(|| {
-        FetchError::CanonicalFormViolation(format!("case[{idx}] must be a JSON object"))
-    })?;
+fn parse_case(raw: &Value, idx: usize) -> Result<Case, ParseError> {
+    let map = raw
+        .as_object()
+        .ok_or_else(|| ParseError::Invalid(format!("case[{idx}] must be a JSON object")))?;
 
     for key in map.keys() {
         if !CASE_KEYS.contains(&key.as_str()) {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case[{idx}] has unrecognised key `{key}`; allowed: id, tags, scenario, expect"
             )));
         }
@@ -459,7 +447,7 @@ fn parse_case(raw: &Value, idx: usize) -> Result<Case, FetchError> {
 
     let id = require_string(map, "id").map_err(|e| augment(e, &format!("case[{idx}]")))?;
     if id.is_empty() {
-        return Err(FetchError::CanonicalFormViolation(format!(
+        return Err(ParseError::Invalid(format!(
             "case[{idx}].id must be non-empty"
         )));
     }
@@ -472,12 +460,12 @@ fn parse_case(raw: &Value, idx: usize) -> Result<Case, FetchError> {
                 match t {
                     Value::String(s) if !s.is_empty() => out.push(s.clone()),
                     Value::String(_) => {
-                        return Err(FetchError::CanonicalFormViolation(format!(
+                        return Err(ParseError::Invalid(format!(
                             "case `{id}`.tags[{ti}] must be a non-empty string"
                         )));
                     }
                     _ => {
-                        return Err(FetchError::CanonicalFormViolation(format!(
+                        return Err(ParseError::Invalid(format!(
                             "case `{id}`.tags[{ti}] must be a string"
                         )));
                     }
@@ -486,20 +474,20 @@ fn parse_case(raw: &Value, idx: usize) -> Result<Case, FetchError> {
             out
         }
         Some(_) => {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{id}`.tags must be an array of strings"
             )));
         }
     };
 
-    let scenario_val = map.get("scenario").ok_or_else(|| {
-        FetchError::CanonicalFormViolation(format!("case `{id}` is missing `scenario`"))
-    })?;
+    let scenario_val = map
+        .get("scenario")
+        .ok_or_else(|| ParseError::Invalid(format!("case `{id}` is missing `scenario`")))?;
     let scenario = parse_scenario(scenario_val, &id)?;
 
-    let expect_val = map.get("expect").ok_or_else(|| {
-        FetchError::CanonicalFormViolation(format!("case `{id}` is missing `expect`"))
-    })?;
+    let expect_val = map
+        .get("expect")
+        .ok_or_else(|| ParseError::Invalid(format!("case `{id}` is missing `expect`")))?;
     let expect = parse_expect(expect_val, &id)?;
 
     Ok(Case {
@@ -510,21 +498,19 @@ fn parse_case(raw: &Value, idx: usize) -> Result<Case, FetchError> {
     })
 }
 
-fn parse_scenario(raw: &Value, case_id: &str) -> Result<Scenario, FetchError> {
+fn parse_scenario(raw: &Value, case_id: &str) -> Result<Scenario, ParseError> {
     let map = raw.as_object().ok_or_else(|| {
-        FetchError::CanonicalFormViolation(format!(
-            "case `{case_id}`.scenario must be a JSON object"
-        ))
+        ParseError::Invalid(format!("case `{case_id}`.scenario must be a JSON object"))
     })?;
 
     let kind = require_string(map, "kind").map_err(|_| {
-        FetchError::CanonicalFormViolation(format!(
+        ParseError::Invalid(format!(
             "case `{case_id}`.scenario.kind is required (one of {:?})",
             SCENARIO_KINDS
         ))
     })?;
     if !SCENARIO_KINDS.contains(&kind.as_str()) {
-        return Err(FetchError::CanonicalFormViolation(format!(
+        return Err(ParseError::Invalid(format!(
             "case `{case_id}`.scenario.kind `{kind}` not one of {:?}",
             SCENARIO_KINDS
         )));
@@ -536,7 +522,7 @@ fn parse_scenario(raw: &Value, case_id: &str) -> Result<Scenario, FetchError> {
             let host = require_string(map, "host")
                 .map_err(|e| augment(e, &format!("case `{case_id}`.scenario.host")))?;
             if host.is_empty() {
-                return Err(FetchError::CanonicalFormViolation(format!(
+                return Err(ParseError::Invalid(format!(
                     "case `{case_id}`.scenario.host must be non-empty"
                 )));
             }
@@ -556,12 +542,12 @@ fn parse_scenario(raw: &Value, case_id: &str) -> Result<Scenario, FetchError> {
                 None | Some(Value::Null) => None,
                 Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
                 Some(Value::String(_)) => {
-                    return Err(FetchError::CanonicalFormViolation(format!(
+                    return Err(ParseError::Invalid(format!(
                         "case `{case_id}`.scenario.model must be a non-empty string"
                     )));
                 }
                 Some(_) => {
-                    return Err(FetchError::CanonicalFormViolation(format!(
+                    return Err(ParseError::Invalid(format!(
                         "case `{case_id}`.scenario.model must be a string"
                     )));
                 }
@@ -573,7 +559,7 @@ fn parse_scenario(raw: &Value, case_id: &str) -> Result<Scenario, FetchError> {
             let tool = require_string(map, "tool")
                 .map_err(|e| augment(e, &format!("case `{case_id}`.scenario.tool")))?;
             if tool.is_empty() {
-                return Err(FetchError::CanonicalFormViolation(format!(
+                return Err(ParseError::Invalid(format!(
                     "case `{case_id}`.scenario.tool must be non-empty"
                 )));
             }
@@ -592,14 +578,14 @@ fn parse_scenario(raw: &Value, case_id: &str) -> Result<Scenario, FetchError> {
             let scope = require_string(map, "scope")
                 .map_err(|e| augment(e, &format!("case `{case_id}`.scenario.scope")))?;
             if scope.is_empty() {
-                return Err(FetchError::CanonicalFormViolation(format!(
+                return Err(ParseError::Invalid(format!(
                     "case `{case_id}`.scenario.scope must be non-empty"
                 )));
             }
             let key = require_string(map, "key")
                 .map_err(|e| augment(e, &format!("case `{case_id}`.scenario.key")))?;
             if key.is_empty() {
-                return Err(FetchError::CanonicalFormViolation(format!(
+                return Err(ParseError::Invalid(format!(
                     "case `{case_id}`.scenario.key must be non-empty"
                 )));
             }
@@ -615,10 +601,10 @@ fn check_scenario_keys(
     allowed: &[&str],
     case_id: &str,
     kind: &str,
-) -> Result<(), FetchError> {
+) -> Result<(), ParseError> {
     for key in map.keys() {
         if !allowed.contains(&key.as_str()) {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{case_id}`.scenario ({kind}) has unrecognised key `{key}`; \
                  allowed: {allowed:?}"
             )));
@@ -630,30 +616,30 @@ fn check_scenario_keys(
 fn parse_messages(
     map: &serde_json::Map<String, Value>,
     case_id: &str,
-) -> Result<Vec<ChatMessage>, FetchError> {
+) -> Result<Vec<ChatMessage>, ParseError> {
     let arr = map
         .get("messages")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            FetchError::CanonicalFormViolation(format!(
+            ParseError::Invalid(format!(
                 "case `{case_id}`.scenario.messages must be a non-empty array"
             ))
         })?;
     if arr.is_empty() {
-        return Err(FetchError::CanonicalFormViolation(format!(
+        return Err(ParseError::Invalid(format!(
             "case `{case_id}`.scenario.messages must be a non-empty array"
         )));
     }
     let mut out = Vec::with_capacity(arr.len());
     for (mi, raw) in arr.iter().enumerate() {
         let m = raw.as_object().ok_or_else(|| {
-            FetchError::CanonicalFormViolation(format!(
+            ParseError::Invalid(format!(
                 "case `{case_id}`.scenario.messages[{mi}] must be a JSON object"
             ))
         })?;
         for key in m.keys() {
             if !matches!(key.as_str(), "role" | "content") {
-                return Err(FetchError::CanonicalFormViolation(format!(
+                return Err(ParseError::Invalid(format!(
                     "case `{case_id}`.scenario.messages[{mi}] has unrecognised key `{key}`; \
                      allowed: role, content"
                 )));
@@ -662,7 +648,7 @@ fn parse_messages(
         let role = require_string(m, "role")
             .map_err(|e| augment(e, &format!("case `{case_id}`.scenario.messages[{mi}].role")))?;
         if role.is_empty() {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{case_id}`.scenario.messages[{mi}].role must be non-empty"
             )));
         }
@@ -677,32 +663,32 @@ fn parse_messages(
     Ok(out)
 }
 
-fn parse_burst(raw: &Value, case_id: &str) -> Result<Burst, FetchError> {
+fn parse_burst(raw: &Value, case_id: &str) -> Result<Burst, ParseError> {
     let map = raw.as_object().ok_or_else(|| {
-        FetchError::CanonicalFormViolation(format!(
+        ParseError::Invalid(format!(
             "case `{case_id}`.scenario.burst must be a JSON object"
         ))
     })?;
     for key in map.keys() {
         if !matches!(key.as_str(), "count" | "windowMs") {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{case_id}`.scenario.burst has unrecognised key `{key}`; \
                  allowed: count, windowMs"
             )));
         }
     }
     let count_u64 = map.get("count").and_then(|v| v.as_u64()).ok_or_else(|| {
-        FetchError::CanonicalFormViolation(format!(
+        ParseError::Invalid(format!(
             "case `{case_id}`.scenario.burst.count must be a positive integer"
         ))
     })?;
     if count_u64 == 0 {
-        return Err(FetchError::CanonicalFormViolation(format!(
+        return Err(ParseError::Invalid(format!(
             "case `{case_id}`.scenario.burst.count must be ≥ 1"
         )));
     }
     let count = u32::try_from(count_u64).map_err(|_| {
-        FetchError::CanonicalFormViolation(format!(
+        ParseError::Invalid(format!(
             "case `{case_id}`.scenario.burst.count {count_u64} exceeds u32::MAX"
         ))
     })?;
@@ -710,25 +696,25 @@ fn parse_burst(raw: &Value, case_id: &str) -> Result<Burst, FetchError> {
         .get("windowMs")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| {
-            FetchError::CanonicalFormViolation(format!(
+            ParseError::Invalid(format!(
                 "case `{case_id}`.scenario.burst.windowMs must be a non-negative integer"
             ))
         })?;
     let window_ms = u32::try_from(window_ms_u64).map_err(|_| {
-        FetchError::CanonicalFormViolation(format!(
+        ParseError::Invalid(format!(
             "case `{case_id}`.scenario.burst.windowMs {window_ms_u64} exceeds u32::MAX"
         ))
     })?;
     Ok(Burst { count, window_ms })
 }
 
-fn parse_expect(raw: &Value, case_id: &str) -> Result<Expect, FetchError> {
+fn parse_expect(raw: &Value, case_id: &str) -> Result<Expect, ParseError> {
     let map = raw.as_object().ok_or_else(|| {
-        FetchError::CanonicalFormViolation(format!("case `{case_id}`.expect must be a JSON object"))
+        ParseError::Invalid(format!("case `{case_id}`.expect must be a JSON object"))
     })?;
     for key in map.keys() {
         if !EXPECT_KEYS.contains(&key.as_str()) {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{case_id}`.expect has unrecognised key `{key}`; allowed: {EXPECT_KEYS:?}"
             )));
         }
@@ -744,7 +730,7 @@ fn parse_expect(raw: &Value, case_id: &str) -> Result<Expect, FetchError> {
                 .map_err(|e| augment(e, &format!("case `{case_id}`.expect.decisionAtLeastSome")))?,
         ),
         Some(_) => {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{case_id}`.expect.decisionAtLeastSome must be a string or null"
             )));
         }
@@ -756,7 +742,7 @@ fn parse_expect(raw: &Value, case_id: &str) -> Result<Expect, FetchError> {
                 .map_err(|e| augment(e, &format!("case `{case_id}`.expect.byPolicyKind")))?,
         ),
         Some(_) => {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{case_id}`.expect.byPolicyKind must be a string or null"
             )));
         }
@@ -765,12 +751,12 @@ fn parse_expect(raw: &Value, case_id: &str) -> Result<Expect, FetchError> {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(Value::String(_)) => {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{case_id}`.expect.reasonContains must be a non-empty string"
             )));
         }
         Some(_) => {
-            return Err(FetchError::CanonicalFormViolation(format!(
+            return Err(ParseError::Invalid(format!(
                 "case `{case_id}`.expect.reasonContains must be a string"
             )));
         }
@@ -783,48 +769,38 @@ fn parse_expect(raw: &Value, case_id: &str) -> Result<Expect, FetchError> {
     })
 }
 
-fn require_string(map: &serde_json::Map<String, Value>, key: &str) -> Result<String, FetchError> {
+fn require_string(map: &serde_json::Map<String, Value>, key: &str) -> Result<String, ParseError> {
     match map.get(key) {
         Some(Value::String(s)) => Ok(s.clone()),
-        Some(_) => Err(FetchError::CanonicalFormViolation(format!(
-            "`{key}` must be a string"
-        ))),
-        None => Err(FetchError::CanonicalFormViolation(format!(
+        Some(_) => Err(ParseError::Invalid(format!("`{key}` must be a string"))),
+        None => Err(ParseError::Invalid(format!(
             "required key `{key}` is missing"
         ))),
     }
 }
 
-fn require_u16(map: &serde_json::Map<String, Value>, key: &str) -> Result<u16, FetchError> {
+fn require_u16(map: &serde_json::Map<String, Value>, key: &str) -> Result<u16, ParseError> {
     match map.get(key) {
         Some(Value::Number(n)) => {
             let v = n.as_u64().ok_or_else(|| {
-                FetchError::CanonicalFormViolation(format!(
-                    "`{key}` must be a non-negative integer (got {n})"
-                ))
+                ParseError::Invalid(format!("`{key}` must be a non-negative integer (got {n})"))
             })?;
             u16::try_from(v).map_err(|_| {
-                FetchError::CanonicalFormViolation(format!(
-                    "`{key}` must fit in u16 (1..=65535) (got {v})"
-                ))
+                ParseError::Invalid(format!("`{key}` must fit in u16 (1..=65535) (got {v})"))
             })
         }
-        Some(_) => Err(FetchError::CanonicalFormViolation(format!(
+        Some(_) => Err(ParseError::Invalid(format!(
             "`{key}` must be a non-negative integer"
         ))),
-        None => Err(FetchError::CanonicalFormViolation(format!(
+        None => Err(ParseError::Invalid(format!(
             "required key `{key}` is missing"
         ))),
     }
 }
 
-fn augment(e: FetchError, ctx: &str) -> FetchError {
-    match e {
-        FetchError::CanonicalFormViolation(msg) => {
-            FetchError::CanonicalFormViolation(format!("{ctx}: {msg}"))
-        }
-        other => other,
-    }
+fn augment(e: ParseError, ctx: &str) -> ParseError {
+    let ParseError::Invalid(msg) = e;
+    ParseError::Invalid(format!("{ctx}: {msg}"))
 }
 
 // ─────────────────────────── built-ins ───────────────────────────
@@ -834,7 +810,7 @@ fn augment(e: FetchError, ctx: &str) -> FetchError {
 /// reference them by name from `ClawEval.spec.corpora[].builtin`.
 ///
 /// Adding a new built-in requires updating this constant and supplying
-/// the JSON file under `controller/src/eval_corpora/`. The
+/// the JSON file under `eval-corpus/src/eval_corpora/`. The
 /// `builtins_parse_and_are_non_empty` test enforces parity.
 pub const BUILTIN_NAMES: &[&str] = &[
     "jailbreak-baseline",
@@ -871,9 +847,9 @@ pub fn builtin_bytes(name: &str) -> Option<&'static [u8]> {
 
 /// Parse a built-in corpus by name. Convenience wrapper around
 /// [`builtin_bytes`] + [`parse`].
-pub fn load_builtin(name: &str) -> Result<Corpus, FetchError> {
+pub fn load_builtin(name: &str) -> Result<Corpus, ParseError> {
     let bytes = builtin_bytes(name).ok_or_else(|| {
-        FetchError::CanonicalFormViolation(format!(
+        ParseError::Invalid(format!(
             "unknown built-in corpus `{name}`; available: {BUILTIN_NAMES:?}"
         ))
     })?;
@@ -920,7 +896,7 @@ mod tests {
     fn parse_rejects_non_utf8() {
         let err = parse(&[0xff, 0xfe]).unwrap_err();
         assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.starts_with("utf-8")),
+            matches!(err, ParseError::Invalid(ref m) if m.starts_with("utf-8")),
             "{err:?}"
         );
     }
@@ -929,32 +905,28 @@ mod tests {
     fn parse_rejects_non_object() {
         let bytes = b"[]";
         let err = parse(bytes).unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("top-level"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("top-level")));
     }
 
     #[test]
     fn parse_rejects_unknown_top_key() {
         let v = json!({ "schemaVersion": "v1", "name": "x", "cases": [], "stowaway": true });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("stowaway")));
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("stowaway")));
     }
 
     #[test]
     fn parse_rejects_wrong_schema_version() {
         let v = json!({ "schemaVersion": "v2", "name": "x", "cases": [] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("v2")));
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("v2")));
     }
 
     #[test]
     fn parse_rejects_empty_cases() {
         let v = json!({ "schemaVersion": "v1", "name": "x", "cases": [] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("non-empty"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("non-empty")));
     }
 
     #[test]
@@ -964,9 +936,7 @@ mod tests {
             "expect": { "decision": "Blocked" }
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("name must be non-empty"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("name must be non-empty")));
     }
 
     #[test]
@@ -976,9 +946,7 @@ mod tests {
             { "id": "x", "tags": [], "scenario": { "kind": "EgressConnect", "host": "b", "port": 2 }, "expect": { "decision": "Blocked" } }
         ] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("duplicate"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("duplicate")));
     }
 
     #[test]
@@ -989,9 +957,7 @@ mod tests {
             "expect": { "decision": "Blocked" }
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("Telepathy"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("Telepathy")));
     }
 
     #[test]
@@ -1002,7 +968,7 @@ mod tests {
             "expect": { "decision": "Blocked" }
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("u16")));
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("u16")));
     }
 
     #[test]
@@ -1048,7 +1014,7 @@ mod tests {
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
         assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("messages must be a non-empty array"))
+            matches!(err, ParseError::Invalid(ref m) if m.contains("messages must be a non-empty array"))
         );
     }
 
@@ -1094,9 +1060,7 @@ mod tests {
             "expect": { "decision": "Allowed" }
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("count must be ≥ 1"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("count must be ≥ 1")));
     }
 
     #[test]
@@ -1122,7 +1086,7 @@ mod tests {
             "expect": { "decision": "Maybe" }
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("Maybe")));
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("Maybe")));
     }
 
     #[test]
@@ -1133,9 +1097,7 @@ mod tests {
             "expect": { "decision": "Blocked", "byPolicyKind": "DnsPolicy" }
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("DnsPolicy"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("DnsPolicy")));
     }
 
     #[test]
@@ -1146,7 +1108,7 @@ mod tests {
             "expect": { "decision": "Blocked" }
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("extra")));
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("extra")));
     }
 
     #[test]
@@ -1157,9 +1119,7 @@ mod tests {
             "expect": { "decision": "Blocked" }
         }] });
         let err = parse(&serde_json::to_vec(&v).unwrap()).unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("id must be non-empty"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("id must be non-empty")));
     }
 
     // ─────────────── judge() ───────────────
@@ -1392,9 +1352,7 @@ mod tests {
     #[test]
     fn load_builtin_unknown_errors() {
         let err = load_builtin("nonexistent").unwrap_err();
-        assert!(
-            matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("nonexistent"))
-        );
+        assert!(matches!(err, ParseError::Invalid(ref m) if m.contains("nonexistent")));
     }
 
     #[test]

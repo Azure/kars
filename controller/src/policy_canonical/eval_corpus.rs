@@ -3,30 +3,32 @@
 
 //! `ClawEval` corpus canonical-form `PolicyKind` impl.
 //!
-//! Slice 6.1 — wires the eval-corpus parser (see
-//! [`crate::eval_corpus`]) into the kind-agnostic
+//! Wires the shared eval-corpus parser (the
+//! [`azureclaw_eval_corpus`] crate) into the kind-agnostic
 //! [`crate::policy_fetcher::fetch_and_verify_generic`] pipeline so
 //! operator-supplied signed corpora (`ClawEval.spec.corpora[].bundleRef`)
 //! pull through the same OCI + cosign trust root as every other policy
 //! kind. The reconciler consumer lands in slice 6.3.
 //!
-//! Built-in corpora ([`crate::eval_corpus::BUILTIN_NAMES`]) **do not**
+//! Built-in corpora ([`azureclaw_eval_corpus::BUILTIN_NAMES`]) **do not**
 //! travel this path — they are compiled into the runner image and
 //! verified against the AzureClaw release public key by the runner
 //! itself. This `PolicyKind` impl exists exclusively for the
 //! `bundleRef` lane.
 
-// Slice 6.1 ships the parser, PolicyKind impl, and cache for the
-// eval-corpus signing pipeline. The consumer (the `ClawEval`
+// Slice 6.1 shipped the parser, PolicyKind impl, and cache for the
+// eval-corpus signing pipeline. The bundleRef consumer (the `ClawEval`
 // reconciler that calls `fetch_and_verify_generic::<EvalCorpusKind>`)
 // lands in slice 6.3. Until then, the items below are reachable only
 // from this module's tests; `dead_code` is silenced here, not at each
-// item, to keep the public surface a single block.
+// item, to keep the public surface a single block. Note: the
+// `Corpus`/`parse`/`judge` parts of the library are NOT dead — they
+// are consumed by the `conformance-runner` workspace crate (slice 6.2).
 #![allow(dead_code)]
 
 use super::{CachedValue, PolicyKind};
-use crate::eval_corpus::{Corpus, parse};
 use crate::policy_fetcher::{CACHE_TTL, FetchError};
+use azureclaw_eval_corpus::{Corpus, ParseError, parse};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
@@ -61,7 +63,8 @@ impl PolicyKind for EvalCorpusKind {
     type Output = VerifiedEvalCorpus;
 
     fn parse(bytes: &[u8]) -> Result<Self::Output, FetchError> {
-        let corpus = parse(bytes)?;
+        let corpus = parse(bytes)
+            .map_err(|ParseError::Invalid(msg)| FetchError::CanonicalFormViolation(msg))?;
         Ok(VerifiedEvalCorpus {
             corpus,
             bytes: bytes.to_vec(),
@@ -128,7 +131,7 @@ fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval_corpus::Decision;
+    use azureclaw_eval_corpus::Decision;
 
     fn minimal_bytes() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({

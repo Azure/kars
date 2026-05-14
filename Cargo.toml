@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "inference-router",
     "controller",
+    "eval-corpus",
+    "conformance-runner",
     "azureclaw-a2a-core",
     "a2a-gateway",
     "tests/chaos",
