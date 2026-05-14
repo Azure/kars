@@ -194,6 +194,7 @@ async fn reconcile(eval: Arc<ClawEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             &jobs,
             &job_name,
             &name,
+            eval.metadata.uid.as_deref(),
             &cm_name,
             &runner_image,
             &target_url,
@@ -220,6 +221,7 @@ async fn reconcile(eval: Arc<ClawEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             &cronjobs,
             &cj_name,
             &name,
+            eval.metadata.uid.as_deref(),
             schedule,
             &cm_name,
             &runner_image,
@@ -492,6 +494,22 @@ fn sandbox_router_url(sandbox_name: &str) -> String {
     format!("http://{sandbox_name}.azureclaw-{sandbox_name}.svc.cluster.local:8443")
 }
 
+/// Owner-reference fragment so spawned Jobs / CronJobs are garbage-
+/// collected by the apiserver when the parent ClawEval is deleted.
+/// Returns `null` if no UID is known yet (first reconcile before the
+/// apiserver populated `metadata.uid` — should be rare; reconciler
+/// re-runs after the next watch event will pick it up).
+fn claweval_owner_refs(eval_name: &str, uid: &str) -> serde_json::Value {
+    json!([{
+        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "kind": "ClawEval",
+        "name": eval_name,
+        "uid": uid,
+        "controller": true,
+        "blockOwnerDeletion": true,
+    }])
+}
+
 fn cron_job_name(eval_name: &str) -> String {
     format!("claweval-{eval_name}")
 }
@@ -557,30 +575,36 @@ fn runner_pod_spec_json(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_run_now_job(
     api: &Api<Job>,
     job_name: &str,
     eval_name: &str,
+    eval_uid: Option<&str>,
     cm_name: &str,
     runner_image: &str,
     target_url: &str,
     corpus_label: &str,
 ) -> Result<(), ReconcileError> {
     let pod_spec = runner_pod_spec_json(eval_name, cm_name, runner_image, target_url, corpus_label);
+    let mut metadata = json!({
+        "name": job_name,
+        "labels": {
+            "app.kubernetes.io/managed-by": "azureclaw-controller",
+            LABEL_KEY_CLAW_EVAL: eval_name,
+            "azureclaw.azure.com/claweval-trigger": "run-now",
+        },
+        "annotations": {
+            "azureclaw.azure.com/claweval-name": eval_name,
+        },
+    });
+    if let Some(uid) = eval_uid {
+        metadata["ownerReferences"] = claweval_owner_refs(eval_name, uid);
+    }
     let body = json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {
-            "name": job_name,
-            "labels": {
-                "app.kubernetes.io/managed-by": "azureclaw-controller",
-                LABEL_KEY_CLAW_EVAL: eval_name,
-                "azureclaw.azure.com/claweval-trigger": "run-now",
-            },
-            "annotations": {
-                "azureclaw.azure.com/claweval-name": eval_name,
-            },
-        },
+        "metadata": metadata,
         "spec": {
             "backoffLimit": 0,
             "ttlSecondsAfterFinished": 3600,
@@ -609,6 +633,7 @@ async fn ensure_cronjob(
     api: &Api<CronJob>,
     cj_name: &str,
     eval_name: &str,
+    eval_uid: Option<&str>,
     schedule: &str,
     cm_name: &str,
     runner_image: &str,
@@ -616,16 +641,20 @@ async fn ensure_cronjob(
     corpus_label: &str,
 ) -> Result<(), ReconcileError> {
     let pod_spec = runner_pod_spec_json(eval_name, cm_name, runner_image, target_url, corpus_label);
+    let mut metadata = json!({
+        "name": cj_name,
+        "labels": {
+            "app.kubernetes.io/managed-by": "azureclaw-controller",
+            LABEL_KEY_CLAW_EVAL: eval_name,
+        },
+    });
+    if let Some(uid) = eval_uid {
+        metadata["ownerReferences"] = claweval_owner_refs(eval_name, uid);
+    }
     let body = json!({
         "apiVersion": "batch/v1",
         "kind": "CronJob",
-        "metadata": {
-            "name": cj_name,
-            "labels": {
-                "app.kubernetes.io/managed-by": "azureclaw-controller",
-                LABEL_KEY_CLAW_EVAL: eval_name,
-            },
-        },
+        "metadata": metadata,
         "spec": {
             "schedule": schedule,
             "concurrencyPolicy": "Forbid",
@@ -1345,6 +1374,31 @@ mod tests {
         assert_eq!(
             sandbox_router_url("agent-001"),
             "http://agent-001.azureclaw-agent-001.svc.cluster.local:8443"
+        );
+    }
+
+    #[test]
+    fn claweval_owner_refs_emits_controller_blocking_reference() {
+        let refs =
+            claweval_owner_refs("nightly-regression", "8f2a3b4c-1111-2222-3333-444455556666");
+        let arr = refs.as_array().expect("owner refs must be a JSON array");
+        assert_eq!(
+            arr.len(),
+            1,
+            "exactly one owner reference per spawned child"
+        );
+        let r = &arr[0];
+        assert_eq!(r["apiVersion"], "azureclaw.azure.com/v1alpha1");
+        assert_eq!(r["kind"], "ClawEval");
+        assert_eq!(r["name"], "nightly-regression");
+        assert_eq!(r["uid"], "8f2a3b4c-1111-2222-3333-444455556666");
+        assert_eq!(
+            r["controller"], true,
+            "must mark controller=true so Jobs/CronJobs are GC'd with the parent",
+        );
+        assert_eq!(
+            r["blockOwnerDeletion"], true,
+            "finalizer correctness: parent delete waits for child cleanup",
         );
     }
 
