@@ -1017,7 +1017,13 @@ fn build_conditions(
         cond_status::FALSE
     };
     let ready_reason = if last_result.is_none() {
-        reason::SCHEDULED
+        if spawned_run_now.is_some() {
+            reason::RUN_TRIGGERED
+        } else if cron_job_name.is_some() {
+            reason::SCHEDULED
+        } else {
+            cond_reason::RECONCILED
+        }
     } else if drift_detected {
         reason::DRIFT_DETECTED
     } else {
