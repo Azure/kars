@@ -16,6 +16,7 @@ AzureClaw exposes its API through eight CustomResourceDefinitions in the `azurec
 | `clawmemories.azureclaw.azure.com` | `ClawMemory` | `cmem` | Namespaced | Memory-store binding (Foundry Memory Store). |
 | `clawevals.azureclaw.azure.com` | `ClawEval` | `ceval` | Namespaced | Reproducible evaluation run. |
 | `trustgraphs.azureclaw.azure.com` | `TrustGraph` | `tg` | Cluster | Cross-namespace / cross-cluster mesh trust topology. |
+| `egressapprovals.azureclaw.azure.com` | `EgressApproval` | `ea` | Namespaced | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
 
 A ninth CRD, `clawpairings.azureclaw.azure.com` (`ClawPairing`, `cp`), is a controller-internal record used to bind sandboxes to AgentMesh registry IDs. It is created by the controller; you generally do not write it directly.
 
@@ -258,6 +259,60 @@ spec:
 ```
 
 See **[AGT boundary](../architecture/agt-boundary.md)** for how trust scores are evaluated at KNOCK time.
+
+---
+
+## `EgressApproval` — ephemeral egress grant
+
+Namespaced overlay on a `ClawSandbox`'s baseline `networkPolicy.allowedEndpoints`. The controller unions the approval's hosts into a sibling ConfigMap mounted by the inference-router; the router rebuilds its allowlist on every change, POSTs the loaded digest back, and the controller promotes `phase=Pending → Active` only when the loaded digest matches the compiled merged digest (the same §3 `Ready ⇔ router echo` invariant used by every other policy CRD). On TTL expiry the file is removed, the merged digest is recomputed, and `phase=Expired` is stamped (terminal).
+
+```yaml
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: debug-stripe-2026-05-14
+  namespace: azureclaw-system        # same namespace as the sandbox
+spec:
+  sandbox: my-agent                  # sibling ClawSandbox name
+  hosts:                             # 1..16 entries; small scoped grants only
+    - host: api.stripe.com
+      port: 443
+    - host: hooks.stripe.com         # port optional (defaults all)
+  reason: "INC-4421 debug pipe"      # 1..512 chars, no ASCII control bytes
+  ticket: "INC-4421"                 # optional, 1..128 chars
+  ttl: PT2H                          # ISO 8601; helm-tunable ceiling, 7d hard cap
+```
+
+| `spec` field | Required | Validation |
+|---|---|---|
+| `sandbox` | ✅ | 1..253 chars; must be a sibling `ClawSandbox` in the same namespace. |
+| `hosts` | ✅ | 1..16 entries; each `host` is 1..253 chars; `port`, when set, is 1..65535. |
+| `reason` | ✅ | 1..512 chars; ASCII control bytes (`\x00-\x08\x0B\x0C\x0E-\x1F\x7F`) rejected. |
+| `ticket` | optional | 1..128 chars (free-form linkage to ITSM / incident system). |
+| `ttl` | ✅ | ISO 8601 duration (`PT15M`, `PT4H`, `P1D`, `PT1H30M`); zero-valued (`PT0S`) rejected; reconciler also rejects W/Y units and clamps to `min(env_ceiling, 604800s)`. |
+
+`status`:
+
+```yaml
+status:
+  phase: Active                      # Pending | Active | Expired (terminal)
+  observedGeneration: 1
+  effectiveAt: "2026-05-14T13:42:11Z"
+  expiresAt:   "2026-05-14T15:42:11Z"
+  mergedDigest: "sha256:9af1…"       # = controller's merged-allowlist digest
+  hostCount: 2
+  usageCount: 17                     # informational, router-reported
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: RouterConfirmed        # | BlockedOnSandbox | AwaitingRouterEcho | Expired | ReasonInvalid
+      message: "Grant is live on data plane."
+    - type: Progressing
+      status: "False"
+      reason: Active
+```
+
+CLI: `azureclaw egress allow-extra <sandbox> --host … --reason … --ttl PT4H` to grant, `azureclaw egress approvals <sandbox>` to list, `azureclaw egress revoke <name>` to revoke. See **[Network egress & proxy](../egress-proxy.md)** for the full lifecycle, status semantics, and FAQ.
 
 ---
 

@@ -1022,6 +1022,13 @@ pub async fn run(client: Client) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes tests that mutate the `EGRESS_APPROVAL_MAX_TTL_SECONDS`
+    /// process env var. `cargo test` runs tests in parallel by default;
+    /// without this, tests race on the shared env and produce flaky
+    /// `assert_eq!(v, HARD_TTL_CEILING_SECONDS)` failures (observed in
+    /// PR #311 CI).
+    static TTL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use crate::egress_approval::EgressApprovalSpec;
 
     fn mk_approval(name: &str, sandbox: &str, ttl: &str, reason: &str) -> EgressApproval {
@@ -1176,6 +1183,7 @@ mod tests {
         // Don't actually mutate env in unit tests — just exercise the
         // helper against the default path. The 'env not set' case is
         // the most-common operator deployment.
+        let _guard = TTL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("EGRESS_APPROVAL_MAX_TTL_SECONDS");
         }
@@ -1185,6 +1193,7 @@ mod tests {
     #[test]
     fn ttl_ceiling_from_env_caps_at_hard_ceiling() {
         // Env override above the hard ceiling clamps down.
+        let _guard = TTL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("EGRESS_APPROVAL_MAX_TTL_SECONDS", "9999999");
         }
@@ -1197,6 +1206,7 @@ mod tests {
 
     #[test]
     fn ttl_ceiling_from_env_ignores_zero_or_invalid() {
+        let _guard = TTL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("EGRESS_APPROVAL_MAX_TTL_SECONDS", "0");
         }

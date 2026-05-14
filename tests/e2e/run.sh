@@ -568,6 +568,191 @@ EOF
     fi
 }
 
+# Slice 5e — EgressApproval CRD reconciliation. Apply a valid grant
+# scoped to e2e-test, assert the reconciler stamps an honest status
+# (phase + Ready condition). In Kind the sibling sandbox does not
+# typically reach phase=Ready (no real Azure backend), so the
+# reconciler stamps phase=Pending + reason=BlockedOnSandbox — that
+# is itself the §3 "Ready ⇔ router echo" invariant working as
+# designed and is a legitimate observable outcome. We also accept
+# AwaitingRouterEcho (sandbox briefly Ready) and the fully-promoted
+# state if both ever land together. Then we exercise the finalizer
+# via delete.
+test_crd_egress_approval() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "EgressApproval apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-egress-approval
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts:
+    - host: example.invalid
+      port: 443
+    - host: api.example.invalid
+  reason: "e2e grant for slice 5e.4"
+  ticket: "E2E-0001"
+  ttl: PT15M
+EOF
+    # The reconciler must at minimum stamp observedGeneration and
+    # hostCount within ~45s. Don't gate on Ready=True because the
+    # sibling sandbox is unlikely to be Ready in Kind.
+    local deadline ea_phase ea_ready ea_reason ea_hosts ea_observed
+    deadline=$(($(date +%s) + 45))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        ea_observed=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+        if [ -n "$ea_observed" ] && [ "$ea_observed" != "0" ]; then
+            break
+        fi
+        sleep 2
+    done
+    ea_phase=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    ea_ready=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    ea_reason=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    ea_hosts=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.hostCount}' 2>/dev/null || true)
+
+    if [ "$ea_hosts" = "2" ]; then
+        pass "EgressApproval: status.hostCount=2 (reconciler ran)"
+    else
+        dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+        fail "EgressApproval: hostCount expected '2', got '$ea_hosts'"
+    fi
+
+    case "$ea_phase|$ea_ready|$ea_reason" in
+        Pending\|False\|BlockedOnSandbox|Pending\|False\|AwaitingRouterEcho|Active\|True\|RouterConfirmed)
+            pass "EgressApproval: phase=$ea_phase ready=$ea_ready reason=$ea_reason (§3 honest state)"
+            ;;
+        *)
+            dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+            fail "EgressApproval: unexpected honest-state — phase=$ea_phase ready=$ea_ready reason=$ea_reason"
+            ;;
+    esac
+
+    # Finalizer must be set so the reconciler can tear down the
+    # merged-allowlist CM key on delete.
+    local fin
+    fin=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+    case "$fin" in
+        *azureclaw.azure.com/egress-approval-cleanup*)
+            pass "EgressApproval: finalizer present"
+            ;;
+        *)
+            dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+            fail "EgressApproval: finalizer missing (got '$fin')"
+            ;;
+    esac
+
+    # Delete must complete (finalizer cleanup runs even if the
+    # merged-allowlist CM was never created — controller no-ops on
+    # missing CM during cleanup).
+    if kubectl delete egressapproval e2e-egress-approval -n azureclaw-system --timeout=30s >/dev/null 2>&1; then
+        pass "EgressApproval: delete completes (finalizer cleanup)"
+    else
+        kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o yaml 2>&1 | tail -30 || true
+        # Force-remove finalizer for cleanup so we don't leak into next test
+        kubectl patch egressapproval e2e-egress-approval -n azureclaw-system --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+        fail "EgressApproval: delete did not complete within 30s"
+    fi
+}
+
+# Slice 5e — CEL admission gates on EgressApproval. The CRD ships
+# eight x-kubernetes-validations rules; test the most operator-facing
+# ones. Each invalid CR MUST be rejected at the apiserver before it
+# reaches the controller.
+test_crd_egress_approval_cel_rejects() {
+    # Empty hosts (size >= 1)
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-bad-ea-empty-hosts
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts: []
+  reason: "test"
+  ttl: PT5M
+EOF
+    then
+        kubectl delete egressapproval e2e-bad-ea-empty-hosts -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted EgressApproval with empty hosts (CEL broken)"
+    else
+        pass "Admission CEL rejects EgressApproval with empty hosts"
+    fi
+
+    # ttl with weeks/years not allowed (rule requires no W/Y units)
+    # The regex actually allows W/Y syntactically; the rule that
+    # rejects W/Y is enforced by the reconciler. So target a TTL
+    # the CEL pattern DOES catch: zero-valued PT0S.
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-bad-ea-zero-ttl
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts:
+    - host: example.com
+  reason: "zero ttl"
+  ttl: PT0S
+EOF
+    then
+        kubectl delete egressapproval e2e-bad-ea-zero-ttl -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted EgressApproval with ttl=PT0S (CEL broken)"
+    else
+        pass "Admission CEL rejects EgressApproval with ttl=PT0S"
+    fi
+
+    # Reason with ASCII control byte (NUL) — should be rejected.
+    if kubectl apply -f - >/dev/null 2>&1 <<EOF
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-bad-ea-ctrl-byte
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts:
+    - host: example.com
+  reason: "bad$(printf '\x01')byte"
+  ttl: PT15M
+EOF
+    then
+        kubectl delete egressapproval e2e-bad-ea-ctrl-byte -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted EgressApproval with control-byte reason (CEL broken)"
+    else
+        pass "Admission CEL rejects EgressApproval with control-byte reason"
+    fi
+
+    # Malformed TTL string — should be rejected by pattern rule.
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-bad-ea-bad-ttl
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts:
+    - host: example.com
+  reason: "malformed ttl"
+  ttl: "not-a-duration"
+EOF
+    then
+        kubectl delete egressapproval e2e-bad-ea-bad-ttl -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted EgressApproval with malformed ttl (CEL broken)"
+    else
+        pass "Admission CEL rejects EgressApproval with malformed ttl"
+    fi
+}
+
 test_runtime_oai_agents() {
     # Render a multi-runtime ClawSandbox of kind OpenAIAgents and assert
     # the controller produces a namespace (Phase 2 schema parses; adapter
@@ -2388,6 +2573,8 @@ main() {
     test_crd_trustgraph_reconcile || true
     test_crd_clawpairing_lifecycle || true
     test_crd_admission_rejects_invalid || true
+    test_crd_egress_approval || true
+    test_crd_egress_approval_cel_rejects || true
     # Reconciler update / delete flow (separate fixtures so they
     # don't disturb the e2e-test sandbox).
     test_tool_policy_update_flow || true
