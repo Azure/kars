@@ -87,7 +87,8 @@ impl PolicyKind for EgressKind {
         }
         match &entry.verified {
             CachedValue::Egress(v) => Some(v.clone()),
-            CachedValue::Inference(_)
+            CachedValue::EvalCorpus(_)
+            | CachedValue::Inference(_)
             | CachedValue::McpServer(_)
             | CachedValue::Memory(_)
             | CachedValue::Tools(_) => None,

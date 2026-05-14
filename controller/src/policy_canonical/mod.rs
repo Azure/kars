@@ -30,6 +30,7 @@ use crate::policy_fetcher::FetchError;
 use std::time::{Instant, SystemTime};
 
 pub mod egress;
+pub mod eval_corpus;
 pub mod inference;
 pub mod mcp_server;
 pub mod memory;
@@ -38,6 +39,8 @@ pub mod tools;
 #[allow(unused_imports)]
 // re-exported for downstream sub-slices (1c.4+); tests use the full path
 pub use egress::EgressKind;
+#[allow(unused_imports)]
+pub use eval_corpus::EvalCorpusKind;
 #[allow(unused_imports)]
 pub use inference::InferenceKind;
 #[allow(unused_imports)]
@@ -59,9 +62,10 @@ pub use tools::ToolsKind;
 /// is the implementation detail of how
 /// [`PolicyKind::cache_get`] / [`PolicyKind::cache_put`] are wired, not
 /// a public extension point.
-#[allow(dead_code)] // future kinds (eval-corpus) will add variants
+#[allow(dead_code)] // EvalCorpus variant ctor lands with the 6.3 reconciler
 pub(crate) enum CachedValue {
     Egress(egress::VerifiedAllowlist),
+    EvalCorpus(eval_corpus::VerifiedEvalCorpus),
     Inference(inference::VerifiedInferencePolicy),
     McpServer(mcp_server::VerifiedMcpServerBundle),
     Memory(memory::VerifiedMemoryBinding),
