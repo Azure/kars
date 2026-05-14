@@ -15,13 +15,14 @@ import {
 } from "./sign.js";
 
 describe("POLICY_KIND_SPECS", () => {
-  it("covers exactly the five signed policy kinds", () => {
+  it("covers exactly the six signed policy kinds", () => {
     expect(POLICY_KIND_IDS).toEqual([
       "egress-allowlist",
       "agt-profile",
       "inference-policy",
       "memory-binding",
       "mcp-server-bundle",
+      "eval-corpus",
     ]);
   });
 
@@ -40,6 +41,9 @@ describe("POLICY_KIND_SPECS", () => {
     );
     expect(POLICY_KIND_SPECS["mcp-server-bundle"].mediaType).toBe(
       "application/vnd.azureclaw.mcp-server-bundle.v1+json",
+    );
+    expect(POLICY_KIND_SPECS["eval-corpus"].mediaType).toBe(
+      "application/vnd.azureclaw.eval-corpus.v1+json",
     );
   });
 

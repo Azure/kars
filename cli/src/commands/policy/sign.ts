@@ -48,7 +48,8 @@ export type PolicyKindId =
   | "agt-profile"
   | "inference-policy"
   | "memory-binding"
-  | "mcp-server-bundle";
+  | "mcp-server-bundle"
+  | "eval-corpus";
 
 export const POLICY_KIND_IDS: readonly PolicyKindId[] = [
   "egress-allowlist",
@@ -56,6 +57,7 @@ export const POLICY_KIND_IDS: readonly PolicyKindId[] = [
   "inference-policy",
   "memory-binding",
   "mcp-server-bundle",
+  "eval-corpus",
 ] as const;
 
 /** Wire-level metadata for one signed-artifact kind. The MIME types
@@ -101,6 +103,12 @@ export const POLICY_KIND_SPECS: Record<PolicyKindId, PolicyKindSpec> = {
     id: "mcp-server-bundle",
     controllerKind: "McpServer",
     mediaType: "application/vnd.azureclaw.mcp-server-bundle.v1+json",
+    expectedExt: ".json",
+  },
+  "eval-corpus": {
+    id: "eval-corpus",
+    controllerKind: "ClawEval",
+    mediaType: "application/vnd.azureclaw.eval-corpus.v1+json",
     expectedExt: ".json",
   },
 };
@@ -271,7 +279,7 @@ export function registerPolicySignSubcommand(parent: Command): Command {
   return parent
     .command("sign")
     .description(
-      "Sign a policy artifact (egress-allowlist, agt-profile, inference-policy, memory-binding, mcp-server-bundle)",
+      "Sign a policy artifact (egress-allowlist, agt-profile, inference-policy, memory-binding, mcp-server-bundle, eval-corpus)",
     )
     .requiredOption(
       "--kind <kind>",
