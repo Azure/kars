@@ -209,6 +209,85 @@ function shortDigest(digest: string | undefined): string {
   return `${digest.slice(0, colon + 1)}${digest.slice(colon + 1, colon + 13)}…`;
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// AllowlistDrift banner (crd-well-oiled-machine Slice 5d)
+//
+// The controller emits an `AllowlistDrift=True` condition when a
+// ClawSandbox's CR carries both `allowedEndpoints` (inline) AND
+// `allowlistRef` (signed artifact) and the two diverge. The artifact
+// wins and inline is ignored — but operators need to *see* the diff
+// so they can either re-sign the bundle to include the new hosts or
+// drop the inline override.
+//
+// The condition message format is:
+//   "inline allowedEndpoints differs from verified artifact; artifact wins | drift={JSON}"
+// where JSON is `{"added":[...],"removed":[...]}` of `host:port` strings.
+// `added` = inline entries missing from the artifact (operator intent
+// diverging from authority). `removed` = artifact entries the operator
+// did not echo inline. See
+// `controller/src/policy_fetcher.rs::DriftSummary` for the canonical
+// schema.
+// ──────────────────────────────────────────────────────────────────────
+
+interface DriftSummary {
+  added: string[];
+  removed: string[];
+}
+
+function parseDriftFromMessage(message: string | undefined): DriftSummary | null {
+  if (!message) return null;
+  const idx = message.indexOf(" | drift=");
+  if (idx < 0) return null;
+  try {
+    const parsed = JSON.parse(message.slice(idx + " | drift=".length));
+    if (!parsed || typeof parsed !== "object") return null;
+    const added = Array.isArray(parsed.added) ? parsed.added.filter((s: unknown) => typeof s === "string") : [];
+    const removed = Array.isArray(parsed.removed) ? parsed.removed.filter((s: unknown) => typeof s === "string") : [];
+    return { added, removed };
+  } catch {
+    return null;
+  }
+}
+
+function AllowlistDriftBanner({ item }: { item: KubeObject }) {
+  const status = getStatus(item);
+  const conditions = (status.conditions as Array<Record<string, any>> | undefined) ?? [];
+  const drift = conditions.find(c => c.type === "AllowlistDrift" && c.status === "True");
+  if (!drift) return null;
+
+  const summary = parseDriftFromMessage(drift.message as string | undefined);
+  const added = summary?.added ?? [];
+  const removed = summary?.removed ?? [];
+
+  return (
+    <SectionBox title="⚠ Allowlist drift detected">
+      <p style={{ padding: "0.5rem", fontSize: "0.9rem" }}>
+        <StatusLabel status={"warning" as any}>artifact wins</StatusLabel>{" "}
+        Inline <code>allowedEndpoints</code> diverges from the verified
+        signed bundle. The router enforces the bundle; the inline list is
+        ignored. Either re-sign the bundle to include the divergent
+        hosts, or remove the inline override.
+      </p>
+      {(added.length > 0 || removed.length > 0) ? (
+        <SimpleTable
+          data={[
+            { side: `Only in inline (operator added, not signed) — ${added.length}`, hosts: added.join(", ") || "—" },
+            { side: `Only in bundle (signed, but missing inline) — ${removed.length}`, hosts: removed.join(", ") || "—" },
+          ]}
+          columns={[
+            { label: "Side", getter: (r: any) => r.side },
+            { label: "Hosts", getter: (r: any) => <code>{r.hosts}</code> },
+          ]}
+        />
+      ) : (
+        <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+          {(drift.message as string) ?? "(no diff payload)"}
+        </p>
+      )}
+    </SectionBox>
+  );
+}
+
 function reasonChip(reason: string | undefined) {
   if (!reason) return <span>—</span>;
   const success = reason === "RouterEnforcing" || reason === "AllDigestsMatch";
@@ -702,6 +781,8 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
       </SectionBox>
 
       {crd.plural === "clawsandboxes" && <SandboxExtras item={item} />}
+
+      <AllowlistDriftBanner item={item} />
 
       <RouterPolicyStatusPanel crd={crd} item={item} />
 

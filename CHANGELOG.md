@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5d — `AllowlistDrift` structured diff + Headlamp banner
+
+Closes Slice 5 DoD #5. The `AllowlistDrift=True` condition already
+fires when a `ClawSandbox` carries both `allowedEndpoints` (inline)
+and `allowlistRef` (signed artifact) and they diverge — but until
+now the message was a single human sentence with no machine-readable
+diff. Operators had to manually compare two host lists to see what
+the bundle was missing.
+
+- **`DriftSummary` payload appended to the condition message.**
+  Format: `"… artifact wins | drift={JSON}"` where the JSON object
+  has `added` (entries only inline — operator intent missing from
+  the signed authority) and `removed` (entries only in the bundle —
+  authority has hosts the operator did not echo). Entries are
+  `host:port` strings, port normalized to `443`, sorted
+  lexicographically. Empty-list contracts: no drift ⇒ no JSON
+  payload at all (legacy message preserved). Pinned in
+  `controller/src/policy_fetcher.rs::DriftSummary` and
+  serde-roundtrip-tested.
+- **Headlamp plugin banner.** Every `ClawSandbox` detail view now
+  shows a yellow "Allowlist drift detected" section when the
+  `AllowlistDrift` condition is `True`. The banner parses the
+  trailing JSON and renders a two-row table (only-in-inline /
+  only-in-bundle) with the host list. Falls back to the raw
+  condition message when the JSON suffix is absent
+  (forward-compat).
+- **No wire surface change.** The drift JSON is a suffix of an
+  existing condition message — no new CRD field, no router
+  protocol bump, no controller env var. Old plugins ignore the
+  suffix; new plugins parse it.
+
 ### Slice 5c.2 — `Unsigned` warning condition + helm `requireSigned` fail-closed toggle
 
 Surfaces the gap when a `ClawSandbox` uses
