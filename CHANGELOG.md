@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5c.2 — `Unsigned` warning condition + helm `requireSigned` fail-closed toggle
+
+Surfaces the gap when a `ClawSandbox` uses
+`spec.networkPolicy.allowedEndpoints` (inline) without a signed
+`spec.networkPolicy.allowlistRef`, and gives operators a single
+helm switch to flip the policy from *allow with warning* to
+*fail-closed*.
+
+- **Default behaviour (no change to working sandboxes):** inline
+  allowlists keep reconciling. The controller now additionally
+  stamps `AllowlistVerified=False / reason=Unsigned` so operators
+  see the missing attestation in `kubectl describe clawsandbox` and
+  in the Headlamp panel. The L4 NetworkPolicy and the L7 router
+  allowlist mount are still programmed from the inline list — no
+  egress regression.
+- **`egress.requireSigned: true`** (new helm value, default
+  `false`): when set, the controller refuses to program user egress
+  for inline-only allowlists. `endpoints` is dropped, the L7 mount
+  is published empty (router rejects every L7 attempt), and the
+  sandbox stamps `Degraded=True / reason=Unsigned` with an
+  actionable message pointing operators to either sign the bundle
+  via `allowlistRef` or relax the helm value.
+- Threaded through `controller-deployment.yaml` as the
+  `REQUIRE_SIGNED_ALLOWLIST` env var. `policy_fetcher`'s
+  `require_signed_allowlist()` reads it on every reconcile so
+  operators can toggle without a controller restart.
+- New `reason::UNSIGNED` constant in `status::conditions`. Existing
+  cosign verify path (`allowlistRef` set) is unchanged — it already
+  emits `AllowlistVerified=True / reason=Verified` on success and
+  the appropriate verify-fail reasons otherwise.
+- Reconciler's `fail_closed_no_lkg` short-circuit now distinguishes
+  *verify-fail-no-LKG* (`reason=FailedClosed`) from the new
+  *require-signed-rejection* path (`reason=Unsigned`) so the
+  Degraded message is actionable in either case.
+- Tests: 3 new + 1 updated unit tests in `policy_fetcher::tests`
+  (`resolve_inline_only_with_require_signed_fails_closed`,
+  `resolve_inline_empty_with_require_signed_is_noop`,
+  `require_signed_allowlist_parses_truthy_values`, plus the
+  existing `resolve_inline_only_emits_authoritative_inline` now
+  asserts the `Unsigned` warning).
+- Closes Slice 5 DoD #7 (attestation surface) — note: full signed
+  *bundleRef path was always-on since S12.e; Slice 5c.2 closes the
+  loop on the *unsigned* side so the cosign infra is no longer
+  silent for inline-only sandboxes.
+
 ### Slice 5c.1 — Egress allowlist mount + router echo (DoD #2 wire)
 
 Wires the controller-published signed egress allowlist into the
