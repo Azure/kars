@@ -287,22 +287,28 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .unwrap_or_default();
     let observed_generation = mcp.metadata.generation;
 
+    // Resolve the effective spec: either pass the CR verbatim (inline
+    // path) or fetch + cosign-verify the referenced OCI bundle and
+    // merge its content onto the CR's `allowedSandboxes` selector
+    // (signed path). See [`resolve_mcp_source`] doc-comment.
+    let (effective_spec, bundle_ref_digest, source_degraded) = resolve_mcp_source(&mcp).await;
+
     // 1. Ensure signing keypair Secret.
     let secret_name = format!("mcp-{name}-signing");
     let signing_kid = ensure_signing_secret(&secrets, &secret_name, &name).await?;
 
     // 2. Ensure JWKS ConfigMap when productionMode=true.
     let mut jwks_ref: Option<LocalObjectRef> = None;
-    let mut degraded: Option<(&'static str, String)> = None;
+    let mut degraded: Option<(&'static str, String)> = source_degraded;
 
-    if mcp.spec.production_mode {
-        let issuer_opt = mcp.spec.oauth.as_ref().map(|o| o.issuer.clone());
+    if degraded.is_none() && effective_spec.production_mode.unwrap_or(false) {
+        let issuer_opt = effective_spec.oauth.as_ref().map(|o| o.issuer.clone());
         match issuer_opt {
             Some(issuer) if !issuer.is_empty() => {
                 let cm_name = format!("mcp-{name}-jwks");
                 match ctx.jwks_fetcher.fetch(&issuer).await {
                     Ok(fetched) => {
-                        let meta = McpServerMeta::from_spec(&mcp.spec);
+                        let meta = McpServerMeta::from_spec(&effective_spec);
                         ensure_jwks_configmap(&configmaps, &cm_name, &name, &fetched.raw, &meta)
                             .await?;
                         jwks_ref = Some(LocalObjectRef {
@@ -332,7 +338,8 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 // controller upgraded ahead of CRD). Fail loudly.
                 degraded = Some((
                     "SpecInvalid",
-                    "productionMode=true requires spec.oauth.issuer".into(),
+                    "productionMode=true requires spec.oauth.issuer (inline or via bundleRef)"
+                        .into(),
                 ));
             }
         }
@@ -374,6 +381,7 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             last_probed_at: Some(rfc3339_now()),
             signing_key_ref: Some(signing_ref),
             jwks_config_map_ref: jwks_ref,
+            bundle_ref_digest: bundle_ref_digest.clone(),
         }
     });
     api.patch_status(
@@ -624,9 +632,9 @@ impl McpServerMeta {
         Self {
             issuer,
             audience,
-            scopes: spec.scopes.clone(),
-            url: spec.url.clone(),
-            allowed_tools: spec.allowed_tools.clone(),
+            scopes: spec.scopes.clone().unwrap_or_default(),
+            url: spec.url.clone().unwrap_or_default(),
+            allowed_tools: spec.allowed_tools.clone().unwrap_or_default(),
         }
     }
 }
@@ -776,6 +784,160 @@ pub async fn run(client: Client) -> Result<()> {
         })
         .await;
     Ok(())
+}
+
+/// Resolve the effective spec the reconciler will operate on.
+///
+/// Slice 1c.5 of `crd-well-oiled-machine` introduces a signed
+/// `bundleRef` authoring path for `McpServer`. This helper closes the
+/// inline-vs-bundle authoring choice with a single normalised
+/// `McpServerSpec` returned to the reconcile loop:
+///
+/// - **Inline (back-compat, no signature)**: any of `url`, `oauth`,
+///   `productionMode`, `scopes`, `allowedTools`, `displayName` set; no
+///   `bundleRef`. Returns the spec verbatim. `bundle_ref_digest = None`.
+/// - **Signed bundle**: `bundleRef` set, content fields all `None`.
+///   Fetches + verifies the OCI artifact via
+///   [`crate::policy_fetcher::fetch_and_verify_generic`] parameterised
+///   by [`crate::policy_canonical::mcp_server::McpServerKind`]. The
+///   bundle's content fields are merged onto the CR's
+///   `allowedSandboxes` selector. `bundle_ref_digest = Some(<digest>)`.
+/// - **Selector-only**: no `bundleRef` and no content fields set.
+///   Acceptable shape (the CR carries only a selector) but
+///   `productionMode` defaults to `false` and `url` resolves to empty
+///   — the reconciler treats this as a degraded `SpecInvalid` only
+///   when `productionMode` would also be `true`; selector-only
+///   prod-mode-false is intentionally allowed for in-progress
+///   authoring drafts.
+/// - **Both inline + bundleRef** *(rejected at runtime as
+///   defense-in-depth — admission CEL already rejects)*: returns
+///   `(InvalidSpec, msg)` without performing the fetch.
+async fn resolve_mcp_source(
+    mcp: &crate::mcp_server::McpServer,
+) -> (
+    crate::mcp_server::McpServerSpec,
+    Option<String>,
+    Option<(&'static str, String)>,
+) {
+    let spec = &mcp.spec;
+    let inline_any = spec.url.is_some()
+        || spec.oauth.is_some()
+        || spec.production_mode.is_some()
+        || spec.scopes.is_some()
+        || spec.allowed_tools.is_some()
+        || spec.display_name.is_some();
+    let bundle_set = spec.bundle_ref.is_some();
+
+    if inline_any && bundle_set {
+        return (
+            // selector-only synthesis; we won't compile this branch
+            crate::mcp_server::McpServerSpec {
+                allowed_sandboxes: spec.allowed_sandboxes.clone(),
+                ..Default::default()
+            },
+            None,
+            Some((
+                "InvalidSpec",
+                "spec.bundleRef is mutually exclusive with spec.url, spec.oauth, \
+                 spec.productionMode, spec.scopes, spec.allowedTools, and \
+                 spec.displayName"
+                    .into(),
+            )),
+        );
+    }
+
+    if !bundle_set {
+        return (spec.clone(), None, None);
+    }
+
+    let bundle_ref = spec
+        .bundle_ref
+        .as_ref()
+        .expect("bundle_set implies Some")
+        .clone();
+
+    let signer_policy_handle = crate::signer_policy::global();
+    let verify_result = match signer_policy_handle.snapshot() {
+        crate::signer_policy::SignerPolicyState::FromConfigMap(p) => {
+            let cfg: crate::policy_fetcher::SignerPolicyConfig = p.into();
+            crate::policy_fetcher::fetch_and_verify_generic::<
+                crate::policy_canonical::mcp_server::McpServerKind,
+            >(&bundle_ref, &cfg)
+            .await
+        }
+        crate::signer_policy::SignerPolicyState::Malformed(msg) => Err(
+            crate::policy_fetcher::FetchError::SignerPolicyMalformed(msg),
+        ),
+        crate::signer_policy::SignerPolicyState::Absent => {
+            let cfg = crate::policy_fetcher::SignerPolicyConfig::from_env();
+            crate::policy_fetcher::fetch_and_verify_generic::<
+                crate::policy_canonical::mcp_server::McpServerKind,
+            >(&bundle_ref, &cfg)
+            .await
+        }
+    };
+
+    match verify_result {
+        Ok(verified) => {
+            let effective = merge_bundle_with_selector(spec, &verified);
+            (effective, Some(verified.digest), None)
+        }
+        Err(e) => {
+            let (reason, msg) = fetch_error_to_degraded(&e);
+            tracing::warn!(
+                mcpserver = %mcp.name_any(),
+                registry = %bundle_ref.registry,
+                repository = %bundle_ref.repository,
+                digest = %bundle_ref.digest,
+                reason,
+                "McpServer bundleRef fetch/verify failed: {msg}"
+            );
+            (
+                crate::mcp_server::McpServerSpec {
+                    allowed_sandboxes: spec.allowed_sandboxes.clone(),
+                    ..Default::default()
+                },
+                None,
+                Some((reason, msg)),
+            )
+        }
+    }
+}
+
+/// Merge the verified bundle's content fields onto the CR's
+/// `allowedSandboxes` selector. The bundle owns the content; the CR
+/// owns the selector — same pattern as InferencePolicy + ClawMemory.
+fn merge_bundle_with_selector(
+    cr_spec: &crate::mcp_server::McpServerSpec,
+    verified: &crate::policy_canonical::mcp_server::VerifiedMcpServerBundle,
+) -> crate::mcp_server::McpServerSpec {
+    use crate::mcp_server::{McpOAuthConfig, McpServerSpec};
+
+    let oauth = verified.oauth.as_ref().map(|o| McpOAuthConfig {
+        issuer: o.issuer.clone(),
+        audience: o.audience.clone(),
+        resource: o.resource.clone(),
+        pkce: o.pkce.clone().unwrap_or_else(|| "S256".to_string()),
+    });
+
+    McpServerSpec {
+        url: verified.url.clone(),
+        oauth,
+        production_mode: verified.production_mode,
+        scopes: verified.scopes.clone(),
+        allowed_tools: verified.allowed_tools.clone(),
+        allowed_sandboxes: cr_spec.allowed_sandboxes.clone(),
+        display_name: verified.display_name.clone(),
+        bundle_ref: None,
+    }
+}
+
+/// Map [`crate::policy_fetcher::FetchError`] to the `(reason, message)`
+/// degraded pair. Mirrors the same helper in the other 1c.x reconcilers
+/// — the controller's class table stays closed.
+fn fetch_error_to_degraded(e: &crate::policy_fetcher::FetchError) -> (&'static str, String) {
+    let reason = crate::policy_fetcher::reason_for_error(e).unwrap_or("Transient");
+    (reason, e.to_string())
 }
 
 #[cfg(test)]

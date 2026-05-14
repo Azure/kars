@@ -64,19 +64,30 @@ use crate::tool_policy::ToolPolicy;
 ///    `https://`.
 /// 3. `oauth.pkce`, when present, must be `S256` (RFC 7636 §4.2 — the
 ///    one PKCE method this CRD supports).
+/// 4. `bundleRef` is mutually exclusive with the inline content
+///    fields (`url`, `oauth`, `productionMode`, `scopes`,
+///    `allowedTools`, `displayName`). The CR may either inline the
+///    server identity + tool surface or reference a signed OCI
+///    bundle, never both. (Selector field `allowedSandboxes` stays
+///    on the CR in both modes — it's authoring metadata, not
+///    bundle content.)
 #[must_use]
 pub fn mcp_server_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule:
-                "self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)"
-                    .into(),
+            rule: "has(self.bundleRef) || !has(self.productionMode) || \
+                   self.productionMode == false || \
+                   (has(self.oauth) && size(self.oauth.issuer) > 0)"
+                .into(),
             message: Some("productionMode requires spec.oauth.issuer to be set".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "self.productionMode == false || self.url.startsWith('https://')".into(),
+            rule: "has(self.bundleRef) || !has(self.productionMode) || \
+                   self.productionMode == false || \
+                   (has(self.url) && self.url.startsWith('https://'))"
+                .into(),
             message: Some("productionMode requires spec.url to begin with https://".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
@@ -84,6 +95,20 @@ pub fn mcp_server_validations() -> Vec<ValidationRule> {
         ValidationRule {
             rule: "!has(self.oauth) || !has(self.oauth.pkce) || self.oauth.pkce == 'S256'".into(),
             message: Some("spec.oauth.pkce, when set, must be 'S256' (RFC 7636 §4.2)".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && \
+                   !has(self.productionMode) && !has(self.scopes) && \
+                   !has(self.allowedTools) && !has(self.displayName))"
+                .into(),
+            message: Some(
+                "spec.bundleRef is mutually exclusive with spec.url, spec.oauth, \
+                 spec.productionMode, spec.scopes, spec.allowedTools, and \
+                 spec.displayName"
+                    .into(),
+            ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },

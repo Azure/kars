@@ -53,11 +53,27 @@ spec:
               `McpServer.spec` — declares an MCP 2026 server reachable from sandboxes
               in the same namespace (or, if `crossNamespaceAllowed: true` on the
               server side, cluster-wide).
+
+              ## Two authoring paths
+
+              The content fields (`url`, `oauth`, `productionMode`, `scopes`,
+              `allowedTools`, `displayName`) are mutually exclusive with
+              [`bundle_ref`](McpServerSpec::bundle_ref): either inline the values
+              (no supply-chain attestation) or reference a signed OCI artifact
+              (cosign-verified against the cluster `SignerPolicy`). The
+              `allowedSandboxes` selector is owned exclusively by the CR — one
+              signed server bundle can be referenced by multiple `McpServer` CRs
+              with different sandbox selectors.
             properties:
               allowedSandboxes:
                 description: |-
                   Selector restricting which sandboxes can reach this server.
                   Empty = same-namespace only.
+
+                  **CR-owned field**: deliberately NOT part of any signed bundle.
+                  The selector is a deployment-time concern; one signed server
+                  bundle can be referenced by multiple `McpServer` CRs in
+                  different environments with different selectors.
                 nullable: true
                 properties:
                   matchLabels:
@@ -70,14 +86,49 @@ spec:
                     type: object
                 type: object
               allowedTools:
-                default: []
                 description: |-
                   Allow-list of tool names. Empty list means "no tools allowed";
                   to allow all tools, use `["*"]` and lean on `ToolPolicy` for
                   per-tool governance. Default empty — fail-closed.
                 items:
                   type: string
+                nullable: true
                 type: array
+              bundleRef:
+                description: |-
+                  Reference to a signed OCI artifact carrying the policy content
+                  (`url`, `oauth`, `productionMode`, `scopes`, `allowedTools`,
+                  `displayName`). Mutually exclusive with inline content fields —
+                  enforced by admission CEL and re-checked by the reconciler.
+
+                  Slice 1c.5 of `crd-well-oiled-machine`.
+                nullable: true
+                properties:
+                  artifactType:
+                    description: |-
+                      OCI artifactType media-type, e.g.
+                      `application/vnd.azureclaw.egress-allowlist.v1+yaml`. Consumers MUST
+                      reject artifacts whose pulled `artifactType` doesn't match.
+                    type: string
+                  digest:
+                    description: |-
+                      Content-addressed digest, including the algorithm prefix
+                      (`sha256:abc…`). The digest covers the canonical artifact bytes —
+                      see `docs/internal/policy-canonical-format.md` for the egress-allowlist
+                      canonicalization rules.
+                    type: string
+                  registry:
+                    description: Registry hostname (e.g. `myacr.azurecr.io`, `ghcr.io`).
+                    type: string
+                  repository:
+                    description: Repository path (e.g. `azureclaw/policies/sandbox-foo`).
+                    type: string
+                required:
+                - artifactType
+                - digest
+                - registry
+                - repository
+                type: object
               displayName:
                 description: Optional human-readable label for operator-TUI display.
                 nullable: true
@@ -111,43 +162,66 @@ spec:
                 - issuer
                 type: object
               productionMode:
-                default: false
                 description: |-
                   When true, the router rejects calls that are not bearer-token-
                   authenticated against `oauth.issuer` with a verified PKCE flow.
                   `false` allows unauthenticated calls — dev-only; admission policy
                   rejects this for non-dev tenants (mirrors `Null*` provider rule).
+
+                  Optional: a signed bundle can supply this. When neither inline
+                  nor bundle sets the field, the effective value defaults to
+                  `false` (back-compat with the pre-1c.5 schema).
+                nullable: true
                 type: boolean
               scopes:
-                default: []
                 description: |-
                   OAuth 2.1 scopes that the router will request when fronting calls
                   from sandboxes to this server. The actual per-tool gating is
                   expressed in `ToolPolicy` resources, not here.
                 items:
                   type: string
+                nullable: true
                 type: array
               url:
                 description: |-
                   Server endpoint URL. MUST be `https://` when `productionMode: true`.
                   Validated by admission CEL.
+
+                  Optional: a signed bundle can supply this via [`bundle_ref`]. At
+                  reconcile time, exactly one of `url` or `bundle_ref.url` must
+                  resolve to a non-empty value, otherwise the reconciler stamps
+                  `Degraded=True/SpecInvalid`.
+                nullable: true
                 type: string
-            required:
-            - url
             type: object
             x-kubernetes-validations:
             - message: productionMode requires spec.oauth.issuer to be set
               reason: FieldValueInvalid
-              rule: self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)
+              rule: has(self.bundleRef) || !has(self.productionMode) || self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)
             - message: productionMode requires spec.url to begin with https://
               reason: FieldValueInvalid
-              rule: self.productionMode == false || self.url.startsWith('https://')
+              rule: has(self.bundleRef) || !has(self.productionMode) || self.productionMode == false || (has(self.url) && self.url.startsWith('https://'))
             - message: spec.oauth.pkce, when set, must be 'S256' (RFC 7636 §4.2)
               reason: FieldValueInvalid
               rule: '!has(self.oauth) || !has(self.oauth.pkce) || self.oauth.pkce == ''S256'''
+            - message: spec.bundleRef is mutually exclusive with spec.url, spec.oauth, spec.productionMode, spec.scopes, spec.allowedTools, and spec.displayName
+              reason: FieldValueInvalid
+              rule: '!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.allowedTools) && !has(self.displayName))'
           status:
             nullable: true
             properties:
+              bundleRefDigest:
+                description: |-
+                  OCI manifest digest of the verified signed bundle, when the
+                  `bundleRef` authoring path was taken. Operator-visible proof
+                  that the signature was checked and the bundle's bytes shaped
+                  the effective server config.
+
+                  `None` when the inline path was used.
+
+                  Slice 1c.5 of `crd-well-oiled-machine`.
+                nullable: true
+                type: string
               conditions:
                 description: Standard K8s Conditions, KEP-1623 shape.
                 items:
