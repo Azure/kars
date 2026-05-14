@@ -12,7 +12,7 @@ name = "azureclaw-conformance-runner"
 path = "src/main.rs"
 
 [dependencies]
-azureclaw-eval-corpus = { path = "../eval-corpus" }
+azureclaw-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

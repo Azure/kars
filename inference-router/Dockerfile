@@ -21,6 +21,8 @@ COPY inference-router/ inference-router/
 COPY controller/ controller/
 COPY a2a-gateway/ a2a-gateway/
 COPY azureclaw-a2a-core/ azureclaw-a2a-core/
+COPY eval-corpus/ eval-corpus/
+COPY conformance-runner/ conformance-runner/
 COPY tests/ tests/
 
 # Cache-bust: changing this ARG invalidates the cargo build layer

@@ -24,7 +24,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 
 # Shared corpus library (ClawEval slice 6)
-azureclaw-eval-corpus = { path = "../eval-corpus" }
+azureclaw-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
 
 # Observability
 tracing.workspace = true

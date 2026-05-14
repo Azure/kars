@@ -20,6 +20,8 @@ COPY controller/ controller/
 COPY inference-router/ inference-router/
 COPY a2a-gateway/ a2a-gateway/
 COPY azureclaw-a2a-core/ azureclaw-a2a-core/
+COPY eval-corpus/ eval-corpus/
+COPY conformance-runner/ conformance-runner/
 COPY tests/ tests/
 COPY cli/blocklists/ cli/blocklists/
 COPY cli/profiles/agt/ cli/profiles/agt/
