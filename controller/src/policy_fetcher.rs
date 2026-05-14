@@ -59,6 +59,8 @@
 //! - <https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation>
 
 use crate::crd::OciArtifactRef;
+use crate::policy_canonical::PolicyKind;
+use crate::policy_canonical::egress::EgressKind;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -69,19 +71,16 @@ const SIGNER_FULCIO_ISSUERS_ENV: &str = "AZURECLAW_SIGNER_FULCIO_ISSUERS";
 /// Comma-separated list of SAN glob patterns. See [`SignerPolicyConfig`].
 const SIGNER_SAN_PATTERNS_ENV: &str = "AZURECLAW_SIGNER_SAN_PATTERNS";
 
-/// OCI media type for the v1 egress-allowlist artifact. The pulled
-/// `artifactType` MUST match this exactly; consumers reject any other
-/// value (forward-compat: v2 bumps the suffix; v1 consumers MUST refuse
-/// v2 artifacts — see canonical-format doc §"Forward compatibility").
-pub const EGRESS_ALLOWLIST_V1_MEDIA_TYPE: &str =
-    "application/vnd.azureclaw.egress-allowlist.v1+yaml";
+/// Re-export the egress-allowlist v1 OCI media type from the canonical
+/// module so existing call sites in this crate keep compiling without
+/// touching the seam.
+#[allow(unused_imports)] // re-export keeps existing call sites in this crate compiling
+pub use crate::policy_canonical::egress::EGRESS_ALLOWLIST_V1_MEDIA_TYPE;
 
-/// Pinned canonical apiVersion / kind values for v1.
-const CANONICAL_API_VERSION: &str = "azureclaw.dev/v1alpha1";
-const CANONICAL_KIND: &str = "EgressAllowlist";
-
-/// Cache TTL for verified artifacts (per plan §S12.b — "1h").
-const CACHE_TTL: Duration = Duration::from_secs(3600);
+/// Cache TTL for verified artifacts (per plan §S12.b — "1h"). Public
+/// so per-kind cache impls in [`crate::policy_canonical`] can apply
+/// the same TTL.
+pub const CACHE_TTL: Duration = Duration::from_secs(3600);
 
 /// Errors surfaced by the fetcher. Each variant maps 1:1 to a Condition
 /// `reason` value emitted on `ClawSandbox.status` — see
@@ -133,29 +132,12 @@ pub fn reason_for_error(err: &FetchError) -> Option<&'static str> {
     }
 }
 
-/// A verified, canonical-form egress allowlist. The `digest` field is the
-/// pulled artifact digest (re-validated against `OciArtifactRef.digest`),
-/// not a content-hash computed over [`endpoints`] — those are byte-stable
-/// from canonicalization rules so the relationship is bijective.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedAllowlist {
-    pub api_version: String,
-    pub kind: String,
-    pub generation: u64,
-    pub endpoints: Vec<CanonicalEndpoint>,
-    /// `sha256:...` matched against `OciArtifactRef.digest`.
-    pub digest: String,
-    pub fetched_at: SystemTime,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanonicalEndpoint {
-    /// Lowercase ASCII; IDNA-2008 Punycode-encoded if originally non-ASCII.
-    pub host: String,
-    pub port: u16,
-    /// Reserved for v2; always `None` in v1 canonical artifacts.
-    pub protocol: Option<String>,
-}
+/// Re-exported from [`crate::policy_canonical::egress`] so existing
+/// call sites in this crate (reconciler, status, signer_policy, tests)
+/// continue to refer to `policy_fetcher::VerifiedAllowlist` /
+/// `CanonicalEndpoint` unchanged after the 1c.1 trait extraction. New
+/// per-kind work should reference the canonical module directly.
+pub use crate::policy_canonical::egress::{CanonicalEndpoint, VerifiedAllowlist};
 
 /// Cluster-wide SignerPolicy. In S12.b this is read from env at call
 /// time; S12.d replaces this with a watched ConfigMap. The wire shape of
@@ -234,16 +216,16 @@ pub(crate) fn require_signed_allowlist() -> bool {
 }
 
 // ─────────────────────────── cache ───────────────────────────
+//
+// 1c.1: the per-kind verified-artifact cache moved into
+// `policy_canonical::<kind>` so each `PolicyKind` impl owns a
+// process-wide `OnceLock<Mutex<HashMap<…>>>` parameterized over its
+// own `Output` type. `cache_key` remains here because the registry +
+// repository + digest tuple is kind-agnostic (kind isolation is
+// already enforced by per-kind storage).
 
-#[derive(Debug, Clone)]
-struct CacheEntry {
-    verified: VerifiedAllowlist,
-    inserted: Instant,
-}
-
-fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn cache_key(r: &OciArtifactRef) -> String {
+    format!("{}/{}@{}", r.registry, r.repository, r.digest)
 }
 
 /// Lazily initialize and cache a process-wide Sigstore Public Good trust
@@ -269,38 +251,6 @@ async fn trust_root_cache()
         })
         .await?;
     Ok(root.clone())
-}
-
-fn cache_key(r: &OciArtifactRef) -> String {
-    format!("{}/{}@{}", r.registry, r.repository, r.digest)
-}
-
-fn cache_get(key: &str, now: Instant) -> Option<VerifiedAllowlist> {
-    let guard = cache().lock().ok()?;
-    let entry = guard.get(key)?;
-    if now.duration_since(entry.inserted) > CACHE_TTL {
-        return None;
-    }
-    Some(entry.verified.clone())
-}
-
-fn cache_put(key: String, verified: VerifiedAllowlist) {
-    if let Ok(mut guard) = cache().lock() {
-        guard.insert(
-            key,
-            CacheEntry {
-                verified,
-                inserted: Instant::now(),
-            },
-        );
-    }
-}
-
-#[cfg(test)]
-fn cache_clear() {
-    if let Ok(mut guard) = cache().lock() {
-        guard.clear();
-    }
 }
 
 // ─────────────────────── last-known-good cache (S12.e) ───────────────────────
@@ -455,11 +405,38 @@ pub fn compute_drift_summary(
 ///
 /// On success, the result is cached by `<registry>/<repository>@<digest>`
 /// for [`CACHE_TTL`].
+///
+/// 1c.1: this is now a thin wrapper around the kind-generic
+/// [`fetch_and_verify_generic`]. New per-kind reconcilers should call
+/// the generic form directly with their `PolicyKind` discriminator
+/// (see `docs/internal/crd-well-oiled-machine/slice-1c-real-signing-generalization.md`).
 pub async fn fetch_and_verify(
     artifact_ref: &OciArtifactRef,
     signer_policy: &SignerPolicyConfig,
 ) -> Result<VerifiedAllowlist, FetchError> {
-    validate_ref_shape(artifact_ref)?;
+    fetch_and_verify_generic::<EgressKind>(artifact_ref, signer_policy).await
+}
+
+/// Kind-agnostic core of the signing pipeline: ref-shape validation,
+/// SignerPolicy presence check, per-kind cache lookup, cosign + Fulcio
+/// verification, OCI pull, per-kind canonical-form re-validation,
+/// per-kind cache write.
+///
+/// The `K` discriminator chooses:
+/// - which OCI `artifactType` to accept (via [`PolicyKind::MEDIA_TYPE`])
+/// - which canonical parser runs over the verified bytes (via
+///   [`PolicyKind::parse`])
+/// - which output struct is returned (via [`PolicyKind::Output`])
+/// - which process-wide cache slot is used (via
+///   [`PolicyKind::cache_get`] / [`PolicyKind::cache_put`])
+///
+/// The cosign trust root, ACR auth, signer-identity verification, and
+/// [`FetchError`] taxonomy are inherited unchanged.
+pub async fn fetch_and_verify_generic<K: PolicyKind>(
+    artifact_ref: &OciArtifactRef,
+    signer_policy: &SignerPolicyConfig,
+) -> Result<K::Output, FetchError> {
+    validate_ref_shape::<K>(artifact_ref)?;
 
     if !signer_policy.is_configured() {
         // Without identity pinning we treat "valid sig" alone as
@@ -469,23 +446,22 @@ pub async fn fetch_and_verify(
     }
 
     let key = cache_key(artifact_ref);
-    if let Some(hit) = cache_get(&key, Instant::now()) {
-        tracing::debug!(digest = %artifact_ref.digest, "policy_fetcher cache hit");
+    if let Some(hit) = K::cache_get(&key, Instant::now()) {
+        tracing::debug!(
+            kind = K::KIND,
+            digest = %artifact_ref.digest,
+            "policy_fetcher cache hit"
+        );
         return Ok(hit);
     }
 
-    // The cosign verification + OCI pull path. Wired against
-    // sigstore-rs 0.13 + oci-client 0.16. With S12.b we exit at
-    // `SignerPolicyMissing` above in production, but the path below is
-    // real code (not a stub): when an operator configures
-    // `AZURECLAW_SIGNER_*` env vars, the controller will execute it.
-    let verified = verify_via_sigstore(artifact_ref, signer_policy).await?;
+    let verified = verify_via_sigstore::<K>(artifact_ref, signer_policy).await?;
 
-    cache_put(key, verified.clone());
+    K::cache_put(key, verified.clone());
     Ok(verified)
 }
 
-fn validate_ref_shape(r: &OciArtifactRef) -> Result<(), FetchError> {
+fn validate_ref_shape<K: PolicyKind>(r: &OciArtifactRef) -> Result<(), FetchError> {
     if r.registry.is_empty() || r.registry.contains(' ') || r.registry.contains('/') {
         return Err(FetchError::InvalidRef(format!(
             "registry `{}` invalid (must be host[:port])",
@@ -513,10 +489,11 @@ fn validate_ref_shape(r: &OciArtifactRef) -> Result<(), FetchError> {
             r.digest
         )));
     }
-    if r.artifact_type != EGRESS_ALLOWLIST_V1_MEDIA_TYPE {
+    if r.artifact_type != K::MEDIA_TYPE {
         return Err(FetchError::InvalidRef(format!(
             "artifactType `{}` is not the expected `{}`",
-            r.artifact_type, EGRESS_ALLOWLIST_V1_MEDIA_TYPE
+            r.artifact_type,
+            K::MEDIA_TYPE
         )));
     }
     Ok(())
@@ -524,10 +501,10 @@ fn validate_ref_shape(r: &OciArtifactRef) -> Result<(), FetchError> {
 
 // ─────────────────────────── verify path ───────────────────────────
 
-async fn verify_via_sigstore(
+async fn verify_via_sigstore<K: PolicyKind>(
     artifact_ref: &OciArtifactRef,
     signer_policy: &SignerPolicyConfig,
-) -> Result<VerifiedAllowlist, FetchError> {
+) -> Result<K::Output, FetchError> {
     use sigstore::cosign::verification_constraint::cert_subject_email_verifier::StringVerifier;
     use sigstore::cosign::verification_constraint::{
         CertSubjectEmailVerifier, CertSubjectUrlVerifier, VerificationConstraintVec,
@@ -643,11 +620,10 @@ async fn verify_via_sigstore(
     // recompute `sha256(layer_bytes)` here and compare it to `artifact_ref.digest`:
     // those are different things (layer digest vs. manifest digest) and would
     // never match for any non-trivial artifact.
-    let bytes = pull_artifact_bytes(artifact_ref, &auth).await?;
+    let bytes = pull_artifact_bytes(artifact_ref, &auth, K::MEDIA_TYPE).await?;
 
-    let mut parsed = canonical::parse(&bytes)?;
-    parsed.digest = artifact_ref.digest.clone();
-    parsed.fetched_at = SystemTime::now();
+    let mut parsed = K::parse(&bytes)?;
+    K::finalize(&mut parsed, artifact_ref.digest.clone(), SystemTime::now());
     Ok(parsed)
 }
 
@@ -672,6 +648,7 @@ fn map_oci_error(e: sigstore::errors::SigstoreError) -> FetchError {
 async fn pull_artifact_bytes(
     artifact_ref: &OciArtifactRef,
     auth: &sigstore::registry::Auth,
+    media_type: &'static str,
 ) -> Result<Vec<u8>, FetchError> {
     use oci_client::Reference;
     use oci_client::client::{Client, ClientConfig};
@@ -692,7 +669,7 @@ async fn pull_artifact_bytes(
         sigstore::registry::Auth::Bearer(t) => RegistryAuth::Bearer(t.clone()),
     };
     let data = client
-        .pull(&reference, &oci_auth, vec![EGRESS_ALLOWLIST_V1_MEDIA_TYPE])
+        .pull(&reference, &oci_auth, vec![media_type])
         .await
         .map_err(map_oci_distribution_error)?;
     let mut out = Vec::new();
@@ -880,259 +857,6 @@ pub async fn acr_token_for_pull(registry: &str, repository: &str) -> Result<Stri
         .ok_or_else(|| FetchError::Unauthorized("acr token missing access_token".into()))?
         .to_string();
     Ok(access_token)
-}
-
-// ─────────────────────────── canonical parser ───────────────────────────
-
-pub mod canonical {
-    //! Canonical YAML parser for
-    //! `application/vnd.azureclaw.egress-allowlist.v1+yaml`.
-    //!
-    //! Implements the byte-stable rules in `docs/internal/policy-canonical-format.md`.
-    //! Invoked **after** cosign signature verification — re-validates that
-    //! the bytes are canonical (sorted, IDNA-normalized, deduplicated,
-    //! generation present). Any deviation returns
-    //! [`FetchError::CanonicalFormViolation`].
-    //!
-    //! Parses with `serde_yaml` for structural deserialization, then
-    //! independently re-checks the byte-level invariants that
-    //! `serde_yaml` would silently tolerate (key order, sort order,
-    //! duplicate detection, etc.). This catches the case where a
-    //! producer signs structurally-valid-but-non-canonical bytes —
-    //! verification still rejects them.
-    use super::{
-        CANONICAL_API_VERSION, CANONICAL_KIND, CanonicalEndpoint, FetchError, VerifiedAllowlist,
-    };
-    use std::time::SystemTime;
-
-    /// Parse + canonical-form re-validate. The returned
-    /// [`VerifiedAllowlist::digest`] is empty here; the caller fills it
-    /// from the verified `OciArtifactRef.digest`.
-    pub fn parse(bytes: &[u8]) -> Result<VerifiedAllowlist, FetchError> {
-        let s = std::str::from_utf8(bytes)
-            .map_err(|e| FetchError::CanonicalFormViolation(format!("utf-8: {e}")))?;
-        // Rule #1: LF line endings, trailing newline.
-        if s.contains('\r') {
-            return Err(FetchError::CanonicalFormViolation(
-                "CRLF line endings forbidden".into(),
-            ));
-        }
-        if !s.ends_with('\n') {
-            return Err(FetchError::CanonicalFormViolation(
-                "missing trailing newline".into(),
-            ));
-        }
-        // Rule #12: no comments.
-        for line in s.lines() {
-            // YAML block scalars don't collide with our schema (we have
-            // no scalar values that contain '#'), so a simple line-level
-            // check is sufficient for the v1 surface.
-            if line.trim_start().starts_with('#') {
-                return Err(FetchError::CanonicalFormViolation(
-                    "comments forbidden".into(),
-                ));
-            }
-        }
-
-        // Top-level key order check (rule #2).
-        validate_top_level_key_order(s)?;
-
-        let doc: serde_yaml::Value = serde_yaml::from_str(s)
-            .map_err(|e| FetchError::CanonicalFormViolation(format!("yaml parse: {e}")))?;
-        let map = doc
-            .as_mapping()
-            .ok_or_else(|| FetchError::CanonicalFormViolation("not a mapping".into()))?;
-
-        // Rule #3 + #4.
-        let api_version = map
-            .get(serde_yaml::Value::String("apiVersion".into()))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FetchError::CanonicalFormViolation("missing apiVersion".into()))?;
-        if api_version != CANONICAL_API_VERSION {
-            return Err(FetchError::CanonicalFormViolation(format!(
-                "apiVersion `{api_version}` != `{CANONICAL_API_VERSION}`"
-            )));
-        }
-        let kind = map
-            .get(serde_yaml::Value::String("kind".into()))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FetchError::CanonicalFormViolation("missing kind".into()))?;
-        if kind != CANONICAL_KIND {
-            return Err(FetchError::CanonicalFormViolation(format!(
-                "kind `{kind}` != `{CANONICAL_KIND}`"
-            )));
-        }
-
-        // Rule #5: metadata.generation must be a positive integer.
-        let metadata = map
-            .get(serde_yaml::Value::String("metadata".into()))
-            .and_then(|v| v.as_mapping())
-            .ok_or_else(|| FetchError::CanonicalFormViolation("missing metadata".into()))?;
-        let generation = metadata
-            .get(serde_yaml::Value::String("generation".into()))
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| {
-                FetchError::CanonicalFormViolation(
-                    "metadata.generation missing or not a positive integer".into(),
-                )
-            })?;
-        if generation == 0 {
-            return Err(FetchError::CanonicalFormViolation(
-                "metadata.generation must be > 0".into(),
-            ));
-        }
-
-        // Rule #6: spec.endpoints required.
-        let spec = map
-            .get(serde_yaml::Value::String("spec".into()))
-            .and_then(|v| v.as_mapping())
-            .ok_or_else(|| FetchError::CanonicalFormViolation("missing spec".into()))?;
-        let endpoints_node = spec
-            .get(serde_yaml::Value::String("endpoints".into()))
-            .ok_or_else(|| FetchError::CanonicalFormViolation("missing spec.endpoints".into()))?;
-        let endpoints_seq = endpoints_node.as_sequence().ok_or_else(|| {
-            FetchError::CanonicalFormViolation("spec.endpoints not a sequence".into())
-        })?;
-
-        // Parse endpoints + per-endpoint validation (rules #7, #8, #11).
-        let mut parsed: Vec<CanonicalEndpoint> = Vec::with_capacity(endpoints_seq.len());
-        for (i, ep) in endpoints_seq.iter().enumerate() {
-            let m = ep.as_mapping().ok_or_else(|| {
-                FetchError::CanonicalFormViolation(format!("endpoint[{i}] not a mapping"))
-            })?;
-            // Rule #11: keys must be host then port, in that order.
-            let mut keys = m.keys();
-            let k1 = keys.next().and_then(|v| v.as_str()).ok_or_else(|| {
-                FetchError::CanonicalFormViolation(format!("endpoint[{i}] missing first key"))
-            })?;
-            let k2 = keys.next().and_then(|v| v.as_str()).ok_or_else(|| {
-                FetchError::CanonicalFormViolation(format!("endpoint[{i}] missing second key"))
-            })?;
-            if keys.next().is_some() {
-                return Err(FetchError::CanonicalFormViolation(format!(
-                    "endpoint[{i}] has extra keys (only host,port allowed in v1)"
-                )));
-            }
-            if k1 != "host" || k2 != "port" {
-                return Err(FetchError::CanonicalFormViolation(format!(
-                    "endpoint[{i}] key order must be host,port (got {k1},{k2})"
-                )));
-            }
-            let host = m
-                .get(serde_yaml::Value::String("host".into()))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    FetchError::CanonicalFormViolation(format!("endpoint[{i}] host not a string"))
-                })?;
-            validate_host(host, i)?;
-            let port = m
-                .get(serde_yaml::Value::String("port".into()))
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| {
-                    FetchError::CanonicalFormViolation(format!("endpoint[{i}] port not an integer"))
-                })?;
-            if port == 0 || port > 65535 {
-                return Err(FetchError::CanonicalFormViolation(format!(
-                    "endpoint[{i}] port {port} out of range [1,65535]"
-                )));
-            }
-            parsed.push(CanonicalEndpoint {
-                host: host.to_string(),
-                port: port as u16,
-                protocol: None,
-            });
-        }
-
-        // Rule #9 + #10: dedup + sort order.
-        for w in parsed.windows(2) {
-            let (a, b) = (&w[0], &w[1]);
-            let cmp = a
-                .host
-                .as_str()
-                .cmp(b.host.as_str())
-                .then(a.port.cmp(&b.port));
-            if cmp == std::cmp::Ordering::Greater {
-                return Err(FetchError::CanonicalFormViolation(format!(
-                    "endpoints not sorted: `{}:{}` after `{}:{}`",
-                    b.host, b.port, a.host, a.port
-                )));
-            }
-            if cmp == std::cmp::Ordering::Equal {
-                return Err(FetchError::CanonicalFormViolation(format!(
-                    "duplicate endpoint `{}:{}`",
-                    a.host, a.port
-                )));
-            }
-        }
-
-        Ok(VerifiedAllowlist {
-            api_version: api_version.to_string(),
-            kind: kind.to_string(),
-            generation,
-            endpoints: parsed,
-            digest: String::new(),
-            fetched_at: SystemTime::UNIX_EPOCH,
-        })
-    }
-
-    fn validate_top_level_key_order(s: &str) -> Result<(), FetchError> {
-        let expected = ["apiVersion:", "kind:", "metadata:", "spec:"];
-        let mut idx = 0;
-        for line in s.lines() {
-            if line.starts_with(' ') || line.is_empty() || line.starts_with('-') {
-                continue;
-            }
-            // Match top-level keys only (no leading whitespace).
-            for (i, k) in expected.iter().enumerate().skip(idx) {
-                if line.starts_with(k) {
-                    if i != idx {
-                        return Err(FetchError::CanonicalFormViolation(format!(
-                            "top-level key `{k}` out of order"
-                        )));
-                    }
-                    idx = i + 1;
-                    break;
-                }
-            }
-        }
-        if idx != expected.len() {
-            return Err(FetchError::CanonicalFormViolation(
-                "top-level keys missing or out of order".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_host(host: &str, idx: usize) -> Result<(), FetchError> {
-        if host.is_empty() {
-            return Err(FetchError::CanonicalFormViolation(format!(
-                "endpoint[{idx}] host empty"
-            )));
-        }
-        if host.ends_with('.') {
-            return Err(FetchError::CanonicalFormViolation(format!(
-                "endpoint[{idx}] host has trailing dot"
-            )));
-        }
-        if host.contains('*') {
-            return Err(FetchError::CanonicalFormViolation(format!(
-                "endpoint[{idx}] wildcards not allowed in v1"
-            )));
-        }
-        for c in host.chars() {
-            let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-';
-            if !ok {
-                return Err(FetchError::CanonicalFormViolation(format!(
-                    "endpoint[{idx}] host `{host}` contains invalid byte `{c}` (rule #7)"
-                )));
-            }
-        }
-        // Rule #7: any non-ASCII Unicode would already have failed the
-        // ASCII-only loop above, so reaching here means the producer
-        // either pre-encoded with IDNA-2008 (good) or the value is
-        // pure ASCII (also good).
-        Ok(())
-    }
 }
 
 // ─────────────────────── reconciler integration (S12.e) ───────────────────────
@@ -1678,9 +1402,10 @@ mod tests {
 
     #[test]
     fn canonical_parser_accepts_valid_artifact() {
-        let v = canonical::parse(canonical_doc().as_bytes()).expect("valid canonical");
-        assert_eq!(v.api_version, CANONICAL_API_VERSION);
-        assert_eq!(v.kind, CANONICAL_KIND);
+        let v = crate::policy_canonical::egress::parse(canonical_doc().as_bytes())
+            .expect("valid canonical");
+        assert_eq!(v.api_version, EgressKind::API_VERSION);
+        assert_eq!(v.kind, EgressKind::KIND);
         assert_eq!(v.generation, 1);
         assert_eq!(v.endpoints.len(), 2);
         assert_eq!(v.endpoints[0].host, "api.github.com");
@@ -1696,7 +1421,7 @@ mod tests {
                    spec:\n  endpoints:\n  \
                    - host: dev.azure.com\n    port: 443\n  \
                    - host: api.github.com\n    port: 443\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("not sorted"))
         );
@@ -1710,7 +1435,7 @@ mod tests {
                    spec:\n  endpoints:\n  \
                    - host: api.github.com\n    port: 443\n  \
                    - host: api.github.com\n    port: 443\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("duplicate"))
         );
@@ -1722,7 +1447,7 @@ mod tests {
                    kind: EgressAllowlist\n\
                    metadata:\n  notGeneration: 1\n\
                    spec:\n  endpoints: []\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("generation"))
         );
@@ -1734,7 +1459,7 @@ mod tests {
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 0\n\
                    spec:\n  endpoints: []\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("> 0")));
     }
 
@@ -1745,7 +1470,7 @@ mod tests {
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
                    - host: API.github.com\n    port: 443\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("invalid byte"))
         );
@@ -1758,7 +1483,7 @@ mod tests {
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
                    - host: '*.example.com'\n    port: 443\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("wildcards"))
         );
@@ -1771,7 +1496,7 @@ mod tests {
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
                    - host: api.github.com\n    port: 65536\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(_)));
     }
 
@@ -1783,7 +1508,7 @@ mod tests {
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
                    - port: 443\n    host: api.github.com\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("key order"))
         );
@@ -1795,7 +1520,7 @@ mod tests {
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints: []";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("trailing newline"))
         );
@@ -1807,7 +1532,7 @@ mod tests {
                    apiVersion: azureclaw.dev/v1alpha1\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints: []\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("out of order") || m.contains("missing"))
         );
@@ -1820,7 +1545,7 @@ mod tests {
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints: []\n";
-        let err = canonical::parse(doc.as_bytes()).unwrap_err();
+        let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("comments")));
     }
 
@@ -1828,7 +1553,7 @@ mod tests {
     fn validate_ref_shape_rejects_bad_digest() {
         let mut r = good_ref();
         r.digest = "sha512:xyz".into();
-        let err = validate_ref_shape(&r).unwrap_err();
+        let err = validate_ref_shape::<EgressKind>(&r).unwrap_err();
         assert!(matches!(err, FetchError::InvalidRef(_)));
     }
 
@@ -1836,7 +1561,7 @@ mod tests {
     fn validate_ref_shape_rejects_bad_artifact_type() {
         let mut r = good_ref();
         r.artifact_type = "application/vnd.something.else".into();
-        let err = validate_ref_shape(&r).unwrap_err();
+        let err = validate_ref_shape::<EgressKind>(&r).unwrap_err();
         assert!(matches!(err, FetchError::InvalidRef(ref m) if m.contains("artifactType")));
     }
 
@@ -1844,13 +1569,13 @@ mod tests {
     fn validate_ref_shape_rejects_uppercase_digest() {
         let mut r = good_ref();
         r.digest = format!("sha256:{}", "A".repeat(64));
-        let err = validate_ref_shape(&r).unwrap_err();
+        let err = validate_ref_shape::<EgressKind>(&r).unwrap_err();
         assert!(matches!(err, FetchError::InvalidRef(ref m) if m.contains("lowercase")));
     }
 
     #[test]
     fn validate_ref_shape_accepts_valid_ref() {
-        validate_ref_shape(&good_ref()).expect("good ref");
+        validate_ref_shape::<EgressKind>(&good_ref()).expect("good ref");
     }
 
     #[test]
@@ -1900,15 +1625,15 @@ mod tests {
 
     #[test]
     fn cache_round_trips_and_expires() {
-        cache_clear();
+        EgressKind::cache_clear();
         let r = good_ref();
         let key = cache_key(&r);
         let now = Instant::now();
-        assert!(cache_get(&key, now).is_none(), "cold cache");
+        assert!(EgressKind::cache_get(&key, now).is_none(), "cold cache");
 
-        let v = canonical::parse(canonical_doc().as_bytes()).unwrap();
-        cache_put(key.clone(), v.clone());
-        let hit = cache_get(&key, now).expect("hit");
+        let v = crate::policy_canonical::egress::parse(canonical_doc().as_bytes()).unwrap();
+        EgressKind::cache_put(key.clone(), v.clone());
+        let hit = EgressKind::cache_get(&key, now).expect("hit");
         assert_eq!(hit.generation, v.generation);
 
         // Simulated expiry: a synthetic "now" beyond TTL should miss
@@ -1917,8 +1642,8 @@ mod tests {
         // `now.duration_since(entry.inserted)`, so passing a future
         // `now` exercises the TTL branch.)
         let future = now + CACHE_TTL + Duration::from_secs(1);
-        assert!(cache_get(&key, future).is_none(), "expired");
-        cache_clear();
+        assert!(EgressKind::cache_get(&key, future).is_none(), "expired");
+        EgressKind::cache_clear();
     }
 
     #[test]

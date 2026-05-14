@@ -45,6 +45,7 @@ mod metrics;
 mod metrics_server;
 mod pairing;
 mod pairing_reconciler;
+mod policy_canonical;
 mod policy_fetcher;
 mod providers;
 mod reconciler;
