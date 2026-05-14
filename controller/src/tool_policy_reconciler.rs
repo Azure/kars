@@ -134,26 +134,37 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let profile = compile_to_profile(&tp.spec);
     let v_hash = version_hash(&profile);
 
-    // 1b. Customer AGT profile (Slice 1b). When `spec.agtProfile.inline`
-    // is set, the controller publishes the raw bytes alongside the
-    // compiled `profile.json` under key `agt-profile.yaml` so the
-    // sandbox inference-router can load it via the existing
-    // `Governance::load_policies_from_dir` (which filters `*.yaml`).
-    // We also compute the wire-contract length-prefixed sha256 digest
-    // here so the controller-side annotation matches what the router
-    // will echo on `GET /internal/policy-status` — the comparator
-    // that closes principles.md §3 (Slice 1c).
-    let agt_profile_inline: Option<&str> = tp
-        .spec
-        .agt_profile
-        .as_ref()
-        .and_then(|p| p.inline.as_deref())
-        .filter(|s| !s.is_empty());
+    // 1b. Resolve the customer AGT profile from `spec.agtProfile`.
+    //
+    // Two sources, mutually exclusive:
+    // - `inline`: raw YAML carried in the spec (Slice 1b path)
+    // - `bundleRef`: signed OCI artifact (Slice 1c.2 path) — pulled
+    //   and cosign-verified via the kind-generic policy_fetcher
+    //   pipeline with `ToolsKind` as the discriminator.
+    //
+    // Both paths converge into `agt_profile_bytes: Option<String>`,
+    // which is then written verbatim into the compiled-profile
+    // ConfigMap under `agt-profile.yaml`. The router echoes the
+    // length-prefixed digest computed over those exact bytes — same
+    // wire contract for both sources, so the existing confirmation
+    // poller works unchanged.
+    //
+    // `bundle_digest_for_status` carries the OCI manifest digest
+    // forward to status.agtProfileBundleDigest when the profile came
+    // from bundleRef (supply-chain attestation, distinct from the
+    // length-prefixed wire-contract digest).
+    let (agt_profile_bytes, bundle_digest_for_status, agt_source_degraded): (
+        Option<String>,
+        Option<String>,
+        Option<(&'static str, String)>,
+    ) = resolve_agt_profile_source(&tp).await;
+
+    let agt_profile_inline: Option<&str> = agt_profile_bytes.as_deref();
     let agt_digest: Option<String> = agt_profile_inline.map(agt_profile_digest);
 
     // 2. Persist as ConfigMap.
     let cm_name = format!("toolpolicy-{name}-profile");
-    let mut degraded: Option<(&'static str, String)> = None;
+    let mut degraded: Option<(&'static str, String)> = agt_source_degraded;
 
     match ensure_profile_configmap(
         &configmaps,
@@ -291,6 +302,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             conditions: Some(new_conditions),
             last_compiled_at: Some(rfc3339_now()),
             agt_profile_digest: agt_digest,
+            agt_profile_bundle_digest: bundle_digest_for_status,
         }
     });
     api.patch_status(
@@ -320,6 +332,129 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
 fn rfc3339_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Resolve the customer AGT profile from `spec.agtProfile`. Returns:
+///
+/// - `(None, None, None)` — no `agtProfile` in the spec; back-compat
+///   path (controller stamps `Ready=True / reason=NotApplicable`).
+/// - `(Some(bytes), None, None)` — `inline` source; bytes are the spec
+///   string verbatim.
+/// - `(Some(bytes), Some(oci_digest), None)` — `bundleRef` source;
+///   bytes are the verified OCI artifact payload; `oci_digest` is the
+///   manifest digest matched against `bundleRef.digest`.
+/// - `(None, None, Some((reason, msg)))` — fetch/validation failed or
+///   the source is malformed. The reconcile loop short-circuits to
+///   `phase=Degraded / Ready=False / reason=<reason>` using the
+///   existing degraded-handling path.
+///
+/// Mutual exclusion: when both `inline` and `bundleRef` are set, this
+/// is a spec error — admission CEL also rejects it, but we re-check at
+/// runtime as defense in depth (older clusters may run without the
+/// latest CRD).
+async fn resolve_agt_profile_source(
+    tp: &ToolPolicy,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<(&'static str, String)>,
+) {
+    let Some(src) = tp.spec.agt_profile.as_ref() else {
+        return (None, None, None);
+    };
+
+    let inline_set = src
+        .inline
+        .as_deref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let bundle_set = src.bundle_ref.is_some();
+
+    match (inline_set, bundle_set) {
+        (false, false) => (None, None, None),
+        (true, true) => (
+            None,
+            None,
+            Some((
+                "InvalidSpec",
+                "spec.agtProfile.inline and spec.agtProfile.bundleRef are mutually exclusive"
+                    .into(),
+            )),
+        ),
+        (true, false) => {
+            // Safe to unwrap: inline_set proves the inner string is Some + non-empty.
+            let bytes = src.inline.clone().expect("inline_set implies Some");
+            (Some(bytes), None, None)
+        }
+        (false, true) => {
+            let bundle_ref = src
+                .bundle_ref
+                .as_ref()
+                .expect("bundle_set implies Some")
+                .clone();
+            let signer_policy_handle = crate::signer_policy::global();
+            let verify_result = match signer_policy_handle.snapshot() {
+                crate::signer_policy::SignerPolicyState::FromConfigMap(p) => {
+                    let cfg: crate::policy_fetcher::SignerPolicyConfig = p.into();
+                    crate::policy_fetcher::fetch_and_verify_generic::<
+                        crate::policy_canonical::tools::ToolsKind,
+                    >(&bundle_ref, &cfg)
+                    .await
+                }
+                crate::signer_policy::SignerPolicyState::Malformed(msg) => Err(
+                    crate::policy_fetcher::FetchError::SignerPolicyMalformed(msg),
+                ),
+                crate::signer_policy::SignerPolicyState::Absent => {
+                    let cfg = crate::policy_fetcher::SignerPolicyConfig::from_env();
+                    crate::policy_fetcher::fetch_and_verify_generic::<
+                        crate::policy_canonical::tools::ToolsKind,
+                    >(&bundle_ref, &cfg)
+                    .await
+                }
+            };
+            match verify_result {
+                Ok(verified) => {
+                    // bytes are valid UTF-8 because canonical-form parse
+                    // (`policy_canonical::tools::parse`) re-validates UTF-8;
+                    // a malformed payload would have produced an error
+                    // before reaching this point.
+                    let bytes = String::from_utf8(verified.bytes)
+                        .expect("ToolsKind::parse re-validates utf-8 before finalize");
+                    (Some(bytes), Some(verified.digest), None)
+                }
+                Err(e) => {
+                    let (reason, msg) = fetch_error_to_degraded(&e);
+                    tracing::warn!(
+                        toolpolicy = %tp.name_any(),
+                        registry = %bundle_ref.registry,
+                        repository = %bundle_ref.repository,
+                        digest = %bundle_ref.digest,
+                        reason,
+                        "ToolPolicy bundleRef fetch/verify failed: {msg}"
+                    );
+                    (None, None, Some((reason, msg)))
+                }
+            }
+        }
+    }
+}
+
+/// Map [`crate::policy_fetcher::FetchError`] variants to the
+/// `(reason, message)` pair the controller status machinery
+/// consumes. Delegates to
+/// [`crate::policy_fetcher::reason_for_error`] so the one shared
+/// vocabulary stays in lockstep with the egress reconciler (one
+/// vocabulary across all signed-policy kinds keeps operator-facing
+/// docs minimal and the controller's class table closed — §15.3
+/// log-injection prevention). [`crate::policy_fetcher::FetchError::Transient`]
+/// is mapped to `"Transient"` here rather than surfaced as a `None`
+/// reason: the ToolPolicy state machine does not have a
+/// "preserve last-known-good" branch (unlike the egress sandbox
+/// reconciler), so a transient fetch failure surfaces honestly as
+/// Degraded until the next requeue succeeds.
+fn fetch_error_to_degraded(e: &crate::policy_fetcher::FetchError) -> (&'static str, String) {
+    let reason = crate::policy_fetcher::reason_for_error(e).unwrap_or("Transient");
+    (reason, e.to_string())
 }
 
 /// Build the Conditions vector preserving prior `lastTransitionTime`
@@ -983,5 +1118,142 @@ mod tests {
         // Distinct from the McpServer manager — required by §10.4 #1.
         assert_eq!(FIELD_MANAGER, "azureclaw-controller/toolpolicy");
         assert_ne!(FIELD_MANAGER, "azureclaw-controller/mcp");
+    }
+
+    /// `resolve_agt_profile_source` for the four spec-shape cases that
+    /// do NOT touch network / global SignerPolicy state:
+    ///   * `agtProfile` absent — back-compat path.
+    ///   * `agtProfile` set but both children empty.
+    ///   * `inline` only — happy path.
+    ///   * `inline` + `bundleRef` both set — runtime mutual-exclusion
+    ///     guard (CEL enforces this at admission, but older clusters
+    ///     without the latest CRD must still surface a clear
+    ///     `Degraded=True / reason=InvalidSpec` here).
+    ///
+    /// The pure `bundleRef`-only path is exercised by `policy_canonical::tools`
+    /// unit tests + e2e (`tests/e2e/...`) rather than here, because it
+    /// reads the global `SignerPolicy` handle and performs an HTTPS
+    /// pull which is integration territory.
+    use crate::tool_policy::{AgtProfileSource, AppliesToSelector, ToolPolicy, ToolPolicySpec};
+
+    fn fixture_spec(agt: Option<AgtProfileSource>) -> ToolPolicySpec {
+        ToolPolicySpec {
+            applies_to: AppliesToSelector::default(),
+            commerce: None,
+            rate_limit: None,
+            approval: None,
+            display_name: None,
+            agt_profile: agt,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_agt_profile_absent_yields_all_none() {
+        let tp = ToolPolicy::new("tp-fixture", fixture_spec(None));
+        let (bytes, digest, degraded) = resolve_agt_profile_source(&tp).await;
+        assert!(bytes.is_none());
+        assert!(digest.is_none());
+        assert!(degraded.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_agt_profile_both_children_empty_yields_all_none() {
+        let tp = ToolPolicy::new(
+            "tp-fixture",
+            fixture_spec(Some(AgtProfileSource {
+                inline: None,
+                bundle_ref: None,
+            })),
+        );
+        let (bytes, digest, degraded) = resolve_agt_profile_source(&tp).await;
+        assert!(bytes.is_none());
+        assert!(digest.is_none());
+        assert!(degraded.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_agt_profile_inline_only_returns_bytes_no_digest() {
+        let body = "version: 1\nagent: foo\npolicies: []\n";
+        let tp = ToolPolicy::new(
+            "tp-fixture",
+            fixture_spec(Some(AgtProfileSource {
+                inline: Some(body.to_string()),
+                bundle_ref: None,
+            })),
+        );
+        let (bytes, digest, degraded) = resolve_agt_profile_source(&tp).await;
+        assert_eq!(bytes.as_deref(), Some(body));
+        assert!(
+            digest.is_none(),
+            "inline path must NOT stamp the OCI manifest digest"
+        );
+        assert!(degraded.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_agt_profile_both_set_yields_invalid_spec_degraded() {
+        let tp = ToolPolicy::new(
+            "tp-fixture",
+            fixture_spec(Some(AgtProfileSource {
+                inline: Some("version: 1\nagent: a\npolicies: []\n".to_string()),
+                bundle_ref: Some(crate::crd::OciArtifactRef {
+                    registry: "example.azurecr.io".into(),
+                    repository: "azureclaw/tools".into(),
+                    digest:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .into(),
+                    artifact_type: "application/vnd.azureclaw.agt-profile.v1+yaml".into(),
+                }),
+            })),
+        );
+        let (bytes, digest, degraded) = resolve_agt_profile_source(&tp).await;
+        assert!(bytes.is_none());
+        assert!(digest.is_none());
+        let (reason, msg) = degraded.expect("both-set must produce degraded tuple");
+        assert_eq!(reason, "InvalidSpec");
+        assert!(msg.contains("mutually exclusive"), "got: {msg}");
+    }
+
+    /// `fetch_error_to_degraded` must delegate to the shared
+    /// `reason_for_error` taxonomy and only synthesize `"Transient"`
+    /// for the Transient variant. This is a tripwire — if egress ever
+    /// renames a reason, this test fails alongside.
+    #[test]
+    fn fetch_error_to_degraded_delegates_to_shared_taxonomy() {
+        use crate::policy_fetcher::FetchError;
+        let cases: &[(FetchError, &str)] = &[
+            (FetchError::SignerPolicyMissing, "SignerPolicyMissing"),
+            (
+                FetchError::SignerPolicyMalformed("oops".into()),
+                "SignerPolicyMalformed",
+            ),
+            (FetchError::InvalidRef("bad".into()), "InvalidRef"),
+            (FetchError::Unauthorized("401".into()), "Unauthorized"),
+            (
+                FetchError::NotFound("ghcr.io/x@sha256:0".into()),
+                "NotFound",
+            ),
+            (
+                FetchError::SignatureVerifyFailed("bad sig".into()),
+                "SignatureVerifyFailed",
+            ),
+            (
+                FetchError::CanonicalFormViolation("non-empty".into()),
+                "CanonicalFormViolation",
+            ),
+            (
+                FetchError::IdentityMismatch("not pinned".into()),
+                "IdentityMismatch",
+            ),
+            (FetchError::Transient("network".into()), "Transient"),
+        ];
+        for (err, expected) in cases {
+            let (reason, msg) = fetch_error_to_degraded(err);
+            assert_eq!(
+                reason, *expected,
+                "FetchError {err:?} mapped to {reason}, expected {expected}"
+            );
+            assert!(!msg.is_empty());
+        }
     }
 }
