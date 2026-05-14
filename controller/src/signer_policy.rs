@@ -27,12 +27,23 @@
 //!   sanPatterns: |
 //!     https://github.com/Azure/azureclaw/.github/workflows/*.yml@*
 //!     signer@example.com
+//!   ed25519Keys: |
+//!     [
+//!       {
+//!         "id": "grant-signer-2026-q2",
+//!         "publicKeyBase64": "MCowBQYDK2VwAyEA...",
+//!         "allowedSubjects": ["egress-approval"]
+//!       }
+//!     ]
 //! ```
 //!
-//! Both keys are **required**; both lists must be non-empty after
-//! trimming and `#` comment stripping. Either being empty is a parse
-//! error (`SignerPolicyError::EmptyKey`) — empty issuers + empty SANs
-//! together is *not* an implicit accept-all (per S12.d trust model).
+//! `fulcioIssuers` + `sanPatterns` are **required** and govern the
+//! data-plane policy lane (egress allowlist / tool policy /
+//! inference / memory / mcp-server bundles, all signed via cosign +
+//! Fulcio). `ed25519Keys` is **optional** forward-compat for the
+//! grant lane that lands in Slice 5e+ (`EgressApproval`) — parsed
+//! and surfaced here, but **not yet enforced**. Empty + absent are
+//! treated identically.
 //!
 //! ## Trust model
 //!
@@ -43,7 +54,9 @@
 //!   existing controller `ClusterRole` already grants this; no
 //!   broadening needed).
 //! - Fail-closed: malformed → `SignerPolicyMalformed`. Absent +
-//!   no-env → `SignerPolicyMissing`.
+//!   no-env → `SignerPolicyMissing`. Malformed `ed25519Keys` blocks
+//!   the **whole** policy parse — the grant lane defers to 5e+ but
+//!   broken JSON is never silently ignored.
 
 use std::sync::{Arc, RwLock};
 
@@ -65,6 +78,49 @@ pub const KEY_FULCIO_ISSUERS: &str = "fulcioIssuers";
 /// (`*`, `?`) is the same as the env-var path.
 pub const KEY_SAN_PATTERNS: &str = "sanPatterns";
 
+/// `data.ed25519Keys` key — JSON array of [`Ed25519Key`] entries.
+///
+/// **Optional** ConfigMap key. Absent or `[]` means "no grant-lane
+/// signers registered" — equivalent for forward-compat purposes.
+/// Parsed + surfaced here for Slice 5e+ consumption; the data-plane
+/// policy lane (1c.1–1c.5) does **not** consult this list.
+pub const KEY_ED25519_KEYS: &str = "ed25519Keys";
+
+/// A registered Ed25519 public key for the grant lane (Slice 5e+).
+///
+/// Wire shape (a single element of the `ed25519Keys` JSON array):
+///
+/// ```json
+/// {
+///   "id": "grant-signer-2026-q2",
+///   "publicKeyBase64": "MCowBQYDK2VwAyEA...",
+///   "allowedSubjects": ["egress-approval"]
+/// }
+/// ```
+///
+/// **Field semantics:**
+///
+/// - `id` — operator-chosen stable identifier. Must be non-empty,
+///   DNS-label-safe (1-63 chars, `[a-z0-9-]`, no leading/trailing
+///   dash) so it can flow through K8s labels + ConfigMap names in
+///   5e+. Duplicate ids across entries are a parse error.
+/// - `public_key_b64` — standard base64-encoded raw Ed25519 public
+///   key (32 bytes raw → 44 chars base64). Both raw + DER/PKIX
+///   forms are accepted to ease cosign-issued material; the 5e+
+///   verifier normalises before use.
+/// - `allowed_subjects` — list of grant-artifact subject types this
+///   key is authorised to sign. Initial vocabulary:
+///   `egress-approval`. Empty list means "the key is registered
+///   but cannot authorise anything yet" — explicit and intentional.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Ed25519Key {
+    pub id: String,
+    pub public_key_base64: String,
+    #[serde(default)]
+    pub allowed_subjects: Vec<String>,
+}
+
 /// Parsed signer policy. The wire shape mirrors
 /// [`crate::policy_fetcher::SignerPolicyConfig`] for a zero-cost
 /// conversion.
@@ -74,6 +130,10 @@ pub struct SignerPolicy {
     pub fulcio_issuers: Vec<String>,
     /// Allowed SAN glob patterns. Empty → reject all.
     pub san_patterns: Vec<String>,
+    /// Registered Ed25519 keys for the grant lane (Slice 5e+).
+    /// Parsed + surfaced; **not enforced** in this slice. Empty +
+    /// absent are equivalent.
+    pub ed25519_keys: Vec<Ed25519Key>,
 }
 
 impl SignerPolicy {
@@ -99,6 +159,18 @@ pub enum SignerPolicyError {
         entry: String,
         reason: &'static str,
     },
+    #[error("ConfigMap key `ed25519Keys` is not valid JSON: {0}")]
+    Ed25519JsonParse(String),
+    #[error("ConfigMap key `ed25519Keys` must be a JSON array")]
+    Ed25519NotArray,
+    #[error("ed25519Keys[{index}].{field} is invalid: {reason}")]
+    Ed25519InvalidEntry {
+        index: usize,
+        field: &'static str,
+        reason: String,
+    },
+    #[error("ed25519Keys contains duplicate id `{0}`")]
+    Ed25519DuplicateId(String),
 }
 
 /// Parse a `ConfigMap` into a [`SignerPolicy`]. Strict — see module docs
@@ -128,7 +200,121 @@ pub fn parse_configmap(cm: &ConfigMap) -> Result<SignerPolicy, SignerPolicyError
     Ok(SignerPolicy {
         fulcio_issuers,
         san_patterns,
+        ed25519_keys: match data.get(KEY_ED25519_KEYS) {
+            Some(raw) => parse_ed25519_keys(raw)?,
+            None => Vec::new(),
+        },
     })
+}
+
+/// Parse the `ed25519Keys` ConfigMap value (a JSON array of
+/// [`Ed25519Key`] objects) into a deduplicated, validated `Vec`.
+///
+/// Strict: empty whitespace and `[]` both parse to an empty `Vec`
+/// (forward-compat — operators wire the data key in early without
+/// having keys yet). Any other malformed shape is an error.
+pub fn parse_ed25519_keys(raw: &str) -> Result<Vec<Ed25519Key>, SignerPolicyError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|e| SignerPolicyError::Ed25519JsonParse(e.to_string()))?;
+    let arr = value
+        .as_array()
+        .ok_or(SignerPolicyError::Ed25519NotArray)?
+        .clone();
+
+    let mut out: Vec<Ed25519Key> = Vec::with_capacity(arr.len());
+    let mut seen_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (index, entry) in arr.into_iter().enumerate() {
+        let key: Ed25519Key =
+            serde_json::from_value(entry).map_err(|e| SignerPolicyError::Ed25519InvalidEntry {
+                index,
+                field: "<entry>",
+                reason: e.to_string(),
+            })?;
+        validate_ed25519_key(index, &key)?;
+        if !seen_ids.insert(key.id.clone()) {
+            return Err(SignerPolicyError::Ed25519DuplicateId(key.id));
+        }
+        out.push(key);
+    }
+    Ok(out)
+}
+
+fn validate_ed25519_key(index: usize, key: &Ed25519Key) -> Result<(), SignerPolicyError> {
+    if key.id.is_empty() {
+        return Err(SignerPolicyError::Ed25519InvalidEntry {
+            index,
+            field: "id",
+            reason: "must be non-empty".to_string(),
+        });
+    }
+    if key.id.len() > 63 {
+        return Err(SignerPolicyError::Ed25519InvalidEntry {
+            index,
+            field: "id",
+            reason: format!("must be ≤63 chars (got {})", key.id.len()),
+        });
+    }
+    if !is_dns_label(&key.id) {
+        return Err(SignerPolicyError::Ed25519InvalidEntry {
+            index,
+            field: "id",
+            reason: "must be a DNS label ([a-z0-9-], no leading/trailing dash)".to_string(),
+        });
+    }
+    let b64 = key.public_key_base64.trim();
+    if b64.is_empty() {
+        return Err(SignerPolicyError::Ed25519InvalidEntry {
+            index,
+            field: "publicKeyBase64",
+            reason: "must be non-empty".to_string(),
+        });
+    }
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| SignerPolicyError::Ed25519InvalidEntry {
+            index,
+            field: "publicKeyBase64",
+            reason: format!("invalid base64: {e}"),
+        })?;
+    // Accept raw 32-byte Ed25519 pubkeys + the 44-byte DER/PKIX SPKI
+    // form cosign emits. Sub-44-byte payloads with `MCowBQYDK2VwAyEA`
+    // prefix are not valid PKIX — reject.
+    let len = decoded.len();
+    if !matches!(len, 32 | 44) {
+        return Err(SignerPolicyError::Ed25519InvalidEntry {
+            index,
+            field: "publicKeyBase64",
+            reason: format!("must decode to 32 (raw) or 44 (DER) bytes, got {len}"),
+        });
+    }
+    for (s_idx, subject) in key.allowed_subjects.iter().enumerate() {
+        if subject.trim().is_empty() {
+            return Err(SignerPolicyError::Ed25519InvalidEntry {
+                index,
+                field: "allowedSubjects",
+                reason: format!("entry [{s_idx}] is empty"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_dns_label(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
 fn parse_list(
@@ -222,7 +408,16 @@ impl SharedSignerPolicy {
     /// [`SignerPolicyState::Malformed`] on parse-error.
     pub fn apply_configmap(&self, cm: &ConfigMap) {
         let next = match parse_configmap(cm) {
-            Ok(p) => SignerPolicyState::FromConfigMap(p),
+            Ok(p) => {
+                tracing::info!(
+                    fulcio_issuers = p.fulcio_issuers.len(),
+                    san_patterns = p.san_patterns.len(),
+                    ed25519_keys = p.ed25519_keys.len(),
+                    ed25519_key_ids = ?p.ed25519_keys.iter().map(|k| k.id.as_str()).collect::<Vec<_>>(),
+                    "SignerPolicy ConfigMap applied",
+                );
+                SignerPolicyState::FromConfigMap(p)
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -234,6 +429,27 @@ impl SharedSignerPolicy {
         if let Ok(mut w) = self.inner.write() {
             *w = next;
         }
+    }
+
+    /// Snapshot of the registered Ed25519 keys (grant lane, Slice 5e+).
+    ///
+    /// Returns an empty `Vec` when the SignerPolicy ConfigMap is
+    /// absent, malformed, or omits the `ed25519Keys` data key. Cheap
+    /// to call — clones the inner `Vec<Ed25519Key>` (which is
+    /// typically 0–4 entries in practice).
+    ///
+    /// **Forward-compat surface.** The data-plane policy verifier
+    /// (egress / tools / inference / memory / mcp-server) does not
+    /// call this method; Slice 5e+ grant-lane verification will.
+    #[allow(dead_code)] // Slice 5e+ grant-lane verifier consumer.
+    pub fn ed25519_keys(&self) -> Vec<Ed25519Key> {
+        self.inner
+            .read()
+            .map(|g| match &*g {
+                SignerPolicyState::FromConfigMap(p) => p.ed25519_keys.clone(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default()
     }
 
     /// Reset to [`SignerPolicyState::Absent`]. Used on watcher delete
@@ -499,5 +715,230 @@ mod tests {
         let s2 = s.clone();
         s.apply_configmap(&cm_with(Some(good_data())));
         assert!(matches!(s2.snapshot(), SignerPolicyState::FromConfigMap(_)));
+    }
+
+    // ─── Slice 1c.6: ed25519 grant-lane forward-compat ───
+
+    /// Raw 32-byte all-zero Ed25519 pubkey base64 (44 chars + padding).
+    const RAW_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    /// DER/PKIX SPKI-wrapped Ed25519 pubkey (44 raw bytes → 60 base64
+    /// chars + padding). Header `30 2a 30 05 06 03 2b 65 70 03 21 00`
+    /// is the standard `id-Ed25519` SubjectPublicKeyInfo prefix.
+    const DER_PUBKEY_B64: &str = "MCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    fn good_data_with_ed25519(ed: &str) -> BTreeMap<String, String> {
+        let mut d = good_data();
+        d.insert(KEY_ED25519_KEYS.into(), ed.into());
+        d
+    }
+
+    #[test]
+    fn ed25519_absent_yields_empty_vec() {
+        let p = parse_configmap(&cm_with(Some(good_data()))).expect("parses");
+        assert!(p.ed25519_keys.is_empty());
+    }
+
+    #[test]
+    fn ed25519_empty_string_yields_empty_vec() {
+        let p = parse_configmap(&cm_with(Some(good_data_with_ed25519("   \n  ")))).expect("parses");
+        assert!(p.ed25519_keys.is_empty());
+    }
+
+    #[test]
+    fn ed25519_empty_array_yields_empty_vec() {
+        let p = parse_configmap(&cm_with(Some(good_data_with_ed25519("[]")))).expect("parses");
+        assert!(p.ed25519_keys.is_empty());
+    }
+
+    #[test]
+    fn ed25519_parses_single_raw_key() {
+        let json = format!(
+            r#"[{{"id":"signer-a","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":["egress-approval"]}}]"#
+        );
+        let p = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).expect("parses");
+        assert_eq!(p.ed25519_keys.len(), 1);
+        assert_eq!(p.ed25519_keys[0].id, "signer-a");
+        assert_eq!(p.ed25519_keys[0].allowed_subjects, vec!["egress-approval"]);
+    }
+
+    #[test]
+    fn ed25519_parses_der_key() {
+        let json = format!(
+            r#"[{{"id":"signer-b","publicKeyBase64":"{DER_PUBKEY_B64}","allowedSubjects":["egress-approval"]}}]"#
+        );
+        parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).expect("parses DER form");
+    }
+
+    #[test]
+    fn ed25519_parses_multiple_keys() {
+        let json = format!(
+            r#"[
+                {{"id":"signer-a","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":["egress-approval"]}},
+                {{"id":"signer-b","publicKeyBase64":"{DER_PUBKEY_B64}","allowedSubjects":["egress-approval","future-grant"]}}
+            ]"#
+        );
+        let p = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).expect("parses");
+        assert_eq!(p.ed25519_keys.len(), 2);
+    }
+
+    #[test]
+    fn ed25519_rejects_malformed_json() {
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519("[{]")))).unwrap_err();
+        assert!(matches!(err, SignerPolicyError::Ed25519JsonParse(_)));
+    }
+
+    #[test]
+    fn ed25519_rejects_non_array_json() {
+        let json = format!(
+            r#"{{"id":"signer-a","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":[]}}"#
+        );
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).unwrap_err();
+        assert!(matches!(err, SignerPolicyError::Ed25519NotArray));
+    }
+
+    #[test]
+    fn ed25519_rejects_empty_id() {
+        let json =
+            format!(r#"[{{"id":"","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":[]}}]"#);
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).unwrap_err();
+        match err {
+            SignerPolicyError::Ed25519InvalidEntry { field: "id", .. } => {}
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ed25519_rejects_non_dns_label_id() {
+        let json = format!(
+            r#"[{{"id":"Signer_A","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":[]}}]"#
+        );
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).unwrap_err();
+        match err {
+            SignerPolicyError::Ed25519InvalidEntry { field: "id", .. } => {}
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ed25519_rejects_long_id() {
+        let long_id = "a".repeat(64);
+        let json = format!(
+            r#"[{{"id":"{long_id}","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":[]}}]"#
+        );
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).unwrap_err();
+        match err {
+            SignerPolicyError::Ed25519InvalidEntry { field: "id", .. } => {}
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ed25519_rejects_wrong_pubkey_length() {
+        // 33-byte payload (32-byte raw key + extra byte) → length 33 ≠ 32 ≠ 44.
+        let bad_pk = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB";
+        let json =
+            format!(r#"[{{"id":"signer-a","publicKeyBase64":"{bad_pk}","allowedSubjects":[]}}]"#);
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).unwrap_err();
+        match err {
+            SignerPolicyError::Ed25519InvalidEntry {
+                field: "publicKeyBase64",
+                ..
+            } => {}
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ed25519_rejects_invalid_base64() {
+        let json =
+            r#"[{"id":"signer-a","publicKeyBase64":"!!!not-base64!!!","allowedSubjects":[]}]"#;
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(json)))).unwrap_err();
+        match err {
+            SignerPolicyError::Ed25519InvalidEntry {
+                field: "publicKeyBase64",
+                ..
+            } => {}
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ed25519_rejects_empty_subject_string() {
+        let json = format!(
+            r#"[{{"id":"signer-a","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":["egress-approval", "  "]}}]"#
+        );
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).unwrap_err();
+        match err {
+            SignerPolicyError::Ed25519InvalidEntry {
+                field: "allowedSubjects",
+                ..
+            } => {}
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ed25519_rejects_duplicate_ids() {
+        let json = format!(
+            r#"[
+                {{"id":"signer-a","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":[]}},
+                {{"id":"signer-a","publicKeyBase64":"{DER_PUBKEY_B64}","allowedSubjects":[]}}
+            ]"#
+        );
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).unwrap_err();
+        assert!(matches!(err, SignerPolicyError::Ed25519DuplicateId(id) if id == "signer-a"));
+    }
+
+    #[test]
+    fn ed25519_rejects_unknown_field() {
+        let json = format!(
+            r#"[{{"id":"signer-a","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":[],"foo":"bar"}}]"#
+        );
+        let err = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).unwrap_err();
+        // serde_json's deny_unknown_fields surfaces as Ed25519InvalidEntry with the parse error message.
+        assert!(matches!(
+            err,
+            SignerPolicyError::Ed25519InvalidEntry {
+                field: "<entry>",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn shared_ed25519_keys_accessor_round_trips() {
+        let s = SharedSignerPolicy::new();
+        let json = format!(
+            r#"[{{"id":"signer-a","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":["egress-approval"]}}]"#
+        );
+        s.apply_configmap(&cm_with(Some(good_data_with_ed25519(&json))));
+        let keys = s.ed25519_keys();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, "signer-a");
+    }
+
+    #[test]
+    fn shared_ed25519_keys_empty_on_absent() {
+        let s = SharedSignerPolicy::default();
+        assert!(s.ed25519_keys().is_empty());
+    }
+
+    #[test]
+    fn shared_ed25519_keys_empty_on_malformed() {
+        let s = SharedSignerPolicy::new();
+        s.apply_configmap(&cm_with(Some(good_data_with_ed25519("[{]"))));
+        assert!(s.ed25519_keys().is_empty());
+        assert!(matches!(s.snapshot(), SignerPolicyState::Malformed(_)));
+    }
+
+    #[test]
+    fn signer_policy_config_from_surfaces_ed25519() {
+        let json = format!(
+            r#"[{{"id":"signer-a","publicKeyBase64":"{RAW_PUBKEY_B64}","allowedSubjects":["egress-approval"]}}]"#
+        );
+        let p = parse_configmap(&cm_with(Some(good_data_with_ed25519(&json)))).expect("parses");
+        let cfg: crate::policy_fetcher::SignerPolicyConfig = p.into();
+        assert_eq!(cfg.ed25519_keys.len(), 1);
+        assert_eq!(cfg.ed25519_keys[0].id, "signer-a");
     }
 }

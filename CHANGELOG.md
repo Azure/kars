@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1c.6 — `SignerPolicy.spec.ed25519Keys[]` + unified `azureclaw policy sign --kind X`
+
+Wraps the Slice 1c-real signing-generalization arc with two
+forward-compat surfaces: the controller-side registration point for
+ephemeral-grant signing keys (Slice 5e+ verifier consumer) and a
+single CLI dispatch covering all five signed policy artifact kinds.
+
+**Producer side (controller)**
+
+- `controller/src/signer_policy.rs` gains an optional
+  `ed25519Keys: [{id, publicKeyBase64, allowedSubjects[]}]` JSON
+  array in the SignerPolicy ConfigMap, parsed via
+  `parse_ed25519_keys` with strict validation: DNS-label IDs
+  (≤ 63 chars, `[a-z0-9-]`, no leading/trailing dash, deduped),
+  base64 keys decoding to **either** 32-byte raw Ed25519 **or**
+  44-byte SPKI/DER form (cosign-compat), non-empty allowedSubjects
+  list (empty strings within rejected), `deny_unknown_fields`. The
+  parsed keys surface on `SignerPolicy::ed25519_keys()` and ride
+  through `policy_fetcher::SignerPolicyConfig` via the existing
+  `From<SignerPolicy>` impl. No verifier wired today —
+  `#[allow(dead_code)]` flags mark them as the Slice 5e+ grant-lane
+  consumer surface, and `apply_configmap` emits a `tracing::info!`
+  with the registered key count so operators get immediate feedback
+  that their config landed. **20 new unit tests** cover absent,
+  empty-array, raw-pubkey, DER-pubkey, multi-key, malformed JSON,
+  non-array, DNS-label edge cases, base64 errors, allowed-subjects
+  hygiene, deduplication, and the round-trip through `SharedSignerPolicy`
+  + `SignerPolicyConfig`. Controller test count: 677 → **697**.
+
+**CLI side**
+
+- New `cli/src/commands/policy/sign.ts` registers
+  `azureclaw policy sign --kind {egress-allowlist | agt-profile |
+   inference-policy | memory-binding | mcp-server-bundle}
+   --file <path> --registry <host> --repository <repo>` (plus
+  optional `--tag`, `--sign-mode`, `--sign-key`, `--json`,
+  `--print-bundle-ref`). Per-kind dispatch table maps `--kind` to
+  the exact media type the controller's `policy_canonical::*::parse`
+  expects, byte-for-byte mirroring the `MEDIA_TYPE` consts. The
+  command does only cheap pre-flight (file exists, non-empty,
+  valid UTF-8) and pushes the operator's pre-canonicalised bytes
+  as-is via `oras push` + `cosign sign` — canonical-form validation
+  remains the controller's authoritative responsibility, exposed
+  via crisp `Degraded / SpecInvalid` conditions on the consuming
+  CRD. `azureclaw egress … --sign` stays unchanged for back-compat
+  (it owns the egress-specific canonical-bytes builder). 13 new
+  CLI unit tests cover the per-kind media-type table, unknown-kind
+  rejection, the file pre-flight branches (missing / empty /
+  non-UTF-8 / unknown kind), the digest-format check, the default
+  tag, and the `renderBundleRefSnippet` YAML output.
+
+**Why this closes the 1c-real arc**
+
+Slice 1c.1–1c.5 wired every policy kind to
+`fetch_and_verify_generic` on the controller side, satisfying
+`principles.md §2` architecturally. The CLI surface remained
+egress-only — operators authoring the other four kinds had to
+drop down to raw `oras push` + `cosign sign`. Slice 1c.6 collapses
+that authoring asymmetry into one command without touching the
+data plane. The ed25519Keys field is the smallest possible
+forward-compat surface the controller needs to absorb Slice 5e's
+EgressApproval verifier without a second SignerPolicy migration:
+the wire shape, parser, validation rules, accessor, and audit
+event all land here so 5e's PR is pure consumer wiring.
+
+**Files changed**
+
+- `controller/src/signer_policy.rs` — wire docs, `Ed25519Key`
+  struct, 5 new error variants, `parse_ed25519_keys` helper,
+  `ed25519_keys()` accessor, 20 unit tests
+- `controller/src/policy_fetcher.rs` — `ed25519_keys` on
+  `SignerPolicyConfig` with `#[allow(dead_code)]` + Slice 5e+
+  comment, `From<SignerPolicy>` impl pass-through, one test
+  struct init updated
+- `cli/src/commands/policy.ts` — wires
+  `registerPolicySignSubcommand`
+- `cli/src/commands/policy/sign.ts` — new (~280 LOC)
+- `cli/src/commands/policy/sign.test.ts` — new (13 tests)
+
 ### Slice 1c.5 — `McpServer.spec.bundleRef` (signed OCI artifact)
 
 Fifth and final per-kind step in the Slice 1c-real

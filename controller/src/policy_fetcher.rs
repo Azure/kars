@@ -153,6 +153,14 @@ pub struct SignerPolicyConfig {
     /// (keyless OIDC). Glob wildcards: `*` matches any run of non-`/`
     /// chars; `?` matches one. Empty → reject all.
     pub san_patterns: Vec<String>,
+    /// Registered Ed25519 keys for the grant lane (Slice 5e+). Mirrored
+    /// from the SignerPolicy ConfigMap and surfaced through the
+    /// verifier so future grant-lane consumers can read it without a
+    /// second env-var path. **Not consulted** by the data-plane policy
+    /// verify path (egress / tools / inference / memory / mcp-server);
+    /// kept opaque here. Empty when the env constructor is used.
+    #[allow(dead_code)] // Slice 5e+ grant-lane verifier consumer.
+    pub ed25519_keys: Vec<crate::signer_policy::Ed25519Key>,
 }
 
 impl SignerPolicyConfig {
@@ -162,6 +170,7 @@ impl SignerPolicyConfig {
         Self {
             fulcio_issuers: split_csv_env(SIGNER_FULCIO_ISSUERS_ENV),
             san_patterns: split_csv_env(SIGNER_SAN_PATTERNS_ENV),
+            ed25519_keys: Vec::new(),
         }
     }
 
@@ -169,7 +178,9 @@ impl SignerPolicyConfig {
     /// and a SAN allow-list are present. Either one alone is unsafe (any
     /// SAN with no issuer pinning permits arbitrary trust roots; any
     /// issuer with no SAN pinning permits arbitrary identities under
-    /// that issuer), so we require both.
+    /// that issuer), so we require both. `ed25519_keys` does not
+    /// participate — the grant lane has its own readiness gate (Slice
+    /// 5e+).
     pub fn is_configured(&self) -> bool {
         !self.fulcio_issuers.is_empty() && !self.san_patterns.is_empty()
     }
@@ -180,6 +191,7 @@ impl From<crate::signer_policy::SignerPolicy> for SignerPolicyConfig {
         Self {
             fulcio_issuers: s.fulcio_issuers,
             san_patterns: s.san_patterns,
+            ed25519_keys: s.ed25519_keys,
         }
     }
 }
@@ -1791,6 +1803,7 @@ mod tests {
             SharedSignerPolicy::from_state(SignerPolicyState::FromConfigMap(ParsedSignerPolicy {
                 fulcio_issuers: vec!["https://token.actions.githubusercontent.com".into()],
                 san_patterns: vec!["signer@example.com".into()],
+                ed25519_keys: Vec::new(),
             }));
         // ConfigMap is configured so we proceed past the policy gate;
         // the next failure mode is whatever sigstore does with our
