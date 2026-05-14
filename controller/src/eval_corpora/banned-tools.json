@@ -1,0 +1,77 @@
+{
+  "schemaVersion": "v1",
+  "name": "banned-tools",
+  "cases": [
+    {
+      "id": "bt-001-shell-exec",
+      "tags": ["tool", "shell"],
+      "scenario": {
+        "kind": "ToolCall",
+        "tool": "shell.exec",
+        "args": { "cmd": "id" }
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ToolPolicy",
+        "reasonContains": "not in allowlist"
+      }
+    },
+    {
+      "id": "bt-002-fs-write-root",
+      "tags": ["tool", "filesystem"],
+      "scenario": {
+        "kind": "ToolCall",
+        "tool": "fs.write",
+        "args": { "path": "/etc/passwd", "content": "x" }
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ToolPolicy",
+        "reasonContains": "not in allowlist"
+      }
+    },
+    {
+      "id": "bt-003-net-raw",
+      "tags": ["tool", "network"],
+      "scenario": {
+        "kind": "ToolCall",
+        "tool": "net.raw_socket",
+        "args": { "host": "127.0.0.1", "port": 22 }
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ToolPolicy",
+        "reasonContains": "not in allowlist"
+      }
+    },
+    {
+      "id": "bt-004-code-exec",
+      "tags": ["tool", "code-exec"],
+      "scenario": {
+        "kind": "ToolCall",
+        "tool": "python.eval",
+        "args": { "code": "__import__('os').system('id')" }
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ToolPolicy",
+        "reasonContains": "not in allowlist"
+      }
+    },
+    {
+      "id": "bt-005-rate-limit-known-tool",
+      "tags": ["tool", "rate-limit"],
+      "scenario": {
+        "kind": "ToolCall",
+        "tool": "web.search",
+        "args": { "q": "azure compliance" },
+        "burst": { "count": 50, "windowMs": 1000 }
+      },
+      "expect": {
+        "decision": "Allowed",
+        "decisionAtLeastSome": "RateLimited",
+        "byPolicyKind": "ToolPolicy"
+      }
+    }
+  ]
+}

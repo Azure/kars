@@ -108,6 +108,7 @@ impl PolicyKind for MemoryKind {
         match &entry.verified {
             CachedValue::Memory(v) => Some(v.clone()),
             CachedValue::Egress(_)
+            | CachedValue::EvalCorpus(_)
             | CachedValue::Inference(_)
             | CachedValue::McpServer(_)
             | CachedValue::Tools(_) => None,

@@ -129,6 +129,7 @@ impl PolicyKind for McpServerKind {
         match &entry.verified {
             CachedValue::McpServer(v) => Some(v.clone()),
             CachedValue::Egress(_)
+            | CachedValue::EvalCorpus(_)
             | CachedValue::Tools(_)
             | CachedValue::Inference(_)
             | CachedValue::Memory(_) => None,
