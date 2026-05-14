@@ -479,8 +479,9 @@ EOF
     kubectl delete clawmemory e2e-clawmemory -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
 
-# ClawEval → claweval-{name}-binding ConfigMap. Schedule is optional;
-# we omit it so the test isn't time-sensitive.
+# ClawEval (slice 6.3) → claweval-{name}-corpus ConfigMap. With no
+# schedule and no run-now annotation, the CR sits in phase=Pending
+# Ready=False (§3 honest state — no run has completed yet).
 test_crd_claw_eval() {
     cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawEval apply rejected"; return; }
 ---
@@ -490,23 +491,37 @@ metadata:
   name: e2e-claweval
   namespace: azureclaw-system
 spec:
-  sandboxRef:
+  targetSandboxRef:
     name: e2e-test
-  suite: foundry-evals
-  evaluators:
-    - "relevance"
+  corpus:
+    builtin: jailbreak-baseline
 EOF
-    if wait_for_resource configmap claweval-e2e-claweval-binding azureclaw-system 45; then
-        pass "ClawEval → binding ConfigMap created"
+    if wait_for_resource configmap claweval-e2e-claweval-corpus azureclaw-system 45; then
+        pass "ClawEval → corpus ConfigMap created"
     else
         dump_cr_diagnostics claweval e2e-claweval azureclaw-system
-        fail "ClawEval: binding ConfigMap not created"
+        fail "ClawEval: corpus ConfigMap not created"
     fi
-    if wait_for_ready claweval e2e-claweval azureclaw-system 30; then
-        pass "ClawEval: status.conditions Ready=True"
+    # Wait for the controller to stamp status (phase=Pending Ready=False
+    # is the honest state until a Job/CronJob run completes).
+    local phase ready reason
+    for _ in $(seq 1 15); do
+        phase=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+            -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        ready=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+        reason=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+        if [[ "$phase" == "Pending" && "$ready" == "False" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$phase" == "Pending" && "$ready" == "False" ]]; then
+        pass "ClawEval: phase=Pending ready=False reason=$reason (§3 honest state, slice 6.3)"
     else
         dump_cr_diagnostics claweval e2e-claweval azureclaw-system
-        fail "ClawEval: Ready=True not observed"
+        fail "ClawEval: expected phase=Pending ready=False (got phase=$phase ready=$ready)"
     fi
     kubectl delete claweval e2e-claweval -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
