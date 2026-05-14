@@ -402,6 +402,50 @@ fn endpoint_lists_equivalent(
     norm(a) == norm(b)
 }
 
+/// Structured drift summary: what's in `inline` but not the verified
+/// artifact (`added`), and what's in the artifact but not inline
+/// (`removed`). Computed only when drift is detected so we can attach
+/// a machine-readable payload to the `AllowlistDrift=True` condition
+/// message. Entries are formatted `host:port` (port normalized to 443
+/// when absent) and sorted lexicographically.
+///
+/// **Wire contract** — the headlamp plugin parses this from the
+/// condition message as JSON. Keep field names stable. Adding fields
+/// is OK; renames are not.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DriftSummary {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+fn normalize_endpoints_for_summary(
+    list: &[crate::crd::EndpointConfig],
+) -> std::collections::BTreeSet<(String, u16)> {
+    list.iter()
+        .map(|e| (e.host.to_ascii_lowercase(), e.port.unwrap_or(443)))
+        .collect()
+}
+
+/// Compute a structured drift summary between an inline endpoint
+/// list and the verified-artifact-derived list. `added` are entries
+/// only present inline (operator intent diverging from the signed
+/// authority); `removed` are entries only in the artifact. Returns
+/// empty lists when the two sets are equivalent.
+#[must_use]
+pub fn compute_drift_summary(
+    inline: &[crate::crd::EndpointConfig],
+    derived: &[crate::crd::EndpointConfig],
+) -> DriftSummary {
+    let inline_set = normalize_endpoints_for_summary(inline);
+    let derived_set = normalize_endpoints_for_summary(derived);
+    let fmt = |(h, p): &(String, u16)| format!("{h}:{p}");
+    let mut added: Vec<String> = inline_set.difference(&derived_set).map(fmt).collect();
+    let mut removed: Vec<String> = derived_set.difference(&inline_set).map(fmt).collect();
+    added.sort();
+    removed.sort();
+    DriftSummary { added, removed }
+}
+
 // ─────────────────────────── public entry ───────────────────────────
 
 /// Pull, verify, and parse a signed egress-allowlist artifact.
@@ -1333,6 +1377,11 @@ pub async fn resolve_allowlist_with_handle(
             );
             let derived = canonical_to_endpoint_config(&verified.endpoints);
             let drift = inline_present && !endpoint_lists_equivalent(&inline, &derived);
+            let drift_summary = if drift {
+                Some(compute_drift_summary(&inline, &derived))
+            } else {
+                None
+            };
 
             conditions.push(preserve_transition_time(
                 prior_verified,
@@ -1356,16 +1405,20 @@ pub async fn resolve_allowlist_with_handle(
                 ),
                 generation,
             ));
-            emit_drift_condition(
-                &mut conditions,
-                &mut lkg_entry,
-                drift,
-                if drift {
-                    "inline allowedEndpoints differs from verified artifact; artifact wins"
-                } else {
-                    "inline allowedEndpoints empty or matches artifact"
-                },
-            );
+            // Drift message format: human prefix + ` | drift=<json>` so
+            // the plugin can parse the trailing JSON without losing the
+            // human-readable summary. Plugins must split on " | drift="
+            // and parse what follows as `DriftSummary`.
+            let drift_msg = if let Some(ref s) = drift_summary {
+                let json = serde_json::to_string(s)
+                    .unwrap_or_else(|_| r#"{"added":[],"removed":[]}"#.to_string());
+                format!(
+                    "inline allowedEndpoints differs from verified artifact; artifact wins | drift={json}"
+                )
+            } else {
+                "inline allowedEndpoints empty or matches artifact".to_string()
+            };
+            emit_drift_condition(&mut conditions, &mut lkg_entry, drift, &drift_msg);
 
             // Update LKG with the freshly verified endpoints.
             lkg_entry.endpoints = Some(derived.clone());
@@ -2348,6 +2401,59 @@ mod tests {
                 .iter()
                 .all(|e| !e.host.is_empty() && e.port.is_some())
         );
+    }
+
+    #[test]
+    fn drift_summary_empty_when_lists_equivalent() {
+        let a = vec![ep("API.Example.COM", None), ep("b.example", Some(443))];
+        let b = vec![ep("b.example", None), ep("api.example.com", Some(443))];
+        let s = compute_drift_summary(&a, &b);
+        assert!(s.added.is_empty());
+        assert!(s.removed.is_empty());
+    }
+
+    #[test]
+    fn drift_summary_reports_added_and_removed_sorted() {
+        let inline = vec![
+            ep("z.added.example", None),
+            ep("api.shared.example", None),
+            ep("a.added.example", Some(8443)),
+        ];
+        let derived = vec![
+            ep("api.shared.example", Some(443)),
+            ep("only-in-artifact.example", None),
+        ];
+        let s = compute_drift_summary(&inline, &derived);
+        assert_eq!(s.added, vec!["a.added.example:8443", "z.added.example:443"]);
+        assert_eq!(s.removed, vec!["only-in-artifact.example:443"]);
+    }
+
+    #[test]
+    fn drift_summary_port_normalization_matches_equivalence() {
+        // ep("h", None) and ep("h", Some(443)) must NOT register as a
+        // change (port-default normalization).
+        let inline = vec![ep("api.example", None)];
+        let derived = vec![ep("api.example", Some(443))];
+        let s = compute_drift_summary(&inline, &derived);
+        assert!(s.added.is_empty());
+        assert!(s.removed.is_empty());
+    }
+
+    #[test]
+    fn drift_summary_is_serde_round_trip_stable() {
+        // Wire contract: headlamp plugin parses the JSON suffix of
+        // the `AllowlistDrift` condition message. Pin the schema.
+        let s = DriftSummary {
+            added: vec!["a.example:443".into()],
+            removed: vec!["b.example:8443".into()],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            json,
+            r#"{"added":["a.example:443"],"removed":["b.example:8443"]}"#
+        );
+        let back: DriftSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
     }
 
     #[test]
