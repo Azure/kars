@@ -139,7 +139,7 @@ Blueprint 02 uses the full v1.0 CRD stack. Apply these in the sandbox namespace 
 | `InferencePolicy` | Token budget per sandbox / per team; content-safety floor; model-preference fallback order. Referenced by `ClawSandbox.spec.inferenceRef.name`. |
 | `ToolPolicy` | Per-tool rate limits, AP2 commerce spend caps, human-in-the-loop approval channels. Referenced by `ClawSandbox.spec.governance.toolPolicyRef.name`. |
 | `McpServer` | Declare private internal MCP tool servers (e.g., `ticketing.corp.example`, `code-search.corp.example`). OAuth 2.1 gated in production mode. |
-| `A2AAgent` | Publish an A2A 1.2 agent card for cross-org callers. See Blueprint 04 for federation use. |
+| `A2AAgent` | Publish an A2A 1.0.0 agent card for cross-org callers. See Blueprint 04 for federation use. |
 | `ClawMemory` | Bind a sandbox to a Foundry Memory Store for persistent per-agent or per-scope memory. |
 | `ClawEval` | Schedule regression eval runs via Foundry Evals; threshold-based pass/fail surfaced as `EvalsPassed` condition. |
 
@@ -285,7 +285,7 @@ azureclaw trace research-bot --network
 - **Multi-runtime, single governance plane.** Teams can run `OpenClaw`, `OpenAIAgents`, or `MicrosoftAgentFramework` agents side-by-side on the same cluster with identical `InferencePolicy` + `ToolPolicy` governance and the same audit chain. Switch runtimes by changing `spec.runtime.kind`.
 - **Signed OCI egress allowlist as the production network policy path.** Inline `allowedEndpoints` are fine for day-0; sign and pin allowlist artifacts in CI for auditable, GitOps-managed network policy. The `SignerPolicy` ConfigMap in `azureclaw-system` pins the authoritative signer identity; the controller fails closed if the policy is absent or the signature doesn't match.
 - **You can scale Confidential Containers in.** AKS supports kata + AMD SEV-SNP node pools today. Set `ClawSandbox.spec.sandbox.isolation: confidential` per-agent for sensitive workloads; sub-agents inherit and cannot downgrade.
-- **CNCF Kubernetes AI Conformance v1.35+.** The cluster and all eight CRDs pass the CNCF AI Conformance suite (`tests/cncf-conformance/`). This gives you a reproducible, vendor-neutral benchmark and audit evidence for your security reviewers.
+- **CNCF Kubernetes AI Conformance v1.35+.** The cluster and all nine CRDs pass the CNCF AI Conformance suite (`tests/cncf-conformance/`). This gives you a reproducible, vendor-neutral benchmark and audit evidence for your security reviewers.
 
 ## Operator polish
 
@@ -311,7 +311,7 @@ The v1.0 controller ships production-grade operator hygiene relevant to enterpri
 - `controller/src/policy_fetcher.rs` (signed OCI allowlist fetch + verify)
 - `inference-router/src/auth.rs` (Workload Identity OIDC exchange)
 - `deploy/helm/azureclaw/values.yaml` (Helm contract)
-- `docs/api/crd-reference.md` (all 8 CRDs)
+- `docs/api/crd-reference.md` (all 9 CRDs)
 - `docs/internal/policy-canonical-format.md` (egress allowlist format + signing modes)
 - `docs/internal/sigs-agent-sandbox-compat.md` (CNCF K8s AI Conformance v1.35+)
 - ADR-0001 — A2A ingress front-edge (`docs/adr/0001-a2a-ingress-front-edge.md`)

@@ -20,10 +20,10 @@ AzureClaw has four code components, two languages, and one rule that ties them t
 
 | Component | Language | Crate / package | Responsibility |
 |---|---|---|---|
-| **Controller** | Rust (kube-rs) | `azureclaw-controller` | Watches `ClawSandbox` and the seven peer CRDs; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
+| **Controller** | Rust (kube-rs) | `azureclaw-controller` | Watches `ClawSandbox` and the eight peer CRDs; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
 | **Inference router** | Rust (axum) | `azureclaw-inference-router` | Sits in the data path of every external call. Identity, content safety, governance, audit, mesh, A2A — all of it. |
-| **A2A gateway** | Rust (axum) | `azureclaw-a2a-gateway` + `azureclaw-a2a-core` | Public-ingress entry point for A2A 1.2 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
-| **CLI** | TypeScript | `@azureclaw/cli` | Lifecycle of clusters, sandboxes, policies. 26 commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
+| **A2A gateway** | Rust (axum) | `azureclaw-a2a-gateway` + `azureclaw-a2a-core` | Public-ingress entry point for A2A 1.0.0 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
+| **CLI** | TypeScript | `@azureclaw/cli` | Lifecycle of clusters, sandboxes, policies. 31 commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
 
 The rule that ties them together: **the agent has no network of its own**. The router is the only process in the sandbox pod that can talk to the outside. Every other property of AzureClaw is a downstream consequence of holding that line.
 
@@ -48,7 +48,7 @@ The router still runs the same code path it does in prod. So the policies, the c
 - **Pod shape:** multi-container Kubernetes pod.
   - `init: egress-guard` — installs iptables rules so the agent UID can only reach the router on localhost. **Safety net**, not the policy point — the router is.
   - `agent` — the runtime, **UID 1000**, no direct egress.
-  - `inference-router` — the Rust router, **UID 1001**, listens on `127.0.0.1:8443` (HTTP) and `127.0.0.1:8444` (forward proxy). This is where egress, governance, content-safety, token-budget, and audit are actually enforced.
+  - `inference-router` — the Rust router, **UID 1001**. The HTTP listener binds `0.0.0.0:8443` and the forward proxy binds `0.0.0.0:8444`; the egress-guard iptables rules + the NetworkPolicy together pin the only reachable peer for UID 1000 to those two ports on loopback. This is where egress, governance, content-safety, token-budget, and audit are actually enforced.
 - **Isolation:** The router enforces the egress allowlist on every outbound request. A Kubernetes NetworkPolicy on the namespace is generated as a **safety net** that limits blast radius if the router process is bypassed or compromised; it pins egress to DNS, Foundry, the AgentMesh relay, and the A2A gateway. Optionally Kata + AMD SEV-SNP for hardware-enforced isolation.
 - **Identity:** Workload Identity. The router exchanges the projected service-account token for a federated AAD token. No keys on disk.
 - **What it is for:** real workloads, multi-tenant fleets, anything that touches customer data.
@@ -138,7 +138,7 @@ Inter-agent communication is **end-to-end encrypted**. Two agents that want to t
 4. On accept, both sides advance the **Double Ratchet**. Every subsequent message is encrypted with a fresh key (forward secrecy) and authenticated.
 5. The relay sees only opaque ciphertext blobs and addressing metadata. It cannot read messages and cannot impersonate either party.
 
-The relay and registry are operated by AzureClaw (`agentmesh` namespace, two small services). They are not trusted with content. The cryptographic primitives are libsodium / Signal Protocol; we vendor a small forked SDK with eight bug-fix patches documented in `vendor/`.
+The relay and registry are operated by AzureClaw (`agentmesh` namespace, two small services). They are not trusted with content. The cryptographic primitives are libsodium / Signal Protocol; AzureClaw consumes upstream [`@agentmesh/sdk`](https://github.com/amitayks/agentmesh) directly on the Rust side. The TypeScript plugin layer keeps a small dist overlay with bug-fix patches against the published npm artifact — patches are itemised in `vendor/agentmesh-sdk/README.md`.
 
 > **Multi-agent peer roster.** When an agent spawns more than one sub-agent (each with a `role` — e.g. `data analyst`, `visualization engineer`, `technical writer`), the OpenClaw runtime maintains a **peer roster** of canonical names + roles and **automatically prepends a `Peer roster:` block** to every outbound `mesh_send` / `mesh_transfer_file` once two or more siblings exist. Sub-agents that need to hand work to each other ("send the chart to viz", "deliver the brief to the writer") resolve role references against this roster instead of guessing names — eliminating misroute bugs in pipelines like `analyst → viz → writer`. The roster is built deterministically from spawn metadata; `azureclaw_spawn` rejects sub-agents without a `role` parameter when more than one sibling will exist. Implementation: `runtimes/openclaw/src/core/agt-tools/agt.ts` (roster maintenance + auto-prepend), `runtimes/openclaw/skills/azureclaw-spawn/SKILL.md` (agent-facing contract).
 
@@ -148,7 +148,7 @@ See **[`docs/architecture/agt-boundary.md`](architecture/agt-boundary.md)** for 
 
 ## The A2A gateway
 
-A2A (Agent-to-Agent, 1.2) is the public-ingress sibling of the mesh. Where the mesh handles intra-fleet traffic with strong cryptographic guarantees, the A2A gateway handles **cross-organisation** traffic where the peer is not part of your AgentMesh.
+A2A (Agent-to-Agent, 1.0.0) is the public-ingress sibling of the mesh. Where the mesh handles intra-fleet traffic with strong cryptographic guarantees, the A2A gateway handles **cross-organisation** traffic where the peer is not part of your AgentMesh.
 
 - **Public ingress** (Azure-managed Kubernetes ingress / Application Gateway).
 - Every inbound request must carry a signed **`AgentCard`** that the gateway verifies against a configured trust anchor.
@@ -164,7 +164,7 @@ Two separate channels for two separate trust models. See **[`docs/architecture/a
 You operate AzureClaw by writing CRDs, not by clicking through a dashboard or
 editing a private config store. The full schema lives in
 **[`docs/api/crd-reference.md`](api/crd-reference.md)**. This section answers
-the question we get every time: *why eight CRDs and not one?*
+the question we get every time: *why nine CRDs and not one?*
 
 ### The principle: separate concerns that change at different rates
 
@@ -179,7 +179,7 @@ A CRD makes sense when it represents a thing that
 
 Anything that fails all three tests is a `ClawSandbox` field, not its own CRD.
 
-### The eight CRDs and what each one buys you
+### The nine CRDs and what each one buys you
 
 | CRD | Owner / changes-with | What you'd give up if it were a `ClawSandbox` field |
 |---|---|---|
@@ -190,9 +190,10 @@ Anything that fails all three tests is a `ClawSandbox` field, not its own CRD.
 | **`A2AAgent`** | The agent itself, but the **public-ingress identity** has its own lifecycle (TLS cert, public route, rate-limit, agent-card). | The Kubernetes `Service` / cert / ingress wiring would be tangled into the agent CRD. With `A2AAgent` separate, the agent can come and go while the public endpoint and its trust anchors stay stable. |
 | **`ClawMemory`** | Whoever owns the memory store. Outlives the agent. | Memory bindings would die with each agent restart; cross-agent memory sharing would require duplicating store IDs in every sandbox. |
 | **`ClawEval`** | Eval / QA. Run on demand. | Eval runs would be pods or jobs without a reproducible record; you'd lose the `status` history that lets `azureclaw eval` show "this prompt regressed at commit X". |
-| **`TrustGraph`** | Cluster admin. Cross-namespace, cross-cluster. | Sibling-trust at scale collapses: every sandbox would need a list of every peer's AMID. `TrustGraph` is the *only* cluster-scoped CRD precisely because trust topology is a cluster concern. |
+| **`TrustGraph`** | Cluster admin. Cross-namespace, cross-cluster. | Sibling-trust at scale collapses: every sandbox would need a list of every peer's AMID. `TrustGraph` is the *only* cluster-scoped CRD precisely because trust topology is a cluster concern. <br><br> **Status — v1alpha1 reconciler-only.** The graph is projected to `/etc/azureclaw/trustgraph/graph.json` in each sandbox; the router does not yet consume it for KNOCK gating (trust scores are tracked in-router from KNOCK outcomes). See [`api/crd-reference.md` §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology). |
+| **`EgressApproval`** | On-call / SRE. Ephemeral, TTL-bounded. | A single inline overlay would mix permanent allowlist drift with short-lived break-glass grants. As a separate CRD, the grant carries its own audit record, TTL, and revocation path. |
 
-A ninth resource, `ClawPairing`, is **controller-internal** — it records the
+A tenth resource, `ClawPairing`, is **controller-internal** — it records the
 binding between a `ClawSandbox` and its AgentMesh registry identity. We
 expose it as a CRD so the controller can use the same reconciliation
 machinery as everything else, but you never write one by hand.
@@ -220,8 +221,8 @@ Three properties fall out of treating these as separate CRDs:
 ### When this design would be wrong
 
 If AzureClaw only ever ran one agent per cluster, with one model, no policy,
-no peers, no memory, and no eval — eight CRDs would be cargo-culting. We
-believe a single CRD with eight optional sub-objects would be worse for
+no peers, no memory, and no eval — nine CRDs would be cargo-culting. We
+believe a single CRD with nine optional sub-objects would be worse for
 real-world deployments because you'd lose the rate-of-change separation
 above. But this is a judgement call, and we re-evaluate it every minor
 release. If your deployment never references a CRD other than `ClawSandbox`,

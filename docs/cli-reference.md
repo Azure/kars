@@ -1,6 +1,6 @@
 # AzureClaw CLI Reference
 
-AzureClaw ships **27 top-level commands** organised by purpose: **Lifecycle**,
+AzureClaw ships **31 top-level commands** organised by purpose: **Lifecycle**,
 **Operations**, **Configuration**, **Observability**, and the
 **Multi-Agent / Federation** family (Agent mobility, Interop, Governance).
 Everything you need to go from zero to a production-hardened, E2E-encrypted
@@ -48,6 +48,8 @@ All commands also inherit Commander.js built-in `--help`.
 - [status](#azureclaw-status)
 - [list](#azureclaw-list)
 - [logs](#azureclaw-logs)
+- [inspect](#azureclaw-inspect)
+- [audit](#azureclaw-audit)
 - [attest](#azureclaw-attest)
 
 ### Configuration
@@ -78,6 +80,7 @@ All commands also inherit Commander.js built-in `--help`.
 - [toolpolicy](#azureclaw-toolpolicy)
 - [inferencepolicy](#azureclaw-inferencepolicy)
 - [mcp](#azureclaw-mcp)
+- [memory](#azureclaw-memory)
 
 ---
 
@@ -185,10 +188,18 @@ azureclaw dev [options]
 | `--name <name>` | `dev-agent` | Sandbox name |
 | `--model <model>` | `claude-opus-4.7` (Copilot) / `gpt-4.1` (Foundry) / `gpt-4o-mini` (GitHub Models) | Model deployment / catalogue name |
 | `--policy <preset>` | `developer` | Policy preset: `minimal`, `developer`, `web`, `azure` |
-| `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use this for ephemeral runs that shouldn't overwrite your saved provider. To make GitHub Models your default, run `azureclaw dev` without this flag and pick GitHub Models at the prompt. For Copilot, run `azureclaw credentials` and pick Copilot — the device-code flow runs interactively. |
+| `--target <target>` | `docker` | Where to run the sandbox: `docker` (fast inner loop) or `local-k8s` (kind + Helm, mirrors AKS layout). |
+| `--cluster-name <name>` | `azureclaw-dev` | Kind cluster name (only used with `--target local-k8s`). |
+| `--ephemeral` | `false` | (local-k8s only) destroy the kind cluster on exit. |
+| `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use for ephemeral runs that shouldn't overwrite your saved provider. To save Copilot/GitHub-Models as your default, run `azureclaw dev` (or `azureclaw credentials`) without this flag and pick at the prompt. |
 | `--image <image>` | `azureclaw-sandbox:dev` | Sandbox container image |
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
 | `--build-base` | `false` | Rebuild the sandbox base image (heavy deps; only needed when upgrading OpenClaw/Python/Go) |
+| `--base-image <image>` | `mcr.microsoft.com/azurelinux/base/core:3.0` | Azure Linux base image for building sandbox |
+| `--mesh-provider <provider>` | `agt` | Mesh stack. Only `agt` is supported (vendored Rust relay/registry were removed in Phase 5.2). Flag kept for backward-compatible scripts. |
+| `--agt-repo <path>` | `$AZURECLAW_AGT_REPO` | Path to the agent-governance-toolkit checkout (used to build relay/registry images). |
+| `--agt-sdk-tarball <path>` | — | Path to a locally-packed `@microsoft/agent-governance-sdk` `.tgz` to install in the sandbox image. Requires `--build`. |
+| `--no-mesh` | — | (local-k8s only) skip mesh relay/registry deployment. Sandboxes lose KNOCK/E2E. Use only for pure controller smoke tests. |
 | `--global-registry <url>` | — | Use a shared external registry (enables handoff); skips local relay/registry/postgres |
 | `--channels <channels>` | — | Channels to enable: `telegram,slack,discord,whatsapp` (comma-separated) |
 | `--telegram-token <token>` | — | Telegram bot token (from BotFather) |
@@ -202,7 +213,18 @@ azureclaw dev [options]
 | `--firecrawl-api-key <key>` | — | Firecrawl web scraping API key |
 | `--perplexity-api-key <key>` | — | Perplexity API key |
 | `--openai-api-key <key>` | — | OpenAI API key (for dual-provider setups) |
-| `--base-image <image>` | `mcr.microsoft.com/azurelinux/base/core:3.0` | Azure Linux base image for building sandbox |
+
+**Subcommand: `azureclaw dev down`**
+
+Tears down a `--target local-k8s` dev environment (Kind cluster +
+Headlamp port-forward). For Docker targets, `azureclaw destroy <name>`
+is the right command — `dev down` is local-k8s-specific.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--target <target>` | `local-k8s` | Only `local-k8s` is currently supported. |
+| `--cluster-name <name>` | `azureclaw-dev` | Kind cluster name to delete. |
+| `--keep-cluster` | `false` | Stop the port-forward and uninstall Headlamp, but keep the kind cluster running. |
 
 **Examples:**
 ```bash
@@ -220,6 +242,12 @@ azureclaw dev --skills browser --brave-api-key $BRAVE_KEY
 
 # Build the image from scratch before starting
 azureclaw dev --build
+
+# Spin up the full Kind-based mirror of AKS (controller, relay, registry, Headlamp)
+azureclaw dev --target local-k8s --build
+
+# Tear it back down (deletes the Kind cluster)
+azureclaw dev down
 ```
 
 **See also:** [docs/channels-plugins.md](channels-plugins.md)
@@ -698,6 +726,74 @@ azureclaw logs my-agent --service openclaw --tail 200
 
 ---
 
+### `azureclaw inspect`
+
+Prints the controller's view of a single sandbox: the compiled
+InferencePolicy digest, the attached ToolPolicies, EgressApproval
+state, the Memory binding (if any), and recent `Reconciled` /
+`AwaitingRouterEnforcement` conditions. Use this when `azureclaw
+status` says "Ready" but you want to confirm the router echoed the
+exact policy revision you expect.
+
+**Usage:**
+```
+azureclaw inspect <sandbox> [options]
+```
+
+**Arguments:**
+| Name | Required | Description |
+|---|---|---|
+| `<sandbox>` | Yes | Sandbox name (the `metadata.name` of the `ClawSandbox`). |
+
+**Options:**
+| Flag | Description |
+|---|---|
+| `-n, --namespace <ns>` | Override the default controller namespace (`azureclaw-system`). |
+| `--json` | Emit raw JSON instead of the formatted tree. |
+
+**Examples:**
+```bash
+azureclaw inspect my-agent
+azureclaw inspect my-agent --json | jq .policy.inferenceDigest
+```
+
+---
+
+### `azureclaw audit`
+
+Tails the inference router's structured audit log for a sandbox.
+Every governance decision (allow, deny, approval-required) is one
+JSON row in the router's stdout; this command shells into the pod
+and surfaces those rows with pretty formatting + filters.
+
+**Usage:**
+```
+azureclaw audit tail <sandbox> [options]
+```
+
+**Options:**
+| Flag | Description |
+|---|---|
+| `-n, --namespace <ns>` | Namespace (default: `azureclaw-<sandbox>`). |
+| `--tail <N>` | Start from the last N rows (default: 200). |
+| `-f, --follow` | Keep streaming new rows as they arrive. |
+| `--decision <kind>` | Filter by decision: `allow`, `deny`, `approval`. |
+| `--agent <id>` | Filter by exact `agent_id`. |
+| `--tool <name>` | Filter by tool / capability name. |
+| `--since <duration>` | Only rows newer than this (e.g. `15m`, `2h`). |
+| `--json` | Emit each row as raw JSON instead of the pretty table. |
+
+**Examples:**
+```bash
+# Pretty-print the last 200 governance decisions
+azureclaw audit tail my-agent
+
+# Follow only denials for the search tool
+azureclaw audit tail my-agent --decision deny --tool web.search -f
+```
+
+---
+
 ### `azureclaw attest`
 
 Prints a deterministic attestation receipt for a sandbox: spec hash, SSA
@@ -1074,41 +1170,40 @@ azureclaw trace my-agent --dns
 
 ### `azureclaw eval`
 
-Runs Azure AI Foundry evaluations against a sandbox agent using JSONL
-test datasets and built-in or custom evaluators. Useful for measuring
-relevance, coherence, and fluency before promoting a model or system
-prompt change.
+Operator surface for the **`ClawEval`** CRD — a policy-conformance
+runner driven by signed corpora and the in-tree
+`conformance-runner` image. Replaces the legacy Foundry-Evals
+wrapper.
 
-**Usage:**
-```
-azureclaw eval <name> [options]
-```
+| Subcommand | What it does |
+|---|---|
+| `list` | List all `ClawEval` resources across the controller namespace. |
+| `show <name>` | Print spec, last-run summary, drift status, and conditions. |
+| `run <name>` | Trigger an immediate run (sets the `azureclaw.azure.com/run-now=true` annotation). |
+| `diff <name>` | Diff the two most recent runs from `status.history[]`. |
 
-**Arguments:**
-| Name | Required | Description |
-|---|---|---|
-| `<name>` | Yes | Sandbox name |
-
-**Options:**
-| Flag | Default | Description |
-|---|---|---|
-| `--model <model>` | `gpt-4.1` | Model to evaluate |
-| `--evaluator <id>` | — | Evaluator ID (e.g. `relevance`, `coherence`, `fluency`) |
-| `--dataset <path>` | — | JSONL dataset file with test cases |
-| `--list-evaluators` | — | List available evaluators in the Foundry project |
-| `--list-runs` | — | List existing evaluation runs |
+All commands hit the apiserver via `kubectl`; no router admin token
+required (operator can still see the CR even when the router is
+unhealthy).
 
 **Examples:**
 ```bash
-# List available evaluators
-azureclaw eval my-agent --list-evaluators
+# Tabular list across the controller namespace
+azureclaw eval list
 
-# Run relevance evaluation against a dataset
-azureclaw eval my-agent --evaluator relevance --dataset ./tests/eval-set.jsonl
+# Schema + last run summary
+azureclaw eval show nightly-regression
 
-# List past evaluation runs
-azureclaw eval my-agent --list-runs
+# Trigger a one-shot run
+azureclaw eval run nightly-regression
+
+# Diff the last two runs
+azureclaw eval diff nightly-regression
 ```
+
+Authoring new corpora and signing them is covered separately:
+- **[`docs/guides/eval-corpus-signing.md`](guides/eval-corpus-signing.md)** — `policy sign --kind eval-corpus` walkthrough.
+- **[`docs/api/crd-reference.md#claweval`](api/crd-reference.md#claweval--reproducible-evaluation-run)** — the CRD schema.
 
 ---
 
@@ -1540,3 +1635,49 @@ azureclaw mcp apply complex --from-file mcp.yaml
 ```
 
 **See also:** [docs/api/crd-reference.md](api/crd-reference.md#mcpserver), [`azureclaw toolpolicy`](#azureclaw-toolpolicy)
+
+---
+
+### `azureclaw memory`
+
+Operator surface for the **`ClawMemory`** CRD — the binding between a
+sandbox and a Foundry Memory Store (scope, retention floor, delete-on-
+sandbox-delete sweep). Mirrors `kubectl get/apply/delete` patterns.
+
+| Subcommand | What it does |
+|---|---|
+| `apply <name>` | Create or update a ClawMemory binding (from flags or `--from-file`). |
+| `get <name>` | Show a ClawMemory by name (`-o pretty|yaml|json`). |
+| `list` | List ClawMemory bindings in a namespace. |
+| `delete <name>` | Delete a binding (`--no-prompt` to skip confirmation). |
+
+**Common flags on `apply`:**
+| Flag | Description |
+|---|---|
+| `-n, --namespace <ns>` | Namespace (use `azureclaw-<sandbox>`). |
+| `--from-file <path>` | Read full spec from a YAML/JSON file (mutually exclusive with the flags below). |
+| `--sandbox <name>` | Sandbox to bind (`spec.sandboxRef.name`). |
+| `--store <name>` | Foundry Memory Store name (DNS-label). |
+| `--scope <key>` | Scope key under which this sandbox reads/writes (e.g. `agent:my-agent`). |
+| `--retention-days <n>` | Retention floor for the `delete_scope` sweep (must be > 0). |
+| `--display-name <s>` | Human-readable display label. |
+| `--no-delete-on-sandbox-delete` | Keep store contents when the sandbox is deleted (default: cleanup on delete). |
+
+**Examples:**
+```bash
+# Bind a sandbox to a Memory Store, scoped per-agent, 30-day floor
+azureclaw memory apply my-agent-mem \
+  -n azureclaw-my-agent \
+  --sandbox my-agent \
+  --store prod-shared-memory \
+  --scope agent:my-agent \
+  --retention-days 30
+
+# List bindings in a namespace
+azureclaw memory list -n azureclaw-my-agent
+
+# Delete (defaults to cleaning up scope contents)
+azureclaw memory delete my-agent-mem -n azureclaw-my-agent
+```
+
+**See also:** [docs/api/crd-reference.md#clawmemory](api/crd-reference.md#clawmemory--foundry-memory-binding)

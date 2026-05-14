@@ -162,20 +162,23 @@ azureclaw up --name prod-agent --location swedencentral
 
 ## What is built in
 
-### Eight CRDs
+### Nine CRDs
 
 `ClawSandbox` is the unit of work — one CRD per agent. Everything else binds policy, identity, or peer relationships to it.
 
 | CRD | Purpose |
 |---|---|
 | **`ClawSandbox`** | The agent itself: runtime kind, model, tools, mesh membership, governance profile. |
-| **`A2AAgent`** | Public-ingress A2A endpoint for peer-to-peer agent communication (A2A 1.2). |
-| **`McpServer`** | An external MCP server the agent is allowed to call, with auth + scope. |
-| **`ToolPolicy`** | Allow/deny/approval rules for shell, HTTP, file, sub-agent spawn. |
-| **`InferencePolicy`** | Per-tenant model routing, token budgets, region pinning, cost caps. |
-| **`ClawMemory`** | Memory-store binding (Foundry Memory Store) with project-MI auth. |
+| **`A2AAgent`** | Public-ingress A2A 1.0.0 endpoint for peer-to-peer agent communication. |
+| **`McpServer`** | An external MCP server the agent is allowed to call, with OAuth + allow-listed tools. |
+| **`ToolPolicy`** | Per-tool gate (approval / rate-limit / commerce caps / AGT profile). |
+| **`InferencePolicy`** | Per-tenant model routing, content-safety floor, and token budgets. |
+| **`ClawMemory`** | Foundry Memory Store binding with project-MI auth (operator-provisioned today). |
 | **`ClawEval`** | Reproducible evaluation runs against a sandbox spec. |
-| **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. |
+| **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. *(v1alpha1 — reconciler-only; router-side KNOCK gating tracked for v1.1.)* |
+| **`EgressApproval`** | Ephemeral, TTL-bounded extra egress hosts overlaid on the baseline allowlist. |
+
+Plus the controller-internal `ClawPairing` record (10th kind) used to bind sandboxes to AgentMesh registry IDs.
 
 Full schema in **[`docs/api/crd-reference.md`](docs/api/crd-reference.md)**.
 
@@ -198,9 +201,9 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 ### One mesh, one gateway, one CLI
 
-- **AgentMesh** — Microsoft AGT relay/registry with Signal Protocol (X3DH + Double Ratchet), KNOCK trust handshake, per-message forward secrecy. No plaintext fallback.
-- **A2A 1.2 gateway** — public-ingress for peer-to-peer agent traffic with signed `AgentCard` verification, tenant routing, observability.
-- **CLI (`azureclaw …`)** — 26 commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `migrate`, `operator` (live TUI), `destroy`. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
+- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. AzureClaw consumes the upstream [`@agentmesh/sdk`](https://github.com/amitayks/agentmesh) directly on the Rust side; the TS plugin layer keeps a small adapter (and a vendored dist overlay for known bug-fixes, documented in `vendor/agentmesh-sdk/README.md`).
+- **A2A 1.0.0 gateway** — public-ingress for peer-to-peer agent traffic with signed `AgentCard` verification, tenant routing, observability.
+- **CLI (`azureclaw …`)** — 31 commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
 ---
 

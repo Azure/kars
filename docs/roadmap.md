@@ -10,7 +10,7 @@ Shipped capabilities (high-level):
 - Six first-class agent runtimes: OpenClaw, OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python + TypeScript), Pydantic-AI.
 - BYO runtime path with strict-mode admission gating ([`docs/operations/byo-strict.md`](operations/byo-strict.md)).
 - Inference router with IMDS / Workload-Identity broker, content-safety floor, per-sandbox token budgets, 18 Foundry API groups, MCP Streamable-HTTP + SSE compat, A2A transport.
-- E2E-encrypted inter-agent messaging via vendored AgentMesh (Signal Protocol — X3DH + Double Ratchet) with TrustGraph projection.
+- E2E-encrypted inter-agent messaging via AgentMesh (Signal Protocol — X3DH + Double Ratchet). The TrustGraph CRD ships in v1alpha1 reconciler-only mode — router-side KNOCK gating using the projected graph is on the v1.1 roadmap.
 - Defense-in-depth sandbox: read-only rootfs, UID-1000 + UID-1001 split, drop-ALL caps, custom seccomp (`azureclaw-strict`), Landlock, iptables UID-based egress, optional Kata.
 - AGT integration: `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` consumed via four provider traits (`MeshProvider`, `PolicyDecisionProvider`, `AuditSink`, `SigningProvider`).
 - Operator TUI + `azureclaw up / add / dev / connect / handoff / mesh / policy learn / migrate / convert / claw attest`.
@@ -28,7 +28,8 @@ Documented v1.0 gaps (tracked in source as `// v1.1:` comments):
 Targets:
 
 - **CRD `v1alpha2` + conversion webhook** — see [`docs/architecture/crd-versioning.md`](architecture/crd-versioning.md). Converts in both directions; existing `v1alpha1` objects continue to round-trip.
-- **TrustGraph dynamic projection** — controller watches mesh edges and patches the in-pod projection without a sandbox restart.
+- **TrustGraph dynamic projection** — controller watches mesh edges and patches the in-pod projection without a sandbox restart, **and** the router reloads the projected graph for KNOCK gating instead of relying on in-memory KNOCK-outcome trust state.
+- **InferencePolicy aggregate budgets** — persisted token counters across requests (per-hour / per-day windows) with `rejectOnExceed` enforced at the router. Today only `tokenBudget.perRequestTokens` is enforced; aggregate counters are accepted on the spec and surfaced in status but not yet metered.
 - **Cosign-on-admission** — ValidatingAdmissionPolicy that rejects sandboxes whose images lack a cosign signature matching configured identity / issuer.
 - **A2A gateway in-binary JWS verifier** — opt-in axum layer in `azureclaw-a2a-gateway` that calls `azureclaw_a2a_core::verify_inbound_card`, removes reliance on upstream Gateway-API mTLS for the trust decision, and lets the gateway run in non-AGC topologies.
 - **CrewAI runtime adapter** — first-class.

@@ -1,0 +1,20 @@
+# Demo scenario step 3 — Time-boxed egress approval.
+#
+# Demonstrates the EgressApproval overlay: a temporary grant to reach
+# api.stripe.com that auto-expires. Phase transitions Pending → Active
+# → Expired are observable via kubectl + the operator TUI.
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: demo-stripe-grant
+  namespace: azureclaw-system
+spec:
+  sandbox: demo-agent
+  hosts:
+    - host: api.stripe.com
+      port: 443
+  ttl: PT10M
+  reason: "Demo: time-boxed grant for payment-flow walk-through."
+  ticket: "DEMO-001"
+

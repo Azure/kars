@@ -154,7 +154,7 @@ trail.
 **Today.** AGT governance runs in-process in the Rust router.
 `PolicyEngine`, `AuditLogger`, `TrustManager`, `RateLimiter`,
 `BehaviorMonitor` implemented in
-`inference-router/src/governance.rs` and
+`inference-router/src/governance/mod.rs` and
 `inference-router/src/providers/policy.rs`. Names frozen in
 `docs/security.md` §Governance (lines ~153-170) and `CHANGELOG.md`.
 
@@ -206,6 +206,5 @@ confusion attacks fail closed.
 
 * `docs/security.md` — the live security posture (§9 layers, syscall
   counts, component names).
-* `docs/internal/threat-model.md` — STRIDE per surface.
-* `docs/internal/security-audits/` — per-capability audit docs.
+* `docs/internal/security-audits/` — per-capability audit docs (where present).
 * Internal v1.1 plan §§0.2, 7 — principles and v1.1 scope.

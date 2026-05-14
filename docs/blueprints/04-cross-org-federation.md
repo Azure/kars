@@ -33,7 +33,7 @@ flowchart TB
     AuditB[("Log Analytics B")]
   end
 
-  ForeignCaller["Foreign A2A 1.2 caller<br/>(non-AzureClaw)"]
+  ForeignCaller["Foreign A2A 1.0.0 caller<br/>(non-AzureClaw)"]
 
   AgentA -->|"mesh send (E2E)"| RlyA
   RlyA -->|"federation peering<br/>over public/peered VNet"| AGwB
@@ -45,7 +45,7 @@ flowchart TB
   AGwA --> RlyA
   RlyA --> AgentA
 
-  ForeignCaller -->|"A2A 1.2 HTTP (JWS)"| AGwA
+  ForeignCaller -->|"A2A 1.0.0 HTTP (JWS)"| AGwA
   AGwA --> A2AGwA
   A2AGwA -->|"mTLS :8445"| AgentA
 
@@ -163,12 +163,12 @@ azureclaw mesh peer add \
 
 ## A2A gateway — cross-org public A2A path
 
-The AgentMesh relay handles authenticated cross-org traffic between AzureClaw clusters. For interoperability with non-AzureClaw agents that speak only **A2A 1.2 HTTP**, the `azureclaw-a2a-gateway` is a Rust axum binary (distroless static image) that sits in front of your sandboxes.
+The AgentMesh relay handles authenticated cross-org traffic between AzureClaw clusters. For interoperability with non-AzureClaw agents that speak only **A2A 1.0.0 HTTP**, the `azureclaw-a2a-gateway` is a Rust axum binary (distroless static image) that sits in front of your sandboxes.
 
 ### Architecture
 
 ```
-Foreign A2A 1.2 caller
+Foreign A2A 1.0.0 caller
          │
          │  POST /.well-known/agent.json  (agent card discovery)
          │  POST /a2a/v1/tasks           (task dispatch, JWS-signed)
@@ -271,7 +271,7 @@ The controller verifies against the `azureclaw-signer-policy` ConfigMap in `azur
 - **Two audit chains.** Both sides have a verifiable, hash-chained record of what their agents said and what was said to them. Disputes are decidable from each org's own logs.
 - **Mesh peering is *cluster-scoped*, not agent-scoped.** Once Org A and Org B are peered, any number of agents on either side can address each other (subject to per-agent AGT policy). This is fundamentally different from Blueprint 03 where each customer is a Pairing slot.
 - **No shared identity provider.** No need for cross-tenant Entra B2B, no need to share Workload Identity audiences. Each side authenticates the other through Ed25519 mesh identities + the federation pairing.
-- **A2A 1.2 gateway for non-AzureClaw callers.** The `azureclaw-a2a-gateway` (Rust axum + rustls, distroless static image) accepts A2A 1.2 HTTP from foreign agents, verifies JWS Ed25519 signatures, enforces replay-cache and per-subject rate limits, and forwards to sandboxes over mTLS `:8445`. Per-sandbox opt-in; VAP blocks inference-router exposure to the internet.
+- **A2A 1.0.0 gateway for non-AzureClaw callers.** The `azureclaw-a2a-gateway` (Rust axum + rustls, distroless static image) accepts A2A 1.0.0 HTTP from foreign agents, verifies JWS Ed25519 signatures, enforces replay-cache and per-subject rate limits, and forwards to sandboxes over mTLS `:8445`. Per-sandbox opt-in; VAP blocks inference-router exposure to the internet.
 
 ## Hardening checklist (cross-org reality)
 
@@ -298,4 +298,4 @@ The controller verifies against the `azureclaw-signer-policy` ConfigMap in `azur
 - `docs/api/crd-reference.md` (`A2AAgent` CRD spec, `ClawSandbox.spec.a2a.*`)
 - `docs/internal/e2e-encryption-proof.md` (the cryptographic proof for cross-org E2E)
 - `docs/internal/policy-canonical-format.md` (signed OCI egress allowlist + SignerPolicy format)
-- ADR-0001 (front-edge architecture for non-mesh ingress; relevant for A2A 1.2 cross-org path)
+- ADR-0001 (front-edge architecture for non-mesh ingress; relevant for A2A 1.0.0 cross-org path)

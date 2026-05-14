@@ -1,0 +1,23 @@
+# Demo scenario step 4 — Run-now ClawEval against the demo sandbox.
+#
+# The reconciler immediately creates a one-shot Job (run-now annotation
+# is consumed), the conformance corpus runs, and status.history is
+# appended. Use any of the BUILTIN_NAMES from eval-corpus:
+#   jailbreak-baseline | prompt-injection-2026q1 | banned-tools |
+#   egress-known-bad   | memory-isolation
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawEval
+metadata:
+  name: demo-eval
+  namespace: azureclaw-system
+  annotations:
+    azureclaw.azure.com/run-now: "true"
+spec:
+  targetSandboxRef:
+    name: demo-agent
+  corpus:
+    builtin: jailbreak-baseline
+  failSandboxOnDrift: false
+  displayName: "Demo: jailbreak baseline against demo-agent"
+

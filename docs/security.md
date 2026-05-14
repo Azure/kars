@@ -79,7 +79,7 @@ In addition, an auto-refreshing **domain blocklist** (OISD + URLhaus, refreshed 
 |---|---|---|
 | Content filtering | Foundry guardrails (`Microsoft.DefaultV2`) | Always on. Server-side. |
 | Jailbreak / Prompt Shield | Foundry-side | Always on. Server-side. |
-| Token budgets | In-process router enforcement | Per-sandbox daily + per-request limits, HTTP 429 on overrun. |
+| Token budgets | In-process router enforcement | Per-request token cap enforced today (v1.0); aggregate per-tenant daily/monthly counters are accepted and surfaced for forward compatibility but not yet aggregated (v1.1). HTTP 429 on overrun. |
 | Audit | Prometheus metrics + signed audit chain | Always on. |
 
 "Foundry-side" means: Content Safety is applied by the Azure AI Foundry model deployment. The router parses `prompt_filter_results` annotations from model responses and reports detected flags to the governance layer for trust scoring and audit.
@@ -102,7 +102,7 @@ The router exposes four provider seams (`PolicyDecisionProvider`, `AuditSink`, `
 
 #### Per-request gate order
 
-The governance modules don't fire as one giant blob — they run in a fixed order on every action that reaches the router (model inference, tool invocation, mesh send). Reading `Governance::evaluate_with_context` in `inference-router/src/governance/mod.rs`:
+The governance modules don't fire as one giant blob — they run in a fixed order on every action that reaches the router (model inference, tool invocation, mesh send). Reading `Governance::evaluate` in `inference-router/src/governance/mod.rs`:
 
 ```mermaid
 flowchart LR
@@ -170,13 +170,16 @@ The properties above are only as good as the CI that protects them. Every PR run
 - `cargo deny` (supply-chain gate, `RUSTSEC` advisories).
 - `cargo audit` (dependency CVEs).
 - `cargo fmt --check` + `cargo clippy -D warnings`.
-- Vendored-patch audit (`ci/vendored-patch-audit.sh`) — fails the build if a vendored fork's patches are not still present.
-- Copyright-header gate (369 source files, every file requires the Microsoft + MIT header).
+- Custom-crypto gate (`ci/no-custom-crypto.sh`) — fails the build on grep hits for primitive-crypto symbols outside the vetted vendor list.
+- Stubs gate (`ci/no-stubs.sh`) — fails the build on `unimplemented!()` / `TODO:` / placeholder text.
+- Copyright-header gate (`ci/check-copyright-headers.sh`) — every source file requires the Microsoft + MIT header.
+- LOC budget (`ci/check-loc.sh`) against `ci/loc-budget.yaml`.
+- A2A module isolation (`ci/a2a-module-isolation.sh`) — `azureclaw-a2a-core` must not depend on the router.
 - Bicep / Helm / Dockerfile lint.
 - Trivy + container image scan.
 - Bench regression (criterion).
 - Manual E2E suite + Kind E2E.
-- Cosign keyless OIDC verify on releases.
+- Notation (Azure KV) signing of released images (`image-sign-sbom.yml`); cosign keyless OIDC verify runs on PRs as a dry-run gate.
 - CodeQL (JavaScript / TypeScript).
 
 The full CI surface is in `.github/workflows/`.
@@ -219,7 +222,7 @@ Honesty matters. AzureClaw does not — and cannot — protect against:
 
 - **A compromised model provider.** If Azure AI Foundry is compromised, an attacker can change model output. Content Safety on the way out limits the damage but does not eliminate it. Use the confidential isolation level for workloads where this matters.
 - **A compromised cluster operator who controls Kata-less nodes.** Without Kata + AMD SEV-SNP, a cluster operator can read pod memory. Move to confidential isolation if your threat model includes the cluster operator.
-- **A compromised CI / supply chain.** We add gates and pinning, but ultimately you trust your builders. See **[`docs/internal/threat-model.md`](../docs/internal/threat-model.md)** for the per-route walkthrough.
+- **A compromised CI / supply chain.** We add gates and pinning, but ultimately you trust your builders. The vendor / patch surface is itemised in `vendor/agentmesh-sdk/README.md`; per-route threat-model walkthroughs are tracked in the internal review board.
 - **The model knowing your API surface.** Prompt injection is real. Treat any output from the model as untrusted; the router enforces this assumption, but you must too in your tools and plugins.
 - **Inline prompt-shield filtering on GitHub Copilot (`provider: "github-copilot"`) and GitHub Models (`azureclaw dev --github-token` / `provider: "github-models"`).** Neither provider returns Foundry's `prompt_filter_results` in responses, so the router cannot enforce inline Content Safety actions on completions from either backend. Use Foundry / Azure OpenAI in any environment where inline prompt-shield is part of your threat model. The CLI logs and `~/.azureclaw/config.json` make the chosen provider explicit so this is auditable.
 

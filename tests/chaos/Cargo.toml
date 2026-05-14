@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [features]
 # Tests are gated behind the `chaos` feature so default `cargo test --all` is
-# not slowed down. Run with `cargo test --workspace --features chaos`.
+# not slowed down. Run with `cargo test --package azureclaw-chaos-tests --features chaos`.
 default = []
 chaos = []
 

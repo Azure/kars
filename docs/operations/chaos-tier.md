@@ -21,13 +21,17 @@ invariant ↔ test map.
 
 | Trigger | Job | What runs |
 |---|---|---|
-| PR / push to `dev` / `main` | `Chaos Tier` (CI) | `cargo test --workspace --tests --features chaos` |
+| PR / push to `dev` / `main` | `Chaos Tier` (CI) | `cargo test --package azureclaw-chaos-tests --features chaos --tests --no-fail-fast` |
 | PR / push to `dev` / `main` | `Bench Regression` (CI) | criterion benches; fail if median > baseline + 25 % |
 | Nightly (04:00 UTC) | `perf-nightly.yml` | k6 smoke against the router (50 VUs / 30 s) |
 | Default `cargo test --all` | (none) | Chaos tests are feature-gated; do not run |
 
 PR signal stays fast because the chaos tier compiles only when the
-`chaos` feature is enabled, and it runs in a parallel job.
+`chaos` feature is enabled, and it runs in a parallel job. The
+invocation is scoped to the `azureclaw-chaos-tests` crate so it does
+not re-execute the full ~1800-test workspace suite that `rust-build`
+already runs (the legacy `--workspace --features chaos` form did, and
+wasted ~95 % of the job's wall-clock budget).
 
 ## Failure mode each test covers
 
