@@ -1,175 +1,413 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Slice 6.4 — `azureclaw eval` operator surface for the ClawEval CRD.
+//
+// Replaces the legacy Foundry-Evals wrapper. ClawEval is now a
+// policy-conformance runner driven by signed corpora (slice 6.1) +
+// the conformance-runner image (slice 6.2) + the controller
+// reconciler (slice 6.3). This CLI is the read/trigger surface
+// operators reach for day-to-day:
+//
+//   azureclaw eval list                       — list ClawEvals across the controller ns
+//   azureclaw eval show <name>                — print spec + last-run + drift status
+//   azureclaw eval run <name>                 — set `azureclaw.azure.com/run-now=true`
+//   azureclaw eval diff <name>                — diff the two most recent runs in history
+//
+// All commands hit the apiserver directly via `kubectl`; no router
+// admin token required (operator can still see the CR even when the
+// router is unhealthy).
+
 import { Command } from "commander";
 import chalk from "chalk";
-import { agentContainerName, runtimeKindFromCr } from "../runtime.js";
+
+import { formatAge, formatTable } from "./crd-helpers.js";
+
+const PLURAL = "clawevals";
+const DEFAULT_NS = "azureclaw-system";
+
+interface ClawEvalCondition {
+  type?: string;
+  status?: string;
+  reason?: string;
+  message?: string;
+  lastTransitionTime?: string;
+}
+
+interface EvalCaseResult {
+  caseId?: string;
+  scenario?: string;
+  outcome?: string;
+  failureKind?: string | null;
+  detail?: string | null;
+}
+
+interface EvalResult {
+  startedAt?: string;
+  finishedAt?: string;
+  totalCases?: number;
+  passedCases?: number;
+  failedCases?: number;
+  drift?: boolean;
+  corpusLabel?: string;
+  jobName?: string;
+  cases?: EvalCaseResult[];
+}
+
+interface ClawEvalStatus {
+  phase?: string;
+  observedGeneration?: number;
+  conditions?: ClawEvalCondition[];
+  lastRunAt?: string;
+  lastResult?: EvalResult;
+  history?: EvalResult[];
+}
+
+interface ClawEvalSpec {
+  targetSandboxRef?: { name?: string };
+  corpus?: {
+    builtin?: string;
+    bundleRef?: {
+      registry?: string;
+      repository?: string;
+      digest?: string;
+      artifactType?: string;
+    };
+  };
+  schedule?: string;
+  failSandboxOnDrift?: boolean;
+  displayName?: string;
+  runnerImage?: string;
+  notifyWebhook?: { url?: string };
+}
+
+interface ClawEvalCR {
+  metadata?: {
+    name?: string;
+    namespace?: string;
+    creationTimestamp?: string;
+    annotations?: Record<string, string>;
+  };
+  spec?: ClawEvalSpec;
+  status?: ClawEvalStatus;
+}
+
+/** Shape one row of `azureclaw eval list` output. Exported so tests
+ *  can drive it without spawning `kubectl`. */
+export function summarizeEvalRow(item: ClawEvalCR, now: Date = new Date()): string[] {
+  const md = item.metadata ?? {};
+  const spec = item.spec ?? {};
+  const status = item.status ?? {};
+  const last = status.lastResult;
+
+  const name = md.name ?? "<unknown>";
+  const target = spec.targetSandboxRef?.name ?? "—";
+  const corpus = spec.corpus?.builtin
+    ? `builtin:${spec.corpus.builtin}`
+    : spec.corpus?.bundleRef?.digest
+      ? `bundle:${spec.corpus.bundleRef.digest.slice(0, 19)}`
+      : "—";
+  const phase = status.phase ?? "Pending";
+  const age = formatAge(md.creationTimestamp);
+  const summary = last
+    ? `${last.passedCases ?? 0}/${last.totalCases ?? 0}${last.drift ? " ⚠ drift" : ""}`
+    : "—";
+
+  return [name, target, corpus, phase, age, summary];
+}
+
+/** Pretty-print the show subcommand. Exported for tests. */
+export function renderEvalShow(item: ClawEvalCR): string {
+  const lines: string[] = [];
+  const md = item.metadata ?? {};
+  const spec = item.spec ?? {};
+  const status = item.status ?? {};
+  const last = status.lastResult;
+
+  lines.push("");
+  lines.push(chalk.bold(`  ClawEval/${md.name ?? "<unknown>"}`));
+  lines.push(`    namespace:           ${md.namespace ?? DEFAULT_NS}`);
+  lines.push(`    target sandbox:      ${spec.targetSandboxRef?.name ?? "—"}`);
+  if (spec.corpus?.builtin) {
+    lines.push(`    corpus:              builtin:${spec.corpus.builtin}`);
+  } else if (spec.corpus?.bundleRef) {
+    const br = spec.corpus.bundleRef;
+    lines.push(`    corpus:              bundle ${br.registry}/${br.repository}@${br.digest ?? ""}`);
+  }
+  if (spec.schedule) {
+    lines.push(`    schedule:            ${spec.schedule}`);
+  } else {
+    lines.push(`    schedule:            (on-demand only)`);
+  }
+  lines.push(`    failSandboxOnDrift:  ${spec.failSandboxOnDrift ? "true" : "false"}`);
+  if (spec.notifyWebhook?.url) {
+    lines.push(`    notifyWebhook:       ${spec.notifyWebhook.url}`);
+  }
+
+  lines.push("");
+  lines.push(chalk.bold("  Status"));
+  lines.push(`    phase:               ${status.phase ?? "Pending"}`);
+  lines.push(`    observedGeneration:  ${status.observedGeneration ?? 0}`);
+  if (status.lastRunAt) {
+    lines.push(`    lastRunAt:           ${status.lastRunAt}`);
+  }
+  for (const c of status.conditions ?? []) {
+    lines.push(`    ${(c.type ?? "?").padEnd(20)} ${c.status ?? "?"} (${c.reason ?? ""})`);
+    if (c.message) lines.push(`      ${chalk.dim(c.message)}`);
+  }
+
+  if (last) {
+    lines.push("");
+    lines.push(chalk.bold("  Last run"));
+    lines.push(`    corpus:              ${last.corpusLabel ?? "—"}`);
+    lines.push(`    started:             ${last.startedAt ?? "—"}`);
+    lines.push(`    finished:            ${last.finishedAt ?? "—"}`);
+    lines.push(`    cases:               ${last.passedCases ?? 0}/${last.totalCases ?? 0} passed`);
+    if (last.drift) lines.push(chalk.red(`    drift:               YES`));
+    if (last.jobName) lines.push(`    job:                 ${last.jobName}`);
+    const failed = (last.cases ?? []).filter(c => c.outcome === "Fail");
+    if (failed.length > 0) {
+      lines.push("");
+      lines.push(chalk.bold("  Failures"));
+      for (const f of failed.slice(0, 10)) {
+        lines.push(`    • ${f.caseId ?? "?"} (${f.scenario ?? "?"}) — ${f.failureKind ?? "?"}`);
+        if (f.detail) lines.push(`      ${chalk.dim(f.detail)}`);
+      }
+      if (failed.length > 10) {
+        lines.push(chalk.dim(`    … and ${failed.length - 10} more`));
+      }
+    }
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+/** Render the diff between two runs. Exported for tests.
+ *  Format: cases that changed outcome are highlighted; otherwise
+ *  shows aggregate movement. */
+export function renderEvalDiff(older: EvalResult, newer: EvalResult): string {
+  const lines: string[] = [];
+  lines.push("");
+  lines.push(chalk.bold("  Run diff (older → newer)"));
+  lines.push(`    started:   ${older.startedAt ?? "—"}  →  ${newer.startedAt ?? "—"}`);
+  lines.push(
+    `    passed:    ${older.passedCases ?? 0}/${older.totalCases ?? 0}  →  ${newer.passedCases ?? 0}/${newer.totalCases ?? 0}`,
+  );
+  if (older.drift !== newer.drift) {
+    lines.push(
+      `    drift:     ${older.drift ? "YES" : "no"}  →  ${newer.drift ? chalk.red("YES") : "no"}`,
+    );
+  }
+
+  // Per-case diff: build maps keyed by caseId.
+  const olderMap = new Map<string, EvalCaseResult>();
+  for (const c of older.cases ?? []) {
+    if (c.caseId) olderMap.set(c.caseId, c);
+  }
+  const newerMap = new Map<string, EvalCaseResult>();
+  for (const c of newer.cases ?? []) {
+    if (c.caseId) newerMap.set(c.caseId, c);
+  }
+  const allIds = new Set<string>([...olderMap.keys(), ...newerMap.keys()]);
+
+  const regressions: EvalCaseResult[] = [];
+  const fixes: EvalCaseResult[] = [];
+  const newlyAdded: EvalCaseResult[] = [];
+  const dropped: EvalCaseResult[] = [];
+
+  for (const id of allIds) {
+    const o = olderMap.get(id);
+    const n = newerMap.get(id);
+    if (o && !n) dropped.push(o);
+    else if (!o && n) newlyAdded.push(n);
+    else if (o && n) {
+      if (o.outcome === "Pass" && n.outcome === "Fail") regressions.push(n);
+      else if (o.outcome === "Fail" && n.outcome === "Pass") fixes.push(n);
+    }
+  }
+
+  if (regressions.length > 0) {
+    lines.push("");
+    lines.push(chalk.red(chalk.bold(`  Regressions (${regressions.length})`)));
+    for (const r of regressions) {
+      lines.push(`    ✗ ${r.caseId ?? "?"} (${r.scenario ?? "?"}) — ${r.failureKind ?? "?"}`);
+    }
+  }
+  if (fixes.length > 0) {
+    lines.push("");
+    lines.push(chalk.green(chalk.bold(`  Fixes (${fixes.length})`)));
+    for (const f of fixes) {
+      lines.push(`    ✓ ${f.caseId ?? "?"} (${f.scenario ?? "?"})`);
+    }
+  }
+  if (newlyAdded.length > 0) {
+    lines.push("");
+    lines.push(chalk.dim(`  Added cases (${newlyAdded.length}): ${newlyAdded.map(c => c.caseId).join(", ")}`));
+  }
+  if (dropped.length > 0) {
+    lines.push("");
+    lines.push(chalk.dim(`  Dropped cases (${dropped.length}): ${dropped.map(c => c.caseId).join(", ")}`));
+  }
+  if (regressions.length === 0 && fixes.length === 0 && newlyAdded.length === 0 && dropped.length === 0) {
+    lines.push("");
+    lines.push(chalk.dim("  No per-case differences."));
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+async function listEvals(namespace: string, jsonOutput: boolean): Promise<void> {
+  const { execa } = await import("execa");
+  try {
+    const { stdout } = await execa(
+      "kubectl",
+      ["get", PLURAL, "-n", namespace, "-o", "json"],
+      { stdio: "pipe" },
+    );
+    const parsed = JSON.parse(stdout) as { items?: ClawEvalCR[] };
+    const items = parsed.items ?? [];
+    if (jsonOutput) {
+      process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);
+      return;
+    }
+    if (items.length === 0) {
+      console.log(chalk.dim(`  No ClawEvals found in namespace '${namespace}'.`));
+      return;
+    }
+    const headers = ["NAME", "TARGET", "CORPUS", "PHASE", "AGE", "LAST"];
+    const rows = items.map(it => ({ cells: summarizeEvalRow(it) }));
+    console.log("\n" + formatTable(headers, rows) + "\n");
+  } catch (e) {
+    console.error(chalk.red(`\nError: ${e instanceof Error ? e.message : String(e)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+async function getEval(name: string, namespace: string): Promise<ClawEvalCR> {
+  const { execa } = await import("execa");
+  const { stdout } = await execa(
+    "kubectl",
+    ["get", PLURAL, name, "-n", namespace, "-o", "json"],
+    { stdio: "pipe" },
+  );
+  return JSON.parse(stdout) as ClawEvalCR;
+}
+
+async function showEval(name: string, namespace: string, jsonOutput: boolean): Promise<void> {
+  try {
+    const item = await getEval(name, namespace);
+    if (jsonOutput) {
+      process.stdout.write(`${JSON.stringify(item, null, 2)}\n`);
+      return;
+    }
+    process.stdout.write(renderEvalShow(item));
+  } catch (e) {
+    console.error(chalk.red(`\nError: ${e instanceof Error ? e.message : String(e)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+async function runEval(name: string, namespace: string): Promise<void> {
+  const { execa } = await import("execa");
+  try {
+    // Strategic merge patch: set the run-now annotation. The controller
+    // reconciler picks this up, spawns a one-shot Job, and clears the
+    // annotation after Job creation (slice 6.3 reconciler).
+    const patch = JSON.stringify({
+      metadata: { annotations: { "azureclaw.azure.com/run-now": "true" } },
+    });
+    await execa(
+      "kubectl",
+      ["annotate", PLURAL, name, "-n", namespace,
+       "azureclaw.azure.com/run-now=true", "--overwrite"],
+      { stdio: "pipe" },
+    );
+    void patch; // patch object kept for documentation; we use `kubectl annotate` which is simpler
+    console.log(chalk.green(`\n  ✓ Run triggered for ClawEval/${name}\n`));
+    console.log(chalk.dim(`    Watch progress with: azureclaw eval show ${name}`));
+    console.log("");
+  } catch (e) {
+    console.error(chalk.red(`\nError triggering run: ${e instanceof Error ? e.message : String(e)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+async function diffEval(name: string, namespace: string): Promise<void> {
+  try {
+    const item = await getEval(name, namespace);
+    const history = item.status?.history ?? [];
+    const last = item.status?.lastResult;
+
+    // Walk: prefer (history[len-1], lastResult) when both present;
+    // fall back to (history[len-2], history[len-1]) when only history
+    // is populated.
+    let older: EvalResult | undefined;
+    let newer: EvalResult | undefined;
+    if (last && history.length >= 1) {
+      older = history[history.length - 1];
+      newer = last;
+    } else if (history.length >= 2) {
+      older = history[history.length - 2];
+      newer = history[history.length - 1];
+    }
+
+    if (!older || !newer) {
+      console.log(chalk.dim(`  ClawEval/${name} has fewer than 2 runs — nothing to diff.`));
+      process.exitCode = 0;
+      return;
+    }
+
+    process.stdout.write(renderEvalDiff(older, newer));
+  } catch (e) {
+    console.error(chalk.red(`\nError: ${e instanceof Error ? e.message : String(e)}\n`));
+    process.exitCode = 1;
+  }
+}
 
 export function evalCommand(): Command {
   const cmd = new Command("eval");
 
+  cmd.description("Manage and inspect ClawEval conformance runs (slice 6 — policy conformance corpus runner)");
+
   cmd
-    .description("Run Foundry evaluations against a sandbox agent")
-    .argument("<name>", "Sandbox name")
-    .option("--model <model>", "Model to evaluate", "gpt-4.1")
-    .option("--evaluator <id>", "Evaluator ID (e.g., relevance, coherence, fluency)")
-    .option("--dataset <path>", "JSONL dataset file with test cases")
-    .option("--list-evaluators", "List available evaluators in the project")
-    .option("--list-runs", "List existing evaluation runs")
-    .action(async (name: string, options) => {
-      const blue = chalk.hex("#0078D4");
-      const bold = chalk.bold;
+    .command("list")
+    .description("List ClawEvals in the controller namespace")
+    .option("-n, --namespace <ns>", "Controller namespace", DEFAULT_NS)
+    .option("--json", "Emit JSON instead of a table", false)
+    .action(async (opts: { namespace: string; json: boolean }) => {
+      await listEvals(opts.namespace, opts.json);
+    });
 
-      try {
-        const { execa } = await import("execa");
+  cmd
+    .command("show <name>")
+    .description("Show spec + status for one ClawEval, including last-run results")
+    .option("-n, --namespace <ns>", "Controller namespace", DEFAULT_NS)
+    .option("--json", "Emit JSON instead of human-readable output", false)
+    .action(async (name: string, opts: { namespace: string; json: boolean }) => {
+      await showEval(name, opts.namespace, opts.json);
+    });
 
-        // Resolve the pod and namespace
-        const namespace = `azureclaw-${name}`;
-        let podName: string;
+  cmd
+    .command("run <name>")
+    .description("Trigger a one-shot run by annotating the CR with azureclaw.azure.com/run-now=true")
+    .option("-n, --namespace <ns>", "Controller namespace", DEFAULT_NS)
+    .action(async (name: string, opts: { namespace: string }) => {
+      await runEval(name, opts.namespace);
+    });
 
-        try {
-          const { stdout } = await execa("kubectl", [
-            "get", "pods", "-n", namespace,
-            "-o", "jsonpath={.items[0].metadata.name}",
-          ], { stdio: "pipe" });
-          podName = stdout.trim();
-        } catch {
-          console.error(chalk.red(`No sandbox '${name}' found. Run 'azureclaw up' first.`));
-          process.exit(1);
-        }
-
-        const V = "api-version=2025-11-15-preview";
-
-        // Resolve the agent container name from the ClawSandbox CR's
-        // runtime kind — `openclaw` for OpenClaw, `agent` for every
-        // other adapter image. Falls back to `openclaw` if lookup fails.
-        let agentContainer = "openclaw";
-        try {
-          const { stdout: crJson } = await execa("kubectl", [
-            "get", "clawsandbox", name, "-n", "azureclaw-system", "-o", "json",
-          ], { stdio: "pipe" });
-          agentContainer = agentContainerName(runtimeKindFromCr(JSON.parse(crJson)));
-        } catch { /* fall back to openclaw default */ }
-
-        // Helper: exec curl inside the pod via the inference router
-        async function foundryGet(path: string): Promise<unknown> {
-          const { stdout } = await execa("kubectl", [
-            "exec", "-n", namespace, podName, "-c", agentContainer, "--",
-            "curl", "-s", `http://localhost:8443/${path}?${V}`,
-          ], { stdio: "pipe" });
-          return JSON.parse(stdout);
-        }
-
-        async function foundryPost(path: string, body: unknown): Promise<unknown> {
-          const { stdout } = await execa("kubectl", [
-            "exec", "-n", namespace, podName, "-c", agentContainer, "--",
-            "curl", "-s", "-X", "POST",
-            `http://localhost:8443/${path}?${V}`,
-            "-H", "Content-Type: application/json",
-            "-d", JSON.stringify(body),
-          ], { stdio: "pipe" });
-          return JSON.parse(stdout);
-        }
-
-        // List evaluators
-        if (options.listEvaluators) {
-          console.log(blue("\n  Foundry Evaluators\n"));
-          const data = await foundryGet("evaluators") as { value?: Array<{ id: string; displayName?: string; description?: string }> };
-          const evaluators = data.value || [];
-          if (evaluators.length === 0) {
-            console.log("  No evaluators found in the project.");
-          } else {
-            for (const e of evaluators) {
-              console.log(`  ${chalk.green("•")} ${bold(e.id)} — ${e.displayName || e.description || ""}`);
-            }
-          }
-          console.log(`\n  Total: ${evaluators.length} evaluators\n`);
-          return;
-        }
-
-        // List eval runs
-        if (options.listRuns) {
-          console.log(blue("\n  Evaluation Runs\n"));
-          const data = await foundryGet("openai/evals") as { data?: Array<{ id: string; name?: string; metadata?: Record<string, string> }> };
-          const evals = data.data || [];
-          if (evals.length === 0) {
-            console.log("  No evaluation runs found.");
-          } else {
-            for (const e of evals) {
-              console.log(`  ${chalk.green("•")} ${bold(e.id)} ${e.name ? `(${e.name})` : ""}`);
-            }
-          }
-          console.log(`\n  Total: ${evals.length} runs\n`);
-          return;
-        }
-
-        // Create and run an evaluation
-        if (!options.dataset) {
-          console.error(chalk.red("--dataset <path> is required to run an evaluation."));
-          console.log("\nUsage examples:");
-          console.log(`  ${bold("azureclaw eval my-agent --list-evaluators")}  — list available evaluators`);
-          console.log(`  ${bold("azureclaw eval my-agent --dataset test.jsonl --evaluator relevance")}  — run eval`);
-          console.log(`  ${bold("azureclaw eval my-agent --list-runs")}  — list past runs`);
-          process.exit(1);
-        }
-
-        const { readFileSync } = await import("fs");
-        const datasetContent = readFileSync(options.dataset, "utf-8").trim();
-        const lines = datasetContent.split("\n").filter(Boolean);
-
-        console.log(blue(`\n  Running evaluation on sandbox '${name}'\n`));
-        console.log(`  Model:     ${bold(options.model)}`);
-        console.log(`  Evaluator: ${bold(options.evaluator || "default")}`);
-        console.log(`  Dataset:   ${bold(options.dataset)} (${lines.length} test cases)`);
-        console.log(`  Pod:       ${bold(podName)}`);
-        console.log();
-
-        // Create the eval via OpenAI Evals API
-        const evalBody: Record<string, unknown> = {
-          name: `azureclaw-eval-${Date.now()}`,
-          data_source_config: {
-            type: "custom",
-            item_schema: {
-              type: "object",
-              properties: {
-                input: { type: "string" },
-                expected: { type: "string" },
-              },
-              required: ["input"],
-            },
-            include_sample_schema: true,
-          },
-          testing_criteria: [] as Array<{ type: string; model?: string; input?: Array<{ role: string; content: string }> }>,
-        };
-
-        // Add evaluator criteria if specified
-        if (options.evaluator) {
-          (evalBody.testing_criteria as Array<unknown>).push({
-            type: "label_model",
-            model: options.model,
-            input: [
-              { role: "system", content: `You are an evaluator. Score the response for ${options.evaluator} on a scale of 1-5.` },
-              { role: "user", content: "Input: {{item.input}}\nResponse: {{sample.output_text}}\nExpected: {{item.expected}}" },
-            ],
-            labels: ["1", "2", "3", "4", "5"],
-            passing_labels: ["4", "5"],
-          });
-        }
-
-        const result = await foundryPost("openai/evals", evalBody) as { id?: string; error?: { message: string } };
-
-        if (result.error) {
-          console.error(chalk.red(`  Eval creation failed: ${result.error.message}`));
-          process.exit(1);
-        }
-
-        console.log(chalk.green(`  ✓ Evaluation created: ${result.id}`));
-        console.log(`\n  Run 'azureclaw eval ${name} --list-runs' to check status.`);
-      } catch (error) {
-        console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
-        process.exit(1);
-      }
+  cmd
+    .command("diff <name>")
+    .description("Compare the two most recent runs in status.history")
+    .option("-n, --namespace <ns>", "Controller namespace", DEFAULT_NS)
+    .action(async (name: string, opts: { namespace: string }) => {
+      await diffEval(name, opts.namespace);
     });
 
   return cmd;
 }
+
+export const __test = {
+  summarizeEvalRow,
+  renderEvalShow,
+  renderEvalDiff,
+};

@@ -358,6 +358,67 @@ function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: Kube
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// ClawEval status panel (slice 6.4) — surfaces last-run aggregate +
+// drift state + corpus reference. Pure read of fields the controller
+// already writes; no router admin token in the browser.
+// ──────────────────────────────────────────────────────────────────────
+
+function ClawEvalStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
+  if (crd.plural !== "clawevals") {
+    return null;
+  }
+  const spec = getSpec(item);
+  const status = getStatus(item);
+  const conditions = (status.conditions as Array<Record<string, any>> | undefined) ?? [];
+  const ready = conditions.find(c => c.type === "Ready");
+  const drift = conditions.find(c => c.type === "ConformanceDrift");
+  const lastResult = status.lastResult as Record<string, any> | undefined;
+  const corpus = spec.corpus as Record<string, any> | undefined;
+  const corpusLabel = corpus?.builtin
+    ? `builtin:${corpus.builtin}`
+    : corpus?.bundleRef?.digest
+      ? `bundle ${corpus.bundleRef.registry ?? "?"}/${corpus.bundleRef.repository ?? "?"}@${corpus.bundleRef.digest}`
+      : "—";
+
+  const passSummary = lastResult
+    ? `${lastResult.passedCases ?? 0}/${lastResult.totalCases ?? 0}`
+    : "—";
+  const driftLabel = lastResult?.drift
+    ? <StatusLabel status="error">YES</StatusLabel>
+    : lastResult
+      ? <StatusLabel status="success">no</StatusLabel>
+      : <span style={{ opacity: 0.6 }}>—</span>;
+
+  return (
+    <SectionBox title="ClawEval (conformance corpus)">
+      <SimpleTable
+        data={[
+          { k: "Target sandbox", v: (spec.targetSandboxRef as any)?.name ?? "—" },
+          { k: "Corpus", v: corpusLabel },
+          { k: "Schedule", v: (spec.schedule as string) ?? "(on-demand only)" },
+          { k: "Fail sandbox on drift", v: spec.failSandboxOnDrift ? "true" : "false" },
+          { k: "Last run", v: (status.lastRunAt as string) ?? "—" },
+          { k: "Cases passed", v: passSummary },
+          { k: "Drift", v: driftLabel },
+          { k: "Ready reason", v: reasonChip(ready?.reason as string | undefined) },
+          { k: "Conformance drift reason", v: reasonChip(drift?.reason as string | undefined) },
+        ]}
+        columns={[
+          { label: "Field", getter: (r: any) => r.k },
+          { label: "Value", getter: (r: any) => r.v },
+        ]}
+      />
+      <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+        ClawEvals replay a signed corpus (or a builtin one) against the target
+        sandbox's inference router. The controller stamps each run's verdicts
+        on <code>status.lastResult</code> and rolls a history of the most
+        recent ones into <code>status.history</code>.
+      </p>
+    </SectionBox>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Overview dashboard
 // ──────────────────────────────────────────────────────────────────────
 
@@ -786,6 +847,8 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
       <AllowlistDriftBanner item={item} />
 
       <RouterPolicyStatusPanel crd={crd} item={item} />
+
+      <ClawEvalStatusPanel crd={crd} item={item} />
 
       <SectionBox title="Spec">
         <pre style={{ maxHeight: "400px", overflow: "auto" }}>
