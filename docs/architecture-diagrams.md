@@ -184,7 +184,7 @@ The A2A gateway is the only inbound public surface. Every request must carry a s
 ```mermaid
 flowchart LR
   User["operator / CLI / GitOps"]
-  CRD[("8 CRDs<br/>ClawSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>ClawMemory · ClawEval · TrustGraph")]
+  CRD[("9 CRDs<br/>ClawSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>ClawMemory · ClawEval · TrustGraph<br/>EgressApproval")]
   Ctrl["azureclaw-controller<br/>(kube-rs)"]
 
   User -->|kubectl apply / azureclaw cli| CRD
