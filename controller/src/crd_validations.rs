@@ -250,6 +250,12 @@ pub fn inference_policy_validations() -> Vec<ValidationRule> {
     let severities = "['Safe','Low','Medium','High']";
     vec![
         ValidationRule {
+            rule: "!has(self.bundleRef) || (!has(self.tokenBudget) && !has(self.contentSafety) && !has(self.modelPreference) && !has(self.displayName))".into(),
+            message: Some("spec.bundleRef is mutually exclusive with spec.tokenBudget, spec.contentSafety, spec.modelPreference, and spec.displayName; the bundle carries those content fields".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
             rule: "!has(self.tokenBudget) || !has(self.tokenBudget.monthlyTokens) || !has(self.tokenBudget.dailyTokens) || self.tokenBudget.monthlyTokens >= self.tokenBudget.dailyTokens".into(),
             message: Some("spec.tokenBudget.monthlyTokens must be >= spec.tokenBudget.dailyTokens".into()),
             reason: Some("FieldValueInvalid".into()),

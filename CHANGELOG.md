@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 1c.3 — `InferencePolicy.spec.bundleRef` (signed OCI artifact)
+
+Third step in the Slice 1c-real signing-generalization arc.
+`InferencePolicy` now joins `EgressAllowlist` (1c.1) and `ToolPolicy`
+(1c.2) on the unified `policy_fetcher::fetch_and_verify_generic`
+pipeline: a single `azureclaw policy sign --kind inference-policy`
+command (lands in Slice 1c.6) produces a cosign-signed OCI artifact
+that the controller pulls by digest and validates per
+`SignerPolicy`.
+
+**Producer side (controller)**
+
+- New `controller/src/policy_canonical/inference.rs` —
+  `InferenceKind: PolicyKind` impl with the per-kind canonical-form
+  parser. Accepts only `tokenBudget`, `contentSafety`,
+  `modelPreference`, `displayName` keys at top-level (a bundle is
+  selector-agnostic so one signed artifact can be referenced by
+  multiple `InferencePolicy` CRs with different `appliesTo`
+  selectors). Structural validation rejects negative budgets,
+  unrecognised severity types, empty `primary.deployment`,
+  malformed `fallback[]` entries, and mis-typed `requirePromptShields`.
+  Media type `application/vnd.azureclaw.inference-policy.v1+json`.
+  Per-kind cache slot via `OnceLock<CachedValue::Inference(...)>` on
+  the shared `policy_canonical` cache, gated by `policy_fetcher::CACHE_TTL`.
+  17 unit tests covering every rejection path.
+- `InferencePolicySpec.bundleRef: Option<OciArtifactRef>` field
+  added at spec top-level (mutex with `tokenBudget`/`contentSafety`/
+  `modelPreference`/`displayName` — selector flows through CR,
+  content flows from bundle).
+- `InferencePolicyStatus.bundleRefDigest: Option<String>` field
+  surfaces the verified OCI manifest digest after a successful
+  `fetch_and_verify_generic::<InferenceKind>` call (distinct from
+  `compiledDigest` which is the wire-contract value the router
+  echoes back via `/internal/policy-status`).
+- `inference_policy_reconciler::resolve_inference_source` —
+  4-way match (no inline, no bundle / inline only / bundle only /
+  both) mirroring `tool_policy_reconciler::resolve_agt_profile_source`.
+  On the bundle path, merges the verified content fields onto the
+  CR's `appliesTo` selector to produce the effective spec for
+  `compile_to_profile`. `FetchError` variants map through the shared
+  `policy_fetcher::reason_for_error` vocabulary (same as egress + tools).
+
+**Admission**
+
+- CEL rule on `InferencePolicySpec`:
+  `!has(self.bundleRef) || (!has(self.tokenBudget) && !has(self.contentSafety) && !has(self.modelPreference) && !has(self.displayName))`
+  — rejects mixed shapes at apply-time so the reconciler-side
+  defense-in-depth check only fires on stale clusters running an
+  older CRD revision.
+
+**Schema**
+
+- Regenerated `deploy/helm/azureclaw/templates/crd-inferencepolicy.yaml`
+  via `DUMP_INFERENCEPOLICY_CRD_YAML=1 cargo test …
+  helm_drift::tests::dump_inferencepolicy_crd_yaml`. Adds the new
+  `spec.bundleRef` block + the new CEL rule + the new
+  `status.bundleRefDigest` field. CNCF C10 labels preserved.
+
+**Out of scope (deferred)**
+
+- CLI dispatch `azureclaw policy sign --kind inference-policy`
+  — lands with the unified CLI in Slice 1c.6.
+- ClawMemory `bundleRef` — Slice 1c.4.
+- McpServer `bundleRef` — Slice 1c.5.
+
+Test deltas: controller 619 → 636 (+17 inference parser tests).
+clippy `-D warnings` clean, fmt clean, helm_drift clean, CNCF
+conformance clean. Router untouched — wire contract unchanged.
+
 ### Slice 1c.2 — `ToolPolicy.spec.agtProfile.bundleRef` (signed OCI artifact)
 
 Continues the Slice 1c-real signing-generalization arc started in

@@ -106,7 +106,7 @@ impl PolicyKind for ToolsKind {
         }
         match &entry.verified {
             CachedValue::Tools(v) => Some(v.clone()),
-            CachedValue::Egress(_) => None,
+            CachedValue::Egress(_) | CachedValue::Inference(_) => None,
         }
     }
 
