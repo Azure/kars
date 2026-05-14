@@ -33,7 +33,6 @@ mod egress_allowlist_compile;
 mod egress_approval;
 mod egress_approval_compile;
 mod egress_approval_reconciler;
-mod eval_corpus;
 mod fedcred;
 mod fedcred_reaper;
 mod field_managers;
