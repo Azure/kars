@@ -54,11 +54,11 @@ pub const MEMORY_BINDING_FILENAME: &str = "binding.json";
 #[must_use]
 pub fn compile_to_binding(spec: &ClawMemorySpec) -> Value {
     json!({
-        "storeName": spec.store_name,
+        "storeName": spec.store_name.clone().unwrap_or_default(),
         "sandboxRef": { "name": spec.sandbox_ref.name },
-        "scope": spec.scope,
+        "scope": spec.scope.clone().unwrap_or_default(),
         "retentionDays": spec.retention_days,
-        "deleteOnSandboxDelete": spec.delete_on_sandbox_delete,
+        "deleteOnSandboxDelete": spec.delete_on_sandbox_delete.unwrap_or(true),
         "displayName": spec.display_name,
     })
 }
@@ -121,25 +121,26 @@ mod tests {
 
     fn full_spec() -> ClawMemorySpec {
         ClawMemorySpec {
-            store_name: "agent-x-mem".into(),
+            store_name: Some("agent-x-mem".into()),
             sandbox_ref: SandboxRef {
                 name: "agent-x".into(),
             },
-            scope: "agent:agent-x".into(),
+            scope: Some("agent:agent-x".into()),
             retention_days: Some(30),
-            delete_on_sandbox_delete: true,
+            delete_on_sandbox_delete: Some(true),
             display_name: Some("Agent X memory".into()),
+            bundle_ref: None,
         }
     }
 
     #[test]
     fn compile_minimal_spec_round_trips() {
         let spec = ClawMemorySpec {
-            store_name: "minimal".into(),
+            store_name: Some("minimal".into()),
             sandbox_ref: SandboxRef {
                 name: "agent".into(),
             },
-            scope: "agent:agent".into(),
+            scope: Some("agent:agent".into()),
             ..ClawMemorySpec::default()
         };
         let binding = compile_to_binding(&spec);
@@ -147,8 +148,9 @@ mod tests {
         assert_eq!(binding["sandboxRef"]["name"], "agent");
         assert_eq!(binding["scope"], "agent:agent");
         assert!(binding["retentionDays"].is_null());
-        // delete_on_sandbox_delete defaults to false on Default ⇒ false.
-        assert_eq!(binding["deleteOnSandboxDelete"], false);
+        // delete_on_sandbox_delete defaults to true at compile time
+        // (preserving the prior bool-default semantics).
+        assert_eq!(binding["deleteOnSandboxDelete"], true);
     }
 
     #[test]
