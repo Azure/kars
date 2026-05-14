@@ -5,11 +5,16 @@ import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
 import { getAdminToken, withAdminAuth } from "../router-admin.js";
+import { registerPolicySignSubcommand } from "./policy/sign.js";
 
 export function policyCommand(): Command {
   const cmd = new Command("policy");
 
   cmd.description("Manage sandbox network and security policies");
+
+  // Slice 1c.6 — unified `azureclaw policy sign --kind X` surface
+  // covering all five signed policy artifact kinds.
+  registerPolicySignSubcommand(cmd);
 
   cmd
     .command("allow")
