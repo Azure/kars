@@ -526,6 +526,119 @@ EOF
     kubectl delete claweval e2e-claweval -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
 
+# ClawEval lifecycle (slice 6.5): run-now annotation spawns a Job;
+# `spec.schedule` ensures a controller-owned CronJob; clearing the
+# schedule deletes it. We do NOT wait for Job *completion* — the
+# runner image is published out-of-band and the Job pod will pull-
+# fail in Kind. The reconciler's contract is "create the K8s objects
+# with the right shape"; runner success belongs to runner-level
+# tests (conformance-runner/tests/end_to_end.rs).
+test_crd_claw_eval_lifecycle() {
+    # ---- run-now spawns a Job ----------------------------------
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawEval lifecycle apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawEval
+metadata:
+  name: e2e-claweval-lc
+  namespace: azureclaw-system
+  annotations:
+    azureclaw.azure.com/run-now: "true"
+spec:
+  targetSandboxRef:
+    name: e2e-test
+  corpus:
+    builtin: jailbreak-baseline
+EOF
+
+    # The Job name embeds a short hash of the CR's resourceVersion,
+    # so we discover it by label rather than by deterministic name.
+    local job_name
+    for _ in $(seq 1 30); do
+        job_name=$(kubectl get jobs -n azureclaw-system \
+            -l azureclaw.azure.com/claweval=e2e-claweval-lc \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+        if [ -n "$job_name" ]; then
+            break
+        fi
+        sleep 1
+    done
+    if [ -n "$job_name" ]; then
+        pass "ClawEval lifecycle: run-now spawned Job ($job_name)"
+    else
+        dump_cr_diagnostics claweval e2e-claweval-lc azureclaw-system
+        fail "ClawEval lifecycle: run-now did not spawn a Job within 30s"
+        kubectl delete claweval e2e-claweval-lc -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    # The controller must clear the run-now annotation after spawning
+    # the Job, otherwise every reconcile would re-spawn.
+    local cleared=""
+    for _ in $(seq 1 15); do
+        if ! kubectl get claweval e2e-claweval-lc -n azureclaw-system \
+            -o jsonpath='{.metadata.annotations.azureclaw\.azure\.com/run-now}' 2>/dev/null \
+            | grep -q "true"; then
+            cleared=1
+            break
+        fi
+        sleep 1
+    done
+    if [ -n "$cleared" ]; then
+        pass "ClawEval lifecycle: run-now annotation cleared after Job spawn"
+    else
+        fail "ClawEval lifecycle: run-now annotation still 'true' (would re-spawn on every reconcile)"
+    fi
+
+    # The Job must be owned by the ClawEval CR for cascade cleanup.
+    local owner_kind
+    owner_kind=$(kubectl get job "$job_name" -n azureclaw-system \
+        -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
+    if [ "$owner_kind" = "ClawEval" ]; then
+        pass "ClawEval lifecycle: Job has ownerReference → ClawEval"
+    else
+        fail "ClawEval lifecycle: Job missing ClawEval ownerReference (got '$owner_kind')"
+    fi
+
+    # ---- schedule ensures a CronJob ----------------------------
+    kubectl patch claweval e2e-claweval-lc -n azureclaw-system --type=merge \
+        -p '{"spec":{"schedule":"*/15 * * * *"}}' >/dev/null 2>&1 \
+        || { fail "ClawEval lifecycle: schedule patch rejected"; return; }
+    if wait_for_resource cronjob claweval-e2e-claweval-lc azureclaw-system 30; then
+        local cron_sched
+        cron_sched=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+            -o jsonpath='{.spec.schedule}' 2>/dev/null || true)
+        if [ "$cron_sched" = "*/15 * * * *" ]; then
+            pass "ClawEval lifecycle: schedule → CronJob created with correct schedule"
+        else
+            fail "ClawEval lifecycle: CronJob schedule mismatch (got '$cron_sched')"
+        fi
+    else
+        dump_cr_diagnostics claweval e2e-claweval-lc azureclaw-system
+        fail "ClawEval lifecycle: CronJob not created within 30s"
+    fi
+
+    # ---- clearing the schedule deletes the CronJob -------------
+    kubectl patch claweval e2e-claweval-lc -n azureclaw-system --type=json \
+        -p '[{"op":"remove","path":"/spec/schedule"}]' >/dev/null 2>&1 \
+        || { fail "ClawEval lifecycle: schedule removal rejected"; return; }
+    local gone=""
+    for _ in $(seq 1 30); do
+        if ! kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system &>/dev/null; then
+            gone=1
+            break
+        fi
+        sleep 1
+    done
+    if [ -n "$gone" ]; then
+        pass "ClawEval lifecycle: clearing schedule deleted the CronJob"
+    else
+        fail "ClawEval lifecycle: CronJob still present after schedule removal"
+    fi
+
+    kubectl delete claweval e2e-claweval-lc -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+}
+
 # McpServer (dev-mode, no OAuth). The reconciler can't fetch JWKS in
 # Kind (no real issuer), so we assert only that the CR is admitted
 # and reaches a terminal status (Ready or Degraded — both indicate
@@ -2584,6 +2697,7 @@ main() {
     test_crd_a2a_agent || true
     test_crd_claw_memory || true
     test_crd_claw_eval || true
+    test_crd_claw_eval_lifecycle || true
     test_crd_mcp_server || true
     test_crd_trustgraph_reconcile || true
     test_crd_clawpairing_lifecycle || true
