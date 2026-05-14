@@ -368,3 +368,14 @@ egress:
   # `AllowlistVerified=False / reason=Unsigned` warnings so operators
   # can migrate to signed bundles at their own pace.
   requireSigned: false
+
+# Slice 5e: EgressApproval ephemeral allowlist deltas. An `EgressApproval`
+# CR points at a target ClawSandbox + lists extra hosts to allow + carries
+# a TTL. The controller clamps the requested TTL to
+# `min(maxTtlSeconds, 604800s)` (one-week hard ceiling baked into the
+# binary). Operators can lower this further to match their policy posture.
+# After `expiresAt`, the reconciler transitions the CR to `phase=Expired`,
+# drops its file from the per-sandbox approvals ConfigMap, and removes the
+# finalizer.
+egressApproval:
+  maxTtlSeconds: 86400

@@ -85,6 +85,26 @@ pub const PHASE_DEGRADED: &str = "Degraded";
 /// is wrong; reconciler will not converge without a spec change.
 pub const PHASE_FAILED: &str = "Failed";
 
+/// `.status.phase = "Active"` — grant-lane phase. The
+/// `EgressApproval` mount is in place and (Slice 5e.3+) the router
+/// has echoed the merged digest. Conceptually equivalent to
+/// `Ready` for policy-lane CRDs, but named distinctly because the
+/// grant lane has a fundamentally different lifecycle (short-TTL,
+/// auto-expires).
+///
+/// In Slice 5e.2 the router consumer does not exist yet, so this
+/// constant is part of the public phase vocabulary but is not
+/// stamped by any reconciler. Slice 5e.3 wires the producer.
+#[allow(dead_code)]
+pub const PHASE_ACTIVE: &str = "Active";
+
+/// `.status.phase = "Expired"` — grant-lane terminal phase. The
+/// TTL elapsed; the reconciler dropped any mount it created and
+/// the grant no longer affects the data plane. The CR persists
+/// for audit purposes until an operator deletes it (or a
+/// retention policy reaps it).
+pub const PHASE_EXPIRED: &str = "Expired";
+
 /// Canonical Warning Event reason for "controller compiled the spec
 /// but the router does not yet consume it." Whatever slice eventually
 /// wires the consumer must delete the corresponding
@@ -236,6 +256,8 @@ mod tests {
             PHASE_READY,
             PHASE_DEGRADED,
             PHASE_FAILED,
+            PHASE_ACTIVE,
+            PHASE_EXPIRED,
         ] {
             assert!(
                 s.chars().next().is_some_and(|c| c.is_uppercase()),
@@ -254,6 +276,18 @@ mod tests {
         // would silently re-introduce the "Ready means nothing" bug.
         assert_ne!(PHASE_COMPILED, PHASE_READY);
         assert_ne!(PHASE_COMPILED, PHASE_PENDING);
+    }
+
+    #[test]
+    fn grant_lane_phases_are_distinct_from_policy_lane() {
+        // Active is conceptually-but-not-identically Ready (grant
+        // lane). Expired is distinct from Failed (grant lane
+        // terminal state vs. spec-broken).
+        assert_ne!(PHASE_ACTIVE, PHASE_READY);
+        assert_ne!(PHASE_ACTIVE, PHASE_COMPILED);
+        assert_ne!(PHASE_EXPIRED, PHASE_FAILED);
+        assert_ne!(PHASE_EXPIRED, PHASE_DEGRADED);
+        assert_ne!(PHASE_EXPIRED, PHASE_ACTIVE);
     }
 
     #[test]
