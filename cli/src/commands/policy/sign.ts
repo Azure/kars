@@ -27,7 +27,7 @@
 // where the operator already has the bytes.
 
 import { Command } from "commander";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 
 import {
@@ -166,21 +166,28 @@ export async function signPolicyArtifact(
 ): Promise<SignedPolicyArtifact> {
   const spec = lookupPolicyKindSpec(opts.kind);
 
-  // Pre-flight: file exists + non-empty + valid UTF-8.
-  if (!existsSync(opts.filePath)) {
-    throw new Error(`--file '${opts.filePath}' does not exist`);
+  // Pre-flight: read bytes in one shot (no check-then-use TOCTOU
+  // window). Map ENOENT/EISDIR/etc. errno strings to a single
+  // operator-friendly message; everything else surfaces verbatim.
+  let buf: Buffer;
+  try {
+    buf = readFileSync(opts.filePath);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
+      throw new Error(`--file '${opts.filePath}' does not exist`);
+    }
+    if (err.code === "EISDIR") {
+      throw new Error(`--file '${opts.filePath}' is not a regular file`);
+    }
+    throw new Error(`--file '${opts.filePath}': ${err.message}`);
   }
-  const stat = statSync(opts.filePath);
-  if (!stat.isFile()) {
-    throw new Error(`--file '${opts.filePath}' is not a regular file`);
-  }
-  if (stat.size === 0) {
+  if (buf.length === 0) {
     throw new Error(`--file '${opts.filePath}' is empty`);
   }
-  // Pull bytes; verify they're valid UTF-8 (Buffer→string with strict
-  // decode catches embedded NULs + invalid surrogates). All five
-  // canonical formats are UTF-8 text — JSON, YAML, or YAML-with-comments.
-  const buf = readFileSync(opts.filePath);
+  // Verify bytes are valid UTF-8 (Buffer→string with strict decode
+  // catches embedded NULs + invalid surrogates). All five canonical
+  // formats are UTF-8 text — JSON, YAML, or YAML-with-comments.
   try {
     new TextDecoder("utf-8", { fatal: true }).decode(buf);
   } catch (e) {
