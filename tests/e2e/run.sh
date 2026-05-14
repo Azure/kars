@@ -494,8 +494,7 @@ spec:
   targetSandboxRef:
     name: e2e-test
   corpus:
-    builtin:
-      name: jailbreak-baseline
+    builtin: jailbreak-baseline
 EOF
     if wait_for_resource configmap claweval-e2e-claweval-corpus azureclaw-system 45; then
         pass "ClawEval → corpus ConfigMap created"
