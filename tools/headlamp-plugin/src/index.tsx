@@ -67,6 +67,7 @@ const AZURECLAW_CRDS: CrdDescriptor[] = [
   { plural: "trustgraphs",      singular: "trustgraph",     kind: "TrustGraph",      label: "Trust Graphs" },
   { plural: "clawpairings",     singular: "clawpairing",    kind: "ClawPairing",     label: "Pairings" },
   { plural: "clawevals",        singular: "claweval",       kind: "ClawEval",        label: "Evals",             phaseField: "phase" },
+  { plural: "egressapprovals",  singular: "egressapproval", kind: "EgressApproval",  label: "Egress Approvals",  phaseField: "phase" },
 ];
 
 const CRD_CLASSES: Record<string, KubeObjectClass> = Object.fromEntries(
@@ -827,6 +828,80 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
 // mode, or which ToolPolicy is gating tool calls.
 // ──────────────────────────────────────────────────────────────────────
 
+function SandboxEgressApprovalsCard({
+  sandboxName,
+  sandboxNamespace,
+}: {
+  sandboxName: string;
+  sandboxNamespace: string;
+}) {
+  const [approvals] = (CRD_CLASSES.egressapprovals as any).useList() as [
+    KubeObject[] | null,
+  ];
+  if (!approvals) return null;
+  // EgressApprovals live in the same namespace as the ClawSandbox and
+  // reference it by spec.sandbox name (sibling, never cross-ns).
+  const matching = approvals.filter(a => {
+    const ns = a.metadata?.namespace ?? "";
+    const spec = getSpec(a);
+    return ns === sandboxNamespace && spec.sandbox === sandboxName;
+  });
+  if (matching.length === 0) return null;
+
+  const rows = matching.map(a => {
+    const spec = getSpec(a);
+    const status = getStatus(a);
+    const hosts: Array<{ host: string; port?: number }> = Array.isArray(spec.hosts)
+      ? spec.hosts
+      : [];
+    const hostSummary = hosts
+      .slice(0, 3)
+      .map(h => (h.port ? `${h.host}:${h.port}` : h.host))
+      .join(", ") + (hosts.length > 3 ? `, +${hosts.length - 3}` : "");
+    return {
+      name: a.metadata?.name ?? "—",
+      phase: status.phase as string | undefined,
+      hosts: hostSummary || "—",
+      reason: (spec.reason as string | undefined) ?? "—",
+      ttl: (spec.ttl as string | undefined) ?? "—",
+      expiresAt: status.expiresAt as string | undefined,
+      digest: status.mergedDigest as string | undefined,
+    };
+  });
+
+  return (
+    <SectionBox title="Egress Approvals (ephemeral grants)">
+      <SimpleTable
+        data={rows}
+        columns={[
+          {
+            label: "Name",
+            getter: (r: any) => (
+              <Link
+                routeName="egressapprovals-detail"
+                params={{ namespace: sandboxNamespace, name: r.name }}
+              >
+                {r.name}
+              </Link>
+            ),
+          },
+          { label: "Phase", getter: (r: any) => phaseChip(r.phase) },
+          { label: "Hosts", getter: (r: any) => r.hosts },
+          { label: "TTL", getter: (r: any) => r.ttl },
+          { label: "Expires", getter: (r: any) => r.expiresAt ?? "—" },
+          { label: "Reason", getter: (r: any) => r.reason },
+          { label: "Merged digest", getter: (r: any) => shortDigest(r.digest) },
+        ]}
+      />
+      <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+        Grants unioned with the baseline allowlist on the data plane. <code>Active</code>{" "}
+        means the router has echoed the merged digest. Grants auto-expire at{" "}
+        <code>status.expiresAt</code>; revoke early with <code>azureclaw egress revoke</code>.
+      </p>
+    </SectionBox>
+  );
+}
+
 function SandboxExtras({ item }: { item: KubeObject }) {
   const spec = getSpec(item);
   const status = getStatus(item);
@@ -958,6 +1033,8 @@ function SandboxExtras({ item }: { item: KubeObject }) {
           />
         </SectionBox>
       )}
+
+      <SandboxEgressApprovalsCard sandboxName={name} sandboxNamespace={namespace} />
 
       <SectionBox title="Pod & Workspace">
         <SimpleTable
