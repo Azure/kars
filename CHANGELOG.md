@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Slice 5e.3 — `azureclaw egress allow-extra/approvals/revoke` CLI + Headlamp panel
+
+Operator surface for the producer-consumer loop landed in Slice 5e.2. Three
+new CLI subcommands under `azureclaw egress` and a sandbox-detail card in
+the Headlamp plugin. No new controller or router code — pure operator UX.
+
+**CLI (`cli/src/commands/egress/approval.ts`, ~430 LOC + 52 vitest cases)**
+
+- `azureclaw egress allow-extra <sandbox> --host h1 [--host h2 ...] --reason "<text>" [--ttl PT4H] [--ticket INC-123] [--name explicit-name] [--dry-run]`
+  Builds an `EgressApproval` CR scoped to the named sandbox, applies via
+  `kubectl apply -f -` with namespace defaulted from kube-context. Reuses
+  `buildCR/stripUndefined` from `crd-helpers.ts` plus parsers mirroring the
+  controller-side `parse_iso8601_duration_secs` and `validate_reason`. Host
+  syntax: `host[:port]` parsed by `parseHostEndpoint`. `--from-file <path>`
+  bypasses flag construction for advanced callers.
+- `azureclaw egress approvals <sandbox> [--namespace ns] [--json]` lists
+  current `EgressApproval` CRs filtered by `spec.sandbox=<sandbox>`,
+  rendered through `formatTable` with columns `NAME PHASE HOSTS TTL EXPIRES REASON`.
+- `azureclaw egress revoke <name> [--namespace ns] [--yes]` deletes a single
+  approval with a confirm prompt by default; reconciler will tear down the
+  CM key + finalizer.
+- `__test` export surfaces `parseHostEndpoint`, `parseIsoDurationSecs`,
+  `validateReasonText`, `buildEgressApprovalSpecFromFlags`,
+  `deriveApprovalName`, `summarizeApprovalRow`, and the three `*Command()`
+  commander factories for vitest.
+
+**Headlamp plugin (`tools/headlamp-plugin/src/index.tsx`)**
+
+- `EgressApproval` registered in `AZURECLAW_CRDS` — auto-wires list view,
+  sidebar entry, and CR detail page (Spec / Status / Conditions tables).
+- New `SandboxEgressApprovalsCard` rendered inside `SandboxExtras` on every
+  ClawSandbox detail page: lists approvals whose `spec.sandbox` matches the
+  current sandbox in the same namespace; columns `NAME PHASE HOSTS TTL EXPIRES REASON MERGED-DIGEST`.
+  Cross-resource read pattern mirrors the existing "Related Resources" card
+  for ToolPolicy/InferencePolicy/ClawMemory links.
+
+**Tests / verify gates**
+
+- CLI: 52 new vitest cases (parsers, builder, summarizer, command-surface
+  presence). `npm run typecheck` + `npm run lint` (oxlint) + `npm test` clean.
+- Headlamp: vite build clean (21.54 kB → 6.68 kB gzip).
+- No controller / router code touched — the wire contract from 5e.2 is
+  unchanged.
+
 ### Slice 5e.2 — `EgressApproval` reconciler + router consumer wired end-to-end
 
 Closes the consumer half of Slice 5e: `EgressApproval` CRs now drive a real
