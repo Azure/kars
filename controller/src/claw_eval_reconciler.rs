@@ -456,13 +456,12 @@ async fn ensure_corpus_configmap(
         "azureclaw.azure.com/claweval-corpus-label".into(),
         resolved.label.clone(),
     );
-    let owner_refs =
-        eval_uid.and_then(|uid| {
-            serde_json::from_value::<
-                Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference>,
-            >(claweval_owner_refs(owner, uid))
-            .ok()
-        });
+    let owner_refs = eval_uid.and_then(|uid| {
+        serde_json::from_value::<
+            Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference>,
+        >(claweval_owner_refs(owner, uid))
+        .ok()
+    });
     let cm = ConfigMap {
         metadata: ObjectMeta {
             name: Some(cm_name.into()),
