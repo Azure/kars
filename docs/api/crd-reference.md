@@ -351,7 +351,7 @@ spec:
 
 ## `ClawEval` — reproducible evaluation run
 
-Replays a corpus of jailbreak / prompt-injection / banned-tool / egress / memory-isolation prompts against a sandbox. Builtin corpora ship in the controller binary (`azureclaw_eval_corpus::builtin::ALL_NAMES`): `jailbreak-baseline`, `prompt-injection-2026q1`, `banned-tools`, `egress-known-bad`, `memory-isolation`.
+Replays a corpus of jailbreak / prompt-injection / banned-tool / egress / memory-isolation prompts against a sandbox. Builtin corpora ship in the controller binary (`azureclaw_eval_corpus::BUILTIN_NAMES`): `jailbreak-baseline`, `prompt-injection-2026q1`, `banned-tools`, `egress-known-bad`, `memory-isolation`. For an operator-focused walkthrough see [`docs/api/claweval.md`](claweval.md).
 
 ```yaml
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -367,7 +367,7 @@ spec:
   schedule: "0 3 * * *"                                   # optional cron; absent = run-now annotation only
   failSandboxOnDrift: false                               # when true, drift patches sandbox Degraded
 status:
-  phase: Completed
+  phase: Ready
   observedGeneration: 1
   lastRunAt: "2026-05-14T03:00:00Z"
   cronJobName: claweval-nightly-regression
