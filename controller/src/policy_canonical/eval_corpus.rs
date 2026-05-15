@@ -173,33 +173,44 @@ mod tests {
         assert_eq!(out.fetched_at, when);
     }
 
+    // Cache tests use a process-wide singleton; serialize via a local
+    // mutex AND use unique keys per test so cache_clear() in one test
+    // can never race a cache_put() in another.
+    fn cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn cache_roundtrip_returns_within_ttl() {
+        let _g = cache_test_lock();
         EvalCorpusKind::cache_clear();
         let bytes = minimal_bytes();
         let mut out = EvalCorpusKind::parse(&bytes).unwrap();
         EvalCorpusKind::finalize(&mut out, "sha256:abc".into(), SystemTime::now());
-        EvalCorpusKind::cache_put("k1".into(), out.clone());
-        let hit = EvalCorpusKind::cache_get("k1", Instant::now()).expect("cache hit");
+        EvalCorpusKind::cache_put("k_roundtrip".into(), out.clone());
+        let hit = EvalCorpusKind::cache_get("k_roundtrip", Instant::now()).expect("cache hit");
         assert_eq!(hit, out);
     }
 
     #[test]
     fn cache_miss_for_unknown_key() {
+        let _g = cache_test_lock();
         EvalCorpusKind::cache_clear();
         assert!(EvalCorpusKind::cache_get("not-there", Instant::now()).is_none());
     }
 
     #[test]
     fn cache_clear_drops_entries() {
+        let _g = cache_test_lock();
         EvalCorpusKind::cache_clear();
         let bytes = minimal_bytes();
         let mut out = EvalCorpusKind::parse(&bytes).unwrap();
         EvalCorpusKind::finalize(&mut out, "sha256:abc".into(), SystemTime::now());
-        EvalCorpusKind::cache_put("k1".into(), out);
-        assert!(EvalCorpusKind::cache_get("k1", Instant::now()).is_some());
+        EvalCorpusKind::cache_put("k_drop".into(), out);
+        assert!(EvalCorpusKind::cache_get("k_drop", Instant::now()).is_some());
         EvalCorpusKind::cache_clear();
-        assert!(EvalCorpusKind::cache_get("k1", Instant::now()).is_none());
+        assert!(EvalCorpusKind::cache_get("k_drop", Instant::now()).is_none());
     }
 
     #[test]
