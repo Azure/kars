@@ -144,7 +144,43 @@ for (const crd of AZURECLAW_CRDS) {
 
 type StatusKind = "success" | "error" | "warning" | "";
 
-function phaseToStatus(phase: string | undefined): StatusKind {
+// Reasons that mean "the policy is broken; needs human attention, not patience".
+// Sourced from `controller/src/status/conditions.rs` (`reason::*`) — kept in
+// sync by audit (`docs/internal/crd-well-oiled-machine/honest-audit.md`).
+// Distinguishing these from `Awaiting*` reasons is the difference between an
+// amber chip (working as designed, just settling) and a red chip (operator
+// action required). The plain phase enum can't tell them apart on its own.
+const HARD_FAILURE_REASONS = new Set<string>([
+  "SignatureMismatch",
+  "BundleVerifyFailed",
+  "AuthMisconfigured",
+  "MemoryStoreMissing",
+  "RuntimeAdapterMissing",
+  "AdapterMissing",
+  "ShapeInvalid",
+  "AllowlistDrift",
+  "PolicyCompileFailed",
+]);
+
+const SOFT_PENDING_REASONS = new Set<string>([
+  "AwaitingRouterEnforcement",
+  "AwaitingFoundryProvisioning",
+  "NoSandboxesReferencing",
+  "Pending",
+]);
+
+function readyReason(item: KubeObject): string | undefined {
+  const conds = (getStatus(item).conditions as Array<Record<string, any>> | undefined) ?? [];
+  const ready = conds.find(c => c.type === "Ready");
+  return ready?.reason as string | undefined;
+}
+
+function phaseToStatus(phase: string | undefined, reason?: string): StatusKind {
+  // Reason wins when present — a `Degraded` phase with reason
+  // `AwaitingRouterEnforcement` is amber (transient), but a `Pending` phase
+  // with reason `SignatureMismatch` is red (operator action required).
+  if (reason && HARD_FAILURE_REASONS.has(reason)) return "error";
+  if (reason && SOFT_PENDING_REASONS.has(reason)) return "warning";
   if (!phase) return "";
   if (phase === "Ready" || phase === "Provisioned" || phase === "Active") return "success";
   if (phase === "Degraded" || phase === "Failed" || phase === "Error") return "error";
@@ -174,10 +210,29 @@ function shortModel(m: string | undefined): string {
   return idx >= 0 ? m.slice(idx + 1) : m;
 }
 
-function phaseChip(phase: string | undefined) {
+function phaseChip(phase: string | undefined, reason?: string) {
   if (!phase) return <span>—</span>;
-  const status = phaseToStatus(phase);
-  return <StatusLabel status={status as any}>{phase}</StatusLabel>;
+  const status = phaseToStatus(phase, reason);
+  // When the reason carries actionable signal, append it as a secondary
+  // muted label so operators see both at a glance. e.g.
+  //   [Degraded] AllowlistDrift   — red, action required
+  //   [Pending]  AwaitingRouterEnforcement — amber, settling
+  const showReason = reason && (HARD_FAILURE_REASONS.has(reason) || SOFT_PENDING_REASONS.has(reason));
+  return (
+    <span>
+      <StatusLabel status={status as any}>{phase}</StatusLabel>
+      {showReason && (
+        <span style={{ marginLeft: "0.4rem", fontSize: "0.85em", color: "#888" }}>
+          {reason}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function chipForItem(item: KubeObject, phaseField: string) {
+  const phase = (getStatus(item) as any)[phaseField] as string | undefined;
+  return phaseChip(phase, readyReason(item));
 }
 
 function urlParams(re: RegExp): RegExpMatchArray | null {
@@ -638,7 +693,7 @@ function Overview() {
             { label: "Namespace", getter: (r: KubeObject) => r.metadata?.namespace ?? "—" },
             { label: "Runtime", getter: (r: KubeObject) => getSpec(r).runtime?.kind ?? "—" },
             { label: "Model", getter: recentModel },
-            { label: "Phase", getter: (r: KubeObject) => phaseChip(getStatus(r).phase as string) },
+            { label: "Phase", getter: (r: KubeObject) => phaseChip(getStatus(r).phase as string, readyReason(r)) },
             {
               label: "Egress",
               getter: (r: KubeObject) => {
@@ -776,7 +831,7 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
   if (crd.phaseField) {
     columns.push({
       label: "Phase",
-      getter: (r: KubeObject) => phaseChip(getStatus(r)[crd.phaseField!] as string),
+      getter: (r: KubeObject) => phaseChip(getStatus(r)[crd.phaseField!] as string, readyReason(r)),
     });
   }
   columns.push({
@@ -831,7 +886,7 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
         <SimpleTable
           data={[
             { k: "Namespace", v: namespace },
-            { k: "Phase", v: phaseChip(status.phase as string) },
+            { k: "Phase", v: phaseChip(status.phase as string, readyReason(item)) },
             { k: "Created", v: item.metadata?.creationTimestamp ?? "—" },
             { k: "UID", v: item.metadata?.uid ?? "—" },
           ]}
@@ -961,6 +1016,64 @@ function SandboxEgressApprovalsCard({
         means the router has echoed the merged digest. Grants auto-expire at{" "}
         <code>status.expiresAt</code>; revoke early with <code>azureclaw egress revoke</code>.
       </p>
+    </SectionBox>
+  );
+}
+
+function McpServerFleetCard({ refs }: { refs: Array<{ name?: string }> }) {
+  // Per-MCP-server live status on the ClawSandbox detail. Each server gets a
+  // row showing phase + reason chip, JWKS digest (router-echoed), and tool
+  // count. Previously the operator had to click each server to see drift —
+  // now you see the whole referenced fleet at a glance.
+  const [servers] = (CRD_CLASSES.mcpservers as any).useList() as [
+    KubeObject[] | null,
+  ];
+  if (refs.length === 0) return null;
+  const byName = new Map<string, KubeObject>();
+  (servers ?? []).forEach(s => {
+    const n = s.metadata?.name;
+    if (n) byName.set(n, s);
+  });
+  const rows = refs.map(r => {
+    const obj = r.name ? byName.get(r.name) : undefined;
+    const status = obj ? getStatus(obj) : {};
+    const spec = obj ? getSpec(obj) : {};
+    const tools = Array.isArray(spec.tools) ? spec.tools.length : (status.toolCount ?? 0);
+    return {
+      name: r.name ?? "—",
+      phase: (status.phase as string | undefined),
+      reason: obj ? readyReason(obj) : undefined,
+      digest: (status.jwksDigest as string | undefined) ?? (status.bundleDigest as string | undefined),
+      tools,
+      missing: !obj,
+    };
+  });
+  return (
+    <SectionBox title={`MCP Servers (${rows.length})`}>
+      <SimpleTable
+        data={rows}
+        columns={[
+          {
+            label: "Name",
+            getter: (r: any) =>
+              r.missing ? (
+                <span>
+                  {r.name} <StatusLabel status="error">MISSING</StatusLabel>
+                </span>
+              ) : (
+                <Link
+                  routeName="mcpservers-detail"
+                  params={{ namespace: "azureclaw-system", name: r.name }}
+                >
+                  {r.name}
+                </Link>
+              ),
+          },
+          { label: "Phase", getter: (r: any) => phaseChip(r.phase, r.reason) },
+          { label: "Tools", getter: (r: any) => r.tools },
+          { label: "JWKS digest", getter: (r: any) => shortDigest(r.digest) },
+        ]}
+      />
     </SectionBox>
   );
 }
@@ -1096,6 +1209,8 @@ function SandboxExtras({ item }: { item: KubeObject }) {
           />
         </SectionBox>
       )}
+
+      <McpServerFleetCard refs={mcpRefs} />
 
       <SandboxEgressApprovalsCard sandboxName={name} sandboxNamespace={namespace} />
 

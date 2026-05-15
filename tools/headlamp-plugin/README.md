@@ -17,13 +17,18 @@ Detail panes show `.spec`, `.status`, and a typed Conditions table with
 status colouring (Ready / Provisioned → green, Degraded / Failed → red,
 everything else → amber).
 
-> **Known gaps (v1).** The status chip is **phase-only** — an amber chip
-> on a policy-lane CRD does not differentiate "signature failed" from
-> "compiled but router-drifted". For `McpServer`, the detail pane
-> renders only the **first/primary** server when a sandbox uses
-> `governance.mcpServerRefs[]` plural — a fleet panel showing all
-> referenced servers is deferred. Both are tracked in
-> [`docs/roadmap.md`](../../docs/roadmap.md).
+> **Status chip semantics.** Chips are **reason-aware**: when the
+> `Ready` condition carries a hard-failure reason
+> (`SignatureMismatch`, `BundleVerifyFailed`, `AuthMisconfigured`,
+> `MemoryStoreMissing`, `RuntimeAdapterMissing`, `ShapeInvalid`,
+> `AllowlistDrift`, `PolicyCompileFailed`) the chip renders **red**;
+> transient reasons (`AwaitingRouterEnforcement`,
+> `AwaitingFoundryProvisioning`, `NoSandboxesReferencing`, `Pending`)
+> render **amber**. The reason is appended as a secondary muted label.
+> The ClawSandbox detail pane renders **all** servers referenced by
+> `governance.mcpServerRefs[]` via `McpServerFleetCard` (per-server
+> phase + reason + JWKS digest + tool count + `MISSING` chip for
+> dangling refs).
 
 ## Build
 
