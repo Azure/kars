@@ -336,16 +336,27 @@ spec:
 | `spec.deleteOnSandboxDelete` | When `true` (default), runtime calls `delete_scope` on this scope when the sandbox or CR is deleted. |
 | `spec.bundleRef` | Signed OCI artifact alternative to inline content (mutex with `storeName` / `scope` / `retentionDays` / `deleteOnSandboxDelete` / `displayName`). `sandboxRef` is always CR-owned. |
 
-> **Provisioning is operator-driven today.** The CRD reconciler compiles
-> the binding into `/etc/azureclaw/memory/binding.json` and confirms the
-> router loaded it (`Ready ⇔ router echo`), but it does **not** create
-> the Foundry Memory Store, assign RBAC, or probe auth. You are
-> responsible for:
-> 1. Creating the Memory Store on the project (Portal or `azure-prepare`).
-> 2. Enabling system-assigned MI on the **project** (not the AI Services account).
-> 3. Granting `Azure AI User` to the project MI on the **resource group**.
+> **Provisioning split.** The CRD reconciler compiles the binding into
+> `/etc/azureclaw/memory/binding.json` and confirms the router loaded it
+> (`Ready ⇔ router echo`). It does **not** create the upstream **Foundry
+> AI Services account / Project** — that is operator-driven (Portal or
+> `azure-prepare`). The Memory **Store** *inside* a provisioned project,
+> however, is **router-auto-provisioned**: on the first `404` from
+> `/memory_stores/{id}` the inference router POSTs to `/memory_stores` to
+> create it and retries (`inference-router/src/mcp/platform.rs` ::
+> `ensure_memory_store`).
 >
-> Token audience must be `https://ai.azure.com/` (not `cognitiveservices.azure.com`). Auto-provisioning is on the roadmap — see [`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades). While provisioning is pending, the controller stamps `Ready=False / reason=AwaitingFoundryProvisioning`.
+> Pre-flight checklist for the human operator:
+> 1. AI Services account + Project exist (`azure-prepare`).
+> 2. System-assigned MI enabled on the **project** (not the AI Services account).
+> 3. `Azure AI User` granted to the project MI on the **resource group**.
+>
+> Token audience must be `https://ai.azure.com/` (not
+> `cognitiveservices.azure.com`). The reconciler surfaces three distinct
+> Degraded reasons when echoes come back unhealthy:
+> `AwaitingFoundryProvisioning` (no project), `MemoryStoreMissing` (project
+> exists but auto-provision failed / disabled), `AuthMisconfigured` (403 on
+> the memory tool call — usually missing project-MI RBAC).
 
 ---
 

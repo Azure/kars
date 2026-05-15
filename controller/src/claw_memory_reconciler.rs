@@ -41,15 +41,31 @@
 //! When binding write fails, `phase=Failed`, `Ready=False`,
 //! `Degraded=True`.
 //!
-//! ## What is *still* deferred (Slice 3b+)
+//! ## What landed in Slice 3b / 3c (no longer deferred)
 //!
-//! - Auto-provisioning of the upstream Foundry Memory Store on first
-//!   use (today the CLI plugin path / chart env still drive this).
-//! - `AuthMisconfigured` condition emission on 403 from Memory Store.
-//! - Memory MCP tool rewire to read from the binding (instead of the
-//!   chart-fed `FOUNDRY_MEMORY_STORE_ID` env). Slice 3a is additive —
-//!   the binding loads and the digest echoes, but no behavior
-//!   changes in the data plane yet.
+//! - **Slice 3b.4** — `AuthMisconfigured` Degraded reason: the router echoes
+//!   403 on the memory tool call back through `status.observedRouters[]`,
+//!   the reconciler elevates phase to `Degraded` with reason
+//!   `AuthMisconfigured` and an actionable message pointing at the project
+//!   MI / RBAC fix.
+//! - **Slice 3b.5** — `MemoryStoreMissing` Degraded reason: same echo path,
+//!   distinct reason so operators don't confuse "wrong RBAC" with "store
+//!   never created".
+//! - **Slice 3c.1** — router-side auto-provisioning. On first 404 from
+//!   `/memory_stores/{id}`, the inference router POSTs to `/memory_stores`
+//!   to create the store, then retries. See
+//!   [`inference-router/src/mcp/platform.rs`] `ensure_memory_store`. The
+//!   *controller* does NOT provision the upstream Foundry resource — that
+//!   remains an operator/`azure-prepare` job — but the store *inside* a
+//!   provisioned AI Services account is now self-healing.
+//!
+//! ## What is *still* operator-driven
+//!
+//! - Upstream Foundry **AI Services account** + **Project** lifecycle
+//!   (not in scope for the operator; `azure-prepare` handles it).
+//! - RBAC pre-grants: project MI needs `Azure AI User` on the resource
+//!   group for the internal model calls that Memory Store makes — see
+//!   `docs/operations/secret-rotation.md`.
 //!
 //! ## Reuse map (no-duplication rule, §0.2/§0.3)
 //!
