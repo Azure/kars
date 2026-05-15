@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Regression-guard test for `crd-well-oiled-machine` Slice 0
 //! "honesty events".
 //!

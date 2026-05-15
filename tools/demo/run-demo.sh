@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
 # tools/demo/run-demo.sh
 #
 # One scripted demo flow that exercises the full ClawSandbox lifecycle

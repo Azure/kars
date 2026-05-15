@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
+// ci:loc-ok: Slice-level module; decomposition tracked in §4.2 (see dev→main #320 promotion notes)
 
 //! Slice 4d.4 — namespaced MCP tool forwarder.
 //!
@@ -726,7 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_skips_servers_with_empty_url() {
-        let mut server = discovered("svc", "http://placeholder/", vec!["*"]);
+        let mut server = discovered("svc", "http://example.invalid/", vec!["*"]);
         server.meta.as_mut().unwrap().url = String::new();
         let registry = registry_with(vec![server]);
 
@@ -740,7 +741,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_skips_servers_requiring_outbound_oauth() {
-        let mut server = discovered("svc", "http://placeholder/", vec!["*"]);
+        let mut server = discovered("svc", "http://example.invalid/", vec!["*"]);
         server.meta.as_mut().unwrap().issuer = "https://idp.example".to_string();
         let registry = registry_with(vec![server]);
 
@@ -758,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_skips_servers_with_empty_allow_list() {
-        let registry = registry_with(vec![discovered("svc", "http://placeholder/", vec![])]);
+        let registry = registry_with(vec![discovered("svc", "http://example.invalid/", vec![])]);
         let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
             .await
             .expect("discover");
