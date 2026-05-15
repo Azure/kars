@@ -183,9 +183,7 @@ pub(super) async fn chat_completions(
     // actions, so operators must add explicit `deny tool.invoke:*`
     // rules to take effect. Pure passthrough cost is one parse +
     // one walk when `tools[]` is absent or empty.
-    if let Some((new_body, dropped)) =
-        filter_disallowed_tools(&state, sandbox_name, &body).await
-    {
+    if let Some((new_body, dropped)) = filter_disallowed_tools(&state, sandbox_name, &body).await {
         tracing::warn!(
             target: "inference.audit",
             sandbox = %sandbox_name,
@@ -1117,9 +1115,8 @@ mod tests {
 
     #[test]
     fn rewrite_skips_when_all_allowed() {
-        let body = Bytes::from_static(
-            br#"{"tools":[{"type":"function","function":{"name":"a"}}]}"#,
-        );
+        let body =
+            Bytes::from_static(br#"{"tools":[{"type":"function","function":{"name":"a"}}]}"#);
         assert!(rewrite_body_dropping_tools(&body, &allowed(&["a"])).is_none());
     }
 

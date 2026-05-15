@@ -371,8 +371,7 @@ mod tests {
         let body = serde_json::to_vec(&doc).unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
         assert_eq!(
-            body_str,
-            r#"{"schemaVersion":1,"endpoints":[{"host":"example.com","port":443}]}"#,
+            body_str, r#"{"schemaVersion":1,"endpoints":[{"host":"example.com","port":443}]}"#,
             "merged-allowlist body must serialize in insertion order \
              (schemaVersion first) so router + controller digests agree; \
              check Cargo.toml: serde_json must have `preserve_order` enabled"

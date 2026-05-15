@@ -801,8 +801,7 @@ mod tests {
         let body = compile_merged_endpoints_body(&endpoints);
         let body_str = std::str::from_utf8(&body).unwrap();
         assert_eq!(
-            body_str,
-            r#"{"schemaVersion":1,"endpoints":[{"host":"example.com","port":443}]}"#,
+            body_str, r#"{"schemaVersion":1,"endpoints":[{"host":"example.com","port":443}]}"#,
             "merged-allowlist body must serialize in insertion order \
              (schemaVersion first); check Cargo.toml: serde_json must \
              have `preserve_order` enabled"

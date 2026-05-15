@@ -466,7 +466,11 @@ mod tests {
         let error_before = crate::metrics::POLICY_BUNDLE_RELOADS
             .with_label_values(&[label, "error"])
             .get();
-        reg.record_error(kind, "/etc/azureclaw/memory/binding.json", "permission denied");
+        reg.record_error(
+            kind,
+            "/etc/azureclaw/memory/binding.json",
+            "permission denied",
+        );
 
         assert_eq!(
             crate::metrics::POLICY_BUNDLE_HEALTHY

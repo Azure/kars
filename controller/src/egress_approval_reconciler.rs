@@ -82,9 +82,7 @@ use crate::egress_approval_compile::{
     approval_file_key, approvals_configmap_name, compile_approval_file, merged_allowlist_digest,
 };
 use crate::status::conditions::{self, status as cond_status};
-use crate::status::phase::{
-    PHASE_ACTIVE, PHASE_EXPIRED, PHASE_PENDING, PHASE_SANDBOX_RUNNING,
-};
+use crate::status::phase::{PHASE_ACTIVE, PHASE_EXPIRED, PHASE_PENDING, PHASE_SANDBOX_RUNNING};
 use crate::status::router_confirmation::{RouterEnforcementState, decide_enforcement_state};
 use crate::status::router_confirmation_io::poll_referencing_sandboxes;
 
