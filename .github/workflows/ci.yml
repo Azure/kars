@@ -370,6 +370,11 @@ jobs:
     # to keep PR signal fast — the path filter is the gate.
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      # Required by docker/build-push-action GHA cache backend
+      # (cache-to: type=gha) used by the image pre-build steps below.
+      actions: write
     if: |
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
@@ -434,6 +439,36 @@ jobs:
           docker system prune -af --volumes >/dev/null 2>&1 || true
           df -h
 
+      # Pre-build controller + router images with buildx GHA cache so that
+      # the `cargo build --release` layer inside the Dockerfile is reused
+      # across PRs. Cache scope is shared with image-cache-publish.yml so
+      # dev-branch builds warm the same cache.
+      - name: Set up Docker Buildx
+        if: steps.paths.outputs.run == 'true'
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - name: Pre-build controller image (buildx + GHA cache)
+        if: steps.paths.outputs.run == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          file: controller/Dockerfile
+          tags: azureclaw-controller:e2e
+          load: true
+          cache-from: type=gha,scope=image-controller
+          cache-to: type=gha,scope=image-controller,mode=max
+
+      - name: Pre-build inference-router image (buildx + GHA cache)
+        if: steps.paths.outputs.run == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          file: inference-router/Dockerfile
+          tags: azureclaw-inference-router:e2e
+          load: true
+          cache-from: type=gha,scope=image-inference-router
+          cache-to: type=gha,scope=image-inference-router,mode=max
+
       - name: Run e2e
         if: steps.paths.outputs.run == 'true'
         env:
@@ -446,6 +481,10 @@ jobs:
           # leader lease so the test environment is deterministic.
           AZURECLAW_E2E_CONTROLLER_REPLICAS: "1"
           AZURECLAW_E2E_DISABLE_LEADER_ELECTION: "1"
+          # Both images were pre-built with buildx GHA cache above —
+          # tell the harness to skip its in-process `docker build` and
+          # just `kind load` the existing tags.
+          AZURECLAW_E2E_SKIP_IMAGE_BUILD: "1"
         run: |
           set -euo pipefail
           make test-e2e

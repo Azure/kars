@@ -1202,7 +1202,7 @@ azureclaw eval diff nightly-regression
 ```
 
 Authoring new corpora and signing them is covered separately:
-- **[`docs/guides/eval-corpus-signing.md`](guides/eval-corpus-signing.md)** — `policy sign --kind eval-corpus` walkthrough.
+- **[`docs/api/claweval.md`](api/claweval.md)** — operator workflows (run-now, schedule, drift, GC).
 - **[`docs/api/crd-reference.md#claweval`](api/crd-reference.md#claweval--reproducible-evaluation-run)** — the CRD schema.
 
 ---

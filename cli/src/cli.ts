@@ -94,11 +94,11 @@ export function createCli(): Command {
 Command groups:
   Lifecycle       up, dev, add, push, destroy
   Operations      connect, status, list, logs, inspect
-  Configuration   credentials, model, policy, egress
+  Configuration   credentials, model, policy, egress, config
   Observability   trace, eval, operator, audit
   Agent mobility  handoff, mesh, pair
   Interop         convert, a2a, a2a-agent, migrate
-  Governance      toolpolicy, inferencepolicy, mcp
+  Governance      toolpolicy, inferencepolicy, mcp, memory
   Attestation     attest
 
 Quick start:

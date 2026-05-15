@@ -157,8 +157,10 @@ async fn reconcile(eval: Arc<ClawEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     };
 
     // -------- 2. Ensure corpus ConfigMap --------------------------
+    let eval_uid = eval.metadata.uid.as_deref();
     let cm_name = format!("claweval-{name}-corpus");
-    if let Err(e) = ensure_corpus_configmap(&configmaps, &cm_name, &name, &resolved).await {
+    if let Err(e) = ensure_corpus_configmap(&configmaps, &cm_name, &name, eval_uid, &resolved).await
+    {
         tracing::warn!(claweval = %name, error_class = e.class(), "ClawEvalCorpusWriteFailed");
         return write_degraded(
             &evals_api,
@@ -194,7 +196,7 @@ async fn reconcile(eval: Arc<ClawEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             &jobs,
             &job_name,
             &name,
-            eval.metadata.uid.as_deref(),
+            eval_uid,
             &cm_name,
             &runner_image,
             &target_url,
@@ -221,7 +223,7 @@ async fn reconcile(eval: Arc<ClawEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             &cronjobs,
             &cj_name,
             &name,
-            eval.metadata.uid.as_deref(),
+            eval_uid,
             schedule,
             &cm_name,
             &runner_image,
@@ -432,6 +434,7 @@ async fn ensure_corpus_configmap(
     api: &Api<ConfigMap>,
     cm_name: &str,
     owner: &str,
+    eval_uid: Option<&str>,
     resolved: &ResolvedCorpus,
 ) -> Result<(), ReconcileError> {
     let mut data: BTreeMap<String, String> = BTreeMap::new();
@@ -453,6 +456,12 @@ async fn ensure_corpus_configmap(
         "azureclaw.azure.com/claweval-corpus-label".into(),
         resolved.label.clone(),
     );
+    let owner_refs = eval_uid.and_then(|uid| {
+        serde_json::from_value::<
+            Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference>,
+        >(claweval_owner_refs(owner, uid))
+        .ok()
+    });
     let cm = ConfigMap {
         metadata: ObjectMeta {
             name: Some(cm_name.into()),
@@ -468,6 +477,7 @@ async fn ensure_corpus_configmap(
                     "claw-eval-corpus".into(),
                 ),
             ])),
+            owner_references: owner_refs,
             ..Default::default()
         },
         data: Some(data),

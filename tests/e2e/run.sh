@@ -54,6 +54,24 @@ setup_cluster() {
 }
 
 build_images() {
+    # CI optimisation: if `AZURECLAW_E2E_SKIP_IMAGE_BUILD=1` and the
+    # required tags are already present in the local docker daemon
+    # (a previous CI step did the buildx-cached build), skip the build
+    # entirely and only do the `kind load` step. Saves ~5-8 min/run.
+    local skip="${AZURECLAW_E2E_SKIP_IMAGE_BUILD:-0}"
+    if [ "$skip" = "1" ] || [ "$skip" = "true" ]; then
+        info "AZURECLAW_E2E_SKIP_IMAGE_BUILD=1 — using pre-loaded images"
+        if ! docker image inspect azureclaw-controller:e2e >/dev/null 2>&1; then
+            warn "azureclaw-controller:e2e not present; falling back to building"
+        elif ! docker image inspect azureclaw-inference-router:e2e >/dev/null 2>&1; then
+            warn "azureclaw-inference-router:e2e not present; falling back to building"
+        else
+            kind load docker-image azureclaw-controller:e2e --name "$CLUSTER_NAME"
+            kind load docker-image azureclaw-inference-router:e2e --name "$CLUSTER_NAME"
+            return 0
+        fi
+    fi
+
     # Retry docker pulls/builds to absorb transient MCR registry flakes
     # (e.g., 403/404 on pinned digests during MCR rollouts).
     docker_build_retry() {
@@ -591,13 +609,30 @@ EOF
     fi
 
     # The Job must be owned by the ClawEval CR for cascade cleanup.
-    local owner_kind
+    local owner_kind owner_controller owner_block
     owner_kind=$(kubectl get job "$job_name" -n azureclaw-system \
         -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
-    if [ "$owner_kind" = "ClawEval" ]; then
-        pass "ClawEval lifecycle: Job has ownerReference → ClawEval"
+    owner_controller=$(kubectl get job "$job_name" -n azureclaw-system \
+        -o jsonpath='{.metadata.ownerReferences[0].controller}' 2>/dev/null || true)
+    owner_block=$(kubectl get job "$job_name" -n azureclaw-system \
+        -o jsonpath='{.metadata.ownerReferences[0].blockOwnerDeletion}' 2>/dev/null || true)
+    if [ "$owner_kind" = "ClawEval" ] && [ "$owner_controller" = "true" ] && [ "$owner_block" = "true" ]; then
+        pass "ClawEval lifecycle: Job has ownerReference → ClawEval (controller=true, blockOwnerDeletion=true)"
     else
-        fail "ClawEval lifecycle: Job missing ClawEval ownerReference (got '$owner_kind')"
+        fail "ClawEval lifecycle: Job ownerReference mismatch (kind='$owner_kind' controller='$owner_controller' block='$owner_block')"
+    fi
+
+    # The corpus ConfigMap must also carry the same ownerReference so it
+    # GCs with the parent even if the controller is down. (The reconciler
+    # also has an explicit finalizer-driven cleanup path; ownerRef is
+    # defence-in-depth.)
+    local cm_owner_kind
+    cm_owner_kind=$(kubectl get configmap claweval-e2e-claweval-lc-corpus -n azureclaw-system \
+        -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
+    if [ "$cm_owner_kind" = "ClawEval" ]; then
+        pass "ClawEval lifecycle: corpus ConfigMap has ownerReference → ClawEval"
+    else
+        fail "ClawEval lifecycle: corpus ConfigMap missing ClawEval ownerReference (got '$cm_owner_kind')"
     fi
 
     # ---- schedule ensures a CronJob ----------------------------
@@ -612,6 +647,16 @@ EOF
             pass "ClawEval lifecycle: schedule → CronJob created with correct schedule"
         else
             fail "ClawEval lifecycle: CronJob schedule mismatch (got '$cron_sched')"
+        fi
+        local cj_owner_kind cj_owner_controller
+        cj_owner_kind=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+            -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
+        cj_owner_controller=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+            -o jsonpath='{.metadata.ownerReferences[0].controller}' 2>/dev/null || true)
+        if [ "$cj_owner_kind" = "ClawEval" ] && [ "$cj_owner_controller" = "true" ]; then
+            pass "ClawEval lifecycle: CronJob has ownerReference → ClawEval (controller=true)"
+        else
+            fail "ClawEval lifecycle: CronJob ownerReference mismatch (kind='$cj_owner_kind' controller='$cj_owner_controller')"
         fi
     else
         dump_cr_diagnostics claweval e2e-claweval-lc azureclaw-system
