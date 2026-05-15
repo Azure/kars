@@ -225,10 +225,10 @@ Phase 2 used a provider factory to compare the vendored adapter with AGT. Phase
 
 ```mermaid
 flowchart TD
-  Runtime[OpenClaw runtime] --> MeshPkg[@azureclaw/mesh]
-  MeshPkg --> Crypto[Node.js crypto helpers\nidentity/sign/verify]
+  Runtime[OpenClaw runtime] --> MeshPkg["@azureclaw/mesh"]
+  MeshPkg --> Crypto["Node.js crypto helpers<br/>identity/sign/verify"]
   MeshPkg --> Agt[AgtTransport]
-  Agt --> Sdk[@microsoft/agent-governance-sdk\nMeshClient]
+  Agt --> Sdk["@microsoft/agent-governance-sdk<br/>MeshClient"]
   Sdk --> Relay[AGT relay + registry]
 ```
 

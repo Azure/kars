@@ -192,5 +192,4 @@ flow needed in CI.
 
 `azureclaw migrate from-kagent` now emits a one-line "Next step" hint
 when the translated bundle includes an egress allowlist, pointing
-operators directly at the GitOps `--emit-manifest` flow. See
-`docs/internal/policy-canonical-format.md` (internal).
+operators directly at the GitOps `--emit-manifest` flow.

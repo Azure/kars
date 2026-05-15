@@ -402,6 +402,28 @@ async fn main() -> Result<()> {
             .layer(axum::middleware::from_fn(trace_id_middleware))
     };
 
+    // Router binds 0.0.0.0:<port> (plaintext HTTP, cluster-internal only).
+    //
+    // Why 0.0.0.0 and not 127.0.0.1: the K8s controller reaches this listener
+    // via the per-sandbox Service DNS
+    // `{name}.azureclaw-{name}.svc.cluster.local:8443` for status-confirmation
+    // probes (see controller/src/status/router_confirmation.rs). The Service
+    // forwards to the pod IP, which only works if the listener is bound on
+    // a non-loopback interface inside the pod.
+    //
+    // The security boundary is therefore:
+    //   1. NetworkPolicy `operator-default-deny`: only ingress from the
+    //      operator namespace (and the openclaw sidecar via loopback) is
+    //      permitted on :8443. No other in-cluster workload can reach it.
+    //   2. `admission-pod-exec-ban`: blocks `kubectl exec` into sandbox pods,
+    //      preventing tenant-namespace operators from bypassing the proxy.
+    //   3. Bearer-token auth on `/admin/*`, `/egress/*`, `/sandbox/*`, and
+    //      `/agt/audit` via `router-admin-token` (controller-generated CSPRNG
+    //      secret, only mounted in the inference-router container).
+    //
+    // Traffic between operator namespace and sandbox namespace is plaintext
+    // inside the cluster. The mTLS-mandatory variant lives on a separate
+    // port (default 8445, see A2A mTLS block below).
     let addr = format!("0.0.0.0:{}", config.port);
     tracing::info!("Listening on {addr}");
 

@@ -35,7 +35,7 @@ RUN cargo build --release --package azureclaw-inference-router
 FROM ${AZURELINUX_BASE}
 ARG VERSION=0.1.0
 
-RUN tdnf install -y ca-certificates shadow-utils iptables && tdnf clean all
+RUN tdnf install -y ca-certificates shadow-utils iptables curl && tdnf clean all
 
 # Non-root user
 RUN groupadd -g 1000 router && useradd -u 1000 -g router -s /sbin/nologin router
@@ -44,6 +44,12 @@ COPY --from=builder /build/target/release/azureclaw-inference-router /usr/local/
 
 USER router
 EXPOSE 8443
+
+# HEALTHCHECK: queries the in-process /healthz endpoint. Useful for
+# `docker compose` / `docker ps` operators; K8s installs use their own
+# liveness/readiness probes defined in the Deployment.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -fsS --max-time 2 http://127.0.0.1:8443/healthz || exit 1
 
 LABEL org.opencontainers.image.title="AzureClaw Inference Router" \
       org.opencontainers.image.description="High-performance inference proxy for AzureClaw" \

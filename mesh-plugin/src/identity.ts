@@ -5,12 +5,27 @@
  * Mesh identity management — Ed25519 signing + X25519 exchange keypairs.
  *
  * Generates keys with Node.js native crypto (no SDK dep). Persists the
- * key material at ~/.azureclaw/identity.json encrypted at rest with
- * AES-256-GCM (key derived from hostname+homedir).
+ * key material at ~/.azureclaw/identity.json under a schema-2 envelope.
  *
  * Exposes a stable `MeshIdentity` facade (amid + raw signing keys) for
  * the rest of the plugin. AMID derivation matches the AgentMesh
  * convention: base58(sha256(signing_public_key)[:20]).
+ *
+ * Security boundary — IMPORTANT.
+ *   The envelope wraps the IdentityData in AES-256-GCM, but the KEK is
+ *   derived from `os.hostname() + os.homedir()`. Both inputs are
+ *   adversary-readable on the host. This wrapping therefore provides:
+ *     - Obfuscation against casual filesystem inspection.
+ *     - Zero protection against an attacker with code execution under
+ *       the same UID on the same machine (they can recompute the KEK
+ *       trivially and decrypt the envelope).
+ *
+ *   The actual on-disk security boundary is the `chmod 0600` set when
+ *   the file is written. Operators who require stronger at-rest
+ *   protection MUST run on a host with full-disk encryption, or store
+ *   the identity in an OS keyring / hardware-backed key store (not yet
+ *   wired here). The schema-2 envelope is retained for back-compat with
+ *   sandboxes that still read the existing format on disk.
  */
 
 import * as crypto from "node:crypto";
@@ -93,6 +108,9 @@ export function deriveAmid(signingPublicKey: Buffer): string {
 // ---------------------------------------------------------------------------
 
 function deriveEncryptionKey(): Buffer {
+  // KEK is derived from host-readable inputs; the wrapping is obfuscation,
+  // not encryption against a same-UID attacker. See file-level docstring
+  // for the actual security boundary (chmod 0600 + encrypted disk).
   const seed = `azureclaw:mesh-identity:${os.hostname()}:${os.homedir()}`;
   return crypto.createHash("sha256").update(seed).digest();
 }

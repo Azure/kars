@@ -161,5 +161,3 @@ operator command  ───►  KubectlDataSource ──► ClusterState
 - **No secret bytes are rendered.** JWKS / token / API-key fields collapse
   to `<present>` / `<missing>` via `panels/redact.ts`.
 - No telemetry is emitted from the TUI.
-
-See `docs/internal/security-audits/2026-04-30-phase2-tui-redesign.md`.

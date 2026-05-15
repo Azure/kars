@@ -201,7 +201,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 ### One mesh, one gateway, one CLI
 
-- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. AzureClaw consumes the upstream [`@agentmesh/sdk`](https://github.com/amitayks/agentmesh) directly on the Rust side; the TS plugin layer keeps a small adapter (and a vendored dist overlay for known bug-fixes, documented in `vendor/agentmesh-sdk/README.md`).
+- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. AzureClaw consumes the upstream [`@agentmesh/sdk`](https://github.com/amitayks/agentmesh) directly on the Rust side, and the TypeScript plugin layer installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time. There is no in-tree fork of the SDK.
 - **A2A 1.0.0 gateway** — public-ingress for peer-to-peer agent traffic with signed `AgentCard` verification, tenant routing, observability.
 - **CLI (`azureclaw …`)** — 31 commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
@@ -234,7 +234,7 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 
 ## Project status
 
-`v1.0.0-rc.1` — release candidate. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E + manual matrix). See **[`CHANGELOG.md`](CHANGELOG.md)** for the per-release change log and **[`docs/api/backwards-compatibility.md`](docs/api/backwards-compatibility.md)** for the API stability contract.
+`v0.1.0` — pre-1.0 development. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E + manual matrix), but the project is still tracking towards its first stable release; expect minor breaking changes on the CRD surface. See **[`CHANGELOG.md`](CHANGELOG.md)** for the per-release change log and **[`docs/api/backwards-compatibility.md`](docs/api/backwards-compatibility.md)** for the API stability contract.
 
 ## Known limitations
 

@@ -746,22 +746,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     };
     let gateway_token = if gateway_token.is_empty() {
-        // Generate a new 32-char alphanumeric token using OS randomness
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
+        // 32-char hex token from a CSPRNG (rand::rng() is the OS-backed
+        // ThreadRng). 16 random bytes = 128 bits of entropy, hex-encoded
+        // to keep the on-the-wire format stable with existing consumers.
+        use rand::RngCore;
+        let mut bytes = [0u8; 16];
+        rand::rng().fill_bytes(&mut bytes);
         let mut token = String::with_capacity(32);
-        for _ in 0..4 {
-            let s = RandomState::new();
-            let mut h = s.build_hasher();
-            h.write_u64(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64,
-            );
-            token.push_str(&format!("{:016x}", h.finish()));
+        for b in bytes {
+            token.push_str(&format!("{b:02x}"));
         }
-        token.truncate(32);
         token
     } else {
         gateway_token
@@ -805,21 +799,15 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     };
     let admin_token = if admin_token.is_empty() {
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
+        // 64-char hex token from a CSPRNG. 32 random bytes = 256 bits of
+        // entropy, hex-encoded for stable on-the-wire format.
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
         let mut token = String::with_capacity(64);
-        for _ in 0..8 {
-            let s = RandomState::new();
-            let mut h = s.build_hasher();
-            h.write_u64(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64,
-            );
-            token.push_str(&format!("{:016x}", h.finish()));
+        for b in bytes {
+            token.push_str(&format!("{b:02x}"));
         }
-        token.truncate(64);
         token
     } else {
         admin_token

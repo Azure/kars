@@ -95,7 +95,7 @@ sequenceDiagram
   WI-->>Router: bearer token
   Router->>Foundry: POST /openai/… + bearer<br/>(Content Safety enforced server-side)
   Foundry-->>Router: completion + prompt_filter_results
-  Router->>Router: parse prompt_filter_results;<br/>block if jailbreak / category > threshold
+  Router->>Router: parse prompt_filter_results — block if jailbreak / category > threshold
   Router-->>Agent: completion
   Note over Router: audit record:<br/>hash-chained, signed
 ```

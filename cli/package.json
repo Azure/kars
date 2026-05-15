@@ -1,6 +1,6 @@
 {
   "name": "@azureclaw/cli",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0",
   "description": "Enterprise-grade runtime for running OpenClaw AI assistants safely on Azure",
   "license": "MIT",
   "repository": {

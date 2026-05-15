@@ -177,6 +177,13 @@ LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \
       org.opencontainers.image.source="https://github.com/Azure/azureclaw" \
       org.opencontainers.image.base.name="azurelinux/base/core:3.0"
 
+# HEALTHCHECK: probes the OpenClaw gateway on its in-pod port. The
+# inference-router sidecar has its own HEALTHCHECK in its base image.
+# This applies to `docker compose` / `docker ps` operators; K8s uses
+# the readiness/liveness probes from the Deployment instead.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+  CMD curl -fsS --max-time 2 http://127.0.0.1:18789/ > /dev/null || exit 1
+
 # Entrypoint runs as root to set up iptables and start services under correct UIDs:
 #   UID 1001 (router)  — can reach the internet (Foundry API, blocklist feeds)
 #   UID 1000 (sandbox) — restricted to localhost + DNS by iptables egress guard
