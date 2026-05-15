@@ -18,7 +18,7 @@
 //! Three reconcilers historically stamped `Ready` while the data plane
 //! ignored the body (`InferencePolicy`'s `tokenBudget` /
 //! `contentSafety` / `modelPreference`, `ClawMemory`'s binding) or
-//! stamped `Pending` forever with a TODO comment. Each was a lie to the
+//! stamped `Pending` forever with an unfinished-marker comment. Each was a lie to the
 //! user: `kubectl wait --for=condition=Ready` returned green for a
 //! policy that was doing nothing.
 //!

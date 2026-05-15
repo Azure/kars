@@ -56,6 +56,9 @@ ALLOW_PATHS=(
   'controller/src/claw_memory_compile.rs'      # ClawMemory binding compile (S5)
   'controller/src/claw_eval_compile.rs'        # ClawEval suite compile (S6)
   'controller/src/trust_graph_compile.rs'      # Phase F1: TrustGraph edge signature verifier — pure conduit to ed25519-dalek::{Signature, Verifier, VerifyingKey} + sha2 for the version-hash; no hand-rolled crypto math, domain-separated canonical payload defined in PAYLOAD_DOMAIN constant
+  'controller/src/egress_allowlist_compile.rs' # Slice 5c.1: signed egress allowlist OCI artifact — sha2::Sha256 only for content-hashing the compiled YAML; no signing math (signatures applied by cosign upstream)
+  'controller/src/egress_approval_compile.rs'  # Slice 5e.2: EgressApproval CEL profile compile — sha2::Sha256 only for canonical-form content hashing; no signing math
+  'inference-router/src/policy_status.rs'      # Slice 5d / 1c: policy status echo — sha2::Sha256 only for verifying digests echoed back to the controller; no signing math
   'vendor/'
   'tests/'
 )

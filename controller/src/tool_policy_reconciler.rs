@@ -210,7 +210,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let enforcement_state = if degraded.is_some() {
         // On compile failure, the state machine doesn't apply —
         // `degraded` short-circuits below. Use NotApplicable as a
-        // placeholder; `build_conditions` ignores it under degraded.
+        // sentinel value; `build_conditions` ignores it under degraded.
         RouterEnforcementState::NotApplicable
     } else {
         match (agt_profile_inline, agt_digest.as_deref()) {

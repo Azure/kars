@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Slice 4d.2 — McpServer registry (discovery half).
 //!
 //! The controller mirrors each `McpServer` referenced by a sandbox
