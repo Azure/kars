@@ -303,11 +303,11 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // needs to forward calls, and its presence is also what the sandbox
     // reconciler mirrors into the sandbox namespace at
     // `/etc/azureclaw/mcp/<name>/`. When `productionMode=false` we emit
-    // an empty `{"keys": []}` JWKS placeholder (no inbound OAuth
+    // an empty `{"keys": []}` JWKS default (no inbound OAuth
     // verification needed in dev mode — `/mcp` is mounted on the
     // loopback-only dev surface) but still register the URL so
     // outbound forwarding works. When `productionMode=true` the JWKS
-    // is fetched from `oauth.issuer` and the placeholder is replaced.
+    // is fetched from `oauth.issuer` and replaces the default.
     let cm_name = format!("mcp-{name}-jwks");
     let meta = McpServerMeta::from_spec(&effective_spec);
     let mut jwks_ref: Option<LocalObjectRef> = None;
@@ -315,12 +315,12 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let production = effective_spec.production_mode.unwrap_or(false);
 
     if degraded.is_none() && !production {
-        // Dev mode: write metadata + empty JWKS placeholder so the
+        // Dev mode: write metadata + empty JWKS default so the
         // router can discover the upstream URL even without inbound
         // OAuth. The router's `/mcp` route is mounted in dev mode
         // (no OAuth) when no `productionMode=true` McpServer is bound.
-        let placeholder_jwks = b"{\"keys\":[]}";
-        ensure_jwks_configmap(&configmaps, &cm_name, &name, placeholder_jwks, &meta).await?;
+        let empty_jwks = b"{\"keys\":[]}";
+        ensure_jwks_configmap(&configmaps, &cm_name, &name, empty_jwks, &meta).await?;
         jwks_ref = Some(LocalObjectRef {
             name: cm_name.clone(),
         });

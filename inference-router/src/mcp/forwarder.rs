@@ -914,7 +914,7 @@ mod tests {
         unsafe {
             std::env::remove_var(env_name);
         }
-        let mut server = discovered("github", "http://placeholder/", vec!["*"]);
+        let mut server = discovered("github", "http://example.invalid/", vec!["*"]);
         server.meta.as_mut().unwrap().bearer_from_env = env_name.to_string();
         let registry = registry_with(vec![server]);
 

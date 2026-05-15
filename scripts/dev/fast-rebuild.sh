@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
 # Fast-rebuild — incrementally cross-compile a Rust crate for Linux
 # inside a builder container (reusing target cache between runs), then
 # overlay the fresh binary onto the existing release image. Saves the
