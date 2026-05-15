@@ -64,6 +64,42 @@ pub mod paths {
     /// ToolPolicy compiled profile (JSON). Loaded by the AGT policy
     /// engine on startup and on hot-reload.
     pub const TOOL_POLICY_DIR: &str = "/etc/agt/policies";
+    /// InferencePolicy compiled profile (JSON). Loaded by the
+    /// inference-router's `inference_policy_loader` on startup; the
+    /// digest is echoed via `/internal/policy-status` so the
+    /// controller can close the §3 Ready ⇔ router-echo loop. Must
+    /// match the router-side default in
+    /// `inference-router/src/inference_policy_loader.rs::INFERENCE_POLICY_DIR_DEFAULT`.
+    pub const INFERENCE_POLICY_DIR: &str = "/etc/azureclaw/inference";
+    /// `ClawMemory` compiled binding (JSON). Loaded by the
+    /// inference-router's `memory_binding_loader` on startup; the
+    /// digest is echoed via `/internal/policy-status` so the
+    /// controller can close the §3 Ready ⇔ router-echo loop
+    /// (Slice 3a). Must match the router-side default in
+    /// `inference-router/src/memory_binding_loader.rs::MEMORY_BINDING_DIR_DEFAULT`.
+    pub const MEMORY_BINDING_DIR: &str = "/etc/azureclaw/memory";
+    /// Signed egress allowlist (JSON). Compiled by the controller
+    /// from the verified `spec.networkPolicy.allowlistRef` (or inline
+    /// `allowedEndpoints` when no ref is set); loaded by the
+    /// inference-router's `egress_allowlist_loader` which seeds the
+    /// L7 hostname filter (`Blocklist.allowlist`). Digest is echoed
+    /// via `/internal/policy-status` under `PolicyKind::EgressAllowlist`
+    /// to close the §3 Ready ⇔ router-echo loop (Slice 5c.1). Must
+    /// match the router-side default in
+    /// `inference-router/src/egress_allowlist_loader.rs::EGRESS_ALLOWLIST_DIR_DEFAULT`.
+    pub const EGRESS_ALLOWLIST_DIR: &str = "/etc/azureclaw/egress";
+    /// Per-sandbox `EgressApproval` files (one `approval-{name}.json`
+    /// per CR pointing at this sandbox). Owned by the
+    /// `egress_approval_reconciler`; consumed by the inference-router's
+    /// `egress_allowlist_loader` which UNIONs them with the baseline
+    /// allowlist and echoes the merged-set digest via
+    /// `/internal/policy-status` under `PolicyKind::EgressApproval`.
+    /// Mounted with `optional: true` so sandbox pods start before any
+    /// approval has landed. Must match the router-side default in
+    /// `inference-router/src/egress_allowlist_loader.rs`
+    /// (`EGRESS_APPROVAL_DIR_DEFAULT` in
+    /// `inference-router/src/egress_allowlist_loader.rs`).
+    pub const EGRESS_APPROVAL_DIR: &str = "/etc/azureclaw/egress-approvals";
     /// McpServer JWKS (used by the customer-MCP OAuth verifier).
     pub const MCP_JWKS_DIR: &str = "/etc/azureclaw/mcp";
     /// A2AAgent compiled signed AgentCard.
@@ -345,6 +381,42 @@ fn inject_container_mount(
     }
 }
 
+/// Set a single environment variable on a named container, idempotently.
+///
+/// Used when an env var must be set independently of a volume mount —
+/// e.g. `MCP_JWKS_DIR` is set once for the parent directory after
+/// per-server JWKS volumes have already been injected.
+///
+/// If the env var name already exists on the container, this is a no-op
+/// (existing value wins — caller is responsible for ordering if updates
+/// matter).
+pub fn inject_container_env(pod_spec: &mut Value, container_name: &str, name: &str, value: &str) {
+    let containers = match pod_spec
+        .get_mut("containers")
+        .and_then(|c| c.as_array_mut())
+    {
+        Some(c) => c,
+        None => return,
+    };
+    for container in containers.iter_mut() {
+        if container.get("name").and_then(|n| n.as_str()) != Some(container_name) {
+            continue;
+        }
+        let env = container
+            .as_object_mut()
+            .unwrap()
+            .entry("env")
+            .or_insert(json!([]));
+        if let Some(env_arr) = env.as_array_mut()
+            && !env_arr
+                .iter()
+                .any(|e| e.get("name").and_then(|n| n.as_str()) == Some(name))
+        {
+            env_arr.push(json!({ "name": name, "value": value }));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +585,69 @@ mod tests {
             spec.pointer("/containers/0/volumeMounts").is_none(),
             "non-target container untouched"
         );
+    }
+
+    #[test]
+    fn inject_container_env_adds_var_to_named_container_only() {
+        let mut spec = empty_router_pod_spec();
+        inject_container_env(
+            &mut spec,
+            "inference-router",
+            "MCP_JWKS_DIR",
+            "/etc/azureclaw/mcp",
+        );
+
+        let env = spec
+            .pointer("/containers/0/env")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(env.len(), 2);
+        assert!(env.iter().any(
+            |e| e.get("name").and_then(|n| n.as_str()) == Some("MCP_JWKS_DIR")
+                && e.get("value").and_then(|v| v.as_str()) == Some("/etc/azureclaw/mcp")
+        ));
+        // Other container untouched.
+        assert!(spec.pointer("/containers/1/env").is_none());
+    }
+
+    #[test]
+    fn inject_container_env_is_idempotent_when_var_already_set() {
+        let mut spec = empty_router_pod_spec();
+        inject_container_env(&mut spec, "inference-router", "EXISTING", "different-value");
+        let env = spec
+            .pointer("/containers/0/env")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        // No duplicate inserted; original value preserved.
+        assert_eq!(env.len(), 1);
+        assert_eq!(
+            env[0].get("value").and_then(|v| v.as_str()),
+            Some("1"),
+            "existing value wins; caller is responsible for ordering",
+        );
+    }
+
+    #[test]
+    fn inject_container_env_creates_env_array_when_missing() {
+        let mut spec = empty_router_pod_spec();
+        // The openclaw container has no "env" key.
+        inject_container_env(&mut spec, "openclaw", "FOO", "bar");
+        let env = spec
+            .pointer("/containers/1/env")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].get("name").and_then(|n| n.as_str()), Some("FOO"));
+    }
+
+    #[test]
+    fn inject_container_env_no_op_when_container_absent() {
+        let mut spec = empty_router_pod_spec();
+        let before = spec.clone();
+        inject_container_env(&mut spec, "does-not-exist", "X", "y");
+        assert_eq!(spec, before);
     }
 }

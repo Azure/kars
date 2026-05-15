@@ -10,6 +10,9 @@
 //! everything we write into `.status`.
 
 pub mod conditions;
+pub mod phase;
+pub mod router_confirmation;
+pub mod router_confirmation_io;
 
 use crate::crd::ClawSandbox;
 use kube::ResourceExt;
@@ -116,7 +119,6 @@ pub fn build_running_status_patch_with_extras(
             "namespace": sandbox_ns,
             "sandboxPod": format!("{name}-*"),
             "inferenceEndpoint": "https://azureclaw-inference-router.azureclaw-system.svc.cluster.local:8443",
-            "pendingApprovals": 0,
             "observedGeneration": generation,
             "runtimeKind": runtime_kind,
             "conditions": conditions_vec,
@@ -308,7 +310,6 @@ pub fn build_overlay_status_patch(
             "phase": "Overlay",
             "namespace": sandbox_ns,
             "sandboxPod": format!("upstream/{upstream_ref}"),
-            "pendingApprovals": 0,
             "observedGeneration": generation,
             "runtimeKind": runtime_kind,
             "conditions": [ready, progressing, suspended, runtime_ready],

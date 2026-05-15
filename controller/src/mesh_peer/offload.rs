@@ -28,6 +28,18 @@ use super::{
     FederationMessage, FileContent, IDENTITY_NAMESPACE, MeshPeerState, OffloadPreferences,
     enqueue_outbound, send_to_peer,
 };
+
+/// Offload-tier AGT policy profile, embedded at compile time from the CLI
+/// asset so there is exactly one source of truth shared by the CLI
+/// (which reads it from disk for normal sandboxes) and the controller
+/// (which inlines it into the ToolPolicy CRs it mints when honouring an
+/// offload request from a paired peer).
+///
+/// Post-Slice-1e the sandbox image no longer carries bundled profile
+/// fallbacks, so every ToolPolicy CR — including the ones synthesized by
+/// this module — must populate `spec.agtProfile.inline` or the
+/// reconciler will fail closed with `Degraded / SpecInvalid`.
+const OFFLOAD_AGT_PROFILE: &str = include_str!("../../../cli/profiles/agt/azureclaw-offload.yaml");
 use crate::pairing::{ClawPairing, phase};
 
 // ---------------------------------------------------------------------------
@@ -183,7 +195,10 @@ pub(super) async fn handle_offload_request(
                 "sandboxMatchLabels": {
                     "azureclaw.azure.com/sandbox": sandbox_name.clone()
                 }
-            }
+            },
+            "agtProfile": {
+                "inline": OFFLOAD_AGT_PROFILE,
+            },
         }
     });
 
@@ -825,8 +840,7 @@ pub(crate) fn build_offload_sandbox_crd(
         },
         "networkPolicy": {
             "defaultDeny": true,
-            "approvalRequired": true,
-            "learnEgress": true,
+            "egressMode": "Learn",
         },
         "governance": {
             "enabled": true,

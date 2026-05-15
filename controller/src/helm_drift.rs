@@ -32,8 +32,8 @@
 
 #[cfg(test)]
 use crate::crd_validations::{
-    a2a_agent_crd, claw_eval_crd, claw_memory_crd, inference_policy_crd, mcp_server_crd,
-    tool_policy_crd, trust_graph_crd,
+    a2a_agent_crd, claw_eval_crd, claw_memory_crd, egress_approval_crd, inference_policy_crd,
+    mcp_server_crd, tool_policy_crd, trust_graph_crd,
 };
 
 const MCP_HELM_CRD_PATH: &str = concat!(
@@ -69,6 +69,11 @@ const CLAWEVAL_HELM_CRD_PATH: &str = concat!(
 const TRUSTGRAPH_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../deploy/helm/azureclaw/templates/crd-trustgraph.yaml"
+);
+
+const EGRESSAPPROVAL_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/azureclaw/templates/crd-egressapproval.yaml"
 );
 
 /// Strip non-schema fields that legitimately differ between the Rust
@@ -271,5 +276,30 @@ mod tests {
         let rust_crd_value =
             serde_json::to_value(trust_graph_crd()).expect("rust crd serializes to JSON");
         assert_helm_matches_rust(TRUSTGRAPH_HELM_CRD_PATH, rust_crd_value, "trustgraph");
+    }
+
+    /// One-shot dumper for the egressapproval CRD. Run via:
+    ///
+    ///   DUMP_EGRESSAPPROVAL_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///       helm_drift::tests::dump_egressapproval_crd_yaml -- --nocapture
+    #[test]
+    fn dump_egressapproval_crd_yaml() {
+        if std::env::var("DUMP_EGRESSAPPROVAL_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = egress_approval_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    #[test]
+    fn helm_egressapproval_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(egress_approval_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(
+            EGRESSAPPROVAL_HELM_CRD_PATH,
+            rust_crd_value,
+            "egressapproval",
+        );
     }
 }

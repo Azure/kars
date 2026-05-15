@@ -82,21 +82,59 @@ pub struct InferencePolicySpec {
     pub applies_to: InferenceAppliesTo,
 
     /// Token-budget caps. Optional — absent ⇒ no budget enforcement.
+    ///
+    /// Mutually exclusive with [`Self::bundle_ref`]: when `bundleRef`
+    /// is set, the budget caps come from the signed bundle. Admission
+    /// CEL + reconciler defense-in-depth both reject specs that set
+    /// any of `tokenBudget`/`contentSafety`/`modelPreference`/
+    /// `displayName` alongside `bundleRef`.
     pub token_budget: Option<TokenBudget>,
 
     /// Content Safety severity floor. Optional — absent ⇒ governance
     /// minimum (router-default) applies. The VAP referenced in §7.14
     /// rejects changes that *lower* the floor below the cluster
-    /// minimum.
+    /// minimum. Mutually exclusive with [`Self::bundle_ref`].
     pub content_safety: Option<ContentSafetyFloor>,
 
     /// Model preference + fallback chain. Optional. **Not** a router:
     /// only declares preferred route order; selection is delegated to
-    /// the underlying provider.
+    /// the underlying provider. Mutually exclusive with
+    /// [`Self::bundle_ref`].
     pub model_preference: Option<ModelPreference>,
 
-    /// Optional human-readable label.
+    /// Optional human-readable label. Mutually exclusive with
+    /// [`Self::bundle_ref`] — when `bundleRef` is set, the label
+    /// comes from the signed bundle.
     pub display_name: Option<String>,
+
+    /// Signed OCI artifact reference. The controller pulls the
+    /// artifact from `<registry>/<repository>@<digest>`, verifies the
+    /// cosign signature against the active
+    /// [`crate::signer_policy::SignerPolicy`], re-validates the JSON
+    /// structure ([`crate::policy_canonical::inference::InferenceKind`]),
+    /// and synthesises the effective spec by combining the CR's
+    /// `appliesTo` selector with the bundle's `tokenBudget` /
+    /// `contentSafety` / `modelPreference` / `displayName` content
+    /// fields. The same compile + ConfigMap write path runs as for
+    /// inline specs — only the source of the content bytes differs.
+    ///
+    /// On any verification failure the controller stamps
+    /// `Ready=False / reason=AllowlistMissing|AllowlistMalformed|
+    /// AllowlistUnauthorized|AllowlistSignatureVerifyFailed` (the
+    /// same `FetchError` variants used by egress + tools — one
+    /// error taxonomy across all signed-policy kinds).
+    ///
+    /// Artifact `artifactType` MUST be
+    /// `application/vnd.azureclaw.inference-policy.v1+json`; a
+    /// mismatch surfaces as `Ready=False / reason=InvalidRef`.
+    ///
+    /// Mutually exclusive with the inline content fields
+    /// (`tokenBudget`, `contentSafety`, `modelPreference`,
+    /// `displayName`). `appliesTo` always comes from the CR so one
+    /// signed bundle can be referenced by multiple CRs with
+    /// different selectors. See
+    /// `docs/internal/policy-canonical-format.md`.
+    pub bundle_ref: Option<crate::crd::OciArtifactRef>,
 }
 
 /// Selector for which sandboxes / call sites an `InferencePolicy`
@@ -219,4 +257,44 @@ pub struct InferencePolicyStatus {
     /// Last time the policy was compiled and pushed.
     #[serde(default)]
     pub last_compiled_at: Option<String>,
+
+    /// `sha256:<full hex>` digest the controller wrote to the
+    /// compiled-profile ConfigMap and the annotation
+    /// `azureclaw.azure.com/inference-policy-digest`. Computed by
+    /// `inference_policy_compile::inference_policy_digest` from the
+    /// canonical bytes of `inference-policy.json`. Distinct from
+    /// `version_hash` (16-byte legacy short-hash kept for
+    /// `PolicyEntry.version` change-detection): this full digest is
+    /// the **wire-contract value** the router echoes back via
+    /// `GET /internal/policy-status`.
+    ///
+    /// `phase=Ready` is only stamped when this matches
+    /// `loaded_digest` on every sandbox that references the policy.
+    /// (Slice 2a of `crd-well-oiled-machine`.)
+    #[serde(default)]
+    pub compiled_digest: Option<String>,
+
+    /// Digest most recently echoed by referencing sandbox routers
+    /// via `GET /internal/policy-status`. When this equals
+    /// `compiled_digest` for every referencing sandbox, the
+    /// reconciler promotes `phase=Compiled → Ready` with reason
+    /// `RouterEnforcing`. While mismatched (or while no sandbox
+    /// references the policy), the reconciler stamps
+    /// `Ready=False / AwaitingRouterEnforcement` and emits a
+    /// `PolicyNotEnforced` Warning Event. (Slice 2a of
+    /// `crd-well-oiled-machine`.)
+    #[serde(default)]
+    pub loaded_digest: Option<String>,
+
+    /// OCI manifest digest of the verified `spec.bundleRef` artifact
+    /// when the bundleRef path was taken; `None` for inline specs.
+    /// Stamped after [`crate::policy_fetcher::fetch_and_verify_generic`]
+    /// returns `Ok`, so its presence is operator-visible proof that
+    /// the controller actually verified the signed artifact (vs.
+    /// taking an inline shortcut). Distinct from `compiled_digest`
+    /// (the wire-contract value the router echoes) — `bundle_ref_digest`
+    /// is the supply-chain identifier. Slice 1c.3 of
+    /// `crd-well-oiled-machine`.
+    #[serde(default)]
+    pub bundle_ref_digest: Option<String>,
 }

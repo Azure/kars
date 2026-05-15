@@ -550,6 +550,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // is authoritative; missing target → Degraded with reason
     // `ToolPolicyNotFound`. The resolved CR's `metadata.name` doubles as
     // the AGT policy profile name carried into the sandbox.
+    //
+    // Slice 1e (phase 1): also detect the bundled-profile fallback path
+    // ── Resolve the ToolPolicy referenced by `spec.governance` ────────
+    // Slice 1e (phase 2): the bundled `/opt/azureclaw-plugin/policies/`
+    // fallback is gone. When governance is enabled and the referenced
+    // ToolPolicy lacks `spec.agtProfile.inline`, fail-closed with
+    // `SpecInvalid` so the operator cannot start a sandbox whose AGT
+    // engine would silently come up empty. Phase 1 surfaced this as a
+    // `BundledProfileInUse` condition during the deprecation window;
+    // that surface is now dead and removed.
     let tool_policy_profile: String = if governance_config.enabled {
         let tp_ref_name = governance_config.tool_policy_ref.name.clone();
         if tp_ref_name.is_empty() {
@@ -562,7 +572,31 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let tp_api: Api<crate::tool_policy::ToolPolicy> =
             Api::namespaced(client.clone(), &sandbox_self_ns);
         match tp_api.get(&tp_ref_name).await {
-            Ok(_) => tp_ref_name,
+            Ok(tp) => {
+                let inline_empty = tp
+                    .spec
+                    .agt_profile
+                    .as_ref()
+                    .and_then(|p| p.inline.as_deref())
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true);
+                if inline_empty {
+                    tracing::error!(
+                        sandbox = %name,
+                        tool_policy = %tp_ref_name,
+                        "ToolPolicy has no agtProfile.inline; bundled fallback was removed in Slice 1e phase 2",
+                    );
+                    degrade!(
+                        SPEC_INVALID,
+                        format!(
+                            "ToolPolicy `{tp_ref_name}` has no `spec.agtProfile.inline`. \
+                             The bundled `/opt/azureclaw-plugin/policies/` fallback was removed in \
+                             Slice 1e phase 2. Set `spec.agtProfile.inline` on the ToolPolicy CR."
+                        )
+                    );
+                }
+                tp_ref_name
+            }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
                 tracing::error!(
                     sandbox = %name,
@@ -902,6 +936,78 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
+    // Slice 5c.1: publish the compiled egress allowlist as a
+    // ConfigMap in the sandbox namespace + stamp the digest as an
+    // annotation. The inference-router container mounts this CM at
+    // `/etc/azureclaw/egress/allowlist.json`; its
+    // `egress_allowlist_loader` reads the file, seeds
+    // `Blocklist.allowlist` (L7 hostname filter on `forward_proxy`),
+    // and echoes the digest under `PolicyKind::EgressAllowlist` via
+    // `GET /internal/policy-status`.
+    //
+    // Why this matters: prior to Slice 5c.1 the signed allowlist was
+    // ONLY wired into the K8s `NetworkPolicy` egress rules above —
+    // which gate L4 ports, not hostnames. The L7 hostname filter in
+    // the router (`Blocklist.check_egress`) was populated solely from
+    // the now-removed `POST /egress/approve` in-memory endpoint, so
+    // signed bundles had no L7 teeth. This block closes that gap.
+    //
+    // Fail-closed semantics: when `allowlist_resolution.endpoints` is
+    // `None` (verify failed and no LKG cache), we publish an EMPTY
+    // allowlist document. The router then rejects every egress
+    // attempt by hostname at L7, matching the L4 deny encoded above.
+    let egress_allowlist_cm_name = format!("clawsandbox-{}-egress-allowlist", name);
+    let egress_approvals_cm_name = crate::egress_approval_compile::approvals_configmap_name(&name);
+    {
+        let endpoints_for_compile: Vec<crate::crd::EndpointConfig> = allowlist_resolution
+            .endpoints
+            .as_deref()
+            .unwrap_or(&[])
+            .to_vec();
+        let allowlist_doc = crate::egress_allowlist_compile::compile_to_doc(&endpoints_for_compile);
+        // Compact (no whitespace) so the bytes the router reads from
+        // the mount are byte-for-byte what the controller hashed.
+        let allowlist_body = serde_json::to_string(&allowlist_doc)?;
+        let allowlist_digest =
+            crate::egress_allowlist_compile::egress_allowlist_digest(allowlist_body.as_bytes());
+
+        let mut data: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        data.insert(
+            crate::egress_allowlist_compile::EGRESS_ALLOWLIST_FILENAME.into(),
+            allowlist_body,
+        );
+        let mut annotations: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        annotations.insert(
+            "azureclaw.azure.com/egress-allowlist-digest".into(),
+            allowlist_digest,
+        );
+        let allowlist_cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": egress_allowlist_cm_name,
+                "namespace": sandbox_ns,
+                "labels": {
+                    "app.kubernetes.io/managed-by": "azureclaw-controller",
+                    "azureclaw.azure.com/sandbox": name,
+                    "azureclaw.azure.com/artifact": "egress-allowlist",
+                },
+                "annotations": annotations,
+            },
+            "data": data,
+        }))?;
+        let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
+        cm_api
+            .patch(
+                &egress_allowlist_cm_name,
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                &Patch::Apply(&allowlist_cm),
+            )
+            .await?;
+    }
+
     // S12.e: if the allowlist resolved to fail-closed-no-LKG (verify
     // failed on first reconcile / after controller restart, no
     // last-known-good cached), stamp Degraded with FailedClosed and
@@ -912,19 +1018,39 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // failure mode that should be visible to operators, not papered
     // over.
     if allowlist_resolution.fail_closed_no_lkg {
+        // Distinguish the two fail-closed reasons so the Degraded
+        // condition is actionable: verify-fail + no-LKG vs.
+        // Slice 5c.2 unsigned-rejection (REQUIRE_SIGNED_ALLOWLIST=true
+        // and inline-only allowlist).
+        let unsigned_rejected = allowlist_resolution.conditions.iter().any(|c| {
+            c.type_ == crate::status::conditions::TYPE_ALLOWLIST_VERIFIED
+                && c.reason == crate::status::conditions::reason::UNSIGNED
+        });
+        let (deg_reason, deg_msg): (&str, &str) = if unsigned_rejected {
+            (
+                crate::status::conditions::reason::UNSIGNED,
+                "REQUIRE_SIGNED_ALLOWLIST=true and inline allowedEndpoints \
+                 have no allowlistRef; refusing to broaden egress (fail-closed). \
+                 Either set spec.networkPolicy.allowlistRef to a signed OCI \
+                 artifact, or set helm value egress.requireSigned=false.",
+            )
+        } else {
+            (
+                crate::status::conditions::reason::FAILED_CLOSED,
+                "egress allowlist verify failed and no last-known-good cached; \
+                 refusing to broaden egress (fail-closed)",
+            )
+        };
         tracing::warn!(
             sandbox = %name,
-            "AllowlistAuthoritative=False/FailedClosed: verify failed and no last-known-good; \
-             refusing to deploy sandbox pod with broad egress"
+            unsigned_rejected,
+            "AllowlistAuthoritative=False/FailedClosed: {}",
+            deg_reason,
         );
         let sandbox_api: Api<ClawSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-        let mut status_obj = crate::status::build_degraded_status_patch(
-            &sandbox,
-            crate::status::conditions::reason::FAILED_CLOSED,
-            "egress allowlist verify failed and no last-known-good cached; \
-             refusing to broaden egress (fail-closed)",
-        );
+        let mut status_obj =
+            crate::status::build_degraded_status_patch(&sandbox, deg_reason, deg_msg);
         // Preserve the resolution's three conditions so operators see
         // the verify-fail reason alongside the Degraded marker.
         if let Some(arr) = status_obj["status"]["conditions"].as_array_mut() {
@@ -1110,8 +1236,6 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-            openclaw_env
-                .push(json!({"name": "AGT_POLICY_PROFILE", "value": tool_policy_profile.clone()}));
             openclaw_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
             // Validate and propagate trusted peers (format: "name:AMID,name:AMID,...")
             let valid_peers = governance_config.trusted_peers.as_deref().filter(|p| {
@@ -1155,8 +1279,6 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
             // Router needs governance vars too (handoff auth, policy enforcement)
             router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
-            router_agt_env
-                .push(json!({"name": "AGT_POLICY_PROFILE", "value": &tool_policy_profile}));
             router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));
             // Behavior-monitor burst threshold: offload workers run long
             // research loops that make many tool/inference calls in short
@@ -1311,15 +1433,21 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}),
         );
 
-        // Egress learn mode — enabled by default so operators can discover required domains.
-        // Blocklist (threat intelligence) is still enforced. Disable with network_policy.learn_egress=false.
-        let learn_egress = spec
+        // Egress mode — Slice 5b: `spec.networkPolicy.egressMode` drives the
+        // router's enforcement strategy. Default = `Learn` so manifests
+        // without an explicit choice keep observing instead of denying.
+        // Router contract: `EGRESS_MODE=strict|learn`.
+        // Blocklist (threat intelligence) is enforced in every mode.
+        let egress_mode = spec
             .network_policy
             .as_ref()
-            .is_none_or(|np| np.learn_egress);
-        if learn_egress {
-            router_env.push(json!({"name": "EGRESS_LEARN_MODE", "value": "true"}));
-        }
+            .map(|np| np.egress_mode)
+            .unwrap_or(crate::crd::EgressMode::Learn);
+        let egress_mode_str = match egress_mode {
+            crate::crd::EgressMode::Strict => "strict",
+            crate::crd::EgressMode::Learn => "learn",
+        };
+        router_env.push(json!({"name": "EGRESS_MODE", "value": egress_mode_str}));
 
         // ── Agent container ──────────────────────────────────────────
         // S10.A2.b: branch the agent container shape on the runtime
@@ -1590,20 +1718,90 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
-        // McpServer (optional): if the sandbox references one, mirror its
-        // JWKS ConfigMap + signing-key Secret and mount them.
-        if let Some(mcp_ref) = governance_config.mcp_server_ref.as_ref() {
-            let mcp_name = mcp_ref.name.trim();
-            if !mcp_name.is_empty() {
-                let jwks_cm = format!("mcp-{mcp_name}-jwks");
-                let signing_secret = format!("mcp-{mcp_name}-signing");
+        // InferencePolicy (always — `spec.inferenceRef` is required by
+        // the CRD): mirror the compiled profile ConfigMap and mount it
+        // into the router. The router's `inference_policy_loader`
+        // sha256s the bytes and echoes the digest via
+        // `/internal/policy-status`; the controller's
+        // `inference_policy_reconciler` polls that endpoint to
+        // close the §3 Ready ⇔ router-echo loop (Slice 2a).
+        //
+        // Failure mode: source missing → mount omitted, router boots
+        // with no InferencePolicy loaded (per-request token budget
+        // cap is None, defence-in-depth gate becomes a no-op). The
+        // existing env-driven `TOKEN_BUDGET_PER_REQUEST` warn-only
+        // path stays in place as a safety net.
+        if !inference_ref_name.is_empty() {
+            let ip_cm = format!("inferencepolicy-{}-profile", &inference_ref_name);
+            match governance_mounts::mirror_configmap(
+                client,
+                &ip_cm,
+                &sandbox_self_ns,
+                &sandbox_ns,
+                &name,
+                "InferencePolicy",
+            )
+            .await
+            {
+                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                    governance_mounts::inject_configmap_mount(
+                        &mut pod_spec,
+                        "inference-router",
+                        &ip_cm,
+                        "inference-policy",
+                        governance_mounts::paths::INFERENCE_POLICY_DIR,
+                        Some((
+                            "INFERENCE_POLICY_DIR",
+                            governance_mounts::paths::INFERENCE_POLICY_DIR,
+                        )),
+                    );
+                }
+                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        cm = %ip_cm,
+                        reason = %reason,
+                        "InferencePolicy profile ConfigMap not mirrored; \
+                         router will start without InferencePolicy enforcement",
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        sandbox = %name,
+                        cm = %ip_cm,
+                        "InferencePolicy ConfigMap mirror failed",
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
+            }
+        }
+
+        // ClawMemory (optional, Slice 3a): if the sandbox references
+        // one via `spec.memoryRef`, mirror its compiled binding
+        // ConfigMap and mount it into the inference-router. The
+        // router's `memory_binding_loader` reads the file, registers
+        // the digest under `PolicyKind::Memory`, and echoes it via
+        // `/internal/policy-status` so the `claw_memory_reconciler`
+        // can close the §3 Ready ⇔ router-echo loop.
+        //
+        // Failure mode: source missing → mount omitted, router boots
+        // without a binding loaded (digest absent in
+        // `/internal/policy-status`, ClawMemory stays `Compiled`).
+        // Memory consumption today still runs through the existing
+        // env-driven `FOUNDRY_MEMORY_STORE_ID` path (Slice 3b will
+        // rewire to the binding).
+        if let Some(memory_ref) = spec.memory_ref.as_ref() {
+            let memory_name = memory_ref.name.trim();
+            if !memory_name.is_empty() {
+                let mem_cm = format!("clawmemory-{memory_name}-binding");
                 match governance_mounts::mirror_configmap(
                     client,
-                    &jwks_cm,
+                    &mem_cm,
                     &sandbox_self_ns,
                     &sandbox_ns,
                     &name,
-                    "McpServer",
+                    "ClawMemory",
                 )
                 .await
                 {
@@ -1611,73 +1809,226 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                         governance_mounts::inject_configmap_mount(
                             &mut pod_spec,
                             "inference-router",
-                            &jwks_cm,
-                            "mcp-jwks",
-                            governance_mounts::paths::MCP_JWKS_DIR,
-                            Some(("MCP_JWKS_PATH", "/etc/azureclaw/mcp/jwks.json")),
-                        );
-                    }
-                    Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
-                        tracing::warn!(
-                            sandbox = %name,
-                            cm = %jwks_cm,
-                            reason = %reason,
-                            "McpServer JWKS ConfigMap not mirrored; \
-                             router will not advertise customer MCP",
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            sandbox = %name,
-                            cm = %jwks_cm,
-                            "McpServer JWKS mirror failed",
-                        );
-                        return Ok(Action::requeue(Duration::from_secs(15)));
-                    }
-                }
-                match governance_mounts::mirror_secret(
-                    client,
-                    &signing_secret,
-                    &sandbox_self_ns,
-                    &sandbox_ns,
-                    &name,
-                    "McpServer",
-                )
-                .await
-                {
-                    Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                        governance_mounts::inject_secret_mount(
-                            &mut pod_spec,
-                            "inference-router",
-                            &signing_secret,
-                            "mcp-signing",
-                            governance_mounts::paths::MCP_SIGNING_DIR,
+                            &mem_cm,
+                            "claw-memory-binding",
+                            governance_mounts::paths::MEMORY_BINDING_DIR,
                             Some((
-                                "MCP_SIGNING_KEY_DIR",
-                                governance_mounts::paths::MCP_SIGNING_DIR,
+                                "MEMORY_BINDING_DIR",
+                                governance_mounts::paths::MEMORY_BINDING_DIR,
                             )),
                         );
                     }
                     Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
                         tracing::warn!(
                             sandbox = %name,
-                            secret = %signing_secret,
+                            cm = %mem_cm,
                             reason = %reason,
-                            "McpServer signing-key Secret not mirrored",
+                            "ClawMemory binding ConfigMap not mirrored; \
+                             router will start without ClawMemory binding loaded",
                         );
                     }
                     Err(e) => {
                         tracing::error!(
                             error = %e,
                             sandbox = %name,
-                            secret = %signing_secret,
-                            "McpServer signing Secret mirror failed",
+                            cm = %mem_cm,
+                            "ClawMemory ConfigMap mirror failed",
                         );
                         return Ok(Action::requeue(Duration::from_secs(15)));
                     }
                 }
             }
+        }
+
+        // Slice 5c.1: egress allowlist mount. The ConfigMap was
+        // published earlier in this reconcile pass directly in the
+        // sandbox namespace (no cross-NS mirror — the data lives
+        // inline on the `ClawSandbox` CR, no separate producer CRD).
+        // Mount only on the inference-router container; the agent
+        // container (UID 1000) has no business reading it.
+        //
+        // The router's `egress_allowlist_loader` reads
+        // `${EGRESS_ALLOWLIST_DIR}/allowlist.json`, atomically
+        // replaces `Blocklist.allowlist` (the L7 hostname filter
+        // consulted by `forward_proxy::handle_connect`), and
+        // registers the digest under `PolicyKind::EgressAllowlist`
+        // on `/internal/policy-status`.
+        governance_mounts::inject_configmap_mount(
+            &mut pod_spec,
+            "inference-router",
+            &egress_allowlist_cm_name,
+            "egress-allowlist",
+            governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
+            Some((
+                "EGRESS_ALLOWLIST_DIR",
+                governance_mounts::paths::EGRESS_ALLOWLIST_DIR,
+            )),
+        );
+
+        // EgressApproval (Slice 5e): per-approval allowlist deltas live in
+        // a sibling ConfigMap owned by `egress_approval_reconciler`. The
+        // router UNIONs them with the baseline `EGRESS_ALLOWLIST_DIR`
+        // contents and echoes a merged-set digest under
+        // `PolicyKind::EgressApproval`. Optional mount — empty/missing
+        // when no approvals are active; the router treats absence as
+        // "no extra hosts" and falls back to the baseline digest.
+        governance_mounts::inject_configmap_mount(
+            &mut pod_spec,
+            "inference-router",
+            &egress_approvals_cm_name,
+            "egress-approvals",
+            governance_mounts::paths::EGRESS_APPROVAL_DIR,
+            Some((
+                "EGRESS_APPROVAL_DIR",
+                governance_mounts::paths::EGRESS_APPROVAL_DIR,
+            )),
+        );
+
+        // McpServer (optional, plural): for each entry in `mcpServerRefs`,
+        // mirror its JWKS ConfigMap + signing-key Secret and mount them
+        // at per-name subdirectories so the router can address them
+        // individually.
+        //
+        // Mount layout (Slice 4d.2):
+        //   - JWKS:    /etc/azureclaw/mcp/{name}/jwks.json
+        //   - signing: /etc/azureclaw/mcp-signing/{name}/{keys...}
+        //
+        // Env vars set on `inference-router`:
+        //   - `MCP_JWKS_DIR`: parent dir for all per-server JWKS subdirs.
+        //     Router scans this dir to discover servers (Slice 4d.2
+        //     startup log). Multi-JWKS OAuth verification + namespaced
+        //     tool dispatch land in Slice 4d.3.
+        //   - `MCP_JWKS_PATH`: legacy single-file pointer, kept for
+        //     backwards compatibility with existing OAuth code in
+        //     `inference-router/src/main.rs::build_mcp_router()`. Points
+        //     at the FIRST entry's `jwks.json` (deterministic ordering
+        //     given the CEL-enforced unique-by-name).
+        //   - `MCP_SIGNING_KEY_DIR`: legacy single-dir pointer for the
+        //     first entry; namespaced replacement TBD in 4d.3.
+        let mcp_refs = governance_config.effective_mcp_server_refs();
+        if governance_config.uses_singular_mcp_server_ref() {
+            tracing::warn!(
+                sandbox = %name,
+                reason = crate::status::conditions::reason::MCP_SINGULAR_DEPRECATED,
+                "spec.governance.mcpServerRef is deprecated; migrate to \
+                 spec.governance.mcpServerRefs (Slice 4d.1)",
+            );
+        }
+        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(mcp_refs.len());
+        for (idx, mcp_ref) in mcp_refs.iter().enumerate() {
+            let mcp_name = mcp_ref.name.trim();
+            if mcp_name.is_empty() {
+                continue;
+            }
+            let jwks_cm = format!("mcp-{mcp_name}-jwks");
+            let signing_secret = format!("mcp-{mcp_name}-signing");
+            let jwks_volume = format!("mcp-jwks-{mcp_name}");
+            let signing_volume = format!("mcp-signing-{mcp_name}");
+            let jwks_mount = format!("{}/{}", governance_mounts::paths::MCP_JWKS_DIR, mcp_name);
+            let signing_mount =
+                format!("{}/{}", governance_mounts::paths::MCP_SIGNING_DIR, mcp_name);
+
+            match governance_mounts::mirror_configmap(
+                client,
+                &jwks_cm,
+                &sandbox_self_ns,
+                &sandbox_ns,
+                &name,
+                "McpServer",
+            )
+            .await
+            {
+                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                    // First-entry only: keep legacy single-file env var
+                    // pointing at this server's jwks.json so the existing
+                    // single-JWKS OAuth verifier keeps working unchanged.
+                    let legacy_env = if idx == 0 {
+                        Some(("MCP_JWKS_PATH", format!("{jwks_mount}/jwks.json")))
+                    } else {
+                        None
+                    };
+                    governance_mounts::inject_configmap_mount(
+                        &mut pod_spec,
+                        "inference-router",
+                        &jwks_cm,
+                        &jwks_volume,
+                        &jwks_mount,
+                        legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
+                    );
+                    mirrored_mcp_names.push(mcp_name.to_string());
+                }
+                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        cm = %jwks_cm,
+                        reason = %reason,
+                        "McpServer JWKS ConfigMap not mirrored; \
+                         router will not advertise this MCP",
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        sandbox = %name,
+                        cm = %jwks_cm,
+                        "McpServer JWKS mirror failed",
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
+            }
+            match governance_mounts::mirror_secret(
+                client,
+                &signing_secret,
+                &sandbox_self_ns,
+                &sandbox_ns,
+                &name,
+                "McpServer",
+            )
+            .await
+            {
+                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                    let legacy_env = if idx == 0 {
+                        Some(("MCP_SIGNING_KEY_DIR", signing_mount.clone()))
+                    } else {
+                        None
+                    };
+                    governance_mounts::inject_secret_mount(
+                        &mut pod_spec,
+                        "inference-router",
+                        &signing_secret,
+                        &signing_volume,
+                        &signing_mount,
+                        legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
+                    );
+                }
+                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                    tracing::warn!(
+                        sandbox = %name,
+                        secret = %signing_secret,
+                        reason = %reason,
+                        "McpServer signing-key Secret not mirrored",
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        sandbox = %name,
+                        secret = %signing_secret,
+                        "McpServer signing Secret mirror failed",
+                    );
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
+            }
+        }
+        // Set MCP_JWKS_DIR (parent) once if any McpServer was mirrored.
+        // Router uses this to discover all servers at startup.
+        if !mirrored_mcp_names.is_empty() {
+            governance_mounts::inject_container_env(
+                &mut pod_spec,
+                "inference-router",
+                "MCP_JWKS_DIR",
+                governance_mounts::paths::MCP_JWKS_DIR,
+            );
         }
 
         // A2AAgent (optional): when A2A is enabled, mirror the signed
@@ -1942,12 +2293,18 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // S7 wiring: the per-CR ToolPolicy compiled-profile ConfigMap is
         // owned by the ToolPolicy reconciler in the user namespace; the
         // sandbox reconciler mirrors it into the sandbox namespace
-        // (above, in the pod-spec assembly block). The previous
-        // implementation baked `cli/policies/azureclaw-default.yaml` /
-        // `cli/policies/azureclaw-offload.yaml` into the controller
-        // binary and wrote it to a static `agt-policy-{profile}`
-        // ConfigMap; that path is removed because it bypassed the
-        // ToolPolicy CRD entirely (changes required a controller rebuild).
+        // (above, in the pod-spec assembly block). Two earlier
+        // implementations have been removed:
+        //   - pre-S7: baked `cli/policies/azureclaw-default.yaml` /
+        //     `cli/policies/azureclaw-offload.yaml` into the controller
+        //     binary and wrote a static `agt-policy-{profile}` ConfigMap,
+        //     which bypassed the ToolPolicy CRD entirely.
+        //   - pre-Slice-1e-phase-2: kept the bundled YAMLs in the
+        //     sandbox image as an `AGT_POLICY_PROFILE` env-var fallback
+        //     when the ToolPolicy lacked `spec.agtProfile.inline`.
+        // Today the ToolPolicy CR is the sole source; sandboxes whose
+        // ToolPolicy has no inline profile are degraded with
+        // `SpecInvalid` before they reach this point.
         let cm_name = format!("toolpolicy-{}-profile", &tool_policy_profile);
 
         // Patch NetworkPolicy to allow ingress on port 8443 for mesh messages

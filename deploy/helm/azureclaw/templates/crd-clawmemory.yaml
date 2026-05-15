@@ -48,17 +48,67 @@ spec:
               must declare distinct `scope` values. Conflict detection is
               router-side (S7) — the CRD admission only validates shape.
             properties:
+              bundleRef:
+                description: |-
+                  Signed OCI artifact carrying the binding content
+                  (`storeName`, `scope`, `retentionDays`,
+                  `deleteOnSandboxDelete`, `displayName`). When set, the
+                  controller pulls the artifact by digest, verifies its
+                  cosign signature against the active
+                  [`crate::signer_policy::SignerPolicy`], and merges the
+                  bundle content onto `sandboxRef` (always owned by the CR)
+                  before writing the binding ConfigMap. Slice 1c.4 of the
+                  `crd-well-oiled-machine` plan.
+
+                  Mutually exclusive with the inline content fields above.
+                  Admission CEL enforces the mutex; the reconciler also checks
+                  as defense-in-depth.
+                nullable: true
+                properties:
+                  artifactType:
+                    description: |-
+                      OCI artifactType media-type, e.g.
+                      `application/vnd.azureclaw.egress-allowlist.v1+yaml`. Consumers MUST
+                      reject artifacts whose pulled `artifactType` doesn't match.
+                    type: string
+                  digest:
+                    description: |-
+                      Content-addressed digest, including the algorithm prefix
+                      (`sha256:abc…`). The digest covers the canonical artifact bytes —
+                      see `docs/internal/policy-canonical-format.md` for the egress-allowlist
+                      canonicalization rules.
+                    type: string
+                  registry:
+                    description: Registry hostname (e.g. `myacr.azurecr.io`, `ghcr.io`).
+                    type: string
+                  repository:
+                    description: Repository path (e.g. `azureclaw/policies/sandbox-foo`).
+                    type: string
+                required:
+                - artifactType
+                - digest
+                - registry
+                - repository
+                type: object
               deleteOnSandboxDelete:
-                default: true
                 description: |-
                   If true (default), the runtime path must call `delete_scope`
                   on this scope when the sandbox is deleted or this CR is
                   deleted. The controller-side cleanup is finalizer-only on the
                   binding ConfigMap; Foundry-side delete via the router is
                   wired in S7+.
+
+                  When [`Self::bundle_ref`] is set, the bundle supplies this
+                  value; the CR's inline value MUST be absent in that case.
+                  Default-true is applied at the reconciler layer (after the
+                  bundle / inline merge) so `None` here is meaningful (= "use
+                  bundle value or default").
+                nullable: true
                 type: boolean
               displayName:
-                description: Optional human-readable label.
+                description: |-
+                  Optional human-readable label. MUST be absent when
+                  [`Self::bundle_ref`] is set.
                 nullable: true
                 type: string
               retentionDays:
@@ -71,7 +121,10 @@ spec:
                 nullable: true
                 type: integer
               sandboxRef:
-                description: Sandbox this binding applies to.
+                description: |-
+                  Sandbox this binding applies to. Owned by the CR (never the
+                  signed bundle) — one signed bundle can be referenced by
+                  multiple `ClawMemory` CRs targeting different sandboxes.
                 properties:
                   name:
                     description: Sandbox name (`ClawSandbox.metadata.name`).
@@ -85,6 +138,10 @@ spec:
                   Foundry Memory Store partitions data per scope. CEL:
                   non-empty. Default convention (set by the runtime path if
                   absent here): `agent:{sandboxName}`.
+
+                  Required when [`Self::bundle_ref`] is absent (the inline
+                  path); MUST be absent when [`Self::bundle_ref`] is set.
+                nullable: true
                 type: string
               storeName:
                 description: |-
@@ -92,25 +149,32 @@ spec:
                   (`cli/src/plugin.ts::ensureMemoryStore`) creates the store
                   on first use if absent. CEL: non-empty,
                   DNS-label-style (lowercase alphanumeric + dashes).
+
+                  Required when [`Self::bundle_ref`] is absent (the inline
+                  path); MUST be absent when [`Self::bundle_ref`] is set
+                  (the bundle supplies the value). Admission CEL enforces
+                  the mutex.
+                nullable: true
                 type: string
             required:
             - sandboxRef
-            - scope
-            - storeName
             type: object
             x-kubernetes-validations:
-            - message: spec.storeName must be a DNS-label (1-63 chars, lowercase alphanumeric + dashes)
+            - message: spec.storeName must be a DNS-label (1-63 chars, lowercase alphanumeric + dashes) when spec.bundleRef is not set
               reason: FieldValueInvalid
-              rule: size(self.storeName) > 0 && size(self.storeName) <= 63 && self.storeName.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+              rule: has(self.bundleRef) || (has(self.storeName) && size(self.storeName) > 0 && size(self.storeName) <= 63 && self.storeName.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))
             - message: spec.sandboxRef.name must be 1-253 characters
               reason: FieldValueInvalid
               rule: size(self.sandboxRef.name) > 0 && size(self.sandboxRef.name) <= 253
-            - message: spec.scope must be 1-256 characters
+            - message: spec.scope must be 1-256 characters when spec.bundleRef is not set
               reason: FieldValueInvalid
-              rule: size(self.scope) > 0 && size(self.scope) <= 256
+              rule: has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256)
             - message: spec.retentionDays must be > 0 when set (use delete_scope for immediate deletion)
               reason: FieldValueInvalid
               rule: '!has(self.retentionDays) || self.retentionDays > 0'
+            - message: spec.bundleRef is mutually exclusive with spec.storeName, spec.scope, spec.retentionDays, spec.deleteOnSandboxDelete, and spec.displayName
+              reason: FieldValueInvalid
+              rule: '!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))'
           status:
             description: Status of a `ClawMemory` reconcile.
             nullable: true
@@ -127,6 +191,24 @@ spec:
                 required:
                 - name
                 type: object
+              bundleRefDigest:
+                description: |-
+                  `sha256:...` of the signed bundle the controller last pulled
+                  for `spec.bundleRef`. Stamped when the bundle path produced
+                  the effective spec used in the latest reconcile; `None` when
+                  the spec used the inline path or no successful fetch has
+                  happened yet. Slice 1c.4.
+                nullable: true
+                type: string
+              compiledDigest:
+                description: |-
+                  `sha256:<hex>` digest of the canonical binding JSON the
+                  controller published — the value every referencing sandbox's
+                  router must echo via `GET /internal/policy-status` before the
+                  CR is promoted to `phase=Ready` (principles.md §3, Slice 3a).
+                  Stays unset on `phase=Failed`.
+                nullable: true
+                type: string
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
@@ -164,6 +246,18 @@ spec:
                 description: Last time the binding was compiled and pushed.
                 nullable: true
                 type: string
+              loadedDigest:
+                description: |-
+                  `sha256:<hex>` digest the inference-router last echoed for
+                  this CR's compiled binding. Populated only in the
+                  `RouterEnforcementState::Confirmed` branch — when every
+                  referencing sandbox returns the matching digest, this equals
+                  [`Self::compiled_digest`]. `None` otherwise (awaiting echo,
+                  no sandboxes referencing, or transient poll failure). The
+                  CLI / `kubectl describe` operator diffs against
+                  `compiledDigest` here.
+                nullable: true
+                type: string
               observedGeneration:
                 description: '`metadata.generation` last successfully reconciled. KEP-1623.'
                 format: int64
@@ -185,3 +279,4 @@ spec:
     storage: true
     subresources:
       status: {}
+

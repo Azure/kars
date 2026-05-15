@@ -17,6 +17,19 @@ Detail panes show `.spec`, `.status`, and a typed Conditions table with
 status colouring (Ready / Provisioned → green, Degraded / Failed → red,
 everything else → amber).
 
+> **Status chip semantics.** Chips are **reason-aware**: when the
+> `Ready` condition carries a hard-failure reason
+> (`SignatureMismatch`, `BundleVerifyFailed`, `AuthMisconfigured`,
+> `MemoryStoreMissing`, `RuntimeAdapterMissing`, `ShapeInvalid`,
+> `AllowlistDrift`, `PolicyCompileFailed`) the chip renders **red**;
+> transient reasons (`AwaitingRouterEnforcement`,
+> `AwaitingFoundryProvisioning`, `NoSandboxesReferencing`, `Pending`)
+> render **amber**. The reason is appended as a secondary muted label.
+> The ClawSandbox detail pane renders **all** servers referenced by
+> `governance.mcpServerRefs[]` via `McpServerFleetCard` (per-server
+> phase + reason + JWKS digest + tool count + `MISSING` chip for
+> dangling refs).
+
 ## Build
 
 ```bash

@@ -23,6 +23,9 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 
+# Shared corpus library (ClawEval slice 6)
+azureclaw-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
+
 # Observability
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -66,18 +69,13 @@ oci-client = { version = "0.16", default-features = false, features = ["rustls-t
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 regex = "1.12.3"
 
-[features]
-# S16 — chaos tier. Default `cargo test` does NOT enable this feature; the
-# chaos tier compiles only under `cargo test --workspace --features chaos` to
-# keep PR CI fast. The flag itself is empty: feature-gating happens inside
-# the `tests/chaos/` crate, this declaration just lets `--workspace
-# --features chaos` succeed against this crate.
-chaos = []
-
 [dev-dependencies]
 # S16 — perf baseline criterion benches. See `controller/benches/`.
 criterion = { workspace = true }
 tokio = { workspace = true }
+# crd-well-oiled-machine Slice 1c — mock router for router-confirmation
+# HTTP poller tests. Pure dev-dep; never linked into the binary.
+wiremock = "0.6"
 
 [[bench]]
 name = "reconciler_bench"

@@ -250,6 +250,10 @@ async fn responses(
         })
         .unwrap_or("unknown");
 
+    // Slice 2 DoD #7 — snapshot policy early so every audit log
+    // emitted from this handler can carry `inference_policy_digest`.
+    let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+
     // AGT policy check via the four-seam PolicyDecisionProvider.
     {
         let model = serde_json::from_slice::<serde_json::Value>(&body)
@@ -260,7 +264,15 @@ async fn responses(
         if let super::inference_policy::InferenceDecision::Deny(reason) =
             super::inference_policy::check(&state, sandbox_name, &action).await
         {
-            tracing::warn!(sandbox = %sandbox_name, %reason, "AGT policy DENIED responses inference");
+            tracing::warn!(
+                target: "inference.audit",
+                sandbox = %sandbox_name,
+                %reason,
+                inference_policy_digest = %policy.digest,
+                decision = "deny",
+                gate = "agt_policy",
+                "AGT policy DENIED responses inference"
+            );
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
@@ -275,8 +287,22 @@ async fn responses(
         }
     }
 
-    // Budget check
-    if let Err(msg) = state.budget.check_budget(sandbox_name).await {
+    // Budget check — daily/monthly limits sourced from the loaded
+    // `InferencePolicy` (Slice 2b); falls back to the env-driven
+    // `TOKEN_BUDGET_DAILY` default when no policy is loaded.
+    if let Err(msg) = state
+        .budget
+        .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
+        .await
+    {
+        tracing::warn!(
+            target: "inference.audit",
+            sandbox = %sandbox_name,
+            inference_policy_digest = %policy.digest,
+            decision = "deny",
+            gate = "token_budget",
+            "Token budget exceeded: {msg}"
+        );
         return errors::openai(
             StatusCode::TOO_MANY_REQUESTS,
             msg,
@@ -286,13 +312,30 @@ async fn responses(
     }
 
     let upstream = state.upstream_config(sandbox_name);
-    tracing::info!(sandbox = %sandbox_name, model = %upstream.deployment, "Responses API request");
+    // Slice 2d.2: walk `modelPreference.primary → fallback[]` with
+    // per-deployment health awareness. The override that 2d.1 did via
+    // `apply_model_preference_override` is now part of
+    // `forward_with_failover`'s candidate construction
+    // (`build_candidates` starts with `primary.deployment` and walks
+    // outward), so this single call subsumes the override + the
+    // retry loop in one place.
+    tracing::info!(
+        target: "inference.audit",
+        sandbox = %sandbox_name,
+        model = %upstream.deployment,
+        inference_policy_digest = %policy.digest,
+        decision = "allow",
+        gate = "forward",
+        "Responses API request"
+    );
 
-    match proxy::forward(
+    match crate::failover::forward_with_failover(
         &state.auth,
         Some(&state.copilot),
         &state.client,
+        &state.deployment_health,
         &upstream,
+        &policy,
         axum::http::Method::POST,
         "responses",
         &headers,

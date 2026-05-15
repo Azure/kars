@@ -46,12 +46,14 @@
 //! confusion, kid mismatch, expired token, replayed token.
 
 pub mod error;
+pub mod forwarder;
 pub mod initialize;
 pub mod jsonrpc;
 pub mod oauth;
 pub mod oauth_layer;
 pub mod pipeline;
 pub mod platform;
+pub mod registry;
 pub mod streamable_http;
 pub mod tools;
 

@@ -54,6 +54,24 @@ setup_cluster() {
 }
 
 build_images() {
+    # CI optimisation: if `AZURECLAW_E2E_SKIP_IMAGE_BUILD=1` and the
+    # required tags are already present in the local docker daemon
+    # (a previous CI step did the buildx-cached build), skip the build
+    # entirely and only do the `kind load` step. Saves ~5-8 min/run.
+    local skip="${AZURECLAW_E2E_SKIP_IMAGE_BUILD:-0}"
+    if [ "$skip" = "1" ] || [ "$skip" = "true" ]; then
+        info "AZURECLAW_E2E_SKIP_IMAGE_BUILD=1 — using pre-loaded images"
+        if ! docker image inspect azureclaw-controller:e2e >/dev/null 2>&1; then
+            warn "azureclaw-controller:e2e not present; falling back to building"
+        elif ! docker image inspect azureclaw-inference-router:e2e >/dev/null 2>&1; then
+            warn "azureclaw-inference-router:e2e not present; falling back to building"
+        else
+            kind load docker-image azureclaw-controller:e2e --name "$CLUSTER_NAME"
+            kind load docker-image azureclaw-inference-router:e2e --name "$CLUSTER_NAME"
+            return 0
+        fi
+    fi
+
     # Retry docker pulls/builds to absorb transient MCR registry flakes
     # (e.g., 403/404 on pinned digests during MCR rollouts).
     docker_build_retry() {
@@ -367,12 +385,28 @@ EOF
         dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
         fail "InferencePolicy: profile ConfigMap not created"
     fi
-    if wait_for_ready inferencepolicy e2e-inferencepolicy azureclaw-system 30; then
-        pass "InferencePolicy: status.conditions Ready=True"
-    else
-        dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
-        fail "InferencePolicy: Ready=True not observed"
-    fi
+    # InferencePolicy uses the §3 echo loop (Slice 2a): without a
+    # router pod actually loading the profile and echoing the digest
+    # back to /internal/policy-status, the CR stays in phase=Compiled
+    # with Ready=False / reason=AwaitingRouterEnforcement (or
+    # NoSandboxesReferencing if the e2e-test sandbox's router isn't
+    # reachable). Asserting Ready=True here would be a §3 violation —
+    # the controller *correctly* refuses to lie. The compiled
+    # ConfigMap check above is the controller's complete output;
+    # router enforcement is exercised in unit + integration tests.
+    local ip_phase ip_ready ip_reason
+    ip_phase=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    ip_ready=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    ip_reason=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    case "$ip_phase|$ip_ready|$ip_reason" in
+        Compiled\|False\|AwaitingRouterEnforcement|Compiled\|False\|NoSandboxesReferencing|Ready\|True\|RouterEnforcing|Ready\|True\|*)
+            pass "InferencePolicy: phase=$ip_phase ready=$ip_ready reason=$ip_reason (§3 honest state)"
+            ;;
+        *)
+            dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
+            fail "InferencePolicy: unexpected honest-state — phase=$ip_phase ready=$ip_ready reason=$ip_reason"
+            ;;
+    esac
     kubectl delete inferencepolicy e2e-inferencepolicy -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
 
@@ -441,27 +475,31 @@ EOF
         dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
         fail "ClawMemory: binding ConfigMap not created"
     fi
-    # ClawMemory intentionally reports phase=Pending / Ready=False with
-    # reason=AwaitingFoundryProvisioning until the upstream Foundry
-    # Memory Store is created lazily by the runtime path on first use
-    # (see commit 825daff). The binding ConfigMap is the controller's
-    # complete output; reporting Ready=True here would mislead anyone
-    # using `kubectl wait --for=condition=Ready`. Assert the honest state.
+    # ClawMemory uses the §3 echo loop (Slice 3a). Without a router
+    # pod actually loading the binding and echoing the digest back
+    # to /internal/policy-status, the CR stays in phase=Compiled
+    # with Ready=False / reason=NoSandboxesReferencing or
+    # AwaitingRouterEnforcement. Asserting the legacy
+    # Pending/AwaitingFoundryProvisioning is incorrect after Slice 3a.
     local mem_phase mem_ready mem_reason
     mem_phase=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
     mem_ready=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
     mem_reason=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
-    if [ "$mem_phase" = "Pending" ] && [ "$mem_ready" = "False" ] && [ "$mem_reason" = "AwaitingFoundryProvisioning" ]; then
-        pass "ClawMemory: phase=Pending, Ready=False reason=AwaitingFoundryProvisioning (binding-only reconcile, honest report)"
-    else
-        dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
-        fail "ClawMemory: expected phase=Pending/Ready=False/AwaitingFoundryProvisioning, got phase=$mem_phase ready=$mem_ready reason=$mem_reason"
-    fi
+    case "$mem_phase|$mem_ready|$mem_reason" in
+        Compiled\|False\|NoSandboxesReferencing|Compiled\|False\|AwaitingRouterEnforcement|Ready\|True\|RouterEnforcing)
+            pass "ClawMemory: phase=$mem_phase ready=$mem_ready reason=$mem_reason (§3 honest state, Slice 3a)"
+            ;;
+        *)
+            dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
+            fail "ClawMemory: unexpected honest-state — phase=$mem_phase ready=$mem_ready reason=$mem_reason"
+            ;;
+    esac
     kubectl delete clawmemory e2e-clawmemory -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
 
-# ClawEval → claweval-{name}-binding ConfigMap. Schedule is optional;
-# we omit it so the test isn't time-sensitive.
+# ClawEval (slice 6.3) → claweval-{name}-corpus ConfigMap. With no
+# schedule and no run-now annotation, the CR sits in phase=Pending
+# Ready=False (§3 honest state — no run has completed yet).
 test_crd_claw_eval() {
     cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawEval apply rejected"; return; }
 ---
@@ -471,25 +509,179 @@ metadata:
   name: e2e-claweval
   namespace: azureclaw-system
 spec:
-  sandboxRef:
+  targetSandboxRef:
     name: e2e-test
-  suite: foundry-evals
-  evaluators:
-    - "relevance"
+  corpus:
+    builtin: jailbreak-baseline
 EOF
-    if wait_for_resource configmap claweval-e2e-claweval-binding azureclaw-system 45; then
-        pass "ClawEval → binding ConfigMap created"
+    if wait_for_resource configmap claweval-e2e-claweval-corpus azureclaw-system 45; then
+        pass "ClawEval → corpus ConfigMap created"
     else
         dump_cr_diagnostics claweval e2e-claweval azureclaw-system
-        fail "ClawEval: binding ConfigMap not created"
+        fail "ClawEval: corpus ConfigMap not created"
     fi
-    if wait_for_ready claweval e2e-claweval azureclaw-system 30; then
-        pass "ClawEval: status.conditions Ready=True"
+    # Wait for the controller to stamp status (phase=Pending Ready=False
+    # is the honest state until a Job/CronJob run completes).
+    local phase ready reason
+    for _ in $(seq 1 15); do
+        phase=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+            -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        ready=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+        reason=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+        if [[ "$phase" == "Pending" && "$ready" == "False" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$phase" == "Pending" && "$ready" == "False" ]]; then
+        pass "ClawEval: phase=Pending ready=False reason=$reason (§3 honest state, slice 6.3)"
     else
         dump_cr_diagnostics claweval e2e-claweval azureclaw-system
-        fail "ClawEval: Ready=True not observed"
+        fail "ClawEval: expected phase=Pending ready=False (got phase=$phase ready=$ready)"
     fi
     kubectl delete claweval e2e-claweval -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+}
+
+# ClawEval lifecycle (slice 6.5): run-now annotation spawns a Job;
+# `spec.schedule` ensures a controller-owned CronJob; clearing the
+# schedule deletes it. We do NOT wait for Job *completion* — the
+# runner image is published out-of-band and the Job pod will pull-
+# fail in Kind. The reconciler's contract is "create the K8s objects
+# with the right shape"; runner success belongs to runner-level
+# tests (conformance-runner/tests/end_to_end.rs).
+test_crd_claw_eval_lifecycle() {
+    # ---- run-now spawns a Job ----------------------------------
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawEval lifecycle apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawEval
+metadata:
+  name: e2e-claweval-lc
+  namespace: azureclaw-system
+  annotations:
+    azureclaw.azure.com/run-now: "true"
+spec:
+  targetSandboxRef:
+    name: e2e-test
+  corpus:
+    builtin: jailbreak-baseline
+EOF
+
+    # The Job name embeds a short hash of the CR's resourceVersion,
+    # so we discover it by label rather than by deterministic name.
+    local job_name
+    for _ in $(seq 1 30); do
+        job_name=$(kubectl get jobs -n azureclaw-system \
+            -l azureclaw.azure.com/claweval=e2e-claweval-lc \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+        if [ -n "$job_name" ]; then
+            break
+        fi
+        sleep 1
+    done
+    if [ -n "$job_name" ]; then
+        pass "ClawEval lifecycle: run-now spawned Job ($job_name)"
+    else
+        dump_cr_diagnostics claweval e2e-claweval-lc azureclaw-system
+        fail "ClawEval lifecycle: run-now did not spawn a Job within 30s"
+        kubectl delete claweval e2e-claweval-lc -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        return
+    fi
+
+    # The controller must clear the run-now annotation after spawning
+    # the Job, otherwise every reconcile would re-spawn.
+    local cleared=""
+    for _ in $(seq 1 15); do
+        if ! kubectl get claweval e2e-claweval-lc -n azureclaw-system \
+            -o jsonpath='{.metadata.annotations.azureclaw\.azure\.com/run-now}' 2>/dev/null \
+            | grep -q "true"; then
+            cleared=1
+            break
+        fi
+        sleep 1
+    done
+    if [ -n "$cleared" ]; then
+        pass "ClawEval lifecycle: run-now annotation cleared after Job spawn"
+    else
+        fail "ClawEval lifecycle: run-now annotation still 'true' (would re-spawn on every reconcile)"
+    fi
+
+    # The Job must be owned by the ClawEval CR for cascade cleanup.
+    local owner_kind owner_controller owner_block
+    owner_kind=$(kubectl get job "$job_name" -n azureclaw-system \
+        -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
+    owner_controller=$(kubectl get job "$job_name" -n azureclaw-system \
+        -o jsonpath='{.metadata.ownerReferences[0].controller}' 2>/dev/null || true)
+    owner_block=$(kubectl get job "$job_name" -n azureclaw-system \
+        -o jsonpath='{.metadata.ownerReferences[0].blockOwnerDeletion}' 2>/dev/null || true)
+    if [ "$owner_kind" = "ClawEval" ] && [ "$owner_controller" = "true" ] && [ "$owner_block" = "true" ]; then
+        pass "ClawEval lifecycle: Job has ownerReference → ClawEval (controller=true, blockOwnerDeletion=true)"
+    else
+        fail "ClawEval lifecycle: Job ownerReference mismatch (kind='$owner_kind' controller='$owner_controller' block='$owner_block')"
+    fi
+
+    # The corpus ConfigMap must also carry the same ownerReference so it
+    # GCs with the parent even if the controller is down. (The reconciler
+    # also has an explicit finalizer-driven cleanup path; ownerRef is
+    # defence-in-depth.)
+    local cm_owner_kind
+    cm_owner_kind=$(kubectl get configmap claweval-e2e-claweval-lc-corpus -n azureclaw-system \
+        -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
+    if [ "$cm_owner_kind" = "ClawEval" ]; then
+        pass "ClawEval lifecycle: corpus ConfigMap has ownerReference → ClawEval"
+    else
+        fail "ClawEval lifecycle: corpus ConfigMap missing ClawEval ownerReference (got '$cm_owner_kind')"
+    fi
+
+    # ---- schedule ensures a CronJob ----------------------------
+    kubectl patch claweval e2e-claweval-lc -n azureclaw-system --type=merge \
+        -p '{"spec":{"schedule":"*/15 * * * *"}}' >/dev/null 2>&1 \
+        || { fail "ClawEval lifecycle: schedule patch rejected"; return; }
+    if wait_for_resource cronjob claweval-e2e-claweval-lc azureclaw-system 30; then
+        local cron_sched
+        cron_sched=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+            -o jsonpath='{.spec.schedule}' 2>/dev/null || true)
+        if [ "$cron_sched" = "*/15 * * * *" ]; then
+            pass "ClawEval lifecycle: schedule → CronJob created with correct schedule"
+        else
+            fail "ClawEval lifecycle: CronJob schedule mismatch (got '$cron_sched')"
+        fi
+        local cj_owner_kind cj_owner_controller
+        cj_owner_kind=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+            -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
+        cj_owner_controller=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+            -o jsonpath='{.metadata.ownerReferences[0].controller}' 2>/dev/null || true)
+        if [ "$cj_owner_kind" = "ClawEval" ] && [ "$cj_owner_controller" = "true" ]; then
+            pass "ClawEval lifecycle: CronJob has ownerReference → ClawEval (controller=true)"
+        else
+            fail "ClawEval lifecycle: CronJob ownerReference mismatch (kind='$cj_owner_kind' controller='$cj_owner_controller')"
+        fi
+    else
+        dump_cr_diagnostics claweval e2e-claweval-lc azureclaw-system
+        fail "ClawEval lifecycle: CronJob not created within 30s"
+    fi
+
+    # ---- clearing the schedule deletes the CronJob -------------
+    kubectl patch claweval e2e-claweval-lc -n azureclaw-system --type=json \
+        -p '[{"op":"remove","path":"/spec/schedule"}]' >/dev/null 2>&1 \
+        || { fail "ClawEval lifecycle: schedule removal rejected"; return; }
+    local gone=""
+    for _ in $(seq 1 30); do
+        if ! kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system &>/dev/null; then
+            gone=1
+            break
+        fi
+        sleep 1
+    done
+    if [ -n "$gone" ]; then
+        pass "ClawEval lifecycle: clearing schedule deleted the CronJob"
+    else
+        fail "ClawEval lifecycle: CronJob still present after schedule removal"
+    fi
+
+    kubectl delete claweval e2e-claweval-lc -n azureclaw-system --wait=false >/dev/null 2>&1 || true
 }
 
 # McpServer (dev-mode, no OAuth). The reconciler can't fetch JWKS in
@@ -546,6 +738,191 @@ EOF
         fail "Admission accepted invalid A2AAgent (productionMode + http + empty keys)"
     else
         pass "Admission CEL rejects invalid A2AAgent (productionMode + http + empty keys)"
+    fi
+}
+
+# Slice 5e — EgressApproval CRD reconciliation. Apply a valid grant
+# scoped to e2e-test, assert the reconciler stamps an honest status
+# (phase + Ready condition). In Kind the sibling sandbox does not
+# typically reach phase=Ready (no real Azure backend), so the
+# reconciler stamps phase=Pending + reason=BlockedOnSandbox — that
+# is itself the §3 "Ready ⇔ router echo" invariant working as
+# designed and is a legitimate observable outcome. We also accept
+# AwaitingRouterEcho (sandbox briefly Ready) and the fully-promoted
+# state if both ever land together. Then we exercise the finalizer
+# via delete.
+test_crd_egress_approval() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "EgressApproval apply rejected"; return; }
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-egress-approval
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts:
+    - host: example.invalid
+      port: 443
+    - host: api.example.invalid
+  reason: "e2e grant for slice 5e.4"
+  ticket: "E2E-0001"
+  ttl: PT15M
+EOF
+    # The reconciler must at minimum stamp observedGeneration and
+    # hostCount within ~45s. Don't gate on Ready=True because the
+    # sibling sandbox is unlikely to be Ready in Kind.
+    local deadline ea_phase ea_ready ea_reason ea_hosts ea_observed
+    deadline=$(($(date +%s) + 45))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        ea_observed=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+        if [ -n "$ea_observed" ] && [ "$ea_observed" != "0" ]; then
+            break
+        fi
+        sleep 2
+    done
+    ea_phase=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    ea_ready=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    ea_reason=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    ea_hosts=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.hostCount}' 2>/dev/null || true)
+
+    if [ "$ea_hosts" = "2" ]; then
+        pass "EgressApproval: status.hostCount=2 (reconciler ran)"
+    else
+        dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+        fail "EgressApproval: hostCount expected '2', got '$ea_hosts'"
+    fi
+
+    case "$ea_phase|$ea_ready|$ea_reason" in
+        Pending\|False\|BlockedOnSandbox|Pending\|False\|AwaitingRouterEcho|Active\|True\|RouterConfirmed)
+            pass "EgressApproval: phase=$ea_phase ready=$ea_ready reason=$ea_reason (§3 honest state)"
+            ;;
+        *)
+            dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+            fail "EgressApproval: unexpected honest-state — phase=$ea_phase ready=$ea_ready reason=$ea_reason"
+            ;;
+    esac
+
+    # Finalizer must be set so the reconciler can tear down the
+    # merged-allowlist CM key on delete.
+    local fin
+    fin=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+    case "$fin" in
+        *azureclaw.azure.com/egress-approval-cleanup*)
+            pass "EgressApproval: finalizer present"
+            ;;
+        *)
+            dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+            fail "EgressApproval: finalizer missing (got '$fin')"
+            ;;
+    esac
+
+    # Delete must complete (finalizer cleanup runs even if the
+    # merged-allowlist CM was never created — controller no-ops on
+    # missing CM during cleanup).
+    if kubectl delete egressapproval e2e-egress-approval -n azureclaw-system --timeout=30s >/dev/null 2>&1; then
+        pass "EgressApproval: delete completes (finalizer cleanup)"
+    else
+        kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o yaml 2>&1 | tail -30 || true
+        # Force-remove finalizer for cleanup so we don't leak into next test
+        kubectl patch egressapproval e2e-egress-approval -n azureclaw-system --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+        fail "EgressApproval: delete did not complete within 30s"
+    fi
+}
+
+# Slice 5e — CEL admission gates on EgressApproval. The CRD ships
+# eight x-kubernetes-validations rules; test the most operator-facing
+# ones. Each invalid CR MUST be rejected at the apiserver before it
+# reaches the controller.
+test_crd_egress_approval_cel_rejects() {
+    # Empty hosts (size >= 1)
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-bad-ea-empty-hosts
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts: []
+  reason: "test"
+  ttl: PT5M
+EOF
+    then
+        kubectl delete egressapproval e2e-bad-ea-empty-hosts -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted EgressApproval with empty hosts (CEL broken)"
+    else
+        pass "Admission CEL rejects EgressApproval with empty hosts"
+    fi
+
+    # ttl with weeks/years not allowed (rule requires no W/Y units)
+    # The regex actually allows W/Y syntactically; the rule that
+    # rejects W/Y is enforced by the reconciler. So target a TTL
+    # the CEL pattern DOES catch: zero-valued PT0S.
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-bad-ea-zero-ttl
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts:
+    - host: example.com
+  reason: "zero ttl"
+  ttl: PT0S
+EOF
+    then
+        kubectl delete egressapproval e2e-bad-ea-zero-ttl -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted EgressApproval with ttl=PT0S (CEL broken)"
+    else
+        pass "Admission CEL rejects EgressApproval with ttl=PT0S"
+    fi
+
+    # Reason with ASCII control byte (NUL) — should be rejected.
+    if kubectl apply -f - >/dev/null 2>&1 <<EOF
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-bad-ea-ctrl-byte
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts:
+    - host: example.com
+  reason: "bad$(printf '\x01')byte"
+  ttl: PT15M
+EOF
+    then
+        kubectl delete egressapproval e2e-bad-ea-ctrl-byte -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted EgressApproval with control-byte reason (CEL broken)"
+    else
+        pass "Admission CEL rejects EgressApproval with control-byte reason"
+    fi
+
+    # Malformed TTL string — should be rejected by pattern rule.
+    if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: e2e-bad-ea-bad-ttl
+  namespace: azureclaw-system
+spec:
+  sandbox: e2e-test
+  hosts:
+    - host: example.com
+  reason: "malformed ttl"
+  ttl: "not-a-duration"
+EOF
+    then
+        kubectl delete egressapproval e2e-bad-ea-bad-ttl -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        fail "Admission accepted EgressApproval with malformed ttl (CEL broken)"
+    else
+        pass "Admission CEL rejects EgressApproval with malformed ttl"
     fi
 }
 
@@ -2365,10 +2742,13 @@ main() {
     test_crd_a2a_agent || true
     test_crd_claw_memory || true
     test_crd_claw_eval || true
+    test_crd_claw_eval_lifecycle || true
     test_crd_mcp_server || true
     test_crd_trustgraph_reconcile || true
     test_crd_clawpairing_lifecycle || true
     test_crd_admission_rejects_invalid || true
+    test_crd_egress_approval || true
+    test_crd_egress_approval_cel_rejects || true
     # Reconciler update / delete flow (separate fixtures so they
     # don't disturb the e2e-test sandbox).
     test_tool_policy_update_flow || true

@@ -63,6 +63,7 @@
 //!   proxy stack that already enforces InferencePolicy, Content
 //!   Safety, token budgets, and audit-chain emission.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -71,6 +72,7 @@ use super::tools::{
     AsyncToolDispatcher, DispatchError, ToolCallOutput, ToolCatalog, ToolContent, ToolDefinition,
     ToolDispatcher,
 };
+use crate::policy_status::{PolicyKind, PolicyStatusRegistry};
 
 /// Default loopback port the router binds in production. Overridable
 /// via `ROUTER_INTERNAL_PORT` so integration tests can target a
@@ -267,6 +269,25 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
     ToolCatalog::new(tools).expect("foundry_tool_catalog: schemas are valid by construction")
 }
 
+/// Outcome of `PlatformDispatcher::ensure_memory_store` — used
+/// by the `memory()` 404→provision→retry path (Slice 3c.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnsureOutcome {
+    /// Provision POST returned 2xx or 409 ("already exists" — the
+    /// idempotent-success case). The caller retries the original
+    /// `foundry.memory.{search,update}` call once.
+    Ready,
+    /// Provision POST hit upstream RBAC (401/403). The caller
+    /// records `AuthMisconfigured:` on the Memory PolicyKind and
+    /// surfaces the original 404 envelope back to the agent. The
+    /// embedded status is informational for log lines.
+    AuthFailed(u16),
+    /// Transport error, 4xx other than 401/403/409, or 5xx. The
+    /// caller falls through to the existing `MemoryStoreMissing:`
+    /// record path so the operator still sees something on the CRD.
+    Failed,
+}
+
 /// Dispatcher backing `/platform/mcp`. Publishes the 9-tool Foundry-shim
 /// catalog and forwards each tool call into the same router process
 /// over loopback so the existing governance/policy/safety/budget
@@ -277,6 +298,27 @@ pub struct PlatformDispatcher {
     base_url: String,
     sandbox_name: String,
     memory_store_id: String,
+    /// Slice 3b.3: optional handle into the ClawMemory binding loaded
+    /// by `memory_binding_loader`. When `Some` and the handle resolves
+    /// to a binding with a non-empty `store_name`, that value wins
+    /// over the chart-fed `FOUNDRY_MEMORY_STORE_ID` env (i.e. CRD
+    /// trumps env). When `None`, or when the binding is missing/empty
+    /// (mount absent, parse failed), we fall back to
+    /// `memory_store_id`. This is the consumer that closes the Slice
+    /// 3a `MEMORY_STORE_ID` deferred work without changing any other
+    /// behaviour — non-`foundry.memory` tools are unaffected.
+    memory_binding: Option<crate::memory_binding_loader::LoadedMemoryBindingHandle>,
+    /// Slice 3b.4 — optional handle into the per-process
+    /// `PolicyStatusRegistry`. When set, `foundry.memory` records an
+    /// `AuthMisconfigured:` prefixed `last_error` on the `Memory`
+    /// policy kind any time the upstream Foundry Memory Store
+    /// returns 401/403. The controller's ClawMemory reconciler
+    /// scans for that prefix and elevates the status to
+    /// `Degraded=True / reason=AuthMisconfigured` rather than the
+    /// generic `AwaitingRouterEnforcement` (see Slice 3b.4 changelog).
+    /// `None` keeps the legacy behaviour: 403s bubble up to the agent
+    /// via the normal envelope but never reach the CRD status.
+    policy_status: Option<Arc<PolicyStatusRegistry>>,
     http: reqwest::Client,
 }
 
@@ -303,6 +345,8 @@ impl PlatformDispatcher {
             base_url,
             sandbox_name,
             memory_store_id,
+            memory_binding: None,
+            policy_status: None,
             http,
         }
     }
@@ -326,6 +370,50 @@ impl PlatformDispatcher {
     pub fn with_memory_store_id(mut self, id: impl Into<String>) -> Self {
         self.memory_store_id = id.into();
         self
+    }
+
+    /// Slice 3b.3: attach a `ClawMemory` binding handle. When the
+    /// handle resolves to a binding with a non-empty `store_name`,
+    /// `foundry.memory` calls use that store id instead of the
+    /// env-fed `memory_store_id`. Lets the CRD-driven binding take
+    /// precedence over the legacy chart env without breaking the
+    /// env-only fallback path (sandboxes with no `spec.memoryRef`
+    /// keep working exactly as before).
+    pub fn with_memory_binding(
+        mut self,
+        handle: crate::memory_binding_loader::LoadedMemoryBindingHandle,
+    ) -> Self {
+        self.memory_binding = Some(handle);
+        self
+    }
+
+    /// Slice 3b.4: attach the per-process `PolicyStatusRegistry`.
+    /// Enables the `foundry.memory` 401/403 path to surface an
+    /// `AuthMisconfigured:` prefixed `last_error` for the `Memory`
+    /// policy kind so the controller can elevate the ClawMemory CRD
+    /// to `Degraded=True / reason=AuthMisconfigured`. Without this
+    /// handle the dispatcher still works end-to-end — 403s just stay
+    /// in-band on the agent envelope and never reach the CRD.
+    pub fn with_policy_status(mut self, registry: Arc<PolicyStatusRegistry>) -> Self {
+        self.policy_status = Some(registry);
+        self
+    }
+
+    /// Resolve the effective Memory Store id for a `foundry.memory`
+    /// call. Returns the ClawMemory binding's `store_name` when one
+    /// is loaded with a non-empty value; otherwise the configured
+    /// env-fed `memory_store_id`. The CRD-driven binding wins.
+    async fn effective_memory_store_id(&self) -> String {
+        if let Some(handle) = self.memory_binding.as_ref() {
+            let guard = handle.read().await;
+            if let Some(binding) = guard.as_ref() {
+                let name = binding.store_name.trim();
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+        self.memory_store_id.clone()
     }
 
     pub fn with_catalog(mut self, catalog: ToolCatalog) -> Self {
@@ -435,8 +523,188 @@ impl PlatformDispatcher {
                 });
             }
         };
-        let path = format!("/memory_stores/{}{}", self.memory_store_id, suffix);
-        self.post_json("foundry.memory", &path, &body).await
+        let store_id = self.effective_memory_store_id().await;
+        let path = format!("/memory_stores/{store_id}{suffix}");
+        let (status, output) = self
+            .post_json_with_status("foundry.memory", &path, &body)
+            .await;
+
+        // Slice 3c.1 — router-side ensure-on-404. When the Foundry
+        // upstream returns 404 ("store does not exist"), attempt to
+        // auto-provision the store via POST `/memory_stores` (the
+        // same body shape the runtime `ensureMemoryStore` uses) and
+        // retry the original call exactly once.
+        //
+        // Retry succeeds → return the retry envelope; the original
+        // 404 is forgotten and no `MemoryStoreMissing` lands on the
+        // CRD status (the store now exists, so the condition would
+        // be a lie). Provisioning fails with 401/403 → record
+        // `AuthMisconfigured:` against the POST path and return the
+        // original 404 envelope (the controller's pre-scan will
+        // elevate Degraded with the right reason). Provisioning
+        // fails for any other reason → fall through to the existing
+        // `MemoryStoreMissing:` record path so the operator still
+        // gets a signal.
+        if status == Some(404) {
+            match self.ensure_memory_store(&store_id).await {
+                EnsureOutcome::Ready => {
+                    let (retry_status, retry_output) = self
+                        .post_json_with_status("foundry.memory", &path, &body)
+                        .await;
+                    if !matches!(retry_status, Some(404)) {
+                        return Ok(retry_output);
+                    }
+                    // Defensive: provisioning claimed success but the
+                    // store still 404s. Fall through to record
+                    // MemoryStoreMissing so the operator notices.
+                }
+                EnsureOutcome::AuthFailed(s) => {
+                    if let Some(registry) = self.policy_status.as_ref() {
+                        let source_path = registry
+                            .get(PolicyKind::Memory)
+                            .map(|e| e.source_path)
+                            .unwrap_or_else(|| "/etc/azureclaw/memory/binding.json".to_string());
+                        let msg = format!(
+                            "AuthMisconfigured: foundry.memory auto-provision returned HTTP {s} \
+                             from /memory_stores (verify the project managed identity has \
+                             the Azure AI User role on the resource group hosting the \
+                             Foundry account)",
+                        );
+                        registry.record_error(PolicyKind::Memory, &source_path, &msg);
+                    }
+                    return Ok(output);
+                }
+                EnsureOutcome::Failed => {
+                    // Provisioning failed for a non-auth reason
+                    // (transport, 5xx, malformed response). Fall
+                    // through to the original 404 record path so
+                    // MemoryStoreMissing surfaces — the operator
+                    // can then look at router logs to find the
+                    // provision failure detail.
+                }
+            }
+        }
+
+        // Slice 3b.4 — surface upstream auth failures from the
+        // Foundry Memory Store on the CRD. The router records an
+        // `AuthMisconfigured:` prefixed `last_error` on
+        // `PolicyKind::Memory` so the ClawMemory reconciler's pre-scan
+        // (see `controller/src/claw_memory_reconciler.rs::
+        // first_auth_misconfigured_message`) lifts the condition to
+        // `Degraded=True / reason=AuthMisconfigured`. The wire prefix
+        // is pinned by the controller side as
+        // `conditions::AUTH_MISCONFIGURED_PREFIX`; we replicate the
+        // string literal here rather than depend on the controller
+        // crate (no cross-binary dep allowed). 401 and 403 both map
+        // — both are pure-RBAC problems against the upstream.
+        if matches!(status, Some(401) | Some(403))
+            && let Some(registry) = self.policy_status.as_ref()
+        {
+            let source_path = registry
+                .get(PolicyKind::Memory)
+                .map(|e| e.source_path)
+                .unwrap_or_else(|| "/etc/azureclaw/memory/binding.json".to_string());
+            let msg = format!(
+                "AuthMisconfigured: foundry.memory:{} returned HTTP {} from {} \
+                 (verify the project managed identity has the Azure AI User \
+                 role on the resource group hosting the Foundry account)",
+                op,
+                status.unwrap_or(0),
+                path,
+            );
+            registry.record_error(PolicyKind::Memory, &source_path, &msg);
+        }
+        // Slice 3b.5 — surface "store does not exist on the upstream"
+        // as a Degraded condition. Only reached now if Slice 3c.1's
+        // ensure-on-404 path either failed for a non-auth reason or
+        // claimed success but the store still 404s (defensive).
+        // Otherwise the retry above already returned 2xx and we
+        // never get here. The wire prefix is pinned controller-side
+        // as `conditions::MEMORY_STORE_MISSING_PREFIX`; replicated
+        // here as a literal because no cross-binary dep is allowed.
+        if status == Some(404)
+            && let Some(registry) = self.policy_status.as_ref()
+        {
+            let source_path = registry
+                .get(PolicyKind::Memory)
+                .map(|e| e.source_path)
+                .unwrap_or_else(|| "/etc/azureclaw/memory/binding.json".to_string());
+            let msg = format!(
+                "MemoryStoreMissing: foundry.memory:{op} returned HTTP 404 from {path} \
+                 (auto-provision also failed; check the router logs for the \
+                 POST /memory_stores response, or pre-create the store via the \
+                 Foundry portal)",
+            );
+            registry.record_error(PolicyKind::Memory, &source_path, &msg);
+        }
+        Ok(output)
+    }
+
+    /// Attempt to auto-provision a Foundry Memory Store named
+    /// `store_id`. Mirrors the body shape the openclaw runtime
+    /// uses in `ensureMemoryStore` (runtimes/openclaw/dist/core/
+    /// agt-tools/foundry.js): kind `default`, chat_model from
+    /// `OPENCLAW_MODEL` env (default `gpt-4.1`), embedding_model
+    /// `text-embedding-3-small`, full options block enabled.
+    ///
+    /// Returns:
+    /// - `Ready` on any 2xx **or** 409 ("conflict — already exists").
+    ///   409 is the idempotent-success outcome when two replicas
+    ///   race or when the store happens to have been created out-of-
+    ///   band between the original 404 and our POST.
+    /// - `AuthFailed(status)` on 401/403 — fed into the CRD as
+    ///   `AuthMisconfigured` by the caller.
+    /// - `Failed` for transport errors, 4xx (except 401/403/409),
+    ///   and 5xx. The caller records the original 404 as
+    ///   `MemoryStoreMissing` so the operator gets a signal.
+    async fn ensure_memory_store(&self, store_id: &str) -> EnsureOutcome {
+        let chat_model = std::env::var("OPENCLAW_MODEL").unwrap_or_else(|_| "gpt-4.1".to_string());
+        let body = json!({
+            "name": store_id,
+            "description": "AzureClaw agent persistent memory",
+            "definition": {
+                "kind": "default",
+                "chat_model": chat_model,
+                "embedding_model": "text-embedding-3-small",
+                "options": {
+                    "user_profile_enabled": true,
+                    "user_profile_details": "Store user preferences, decisions, and project context",
+                    "chat_summary_enabled": true,
+                },
+            },
+        });
+        let (status, _envelope) = self
+            .post_json_with_status("foundry.memory.ensure", "/memory_stores", &body)
+            .await;
+        match status {
+            Some(s) if (200..300).contains(&s) || s == 409 => {
+                tracing::info!(
+                    target: "foundry.memory.ensure",
+                    store_id = %store_id,
+                    status = s,
+                    "Foundry Memory Store auto-provisioned (or already existed)"
+                );
+                EnsureOutcome::Ready
+            }
+            Some(401) | Some(403) => {
+                tracing::warn!(
+                    target: "foundry.memory.ensure",
+                    store_id = %store_id,
+                    status = ?status,
+                    "Foundry Memory Store auto-provision rejected by upstream RBAC"
+                );
+                EnsureOutcome::AuthFailed(status.unwrap_or(0))
+            }
+            _ => {
+                tracing::warn!(
+                    target: "foundry.memory.ensure",
+                    store_id = %store_id,
+                    status = ?status,
+                    "Foundry Memory Store auto-provision failed"
+                );
+                EnsureOutcome::Failed
+            }
+        }
     }
 
     async fn image_generation(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
@@ -596,22 +864,47 @@ impl PlatformDispatcher {
         path: &str,
         body: &Value,
     ) -> Result<ToolCallOutput, DispatchError> {
+        let (_status, output) = self.post_json_with_status(tool, path, body).await;
+        Ok(output)
+    }
+
+    /// Variant of [`post_json`] that returns the upstream HTTP status
+    /// alongside the envelope. Returns `None` for the status when the
+    /// transport itself failed (DNS, TCP, TLS, body serialise) — those
+    /// paths cannot reasonably be classified as auth issues. Used by
+    /// `foundry.memory` (Slice 3b.4) to detect 401/403 and lift the
+    /// CRD `Degraded` condition.
+    async fn post_json_with_status(
+        &self,
+        tool: &'static str,
+        path: &str,
+        body: &Value,
+    ) -> (Option<u16>, ToolCallOutput) {
         let url = self.url(path);
+        let bytes = match serde_json::to_vec(body) {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    None,
+                    ToolCallOutput {
+                        content: vec![ToolContent::Text {
+                            text: format!("{tool} body serialise: {e}"),
+                        }],
+                        is_error: true,
+                    },
+                );
+            }
+        };
         let resp = self
             .http
             .post(&url)
             .header("content-type", "application/json")
             .header("x-azureclaw-sandbox", &self.sandbox_name)
             .header("x-azureclaw-platform-mcp", "1")
-            .body(
-                serde_json::to_vec(body).map_err(|e| DispatchError::ExecutionFailed {
-                    tool: tool.into(),
-                    reason: format!("body serialise: {e}"),
-                })?,
-            )
+            .body(bytes)
             .send()
             .await;
-        Ok(self.envelope(tool, resp).await)
+        self.envelope_with_status(tool, resp).await
     }
 
     async fn get(&self, tool: &'static str, path: &str) -> Result<ToolCallOutput, DispatchError> {
@@ -647,35 +940,54 @@ impl PlatformDispatcher {
         tool: &'static str,
         resp: Result<reqwest::Response, reqwest::Error>,
     ) -> ToolCallOutput {
+        self.envelope_with_status(tool, resp).await.1
+    }
+
+    /// Variant of [`envelope`] that returns the upstream HTTP status
+    /// alongside the rendered `ToolCallOutput`. `None` when the
+    /// transport itself failed (DNS, TCP, TLS, timeout). Used by
+    /// `post_json_with_status` so the `foundry.memory` 401/403 hook
+    /// (Slice 3b.4) can classify auth failures without losing the
+    /// existing envelope shape.
+    async fn envelope_with_status(
+        &self,
+        tool: &'static str,
+        resp: Result<reqwest::Response, reqwest::Error>,
+    ) -> (Option<u16>, ToolCallOutput) {
         match resp {
             Ok(r) => {
                 let status = r.status();
+                let code = status.as_u16();
                 let text = r.text().await.unwrap_or_default();
                 if status.is_success() {
-                    ToolCallOutput {
-                        content: vec![ToolContent::Text { text }],
-                        is_error: false,
-                    }
+                    (
+                        Some(code),
+                        ToolCallOutput {
+                            content: vec![ToolContent::Text { text }],
+                            is_error: false,
+                        },
+                    )
                 } else {
-                    ToolCallOutput {
-                        content: vec![ToolContent::Text {
-                            text: format!(
-                                "{} upstream returned HTTP {}: {}",
-                                tool,
-                                status.as_u16(),
-                                text
-                            ),
-                        }],
-                        is_error: true,
-                    }
+                    (
+                        Some(code),
+                        ToolCallOutput {
+                            content: vec![ToolContent::Text {
+                                text: format!("{tool} upstream returned HTTP {code}: {text}"),
+                            }],
+                            is_error: true,
+                        },
+                    )
                 }
             }
-            Err(e) => ToolCallOutput {
-                content: vec![ToolContent::Text {
-                    text: format!("{tool} transport error: {e}"),
-                }],
-                is_error: true,
-            },
+            Err(e) => (
+                None,
+                ToolCallOutput {
+                    content: vec![ToolContent::Text {
+                        text: format!("{tool} transport error: {e}"),
+                    }],
+                    is_error: true,
+                },
+            ),
         }
     }
 }
@@ -952,6 +1264,112 @@ mod tests {
         assert!(matches!(err, DispatchError::InvalidArguments { .. }));
     }
 
+    /// Slice 3b.3: when a ClawMemory binding is attached and carries
+    /// a non-empty `store_name`, that name wins over the env-fed
+    /// `memory_store_id`. The compiled CRD is the source of truth.
+    #[tokio::test]
+    async fn memory_binding_store_name_overrides_env_store_id() {
+        use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/from-crd:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+        let handle = empty_handle();
+        {
+            let mut g = handle.write().await;
+            *g = Some(LoadedMemoryBinding {
+                digest: "sha256:deadbeef".into(),
+                source_path: "/etc/azureclaw/memory/binding.json".into(),
+                store_name: "from-crd".into(),
+                scope: "agent:test".into(),
+                raw: json!({"storeName": "from-crd"}),
+            });
+        }
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("from-env")
+            .with_memory_binding(handle);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        // Mock was registered for the CRD-driven path; if the env id
+        // had won we'd see zero matched requests and the mock would
+        // 404.
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "foundry.memory must route to the CRD-driven store name"
+        );
+    }
+
+    /// Slice 3b.3: when the binding handle resolves to a binding
+    /// whose `store_name` is empty (or whitespace), we fall back to
+    /// the env-fed id. Avoids tripping on a malformed compiled
+    /// binding.
+    #[tokio::test]
+    async fn memory_empty_binding_store_name_falls_back_to_env() {
+        use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/from-env:update_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"updated": 1})))
+            .mount(&server)
+            .await;
+        let handle = empty_handle();
+        {
+            let mut g = handle.write().await;
+            *g = Some(LoadedMemoryBinding {
+                digest: "sha256:deadbeef".into(),
+                source_path: "/etc/azureclaw/memory/binding.json".into(),
+                store_name: "   ".into(),
+                scope: "agent:test".into(),
+                raw: json!({}),
+            });
+        }
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("from-env")
+            .with_memory_binding(handle);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "update", "text": "remember"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "empty store_name in binding must fall back to env"
+        );
+    }
+
+    /// Slice 3b.3: when no binding handle is attached at all, the
+    /// dispatcher behaves exactly as before (env-fed id wins). This
+    /// is the path sandboxes without `spec.memoryRef` follow.
+    #[tokio::test]
+    async fn memory_without_binding_handle_uses_env_store_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/from-env:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+        let d = PlatformDispatcher::with_base_url(server.uri()).with_memory_store_id("from-env");
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn image_generation_posts_to_v1_images_generations_with_defaults() {
         let server = MockServer::start().await;
@@ -1219,5 +1637,532 @@ mod tests {
         // may be unset; we only assert the catalog shape is intact.
         let d = PlatformDispatcher::default();
         assert_eq!(d.catalog_ref().tools().len(), 9);
+    }
+
+    // ----- Slice 3b.4: foundry.memory 401/403 → AuthMisconfigured -----
+
+    /// 403 from the upstream Memory Store records an
+    /// `AuthMisconfigured:` prefixed `last_error` on
+    /// `PolicyKind::Memory` while preserving the prior digest. This
+    /// is the producer half of the controller-side scan added in
+    /// `controller/src/claw_memory_reconciler::first_auth_misconfigured_message`.
+    #[tokio::test]
+    async fn memory_403_records_auth_misconfigured_on_policy_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        // Pre-seed the registry as if the memory binding had loaded
+        // successfully — `record_error` must preserve this digest so
+        // the controller can still tell "loaded once, now broken" from
+        // "never loaded".
+        registry.record_success(
+            PolicyKind::Memory,
+            "/etc/azureclaw/memory/binding.json",
+            b"binding",
+        );
+        let prior_digest = registry
+            .get(PolicyKind::Memory)
+            .and_then(|e| e.digest)
+            .unwrap();
+
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        // Agent-facing envelope still surfaces the upstream error.
+        assert!(out.is_error);
+
+        let entry = registry.get(PolicyKind::Memory).expect("entry present");
+        let err = entry.last_error.expect("last_error recorded");
+        assert!(
+            err.starts_with("AuthMisconfigured:"),
+            "expected AuthMisconfigured: prefix, got {err}"
+        );
+        assert!(err.contains("HTTP 403"), "should mention status: {err}");
+        assert!(err.contains("search"), "should mention operation: {err}");
+        // Digest preserved through the error record.
+        assert_eq!(entry.digest, Some(prior_digest));
+    }
+
+    /// 401 maps the same way — it's a credentials problem at the
+    /// upstream, equally a misconfig signal.
+    #[tokio::test]
+    async fn memory_401_records_auth_misconfigured_on_policy_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:update_memories"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "update", "text": "x"}),
+        )
+        .await
+        .unwrap();
+        let entry = registry.get(PolicyKind::Memory).expect("entry present");
+        let err = entry.last_error.unwrap();
+        assert!(err.starts_with("AuthMisconfigured:"));
+        assert!(err.contains("HTTP 401"));
+        assert!(err.contains("update"));
+    }
+
+    /// 500 from the upstream is **not** an auth issue and must not
+    /// trip the AuthMisconfigured surface — the controller would
+    /// over-promote a transient outage to a hard Degraded.
+    #[tokio::test]
+    async fn memory_500_does_not_record_auth_misconfigured() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            registry.get(PolicyKind::Memory).is_none(),
+            "500 must not record any Memory entry"
+        );
+    }
+
+    /// 200 success leaves the registry untouched — only the
+    /// `memory_binding_loader` startup path is allowed to call
+    /// `record_success` for the Memory kind.
+    #[tokio::test]
+    async fn memory_200_does_not_touch_policy_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(&server)
+            .await;
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        assert!(registry.get(PolicyKind::Memory).is_none());
+    }
+
+    /// Without a `PolicyStatusRegistry` handle, the dispatcher still
+    /// surfaces 403 to the agent envelope but cannot reach the CRD.
+    /// This is the legacy path — must not panic or misbehave.
+    #[tokio::test]
+    async fn memory_403_without_policy_status_handle_is_silent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+        let d = PlatformDispatcher::with_base_url(server.uri()).with_memory_store_id("store-xyz");
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        assert!(out.is_error);
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(text.contains("HTTP 403"));
+    }
+
+    // ----- Slice 3b.5: foundry.memory 404 → MemoryStoreMissing -----
+
+    /// 404 from the upstream Memory Store records a
+    /// `MemoryStoreMissing:` prefixed `last_error` on
+    /// `PolicyKind::Memory` while preserving the prior digest. The
+    /// controller's `first_memory_store_missing_message` pre-scan
+    /// (claw_memory_reconciler) elevates this to
+    /// `Degraded=True / reason=MemoryStoreMissing`. 404 has lower
+    /// precedence than 401/403 (RBAC dominates), so callers must
+    /// check AuthMisconfigured first — which they do.
+    #[tokio::test]
+    async fn memory_404_records_memory_store_missing_on_policy_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        registry.record_success(
+            PolicyKind::Memory,
+            "/etc/azureclaw/memory/binding.json",
+            b"binding",
+        );
+        let prior_digest = registry
+            .get(PolicyKind::Memory)
+            .and_then(|e| e.digest)
+            .unwrap();
+
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        assert!(out.is_error);
+
+        let entry = registry.get(PolicyKind::Memory).expect("entry present");
+        let err = entry.last_error.expect("last_error recorded");
+        assert!(
+            err.starts_with("MemoryStoreMissing:"),
+            "expected MemoryStoreMissing: prefix, got {err}"
+        );
+        assert!(err.contains("HTTP 404"), "should mention status: {err}");
+        assert!(err.contains("search"), "should mention operation: {err}");
+        // Digest preserved through the error record (matches the
+        // 3b.4 design — record_error never wipes the digest).
+        assert_eq!(entry.digest, Some(prior_digest));
+    }
+
+    /// 404 must NOT trip the AuthMisconfigured surface — the
+    /// controller would attribute a missing store to RBAC and
+    /// mislead the operator. The `MemoryStoreMissing:` prefix is
+    /// the only signal recorded.
+    #[tokio::test]
+    async fn memory_404_does_not_record_auth_misconfigured() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:update_memories"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "update", "text": "x"}),
+        )
+        .await
+        .unwrap();
+        let err = registry
+            .get(PolicyKind::Memory)
+            .and_then(|e| e.last_error)
+            .expect("404 must record an error");
+        assert!(
+            !err.starts_with("AuthMisconfigured:"),
+            "404 must not be classified as AuthMisconfigured: {err}"
+        );
+        assert!(err.starts_with("MemoryStoreMissing:"));
+    }
+
+    /// Without a `PolicyStatusRegistry` handle, the dispatcher still
+    /// surfaces 404 to the agent envelope but cannot reach the CRD.
+    /// Legacy path — must not panic.
+    #[tokio::test]
+    async fn memory_404_without_policy_status_handle_is_silent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let d = PlatformDispatcher::with_base_url(server.uri()).with_memory_store_id("store-xyz");
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        assert!(out.is_error);
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(text.contains("HTTP 404"));
+    }
+
+    // ----- Slice 3c.1: foundry.memory 404 → auto-provision → retry -----
+
+    /// Happy path: upstream 404 on the search call → router POSTs
+    /// `/memory_stores` to provision → upstream returns 201 → retry
+    /// of the original call returns 200. The agent sees success and
+    /// **no** `MemoryStoreMissing:` lands on the Memory PolicyKind.
+    /// This is the slice's whole point: routine 404s self-heal.
+    #[tokio::test]
+    async fn memory_404_then_provision_then_retry_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let server = MockServer::start().await;
+        // The original call mock cycles through responses by using
+        // an external counter — first call 404, subsequent calls 200.
+        // wiremock's `respond_with` is stateless, so we use a custom
+        // responder backed by a shared AtomicUsize.
+        static SEARCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+        SEARCH_CALLS.store(0, Ordering::SeqCst);
+
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(|_: &wiremock::Request| {
+                let n = SEARCH_CALLS.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    ResponseTemplate::new(404).set_body_string("not found")
+                } else {
+                    ResponseTemplate::new(200).set_body_string(r#"{"results":[]}"#)
+                }
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores"))
+            .respond_with(ResponseTemplate::new(201).set_body_string(r#"{"name":"store-xyz"}"#))
+            .mount(&server)
+            .await;
+
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        registry.record_success(
+            PolicyKind::Memory,
+            "/etc/azureclaw/memory/binding.json",
+            b"binding",
+        );
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        // Retry succeeded → agent sees success.
+        assert!(!out.is_error, "retry should have succeeded: {out:?}");
+        // No MemoryStoreMissing recorded — the store now exists.
+        let entry = registry.get(PolicyKind::Memory).expect("entry present");
+        assert!(
+            entry.last_error.is_none(),
+            "auto-heal must not record an error: {:?}",
+            entry.last_error
+        );
+        // Original call invoked twice (initial + retry).
+        assert_eq!(SEARCH_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    /// 409 ("already exists") from the provision POST is the
+    /// idempotent-success case — two replicas racing or out-of-band
+    /// creation. The router still retries the original call.
+    #[tokio::test]
+    async fn memory_404_then_provision_409_treated_as_ready_and_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let server = MockServer::start().await;
+        static SEARCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+        SEARCH_CALLS.store(0, Ordering::SeqCst);
+
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:update_memories"))
+            .respond_with(|_: &wiremock::Request| {
+                let n = SEARCH_CALLS.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    ResponseTemplate::new(404).set_body_string("not found")
+                } else {
+                    ResponseTemplate::new(200).set_body_string(r#"{"ok":true}"#)
+                }
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
+            .mount(&server)
+            .await;
+
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "update", "text": "x"}),
+        )
+        .await
+        .unwrap();
+        assert!(!out.is_error);
+        // Success path doesn't touch the registry — no entry exists,
+        // and that's the correct "no error" surface for the controller.
+        let no_err = registry
+            .get(PolicyKind::Memory)
+            .and_then(|e| e.last_error)
+            .is_none();
+        assert!(no_err, "successful retry must not record an error");
+    }
+
+    /// Provision POST hit 403 (RBAC against the upstream control
+    /// plane). The router records `AuthMisconfigured:` against the
+    /// `/memory_stores` POST path so the controller's pre-scan
+    /// elevates Degraded with the correct reason. The original 404
+    /// envelope is what surfaces back to the agent.
+    #[tokio::test]
+    async fn memory_404_then_provision_403_records_auth_misconfigured() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        // Original 404 envelope flows to the agent.
+        assert!(out.is_error);
+
+        let entry = registry.get(PolicyKind::Memory).expect("entry present");
+        let err = entry.last_error.expect("auth misconfigured recorded");
+        assert!(
+            err.starts_with("AuthMisconfigured:"),
+            "expected AuthMisconfigured: prefix, got {err}"
+        );
+        assert!(err.contains("HTTP 403"), "should mention status: {err}");
+        assert!(
+            err.contains("/memory_stores"),
+            "should mention the provision path: {err}"
+        );
+        // MemoryStoreMissing must NOT also be recorded (RBAC
+        // dominates the 404 signal — see precedence comment in
+        // claw_memory_reconciler).
+        assert!(
+            !err.starts_with("MemoryStoreMissing:"),
+            "RBAC must dominate 404: {err}"
+        );
+    }
+
+    /// Provision POST returned 500 — transient upstream failure or
+    /// genuine plane outage. We fall through to the existing
+    /// MemoryStoreMissing record path so the operator still sees
+    /// something on the CRD (and the router logs carry the 500
+    /// details for triage).
+    #[tokio::test]
+    async fn memory_404_then_provision_500_falls_through_to_memory_store_missing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream boom"))
+            .mount(&server)
+            .await;
+
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        let entry = registry.get(PolicyKind::Memory).expect("entry present");
+        let err = entry.last_error.expect("error recorded");
+        assert!(
+            err.starts_with("MemoryStoreMissing:"),
+            "non-auth provision failure must surface MemoryStoreMissing: {err}"
+        );
+    }
+
+    /// Initial 200 from the upstream → no provision attempted, no
+    /// error recorded. This guards against a regression where the
+    /// ensure path fires unconditionally and races against healthy
+    /// traffic.
+    #[tokio::test]
+    async fn memory_200_skips_provision_path() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let server = MockServer::start().await;
+        static ENSURE_CALLS: AtomicUsize = AtomicUsize::new(0);
+        ENSURE_CALLS.store(0, Ordering::SeqCst);
+
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"results":[]}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores"))
+            .respond_with(|_: &wiremock::Request| {
+                ENSURE_CALLS.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(201)
+            })
+            .mount(&server)
+            .await;
+
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "text": "q"}),
+        )
+        .await
+        .unwrap();
+        assert!(!out.is_error);
+        assert_eq!(
+            ENSURE_CALLS.load(Ordering::SeqCst),
+            0,
+            "ensure must not fire on the happy path"
+        );
+        assert!(
+            registry
+                .get(PolicyKind::Memory)
+                .and_then(|e| e.last_error)
+                .is_none()
+        );
     }
 }

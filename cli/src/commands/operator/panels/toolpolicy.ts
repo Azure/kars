@@ -26,9 +26,8 @@ export const toolPolicyPanel: Panel = {
     for (const t of items) {
       lines.push(renderItemHeader(t));
       const applies = t.appliesToSandbox ?? "<all>";
-      const approval = t.approvalRequired ? "yes" : "no";
       const rate = t.rateLimitPerMin !== undefined ? `${t.rateLimitPerMin}/min` : "—";
-      lines.push(`  appliesTo: {cyan-fg}${applies}{/}   rules=${t.ruleCount ?? 0}   approval=${approval}   rate-limit=${rate}`);
+      lines.push(`  appliesTo: {cyan-fg}${applies}{/}   rules=${t.ruleCount ?? 0}   rate-limit=${rate}`);
       const c = t.commerce;
       if (c && (c.mandates !== undefined || c.floorUsd !== undefined)) {
         const mandates = c.mandates ? "yes" : "no";

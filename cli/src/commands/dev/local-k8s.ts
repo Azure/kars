@@ -1802,8 +1802,7 @@ async function autoCreateSandbox(
     // allowlist via `azureclaw policy allow` once they're happy.
     "  networkPolicy:",
     "    defaultDeny: true",
-    "    approvalRequired: false",
-    "    learnEgress: true",
+    "    egressMode: Learn",
     "    allowedEndpoints: []",
     "",
   ].join("\n");

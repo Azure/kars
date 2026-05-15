@@ -63,6 +63,12 @@ async fn main() -> Result<()> {
 
     tracing::info!("AzureClaw Inference Router starting");
 
+    // Slice 4d.2: surface per-server McpServer JWKS mounts at startup
+    // so operators can verify that all `mcpServerRefs` on the sandbox
+    // landed correctly inside the pod. Discovery is read-only and
+    // pre-config — it cannot fail startup.
+    let _mcp_registry = azureclaw_inference_router::mcp::registry::discover_from_env();
+
     let config = config::Config::from_env()?;
 
     // Log registry mode — informs whether handoff is available.
@@ -109,6 +115,71 @@ async fn main() -> Result<()> {
 
     // Start policy hot-reload watcher (polls AGT_POLICY_DIR for mtime changes).
     governance::Governance::spawn_policy_watcher(state.governance.clone());
+
+    // Slice 2 / Slice 3 hot-reload: poll the InferencePolicy and
+    // ClawMemory mount directories for mtime changes and re-invoke
+    // each loader's `load_and_install`. Without this the router
+    // would happily echo a stale digest for the lifetime of the
+    // pod whenever an operator `kubectl edit`s the CR — the
+    // controller-side echo loop would never close `Compiled → Ready`
+    // after the first change. Each watcher is best-effort: a missing
+    // directory is fine (the mount may appear later when the
+    // operator adds `spec.inferenceRef` / `spec.memoryRef`).
+    {
+        let inference_dir = std::env::var("INFERENCE_POLICY_DIR")
+            .unwrap_or_else(|_| "/etc/azureclaw/inference".into());
+        azureclaw_inference_router::inference_policy_loader::spawn_inference_policy_watcher(
+            inference_dir,
+            state.policy_status.clone(),
+            state.inference_policy.clone(),
+        );
+
+        let memory_dir = std::env::var("MEMORY_BINDING_DIR").unwrap_or_else(|_| {
+            azureclaw_inference_router::memory_binding_loader::MEMORY_BINDING_DIR_DEFAULT.into()
+        });
+        azureclaw_inference_router::memory_binding_loader::spawn_memory_binding_watcher(
+            memory_dir,
+            state.policy_status.clone(),
+            state.memory_binding.clone(),
+        );
+
+        // Slice 5c.1: load the signed egress allowlist bundle once on
+        // startup so the in-memory `Blocklist` allowlist reflects the
+        // controller-published bytes before the forward proxy starts
+        // accepting connections. The watcher then keeps it in sync on
+        // every hot-reload (kubectl edit → ConfigMap mtime bump →
+        // atomic `Blocklist::replace_allowlist`).
+        let egress_dir = std::env::var("EGRESS_ALLOWLIST_DIR").unwrap_or_else(|_| {
+            azureclaw_inference_router::egress_allowlist_loader::EGRESS_ALLOWLIST_DIR_DEFAULT.into()
+        });
+        // Slice 5e: per-sandbox `EgressApproval` files (one
+        // `approval-{name}.json` per CR pointing at this sandbox) live
+        // in a sibling ConfigMap mounted at `EGRESS_APPROVAL_DIR`. The
+        // loader UNIONs them with the baseline allowlist and registers
+        // the merged-set digest under `PolicyKind::EgressApproval`.
+        let approvals_dir = std::env::var(
+            azureclaw_inference_router::egress_allowlist_loader::EGRESS_APPROVAL_DIR_ENV,
+        )
+        .unwrap_or_else(|_| {
+            azureclaw_inference_router::egress_allowlist_loader::EGRESS_APPROVAL_DIR_DEFAULT.into()
+        });
+        let _ =
+            azureclaw_inference_router::egress_allowlist_loader::load_and_install_with_approvals(
+                &egress_dir,
+                Some(approvals_dir.as_str()),
+                &state.policy_status,
+                &state.egress_allowlist,
+                &state.blocklist,
+            )
+            .await;
+        azureclaw_inference_router::egress_allowlist_loader::spawn_egress_allowlist_watcher_with_approvals(
+            egress_dir,
+            Some(approvals_dir),
+            state.policy_status.clone(),
+            state.egress_allowlist.clone(),
+            state.blocklist.clone(),
+        );
+    }
 
     // Clone blocklist for the forward proxy before state is moved into the router.
     let proxy_blocklist = state.blocklist.clone();
@@ -189,7 +260,8 @@ async fn main() -> Result<()> {
             .merge(routes::admin_routes())
             .merge(routes::egress_routes())
             .merge(routes::spawn_routes())
-            .merge(routes::sensitive_agt_routes());
+            .merge(routes::sensitive_agt_routes())
+            .merge(routes::internal_routes());
 
         let protected = if let Some(ref token) = admin_token {
             let token = token.clone();
@@ -296,14 +368,19 @@ async fn main() -> Result<()> {
                 }
             });
 
+        let memory_binding_for_platform = state.memory_binding.clone();
+        let policy_status_for_platform = state.policy_status.clone();
         let merged = public
             .merge(protected)
             .merge(handoff_init)
             .merge(handoff_mutations)
             .merge(handoff_status)
             .with_state(state)
-            .merge(build_mcp_router())
-            .merge(build_platform_mcp_router());
+            .merge(build_mcp_router().await)
+            .merge(build_platform_mcp_router(
+                Some(memory_binding_for_platform),
+                Some(policy_status_for_platform),
+            ));
 
         let merged = if let Some(a2a) = a2a_router_opt {
             merged.merge(a2a)
@@ -445,8 +522,11 @@ async fn main() -> Result<()> {
 /// falling back to the unauthenticated dev route. Operators see a clear
 /// startup-time error instead of a route that quietly serves
 /// unauthenticated MCP traffic.
-fn build_mcp_router() -> Router {
+async fn build_mcp_router() -> Router {
+    use azureclaw_inference_router::mcp::forwarder::RouterToolDispatcher;
     use azureclaw_inference_router::mcp::oauth::OAuthVerifierConfig;
+    use azureclaw_inference_router::mcp::registry;
+    use std::time::Duration;
 
     let production = std::env::var("MCP_PRODUCTION_MODE")
         .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
@@ -454,7 +534,88 @@ fn build_mcp_router() -> Router {
     let jwks_path = std::env::var("MCP_JWKS_PATH").ok();
     let audience = std::env::var("MCP_OAUTH_AUDIENCE").ok();
 
-    let state = routes::McpRouteState::standard();
+    let registry_arc = Arc::new(registry::discover_from_env());
+
+    // Slice 4d.4 — when the registry advertises at least one server
+    // with a usable upstream URL, replace the in-tree EchoDispatcher
+    // with the namespaced forwarder. Discovery is best-effort: per-
+    // server failures are recorded and logged, the router still
+    // starts. If *catalog construction* itself fails (duplicate
+    // namespaced tool names across servers) we honor §3 and refuse
+    // to mount /mcp.
+    let dispatcher_arc: Option<
+        Arc<dyn azureclaw_inference_router::mcp::tools::AsyncToolDispatcher>,
+    > = if !registry_arc.is_empty() {
+        let timeout = std::env::var("MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5);
+        match RouterToolDispatcher::discover(registry_arc.clone(), Duration::from_secs(timeout))
+            .await
+        {
+            Ok(dispatcher) => {
+                tracing::info!(
+                    servers = registry_arc.len(),
+                    tools = dispatcher.len(),
+                    skipped = dispatcher.skipped().len(),
+                    "Mounted /mcp upstream forwarder (Slice 4d.4)"
+                );
+                for (server, reason) in dispatcher.skipped() {
+                    tracing::warn!(server = %server, reason = %reason, "McpServer skipped by forwarder");
+                }
+                Some(Arc::new(dispatcher))
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Forwarder catalog construction failed; refusing to mount /mcp");
+                return Router::new();
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut state = routes::McpRouteState::standard();
+    if let Some(d) = dispatcher_arc {
+        state = state.with_tools(d);
+    }
+
+    // Slice 4d.3 — prefer the multi-issuer path when MCP_JWKS_DIR is
+    // populated and at least one server contributes `meta.json`. Falls
+    // back to legacy single-JWKS path on empty/absent registry.
+    if production && !registry_arc.is_empty() {
+        let default_audience = audience.clone().unwrap_or_default();
+        let required_scopes = std::env::var("MCP_OAUTH_REQUIRED_SCOPES")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.split_whitespace().map(|t| t.to_string()).collect())
+            .unwrap_or_default();
+        match OAuthVerifierConfig::from_registry(
+            &registry_arc,
+            &default_audience,
+            required_scopes,
+            60,
+        ) {
+            Ok(Some(cfg)) => {
+                let issuers: Vec<&String> = cfg.trusted_issuers.keys().collect();
+                tracing::info!(
+                    servers = registry_arc.len(),
+                    issuers = ?issuers,
+                    "Mounting /mcp with multi-issuer OAuth 2.1 verification (Slice 4d.3)"
+                );
+                return routes::protected_mcp_route(state, Arc::new(cfg));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "MCP_JWKS_DIR populated but no servers carry meta.json — \
+                     falling back to legacy single-issuer MCP_JWKS_PATH path"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Multi-issuer OAuth config build failed; refusing to mount /mcp");
+                return Router::new();
+            }
+        }
+    }
 
     if production && jwks_path.is_some() && audience.is_some() {
         let path = std::path::PathBuf::from(jwks_path.unwrap());
@@ -512,8 +673,15 @@ fn build_mcp_router() -> Router {
 ///    without changing the actual exposure surface.
 ///
 /// See `mcp/platform.rs` and `plan.md` S10.B for the full rationale.
-fn build_platform_mcp_router() -> Router {
-    let state = routes::McpRouteState::platform();
+fn build_platform_mcp_router(
+    memory_binding: Option<
+        azureclaw_inference_router::memory_binding_loader::LoadedMemoryBindingHandle,
+    >,
+    policy_status: Option<
+        std::sync::Arc<azureclaw_inference_router::policy_status::PolicyStatusRegistry>,
+    >,
+) -> Router {
+    let state = routes::McpRouteState::platform(memory_binding, policy_status);
     tracing::info!(
         "Mounting /platform/mcp (Foundry-shim discovery surface, loopback-only, no OAuth)"
     );

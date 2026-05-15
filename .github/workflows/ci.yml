@@ -11,6 +11,16 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref. PRs that push rapid-fire commits
+# (or rebases) immediately kill prior in-flight runs instead of letting them
+# burn CI minutes to completion. We still gate on the *final* push, so the
+# merge check is unaffected. Push events on dev/main do NOT cancel — the
+# group includes the workflow name + event name to keep branch protection
+# runs intact.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   rust-build:
     name: Rust Build & Test (Controller + Inference Router)
@@ -21,6 +31,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Shared key so audit, deny, chaos, bench, and e2e all hit the same
+          # `target/` cache that rust-build populates. Saves ~3-5min per job
+          # compared to per-job cache keys (which made each one rebuild deps).
+          shared-key: rust-build
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo build --release
@@ -34,11 +49,35 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # Only meaningful when dependency surface changes. Doc-only PRs can't
+      # introduce an advisory.
+      - name: Detect dependency-affecting changes
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
+          if git diff --name-only "$base" "$head" 2>/dev/null \
+             | grep -E '(^|/)Cargo\.(toml|lock)$|^deny\.toml$|^\.github/workflows/ci\.yml$' >/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No dependency-affecting paths changed — skipping cargo audit"
+          fi
+
+      # Prebuilt binary (~2s) instead of `cargo install --locked` (~2-3 min).
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        if: steps.paths.outputs.run == 'true'
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: cargo-audit
       - name: Run cargo audit
+        if: steps.paths.outputs.run == 'true'
         run: cargo audit --deny warnings
 
   cargo-deny:
@@ -50,11 +89,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Detect dependency-affecting changes
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
+          if git diff --name-only "$base" "$head" 2>/dev/null \
+             | grep -E '(^|/)Cargo\.(toml|lock)$|^deny\.toml$|^\.github/workflows/ci\.yml$' >/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No dependency-affecting paths changed — skipping cargo deny"
+          fi
+
       - name: Install cargo-deny
-        run: cargo install --locked cargo-deny
+        if: steps.paths.outputs.run == 'true'
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: cargo-deny
       - name: Run cargo deny check
+        if: steps.paths.outputs.run == 'true'
         run: cargo deny check
 
   cosign-verify:
@@ -293,7 +353,13 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test --workspace --tests --features chaos --no-fail-fast
+        with:
+          shared-key: rust-build
+      # Scope to the chaos crate only. `--workspace --features chaos` would
+      # re-execute the full ~1800-test suite already run by `rust-build` and
+      # only add 22 chaos tests on top — wasting ~95% of the job's runtime.
+      # The fault-injection tests live exclusively in `tests/chaos/`.
+      - run: cargo test --package azureclaw-chaos-tests --features chaos --tests --no-fail-fast
 
   e2e-kind:
     name: E2E (Kind)
@@ -304,6 +370,11 @@ jobs:
     # to keep PR signal fast — the path filter is the gate.
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      # Required by docker/build-push-action GHA cache backend
+      # (cache-to: type=gha) used by the image pre-build steps below.
+      actions: write
     if: |
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
@@ -336,6 +407,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.paths.outputs.run == 'true'
+        with:
+          shared-key: rust-build
+          # E2E builds via Docker (cargo runs inside the image, not on host),
+          # so host target/ isn't hit. Keep the cache restore for the
+          # occasional cargo invocation in the harness but don't pay the
+          # save cost.
+          save-if: false
 
       - name: Install kind
         if: steps.paths.outputs.run == 'true'
@@ -361,6 +439,36 @@ jobs:
           docker system prune -af --volumes >/dev/null 2>&1 || true
           df -h
 
+      # Pre-build controller + router images with buildx GHA cache so that
+      # the `cargo build --release` layer inside the Dockerfile is reused
+      # across PRs. Cache scope is shared with image-cache-publish.yml so
+      # dev-branch builds warm the same cache.
+      - name: Set up Docker Buildx
+        if: steps.paths.outputs.run == 'true'
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - name: Pre-build controller image (buildx + GHA cache)
+        if: steps.paths.outputs.run == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          file: controller/Dockerfile
+          tags: azureclaw-controller:e2e
+          load: true
+          cache-from: type=gha,scope=image-controller
+          cache-to: type=gha,scope=image-controller,mode=max
+
+      - name: Pre-build inference-router image (buildx + GHA cache)
+        if: steps.paths.outputs.run == 'true'
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          file: inference-router/Dockerfile
+          tags: azureclaw-inference-router:e2e
+          load: true
+          cache-from: type=gha,scope=image-inference-router
+          cache-to: type=gha,scope=image-inference-router,mode=max
+
       - name: Run e2e
         if: steps.paths.outputs.run == 'true'
         env:
@@ -373,6 +481,10 @@ jobs:
           # leader lease so the test environment is deterministic.
           AZURECLAW_E2E_CONTROLLER_REPLICAS: "1"
           AZURECLAW_E2E_DISABLE_LEADER_ELECTION: "1"
+          # Both images were pre-built with buildx GHA cache above —
+          # tell the harness to skip its in-process `docker build` and
+          # just `kind load` the existing tags.
+          AZURECLAW_E2E_SKIP_IMAGE_BUILD: "1"
         run: |
           set -euo pipefail
           make test-e2e
@@ -407,8 +519,15 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-build
+          save-if: false
       - name: Build benches (compile-only on every PR)
-        run: cargo bench --no-run --workspace
+        # Scope to the two benches we actually execute. `--workspace` would
+        # compile every bench target in every crate; we only run two.
+        run: |
+          cargo bench --no-run --bench reconciler_bench --package azureclaw-controller
+          cargo bench --no-run --bench proxy_bench --package azureclaw-inference-router
       - name: Run controller bench + compare to baseline
         run: |
           cargo bench --bench reconciler_bench -- --save-baseline pr --output-format bencher \

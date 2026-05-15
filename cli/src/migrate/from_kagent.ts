@@ -31,6 +31,7 @@
 //     is a separate CRD; we preserve provenance only).
 
 import { createHash } from "node:crypto";
+import { loadAgtProfile } from "../refs.js";
 
 export const KAGENT_API_VERSION = "kagent.dev/v1alpha2";
 export const KAGENT_KIND = "Agent";
@@ -465,7 +466,6 @@ export function translate(
     if (endpoints.length > 0) {
       networkPolicy = {
         defaultDeny: true,
-        approvalRequired: true,
         allowedEndpoints: endpoints,
       };
     }
@@ -732,6 +732,10 @@ export function translate(
       spec: {
         // ToolPolicy.appliesTo has no sandboxName field — scope via sandbox label.
         appliesTo: { sandboxMatchLabels: { [SANDBOX_LABEL_KEY]: sandboxName } },
+        // Slice 1e (phase 2): controller hard-fails ToolPolicies that
+        // lack `spec.agtProfile.inline`. Migrated agents inherit the
+        // `default` AGT profile — operators can edit post-migration.
+        agtProfile: { inline: loadAgtProfile("default") },
       },
     });
     toolPolicies.sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));

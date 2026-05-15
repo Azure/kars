@@ -56,9 +56,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::inference_policy::{InferencePolicy, InferencePolicyStatus};
-use crate::inference_policy_compile::{compile_to_profile, version_hash};
+use crate::inference_policy_compile::{
+    INFERENCE_POLICY_FILENAME, compile_to_profile, inference_policy_digest, version_hash,
+};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
+use crate::status::phase::{PHASE_COMPILED, PHASE_DEGRADED, PHASE_READY, PhaseEventReporter};
+use crate::status::router_confirmation::{self, RouterEnforcementState, decide_enforcement_state};
+use crate::status::router_confirmation_io::{list_sandboxes_matching, poll_referencing_sandboxes};
 
 /// Field manager for SSA patches emitted by this reconciler. Distinct
 /// from S1 `…/mcp`, S2 `…/toolpolicy`, S3 `…/a2aagent` per §10.4 #1
@@ -95,6 +100,8 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    http: reqwest::Client,
+    phase_reporter: PhaseEventReporter,
 }
 
 async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -133,48 +140,156 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         .unwrap_or_default();
     let observed_generation = policy.metadata.generation;
 
-    let profile = compile_to_profile(&policy.spec);
+    let (effective_spec, bundle_ref_digest, source_degraded) =
+        resolve_inference_source(policy.as_ref()).await;
+
+    let profile = compile_to_profile(&effective_spec);
     let v_hash = version_hash(&profile);
+    // Slice 2a — canonical bytes the router-side
+    // `inference_policy_loader` will sha256 + echo via
+    // `GET /internal/policy-status`. The bytes written into the
+    // ConfigMap must be **exactly** what we hash here so the
+    // controller-emitted digest matches the router-loaded digest;
+    // any reformatting (pretty-print, trailing newline, key
+    // reordering) silently breaks the §3 echo contract.
+    let canonical_bytes = serde_json::to_vec(&profile)?;
+    let canonical_str =
+        String::from_utf8(canonical_bytes.clone()).expect("serde_json::to_vec emits valid UTF-8");
+    let compiled_digest = inference_policy_digest(&canonical_bytes);
 
     let cm_name = format!("inferencepolicy-{name}-profile");
-    let mut degraded: Option<(&'static str, String)> = None;
+    let mut degraded: Option<(&'static str, String)> = source_degraded;
 
-    match ensure_profile_configmap(&configmaps, &cm_name, &name, &profile, &v_hash).await {
-        Ok(()) => {
-            tracing::info!(
-                inferencepolicy = %name,
-                ns = %ns,
-                version_hash = %v_hash,
-                generation = observed_generation.unwrap_or(0),
-                has_token_budget = policy.spec.token_budget.is_some(),
-                has_content_safety = policy.spec.content_safety.is_some(),
-                has_model_preference = policy.spec.model_preference.is_some(),
-                "InferencePolicyCompiled"
-            );
+    if degraded.is_none() {
+        match ensure_profile_configmap(
+            &configmaps,
+            &cm_name,
+            &name,
+            &canonical_str,
+            &v_hash,
+            &compiled_digest,
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    inferencepolicy = %name,
+                    ns = %ns,
+                    version_hash = %v_hash,
+                    compiled_digest = %compiled_digest,
+                    bundle_ref_digest = bundle_ref_digest.as_deref().unwrap_or("-"),
+                    generation = observed_generation.unwrap_or(0),
+                    has_token_budget = effective_spec.token_budget.is_some(),
+                    has_content_safety = effective_spec.content_safety.is_some(),
+                    has_model_preference = effective_spec.model_preference.is_some(),
+                    "InferencePolicyCompiled"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    inferencepolicy = %name,
+                    error_class = e.class(),
+                    "InferencePolicyProfileWriteFailed"
+                );
+                degraded = Some(("ProfileWriteFailed", e.to_string()));
+            }
         }
-        Err(e) => {
-            tracing::warn!(
-                inferencepolicy = %name,
-                error_class = e.class(),
-                "InferencePolicyProfileWriteFailed"
-            );
-            degraded = Some(("ProfileWriteFailed", e.to_string()));
-        }
+    } else {
+        tracing::warn!(
+            inferencepolicy = %name,
+            ns = %ns,
+            reason = degraded.as_ref().map(|(r, _)| *r).unwrap_or("-"),
+            "InferencePolicySourceResolveFailed; skipping ConfigMap write"
+        );
     }
+
+    // Slice 2a — close the §3 "Ready ⇔ router echo" loop. List
+    // ClawSandboxes that reference this InferencePolicy by
+    // `spec.inferenceRef.name`, GET `/internal/policy-status` on
+    // each router, and let the result drive both `phase` and the
+    // Ready condition. The `compiled_digest` we just wrote is the
+    // value every router must echo before we promote to Ready.
+    let enforcement_state = if degraded.is_some() {
+        RouterEnforcementState::NotApplicable
+    } else {
+        let referrers = match list_sandboxes_matching(&ctx.client, &ns, |cs| {
+            cs.spec.inference_ref.name == name
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    inferencepolicy = %name,
+                    ns = %ns,
+                    error = %e,
+                    "ClawSandbox list failed; treating as no referrers"
+                );
+                Vec::new()
+            }
+        };
+        let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
+        decide_enforcement_state(&compiled_digest, "InferencePolicy", &results)
+    };
+
+    // Latest digest echoed by any referring router — surfaced in
+    // status for `kubectl describe` / `azureclaw inspect`. When
+    // every router reports the same value we promote to Ready; in
+    // the Awaiting branch we surface what we actually saw so the
+    // operator can diff against `compiledDigest`.
+    let loaded_digest: Option<String> = match &enforcement_state {
+        RouterEnforcementState::Confirmed { .. } => Some(compiled_digest.clone()),
+        _ => None,
+    };
 
     let new_conditions = build_conditions(
         &prior_conditions,
         observed_generation,
         degraded.as_ref().map(|(r, m)| (*r, m.as_str())),
+        &enforcement_state,
     );
+
     let phase = if degraded.is_some() {
-        "Degraded"
+        PHASE_DEGRADED
     } else {
-        "Ready"
+        match enforcement_state {
+            RouterEnforcementState::Confirmed { .. } | RouterEnforcementState::NotApplicable => {
+                PHASE_READY
+            }
+            RouterEnforcementState::NoSandboxesReferencing
+            | RouterEnforcementState::Awaiting { .. } => PHASE_COMPILED,
+        }
     };
 
-    // SSA requires apiVersion + kind in the patch body — without
-    // them, the API server returns "invalid object type: /, Kind=".
+    // Only emit the Warning while truly awaiting router-side
+    // confirmation (mirroring slice-1c ToolPolicy). Once Confirmed
+    // fires we stop shouting — the loop is honestly closed.
+    let publish_warning = degraded.is_none()
+        && matches!(
+            enforcement_state,
+            RouterEnforcementState::Awaiting { .. }
+                | RouterEnforcementState::NoSandboxesReferencing
+        );
+    if publish_warning
+        && let Err(e) = ctx
+            .phase_reporter
+            .warn_policy_not_enforced(
+                policy.as_ref(),
+                "AwaitingRouterConfirmation",
+                "InferencePolicy compiled and published, but the inference-router has not \
+                 yet echoed the matching digest on /internal/policy-status. \
+                 tokenBudget.perRequestTokens is the only axis enforced today; \
+                 contentSafety / modelPreference still land in later sub-slices.",
+            )
+            .await
+    {
+        tracing::warn!(
+            inferencepolicy = %name,
+            error = %e,
+            "InferencePolicyEventPublishFailed",
+        );
+    }
+
     let status_patch = json!({
         "apiVersion": "azureclaw.azure.com/v1alpha1",
         "kind": "InferencePolicy",
@@ -185,6 +300,9 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
             profile_config_map_ref: Some(LocalObjectRef { name: cm_name.clone() }),
             version_hash: Some(v_hash),
             last_compiled_at: Some(rfc3339_now()),
+            compiled_digest: Some(compiled_digest),
+            loaded_digest,
+            bundle_ref_digest: bundle_ref_digest.clone(),
         }
     });
     api.patch_status(
@@ -196,6 +314,9 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
+    } else if matches!(enforcement_state, RouterEnforcementState::Awaiting { .. }) {
+        // Short requeue while awaiting echo — mirrors slice-1c.
+        Ok(Action::requeue(Duration::from_secs(15)))
     } else {
         Ok(Action::requeue(REQUEUE_OK))
     }
@@ -205,13 +326,233 @@ fn rfc3339_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Resolve `InferencePolicy.spec` to the effective spec the reconciler
+/// will compile + serialize. Slice 1c.3 (`crd-well-oiled-machine`).
+///
+/// Four spec shapes are accepted, matching the
+/// [`PolicyKind`](crate::policy_canonical::PolicyKind) trait's
+/// invariants:
+///
+/// - **Inline (back-compat, no signature)**: any of `tokenBudget` /
+///   `contentSafety` / `modelPreference` / `displayName` set; no
+///   `bundleRef`. Returns the spec verbatim. `bundle_ref_digest = None`.
+/// - **Signed bundle**: `bundleRef` set, content fields all `None`.
+///   Fetches + verifies the OCI artifact via
+///   [`crate::policy_fetcher::fetch_and_verify_generic`]
+///   parameterised by
+///   [`crate::policy_canonical::inference::InferenceKind`]. The
+///   bundle's content fields are merged onto the CR's `appliesTo`
+///   selector. `bundle_ref_digest = Some(<manifest digest>)`.
+/// - **Selector-only (no content)**: no `bundleRef` and no inline
+///   content fields. Acceptable today: the compile path still emits
+///   a valid `inference-policy.json` (all content fields null) so
+///   the router echo loop still closes. `bundle_ref_digest = None`.
+/// - **Both inline + bundleRef** *(rejected at runtime as
+///   defense-in-depth — admission CEL already rejects)*: returns a
+///   `(InvalidSpec, msg)` degraded reason without performing the
+///   fetch. Older clusters running without the latest CRD CEL still
+///   surface the error honestly.
+///
+/// Returns a triple:
+/// - `effective_spec`: the spec the reconciler will compile (always
+///   contains `appliesTo` from the CR; content fields come from
+///   either the inline fields or the verified bundle).
+/// - `bundle_ref_digest`: `Some(<sha256:...>)` when the bundleRef path
+///   was taken (operator-visible proof the signature was checked);
+///   `None` otherwise.
+/// - `degraded`: `Some((reason, message))` on fetch/verify failure or
+///   spec-shape error. The reconcile loop short-circuits to
+///   `phase=Degraded / Ready=False / reason=<reason>` using the
+///   existing degraded-handling path.
+async fn resolve_inference_source(
+    policy: &InferencePolicy,
+) -> (
+    crate::inference_policy::InferencePolicySpec,
+    Option<String>,
+    Option<(&'static str, String)>,
+) {
+    let spec = &policy.spec;
+    let inline_any = spec.token_budget.is_some()
+        || spec.content_safety.is_some()
+        || spec.model_preference.is_some()
+        || spec.display_name.is_some();
+    let bundle_set = spec.bundle_ref.is_some();
+
+    if inline_any && bundle_set {
+        return (
+            // selector-only synthesis; we won't compile this branch
+            crate::inference_policy::InferencePolicySpec {
+                applies_to: spec.applies_to.clone(),
+                ..Default::default()
+            },
+            None,
+            Some((
+                "InvalidSpec",
+                "spec.bundleRef is mutually exclusive with spec.tokenBudget, \
+                 spec.contentSafety, spec.modelPreference, and spec.displayName"
+                    .into(),
+            )),
+        );
+    }
+
+    if !bundle_set {
+        // Inline-only or selector-only: pass spec verbatim.
+        return (spec.clone(), None, None);
+    }
+
+    let bundle_ref = spec
+        .bundle_ref
+        .as_ref()
+        .expect("bundle_set implies Some")
+        .clone();
+
+    let signer_policy_handle = crate::signer_policy::global();
+    let verify_result = match signer_policy_handle.snapshot() {
+        crate::signer_policy::SignerPolicyState::FromConfigMap(p) => {
+            let cfg: crate::policy_fetcher::SignerPolicyConfig = p.into();
+            crate::policy_fetcher::fetch_and_verify_generic::<
+                crate::policy_canonical::inference::InferenceKind,
+            >(&bundle_ref, &cfg)
+            .await
+        }
+        crate::signer_policy::SignerPolicyState::Malformed(msg) => Err(
+            crate::policy_fetcher::FetchError::SignerPolicyMalformed(msg),
+        ),
+        crate::signer_policy::SignerPolicyState::Absent => {
+            let cfg = crate::policy_fetcher::SignerPolicyConfig::from_env();
+            crate::policy_fetcher::fetch_and_verify_generic::<
+                crate::policy_canonical::inference::InferenceKind,
+            >(&bundle_ref, &cfg)
+            .await
+        }
+    };
+
+    match verify_result {
+        Ok(verified) => {
+            let effective = merge_bundle_with_selector(&spec.applies_to, &verified);
+            (effective, Some(verified.digest), None)
+        }
+        Err(e) => {
+            let (reason, msg) = fetch_error_to_degraded(&e);
+            tracing::warn!(
+                inferencepolicy = %policy.name_any(),
+                registry = %bundle_ref.registry,
+                repository = %bundle_ref.repository,
+                digest = %bundle_ref.digest,
+                reason,
+                "InferencePolicy bundleRef fetch/verify failed: {msg}"
+            );
+            (
+                crate::inference_policy::InferencePolicySpec {
+                    applies_to: spec.applies_to.clone(),
+                    ..Default::default()
+                },
+                None,
+                Some((reason, msg)),
+            )
+        }
+    }
+}
+
+/// Merge the verified-bundle content fields onto the CR's selector to
+/// produce the effective spec for [`compile_to_profile`]. The bundle
+/// owns the content; the CR owns the selector.
+fn merge_bundle_with_selector(
+    applies_to: &crate::inference_policy::InferenceAppliesTo,
+    verified: &crate::policy_canonical::inference::VerifiedInferencePolicy,
+) -> crate::inference_policy::InferencePolicySpec {
+    use crate::inference_policy::{
+        ContentSafetyFloor, InferencePolicySpec, ModelPreference, ModelRef, TokenBudget,
+    };
+    use serde_json::Value;
+
+    let token_budget = verified.token_budget.as_ref().map(|v| TokenBudget {
+        per_request_tokens: v.get("perRequestTokens").and_then(Value::as_u64),
+        daily_tokens: v.get("dailyTokens").and_then(Value::as_u64),
+        monthly_tokens: v.get("monthlyTokens").and_then(Value::as_u64),
+    });
+
+    let content_safety = verified
+        .content_safety
+        .as_ref()
+        .map(|v| ContentSafetyFloor {
+            hate: v.get("hate").and_then(Value::as_str).map(str::to_owned),
+            self_harm: v.get("selfHarm").and_then(Value::as_str).map(str::to_owned),
+            sexual: v.get("sexual").and_then(Value::as_str).map(str::to_owned),
+            violence: v.get("violence").and_then(Value::as_str).map(str::to_owned),
+            require_prompt_shields: v.get("requirePromptShields").and_then(Value::as_bool),
+        });
+
+    let model_preference = verified.model_preference.as_ref().and_then(|v| {
+        let primary_obj = v.get("primary")?.as_object()?;
+        let primary = ModelRef {
+            provider: primary_obj
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            deployment: primary_obj
+                .get("deployment")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        };
+        let fallback = v
+            .get("fallback")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| {
+                        let o = e.as_object()?;
+                        Some(ModelRef {
+                            provider: o.get("provider").and_then(Value::as_str)?.to_owned(),
+                            deployment: o.get("deployment").and_then(Value::as_str)?.to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(ModelPreference { primary, fallback })
+    });
+
+    InferencePolicySpec {
+        applies_to: applies_to.clone(),
+        token_budget,
+        content_safety,
+        model_preference,
+        display_name: verified.display_name.clone(),
+        bundle_ref: None,
+    }
+}
+
+/// Map [`crate::policy_fetcher::FetchError`] variants to the
+/// `(reason, message)` pair the controller status machinery consumes.
+/// Delegates to [`crate::policy_fetcher::reason_for_error`] so the one
+/// shared vocabulary stays in lockstep with the egress + tools
+/// reconcilers (one vocabulary across all signed-policy kinds keeps
+/// operator-facing docs minimal and the controller's class table
+/// closed — §15.3 log-injection prevention).
+/// [`crate::policy_fetcher::FetchError::Transient`] is mapped to
+/// `"Transient"` here rather than surfaced as a `None` reason: the
+/// InferencePolicy state machine does not have a "preserve last-known-
+/// good" branch (unlike the egress sandbox reconciler), so a transient
+/// fetch failure surfaces honestly as Degraded until the next requeue
+/// succeeds.
+fn fetch_error_to_degraded(e: &crate::policy_fetcher::FetchError) -> (&'static str, String) {
+    let reason = crate::policy_fetcher::reason_for_error(e).unwrap_or("Transient");
+    (reason, e.to_string())
+}
+
 /// Build the Conditions vector preserving prior `lastTransitionTime`
 /// where status hasn't flipped. Always emits `Ready`, `Progressing`,
-/// `Degraded`. Same shape as S1 / S2 / S3.
+/// `Degraded`. Driven by `enforcement` once the compile step
+/// succeeds — Slice 2a closes the §3 echo loop and replaces the
+/// always-`AwaitingRouterEnforcement` branch.
 fn build_conditions(
     prior: &[Condition],
     observed_generation: Option<i64>,
     degraded: Option<(&str, &str)>,
+    enforcement: &RouterEnforcementState,
 ) -> Vec<Condition> {
     let mut out: Vec<Condition> = Vec::with_capacity(3);
     let prior_ready = conditions::find(prior, conditions::TYPE_READY);
@@ -245,32 +586,119 @@ fn build_conditions(
                 observed_generation,
             ));
         }
-        None => {
-            out.push(conditions::preserve_transition_time(
-                prior_ready,
-                conditions::TYPE_READY,
-                cond_status::TRUE,
-                reason::RECONCILED,
-                "InferencePolicy compiled and published",
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_progressing,
-                conditions::TYPE_PROGRESSING,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "compile complete",
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_degraded,
-                conditions::TYPE_DEGRADED,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "no errors",
-                observed_generation,
-            ));
-        }
+        None => match enforcement {
+            RouterEnforcementState::NotApplicable => {
+                // Used when degraded — never reached here in the
+                // success branch. Kept for completeness and
+                // build_conditions truth-table symmetry with
+                // tool_policy_reconciler.
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::RECONCILED,
+                    "InferencePolicy compiled and published",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "compile complete",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Confirmed { total } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::ROUTER_ENFORCING,
+                    &format!(
+                        "all {total} referencing sandbox router(s) confirmed \
+                         inference-policy digest"
+                    ),
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "router echo confirmed",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::NoSandboxesReferencing => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "no ClawSandbox references this InferencePolicy; nothing to enforce",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "waiting for a ClawSandbox to reference this policy",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Awaiting { message, .. } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    message,
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    "awaiting router-side enforcement",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+        },
     }
     out
 }
@@ -279,16 +707,24 @@ async fn ensure_profile_configmap(
     api: &Api<ConfigMap>,
     cm_name: &str,
     owner: &str,
-    profile: &serde_json::Value,
+    canonical_body: &str,
     v_hash: &str,
+    compiled_digest: &str,
 ) -> Result<(), ReconcileError> {
-    let json_str = serde_json::to_string_pretty(profile)?;
     let mut data: BTreeMap<String, String> = BTreeMap::new();
-    data.insert("profile.json".into(), json_str);
+    // Canonical key: the router-side `inference_policy_loader`
+    // reads this filename from the mount directory and sha256s the
+    // exact bytes, so it must match
+    // `inference_policy_compile::INFERENCE_POLICY_FILENAME`.
+    data.insert(INFERENCE_POLICY_FILENAME.into(), canonical_body.into());
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
         "azureclaw.azure.com/inferencepolicy-version-hash".into(),
         v_hash.into(),
+    );
+    annotations.insert(
+        "azureclaw.azure.com/inference-policy-digest".into(),
+        compiled_digest.into(),
     );
     let cm = ConfigMap {
         metadata: ObjectMeta {
@@ -384,7 +820,15 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
-    let ctx = Arc::new(Ctx { client });
+    let http = reqwest::Client::builder()
+        .timeout(router_confirmation::DEFAULT_TIMEOUT)
+        .build()
+        .expect("default reqwest client builds with infallible config");
+    let ctx = Arc::new(Ctx {
+        client: client.clone(),
+        http,
+        phase_reporter: PhaseEventReporter::new(client, "InferencePolicy"),
+    });
     Controller::new(policies, kube::runtime::watcher::Config::default())
         .run(
             |x, ctx| async move {
@@ -428,8 +872,16 @@ mod tests {
     }
 
     #[test]
-    fn build_conditions_emits_all_three_types_on_success() {
-        let conds = build_conditions(&[], Some(1), None);
+    fn build_conditions_no_referrers_is_compiled_not_ready() {
+        // Slice 2a: when no ClawSandbox references this
+        // InferencePolicy there's nothing to enforce — Ready=False
+        // with reason `NoSandboxesReferencing`, no Degraded.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::NoSandboxesReferencing,
+        );
         assert_eq!(conds.len(), 3);
         let types: Vec<&str> = conds.iter().map(|c| c.type_.as_str()).collect();
         assert!(types.contains(&conditions::TYPE_READY));
@@ -439,7 +891,69 @@ mod tests {
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
             .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::NO_SANDBOXES_REFERENCING);
+        let progressing = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
+            .unwrap();
+        assert_eq!(progressing.status, cond_status::TRUE);
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::FALSE);
+    }
+
+    #[test]
+    fn build_conditions_awaiting_branch_is_ready_false_with_reason() {
+        // Slice 2a: router has not yet echoed our digest — keep
+        // Progressing=True and surface the awaiting message on
+        // Ready.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Awaiting {
+                total: 2,
+                matched: 1,
+                message: "1/2 routers confirmed".into(),
+            },
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+        assert!(ready.message.contains("1/2"));
+        let progressing = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
+            .unwrap();
+        assert_eq!(progressing.status, cond_status::TRUE);
+    }
+
+    #[test]
+    fn build_conditions_confirmed_is_ready_true_router_enforcing() {
+        // Slice 2a: every referring router echoes the digest — this
+        // is the only path that promotes Ready=True. Reason must be
+        // `RouterEnforcing`, never the legacy `Reconciled` (which
+        // historically meant "controller stamped it" — Slice 2a
+        // redirects that meaning to the router echo).
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 3 },
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
         assert_eq!(ready.status, cond_status::TRUE);
+        assert_eq!(ready.reason, reason::ROUTER_ENFORCING);
+        assert!(ready.message.contains("3"));
         let degraded = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_DEGRADED)
@@ -449,7 +963,12 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_all_three_types_on_failure() {
-        let conds = build_conditions(&[], Some(1), Some(("ProfileWriteFailed", "boom")));
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some(("ProfileWriteFailed", "boom")),
+            &RouterEnforcementState::NotApplicable,
+        );
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
@@ -466,8 +985,18 @@ mod tests {
 
     #[test]
     fn build_conditions_preserves_transition_time_when_status_unchanged() {
-        let first = build_conditions(&[], Some(1), None);
-        let second = build_conditions(&first, Some(2), None);
+        let first = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 1 },
+        );
+        let second = build_conditions(
+            &first,
+            Some(2),
+            None,
+            &RouterEnforcementState::Confirmed { total: 1 },
+        );
         let r1 = first
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)

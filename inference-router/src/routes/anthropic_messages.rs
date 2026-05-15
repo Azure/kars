@@ -241,8 +241,15 @@ pub(super) async fn anthropic_messages(
         }
     }
 
-    // Token budget check.
-    if let Err(msg) = state.budget.check_budget(sandbox_name).await {
+    // Token budget check — daily/monthly limits sourced from the
+    // loaded `InferencePolicy` (Slice 2b); env-default fallback.
+    // Latency: one snapshot read per request (mirrors chat_completions).
+    let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+    if let Err(msg) = state
+        .budget
+        .check_budget(sandbox_name, policy.daily_tokens, policy.monthly_tokens)
+        .await
+    {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded (anthropic): {msg}");
         return deny_response(StatusCode::TOO_MANY_REQUESTS, &msg, "rate_limit_error");
     }
@@ -253,7 +260,9 @@ pub(super) async fn anthropic_messages(
         .unwrap_or("")
         .to_string();
 
-    let upstream = state.upstream_config(sandbox_name);
+    let mut upstream = state.upstream_config(sandbox_name);
+    // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
+    crate::routes::apply_model_preference_override(&mut upstream, &policy);
 
     // Copilot exposes a native Anthropic Messages endpoint at /v1/messages.
     // Skip translation entirely and forward the body as-is, preserving the

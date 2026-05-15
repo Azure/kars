@@ -18,11 +18,8 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.sandboxRef.name
+    - jsonPath: .spec.targetSandboxRef.name
       name: Sandbox
-      type: string
-    - jsonPath: .spec.suite
-      name: Suite
       type: string
     - jsonPath: .spec.schedule
       name: Schedule
@@ -30,9 +27,15 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
-    - jsonPath: .status.lastScore
-      name: LastScore
-      type: string
+    - jsonPath: .status.lastRunAt
+      name: LastRun
+      type: date
+    - jsonPath: .status.lastResult.passed
+      name: Passed
+      type: integer
+    - jsonPath: .status.lastResult.failed
+      name: Failed
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -42,67 +45,83 @@ spec:
         description: Auto-generated derived type for ClawEvalSpec via `CustomResource`
         properties:
           spec:
-            description: |-
-              `ClawEval.spec` — declares an evaluation workflow over a sandbox.
-
-              Resolution rule: a sandbox can have multiple `ClawEval` CRs (one
-              per suite or schedule). The runtime path indexes them by name.
+            description: '`ClawEval.spec` — declares a conformance run over a sandbox.'
             properties:
-              dataset:
+              corpus:
                 description: |-
-                  Optional dataset reference. The runtime path resolves either
-                  `configMapRef` (operator-managed JSONL) or `inline` (small
-                  inline list). Mutually exclusive — admission enforces.
-                nullable: true
+                  Source of the corpus to replay. Exactly one variant must be set;
+                  CEL admission enforces the mutex.
                 properties:
-                  configMapRef:
+                  builtin:
                     description: |-
-                      Reference to a `ConfigMap` whose `dataset.jsonl` key contains
-                      the eval cases.
+                      Name of a builtin corpus shipped with the controller. See
+                      `azureclaw_eval_corpus::builtin::ALL_NAMES`.
+                    nullable: true
+                    type: string
+                  bundleRef:
+                    description: Reference to a signed OCI artifact carrying a corpus.
                     nullable: true
                     properties:
-                      name:
+                      artifactType:
+                        description: |-
+                          OCI artifactType media-type, e.g.
+                          `application/vnd.azureclaw.egress-allowlist.v1+yaml`. Consumers MUST
+                          reject artifacts whose pulled `artifactType` doesn't match.
+                        type: string
+                      digest:
+                        description: |-
+                          Content-addressed digest, including the algorithm prefix
+                          (`sha256:abc…`). The digest covers the canonical artifact bytes —
+                          see `docs/internal/policy-canonical-format.md` for the egress-allowlist
+                          canonicalization rules.
+                        type: string
+                      registry:
+                        description: Registry hostname (e.g. `myacr.azurecr.io`, `ghcr.io`).
+                        type: string
+                      repository:
+                        description: Repository path (e.g. `azureclaw/policies/sandbox-foo`).
                         type: string
                     required:
-                    - name
+                    - artifactType
+                    - digest
+                    - registry
+                    - repository
                     type: object
-                  inline:
-                    description: |-
-                      Inline list of eval cases. Each entry is a free-form JSON
-                      object the runtime path passes through to the suite. Bounded
-                      to 64 entries by CEL to keep the CR small.
-                    items:
-                      type: object
-                      x-kubernetes-preserve-unknown-fields: true
-                    type: array
                 type: object
               displayName:
-                description: Optional human-readable label.
+                description: Optional human-readable label surfaced in CLI output.
                 nullable: true
                 type: string
-              evaluators:
+              failSandboxOnDrift:
                 description: |-
-                  Foundry evaluator IDs (e.g., `relevance`, `coherence`,
-                  `fluency`). Required when `suite=foundry-evals`. Other suites
-                  ignore this list.
-                items:
-                  type: string
-                type: array
-              model:
+                  When `true`, a failing run patches the target `ClawSandbox`'s
+                  `Degraded` condition (reason `ConformanceDrift`) via a distinct
+                  field manager. The sandbox reconciler will then refuse to admit
+                  new agent sessions until the next successful eval clears the
+                  condition.
+
+                  Defaults to `false` so first-time operators can adopt the CRD
+                  without immediately taking sandboxes offline on a corpus update.
+                nullable: true
+                type: boolean
+              runnerImage:
                 description: |-
-                  Model identifier the runtime path should evaluate against.
-                  Optional; runtime defaults to the sandbox's primary model.
+                  Optional override of the conformance-runner container image. When
+                  absent the controller falls back to the Helm-configured default
+                  (`AZURECLAW_CONFORMANCE_RUNNER_IMAGE` env). Setting this on a CR
+                  is an escape hatch for in-cluster development; production should
+                  pin the image globally via the Helm chart.
                 nullable: true
                 type: string
-              regressionAction:
-                description: Action to take when an eval run fails the threshold.
-                enum:
-                - Suspend
-                - None
+              schedule:
+                description: |-
+                  Optional cron schedule (5-token form, K8s `CronJob.spec.schedule`
+                  shape). When empty/absent, the eval runs only when an operator
+                  adds the `azureclaw.azure.com/run-now=true` annotation.
                 nullable: true
                 type: string
-              sandboxRef:
-                description: Sandbox this eval applies to.
+              targetSandboxRef:
+                description: Sandbox this eval applies to. Must live in the same namespace.
                 properties:
                   name:
                     description: Sandbox name (`ClawSandbox.metadata.name`).
@@ -110,93 +129,38 @@ spec:
                 required:
                 - name
                 type: object
-              schedule:
-                description: |-
-                  Cron schedule (5 or 6 space-separated tokens). When absent,
-                  the eval is manual-trigger only (`azureclaw eval <name>`).
-                nullable: true
-                type: string
-              suite:
-                description: |-
-                  Eval suite. `foundry-evals` is the only suite with a runtime
-                  path today; `promptfoo` and `inspect-ai` are reserved for
-                  future runtime adapters and are accepted by admission so
-                  operators can pre-author manifests.
-                enum:
-                - foundry-evals
-                - promptfoo
-                - inspect-ai
-                type: string
-              threshold:
-                description: |-
-                  Pass/fail threshold. When absent, the runtime records the
-                  score but never marks the eval failed.
-                nullable: true
-                properties:
-                  op:
-                    default: Gte
-                    description: Comparison operator. Defaults to `Gte`.
-                    enum:
-                    - Gte
-                    - Gt
-                    type: string
-                  score:
-                    description: Numeric pass threshold, in `[0.0, 1.0]`.
-                    format: double
-                    type: number
-                required:
-                - score
-                type: object
             required:
-            - sandboxRef
-            - suite
+            - corpus
+            - targetSandboxRef
             type: object
             x-kubernetes-validations:
-            - message: spec.sandboxRef.name must be 1-253 characters
+            - message: spec.targetSandboxRef.name must be 1-253 characters
               reason: FieldValueInvalid
-              rule: size(self.sandboxRef.name) > 0 && size(self.sandboxRef.name) <= 253
-            - message: spec.evaluators must contain at least one entry when spec.suite is 'foundry-evals'
+              rule: size(self.targetSandboxRef.name) > 0 && size(self.targetSandboxRef.name) <= 253
+            - message: spec.corpus must set exactly one of `builtin` or `bundleRef` (mutually exclusive)
               reason: FieldValueInvalid
-              rule: self.suite != 'foundry-evals' || (has(self.evaluators) && size(self.evaluators) >= 1)
-            - message: each spec.evaluators entry must be 1-256 characters
+              rule: has(self.corpus.builtin) != has(self.corpus.bundleRef)
+            - message: spec.corpus.builtin, when set, must be 1-253 characters
               reason: FieldValueInvalid
-              rule: '!has(self.evaluators) || self.evaluators.all(e, size(e) > 0 && size(e) <= 256)'
+              rule: '!has(self.corpus.builtin) || (size(self.corpus.builtin) > 0 && size(self.corpus.builtin) <= 253)'
             - message: spec.schedule, when set, must be a 5-or-6-field cron expression (1-256 chars)
               reason: FieldValueInvalid
               rule: '!has(self.schedule) || (size(self.schedule) > 0 && size(self.schedule) <= 256 && (size(self.schedule.split('' '')) == 5 || size(self.schedule.split('' '')) == 6))'
-            - message: spec.threshold.score must be in [0.0, 1.0] when set
-              reason: FieldValueInvalid
-              rule: '!has(self.threshold) || (self.threshold.score >= 0.0 && self.threshold.score <= 1.0)'
-            - message: spec.dataset.configMapRef and spec.dataset.inline are mutually exclusive
-              reason: FieldValueInvalid
-              rule: '!has(self.dataset) || !(has(self.dataset.configMapRef) && has(self.dataset.inline) && size(self.dataset.inline) > 0)'
-            - message: spec.dataset.inline is capped at 64 entries; use a ConfigMap for larger datasets
-              reason: FieldValueInvalid
-              rule: '!has(self.dataset) || !has(self.dataset.inline) || size(self.dataset.inline) <= 64'
             - message: spec.displayName, when set, must be 1-256 characters
               reason: FieldValueInvalid
               rule: '!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 256)'
+            - message: spec.runnerImage, when set, must be 1-512 characters
+              reason: FieldValueInvalid
+              rule: '!has(self.runnerImage) || (size(self.runnerImage) > 0 && size(self.runnerImage) <= 512)'
           status:
-            description: |-
-              Status of a `ClawEval` reconcile.
-
-              **Field ownership** (see module docstring): the controller owns
-              `phase`, `observedGeneration`, `conditions`, `bindingConfigMapRef`,
-              `versionHash`, `lastReconciledAt`. The runtime (S7) owns
-              `lastRunAt`, `lastScore`, `lastPass`. Both sides use SSA with
-              distinct field managers so updates do not race.
+            description: '`ClawEval.status`.'
             nullable: true
             properties:
-              bindingConfigMapRef:
-                description: Pointer to the binding `ConfigMap` produced by the reconciler.
-                nullable: true
-                properties:
-                  name:
-                    type: string
-                required:
-                - name
-                type: object
               conditions:
+                description: |-
+                  Standard K8s conditions. Includes `Ready`, `Progressing`,
+                  `Degraded`, plus the eval-specific `ConformanceDrift` condition
+                  (`True` when the most recent run reported any failed case).
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -229,39 +193,142 @@ spec:
                   type: object
                 nullable: true
                 type: array
-              lastPass:
-                description: |-
-                  Whether the last completed eval run passed `spec.threshold`,
-                  written by the runtime path.
+              corpusConfigMapRef:
+                description: Pointer to the corpus `ConfigMap` produced by the reconciler.
                 nullable: true
-                type: boolean
-              lastReconciledAt:
-                description: Last time the binding was compiled and pushed.
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              corpusDigest:
+                description: |-
+                  Hex `sha256:` digest of the resolved corpus bytes (matches the
+                  digest computed by `eval_corpus::parse_corpus`).
                 nullable: true
                 type: string
+              cronJobName:
+                description: |-
+                  When `spec.schedule` is set, name of the controller-owned
+                  `CronJob` that fires periodic runs.
+                nullable: true
+                type: string
+              history:
+                description: |-
+                  Summaries of the previous [`MAX_HISTORY`] runs, newest-first. The
+                  entry at index 0 is also reflected in `last_result`.
+                items:
+                  description: |-
+                    Compact summary kept in `status.history`. The most-recent entry
+                    matches `last_result.{schema_version, corpus_digest, total, passed,
+                    failed, errored, last_run_at}`.
+                  properties:
+                    at:
+                      description: RFC 3339 completion timestamp.
+                      type: string
+                    corpusDigest:
+                      type: string
+                    errored:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    failed:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    jobName:
+                      type: string
+                    passed:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    total:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                  required:
+                  - at
+                  - corpusDigest
+                  - errored
+                  - failed
+                  - jobName
+                  - passed
+                  - total
+                  type: object
+                type: array
+              lastResult:
+                description: Detailed result of the most recent run.
+                nullable: true
+                properties:
+                  corpusDigest:
+                    description: Hex `sha256:` digest of the corpus that produced this run.
+                    type: string
+                  corpusLabel:
+                    description: |-
+                      Name of the corpus (`builtin` name, or the `repository@digest`
+                      of the bundle).
+                    type: string
+                  errored:
+                    description: Cases the runner could not exercise (transport error, timeout).
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  failed:
+                    description: Cases whose actual decision did NOT match the expected verdict.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  firstFailingCases:
+                    description: |-
+                      Up to 5 first-failing case IDs surfaced for at-a-glance triage.
+                      The full per-case detail lives in the runner log.
+                    items:
+                      type: string
+                    type: array
+                  jobName:
+                    description: |-
+                      Name of the K8s `Job` that produced this run. Operators use this
+                      to fetch the full runner log via `kubectl logs`.
+                    type: string
+                  passed:
+                    description: Cases whose actual decision matched the expected verdict.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  schemaVersion:
+                    description: |-
+                      Schema version of the runner `RunReport` consumed. Matches
+                      `azureclaw_conformance_runner::report::REPORT_SCHEMA_VERSION`.
+                    type: string
+                  total:
+                    description: Total cases the runner attempted.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                required:
+                - corpusDigest
+                - corpusLabel
+                - errored
+                - failed
+                - jobName
+                - passed
+                - schemaVersion
+                - total
+                type: object
               lastRunAt:
                 description: |-
-                  RFC3339 timestamp of the last completed eval run, written by
-                  the runtime path.
+                  RFC 3339 timestamp of the last completed run, written when the
+                  reconciler successfully reads the runner pod log and parses the
+                  `RunReport`.
                 nullable: true
                 type: string
-              lastScore:
-                description: |-
-                  Score of the last completed eval run, written by the runtime
-                  path. Range `[0.0, 1.0]`.
-                format: double
-                nullable: true
-                type: number
               observedGeneration:
-                description: '`metadata.generation` last successfully reconciled. KEP-1623.'
                 format: int64
                 nullable: true
                 type: integer
               phase:
-                nullable: true
-                type: string
-              versionHash:
-                description: Hex-encoded sha256 prefix of the compiled binding JSON.
+                description: 'One of: `Pending`, `Running`, `Ready`, `Degraded`.'
                 nullable: true
                 type: string
             type: object

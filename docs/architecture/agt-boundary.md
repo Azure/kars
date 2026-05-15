@@ -17,7 +17,7 @@ AGT ships the governance engine. AzureClaw is the AKS operator and data plane th
 - **Behavior anomaly detection** — `BehaviorMonitor`. Baseline capture, deviation detection, Shadow-MCP behavioral signals.
 - **Rate-limit token bucket** — per-identity, per-tool, per-mesh counters. We configure caps; AGT enforces.
 - **Signing keys** — HSM / HW-backed key custody, key rotation, signing primitives for A2A cards and AP2 transfers.
-- **A2A 1.2 Signed Agent Card signing** — when AGT ships this primitive. Until then we implement via the `SigningProvider` seam and document the gap.
+- **A2A 1.0.0 Signed Agent Card signing** — when AGT ships this primitive. Until then we implement via the `SigningProvider` seam and document the gap.
 - **AP2 policy grammar** — if AGT defines it. Until then AzureClaw defines a private schema designed to be portable to a future AGT definition.
 
 ### AzureClaw owns
@@ -33,16 +33,18 @@ AGT ships the governance engine. AzureClaw is the AKS operator and data plane th
 
 ## 2. Provider contracts
 
-AzureClaw exposes four provider traits, each with three implementations (`Vendored*`, `Agt*`, `Null*`). `Null*` is test-only and blocked in production by admission policy.
+AzureClaw exposes four provider traits. Two of them (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) ship a vendored implementation alongside the AGT-Rust-SDK path; one (`MeshProvider`) consumes the upstream `@agentmesh/sdk` directly.
 
 | Trait | Current implementations | Role |
 |---|---|---|
-| `MeshProvider` | `VendoredAgentMesh` · `Agt` (pending AGT AgentMesh delivery) | E2E session establishment + message send/receive |
+| `MeshProvider` | upstream `@agentmesh/sdk` (Rust crate `agentmesh = "3.1.0"`) | E2E session establishment + message send/receive |
 | `PolicyDecisionProvider` | `Vendored` · `AgtRustSdk` · `Null` | Allow / Deny / Approval / RateLimit evaluation |
 | `AuditSink` | `Vendored` · `AgtRustSdk` · `Null` | Append-only audit events → receipt id |
 | `SigningProvider` | `Vendored` · `AgtRustSdk` · `Null` | Sign `(key_ref, payload)` and verify |
 
-Providers are selected per-tenant via feature flag. The vendored path is a **permanent alternate architecture**, not migration staging — it is never scheduled for deletion.
+`Null*` is test-only and blocked in production by admission policy. The Rust-side AgentMesh vendor was retired in Phase 5.2 — `Cargo.toml` now depends on the published `agentmesh = "3.1.0"` crate. A small dist-only patch set against `@agentmesh/sdk` (TypeScript plugin layer) survives in `vendor/agentmesh-sdk/`; patches are itemised in `vendor/agentmesh-sdk/README.md`.
+
+The remaining vendored paths (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) are a **permanent alternate architecture**, not migration staging — they are never scheduled for deletion.
 
 ## 3. Outage semantics
 
@@ -74,4 +76,4 @@ Per-tenant override via `ClawSandbox.spec.agt.outageMode`.
 
 - This file is shared with the AGT team for confirmation as a living seam document.
 - Disagreements are resolved by: (a) AGT's ownership wins if they commit to shipping; (b) AzureClaw picks it up temporarily if they cannot commit; (c) the scope is documented here and in the relevant security-audit doc.
-- AGT Rust SDK releases trigger `ci/vendored-patch-audit.sh` re-runs.
+- AGT Rust SDK releases trigger a manual audit pass against `vendor/agentmesh-sdk/README.md` to verify each listed patch is either upstreamed or still needed.

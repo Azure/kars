@@ -1,0 +1,44 @@
+[package]
+name = "azureclaw-conformance-runner"
+description = "In-cluster runner that replays signed ClawEval corpora against the live inference router and emits per-case verdicts. Consumed by the ClawEval reconciler (slice 6.3) which launches one runner Pod per scheduled run; the binary is endpoint-agnostic and CR-agnostic — it reads a corpus path + router base URL, writes a JSON report, exits non-zero on judge failures."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "azureclaw-conformance-runner"
+path = "src/main.rs"
+
+[dependencies]
+azureclaw-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async + HTTP client
+tokio = { workspace = true }
+reqwest = { workspace = true }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Errors + observability
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Time + hashing (for corpus digest)
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# URL parsing (forward-proxy derivation in main.rs)
+url = "2"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"

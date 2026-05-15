@@ -19,7 +19,6 @@ mod a2a_agent_compile;
 mod a2a_agent_reconciler;
 mod backoff;
 mod claw_eval;
-mod claw_eval_compile;
 mod claw_eval_reconciler;
 mod claw_memory;
 mod claw_memory_compile;
@@ -29,6 +28,10 @@ mod crd;
 #[allow(dead_code)]
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
 mod crd_validations;
+mod egress_allowlist_compile;
+mod egress_approval;
+mod egress_approval_compile;
+mod egress_approval_reconciler;
 mod fedcred;
 mod fedcred_reaper;
 mod field_managers;
@@ -44,6 +47,7 @@ mod metrics;
 mod metrics_server;
 mod pairing;
 mod pairing_reconciler;
+mod policy_canonical;
 mod policy_fetcher;
 mod providers;
 mod reconciler;
@@ -202,6 +206,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { trust_graph_reconciler::run(client).await })
     };
+    let egress_approval_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { egress_approval_reconciler::run(client).await })
+    };
 
     // S12.d: SignerPolicy ConfigMap watcher. Installs a process-global
     // handle so `policy_fetcher::maybe_verify_allowlist` resolves
@@ -342,6 +350,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = trust_graph_handle => {
+            res??;
+        }
+        res = egress_approval_handle => {
             res??;
         }
         res = mesh_peer_handle => {

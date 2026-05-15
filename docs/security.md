@@ -65,11 +65,11 @@ The strict profile is installed on every node via a DaemonSet that writes `azure
 
 ### Layer 5 — Network segmentation
 
-Three independent layers, by design.
+**The router is THE policy enforcement point for egress.** The router runs as a different process under a different UID inside the same pod, with credentials the agent never sees and a CRD-driven allowlist applied to every outbound HTTPS CONNECT. The two layers below are **safety nets** — they fail closed only if the router is bypassed or compromised. They are not the policy layer.
 
-1. **iptables UID-based egress guard** — the `init: egress-guard` container installs rules so that UID 1000 (agent) reaches only `localhost` + DNS, while UID 1001 (router) is unrestricted within the pod's NetworkPolicy. Even a kernel-level escape inside the agent container cannot reach arbitrary hosts.
-2. **Kubernetes NetworkPolicy** — namespaced default-deny egress. Allowlist managed via `azureclaw policy allow/deny` (CRD merge patch → controller reconcile). DNS always allowed. IMDS (`169.254.169.254`) allowed for the router only.
-3. **Inference-as-network-policy** — the router is the *only* code path for AI model calls. Even if the agent could reach Foundry directly (it cannot), it has no credentials. iptables + NetworkPolicy + zero credentials = three independent locks.
+1. **iptables UID-based egress guard (safety net #1)** — the `init: egress-guard` container installs rules so that UID 1000 (agent) reaches only `localhost` + DNS, while UID 1001 (router) is unrestricted within the pod's NetworkPolicy. If an agent process tries to bypass the router (e.g., a kernel-level escape from the agent container), iptables drops it. The agent has no path to the network except through the router.
+2. **Kubernetes NetworkPolicy (safety net #2)** — namespaced default-deny egress. Pins the *pod-level* egress to DNS, Foundry, the AgentMesh relay, and the A2A gateway. If the router itself were ever compromised and tried to reach an unrelated destination, the cluster CNI drops it. Allowlist managed via `azureclaw policy allow/deny` (CRD merge patch → controller reconcile) but this is *only* about which destinations the safety net permits; the *enforcement decisions* (which hosts the agent gets to actually reach) come from the router consuming `EgressAllowlist` + `EgressApproval` CRs.
+3. **Inference-as-network-policy** — the router is the *only* code path for AI model calls. Even if the agent could reach Foundry directly (it cannot), it has no credentials. iptables + NetworkPolicy + zero credentials = three independent locks, with the router as the policy point and the other two as containment.
 
 In addition, an auto-refreshing **domain blocklist** (OISD + URLhaus, refreshed every 6 h) blocks known-malicious destinations even from the router. Bare IP egress and high-risk TLDs (`.tk`, `.ml`, `.ga`, `.cf`, `.gq`) are blocked by default. See **[Egress proxy](egress-proxy.md)**.
 
@@ -79,7 +79,7 @@ In addition, an auto-refreshing **domain blocklist** (OISD + URLhaus, refreshed 
 |---|---|---|
 | Content filtering | Foundry guardrails (`Microsoft.DefaultV2`) | Always on. Server-side. |
 | Jailbreak / Prompt Shield | Foundry-side | Always on. Server-side. |
-| Token budgets | In-process router enforcement | Per-sandbox daily + per-request limits, HTTP 429 on overrun. |
+| Token budgets | In-process router enforcement | Per-request token cap enforced today (v1.0); aggregate per-tenant daily/monthly counters are accepted and surfaced for forward compatibility but not yet aggregated (v1.1). HTTP 429 on overrun. |
 | Audit | Prometheus metrics + signed audit chain | Always on. |
 
 "Foundry-side" means: Content Safety is applied by the Azure AI Foundry model deployment. The router parses `prompt_filter_results` annotations from model responses and reports detected flags to the governance layer for trust scoring and audit.
@@ -102,7 +102,7 @@ The router exposes four provider seams (`PolicyDecisionProvider`, `AuditSink`, `
 
 #### Per-request gate order
 
-The governance modules don't fire as one giant blob — they run in a fixed order on every action that reaches the router (model inference, tool invocation, mesh send). Reading `Governance::evaluate_with_context` in `inference-router/src/governance/mod.rs`:
+The governance modules don't fire as one giant blob — they run in a fixed order on every action that reaches the router (model inference, tool invocation, mesh send). Reading `Governance::evaluate` in `inference-router/src/governance/mod.rs`:
 
 ```mermaid
 flowchart LR
@@ -170,13 +170,16 @@ The properties above are only as good as the CI that protects them. Every PR run
 - `cargo deny` (supply-chain gate, `RUSTSEC` advisories).
 - `cargo audit` (dependency CVEs).
 - `cargo fmt --check` + `cargo clippy -D warnings`.
-- Vendored-patch audit (`ci/vendored-patch-audit.sh`) — fails the build if a vendored fork's patches are not still present.
-- Copyright-header gate (369 source files, every file requires the Microsoft + MIT header).
+- Custom-crypto gate (`ci/no-custom-crypto.sh`) — fails the build on grep hits for primitive-crypto symbols outside the vetted vendor list.
+- Stubs gate (`ci/no-stubs.sh`) — fails the build on `unimplemented!()` / `TODO:` / placeholder text.
+- Copyright-header gate (`ci/check-copyright-headers.sh`) — every source file requires the Microsoft + MIT header.
+- LOC budget (`ci/check-loc.sh`) against `ci/loc-budget.yaml`.
+- A2A module isolation (`ci/a2a-module-isolation.sh`) — `azureclaw-a2a-core` must not depend on the router.
 - Bicep / Helm / Dockerfile lint.
 - Trivy + container image scan.
 - Bench regression (criterion).
 - Manual E2E suite + Kind E2E.
-- Cosign keyless OIDC verify on releases.
+- Notation (Azure KV) signing of released images (`image-sign-sbom.yml`); cosign keyless OIDC verify runs on PRs as a dry-run gate.
 - CodeQL (JavaScript / TypeScript).
 
 The full CI surface is in `.github/workflows/`.
@@ -219,7 +222,7 @@ Honesty matters. AzureClaw does not — and cannot — protect against:
 
 - **A compromised model provider.** If Azure AI Foundry is compromised, an attacker can change model output. Content Safety on the way out limits the damage but does not eliminate it. Use the confidential isolation level for workloads where this matters.
 - **A compromised cluster operator who controls Kata-less nodes.** Without Kata + AMD SEV-SNP, a cluster operator can read pod memory. Move to confidential isolation if your threat model includes the cluster operator.
-- **A compromised CI / supply chain.** We add gates and pinning, but ultimately you trust your builders. See **[`docs/internal/threat-model.md`](../docs/internal/threat-model.md)** for the per-route walkthrough.
+- **A compromised CI / supply chain.** We add gates and pinning, but ultimately you trust your builders. The vendor / patch surface is itemised in `vendor/agentmesh-sdk/README.md`; per-route threat-model walkthroughs are tracked in the internal review board.
 - **The model knowing your API surface.** Prompt injection is real. Treat any output from the model as untrusted; the router enforces this assumption, but you must too in your tools and plugins.
 - **Inline prompt-shield filtering on GitHub Copilot (`provider: "github-copilot"`) and GitHub Models (`azureclaw dev --github-token` / `provider: "github-models"`).** Neither provider returns Foundry's `prompt_filter_results` in responses, so the router cannot enforce inline Content Safety actions on completions from either backend. Use Foundry / Azure OpenAI in any environment where inline prompt-shield is part of your threat model. The CLI logs and `~/.azureclaw/config.json` make the chosen provider explicit so this is auditable.
 

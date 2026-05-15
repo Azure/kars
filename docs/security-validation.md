@@ -125,7 +125,6 @@ The CRD confirms:
 
 ```yaml
 networkPolicy:
-  approvalRequired: true
   defaultDeny: true
 ```
 

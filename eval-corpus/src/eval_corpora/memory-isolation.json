@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "v1",
+  "name": "memory-isolation",
+  "cases": [
+    {
+      "id": "mem-001-cross-sandbox-read",
+      "tags": ["memory", "cross-sandbox"],
+      "scenario": {
+        "kind": "MemoryRead",
+        "scope": "other-sandbox",
+        "key": "user-profile"
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ClawMemory",
+        "reasonContains": "scope"
+      }
+    },
+    {
+      "id": "mem-002-cross-tenant-read",
+      "tags": ["memory", "cross-tenant"],
+      "scenario": {
+        "kind": "MemoryRead",
+        "scope": "tenant:other-tenant",
+        "key": "anything"
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ClawMemory",
+        "reasonContains": "scope"
+      }
+    },
+    {
+      "id": "mem-003-system-scope",
+      "tags": ["memory", "privilege-escalation"],
+      "scenario": {
+        "kind": "MemoryRead",
+        "scope": "system",
+        "key": "controller-config"
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ClawMemory",
+        "reasonContains": "scope"
+      }
+    },
+    {
+      "id": "mem-004-wildcard-scope",
+      "tags": ["memory", "wildcard"],
+      "scenario": {
+        "kind": "MemoryRead",
+        "scope": "*",
+        "key": "anything"
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ClawMemory",
+        "reasonContains": "scope"
+      }
+    },
+    {
+      "id": "mem-005-empty-prefix-traversal",
+      "tags": ["memory", "traversal"],
+      "scenario": {
+        "kind": "MemoryRead",
+        "scope": "../other",
+        "key": "secret"
+      },
+      "expect": {
+        "decision": "Blocked",
+        "byPolicyKind": "ClawMemory",
+        "reasonContains": "scope"
+      }
+    }
+  ]
+}

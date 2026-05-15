@@ -72,7 +72,7 @@ make lint     # clippy + oxlint
 | `inference-router/` | Rust (axum) | Per-sandbox router — auth, safety, budgets, 18 Foundry APIs, native AGT governance |
 | `cli/` | TypeScript | 18 CLI commands + OpenClaw plugin + 10 Foundry skills |
 | `runtimes/openclaw/skills/` | Markdown | 10 SKILL.md files teaching the OpenClaw agent to use AzureClaw + Foundry services |
-| `cli/policies/` | YAML | AGT policy profiles (shell-safety, approval, rate-limit) |
+| `cli/profiles/agt/` | YAML | AGT policy profiles (default/offload) inlined by the CLI into `ToolPolicy.spec.agtProfile.inline` |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
 | `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp, NetworkPolicy) |
 | `deploy/seccomp/` | JSON | seccomp profile (`azureclaw-strict.json`) |

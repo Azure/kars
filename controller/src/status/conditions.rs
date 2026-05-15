@@ -194,7 +194,117 @@ pub mod reason {
     /// the controller. Until the runtime confirms the upstream store
     /// exists, we cannot honestly report `Ready=True`.
     pub const AWAITING_FOUNDRY_PROVISIONING: &str = "AwaitingFoundryProvisioning";
+    /// `crd-well-oiled-machine` Slice 0 — `AwaitingRouterEnforcement`:
+    /// the controller has compiled the spec and published the
+    /// artifact ConfigMap, but the router has not yet echoed back the
+    /// loaded digest (or, for today, the router does not yet consume
+    /// this CRD kind at all — InferencePolicy in Slice 0, McpServer
+    /// plural in Slice 4, etc.). Until the data-plane confirmation
+    /// closure of principles.md §3 is wired, the controller emits
+    /// `Ready=False` / reason=`AwaitingRouterEnforcement` and stamps
+    /// `phase=Compiled`. Each slice that wires its router-side
+    /// informer deletes the corresponding call site (§5 "delete on
+    /// contact").
+    pub const AWAITING_ROUTER_ENFORCEMENT: &str = "AwaitingRouterEnforcement";
+
+    /// The data-plane router has confirmed it loaded the exact policy
+    /// digest the controller published. This closes the principles.md
+    /// §3 invariant ("Ready ⇔ router echo") for ToolPolicy's AGT
+    /// profile. Slice 1c is the first user; later slices reuse it for
+    /// InferencePolicy, ClawMemory, and McpServer plural.
+    pub const ROUTER_ENFORCING: &str = "RouterEnforcing";
+
+    /// A ToolPolicy with `spec.agtProfile.inline` set has no
+    /// referencing `ClawSandbox` — no router exists to confirm
+    /// enforcement. The controller stamps `phase=Compiled` with
+    /// this reason rather than `Ready` because there is no consumer
+    /// to honor the policy yet. As soon as a sandbox references the
+    /// policy, the reconciler retries and (on success) promotes to
+    /// `Ready` / `RouterEnforcing`.
+    pub const NO_SANDBOXES_REFERENCING: &str = "NoSandboxesReferencing";
+
+    /// `crd-well-oiled-machine` Slice 3b.4 — `AuthMisconfigured`: at
+    /// least one referencing sandbox's router reported an upstream
+    /// authentication failure while consuming the compiled policy
+    /// (today: Foundry Memory Store returning 403 on the
+    /// `foundry.memory` MCP tool). This is *not* a transient network
+    /// error; it indicates a misconfigured project-MI or wrong
+    /// `Azure AI User` role assignment (see the
+    /// `azureclaw-deployment` skill notes on the project-MI
+    /// gotcha). The controller stamps `Ready=False` / `Degraded=True`
+    /// with this reason so operators don't waste time chasing
+    /// transient digest mismatches when the real problem is RBAC.
+    ///
+    /// Wire contract: the router records auth failures via
+    /// `PolicyStatusRegistry::record_error` with an
+    /// `AuthMisconfigured:` prefix on the message; the controller
+    /// matches that exact prefix on the `last_error` returned in
+    /// `/internal/policy-status` to elevate the condition.
+    pub const AUTH_MISCONFIGURED: &str = "AuthMisconfigured";
+
+    /// `crd-well-oiled-machine` Slice 3b.5 — `MemoryStoreMissing`: at
+    /// least one referencing sandbox's router observed an HTTP 404
+    /// from the upstream Foundry Memory Store on a
+    /// `foundry.memory.{search,update,...}` call. The store the
+    /// compiled `ClawMemory` binding points at does not exist (yet)
+    /// on the Foundry side. Today the openclaw runtime lazily
+    /// auto-creates stores via `ensureMemoryStore` on first sync, so
+    /// 404 is operator-visible up to the first runtime sync. Slice
+    /// 3c (router-side auto-provision at binding install) eliminates
+    /// the 404 path entirely.
+    ///
+    /// Wire contract: the router records 404s via
+    /// `PolicyStatusRegistry::record_error` with a
+    /// `MemoryStoreMissing:` prefix on the message; the controller
+    /// matches the exact prefix to elevate `Degraded=True`.
+    ///
+    /// Precedence: `AuthMisconfigured` outranks `MemoryStoreMissing`
+    /// — a 403 means the operator can't even check whether the
+    /// store exists, so RBAC dominates.
+    pub const MEMORY_STORE_MISSING: &str = "MemoryStoreMissing";
+
+    /// `crd-well-oiled-machine` Slice 4d.1 — `McpSingularDeprecated`:
+    /// the ClawSandbox uses `spec.governance.mcpServerRef` (singular),
+    /// which is superseded by `spec.governance.mcpServerRefs` (plural).
+    /// The singular path keeps working in Slice 4d.1 (one-to-one
+    /// alias), but operators should migrate. Emitted as a Warning
+    /// event, not a Degraded condition — the sandbox still reconciles
+    /// to Ready. Slice 4d.2 wires the per-server file scheme that the
+    /// plural form unlocks; Slice 4-final removes the singular field.
+    pub const MCP_SINGULAR_DEPRECATED: &str = "McpSingularDeprecated";
+
+    /// `crd-well-oiled-machine` Slice 5c.2 — `Unsigned`:
+    /// `AllowlistVerified=False` reason for sandboxes that use
+    /// `spec.networkPolicy.allowedEndpoints` (inline) without a
+    /// signed `spec.networkPolicy.allowlistRef`. Default behaviour
+    /// is *allow with warning* — the sandbox still reconciles to
+    /// `Ready=True` and the inline endpoints are programmed into the
+    /// L4 NetworkPolicy and the L7 router allowlist mount. When the
+    /// controller is configured with `REQUIRE_SIGNED_ALLOWLIST=true`
+    /// (helm value `egress.requireSigned: true`), the resolver
+    /// fail-closes instead: endpoints = None,
+    /// `AllowlistAuthoritative=False/FailedClosed`,
+    /// `fail_closed_no_lkg = true`, and the reconciler elevates
+    /// `Degraded=True/Unsigned`.
+    pub const UNSIGNED: &str = "Unsigned";
 }
+
+/// Slice 3b.4 wire-contract prefix routers attach to
+/// `PolicyStatusRegistry::record_error` messages when the upstream
+/// (Foundry Memory Store, today) rejected auth. The controller scans
+/// for this prefix to elevate the Degraded condition with
+/// `reason=AuthMisconfigured`. Kept here in `conditions` so producer
+/// and consumer share one source of truth.
+pub const AUTH_MISCONFIGURED_PREFIX: &str = "AuthMisconfigured:";
+
+/// Slice 3b.5 wire-contract prefix routers attach to
+/// `PolicyStatusRegistry::record_error` messages when the upstream
+/// Foundry Memory Store returned HTTP 404 for the bound store. The
+/// controller scans for this prefix to elevate the Degraded
+/// condition with `reason=MemoryStoreMissing`. Lives next to
+/// `AUTH_MISCONFIGURED_PREFIX` so producer and consumer share one
+/// source of truth.
+pub const MEMORY_STORE_MISSING_PREFIX: &str = "MemoryStoreMissing:";
 
 /// Build a condition with a freshly-stamped `lastTransitionTime`.
 ///

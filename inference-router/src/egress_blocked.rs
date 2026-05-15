@@ -187,6 +187,57 @@ impl BlockedBuffer {
             .collect()
     }
 
+    /// Snapshot of every entry whose `last_seen_unix >= since_unix`, newest
+    /// first by last-seen. Used by `/internal/egress/blocked?since=…` to
+    /// support the CLI's `--since` filter.
+    ///
+    /// The buffer doesn't index by time, so this performs a full scan over
+    /// the deduplicated entry set. Bounded by `capacity` (1024 by default).
+    pub fn snapshot_since(&self, since_unix: u64) -> Vec<BlockedEntry> {
+        let inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let mut out: Vec<BlockedEntry> = inner
+            .by_key
+            .values()
+            .filter(|e| e.last_seen_unix >= since_unix)
+            .cloned()
+            .collect();
+        out.sort_by_key(|e| std::cmp::Reverse(e.last_seen_unix));
+        out
+    }
+
+    /// Top-N most-attempted hosts whose `last_seen_unix >= since_unix`,
+    /// aggregated across sandboxes + ports by hostname. Returns
+    /// `(host, total_attempts)` pairs, descending by attempt count.
+    ///
+    /// Used by the periodic `EgressBlockedSeen` event (Slice 5b) and the
+    /// `/internal/egress/blocked/top` endpoint surfaced to the plugin.
+    pub fn top_hosts(&self, since_unix: u64, n: usize) -> Vec<(String, u32)> {
+        if n == 0 {
+            return Vec::new();
+        }
+        let inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let mut by_host: HashMap<String, u32> = HashMap::new();
+        for e in inner.by_key.values() {
+            if e.last_seen_unix < since_unix {
+                continue;
+            }
+            let slot = by_host.entry(e.host.clone()).or_insert(0);
+            *slot = slot.saturating_add(e.count);
+        }
+        let mut out: Vec<(String, u32)> = by_host.into_iter().collect();
+        // Stable secondary sort by host name so equal counts produce
+        // deterministic output for tests + UI.
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out.truncate(n);
+        out
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().map(|g| g.by_key.len()).unwrap_or(0)
     }
@@ -443,5 +494,97 @@ mod tests {
         b.clear();
         assert_eq!(b.len(), 0);
         assert!(b.snapshot(10).is_empty());
+    }
+
+    // ---- Slice 5a: snapshot_since + top_hosts ----------------------------
+
+    /// Use `record_at` to inject known timestamps so the since-filter is
+    /// deterministic. The instant clock value (`now`) is unused for the
+    /// filter assertions — the test only inspects `last_seen_unix`.
+    fn rec_at(b: &BlockedBuffer, ts_unix: u64, sandbox: &str, host: &str, port: u16) {
+        b.record_at(Instant::now(), ts_unix, sandbox, host, port);
+    }
+
+    #[test]
+    fn snapshot_since_filters_by_last_seen_and_sorts_desc() {
+        let b = buf();
+        rec_at(&b, 100, "sb1", "old.example.com", 443);
+        rec_at(&b, 200, "sb1", "mid.example.com", 443);
+        rec_at(&b, 300, "sb1", "new.example.com", 443);
+
+        // since=150 → drops old.example.com
+        let snap = b.snapshot_since(150);
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].host, "new.example.com"); // newest first
+        assert_eq!(snap[1].host, "mid.example.com");
+
+        // since=0 → all three
+        assert_eq!(b.snapshot_since(0).len(), 3);
+
+        // since=>max ts → none
+        assert!(b.snapshot_since(9999).is_empty());
+    }
+
+    #[test]
+    fn snapshot_since_returns_dedup_count_for_repeats() {
+        let b = buf();
+        rec_at(&b, 100, "sb1", "h.example.com", 443);
+        rec_at(&b, 200, "sb1", "h.example.com", 443); // dedup; bumps last_seen
+        rec_at(&b, 300, "sb1", "h.example.com", 443); // dedup again
+
+        let snap = b.snapshot_since(0);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].count, 3);
+        assert_eq!(snap[0].last_seen_unix, 300);
+    }
+
+    #[test]
+    fn top_hosts_aggregates_across_sandboxes_and_ports() {
+        let b = buf();
+        // a.example.com from two sandboxes; total count = 1 + 1 = 2.
+        rec_at(&b, 100, "sb1", "a.example.com", 443);
+        rec_at(&b, 110, "sb2", "a.example.com", 443);
+        // b.example.com on two ports; total count = 1 + 1 = 2.
+        rec_at(&b, 120, "sb1", "b.example.com", 443);
+        rec_at(&b, 130, "sb1", "b.example.com", 80);
+        // c.example.com seen 3 times from one sandbox.
+        rec_at(&b, 140, "sb1", "c.example.com", 443);
+        rec_at(&b, 141, "sb1", "c.example.com", 443);
+        rec_at(&b, 142, "sb1", "c.example.com", 443);
+
+        let top = b.top_hosts(0, 3);
+        // c (count 3) > a (2) = b (2); a sorts before b alphabetically.
+        assert_eq!(top.len(), 3);
+        assert_eq!(top[0], ("c.example.com".to_string(), 3));
+        assert_eq!(top[1], ("a.example.com".to_string(), 2));
+        assert_eq!(top[2], ("b.example.com".to_string(), 2));
+    }
+
+    #[test]
+    fn top_hosts_respects_since_filter() {
+        let b = buf();
+        rec_at(&b, 100, "sb1", "old.example.com", 443);
+        rec_at(&b, 200, "sb1", "new.example.com", 443);
+
+        let top = b.top_hosts(150, 10);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].0, "new.example.com");
+    }
+
+    #[test]
+    fn top_hosts_truncates_to_n() {
+        let b = BlockedBuffer::new(64, Duration::from_secs(60), 100);
+        for i in 0..5 {
+            rec_at(&b, 100 + i as u64, "sb1", &format!("h{i}.example.com"), 443);
+        }
+        assert_eq!(b.top_hosts(0, 3).len(), 3);
+        assert_eq!(b.top_hosts(0, 0).len(), 0);
+        assert_eq!(b.top_hosts(0, 100).len(), 5);
+    }
+
+    #[test]
+    fn top_hosts_empty_buffer_returns_empty() {
+        let b = buf();
+        assert!(b.top_hosts(0, 10).is_empty());
     }
 }

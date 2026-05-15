@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `ClawMemory` reconciler — Phase 2 §8 entry 5 (S5).
+//! `ClawMemory` reconciler — Phase 2 §8 entry 5 (S5), upgraded in
+//! Slice 3a of `crd-well-oiled-machine` to close the principles.md §3
+//! "Ready ⇔ router echo" loop.
 //!
 //! Watches `ClawMemory` CRs and, for each:
 //!
@@ -9,40 +11,73 @@
 //! 2. Compiles the binding via
 //!    [`crate::claw_memory_compile::compile_to_binding`].
 //! 3. Persists as `ConfigMap` (`clawmemory-{name}-binding`,
-//!    key `binding.json`).
-//! 4. Sets full status (phase, observedGeneration, conditions,
-//!    bindingConfigMapRef, versionHash, lastReconciledAt).
+//!    key `binding.json`), with the canonical compile digest stamped
+//!    in an annotation for diff debugging.
+//! 4. Polls every referencing `ClawSandbox`'s inference router via
+//!    `GET /internal/policy-status` for `PolicyKind::Memory` and only
+//!    promotes `phase=Compiled → Ready` when every router echoes the
+//!    same digest.
+//! 5. Sets full status (phase, observedGeneration, conditions,
+//!    bindingConfigMapRef, versionHash, lastReconciledAt,
+//!    compiledDigest, loadedDigest).
 //!
-//! ## Honesty rule (status reporting)
+//! ## Honesty rule (Slice 3a)
 //!
-//! The controller does **not** create the upstream Azure AI Foundry
-//! Memory Store — that happens runtime-side via the CLI plugin and
-//! the router's `/memory_stores/*` proxy on first use (S7+ wiring).
-//! Therefore, on a successful binding compile, the controller reports:
+//! Up to Slice 0 the reconciler stamped `Compiled` unconditionally
+//! and emitted a `PolicyNotEnforced` Warning Event because the
+//! data-plane consumer did not exist yet. Slice 3a wires the
+//! router-side `memory_binding_loader` consumer; the controller
+//! therefore now distinguishes three success states:
 //!
-//! - `phase = "Pending"` (not `"Ready"`)
-//! - `Ready = False` / reason `AwaitingFoundryProvisioning`
-//! - `Progressing = True` / reason `AwaitingFoundryProvisioning`
+//! * `Compiled` + `Ready=False / AwaitingRouterEnforcement` — binding
+//!   published, no router has echoed the matching digest yet
+//!   (also the `NoSandboxesReferencing` branch).
+//! * `Compiled` + `Ready=False / NoSandboxesReferencing` — binding
+//!   published but no `ClawSandbox` currently references this
+//!   `ClawMemory` via `spec.memoryRef`.
+//! * `Ready` + `Ready=True / RouterEnforcing` — every referencing
+//!   sandbox's router has confirmed the digest.
 //!
-//! Reporting `Ready=True` after only writing the binding ConfigMap is
-//! a lie: the router will still 404 on `/memory_stores/<name>` until
-//! the runtime path provisions the store. `kubectl wait
-//! --for=condition=Ready` must block here — flipping it `True`
-//! prematurely was the bug this module guards against.
+//! When binding write fails, `phase=Failed`, `Ready=False`,
+//! `Degraded=True`.
 //!
-//! When binding write itself fails, phase is `Failed` (not
-//! `Degraded`), `Ready=False`, `Degraded=True`.
+//! ## What landed in Slice 3b / 3c (no longer deferred)
+//!
+//! - **Slice 3b.4** — `AuthMisconfigured` Degraded reason: the router echoes
+//!   403 on the memory tool call back through `status.observedRouters[]`,
+//!   the reconciler elevates phase to `Degraded` with reason
+//!   `AuthMisconfigured` and an actionable message pointing at the project
+//!   MI / RBAC fix.
+//! - **Slice 3b.5** — `MemoryStoreMissing` Degraded reason: same echo path,
+//!   distinct reason so operators don't confuse "wrong RBAC" with "store
+//!   never created".
+//! - **Slice 3c.1** — router-side auto-provisioning. On first 404 from
+//!   `/memory_stores/{id}`, the inference router POSTs to `/memory_stores`
+//!   to create the store, then retries. See
+//!   [`inference-router/src/mcp/platform.rs`] `ensure_memory_store`. The
+//!   *controller* does NOT provision the upstream Foundry resource — that
+//!   remains an operator/`azure-prepare` job — but the store *inside* a
+//!   provisioned AI Services account is now self-healing.
+//!
+//! ## What is *still* operator-driven
+//!
+//! - Upstream Foundry **AI Services account** + **Project** lifecycle
+//!   (not in scope for the operator; `azure-prepare` handles it).
+//! - RBAC pre-grants: project MI needs `Azure AI User` on the resource
+//!   group for the internal model calls that Memory Store makes — see
+//!   `docs/operations/secret-rotation.md`.
 //!
 //! ## Reuse map (no-duplication rule, §0.2/§0.3)
 //!
-//! Same shape as S2 (ToolPolicy), S3 (A2AAgent), S4 (InferencePolicy).
+//! Mirror of the Slice 2a (`InferencePolicy`) reconciler shape:
 //! - Conditions vocabulary + transition-time helpers from
 //!   [`crate::status::conditions`].
+//! - `RouterEnforcementState` + `decide_enforcement_state` from
+//!   [`crate::status::router_confirmation`].
+//! - `list_sandboxes_matching` + `poll_referencing_sandboxes` from
+//!   [`crate::status::router_confirmation_io`].
 //! - Compile module is single-purpose and reconciler does no JSON
 //!   shaping itself.
-//! - **No Foundry calls** — Foundry interaction stays in the runtime
-//!   path (`cli/src/plugin.ts::ensureMemoryStore` + the router's
-//!   `/memory_stores/*` proxy). The S7 informer wires the consumer.
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -59,9 +94,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::claw_memory::{ClawMemory, ClawMemoryStatus};
-use crate::claw_memory_compile::{compile_to_binding, version_hash};
+use crate::claw_memory_compile::{
+    MEMORY_BINDING_FILENAME, claw_memory_digest, compile_to_binding, version_hash,
+};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason, status as cond_status};
+use crate::status::phase::{PHASE_COMPILED, PHASE_FAILED, PHASE_READY, PhaseEventReporter};
+use crate::status::router_confirmation::{self, RouterEnforcementState, decide_enforcement_state};
+use crate::status::router_confirmation_io::{list_sandboxes_matching, poll_referencing_sandboxes};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_MEMORY;
 const FINALIZER: &str = "azureclaw.azure.com/clawmemory-cleanup";
@@ -88,6 +128,8 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    http: reqwest::Client,
+    phase_reporter: PhaseEventReporter,
 }
 
 async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -126,55 +168,178 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
         .unwrap_or_default();
     let observed_generation = memory.metadata.generation;
 
-    let binding = compile_to_binding(&memory.spec);
+    // Slice 1c.4 — resolve bundleRef (if set) into an effective spec
+    // before compile. The bundle carries content (storeName, scope,
+    // retentionDays, deleteOnSandboxDelete, displayName); `sandboxRef`
+    // always stays in the CR. When `bundleRef` is unset the path is
+    // a no-op and returns the CR's spec verbatim.
+    let (effective_spec, bundle_ref_digest, bundle_degraded) =
+        resolve_memory_source(memory.as_ref()).await;
+    let mut degraded: Option<(&'static str, String)> = bundle_degraded;
+
+    let binding = compile_to_binding(&effective_spec);
     let v_hash = version_hash(&binding);
+    // Slice 3a — canonical bytes the router-side `memory_binding_loader`
+    // will sha256 + echo via `GET /internal/policy-status`. The bytes
+    // written into the ConfigMap MUST equal what we hash here, byte
+    // for byte; any reformatting (pretty-print, trailing newline, key
+    // reordering) silently breaks the §3 echo contract.
+    let canonical_bytes = serde_json::to_vec(&binding)?;
+    let canonical_str =
+        String::from_utf8(canonical_bytes.clone()).expect("serde_json::to_vec emits valid UTF-8");
+    let compiled_digest = claw_memory_digest(&canonical_bytes);
 
     let cm_name = format!("clawmemory-{name}-binding");
-    let mut degraded: Option<(&'static str, String)> = None;
 
-    match ensure_binding_configmap(&configmaps, &cm_name, &name, &binding, &v_hash).await {
-        Ok(()) => {
-            tracing::info!(
-                clawmemory = %name,
-                ns = %ns,
-                version_hash = %v_hash,
-                generation = observed_generation.unwrap_or(0),
-                store_name = %memory.spec.store_name,
-                scope = %memory.spec.scope,
-                "ClawMemoryReconciled"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                clawmemory = %name,
-                error_class = e.class(),
-                "ClawMemoryBindingWriteFailed"
-            );
-            degraded = Some(("BindingWriteFailed", e.to_string()));
+    // If bundleRef resolution already marked us Degraded
+    // (InvalidSpec mutex / fetch / verify failure), skip the
+    // ConfigMap write — `effective_spec` is the selector-only
+    // sentinel and compiling it would publish empty bytes that
+    // every router would reject anyway. Mirrors the 1c.3
+    // InferencePolicy path.
+    if degraded.is_none() {
+        match ensure_binding_configmap(
+            &configmaps,
+            &cm_name,
+            &name,
+            &canonical_str,
+            &v_hash,
+            &compiled_digest,
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    clawmemory = %name,
+                    ns = %ns,
+                    version_hash = %v_hash,
+                    compiled_digest = %compiled_digest,
+                    generation = observed_generation.unwrap_or(0),
+                    store_name = effective_spec.store_name.as_deref().unwrap_or(""),
+                    scope = effective_spec.scope.as_deref().unwrap_or(""),
+                    bundle_ref_digest = bundle_ref_digest.as_deref().unwrap_or(""),
+                    "ClawMemoryCompiled"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    clawmemory = %name,
+                    error_class = e.class(),
+                    "ClawMemoryBindingWriteFailed"
+                );
+                degraded = Some(("BindingWriteFailed", e.to_string()));
+            }
         }
     }
+
+    // Slice 3a — close the §3 "Ready ⇔ router echo" loop. List
+    // ClawSandboxes that reference this ClawMemory by
+    // `spec.memoryRef.name`, GET `/internal/policy-status` on each
+    // router, and let the result drive both `phase` and the `Ready`
+    // condition. The `compiled_digest` we just wrote is the value
+    // every router must echo before we promote to Ready.
+    //
+    // Slice 3b.4 — auth probe surfacing. The pre-aggregation
+    // `results` carry per-sandbox `last_error` strings. We scan them
+    // for the router-side `AuthMisconfigured:` prefix (wire contract
+    // pinned in `crate::status::conditions::AUTH_MISCONFIGURED_PREFIX`)
+    // *before* the aggregator collapses them into the Awaiting
+    // message. When any sandbox surfaces an auth failure, we elevate
+    // `degraded` directly so the resulting `Degraded=True` /
+    // `reason=AuthMisconfigured` condition jumps to the top instead
+    // of getting buried inside a generic Awaiting message — RBAC
+    // misconfigs are not transient.
+    let enforcement_state = if degraded.is_some() {
+        RouterEnforcementState::NotApplicable
+    } else {
+        let referrers = match list_sandboxes_matching(&ctx.client, &ns, |cs| {
+            cs.spec.memory_ref.as_ref().is_some_and(|r| r.name == name)
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    clawmemory = %name,
+                    ns = %ns,
+                    error = %e,
+                    "ClawSandbox list failed; treating as no referrers"
+                );
+                Vec::new()
+            }
+        };
+        let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
+        if let Some(msg) = first_auth_misconfigured_message(&results) {
+            degraded = Some((conditions::reason::AUTH_MISCONFIGURED, msg));
+            RouterEnforcementState::NotApplicable
+        } else if let Some(msg) = first_memory_store_missing_message(&results) {
+            // Slice 3b.5 — `MemoryStoreMissing:` is the second-tier
+            // Degraded signal. `AuthMisconfigured:` is checked first
+            // (RBAC dominates: if we can't read the store, we can't
+            // even tell if it's missing). A 404 means the bound
+            // store does not exist on the upstream — operator-
+            // visible until Slice 3c's router-side auto-provision
+            // ships.
+            degraded = Some((conditions::reason::MEMORY_STORE_MISSING, msg));
+            RouterEnforcementState::NotApplicable
+        } else {
+            decide_enforcement_state(&compiled_digest, "Memory", &results)
+        }
+    };
+
+    let loaded_digest: Option<String> = match &enforcement_state {
+        RouterEnforcementState::Confirmed { .. } => Some(compiled_digest.clone()),
+        _ => None,
+    };
 
     let new_conditions = build_conditions(
         &prior_conditions,
         observed_generation,
         degraded.as_ref().map(|(r, m)| (*r, m.as_str())),
+        &enforcement_state,
     );
-    // Honesty rule (see module docstring + claw_memory.rs §"Scope (S5)"):
-    // The controller only compiles a binding ConfigMap. Creating the
-    // upstream Azure AI Foundry Memory Store is the runtime path's job
-    // (CLI plugin → router `/memory_stores/*` proxy), and is not wired
-    // in this slice. Until S7 lands a sandbox-side informer that
-    // confirms the upstream store exists and stamps `foundryStoreId`,
-    // we MUST NOT report `phase=Ready` / `Ready=True` — doing so makes
-    // operators believe the store is provisioned when the router will
-    // still 404 on `/memory_stores/<name>`. Report `Pending` instead so
-    // `kubectl wait --for=condition=Ready` blocks until the upstream
-    // store is real.
+
     let phase = if degraded.is_some() {
-        "Failed"
+        PHASE_FAILED
     } else {
-        "Pending"
+        match enforcement_state {
+            RouterEnforcementState::Confirmed { .. } | RouterEnforcementState::NotApplicable => {
+                PHASE_READY
+            }
+            RouterEnforcementState::NoSandboxesReferencing
+            | RouterEnforcementState::Awaiting { .. } => PHASE_COMPILED,
+        }
     };
+
+    // Only emit the Warning while truly awaiting router-side
+    // confirmation (mirrors slice-1c ToolPolicy + slice-2a
+    // InferencePolicy). Once Confirmed fires we stop shouting — the
+    // loop is honestly closed.
+    let publish_warning = degraded.is_none()
+        && matches!(
+            enforcement_state,
+            RouterEnforcementState::Awaiting { .. }
+                | RouterEnforcementState::NoSandboxesReferencing
+        );
+    if publish_warning
+        && let Err(e) = ctx
+            .phase_reporter
+            .warn_policy_not_enforced(
+                memory.as_ref(),
+                "AwaitingRouterConfirmation",
+                "ClawMemory binding compiled and published, but the inference-router has \
+                 not yet echoed the matching digest on /internal/policy-status. \
+                 Memory MCP tools today still authenticate via the chart-fed \
+                 FOUNDRY_MEMORY_STORE_ID env; Slice 3b will rewire them through the binding.",
+            )
+            .await
+    {
+        tracing::warn!(
+            clawmemory = %name,
+            error = %e,
+            "ClawMemoryEventPublishFailed",
+        );
+    }
 
     // SSA requires apiVersion + kind in the patch body — without
     // them, the API server returns "invalid object type: /, Kind=".
@@ -188,6 +353,9 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
             binding_config_map_ref: Some(LocalObjectRef { name: cm_name.clone() }),
             version_hash: Some(v_hash),
             last_reconciled_at: Some(rfc3339_now()),
+            compiled_digest: Some(compiled_digest),
+            loaded_digest,
+            bundle_ref_digest,
         }
     });
     api.patch_status(
@@ -199,6 +367,9 @@ async fn reconcile(memory: Arc<ClawMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
+    } else if matches!(enforcement_state, RouterEnforcementState::Awaiting { .. }) {
+        // Short requeue while awaiting echo — mirrors slice-1c / 2a.
+        Ok(Action::requeue(Duration::from_secs(15)))
     } else {
         Ok(Action::requeue(REQUEUE_OK))
     }
@@ -208,10 +379,229 @@ fn rfc3339_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Slice 1c.4 — resolve `spec.bundleRef` (if set) into an effective
+/// [`crate::claw_memory::ClawMemorySpec`] for [`compile_to_binding`].
+///
+/// Returns a 3-tuple `(effective_spec, bundle_ref_digest, degraded)`:
+/// - `effective_spec` is what compile_to_binding will see. When
+///   `bundleRef` is unset, this is the CR's spec verbatim (the
+///   inline path). When `bundleRef` is set and the fetch + cosign
+///   verification succeed, the bundle's content fields are merged
+///   onto the CR's `sandboxRef`. On any error this is a
+///   selector-only sentinel that won't be compiled.
+/// - `bundle_ref_digest` is the verified bundle's
+///   `sha256:...` (stamped into `status.bundleRefDigest`) when the
+///   bundle path succeeded; `None` otherwise.
+/// - `degraded`, when `Some`, carries the `(reason, message)` for
+///   the `Degraded=True` condition the reconciler will surface.
+///
+/// The bundle path goes through
+/// [`crate::policy_fetcher::fetch_and_verify_generic`] with
+/// [`crate::policy_canonical::memory::MemoryKind`], so this function
+/// inherits the same cosign trust-root, ACR auth, and `FetchError`
+/// taxonomy as the egress, tools, and inference paths.
+async fn resolve_memory_source(
+    memory: &ClawMemory,
+) -> (
+    crate::claw_memory::ClawMemorySpec,
+    Option<String>,
+    Option<(&'static str, String)>,
+) {
+    let spec = &memory.spec;
+    let inline_any = spec.store_name.is_some()
+        || spec.scope.is_some()
+        || spec.retention_days.is_some()
+        || spec.delete_on_sandbox_delete.is_some()
+        || spec.display_name.is_some();
+    let bundle_set = spec.bundle_ref.is_some();
+
+    if inline_any && bundle_set {
+        return (
+            crate::claw_memory::ClawMemorySpec {
+                sandbox_ref: spec.sandbox_ref.clone(),
+                ..Default::default()
+            },
+            None,
+            Some((
+                "InvalidSpec",
+                "spec.bundleRef is mutually exclusive with spec.storeName, \
+                 spec.scope, spec.retentionDays, spec.deleteOnSandboxDelete, \
+                 and spec.displayName"
+                    .into(),
+            )),
+        );
+    }
+
+    if !bundle_set {
+        return (spec.clone(), None, None);
+    }
+
+    let bundle_ref = spec
+        .bundle_ref
+        .as_ref()
+        .expect("bundle_set implies Some")
+        .clone();
+
+    let signer_policy_handle = crate::signer_policy::global();
+    let verify_result = match signer_policy_handle.snapshot() {
+        crate::signer_policy::SignerPolicyState::FromConfigMap(p) => {
+            let cfg: crate::policy_fetcher::SignerPolicyConfig = p.into();
+            crate::policy_fetcher::fetch_and_verify_generic::<
+                crate::policy_canonical::memory::MemoryKind,
+            >(&bundle_ref, &cfg)
+            .await
+        }
+        crate::signer_policy::SignerPolicyState::Malformed(msg) => Err(
+            crate::policy_fetcher::FetchError::SignerPolicyMalformed(msg),
+        ),
+        crate::signer_policy::SignerPolicyState::Absent => {
+            let cfg = crate::policy_fetcher::SignerPolicyConfig::from_env();
+            crate::policy_fetcher::fetch_and_verify_generic::<
+                crate::policy_canonical::memory::MemoryKind,
+            >(&bundle_ref, &cfg)
+            .await
+        }
+    };
+
+    match verify_result {
+        Ok(verified) => {
+            let effective = merge_bundle_with_selector(&spec.sandbox_ref, &verified);
+            (effective, Some(verified.digest), None)
+        }
+        Err(e) => {
+            let (reason, msg) = fetch_error_to_degraded(&e);
+            tracing::warn!(
+                clawmemory = %memory.name_any(),
+                registry = %bundle_ref.registry,
+                repository = %bundle_ref.repository,
+                digest = %bundle_ref.digest,
+                reason,
+                "ClawMemory bundleRef fetch/verify failed: {msg}"
+            );
+            (
+                crate::claw_memory::ClawMemorySpec {
+                    sandbox_ref: spec.sandbox_ref.clone(),
+                    ..Default::default()
+                },
+                None,
+                Some((reason, msg)),
+            )
+        }
+    }
+}
+
+/// Merge the verified-bundle content fields onto the CR's
+/// `sandboxRef` to produce the effective spec for
+/// [`compile_to_binding`]. The bundle owns content; the CR owns the
+/// sandbox the binding applies to.
+fn merge_bundle_with_selector(
+    sandbox_ref: &crate::claw_memory::SandboxRef,
+    verified: &crate::policy_canonical::memory::VerifiedMemoryBinding,
+) -> crate::claw_memory::ClawMemorySpec {
+    crate::claw_memory::ClawMemorySpec {
+        store_name: verified.store_name.clone(),
+        sandbox_ref: sandbox_ref.clone(),
+        scope: verified.scope.clone(),
+        retention_days: verified.retention_days,
+        delete_on_sandbox_delete: verified.delete_on_sandbox_delete,
+        display_name: verified.display_name.clone(),
+        bundle_ref: None,
+    }
+}
+
+/// Map [`crate::policy_fetcher::FetchError`] to the `(reason,
+/// message)` pair surfaced as a `Degraded=True` condition. Shares
+/// the one vocabulary [`crate::policy_fetcher::reason_for_error`]
+/// owns across all signed-policy kinds.
+fn fetch_error_to_degraded(e: &crate::policy_fetcher::FetchError) -> (&'static str, String) {
+    let reason = crate::policy_fetcher::reason_for_error(e).unwrap_or("Transient");
+    (reason, e.to_string())
+}
+
+/// Slice 3b.4 — scan the per-sandbox poll outcomes for a router-side
+/// `AuthMisconfigured:` `last_error` on the `Memory` policy kind. If
+/// any referencing sandbox surfaces one, return a deterministic
+/// message attributing the failure to that sandbox so the controller
+/// can elevate it to a `Degraded=True / reason=AuthMisconfigured`
+/// condition instead of folding it into a generic Awaiting message.
+///
+/// Returns the first match (sandbox iteration order is preserved by
+/// the upstream pollers, so this is stable across reconciles).
+/// Multiple-sandbox cases are flagged in the message tail.
+fn first_auth_misconfigured_message(
+    results: &[(
+        String,
+        Result<
+            crate::status::router_confirmation::PolicyStatusResponse,
+            crate::status::router_confirmation::ConfirmError,
+        >,
+    )],
+) -> Option<String> {
+    first_prefixed_memory_error(results, conditions::AUTH_MISCONFIGURED_PREFIX)
+}
+
+/// Slice 3b.5 — scan the per-sandbox poll outcomes for a router-side
+/// `MemoryStoreMissing:` `last_error` on the `Memory` policy kind.
+/// Mirrors [`first_auth_misconfigured_message`] but matches the
+/// missing-store prefix.
+///
+/// Lower precedence than auth misconfigs: callers must check
+/// AuthMisconfigured first. 404 only tells you the store does not
+/// exist *given* the operator has access to ask; if RBAC is broken
+/// (403) the controller cannot trust a 404 result at all.
+fn first_memory_store_missing_message(
+    results: &[(
+        String,
+        Result<
+            crate::status::router_confirmation::PolicyStatusResponse,
+            crate::status::router_confirmation::ConfirmError,
+        >,
+    )],
+) -> Option<String> {
+    first_prefixed_memory_error(results, conditions::MEMORY_STORE_MISSING_PREFIX)
+}
+
+/// Shared scan-for-prefixed-error helper used by Slice 3b.4
+/// (`AuthMisconfigured:`) and Slice 3b.5 (`MemoryStoreMissing:`).
+/// Walks per-sandbox `PolicyStatusResponse` results, looks for
+/// `find_last_error("Memory")` starting with `prefix`, and returns a
+/// deterministic `"<sandbox>: <error>"` message with a tail when
+/// multiple sandboxes are affected.
+fn first_prefixed_memory_error(
+    results: &[(
+        String,
+        Result<
+            crate::status::router_confirmation::PolicyStatusResponse,
+            crate::status::router_confirmation::ConfirmError,
+        >,
+    )],
+    prefix: &str,
+) -> Option<String> {
+    let mut hits: Vec<(String, String)> = Vec::new();
+    for (sandbox, outcome) in results {
+        if let Ok(resp) = outcome
+            && let Some(err) = resp.find_last_error("Memory")
+            && err.starts_with(prefix)
+        {
+            hits.push((sandbox.clone(), err.to_string()));
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    let (first_sb, first_err) = &hits[0];
+    let mut msg = format!("{first_sb}: {first_err}");
+    if hits.len() > 1 {
+        msg.push_str(&format!(" (+{} more sandbox(es) affected)", hits.len() - 1));
+    }
+    Some(msg)
+}
+
 fn build_conditions(
     prior: &[Condition],
     observed_generation: Option<i64>,
     degraded: Option<(&str, &str)>,
+    enforcement: &RouterEnforcementState,
 ) -> Vec<Condition> {
     let mut out: Vec<Condition> = Vec::with_capacity(3);
     let prior_ready = conditions::find(prior, conditions::TYPE_READY);
@@ -245,40 +635,119 @@ fn build_conditions(
                 observed_generation,
             ));
         }
-        None => {
-            // Binding compiled OK, but the upstream Foundry Memory
-            // Store is provisioned by the runtime path (S7+), not by
-            // the controller. Report this honestly: `Ready=False` with
-            // `Progressing=True` until upstream confirmation lands.
-            // Operators / `kubectl wait --for=condition=Ready` should
-            // block here, not race ahead to talk to a store the router
-            // will 404 on.
-            const AWAITING_MSG: &str = "binding ConfigMap compiled; awaiting upstream Foundry memory store provisioning by runtime path (router proxy on first use)";
-            out.push(conditions::preserve_transition_time(
-                prior_ready,
-                conditions::TYPE_READY,
-                cond_status::FALSE,
-                reason::AWAITING_FOUNDRY_PROVISIONING,
-                AWAITING_MSG,
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_progressing,
-                conditions::TYPE_PROGRESSING,
-                cond_status::TRUE,
-                reason::AWAITING_FOUNDRY_PROVISIONING,
-                AWAITING_MSG,
-                observed_generation,
-            ));
-            out.push(conditions::preserve_transition_time(
-                prior_degraded,
-                conditions::TYPE_DEGRADED,
-                cond_status::FALSE,
-                reason::RECONCILED,
-                "no errors",
-                observed_generation,
-            ));
-        }
+        None => match enforcement {
+            RouterEnforcementState::NotApplicable => {
+                // Not reached today (the success branch maps
+                // degraded=None → one of the three states below).
+                // Kept for build_conditions truth-table symmetry
+                // with the other reconcilers.
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::RECONCILED,
+                    "ClawMemory binding compiled and published",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "compile complete",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Confirmed { total } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::TRUE,
+                    reason::ROUTER_ENFORCING,
+                    &format!(
+                        "all {total} referencing sandbox router(s) confirmed \
+                         claw-memory binding digest"
+                    ),
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "router echo confirmed",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::NoSandboxesReferencing => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "no ClawSandbox references this ClawMemory; nothing to enforce",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::NO_SANDBOXES_REFERENCING,
+                    "waiting for a ClawSandbox to reference this binding",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+            RouterEnforcementState::Awaiting { message, .. } => {
+                out.push(conditions::preserve_transition_time(
+                    prior_ready,
+                    conditions::TYPE_READY,
+                    cond_status::FALSE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    message,
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_progressing,
+                    conditions::TYPE_PROGRESSING,
+                    cond_status::TRUE,
+                    reason::AWAITING_ROUTER_ENFORCEMENT,
+                    "awaiting router-side enforcement",
+                    observed_generation,
+                ));
+                out.push(conditions::preserve_transition_time(
+                    prior_degraded,
+                    conditions::TYPE_DEGRADED,
+                    cond_status::FALSE,
+                    reason::RECONCILED,
+                    "no errors",
+                    observed_generation,
+                ));
+            }
+        },
     }
     out
 }
@@ -287,16 +756,24 @@ async fn ensure_binding_configmap(
     api: &Api<ConfigMap>,
     cm_name: &str,
     owner: &str,
-    binding: &serde_json::Value,
+    canonical_body: &str,
     v_hash: &str,
+    compiled_digest: &str,
 ) -> Result<(), ReconcileError> {
-    let json_str = serde_json::to_string_pretty(binding)?;
     let mut data: BTreeMap<String, String> = BTreeMap::new();
-    data.insert("binding.json".into(), json_str);
+    // Canonical key: the router-side `memory_binding_loader` reads
+    // this filename from the mount directory and sha256s the exact
+    // bytes, so it MUST match
+    // `claw_memory_compile::MEMORY_BINDING_FILENAME`.
+    data.insert(MEMORY_BINDING_FILENAME.into(), canonical_body.into());
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
         "azureclaw.azure.com/clawmemory-version-hash".into(),
         v_hash.into(),
+    );
+    annotations.insert(
+        "azureclaw.azure.com/claw-memory-digest".into(),
+        compiled_digest.into(),
     );
     let cm = ConfigMap {
         metadata: ObjectMeta {
@@ -380,17 +857,20 @@ pub async fn run(client: Client) -> Result<()> {
         Ok(_) => tracing::info!("ClawMemory CRD found — starting controller"),
         Err(e) => {
             tracing::warn!("ClawMemory CRD not installed — reconciler disabled: {e}");
-            // Park forever so the tokio::select! in main() does not see
-            // this reconciler exit cleanly and tear the whole controller
-            // down. The CRD is only optional from the controller's
-            // perspective; its absence is operator config, not a fatal
-            // condition.
             std::future::pending::<()>().await;
             #[allow(unreachable_code)]
             return Ok(());
         }
     }
-    let ctx = Arc::new(Ctx { client });
+    let http = reqwest::Client::builder()
+        .timeout(router_confirmation::DEFAULT_TIMEOUT)
+        .build()
+        .expect("default reqwest client builds with infallible config");
+    let ctx = Arc::new(Ctx {
+        client: client.clone(),
+        http,
+        phase_reporter: PhaseEventReporter::new(client, "ClawMemory"),
+    });
     Controller::new(memories, kube::runtime::watcher::Config::default())
         .run(
             |x, ctx| async move {
@@ -434,24 +914,29 @@ mod tests {
     }
 
     #[test]
-    fn build_conditions_emits_all_three_types_on_success() {
-        // "Success" here = binding ConfigMap published. Upstream Foundry
-        // store provisioning is runtime-path; controller intentionally
-        // reports Ready=False / Progressing=True until S7 confirmation.
-        let conds = build_conditions(&[], Some(1), None);
+    fn build_conditions_confirmed_promotes_ready_true() {
+        // Slice 3a: every referencing router echoed the matching
+        // digest → Ready=True / reason=RouterEnforcing. This is the
+        // §3 honest-Ready transition that replaces the old
+        // unconditional AwaitingFoundryProvisioning stamp.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 2 },
+        );
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
             .unwrap();
-        assert_eq!(ready.status, cond_status::FALSE);
-        assert_eq!(ready.reason, reason::AWAITING_FOUNDRY_PROVISIONING);
+        assert_eq!(ready.status, cond_status::TRUE);
+        assert_eq!(ready.reason, reason::ROUTER_ENFORCING);
         let progressing = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_PROGRESSING)
             .unwrap();
-        assert_eq!(progressing.status, cond_status::TRUE);
-        assert_eq!(progressing.reason, reason::AWAITING_FOUNDRY_PROVISIONING);
+        assert_eq!(progressing.status, cond_status::FALSE);
         let degraded = conds
             .iter()
             .find(|c| c.type_ == conditions::TYPE_DEGRADED)
@@ -460,8 +945,54 @@ mod tests {
     }
 
     #[test]
-    fn build_conditions_emits_all_three_types_on_failure() {
-        let conds = build_conditions(&[], Some(1), Some(("BindingWriteFailed", "boom")));
+    fn build_conditions_awaiting_keeps_ready_false() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Awaiting {
+                total: 1,
+                matched: 0,
+                message: "1/1 awaiting".into(),
+            },
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::AWAITING_ROUTER_ENFORCEMENT);
+    }
+
+    #[test]
+    fn build_conditions_no_sandboxes_referencing_keeps_ready_false() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::NoSandboxesReferencing,
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        assert_eq!(ready.reason, reason::NO_SANDBOXES_REFERENCING);
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::FALSE);
+    }
+
+    #[test]
+    fn build_conditions_failure_branch_sets_degraded_true() {
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some(("BindingWriteFailed", "boom")),
+            &RouterEnforcementState::NotApplicable,
+        );
         assert_eq!(conds.len(), 3);
         let ready = conds
             .iter()
@@ -478,8 +1009,18 @@ mod tests {
 
     #[test]
     fn build_conditions_preserves_transition_time_when_status_unchanged() {
-        let first = build_conditions(&[], Some(1), None);
-        let second = build_conditions(&first, Some(2), None);
+        let first = build_conditions(
+            &[],
+            Some(1),
+            None,
+            &RouterEnforcementState::Confirmed { total: 1 },
+        );
+        let second = build_conditions(
+            &first,
+            Some(2),
+            None,
+            &RouterEnforcementState::Confirmed { total: 1 },
+        );
         let r1 = first
             .iter()
             .find(|c| c.type_ == conditions::TYPE_READY)
@@ -497,6 +1038,227 @@ mod tests {
         let (domain, key) = FINALIZER.split_once('/').unwrap();
         assert_eq!(domain, "azureclaw.azure.com");
         assert!(!key.is_empty());
+    }
+
+    fn ok_resp(kind: &str, last_error: Option<&str>) -> router_confirmation::PolicyStatusResponse {
+        router_confirmation::PolicyStatusResponse {
+            schema_version: router_confirmation::SUPPORTED_SCHEMA_VERSION,
+            count: 1,
+            entries: vec![router_confirmation::PolicyStatusEntry {
+                kind: kind.to_string(),
+                digest: Some("sha256:dead".to_string()),
+                source_path: "/etc/azureclaw/memory/binding.json".to_string(),
+                loaded_at: "1970-01-01T00:00:00Z".to_string(),
+                last_error: last_error.map(str::to_string),
+            }],
+        }
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_none_when_no_errors() {
+        let results = vec![
+            ("sb-a".to_string(), Ok(ok_resp("Memory", None))),
+            ("sb-b".to_string(), Ok(ok_resp("Memory", None))),
+        ];
+        assert!(first_auth_misconfigured_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_ignores_unrelated_errors() {
+        // A non-prefixed `last_error` on Memory must not trip the
+        // AuthMisconfigured detector — generic transient errors stay
+        // in the Awaiting bucket.
+        let results = vec![(
+            "sb-a".to_string(),
+            Ok(ok_resp("Memory", Some("upstream 500"))),
+        )];
+        assert!(first_auth_misconfigured_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_ignores_other_kinds() {
+        // Router echoed AuthMisconfigured on a different policy kind
+        // — the ClawMemory reconciler must scope its scan to
+        // `kind == "Memory"`.
+        let results = vec![(
+            "sb-a".to_string(),
+            Ok(ok_resp(
+                "InferencePolicy",
+                Some("AuthMisconfigured: 403 from Foundry"),
+            )),
+        )];
+        assert!(first_auth_misconfigured_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_returns_first_hit() {
+        let results = vec![
+            (
+                "sb-a".to_string(),
+                Ok(ok_resp(
+                    "Memory",
+                    Some("AuthMisconfigured: 403 search_memories"),
+                )),
+            ),
+            (
+                "sb-b".to_string(),
+                Ok(ok_resp(
+                    "Memory",
+                    Some("AuthMisconfigured: 403 update_memories"),
+                )),
+            ),
+        ];
+        let msg = first_auth_misconfigured_message(&results).unwrap();
+        assert!(msg.starts_with("sb-a: AuthMisconfigured: 403 search_memories"));
+        assert!(msg.contains("+1 more sandbox(es) affected"));
+    }
+
+    #[test]
+    fn first_auth_misconfigured_message_skips_failed_polls() {
+        // Poll failures (Err) don't carry a router-reported
+        // last_error, so the detector must ignore them and not
+        // misattribute the failure as AuthMisconfigured.
+        let results = vec![(
+            "sb-a".to_string(),
+            Err(router_confirmation::ConfirmError::HttpStatus(503)),
+        )];
+        assert!(first_auth_misconfigured_message(&results).is_none());
+    }
+
+    #[test]
+    fn build_conditions_auth_misconfigured_sets_degraded_true_with_reason() {
+        // Slice 3b.4 — when the reconciler pre-scan elevates an
+        // AuthMisconfigured router error to `degraded`, the resulting
+        // conditions must surface that reason on Degraded (not a
+        // generic Awaiting) so operators get a clear pointer at the
+        // RBAC misconfig rather than a transient-looking digest gap.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some((
+                reason::AUTH_MISCONFIGURED,
+                "sb-a: AuthMisconfigured: 403 from Foundry",
+            )),
+            &RouterEnforcementState::NotApplicable,
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::TRUE);
+        assert_eq!(degraded.reason, reason::AUTH_MISCONFIGURED);
+        assert!(degraded.message.contains("AuthMisconfigured: 403"));
+    }
+
+    // ----- Slice 3b.5: MemoryStoreMissing detector + condition -----
+
+    #[test]
+    fn first_memory_store_missing_message_none_when_no_errors() {
+        let results = vec![
+            ("sb-a".to_string(), Ok(ok_resp("Memory", None))),
+            ("sb-b".to_string(), Ok(ok_resp("Memory", None))),
+        ];
+        assert!(first_memory_store_missing_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_memory_store_missing_message_ignores_unrelated_errors() {
+        // A generic transient error and an AuthMisconfigured error
+        // must not trip the MemoryStoreMissing detector — those
+        // belong to other buckets (Awaiting / AuthMisconfigured).
+        let results = vec![
+            (
+                "sb-a".to_string(),
+                Ok(ok_resp("Memory", Some("upstream 500"))),
+            ),
+            (
+                "sb-b".to_string(),
+                Ok(ok_resp("Memory", Some("AuthMisconfigured: 403 search"))),
+            ),
+        ];
+        assert!(first_memory_store_missing_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_memory_store_missing_message_ignores_other_kinds() {
+        // Router echoed `MemoryStoreMissing:` against a different
+        // policy kind. The ClawMemory reconciler scans only Memory.
+        let results = vec![(
+            "sb-a".to_string(),
+            Ok(ok_resp(
+                "InferencePolicy",
+                Some("MemoryStoreMissing: 404 search_memories"),
+            )),
+        )];
+        assert!(first_memory_store_missing_message(&results).is_none());
+    }
+
+    #[test]
+    fn first_memory_store_missing_message_returns_first_hit() {
+        let results = vec![
+            (
+                "sb-a".to_string(),
+                Ok(ok_resp(
+                    "Memory",
+                    Some("MemoryStoreMissing: 404 search_memories"),
+                )),
+            ),
+            (
+                "sb-b".to_string(),
+                Ok(ok_resp(
+                    "Memory",
+                    Some("MemoryStoreMissing: 404 update_memories"),
+                )),
+            ),
+        ];
+        let msg = first_memory_store_missing_message(&results).unwrap();
+        assert!(msg.starts_with("sb-a: MemoryStoreMissing: 404 search_memories"));
+        assert!(msg.contains("+1 more sandbox(es) affected"));
+    }
+
+    #[test]
+    fn first_memory_store_missing_message_skips_failed_polls() {
+        let results = vec![(
+            "sb-a".to_string(),
+            Err(router_confirmation::ConfirmError::HttpStatus(503)),
+        )];
+        assert!(first_memory_store_missing_message(&results).is_none());
+    }
+
+    #[test]
+    fn build_conditions_memory_store_missing_sets_degraded_true_with_reason() {
+        // Slice 3b.5 — when the reconciler pre-scan elevates a
+        // MemoryStoreMissing router error to `degraded`, the
+        // resulting conditions must surface that reason on Degraded
+        // (not Awaiting, not AuthMisconfigured) so operators get a
+        // clear pointer at the missing-store fact rather than a
+        // transient-looking digest gap.
+        let conds = build_conditions(
+            &[],
+            Some(1),
+            Some((
+                reason::MEMORY_STORE_MISSING,
+                "sb-a: MemoryStoreMissing: 404 from Foundry",
+            )),
+            &RouterEnforcementState::NotApplicable,
+        );
+        let ready = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_READY)
+            .unwrap();
+        assert_eq!(ready.status, cond_status::FALSE);
+        let degraded = conds
+            .iter()
+            .find(|c| c.type_ == conditions::TYPE_DEGRADED)
+            .unwrap();
+        assert_eq!(degraded.status, cond_status::TRUE);
+        assert_eq!(degraded.reason, reason::MEMORY_STORE_MISSING);
+        assert!(degraded.message.contains("MemoryStoreMissing: 404"));
     }
 
     #[test]

@@ -42,10 +42,14 @@ rules:
       - "clawmemories/status"
       - "clawevals"
       - "clawevals/status"
+      - "clawevals/finalizers"
       - "trustgraphs"
       - "trustgraphs/status"
       - "signerpolicies"
       - "signerpolicies/status"
+      - "egressapprovals"
+      - "egressapprovals/status"
+      - "egressapprovals/finalizers"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Create and manage sandbox namespaces
   - apiGroups: [""]
@@ -62,6 +66,10 @@ rules:
   # Manage deployments
   - apiGroups: ["apps"]
     resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # ClawEval runs jobs and cronjobs to invoke the conformance runner
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Manage network policies
   - apiGroups: ["networking.k8s.io"]
@@ -105,3 +113,36 @@ rules:
   - apiGroups: ["azureclaw.azure.com"]
     resources: ["clawsandboxes"]
     verbs: ["get", "list", "create", "delete"]
+---
+# Egress approver ClusterRole — authority lane for Slice 5e-thin
+# EgressApproval CRDs. Binding this role (or an aggregating role that
+# selects on its label) IS the authority decision: any subject with
+# `create` on `egressapprovals.azureclaw.azure.com` can widen a
+# sandbox's baseline egress allowlist for the TTL declared in
+# `spec.ttl`. The k8s audit log records who used it; the controller
+# enforces TTL, host caps, and the sibling-sandbox-Ready invariant.
+#
+# Not bound by default — operators bind explicitly per cluster
+# convention (e.g. to an on-call group, an SRE rotation, or a break-
+# glass account). The aggregation label allows higher-level roles
+# (admin, edit) to inherit it cleanly.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: azureclaw:egress-approver
+  labels:
+    app.kubernetes.io/name: azureclaw
+    app.kubernetes.io/component: rbac
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+rules:
+  # Sibling sandbox must be readable so an approver can verify the
+  # target before creating the approval.
+  - apiGroups: ["azureclaw.azure.com"]
+    resources: ["clawsandboxes"]
+    verbs: ["get", "list"]
+  # Full lifecycle on EgressApproval. Update is intentionally
+  # excluded — approvals are immutable; revocation is delete.
+  - apiGroups: ["azureclaw.azure.com"]
+    resources: ["egressapprovals"]
+    verbs: ["get", "list", "watch", "create", "delete"]

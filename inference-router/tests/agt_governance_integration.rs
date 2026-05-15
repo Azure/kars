@@ -35,7 +35,9 @@ use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_ro
 
 /// Build a minimal AppState suitable for testing (no env vars, no network).
 fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
-    let governance = Arc::new(Governance::new(sandbox));
+    let policy_status =
+        Arc::new(azureclaw_inference_router::policy_status::PolicyStatusRegistry::new());
+    let governance = Arc::new(Governance::new_with_status(sandbox, policy_status.clone()));
     AppState {
         auth: Arc::new(WorkloadIdentityAuth::new()),
         copilot: Arc::new(azureclaw_inference_router::copilot_auth::CopilotTokenCache::from_env()),
@@ -74,6 +76,13 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         handoff_session: HandoffSession::new(),
         drain_state: DrainState::new(),
         pending_handoff: PendingHandoffStore::new(),
+        policy_status,
+        inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
+        memory_binding: azureclaw_inference_router::memory_binding_loader::empty_handle(),
+        egress_allowlist: azureclaw_inference_router::egress_allowlist_loader::empty_handle(),
+        deployment_health: std::sync::Arc::new(
+            azureclaw_inference_router::deployment_health::DeploymentHealthRegistry::new(),
+        ),
     }
 }
 

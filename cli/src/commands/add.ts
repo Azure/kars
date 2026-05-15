@@ -159,7 +159,6 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           },
           networkPolicy: {
             defaultDeny: true,
-            approvalRequired: true,
             allowedEndpoints: [
               { host: "github.com", port: 443 },
               { host: "api.github.com", port: 443 },
@@ -193,10 +192,12 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         };
       }
 
-      // Egress learn mode
+      // Egress mode (Slice 5b): the `--learn-egress` flag now writes
+      // `egressMode: Learn`. Default is also Learn (controller-side), so
+      // omitting the flag is equivalent.
       if (options.learnEgress) {
         const np = (sandbox.spec as Record<string, unknown>).networkPolicy as Record<string, unknown>;
-        np.learnEgress = true;
+        np.egressMode = "Learn";
       }
 
       // Channel and plugin credentials — stored in K8s secret, NOT in CRD spec.

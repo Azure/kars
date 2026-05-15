@@ -67,6 +67,7 @@ const AZURECLAW_CRDS: CrdDescriptor[] = [
   { plural: "trustgraphs",      singular: "trustgraph",     kind: "TrustGraph",      label: "Trust Graphs" },
   { plural: "clawpairings",     singular: "clawpairing",    kind: "ClawPairing",     label: "Pairings" },
   { plural: "clawevals",        singular: "claweval",       kind: "ClawEval",        label: "Evals",             phaseField: "phase" },
+  { plural: "egressapprovals",  singular: "egressapproval", kind: "EgressApproval",  label: "Egress Approvals",  phaseField: "phase" },
 ];
 
 const CRD_CLASSES: Record<string, KubeObjectClass> = Object.fromEntries(
@@ -143,10 +144,52 @@ for (const crd of AZURECLAW_CRDS) {
 
 type StatusKind = "success" | "error" | "warning" | "";
 
-function phaseToStatus(phase: string | undefined): StatusKind {
+// Reasons that mean "the policy is broken; needs human attention, not patience".
+// Sourced from `controller/src/status/conditions.rs` (`reason::*`) — kept in
+// sync by audit (`docs/internal/crd-well-oiled-machine/honest-audit.md`).
+// Distinguishing these from `Awaiting*` reasons is the difference between an
+// amber chip (working as designed, just settling) and a red chip (operator
+// action required). The plain phase enum can't tell them apart on its own.
+const HARD_FAILURE_REASONS = new Set<string>([
+  "SignatureMismatch",
+  "BundleVerifyFailed",
+  "AuthMisconfigured",
+  "MemoryStoreMissing",
+  "RuntimeAdapterMissing",
+  "AdapterMissing",
+  "ShapeInvalid",
+  "AllowlistDrift",
+  "PolicyCompileFailed",
+]);
+
+const SOFT_PENDING_REASONS = new Set<string>([
+  "AwaitingRouterEnforcement",
+  "AwaitingFoundryProvisioning",
+  "NoSandboxesReferencing",
+  "Pending",
+]);
+
+function readyReason(item: KubeObject): string | undefined {
+  const conds = (getStatus(item).conditions as Array<Record<string, any>> | undefined) ?? [];
+  const ready = conds.find(c => c.type === "Ready");
+  return ready?.reason as string | undefined;
+}
+
+function phaseToStatus(phase: string | undefined, reason?: string): StatusKind {
+  // Reason wins when present — a `Degraded` phase with reason
+  // `AwaitingRouterEnforcement` is amber (transient), but a `Pending` phase
+  // with reason `SignatureMismatch` is red (operator action required).
+  if (reason && HARD_FAILURE_REASONS.has(reason)) return "error";
+  if (reason && SOFT_PENDING_REASONS.has(reason)) return "warning";
   if (!phase) return "";
   if (phase === "Ready" || phase === "Provisioned" || phase === "Active") return "success";
   if (phase === "Degraded" || phase === "Failed" || phase === "Error") return "error";
+  // `Compiled` is the crd-well-oiled-machine Slice 0 honesty value:
+  // controller wrote the artifact ConfigMap but the router has not
+  // echoed a loaded digest yet. Render amber/warning so operators
+  // see at a glance that the policy is parsed but NOT live. Falls
+  // back to "warning" for any unknown phase (defensive default).
+  if (phase === "Compiled" || phase === "Pending") return "warning";
   return "warning";
 }
 
@@ -167,14 +210,267 @@ function shortModel(m: string | undefined): string {
   return idx >= 0 ? m.slice(idx + 1) : m;
 }
 
-function phaseChip(phase: string | undefined) {
+function phaseChip(phase: string | undefined, reason?: string) {
   if (!phase) return <span>—</span>;
-  const status = phaseToStatus(phase);
-  return <StatusLabel status={status as any}>{phase}</StatusLabel>;
+  const status = phaseToStatus(phase, reason);
+  // When the reason carries actionable signal, append it as a secondary
+  // muted label so operators see both at a glance. e.g.
+  //   [Degraded] AllowlistDrift   — red, action required
+  //   [Pending]  AwaitingRouterEnforcement — amber, settling
+  const showReason = reason && (HARD_FAILURE_REASONS.has(reason) || SOFT_PENDING_REASONS.has(reason));
+  return (
+    <span>
+      <StatusLabel status={status as any}>{phase}</StatusLabel>
+      {showReason && (
+        <span style={{ marginLeft: "0.4rem", fontSize: "0.85em", color: "#888" }}>
+          {reason}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function chipForItem(item: KubeObject, phaseField: string) {
+  const phase = (getStatus(item) as any)[phaseField] as string | undefined;
+  return phaseChip(phase, readyReason(item));
 }
 
 function urlParams(re: RegExp): RegExpMatchArray | null {
   return window.location.pathname.match(re);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Router policy-status panel (crd-well-oiled-machine Slice 1d.2)
+//
+// For policy CRDs that participate in the §3 "Ready ⇔ router echo"
+// loop, the controller stamps `status.compiledDigest` /
+// `status.agtProfileDigest` (the bytes the controller wrote) plus a
+// `status.loadedDigest` (the bytes the router actually loaded — only
+// populated once every referencing sandbox echoes the digest). The
+// `Ready` condition's `reason` carries the live confirmation state
+// (`RouterEnforcing` / `AwaitingRouterEnforcement` /
+// `NoSandboxesReferencing`). This panel surfaces all three in one
+// place so operators don't have to grep `status.conditions`.
+//
+// Pure read of fields the controller already writes — zero new API
+// traffic, no kube-apiserver proxy round-trips, no admin token
+// plumbing. Mirrors the data the `azureclaw inspect <sandbox>` CLI
+// surfaces (Slice 1d) but on the producer side.
+// ──────────────────────────────────────────────────────────────────────
+
+function shortDigest(digest: string | undefined): string {
+  if (!digest) return "—";
+  const colon = digest.indexOf(":");
+  if (colon < 0 || colon + 13 >= digest.length) return digest;
+  return `${digest.slice(0, colon + 1)}${digest.slice(colon + 1, colon + 13)}…`;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// AllowlistDrift banner (crd-well-oiled-machine Slice 5d)
+//
+// The controller emits an `AllowlistDrift=True` condition when a
+// ClawSandbox's CR carries both `allowedEndpoints` (inline) AND
+// `allowlistRef` (signed artifact) and the two diverge. The artifact
+// wins and inline is ignored — but operators need to *see* the diff
+// so they can either re-sign the bundle to include the new hosts or
+// drop the inline override.
+//
+// The condition message format is:
+//   "inline allowedEndpoints differs from verified artifact; artifact wins | drift={JSON}"
+// where JSON is `{"added":[...],"removed":[...]}` of `host:port` strings.
+// `added` = inline entries missing from the artifact (operator intent
+// diverging from authority). `removed` = artifact entries the operator
+// did not echo inline. See
+// `controller/src/policy_fetcher.rs::DriftSummary` for the canonical
+// schema.
+// ──────────────────────────────────────────────────────────────────────
+
+interface DriftSummary {
+  added: string[];
+  removed: string[];
+}
+
+function parseDriftFromMessage(message: string | undefined): DriftSummary | null {
+  if (!message) return null;
+  const idx = message.indexOf(" | drift=");
+  if (idx < 0) return null;
+  try {
+    const parsed = JSON.parse(message.slice(idx + " | drift=".length));
+    if (!parsed || typeof parsed !== "object") return null;
+    const added = Array.isArray(parsed.added) ? parsed.added.filter((s: unknown) => typeof s === "string") : [];
+    const removed = Array.isArray(parsed.removed) ? parsed.removed.filter((s: unknown) => typeof s === "string") : [];
+    return { added, removed };
+  } catch {
+    return null;
+  }
+}
+
+function AllowlistDriftBanner({ item }: { item: KubeObject }) {
+  const status = getStatus(item);
+  const conditions = (status.conditions as Array<Record<string, any>> | undefined) ?? [];
+  const drift = conditions.find(c => c.type === "AllowlistDrift" && c.status === "True");
+  if (!drift) return null;
+
+  const summary = parseDriftFromMessage(drift.message as string | undefined);
+  const added = summary?.added ?? [];
+  const removed = summary?.removed ?? [];
+
+  return (
+    <SectionBox title="⚠ Allowlist drift detected">
+      <p style={{ padding: "0.5rem", fontSize: "0.9rem" }}>
+        <StatusLabel status={"warning" as any}>artifact wins</StatusLabel>{" "}
+        Inline <code>allowedEndpoints</code> diverges from the verified
+        signed bundle. The router enforces the bundle; the inline list is
+        ignored. Either re-sign the bundle to include the divergent
+        hosts, or remove the inline override.
+      </p>
+      {(added.length > 0 || removed.length > 0) ? (
+        <SimpleTable
+          data={[
+            { side: `Only in inline (operator added, not signed) — ${added.length}`, hosts: added.join(", ") || "—" },
+            { side: `Only in bundle (signed, but missing inline) — ${removed.length}`, hosts: removed.join(", ") || "—" },
+          ]}
+          columns={[
+            { label: "Side", getter: (r: any) => r.side },
+            { label: "Hosts", getter: (r: any) => <code>{r.hosts}</code> },
+          ]}
+        />
+      ) : (
+        <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+          {(drift.message as string) ?? "(no diff payload)"}
+        </p>
+      )}
+    </SectionBox>
+  );
+}
+
+function reasonChip(reason: string | undefined) {
+  if (!reason) return <span>—</span>;
+  const success = reason === "RouterEnforcing" || reason === "AllDigestsMatch";
+  const neutral =
+    reason === "NoSandboxesReferencing" || reason === "AsExpected";
+  const status: StatusKind = success
+    ? "success"
+    : neutral
+      ? ""
+      : reason === "AwaitingRouterEnforcement"
+        ? "warning"
+        : "error";
+  return <StatusLabel status={status as any}>{reason}</StatusLabel>;
+}
+
+function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
+  // Only the policy CRDs that the router actually loads carry these
+  // fields. ClawSandbox, McpServer, etc. don't participate in the
+  // digest-echo loop yet.
+  if (
+    crd.plural !== "toolpolicies" &&
+    crd.plural !== "inferencepolicies" &&
+    crd.plural !== "clawmemories"
+  ) {
+    return null;
+  }
+  const status = getStatus(item);
+  const conditions = (status.conditions as Array<Record<string, any>> | undefined) ?? [];
+  const ready = conditions.find(c => c.type === "Ready");
+  const compiled =
+    crd.plural === "toolpolicies"
+      ? (status.agtProfileDigest as string | undefined)
+      : (status.compiledDigest as string | undefined);
+  const loaded = status.loadedDigest as string | undefined;
+  const echo =
+    !compiled
+      ? "—"
+      : loaded && loaded === compiled
+        ? "✓ matches"
+        : loaded
+          ? "≠ mismatched"
+          : "(awaiting)";
+
+  return (
+    <SectionBox title="Router enforcement (data-plane echo)">
+      <SimpleTable
+        data={[
+          { k: "Compiled digest", v: shortDigest(compiled) },
+          { k: "Loaded digest", v: shortDigest(loaded) },
+          { k: "Echo", v: echo },
+          { k: "Confirmation", v: reasonChip(ready?.reason as string | undefined) },
+        ]}
+        columns={[
+          { label: "Field", getter: (r: any) => r.k },
+          { label: "Value", getter: (r: any) => r.v },
+        ]}
+      />
+      <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+        The controller polls every referencing sandbox's router and promotes
+        <code> phase: Compiled → Ready </code> only when every router echoes
+        the exact compiled digest. While{" "}
+        <code>AwaitingRouterEnforcement</code>, the policy is parsed but
+        <strong> not</strong> live in the data plane.
+      </p>
+    </SectionBox>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// ClawEval status panel (slice 6.4) — surfaces last-run aggregate +
+// drift state + corpus reference. Pure read of fields the controller
+// already writes; no router admin token in the browser.
+// ──────────────────────────────────────────────────────────────────────
+
+function ClawEvalStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
+  if (crd.plural !== "clawevals") {
+    return null;
+  }
+  const spec = getSpec(item);
+  const status = getStatus(item);
+  const conditions = (status.conditions as Array<Record<string, any>> | undefined) ?? [];
+  const ready = conditions.find(c => c.type === "Ready");
+  const drift = conditions.find(c => c.type === "ConformanceDrift");
+  const lastResult = status.lastResult as Record<string, any> | undefined;
+  const corpus = spec.corpus as Record<string, any> | undefined;
+  const corpusLabel = corpus?.builtin
+    ? `builtin:${corpus.builtin}`
+    : corpus?.bundleRef?.digest
+      ? `bundle ${corpus.bundleRef.registry ?? "?"}/${corpus.bundleRef.repository ?? "?"}@${corpus.bundleRef.digest}`
+      : "—";
+
+  const passSummary = lastResult
+    ? `${lastResult.passedCases ?? 0}/${lastResult.totalCases ?? 0}`
+    : "—";
+  const driftLabel = lastResult?.drift
+    ? <StatusLabel status="error">YES</StatusLabel>
+    : lastResult
+      ? <StatusLabel status="success">no</StatusLabel>
+      : <span style={{ opacity: 0.6 }}>—</span>;
+
+  return (
+    <SectionBox title="ClawEval (conformance corpus)">
+      <SimpleTable
+        data={[
+          { k: "Target sandbox", v: (spec.targetSandboxRef as any)?.name ?? "—" },
+          { k: "Corpus", v: corpusLabel },
+          { k: "Schedule", v: (spec.schedule as string) ?? "(on-demand only)" },
+          { k: "Fail sandbox on drift", v: spec.failSandboxOnDrift ? "true" : "false" },
+          { k: "Last run", v: (status.lastRunAt as string) ?? "—" },
+          { k: "Cases passed", v: passSummary },
+          { k: "Drift", v: driftLabel },
+          { k: "Ready reason", v: reasonChip(ready?.reason as string | undefined) },
+          { k: "Conformance drift reason", v: reasonChip(drift?.reason as string | undefined) },
+        ]}
+        columns={[
+          { label: "Field", getter: (r: any) => r.k },
+          { label: "Value", getter: (r: any) => r.v },
+        ]}
+      />
+      <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+        ClawEvals replay a signed corpus (or a builtin one) against the target
+        sandbox's inference router. The controller stamps each run's verdicts
+        on <code>status.lastResult</code> and rolls a history of the most
+        recent ones into <code>status.history</code>.
+      </p>
+    </SectionBox>
+  );
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -186,7 +482,6 @@ interface OverviewMetrics {
   channelCounts: Record<string, number>;
   egressLearn: number;
   egressStrict: number;
-  pendingApprovals: number;
   governanceEnabled: number;
   totalRuntime: Record<string, number>;
 }
@@ -221,7 +516,6 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
     channelCounts: {},
     egressLearn: 0,
     egressStrict: 0,
-    pendingApprovals: 0,
     governanceEnabled: 0,
     totalRuntime: {},
   };
@@ -243,11 +537,9 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
 
     const np = spec.networkPolicy ?? null;
     // Same default semantics as the controller — absent block ⇒ Learn.
-    const isLearn = !np || np.learnEgress !== false;
+    const isLearn = !np || (np.egressMode ?? "Learn") === "Learn";
     if (isLearn) m.egressLearn += 1;
     else m.egressStrict += 1;
-    const pending = Array.isArray(status.pendingApprovals) ? status.pendingApprovals.length : 0;
-    m.pendingApprovals += pending;
 
     if (spec.governance?.enabled) m.governanceEnabled += 1;
 
@@ -334,7 +626,6 @@ function Overview() {
           <Stat label="Total Sandboxes" value={total} />
           <Stat label="Ready" value={metrics.sandboxesByPhase.Ready ?? 0} tone="success" />
           <Stat label="Degraded" value={metrics.sandboxesByPhase.Degraded ?? 0} tone={metrics.sandboxesByPhase.Degraded ? "error" : ""} />
-          <Stat label="Pending Egress Approvals" value={metrics.pendingApprovals} tone={metrics.pendingApprovals ? "warning" : ""} />
           <Stat label="Governance ON" value={`${metrics.governanceEnabled} / ${total}`} />
           <Stat label="Egress: Learn / Strict" value={`${metrics.egressLearn} / ${metrics.egressStrict}`} />
         </div>
@@ -402,12 +693,12 @@ function Overview() {
             { label: "Namespace", getter: (r: KubeObject) => r.metadata?.namespace ?? "—" },
             { label: "Runtime", getter: (r: KubeObject) => getSpec(r).runtime?.kind ?? "—" },
             { label: "Model", getter: recentModel },
-            { label: "Phase", getter: (r: KubeObject) => phaseChip(getStatus(r).phase as string) },
+            { label: "Phase", getter: (r: KubeObject) => phaseChip(getStatus(r).phase as string, readyReason(r)) },
             {
               label: "Egress",
               getter: (r: KubeObject) => {
                 const np = getSpec(r).networkPolicy;
-                const isLearn = !np || np.learnEgress !== false;
+                const isLearn = !np || (np.egressMode ?? "Learn") === "Learn";
                 return isLearn ? "Learn" : "Strict";
               },
             },
@@ -525,9 +816,9 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
         label: "Egress",
         getter: (r: KubeObject) => {
           const np = getSpec(r).networkPolicy;
-          // Controller default: NetworkPolicy block absent OR learnEgress
-          // unset → Learn mode. Only explicit `learnEgress: false` → Strict.
-          const isLearn = !np || np.learnEgress !== false;
+          // Controller default: NetworkPolicy block absent OR egressMode
+          // unset → Learn mode. Only explicit `egressMode: Strict` → Strict.
+          const isLearn = !np || (np.egressMode ?? "Learn") === "Learn";
           return isLearn ? (
             <StatusLabel status="warning">Learn</StatusLabel>
           ) : (
@@ -540,7 +831,7 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
   if (crd.phaseField) {
     columns.push({
       label: "Phase",
-      getter: (r: KubeObject) => phaseChip(getStatus(r)[crd.phaseField!] as string),
+      getter: (r: KubeObject) => phaseChip(getStatus(r)[crd.phaseField!] as string, readyReason(r)),
     });
   }
   columns.push({
@@ -595,7 +886,7 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
         <SimpleTable
           data={[
             { k: "Namespace", v: namespace },
-            { k: "Phase", v: phaseChip(status.phase as string) },
+            { k: "Phase", v: phaseChip(status.phase as string, readyReason(item)) },
             { k: "Created", v: item.metadata?.creationTimestamp ?? "—" },
             { k: "UID", v: item.metadata?.uid ?? "—" },
           ]}
@@ -607,6 +898,12 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
       </SectionBox>
 
       {crd.plural === "clawsandboxes" && <SandboxExtras item={item} />}
+
+      <AllowlistDriftBanner item={item} />
+
+      <RouterPolicyStatusPanel crd={crd} item={item} />
+
+      <ClawEvalStatusPanel crd={crd} item={item} />
 
       <SectionBox title="Spec">
         <pre style={{ maxHeight: "400px", overflow: "auto" }}>
@@ -649,6 +946,138 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
 // mode, or which ToolPolicy is gating tool calls.
 // ──────────────────────────────────────────────────────────────────────
 
+function SandboxEgressApprovalsCard({
+  sandboxName,
+  sandboxNamespace,
+}: {
+  sandboxName: string;
+  sandboxNamespace: string;
+}) {
+  const [approvals] = (CRD_CLASSES.egressapprovals as any).useList() as [
+    KubeObject[] | null,
+  ];
+  if (!approvals) return null;
+  // EgressApprovals live in the same namespace as the ClawSandbox and
+  // reference it by spec.sandbox name (sibling, never cross-ns).
+  const matching = approvals.filter(a => {
+    const ns = a.metadata?.namespace ?? "";
+    const spec = getSpec(a);
+    return ns === sandboxNamespace && spec.sandbox === sandboxName;
+  });
+  if (matching.length === 0) return null;
+
+  const rows = matching.map(a => {
+    const spec = getSpec(a);
+    const status = getStatus(a);
+    const hosts: Array<{ host: string; port?: number }> = Array.isArray(spec.hosts)
+      ? spec.hosts
+      : [];
+    const hostSummary = hosts
+      .slice(0, 3)
+      .map(h => (h.port ? `${h.host}:${h.port}` : h.host))
+      .join(", ") + (hosts.length > 3 ? `, +${hosts.length - 3}` : "");
+    return {
+      name: a.metadata?.name ?? "—",
+      phase: status.phase as string | undefined,
+      hosts: hostSummary || "—",
+      reason: (spec.reason as string | undefined) ?? "—",
+      ttl: (spec.ttl as string | undefined) ?? "—",
+      expiresAt: status.expiresAt as string | undefined,
+      digest: status.mergedDigest as string | undefined,
+    };
+  });
+
+  return (
+    <SectionBox title="Egress Approvals (ephemeral grants)">
+      <SimpleTable
+        data={rows}
+        columns={[
+          {
+            label: "Name",
+            getter: (r: any) => (
+              <Link
+                routeName="egressapprovals-detail"
+                params={{ namespace: sandboxNamespace, name: r.name }}
+              >
+                {r.name}
+              </Link>
+            ),
+          },
+          { label: "Phase", getter: (r: any) => phaseChip(r.phase) },
+          { label: "Hosts", getter: (r: any) => r.hosts },
+          { label: "TTL", getter: (r: any) => r.ttl },
+          { label: "Expires", getter: (r: any) => r.expiresAt ?? "—" },
+          { label: "Reason", getter: (r: any) => r.reason },
+          { label: "Merged digest", getter: (r: any) => shortDigest(r.digest) },
+        ]}
+      />
+      <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+        Grants unioned with the baseline allowlist on the data plane. <code>Active</code>{" "}
+        means the router has echoed the merged digest. Grants auto-expire at{" "}
+        <code>status.expiresAt</code>; revoke early with <code>azureclaw egress revoke</code>.
+      </p>
+    </SectionBox>
+  );
+}
+
+function McpServerFleetCard({ refs }: { refs: Array<{ name?: string }> }) {
+  // Per-MCP-server live status on the ClawSandbox detail. Each server gets a
+  // row showing phase + reason chip, JWKS digest (router-echoed), and tool
+  // count. Previously the operator had to click each server to see drift —
+  // now you see the whole referenced fleet at a glance.
+  const [servers] = (CRD_CLASSES.mcpservers as any).useList() as [
+    KubeObject[] | null,
+  ];
+  if (refs.length === 0) return null;
+  const byName = new Map<string, KubeObject>();
+  (servers ?? []).forEach(s => {
+    const n = s.metadata?.name;
+    if (n) byName.set(n, s);
+  });
+  const rows = refs.map(r => {
+    const obj = r.name ? byName.get(r.name) : undefined;
+    const status = obj ? getStatus(obj) : {};
+    const spec = obj ? getSpec(obj) : {};
+    const tools = Array.isArray(spec.tools) ? spec.tools.length : (status.toolCount ?? 0);
+    return {
+      name: r.name ?? "—",
+      phase: (status.phase as string | undefined),
+      reason: obj ? readyReason(obj) : undefined,
+      digest: (status.jwksDigest as string | undefined) ?? (status.bundleDigest as string | undefined),
+      tools,
+      missing: !obj,
+    };
+  });
+  return (
+    <SectionBox title={`MCP Servers (${rows.length})`}>
+      <SimpleTable
+        data={rows}
+        columns={[
+          {
+            label: "Name",
+            getter: (r: any) =>
+              r.missing ? (
+                <span>
+                  {r.name} <StatusLabel status="error">MISSING</StatusLabel>
+                </span>
+              ) : (
+                <Link
+                  routeName="mcpservers-detail"
+                  params={{ namespace: "azureclaw-system", name: r.name }}
+                >
+                  {r.name}
+                </Link>
+              ),
+          },
+          { label: "Phase", getter: (r: any) => phaseChip(r.phase, r.reason) },
+          { label: "Tools", getter: (r: any) => r.tools },
+          { label: "JWKS digest", getter: (r: any) => shortDigest(r.digest) },
+        ]}
+      />
+    </SectionBox>
+  );
+}
+
 function SandboxExtras({ item }: { item: KubeObject }) {
   const spec = getSpec(item);
   const status = getStatus(item);
@@ -666,11 +1095,8 @@ function SandboxExtras({ item }: { item: KubeObject }) {
 
   const npRaw = spec.networkPolicy ?? null;
   const np = npRaw ?? {};
-  const isLearn = !npRaw || np.learnEgress !== false;
+  const isLearn = !npRaw || (np.egressMode ?? "Learn") === "Learn";
   const allowed: Array<{ host?: string; port?: number }> = Array.isArray(np.allowedEndpoints) ? np.allowedEndpoints : [];
-  const pendingApprovals: Array<{ domain?: string; reason?: string }> = Array.isArray(status.pendingApprovals)
-    ? status.pendingApprovals
-    : [];
 
   // Detect channels from secret keys (preferred) and from spec inline.
   const detectedChannels = new Set<string>(channelsFromSecret(credSecret ?? undefined));
@@ -697,10 +1123,8 @@ function SandboxExtras({ item }: { item: KubeObject }) {
         <SimpleTable
           data={[
             { k: "Default Deny", v: String(np.defaultDeny ?? false) },
-            { k: "Approval Required", v: String(np.approvalRequired ?? false) },
             { k: "Learn Mode", v: isLearn ? <StatusLabel status="warning">LEARN</StatusLabel> : <StatusLabel status="success">STRICT</StatusLabel> },
             { k: "Allowed Endpoints", v: `${allowed.length}` },
-            { k: "Pending Approvals", v: pendingApprovals.length ? <StatusLabel status="warning">{pendingApprovals.length}</StatusLabel> : "0" },
           ]}
           columns={[
             { label: "Field", getter: (r: any) => r.k },
@@ -715,18 +1139,6 @@ function SandboxExtras({ item }: { item: KubeObject }) {
               columns={[
                 { label: "Host", getter: (r: any) => r.host ?? "—" },
                 { label: "Port", getter: (r: any) => r.port ?? "—" },
-              ]}
-            />
-          </div>
-        )}
-        {pendingApprovals.length > 0 && (
-          <div style={{ marginTop: "1rem" }}>
-            <h4>Pending Approvals</h4>
-            <SimpleTable
-              data={pendingApprovals}
-              columns={[
-                { label: "Domain", getter: (r: any) => r.domain ?? "—" },
-                { label: "Reason", getter: (r: any) => r.reason ?? "—" },
               ]}
             />
           </div>
@@ -797,6 +1209,10 @@ function SandboxExtras({ item }: { item: KubeObject }) {
           />
         </SectionBox>
       )}
+
+      <McpServerFleetCard refs={mcpRefs} />
+
+      <SandboxEgressApprovalsCard sandboxName={name} sandboxNamespace={namespace} />
 
       <SectionBox title="Pod & Workspace">
         <SimpleTable

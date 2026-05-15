@@ -125,7 +125,7 @@ Every CLI command is a thin wrapper around `kubectl apply`. The CLI does no orch
 | `azureclaw destroy <name>` | Deletes `ClawSandbox` | Cascades via finalizer to delete the namespace + federated credential | — |
 | `azureclaw inferencepolicy apply` | `InferencePolicy` | `ConfigMap` `inferencepolicy-<name>-profile` | Inference router (`/v1/chat`, `/v1/responses`) |
 | `azureclaw toolpolicy apply` | `ToolPolicy` | `ConfigMap` `toolpolicy-<name>-profile` | Inference router (every tool dispatch) |
-| `azureclaw mcp add` | `McpServer` | `Secret` `mcp-<name>-signing` (Ed25519 keypair) <br/> `ConfigMap` `mcp-<name>-jwks` (when `productionMode=true`) | Inference router (`/v1/mcp/*` proxy) |
+| `azureclaw mcp add` | `McpServer` | `Secret` `mcp-<name>-signing` (Ed25519 keypair) <br/> `ConfigMap` `mcp-<name>-jwks` (when `productionMode=true`) | Inference router (`/mcp` proxy — multi-issuer OAuth verifier + namespaced `{server}.{tool}` dispatch since Slice 4d.3 / 4d.4) |
 | `azureclaw a2a-agent apply` | `A2AAgent` | `ConfigMap` `a2aagent-<name>-card` (signed AgentCard) | A2A gateway (inbound JWS verification) |
 | `azureclaw eval` | `ClawEval` | `ConfigMap` `claweval-<name>-spec` <br/> `Job` (when run-now) | Eval harness |
 | `azureclaw mesh ...` | `TrustGraph` | `ConfigMap` `trustgraph-<name>-graph` | Inference router (KNOCK accept/deny + AGT trust score) |
@@ -251,6 +251,27 @@ Two artifacts, two purposes:
 
 If JWKS fetch fails the CR is stamped `Degraded / JwksFetchFailed` and the controller requeues with backoff. The router's tool dispatch path treats this as fail-closed for that MCP server.
 
+### Plural binding (`mcpServerRefs`, Slice 4)
+
+A `ClawSandbox` may bind up to **8** `McpServer`s via `spec.mcpServerRefs: []LocalObjectReference`. The legacy singular form `spec.mcpServerRef` is accepted on input and folded into the plural list on reconcile (a `Warning` event is emitted to nudge migration). For every referenced server the controller mirrors a per-server volume into the sandbox pod:
+
+```
+/etc/azureclaw/mcp/
+  ├── <name-a>/
+  │   ├── jwks.json   ← mirrored issuer JWKS
+  │   └── meta.json   ← { url, issuer, audience, allowed_tools }
+  └── <name-b>/
+      ├── jwks.json
+      └── meta.json
+```
+
+The inference router walks `MCP_JWKS_DIR` at startup, builds an `McpServerRegistry` keyed by name, and:
+
+1. **OAuth (Slice 4d.3):** registers each `meta.issuer` as a trusted issuer in the multi-issuer `OAuthVerifier`. Inbound MCP-host requests are routed to the matching JWKS by `iss` claim.
+2. **Tool dispatch (Slice 4d.4):** for each unauthenticated server (servers requiring outbound OAuth are skipped until Slice 4d.5), the router calls `tools/list` upstream and registers each tool under the namespaced name `{server_snake_case}.{tool}`. `allowed_tools` filters the catalog (`["*"]` = full passthrough; explicit list = subset; empty = fail-closed with reason recorded).
+
+Stale-file sweep (DoD #6) is producer-side: each reconcile rewrites the full current ref set, so removed servers' volumes disappear naturally on the next kubelet pod sync.
+
 ---
 
 ## `A2AAgent` — public-ingress endpoint
@@ -306,10 +327,24 @@ All four follow the same `compile → version_hash → SSA ConfigMap → patch_s
 
 Every reconcile ends with a `patch_status` call. The status block always carries:
 
-- `phase` — `Ready` / `Degraded` / (heavyweight CRDs add `Progressing`).
+- `phase` — see vocabulary table below.
 - `observedGeneration` — `metadata.generation` of the spec the reconciler saw.
 - `conditions[]` — at least `Ready`, `Progressing`, `Degraded`. Reasons are taxonomy-controlled — see [Conditions reference](conditions.md).
 - For compile pattern: `versionHash`, the `*-Ref` pointing at the produced `ConfigMap`/`Secret`, and `lastCompiledAt` / `lastProbedAt`.
+
+### Phase vocabulary
+
+The `status.phase` string is part of the public contract: `azureclaw connect`, `kubectl wait`, GitOps tooling and the Headlamp plugin all branch on it. The taxonomy is closed — reconcilers must use one of these values (constants live in `controller/src/status/phase.rs`):
+
+| Phase | Meaning | `Ready` condition | When the controller stamps it |
+|---|---|---|---|
+| `Pending` | Controller accepted the CR but has not yet produced a compiled artifact (waiting on an admit step or finalizer cleanup). | `False` | Reserved for async admission flows; not stamped by Slice 0 reconcilers. |
+| `Compiled` | Spec parsed, `ConfigMap` written, but the **router has not yet echoed back the loaded digest**. The artifact exists; the data plane is not yet enforcing it. | `False` (reason `AwaitingRouterEnforcement` or `NoSandboxesReferencing`) | Slice 0 — `ClawMemory`. Slice 1c — `ToolPolicy` with `spec.agtProfile.inline` while the controller-side poller is awaiting confirmation from at least one referencing `ClawSandbox`'s `inference-router /internal/policy-status` endpoint, or while no `ClawSandbox` references the policy yet. Slice 2a/2b/2c/2d.1 — `InferencePolicy` while the same digest-echo loop awaits confirmation for `tokenBudget.{perRequestTokens, dailyTokens, monthlyTokens}` + `contentSafety.{hate, selfHarm, sexual, violence}` floors + `requirePromptShields` fail-closed + `modelPreference.primary.deployment` override (the remaining `modelPreference.fallback` health-aware failover keeps `InferencePolicy` in `Compiled` only when an operator explicitly relies on it — Slice 2d.2 deliverable). A `Warning` Event with reason `PolicyNotEnforced` is emitted on every reconcile in this state so operators see the gap in `kubectl describe`. |
+| `Ready` | Spec compiled **and** the consuming component (router, runtime, etc.) has confirmed it is enforcing the artifact. `kubectl wait --for=condition=Ready` must only return at this point. | `True` | `ToolPolicy` **without** `spec.agtProfile` (runtime-side enforcement of commerce / rate-limit / approval is co-located in the in-process AGT plugin); `ToolPolicy` with `spec.agtProfile.inline` after every referencing `ClawSandbox`'s router echoes the published digest on `/internal/policy-status` (reason `RouterEnforcing` — Slice 1c); `InferencePolicy` after every referencing `ClawSandbox`'s router echoes the inference-policy digest on the same endpoint (reason `RouterEnforcing` — Slice 2a); `ClawMemory` after the binding digest is echoed (reason `RouterEnforcing` — Slice 3a); `McpServer` (plural since Slice 4 — `ClawSandbox.spec.mcpServerRefs` mirrors up to 8 servers; the singular `spec.mcpServerRef` remains an accepted alias with deprecation warning); `A2AAgent`, `ClawSandbox`, `TrustGraph`. |
+| `Degraded` | Spec is valid but a dependency is failing (Foundry 5xx, JWKS fetch timeout, etc.). Retry will help — the reconciler requeues at `REQUEUE_FAIL`. | `False` (reason describes the dependency) | Any reconciler on transient failure. |
+| `Failed` | Spec is invalid and will not converge without user editing the CR (validation, signature mismatch, malformed reference). | `False` | Any reconciler on permanent failure. |
+
+The `Compiled` state is the load-bearing honesty value introduced in `docs/internal/crd-well-oiled-machine/slice-0-honesty-events.md`. Each subsequent slice (2 = `InferencePolicy`, 3 = `ClawMemory`, …) deletes its `Compiled`/`AwaitingRouterEnforcement` call site once the router-side informer or runtime echo is wired, flipping the success path back to `Ready=True`.
 
 Requeue cadence is per-reconciler:
 

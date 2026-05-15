@@ -70,14 +70,23 @@ pub struct McpRouteState {
 impl McpRouteState {
     /// Default production state: stock `InitializeConfig`, `OsRng`
     /// session ids, in-tree `EchoDispatcher` (real ping/echo tool).
-    /// Real upstream tools land via a future `RouterToolDispatcher`
-    /// implementation that proxies into `McpServer` CRs.
+    ///
+    /// Slice 4d.4 replaces this dispatcher with [`crate::mcp::forwarder::RouterToolDispatcher`]
+    /// at mount time when the registry advertises at least one usable
+    /// `McpServer.spec.url`; see [`with_tools`].
     pub fn standard() -> Self {
         Self {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
             tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
         }
+    }
+
+    /// Swap the dispatcher (used by Slice 4d.4 to mount the
+    /// namespaced upstream forwarder when the registry is non-empty).
+    pub fn with_tools(mut self, tools: Arc<dyn AsyncToolDispatcher>) -> Self {
+        self.tools = tools;
+        self
     }
 
     /// State for the **platform MCP server** mounted at `/platform/mcp`.
@@ -88,11 +97,32 @@ impl McpRouteState {
     /// runtime adapter (OpenClaw, OpenAI Agents Python, Microsoft
     /// Agent Framework, BYO) discovers them through one MCP endpoint.
     /// See `mcp/platform.rs` and `plan.md` S10.B.
-    pub fn platform() -> Self {
+    ///
+    /// Slice 3b.3: takes an optional ClawMemory binding handle so the
+    /// dispatcher's `foundry.memory` calls can prefer the CRD-driven
+    /// `store_name` over the chart-fed env. `None` keeps the legacy
+    /// env-only behaviour (for sandboxes without `spec.memoryRef`).
+    ///
+    /// Slice 3b.4: takes an optional `PolicyStatusRegistry` handle so
+    /// the dispatcher can surface upstream Foundry Memory Store
+    /// 401/403s as `AuthMisconfigured:` prefixed `last_error` entries
+    /// on `PolicyKind::Memory`. Without this, 403s still propagate to
+    /// the agent envelope but never reach the ClawMemory CRD status.
+    pub fn platform(
+        memory_binding: Option<crate::memory_binding_loader::LoadedMemoryBindingHandle>,
+        policy_status: Option<Arc<crate::policy_status::PolicyStatusRegistry>>,
+    ) -> Self {
+        let mut dispatcher = crate::mcp::PlatformDispatcher::standard();
+        if let Some(handle) = memory_binding {
+            dispatcher = dispatcher.with_memory_binding(handle);
+        }
+        if let Some(registry) = policy_status {
+            dispatcher = dispatcher.with_policy_status(registry);
+        }
         Self {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
-            tools: Arc::new(crate::mcp::PlatformDispatcher::standard()),
+            tools: Arc::new(dispatcher),
         }
     }
 }
@@ -435,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn platform_state_publishes_nine_foundry_tools() {
-        let s = McpRouteState::platform();
+        let s = McpRouteState::platform(None, None);
         assert_eq!(
             s.tools.catalog().tools().len(),
             9,
@@ -648,9 +678,11 @@ mod tests {
         Arc::new(OAuthVerifierConfig {
             trusted_issuers: trusted,
             expected_audience: ROUTE_TEST_AUD.into(),
+            per_issuer_audience: HashMap::new(),
             allowed_algorithms: vec![Algorithm::EdDSA],
             leeway_seconds: 30,
             required_scopes: vec![],
+            per_issuer_scopes: HashMap::new(),
         })
     }
 

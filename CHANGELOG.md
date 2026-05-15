@@ -5,6 +5,2669 @@ All notable changes to AzureClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — `crd-well-oiled-machine`
+
+### Slice 5e.4 — `EgressApproval` E2E coverage + docs
+
+Closes the Slice 5e arc with operator-facing documentation and Kind-based
+E2E coverage. No controller, router, CLI, or Headlamp code touched.
+
+**E2E (`tests/e2e/run.sh`, +180 LOC, 2 new test functions)**
+
+- `test_crd_egress_approval` applies a valid `EgressApproval` scoped to
+  the existing `e2e-test` sandbox, polls `status.observedGeneration` to
+  confirm the reconciler ran, asserts `status.hostCount == 2`, accepts
+  the §3 honest-state triple `(phase, Ready, reason)` ∈
+  `{(Pending,False,BlockedOnSandbox), (Pending,False,AwaitingRouterEcho), (Active,True,RouterConfirmed)}`,
+  confirms the finalizer is set, and exercises delete-with-finalizer.
+  Pattern mirrors `test_crd_claw_memory` (§3 honest-state acceptance
+  set) since the sibling sandbox doesn't reliably reach `Ready` in Kind.
+- `test_crd_egress_approval_cel_rejects` confirms the four most
+  operator-facing CEL gates reject malformed CRs at the apiserver:
+  empty `hosts`, `ttl: PT0S`, reason with control byte, malformed `ttl`
+  string. Each test attempts `kubectl apply` and fails if it succeeds.
+- Both wired into `main()` after `test_crd_admission_rejects_invalid`,
+  before `test_cleanup_sandbox`.
+
+**Docs**
+
+- `docs/egress-proxy.md` — new section **Ephemeral approvals —
+  `EgressApproval` CR**: shape, lifecycle diagram (Pending→Active→Expired),
+  CLI invocations, status-condition table, TTL ceiling, audit signal,
+  and a "Why a separate CRD?" comparison table.
+- `docs/api/crd-reference.md` — new `EgressApproval` section + at-a-glance
+  row; spec validation table; status field reference; cross-link to
+  `docs/egress-proxy.md`.
+
+**Verify**
+
+- `bash -n tests/e2e/run.sh` clean.
+- `shellcheck -S warning tests/e2e/run.sh` clean on new code.
+- No code changes outside docs + e2e harness.
+
+### Slice 5e.3 — `azureclaw egress allow-extra/approvals/revoke` CLI + Headlamp panel
+
+Operator surface for the producer-consumer loop landed in Slice 5e.2. Three
+new CLI subcommands under `azureclaw egress` and a sandbox-detail card in
+the Headlamp plugin. No new controller or router code — pure operator UX.
+
+**CLI (`cli/src/commands/egress/approval.ts`, ~430 LOC + 52 vitest cases)**
+
+- `azureclaw egress allow-extra <sandbox> --host h1 [--host h2 ...] --reason "<text>" [--ttl PT4H] [--ticket INC-123] [--name explicit-name] [--dry-run]`
+  Builds an `EgressApproval` CR scoped to the named sandbox, applies via
+  `kubectl apply -f -` with namespace defaulted from kube-context. Reuses
+  `buildCR/stripUndefined` from `crd-helpers.ts` plus parsers mirroring the
+  controller-side `parse_iso8601_duration_secs` and `validate_reason`. Host
+  syntax: `host[:port]` parsed by `parseHostEndpoint`. `--from-file <path>`
+  bypasses flag construction for advanced callers.
+- `azureclaw egress approvals <sandbox> [--namespace ns] [--json]` lists
+  current `EgressApproval` CRs filtered by `spec.sandbox=<sandbox>`,
+  rendered through `formatTable` with columns `NAME PHASE HOSTS TTL EXPIRES REASON`.
+- `azureclaw egress revoke <name> [--namespace ns] [--yes]` deletes a single
+  approval with a confirm prompt by default; reconciler will tear down the
+  CM key + finalizer.
+- `__test` export surfaces `parseHostEndpoint`, `parseIsoDurationSecs`,
+  `validateReasonText`, `buildEgressApprovalSpecFromFlags`,
+  `deriveApprovalName`, `summarizeApprovalRow`, and the three `*Command()`
+  commander factories for vitest.
+
+**Headlamp plugin (`tools/headlamp-plugin/src/index.tsx`)**
+
+- `EgressApproval` registered in `AZURECLAW_CRDS` — auto-wires list view,
+  sidebar entry, and CR detail page (Spec / Status / Conditions tables).
+- New `SandboxEgressApprovalsCard` rendered inside `SandboxExtras` on every
+  ClawSandbox detail page: lists approvals whose `spec.sandbox` matches the
+  current sandbox in the same namespace; columns `NAME PHASE HOSTS TTL EXPIRES REASON MERGED-DIGEST`.
+  Cross-resource read pattern mirrors the existing "Related Resources" card
+  for ToolPolicy/InferencePolicy/ClawMemory links.
+
+**Tests / verify gates**
+
+- CLI: 52 new vitest cases (parsers, builder, summarizer, command-surface
+  presence). `npm run typecheck` + `npm run lint` (oxlint) + `npm test` clean.
+- Headlamp: vite build clean (21.54 kB → 6.68 kB gzip).
+- No controller / router code touched — the wire contract from 5e.2 is
+  unchanged.
+
+### Slice 5e.2 — `EgressApproval` reconciler + router consumer wired end-to-end
+
+Closes the consumer half of Slice 5e: `EgressApproval` CRs now drive a real
+data-plane change. The reconciler computes a merged-allowlist digest, writes
+per-approval files into a sibling ConfigMap mounted into the sandbox router,
+and only promotes `phase=Pending→Active` once the router echoes the digest
+on `/internal/policy-status` under `PolicyKind::EgressApproval`. On TTL
+expiry the reconciler drops the file, removes the finalizer, and stamps
+`phase=Expired` (terminal). This is the first full producer↔consumer loop
+for the grant lane of `principles.md §2.4` / `signing-model.md §6` —
+principles.md §3 (`Ready ⇔ router echo`) and §5 (no scaffolding) are both
+satisfied.
+
+**Producer side (controller)**
+
+- `controller/src/egress_approval_compile.rs` (new, ~360 LOC including
+  tests): `approvals_configmap_name(sandbox) → clawsandbox-{sandbox}-egress-approvals`,
+  `approval_file_key(name) → approval-{name}.json`, `compile_approval_file`
+  (canonical JSON: name, sandbox, hosts (sorted, deduped), reason, ticket,
+  effectiveAt, expiresAt), and `merged_allowlist_digest` — the
+  length-prefixed sha256 over the UNION of baseline allowlist + approval
+  hosts. Cross-binary parity with the router-side digest in
+  `egress_allowlist_loader::compile_merged_endpoints_body`.
+- `controller/src/egress_approval_reconciler.rs` (new, ~870 LOC, 28 unit
+  tests): the full state machine.
+  - **Validate**: `parse_iso8601_duration_secs` (hand-rolled grammar; accepts
+    `PT15M`, `PT4H`, `P1D`, `PT1H30M`, `PT30S`; rejects `P1W/Y`, `P1H` with
+    `H` before `T`, `PT1D` with `D` after `T`, `PT0M`); `validate_reason`
+    rejects empty / >512 bytes / ASCII control bytes (except \t\n\r).
+    TTL is clamped to `min(env_ceiling, 604800s)` (1 week hard ceiling).
+  - **Sibling sandbox**: requires `phase=Ready` else stamps
+    `Pending(BlockedOnSandbox)` and requeues at 5s.
+  - **Idempotency**: `effective_at` is stamped only on first transition;
+    re-reconciles preserve the prior value. `expires_at = effective_at + ttl`.
+  - **Expiry**: at `now ≥ expires_at` the reconciler drops the per-approval
+    CM key (SSA empty `data: {}` from the per-approval field manager +
+    JSON-merge `null` defense-in-depth), stamps `phase=Expired`, and
+    removes the finalizer.
+  - **CM write**: SSA-apply under per-approval field manager
+    `azureclaw-controller/egressapproval/{approval_name}` so siblings on
+    the same ConfigMap don't trample each other.
+  - **Router poll**: `poll_referencing_sandboxes` against the merged
+    digest under `PolicyKind::EgressApproval`. `Confirmed → Active`;
+    `Awaiting → Pending(AwaitingRouterEcho)` + 5s requeue.
+  - **Finalizer**: `azureclaw.azure.com/egress-approval-cleanup`.
+  - **Env knob**: `EGRESS_APPROVAL_MAX_TTL_SECONDS` (default 86400 / 1d via
+    Helm; capped at one week absolute).
+- `controller/src/main.rs` spawns the reconciler in its own `select!` arm
+  next to the existing CRDs.
+- `controller/src/reconciler/mod.rs` injects an optional ConfigMap mount
+  for the per-sandbox approvals CM into the `inference-router` container
+  at `/etc/azureclaw/egress-approvals`, with `EGRESS_APPROVAL_DIR` env
+  pushed alongside.
+- `controller/src/reconciler/governance_mounts.rs` adds the
+  `EGRESS_APPROVAL_DIR` path constant.
+- `controller/src/status/phase.rs` adds `PHASE_ACTIVE` + `PHASE_EXPIRED`
+  with phase-taxonomy-guard coverage.
+- `controller/src/field_managers.rs` adds the `EGRESS_APPROVAL` field
+  manager (the per-approval scoping is layered on top by the reconciler).
+
+**Consumer side (inference-router)**
+
+- `inference-router/src/policy_status.rs` adds the `PolicyKind::EgressApproval`
+  variant (wire string `"EgressApproval"`).
+- `inference-router/src/egress_allowlist_loader.rs` gains the
+  `_with_approvals` variants — `load_and_install_with_approvals` and
+  `spawn_egress_allowlist_watcher_with_approvals` — which scan an
+  optional approvals directory, UNION every `approval-*.json` host
+  with the baseline allowlist, register the digest under
+  `PolicyKind::EgressApproval`, and rebuild the L7 blocklist
+  accordingly. The watcher reacts to mtime changes in either directory.
+- `inference-router/src/main.rs` boot now wires the approvals dir via
+  `EGRESS_APPROVAL_DIR` env (default `/etc/azureclaw/egress-approvals`).
+
+**Helm / RBAC**
+
+- `deploy/helm/azureclaw/values.yaml`: new `egressApproval.maxTtlSeconds: 86400`.
+- `deploy/helm/azureclaw/templates/controller-deployment.yaml`: pushes
+  `EGRESS_APPROVAL_MAX_TTL_SECONDS` env onto the controller pod.
+
+**Test coverage**
+
+Controller: +28 reconciler tests (ISO 8601 parser corners, reason validation,
+TTL ceiling env parsing, status-patch shape for all 5 transitions including
+prior-`effective_at` preservation, field-manager scoping, finalizer DNS
+format, cross-binary digest parity with the compile module, policy-kind
+wire-string parity with the router). +1 phase taxonomy guard run.
+Router: +0 net new (the `_with_approvals` extension landed in Slice 5e.0;
+21 tests there cover the merge + watcher paths).
+Helm drift: green (egressapproval CRD unchanged from 5e.1).
+
+
+
+Opens the **grant lane** of `principles.md §2.4` /
+`signing-model.md §6`: a namespaced, short-TTL, attributable widening
+of a sandbox's baseline egress allowlist. The CRD shape, admission
+CEL, Helm manifest, and `azureclaw:egress-approver` ClusterRole all
+land here; the reconciler + router merge + CLI ship in Slices 5e.2 →
+5e.4.
+
+The slice is intentionally **additive-only** — no consumer paths run
+yet. The CRD installs cleanly, admission rejects malformed approvals,
+and operators can experiment by `kubectl apply`-ing fixtures without
+any side effect on running sandboxes.
+
+**Producer side (controller)**
+
+- `controller/src/egress_approval.rs` (new, ~370 LOC including tests)
+  defines `EgressApprovalSpec { sandbox, hosts, reason, ticket, ttl }`
+  and `EgressApprovalStatus { phase, observedGeneration, effectiveAt,
+  expiresAt, mergedDigest, hostCount, usageCount, conditions }` plus
+  a `condition_reasons` module pinning the seven stable reason strings
+  (`BlockedOnSandbox`, `RouterConfirmed`, `AwaitingRouterEcho`,
+  `TtlExceedsCeiling`, `TtlInvalid`, `ReasonInvalid`, `Expired`).
+  Group `azureclaw.azure.com`, version `v1alpha1`, shortname `eappr`,
+  five printer columns (Sandbox / Phase / Expires / Hosts / Age).
+  `hosts` reuses the existing `crd::EndpointConfig` — no parallel
+  endpoint type.
+- `controller/src/crd_validations.rs` gains `egress_approval_validations()`
+  (9 CEL rules: sandbox length cap, host-count 1–16, per-host port
+  range, reason length cap + ASCII control-byte guard, ticket length
+  cap, ISO 8601 positive-duration regex + non-zero guard) and
+  `egress_approval_crd()` injecting them.
+- `controller/src/main.rs` declares `mod egress_approval` behind an
+  `#[allow(dead_code)]` (the explicit marker for the unread-today
+  reconciler surface, matching the Slice 1c.6 pattern).
+- `controller/src/helm_drift.rs` extends the drift-detection suite
+  with the new `crd-egressapproval.yaml` manifest and a one-shot
+  dumper.
+
+**Forward-compatible to Slice 5e+ (deferred, demand-gated)**: the
+cryptographic-attestation field (`spec.attestation: Option<Attestation>`)
+adds without a schema break. The 1c.6 `SignerPolicy.spec.ed25519Keys[]`
+registry is the future verification anchor.
+
+**Helm**
+
+- `deploy/helm/azureclaw/templates/crd-egressapproval.yaml` (new) —
+  the helm-installed CRD manifest. Schema generated via the standard
+  `DUMP_EGRESSAPPROVAL_CRD_YAML=1 cargo test` workflow + helm labels
+  applied. Helm-drift test passes byte-for-byte.
+- `deploy/helm/azureclaw/templates/rbac.yaml` —
+  - extends the existing `azureclaw-controller` ClusterRole with
+    `egressapprovals` / `egressapprovals/status` /
+    `egressapprovals/finalizers` (the reconciler in 5e.2 needs all
+    three);
+  - adds a new `azureclaw:egress-approver` ClusterRole carrying
+    `get/list` on `clawsandboxes` (so an approver can verify the
+    target before granting) and `get/list/watch/create/delete` on
+    `egressapprovals` (`update` intentionally excluded — approvals
+    are immutable; revocation is `delete`). Aggregation labels
+    (`aggregate-to-admin`, `aggregate-to-edit`) wire it into the
+    standard k8s composite roles cleanly. Not bound by default —
+    operators bind explicitly per cluster convention.
+
+**Tests**
+
+- 11 new tests in `egress_approval` module: spec round-trip with/
+  without optional fields, camelCase wire-shape pin, status round-trip,
+  status defaults, `merged_host_count` correctness,
+  condition_reasons string-stability pin, CRD shape + printcolumn
+  shape pins.
+- 5 new tests in `crd_validations` covering the CEL rule list:
+  non-empty, message + rule populated on every rule, schema-injection
+  count matches, core-invariant coverage (sandbox / hosts cap / port
+  / reason / control-byte guard / ticket / TTL ISO-8601 regex),
+  serde round-trip.
+- helm-drift suite reports 16 passing tests (was 14): the new dumper
+  + the new drift assertion.
+- Total controller suite **697 → 713** (+16 new). `cargo clippy
+  --all-targets -- -D warnings` clean across the workspace,
+  `cargo fmt --check` clean.
+
+**Out of scope (deferred to subsequent 5e sub-slices)**
+
+- Reconciler (Pending → Active → Expired state machine, finalizer,
+  expiry tick, sibling-sandbox-Ready gate, TTL ceiling enforcement
+  beyond CEL) — Slice 5e.2.
+- Router-side merge logic + per-approval usage counter +
+  `/internal/policy-status` echo extension — Slice 5e.3.
+- CLI surface (`azureclaw egress approve / revoke / approvals`) —
+  Slice 5e.4.
+- Cryptographic attestation (ed25519 signature over canonical
+  approval bytes, verified against `SignerPolicy.spec.ed25519Keys[]`)
+  — Slice 5e+ (demand-gated; the registration half landed in 1c.6).
+- Headlamp panel — Slice 5e.6 (deferable, mirrors the 1c.6 chip
+  deferral pattern).
+
+### Slice 1c.6 — `SignerPolicy.spec.ed25519Keys[]` + unified `azureclaw policy sign --kind X`
+
+Wraps the Slice 1c-real signing-generalization arc with two
+forward-compat surfaces: the controller-side registration point for
+ephemeral-grant signing keys (Slice 5e+ verifier consumer) and a
+single CLI dispatch covering all five signed policy artifact kinds.
+
+**Producer side (controller)**
+
+- `controller/src/signer_policy.rs` gains an optional
+  `ed25519Keys: [{id, publicKeyBase64, allowedSubjects[]}]` JSON
+  array in the SignerPolicy ConfigMap, parsed via
+  `parse_ed25519_keys` with strict validation: DNS-label IDs
+  (≤ 63 chars, `[a-z0-9-]`, no leading/trailing dash, deduped),
+  base64 keys decoding to **either** 32-byte raw Ed25519 **or**
+  44-byte SPKI/DER form (cosign-compat), non-empty allowedSubjects
+  list (empty strings within rejected), `deny_unknown_fields`. The
+  parsed keys surface on `SignerPolicy::ed25519_keys()` and ride
+  through `policy_fetcher::SignerPolicyConfig` via the existing
+  `From<SignerPolicy>` impl. No verifier wired today —
+  `#[allow(dead_code)]` flags mark them as the Slice 5e+ grant-lane
+  consumer surface, and `apply_configmap` emits a `tracing::info!`
+  with the registered key count so operators get immediate feedback
+  that their config landed. **20 new unit tests** cover absent,
+  empty-array, raw-pubkey, DER-pubkey, multi-key, malformed JSON,
+  non-array, DNS-label edge cases, base64 errors, allowed-subjects
+  hygiene, deduplication, and the round-trip through `SharedSignerPolicy`
+  + `SignerPolicyConfig`. Controller test count: 677 → **697**.
+
+**CLI side**
+
+- New `cli/src/commands/policy/sign.ts` registers
+  `azureclaw policy sign --kind {egress-allowlist | agt-profile |
+   inference-policy | memory-binding | mcp-server-bundle}
+   --file <path> --registry <host> --repository <repo>` (plus
+  optional `--tag`, `--sign-mode`, `--sign-key`, `--json`,
+  `--print-bundle-ref`). Per-kind dispatch table maps `--kind` to
+  the exact media type the controller's `policy_canonical::*::parse`
+  expects, byte-for-byte mirroring the `MEDIA_TYPE` consts. The
+  command does only cheap pre-flight (file exists, non-empty,
+  valid UTF-8) and pushes the operator's pre-canonicalised bytes
+  as-is via `oras push` + `cosign sign` — canonical-form validation
+  remains the controller's authoritative responsibility, exposed
+  via crisp `Degraded / SpecInvalid` conditions on the consuming
+  CRD. `azureclaw egress … --sign` stays unchanged for back-compat
+  (it owns the egress-specific canonical-bytes builder). 13 new
+  CLI unit tests cover the per-kind media-type table, unknown-kind
+  rejection, the file pre-flight branches (missing / empty /
+  non-UTF-8 / unknown kind), the digest-format check, the default
+  tag, and the `renderBundleRefSnippet` YAML output.
+
+**Why this closes the 1c-real arc**
+
+Slice 1c.1–1c.5 wired every policy kind to
+`fetch_and_verify_generic` on the controller side, satisfying
+`principles.md §2` architecturally. The CLI surface remained
+egress-only — operators authoring the other four kinds had to
+drop down to raw `oras push` + `cosign sign`. Slice 1c.6 collapses
+that authoring asymmetry into one command without touching the
+data plane. The ed25519Keys field is the smallest possible
+forward-compat surface the controller needs to absorb Slice 5e's
+EgressApproval verifier without a second SignerPolicy migration:
+the wire shape, parser, validation rules, accessor, and audit
+event all land here so 5e's PR is pure consumer wiring.
+
+**Files changed**
+
+- `controller/src/signer_policy.rs` — wire docs, `Ed25519Key`
+  struct, 5 new error variants, `parse_ed25519_keys` helper,
+  `ed25519_keys()` accessor, 20 unit tests
+- `controller/src/policy_fetcher.rs` — `ed25519_keys` on
+  `SignerPolicyConfig` with `#[allow(dead_code)]` + Slice 5e+
+  comment, `From<SignerPolicy>` impl pass-through, one test
+  struct init updated
+- `cli/src/commands/policy.ts` — wires
+  `registerPolicySignSubcommand`
+- `cli/src/commands/policy/sign.ts` — new (~280 LOC)
+- `cli/src/commands/policy/sign.test.ts` — new (13 tests)
+
+### Slice 1c.5 — `McpServer.spec.bundleRef` (signed OCI artifact)
+
+Fifth and final per-kind step in the Slice 1c-real
+signing-generalization arc. `McpServer` now joins `EgressAllowlist`
+(1c.1), `ToolPolicy` (1c.2), `InferencePolicy` (1c.3), and
+`ClawMemory` (1c.4) on the unified
+`policy_fetcher::fetch_and_verify_generic` pipeline.
+
+**Producer side (controller)**
+
+- New `controller/src/policy_canonical/mcp_server.rs` —
+  `McpServerKind: PolicyKind` impl. Bundle carries the server
+  identity + tool surface: `url`, `oauth` (issuer / audience /
+  resource / pkce), `productionMode`, `scopes`, `allowedTools`,
+  `displayName`. The `allowedSandboxes` selector stays on the CR
+  — the parser explicitly rejects it inside a bundle so one signed
+  artifact can be referenced by multiple `McpServer` CRs with
+  different sandbox selectors (the multi-tenant fan-out pattern
+  established in 1c.4). Structural validation: type-checked
+  scalars, non-empty string arrays, RFC 7636 PKCE constraint
+  surfaced via the canonical-form parser too. Media type
+  `application/vnd.azureclaw.mcp-server-bundle.v1+json`. Per-kind
+  cache slot via `OnceLock<CachedValue::McpServer(...)>` on the
+  shared `policy_canonical` cache. 22 unit tests covering every
+  rejection path.
+- `McpServerSpec.bundleRef: Option<OciArtifactRef>` added; the
+  inline content fields (`url`, `oauth`, `productionMode`,
+  `scopes`, `allowedTools`, `displayName`) are now `Option`-typed
+  and required only on the inline path.
+- `McpServerStatus.bundleRefDigest: Option<String>` surfaces the
+  verified OCI manifest digest after a successful
+  `fetch_and_verify_generic::<McpServerKind>` call.
+- `mcp_server_reconciler::resolve_mcp_source` — 4-way match
+  (no inline / inline only / bundle only / both) mirroring
+  `inference_policy_reconciler::resolve_inference_source` and
+  `claw_memory_reconciler::resolve_memory_source`. On the bundle
+  path, merges the verified content onto the CR's
+  `allowedSandboxes` selector to produce the effective spec
+  consumed by the rest of the reconcile loop (JWKS write,
+  productionMode guard, signing secret, ConfigMap mirror).
+  `FetchError` variants map through the shared
+  `policy_fetcher::reason_for_error` vocabulary. On any degraded
+  branch (mutex / fetch / verify) the per-server JWKS ConfigMap
+  write is skipped so the router's last-good server registry
+  remains in force until the operator fixes the spec.
+
+**Admission**
+
+- CEL rules on `McpServerSpec` rewritten:
+  - The pre-existing `productionMode → oauth.issuer` rule and the
+    `productionMode → url https://` rule are now wrapped in
+    `has(self.bundleRef) || !has(self.productionMode) || …` so
+    the inline-path validations only fire when the bundle path is
+    unused (and `productionMode` is set + true).
+  - New mutex rule:
+    `!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.allowedTools) && !has(self.displayName))`
+    — rejects mixed shapes at apply-time.
+
+**Schema**
+
+- Regenerated `deploy/helm/azureclaw/templates/crd-mcpserver.yaml`
+  via `DUMP_MCP_CRD_YAML=1 cargo test …
+  helm_drift::tests::dump_mcp_crd_yaml`. Adds the `spec.bundleRef`
+  block, makes the content fields optional in the schema, and adds
+  the new CEL mutex rule + `status.bundleRefDigest`. CNCF C10
+  labels preserved.
+
+**Out of scope (deferred)**
+
+- CLI dispatch `azureclaw policy sign --kind mcp-server-bundle`
+  — lands with the unified CLI in Slice 1c.6.
+- `SignerPolicy.ed25519Keys[]` forward-compat for the grant lane
+  — Slice 1c.6.
+- `EgressApproval` CRD — Slice 5e-thin (independent code path).
+
+Test deltas: controller 654 → 677 (+22 mcp_server parser tests +
++1 mcp_server_validations injection). clippy `-D warnings` clean,
+fmt clean, helm_drift clean, workspace tests clean. Router
+untouched — wire contract unchanged (per-server JWKS bytes are
+identical whether the spec is inline or merged from a verified
+bundle).
+
+### Slice 1c.4 — `ClawMemory.spec.bundleRef` (signed OCI artifact)
+
+Fourth step in the Slice 1c-real signing-generalization arc.
+`ClawMemory` now joins `EgressAllowlist` (1c.1), `ToolPolicy` (1c.2),
+and `InferencePolicy` (1c.3) on the unified
+`policy_fetcher::fetch_and_verify_generic` pipeline.
+
+**Producer side (controller)**
+
+- New `controller/src/policy_canonical/memory.rs` —
+  `MemoryKind: PolicyKind` impl. Bundle carries `storeName`, `scope`,
+  `retentionDays`, `deleteOnSandboxDelete`, `displayName`. The
+  `sandboxRef` selector stays in the CR — the parser explicitly
+  rejects it inside a bundle so one signed artifact can be referenced
+  by multiple `ClawMemory` CRs targeting different sandboxes.
+  Structural validation: DNS-label `storeName` (1-63), non-empty
+  `scope`, `retentionDays > 0`, type-checked `deleteOnSandboxDelete`
+  / `displayName`. Media type
+  `application/vnd.azureclaw.memory-binding.v1+json`. Per-kind cache
+  slot via `OnceLock<CachedValue::Memory(...)>` on the shared
+  `policy_canonical` cache. 18 unit tests covering every rejection
+  path.
+- `ClawMemorySpec.bundleRef: Option<OciArtifactRef>` added; the
+  inline content fields (`storeName`, `scope`, `retentionDays`,
+  `deleteOnSandboxDelete`, `displayName`) are now `Option`-typed and
+  required only on the inline path.
+- `ClawMemoryStatus.bundleRefDigest: Option<String>` surfaces the
+  verified OCI manifest digest after a successful
+  `fetch_and_verify_generic::<MemoryKind>` call.
+- `claw_memory_reconciler::resolve_memory_source` — 4-way match
+  (no inline / inline only / bundle only / both) mirroring
+  `inference_policy_reconciler::resolve_inference_source`. On the
+  bundle path, merges the verified content onto the CR's
+  `sandboxRef` selector to produce the effective spec for
+  `compile_to_binding`. `FetchError` variants map through the shared
+  `policy_fetcher::reason_for_error` vocabulary. On any degraded
+  branch (mutex / fetch / verify) the binding ConfigMap write is
+  skipped so the router's last-good binding remains in force until
+  the operator fixes the spec.
+- `claw_memory_compile::compile_to_binding` now tolerates the new
+  Optional spec fields, applying the same defaults the inline path
+  always implied (`deleteOnSandboxDelete` defaults to `true`, others
+  to empty / `None`).
+
+**Admission**
+
+- CEL rule on `ClawMemorySpec`:
+  `!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))`
+  — rejects mixed shapes at apply-time. The pre-existing `storeName`
+  and `scope` rules are wrapped in `has(self.bundleRef) || …` so the
+  inline-path validations only fire when the bundle path is unused.
+
+**Schema**
+
+- Regenerated `deploy/helm/azureclaw/templates/crd-clawmemory.yaml`
+  via `DUMP_CLAWMEMORY_CRD_YAML=1 cargo test …
+  helm_drift::tests::dump_clawmemory_crd_yaml`. Adds the
+  `spec.bundleRef` block, relaxes `required: [storeName, scope]` on
+  the spec to `required: [sandboxRef]`, and adds the new CEL mutex
+  rule + `status.bundleRefDigest`. CNCF C10 labels preserved.
+
+**Out of scope (deferred)**
+
+- CLI dispatch `azureclaw policy sign --kind memory-binding` — lands
+  with the unified CLI in Slice 1c.6.
+
+Test deltas: controller 636 → 654 (+18 memory parser tests).
+clippy `-D warnings` clean, fmt clean, helm_drift clean, CNCF
+conformance clean. Router untouched — wire contract unchanged
+(`compile_to_binding` produces identical bytes from the effective
+spec regardless of provenance).
+
+### Slice 1c.3 — `InferencePolicy.spec.bundleRef` (signed OCI artifact)
+
+Third step in the Slice 1c-real signing-generalization arc.
+`InferencePolicy` now joins `EgressAllowlist` (1c.1) and `ToolPolicy`
+(1c.2) on the unified `policy_fetcher::fetch_and_verify_generic`
+pipeline: a single `azureclaw policy sign --kind inference-policy`
+command (lands in Slice 1c.6) produces a cosign-signed OCI artifact
+that the controller pulls by digest and validates per
+`SignerPolicy`.
+
+**Producer side (controller)**
+
+- New `controller/src/policy_canonical/inference.rs` —
+  `InferenceKind: PolicyKind` impl with the per-kind canonical-form
+  parser. Accepts only `tokenBudget`, `contentSafety`,
+  `modelPreference`, `displayName` keys at top-level (a bundle is
+  selector-agnostic so one signed artifact can be referenced by
+  multiple `InferencePolicy` CRs with different `appliesTo`
+  selectors). Structural validation rejects negative budgets,
+  unrecognised severity types, empty `primary.deployment`,
+  malformed `fallback[]` entries, and mis-typed `requirePromptShields`.
+  Media type `application/vnd.azureclaw.inference-policy.v1+json`.
+  Per-kind cache slot via `OnceLock<CachedValue::Inference(...)>` on
+  the shared `policy_canonical` cache, gated by `policy_fetcher::CACHE_TTL`.
+  17 unit tests covering every rejection path.
+- `InferencePolicySpec.bundleRef: Option<OciArtifactRef>` field
+  added at spec top-level (mutex with `tokenBudget`/`contentSafety`/
+  `modelPreference`/`displayName` — selector flows through CR,
+  content flows from bundle).
+- `InferencePolicyStatus.bundleRefDigest: Option<String>` field
+  surfaces the verified OCI manifest digest after a successful
+  `fetch_and_verify_generic::<InferenceKind>` call (distinct from
+  `compiledDigest` which is the wire-contract value the router
+  echoes back via `/internal/policy-status`).
+- `inference_policy_reconciler::resolve_inference_source` —
+  4-way match (no inline, no bundle / inline only / bundle only /
+  both) mirroring `tool_policy_reconciler::resolve_agt_profile_source`.
+  On the bundle path, merges the verified content fields onto the
+  CR's `appliesTo` selector to produce the effective spec for
+  `compile_to_profile`. `FetchError` variants map through the shared
+  `policy_fetcher::reason_for_error` vocabulary (same as egress + tools).
+
+**Admission**
+
+- CEL rule on `InferencePolicySpec`:
+  `!has(self.bundleRef) || (!has(self.tokenBudget) && !has(self.contentSafety) && !has(self.modelPreference) && !has(self.displayName))`
+  — rejects mixed shapes at apply-time so the reconciler-side
+  defense-in-depth check only fires on stale clusters running an
+  older CRD revision.
+
+**Schema**
+
+- Regenerated `deploy/helm/azureclaw/templates/crd-inferencepolicy.yaml`
+  via `DUMP_INFERENCEPOLICY_CRD_YAML=1 cargo test …
+  helm_drift::tests::dump_inferencepolicy_crd_yaml`. Adds the new
+  `spec.bundleRef` block + the new CEL rule + the new
+  `status.bundleRefDigest` field. CNCF C10 labels preserved.
+
+**Out of scope (deferred)**
+
+- CLI dispatch `azureclaw policy sign --kind inference-policy`
+  — lands with the unified CLI in Slice 1c.6.
+
+Test deltas: controller 619 → 636 (+17 inference parser tests).
+clippy `-D warnings` clean, fmt clean, helm_drift clean, CNCF
+conformance clean. Router untouched — wire contract unchanged.
+
+### Slice 1c.2 — `ToolPolicy.spec.agtProfile.bundleRef` (signed OCI artifact)
+
+Continues the Slice 1c-real signing-generalization arc started in
+1c.1 (`PolicyKind` trait + `policy_canonical` module). 1c.2 wires
+the first per-kind consumer: `ToolPolicy.spec.agtProfile` now
+accepts a signed OCI artifact as an alternative to inline YAML.
+
+- **`AgtProfileSource.bundleRef`** — new field on `ToolPolicy.spec.agtProfile`,
+  mutually exclusive with `inline`. The controller pulls the artifact
+  via `policy_fetcher::fetch_and_verify_generic::<ToolsKind>`, cosign-
+  verifies against the active `SignerPolicy`, parses the bytes through
+  `policy_canonical::tools::parse` (UTF-8 + YAML mapping + required
+  fields `version` / `agent` / `policies`), and writes the verified
+  bytes into the compiled-profile `ConfigMap` under
+  `agt-profile.yaml`. The wire contract with the router is **identical
+  to the inline path** — the router doesn't know which source produced
+  the bytes; the length-prefixed content digest (Slice 1b) closes the
+  echo loop the same way either way.
+- **OCI artifact media type:**
+  `application/vnd.azureclaw.agt-profile.v1+yaml`. Mismatches surface
+  as `Ready=False / reason=InvalidRef`.
+- **`ToolPolicyStatus.agtProfileBundleDigest`** — new status field
+  carrying the verified OCI manifest digest (distinct from
+  `agtProfileDigest`, which is the length-prefixed content digest the
+  router echoes). `None` for the inline path. Populated only after
+  cosign verification succeeds.
+- **Mutual exclusion** — admission CEL
+  (`!has(self.agtProfile) || !(has(self.agtProfile.inline) && has(self.agtProfile.bundleRef))`)
+  rejects specs that set both at apply time. The reconciler also
+  performs a runtime defense-in-depth check (`reason=InvalidSpec`) for
+  older clusters lacking the latest CRD.
+- **Error taxonomy** — fetch/verify failures reuse the egress
+  `FetchError` vocabulary verbatim via `reason_for_error`:
+  `SignerPolicyMissing` / `SignerPolicyMalformed` / `InvalidRef` /
+  `Unauthorized` / `NotFound` / `SignatureVerifyFailed` /
+  `IdentityMismatch` / `CanonicalFormViolation` / `Transient`. One
+  vocabulary across all signed-policy kinds — operator docs stay
+  minimal as 1c.3 / 1c.4 / 1c.5 land.
+- **Canonical form for AGT YAML** intentionally permits comments
+  (operator-authored YAML profiles); the OCI digest pins the bytes
+  loaded into the router, so the byte-frozen "no comments" rule that
+  the egress allowlist applies for semantic-deduplication does not
+  apply here. Validation is structural (UTF-8 + parseable YAML mapping
+  + required top-level fields).
+- **TODO comments removed** in `controller/src/tool_policy.rs` —
+  the long-deferred *"Slice 1c will add bundleRef"* §5 violation is
+  now closed (the field is shipped).
+
+`controller/src/policy_canonical/tools.rs` — new ~300 LOC module
+with the `ToolsKind` `PolicyKind` impl, per-kind cache, and 15
+unit tests (minimal/with-policies/with-comments parse, all
+required-field rejection paths, non-UTF8/non-mapping rejection,
+finalize/cache roundtrip, cross-kind cache isolation).
+
+`controller/src/tool_policy_reconciler.rs` — new
+`resolve_agt_profile_source` helper unifies the inline / bundleRef /
+none / both-set cases into a single
+`(bytes, oci_digest, degraded)` triple consumed by the existing
+`ensure_profile_configmap` flow. 5 new unit tests covering all four
+spec-shape cases + a tripwire test pinning the `fetch_error_to_degraded`
+mapping to the shared `reason_for_error` taxonomy.
+
+CRD schema regenerated; 14 helm_drift tests pass. 619 controller
+tests (was 597 at 1c.1), clippy `-D warnings` clean, fmt clean.
+
+### Slice 5d — `AllowlistDrift` structured diff + Headlamp banner
+
+Closes Slice 5 DoD #5. The `AllowlistDrift=True` condition already
+fires when a `ClawSandbox` carries both `allowedEndpoints` (inline)
+and `allowlistRef` (signed artifact) and they diverge — but until
+now the message was a single human sentence with no machine-readable
+diff. Operators had to manually compare two host lists to see what
+the bundle was missing.
+
+- **`DriftSummary` payload appended to the condition message.**
+  Format: `"… artifact wins | drift={JSON}"` where the JSON object
+  has `added` (entries only inline — operator intent missing from
+  the signed authority) and `removed` (entries only in the bundle —
+  authority has hosts the operator did not echo). Entries are
+  `host:port` strings, port normalized to `443`, sorted
+  lexicographically. Empty-list contracts: no drift ⇒ no JSON
+  payload at all (legacy message preserved). Pinned in
+  `controller/src/policy_fetcher.rs::DriftSummary` and
+  serde-roundtrip-tested.
+- **Headlamp plugin banner.** Every `ClawSandbox` detail view now
+  shows a yellow "Allowlist drift detected" section when the
+  `AllowlistDrift` condition is `True`. The banner parses the
+  trailing JSON and renders a two-row table (only-in-inline /
+  only-in-bundle) with the host list. Falls back to the raw
+  condition message when the JSON suffix is absent
+  (forward-compat).
+- **No wire surface change.** The drift JSON is a suffix of an
+  existing condition message — no new CRD field, no router
+  protocol bump, no controller env var. Old plugins ignore the
+  suffix; new plugins parse it.
+
+### Slice 5c.2 — `Unsigned` warning condition + helm `requireSigned` fail-closed toggle
+
+Surfaces the gap when a `ClawSandbox` uses
+`spec.networkPolicy.allowedEndpoints` (inline) without a signed
+`spec.networkPolicy.allowlistRef`, and gives operators a single
+helm switch to flip the policy from *allow with warning* to
+*fail-closed*.
+
+- **Default behaviour (no change to working sandboxes):** inline
+  allowlists keep reconciling. The controller now additionally
+  stamps `AllowlistVerified=False / reason=Unsigned` so operators
+  see the missing attestation in `kubectl describe clawsandbox` and
+  in the Headlamp panel. The L4 NetworkPolicy and the L7 router
+  allowlist mount are still programmed from the inline list — no
+  egress regression.
+- **`egress.requireSigned: true`** (new helm value, default
+  `false`): when set, the controller refuses to program user egress
+  for inline-only allowlists. `endpoints` is dropped, the L7 mount
+  is published empty (router rejects every L7 attempt), and the
+  sandbox stamps `Degraded=True / reason=Unsigned` with an
+  actionable message pointing operators to either sign the bundle
+  via `allowlistRef` or relax the helm value.
+- Threaded through `controller-deployment.yaml` as the
+  `REQUIRE_SIGNED_ALLOWLIST` env var. `policy_fetcher`'s
+  `require_signed_allowlist()` reads it on every reconcile so
+  operators can toggle without a controller restart.
+- New `reason::UNSIGNED` constant in `status::conditions`. Existing
+  cosign verify path (`allowlistRef` set) is unchanged — it already
+  emits `AllowlistVerified=True / reason=Verified` on success and
+  the appropriate verify-fail reasons otherwise.
+- Reconciler's `fail_closed_no_lkg` short-circuit now distinguishes
+  *verify-fail-no-LKG* (`reason=FailedClosed`) from the new
+  *require-signed-rejection* path (`reason=Unsigned`) so the
+  Degraded message is actionable in either case.
+- Tests: 3 new + 1 updated unit tests in `policy_fetcher::tests`
+  (`resolve_inline_only_with_require_signed_fails_closed`,
+  `resolve_inline_empty_with_require_signed_is_noop`,
+  `require_signed_allowlist_parses_truthy_values`, plus the
+  existing `resolve_inline_only_emits_authoritative_inline` now
+  asserts the `Unsigned` warning).
+- Closes Slice 5 DoD #7 (attestation surface) — note: full signed
+  *bundleRef path was always-on since S12.e; Slice 5c.2 closes the
+  loop on the *unsigned* side so the cosign infra is no longer
+  silent for inline-only sandboxes.
+
+### Slice 5c.1 — Egress allowlist mount + router echo (DoD #2 wire)
+
+Wires the controller-published signed egress allowlist into the
+router's L7 enforcement via the same ConfigMap → mount → loader →
+`/internal/policy-status` echo pattern used by ClawMemory (Slice 3a).
+Also strips the decorative, unsigned in-memory mutable allowlist
+surface that had no audit trail and no signing.
+
+**Controller (producer):**
+- `controller/src/egress_allowlist_compile.rs` (new, ~245 lines) —
+  pure compiler from `EgressAllowlistSpec` → canonical JSON +
+  length-prefixed sha256 (`u64-BE(name.len()) || name || u64-BE(body.len()) || body`).
+  Hosts sorted by `(host,port)`, lowercased, dedup, port default 443.
+  Identical wire layout to ClawMemory binding. 12 unit tests.
+- `controller/src/reconciler/mod.rs` — publishes
+  `clawsandbox-{name}-egress-allowlist` ConfigMap, mirrors into
+  sandbox namespace, mounts at `/etc/azureclaw/egress/allowlist.json`,
+  sets `EGRESS_ALLOWLIST_DIR=/etc/azureclaw/egress` env, stamps
+  `azureclaw.azure.com/egress-allowlist-digest` annotation.
+
+**Router (consumer):**
+- `inference-router/src/egress_allowlist_loader.rs` (new, ~480 lines)
+  — `LoadedEgressAllowlist` handle, `load_and_install()` swaps the
+  shared `Blocklist` allowlist on `Loaded`, drains to empty on
+  `NoBinding`, leaves prior state intact on `Error` (transient
+  parse blip must not knock data plane offline). mtime poller
+  mirrors `memory_binding_loader`. ~12 tests.
+- `inference-router/src/blocklist.rs` — new `replace_allowlist`
+  taking `&[(host, port)]`. Atomically swaps the live allowlist.
+- `inference-router/src/main.rs` — watcher spawn parallel to
+  memory binding loader.
+- `inference-router/src/routes/mod.rs` — `AppState.egress_allowlist`
+  handle field; initial install at construction.
+- `PolicyKind::EgressAllowlist` echo on `/internal/policy-status`.
+
+**Decorative surface removal (no signing, no audit ⇒ deleted):**
+- `controller/src/crd.rs` — `NetworkPolicyConfig.approval_required`
+  field gone; `ClawSandboxStatus.pending_approvals` gone.
+- `controller/src/status/mod.rs` — `pendingApprovals` JSON literals
+  gone.
+- `controller/src/mesh_peer/offload.rs` — auto-minted CR no longer
+  sets `approvalRequired`.
+- Router: `/egress/approve|deny|pending|enforce` routes gone;
+  `pending_approvals`, `PendingApproval`, `allow_domain`,
+  `deny_domain`, `get_pending_approvals`, `record_proxy_block` gone
+  from `blocklist.rs`/`forward_proxy.rs`/`egress.rs`.
+- CLI: `cli/src/commands/operator/actions.ts` — `approveDomain` and
+  `denyDomain` removed; `enforceEgress` no longer POSTs to deleted
+  `/egress/enforce`, just CRD-patches.
+- CLI: `cli/src/commands/operator.ts` — `a` and `Shift-A` (approve)
+  key handlers gone; `d` simplified to delete-agent only.
+- CLI: `approvalRequired: true` removed from 7 producer call sites
+  (`add.ts`, `handoff.ts`, `up/sandbox_bringup.ts`,
+  `migrate/from_kagent.ts`, `dev/local-k8s.ts`, `add.test.ts`).
+- CLI panels: phantom `spec.approvalRequired` reads on ToolPolicy
+  removed from `datasource.ts`, `types.ts`, `layout.ts`,
+  `toolpolicy.ts`, `dialogs/agent_detail.ts`, `fixtures.ts` —
+  the field never existed in the ToolPolicy CRD schema (ToolPolicy
+  has per-rule `rules[].approval`, not `spec.approvalRequired`).
+- Headlamp: `pendingApprovals` removed from `OverviewMetrics`,
+  `computeMetrics`, Stat tile, Network Policy table.
+- Helm: `approvalRequired` schema block removed from
+  `crd.yaml`; status `pendingApprovals` removed.
+- Docs/examples: stale `approvalRequired: true` lines stripped from
+  9 example manifests, `docs/security-validation.md`, and
+  `docs/internal/competitive.md`.
+
+**Wire contract:**
+- File: `allowlist.json`, env: `EGRESS_ALLOWLIST_DIR`,
+  mount: `/etc/azureclaw/egress/`,
+  PolicyKind wire string: `"EgressAllowlist"`.
+- Schema: `{"schemaVersion":1,"endpoints":[{"host","port"}]}`.
+
+Verified: 863 router lib tests, 574 controller tests, 692 CLI tests,
+`cargo clippy --workspace --all-targets -D warnings` clean,
+`cargo fmt --check` clean, headlamp build clean.
+
+### Slice 5f — security.md egress reframe (DoD #6)
+
+Slice 5 DoD #6 is *"docs/architecture.md, docs/security-model.md,
+README.md reframed"* — saying explicitly that the router is THE
+enforcement point for egress and that the K8s NetworkPolicy +
+iptables `egress-guard` are **safety nets** that fail closed only
+if the router is bypassed or compromised.
+
+- `docs/architecture.md` and `README.md` were already correctly
+  reframed in earlier slices.
+- `docs/security.md` (the project's security-model doc; the
+  principles.md reference to `docs/security-model.md` resolves here)
+  Layer 5 section rewritten: explicit "router is THE policy
+  enforcement point", iptables/NetworkPolicy labelled "safety net #1"
+  and "safety net #2" with prose explaining the failure modes each
+  catches.
+
+### Slice 5b — `egressMode` enum replaces `learnEgress` bool (DoD #3)
+
+Replaces `ClawSandbox.spec.networkPolicy.learnEgress: bool` with
+`egressMode: Strict | Learn` enum across the controller, router,
+CLI, Headlamp plugin, helm CRD schema, and docs. Default = `Learn`.
+The `Approval` variant is deferred to Slice 5c (no consumer yet
+per principles §5). No back-compat shim: the repo has no live
+deployments, so the legacy field was removed cleanly rather than
+deprecated.
+
+- `controller/src/crd.rs`: new `EgressMode` enum (`#[derive(Default)]`
+  with `#[default]` on `Learn`); replaces `NetworkPolicyConfig.learn_egress`.
+  Tests cover default + wire-format round-trip in PascalCase.
+- `controller/src/reconciler/mod.rs`: emits `EGRESS_MODE=strict|learn`
+  on the sandbox pod env. No back-compat `EGRESS_LEARN_MODE`.
+- `inference-router/src/routes/mod.rs`: consumes `EGRESS_MODE`, defaults
+  to Learn when unset.
+- `inference-router/src/spawn/mod.rs`: sub-agent CR builder reads
+  `networkPolicy.egressMode` and emits the new field on respawn.
+  Internal `SpawnRequest.learn_egress: bool` retained (not wire).
+- `deploy/helm/azureclaw/templates/crd.yaml`: `learnEgress` removed
+  from the schema; `egressMode` enum-validated.
+- `cli/src/commands/{add,policy,handoff,handoff/helpers,up/sandbox_bringup,
+  dev/local-k8s,operator/actions}.ts`: every CR producer/reader migrated.
+- `tools/headlamp-plugin/src/index.tsx`: all 4 egress readers consume
+  `egressMode` directly. Phase chips + dashboard counters honour the
+  new enum.
+- `docs/use-cases.md`, `docs/egress-proxy.md`: doc samples updated.
+
+### Slice 5a — Surface blocked egress attempts (DoD #1)
+
+First slice in the Slice 5 "egress polish + observability" sequence.
+Closes Slice 5 DoD #1 (*"`azureclaw egress blocked` lists every host the
+agent attempted that the enforcement layer refused"*) by exposing the
+existing in-process `BlockedBuffer` over operator-facing surfaces.
+
+- `inference-router/src/egress_blocked.rs`: new `snapshot_since` +
+  `top_hosts` methods on `BlockedBuffer`. Newest-first ordering by
+  `last_seen_unix`; `top_hosts` aggregates across `(sandbox, port)` by
+  hostname with a deterministic secondary sort for tied counts. 7
+  unit tests cover filter cutoffs, dedup count carry-through,
+  aggregation across sandboxes/ports, `n=0` early return, and the
+  100-cap truncation.
+- `inference-router/src/routes/internal.rs`: two new endpoints
+  mounted on the admin-gated `protected` router:
+  - `GET /internal/egress/blocked?since=<rfc3339|unix|-Nm>` — full list.
+  - `GET /internal/egress/blocked/top?window=<duration>&n=<int>` —
+    top-N rolling-window aggregate.
+  Both emit `schema_version: 1` envelopes carrying RFC 3339 strings
+  alongside raw Unix seconds for downstream parsers. Hand-rolled
+  duration + RFC 3339 parsers (no `chrono` dep) with 7 unit + 6
+  integration tests covering bare seconds, `s/m/h/d` suffixes,
+  relative `-Nm` form, malformed input → `0`, the `n ≤ 100` cap, and
+  the `window` default of 5m.
+- `cli/src/commands/egress/blocked.ts`: new
+  `azureclaw egress blocked <sandbox> [--since 10m] [--top]
+  [--window 1h] [--n 20] [--watch] [--json]` subcommand. Mirrors
+  the `azureclaw inspect` token-resolution path
+  (`router-admin-token` secret first, in-pod `admin-token` file
+  fallback) and uses in-pod `kubectl exec curl` to avoid
+  port-forward collisions. `--watch` re-renders every 5s with VT
+  clear; `--top` overrides `--since` (window is its own filter).
+  13 vitest unit tests cover query-string composition, the renderer
+  surface (HOST/PORT/SANDBOX/LAST_SEEN/COUNT columns, empty-state
+  message, since-filter line, top-N window line) and the
+  `unixToIso(0) === "epoch"` sentinel.
+
+Producer→consumer loop is real and complete: the router has been
+populating `BlockedBuffer` from the forward proxy since S12.f; this
+slice just makes that surface visible to operators without giving
+the agent any new wire access.
+
+### Slice 4e — Slice 4 docs consolidation (DoD #8)
+
+Closes Slice 4 DoD #8 (*"CHANGELOG + `docs/api/mcpserver.md` updated"*).
+Per-CRD doc pages have been consolidated into
+[`docs/api/crd-reference.md`](docs/api/crd-reference.md) +
+[`docs/api/lifecycle.md`](docs/api/lifecycle.md) since Slice 1; the
+remaining gap was stale singular-form prose:
+
+- `docs/api/crd-reference.md`: `spec.mcpRefs` corrected to
+  `spec.mcpServerRefs`; `McpServer` section rewritten to reflect the
+  Slice 4 plural model — per-server `/etc/azureclaw/mcp/<name>/`
+  volumes, multi-issuer `OAuthVerifier`, namespaced
+  `{server}.{tool}` dispatch, `allowed_tools` semantics
+  (`["*"]` vs explicit subset vs empty = fail-closed).
+- `docs/api/lifecycle.md`: `/v1/mcp/*` proxy reference updated to
+  `/mcp` (the actual route); new "Plural binding (`mcpServerRefs`,
+  Slice 4)" subsection documents the per-server volume layout,
+  OAuth verifier population (4d.3), and namespaced forwarder
+  catalog (4d.4); `Ready` row gains plural-McpServer + ClawMemory
+  echo coverage. Stale-file sweep (DoD #6) explicitly documented
+  as producer-side: each reconcile rewrites the current ref set,
+  removed-server volumes disappear on next kubelet pod sync.
+
+No code changes. Closes Slice 4.
+
+### Slice 4d.4 — namespaced MCP tool forwarder (DoD #3 — dispatch half)
+
+Closes the dispatch half of Slice 4 DoD #3 (*"…with namespaced tool
+names; tool calls route to the correct upstream"*). The router no
+longer serves only the in-tree `EchoDispatcher` at `/mcp` — when at
+least one McpServer is discovered with a usable upstream URL, traffic
+is dispatched to a new `RouterToolDispatcher` that proxies into the
+upstream MCP server declared by `McpServer.spec.url`.
+
+What this PR adds:
+
+- **Controller — `McpServerMeta` extension.** `mcp_server_reconciler.rs`
+  now writes two additional fields into the per-server `meta.json`
+  key alongside Slice 4d.3's OAuth metadata: `url` (the upstream MCP
+  server URL) and `allowedTools` (the per-server allow-list). Empty
+  fields are skipped via `skip_serializing_if` to keep the wire shape
+  forward-compatible.
+- **Router — `DiscoveredMcpServerMeta` extension.** `mcp::registry`'s
+  consumer-side struct gains the matching `url` + `allowed_tools`
+  fields. The struct now derives `Default` so future field additions
+  don't break test fixtures (4 existing test literals updated to use
+  `..Default::default()` trailing spread for forward-compat).
+- **Router — `mcp::forwarder` module (new).** Introduces
+  `RouterToolDispatcher` implementing `AsyncToolDispatcher`. At
+  startup, `RouterToolDispatcher::discover()` walks the registry and
+  for each server:
+    - POSTs JSON-RPC `tools/list` to `meta.url` (per-call timeout,
+      default 5 s, configurable via `MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS`).
+    - Filters the response through `meta.allowed_tools` (`["*"]`
+      exposes every upstream tool; an explicit list selects the
+      named subset; empty fails closed).
+    - Prefixes each tool with the server's snake_case name (so
+      `github-mcp` exposing `search` is advertised as
+      `github_mcp.search`).
+  Servers with empty URL, empty allow-list, an OAuth requirement
+  (deferred to Slice 4d.5), unreachable upstreams, or HTTP/JSON-RPC
+  errors during discovery are recorded in `skipped` with a human-
+  readable reason and excluded from the catalog. The router still
+  starts — operators see the gap via the structured logs at startup.
+- **Router — `mcp::tools::AsyncToolDispatcher` swap-in.**
+  `McpRouteState` gains a `with_tools()` builder. When the registry
+  is non-empty, `main::build_mcp_router()` swaps the default
+  `EchoDispatcher` for the forwarder via that builder; otherwise
+  the existing dev/echo behaviour is preserved untouched.
+- **Dispatch path.** On `tools/call`, `RouterToolDispatcher::invoke`
+  splits the namespaced name on the first `.` to find the
+  destination server, then forwards a JSON-RPC `tools/call`
+  envelope to the upstream URL. Upstream protocol errors surface
+  as `is_error: true` `ToolCallOutput`s; HTTP 5xx/4xx surface as
+  `DispatchError::ExecutionFailed`; missing prefixes / unknown
+  suffixes surface as `DispatchError::UnknownTool`.
+
+Outbound auth scope: **unauthenticated upstreams only.** Servers
+whose `meta.json` carries an `issuer` are deliberately skipped with
+`reason = "outbound OAuth unsupported in 4d.4 …"` — outbound OAuth
+(client-credentials / on-behalf-of) lands in Slice 4d.5 once we
+have a real credential source wired (sandbox-mounted secret per
+McpServer). This is the §5 anti-scaffolding boundary: the consumer
+that ships in 4d.4 is the one we can actually drive end-to-end.
+
+Test coverage (15 new unit tests in `mcp::forwarder::tests`,
+exercising both happy path and every skip-reason branch):
+
+- `server_name_to_prefix_converts_hyphens` — name→prefix mapping.
+- `split_namespaced_name_happy_and_edge` — dispatch parser including
+  multi-dot tool suffixes (`foundry.memory.update` survives intact).
+- `filter_by_allowlist_star_returns_all` / `_named_subset` — the
+  two allow-list semantics, asserted on real `ToolDefinition`s.
+- `discover_happy_path_builds_namespaced_catalog` — full end-to-end:
+  mock upstream `tools/list` → forwarder catalog carries the
+  prefixed names.
+- `discover_filters_by_allow_list` — same, with a non-`*` allow-list.
+- `discover_skips_servers_with_empty_url` /
+  `_requiring_outbound_oauth` / `_with_empty_allow_list` /
+  `_whose_upstream_returns_500` — each skip reason is recorded with
+  the expected substring (operator-actionable).
+- `invoke_forwards_call_and_returns_content` — `tools/call`
+  round-trips through the mock upstream and the agent sees the
+  upstream-provided content unchanged.
+- `invoke_unknown_tool_returns_unknown_tool` — three negative
+  branches (wrong prefix, unknown suffix, no `.` at all).
+- `invoke_surfaces_upstream_json_rpc_error_as_is_error` — JSON-RPC
+  errors collapse into `ToolCallOutput { is_error: true, ... }`
+  (per MCP spec: protocol errors vs. semantic errors).
+- `invoke_returns_execution_failed_on_upstream_5xx` — HTTP 5xx
+  surfaces as `DispatchError::ExecutionFailed` with the status in
+  the reason string.
+- `multi_server_namespaces_dispatch_correctly` — two mock upstreams,
+  the dispatcher routes each invocation to its own server's URL.
+
+Backward compatibility:
+
+- Registries with no `meta.json` files or no `url` fields fall
+  through to the existing `EchoDispatcher`, preserving the Slice 4d.3
+  / 4d.1 dev surface.
+- The single-issuer `MCP_JWKS_PATH` legacy path remains the third
+  fallback for production mode without a registry.
+
+Files touched:
+
+- `controller/src/mcp_server_reconciler.rs` — `McpServerMeta` gains
+  `url` + `allowed_tools`.
+- `inference-router/src/mcp/registry.rs` — `DiscoveredMcpServerMeta`
+  gains matching fields + `Default` derive.
+- `inference-router/src/mcp/forwarder.rs` — new module.
+- `inference-router/src/mcp/mod.rs` — wire module.
+- `inference-router/src/mcp/oauth.rs` — 4 test fixtures updated for
+  forward-compat with the new meta fields.
+- `inference-router/src/routes/mcp.rs` — `McpRouteState::with_tools`
+  builder; TODO comment for "future RouterToolDispatcher" deleted.
+- `inference-router/src/main.rs` — `build_mcp_router` now async,
+  discovers the forwarder catalog before mounting `/mcp`.
+
+### Slice 4d.3 — multi-issuer OAuth verification (DoD #3 — OAuth half)
+
+Closes the OAuth half of Slice 4 DoD #3 (*"each McpServer has its own
+JWKS"*). Each McpServer now has its OAuth tokens validated against
+*its own* JWKS, with a per-issuer `audience` and `scopes` override —
+all driven by a `meta.json` file the controller writes alongside
+`jwks.json` into the per-server ConfigMap mounted at
+`/etc/azureclaw/mcp/<name>/`.
+
+What this PR adds:
+
+- **Controller — `McpServerMeta` producer.**
+  `mcp_server_reconciler.rs` now writes a second key, `meta.json`, into
+  the `mcp-<name>-jwks` ConfigMap alongside `jwks.json`. The
+  serialized shape carries `{ issuer, audience?, scopes[] }` —
+  serialized in camelCase, with optional/empty fields skipped for
+  forward-compat. The struct + helper `McpServerMeta::from_spec`
+  centralise the wire contract.
+- **Router — `DiscoveredMcpServerMeta`.** `mcp::registry` gains a
+  matching deserialize-side struct and reads `meta.json` adjacent to
+  each `jwks.json` during `scan()`. Missing files are silently
+  back-compat (pre-4d.3 layouts → `meta = None`); malformed or
+  empty-issuer files are *recorded in `skipped`* so operators see
+  the gap honestly (principles §3 — no silent failure).
+- **Router — multi-issuer `OAuthVerifierConfig`.**
+  - `expected_audience` is now a per-issuer floor; new
+    `per_issuer_audience: HashMap<String, String>` overrides on a
+    per-token basis (keyed by the token's `iss` claim).
+  - `required_scopes` is now a per-issuer floor; new
+    `per_issuer_scopes: HashMap<String, Vec<String>>` overrides.
+  - New `OAuthVerifierConfig::from_registry(&McpServerRegistry,
+    default_audience, default_scopes, leeway) -> Result<Option<Self>>`
+    materialises a multi-issuer config from a scanned registry.
+    Returns `Ok(None)` when no servers carry meta — the caller
+    (`build_mcp_router`) then falls back to the legacy single-JWKS
+    `from_jwks_file` path. Conflicting JWKS for the same issuer
+    across two servers surface as a hard error rather than silently
+    overwriting.
+- **Router — `build_mcp_router` wires the registry-first path.**
+  When `MCP_PRODUCTION_MODE=true` and the registry is non-empty, the
+  router prefers the multi-issuer path. Empty registry / no-meta
+  fallback to the legacy `MCP_JWKS_PATH` path. Refusal to mount on
+  hard error remains intact (operators see a clear startup-time
+  error instead of an unauthenticated `/mcp`).
+
+The per-issuer pin works because `verify_access_token` already keys
+JWKS lookup off the token's claimed `iss` (which is then re-validated
+by `Validation::set_issuer`). Slice 4d.3 simply lifts the audience and
+scope checks onto the same per-issuer key — so a token from server-A
+carrying server-B's audience fails closed even though both audiences
+are listed in the same config.
+
+Verified: 820 router lib tests pass (+10 new for multi-issuer aud,
+multi-issuer scopes, `from_registry` happy/none/conflict paths, meta
+load happy/skip paths), 559 controller tests pass, `cargo clippy
+--all-targets -- -D warnings` clean across workspace, `cargo fmt
+--check` clean.
+
+Out of scope for 4d.3 (queued for 4d.4):
+
+- Namespaced tool dispatch (`/mcp/<server>/...`) — needs a real
+  upstream MCP forwarder backend; until one lands, dispatch
+  namespacing would be scaffolding (principles §5).
+
+### Slice 4d.2 — per-server McpServer mount scheme + router discovery (DoD #1 + #6)
+
+Closes Slice 4 DoD #1 (*"≥ 3 plural McpServers reachable e2e"*) at the
+mount-and-discovery layer, and DoD #6 (*"stale-file sweep on ref
+removal"*) via reconciler-driven volume rebuild. Multi-JWKS OAuth
+verification and namespaced tool dispatch (DoD #3) follow in **Slice
+4d.3** — this slice ships the producer-side mount layout and the
+router-side discovery surface that 4d.3 will consume.
+
+What this PR adds:
+
+- **Controller — per-server volume scheme.** `reconciler/mod.rs`
+  McpServer mirror block now iterates the full
+  `governance_config.effective_mcp_server_refs()` list instead of
+  short-circuiting at length > 1. Each ref produces its own
+  ConfigMap/Secret pair mounted at per-name subdirectories:
+  - `/etc/azureclaw/mcp/<name>/jwks.json` (from `mcp-<name>-jwks` CM)
+  - `/etc/azureclaw/mcp-signing/<name>/...` (from `mcp-<name>-signing` Secret)
+
+  Volume names follow `mcp-jwks-<name>` / `mcp-signing-<name>`. The
+  CRD's `maxItems: 8` on `mcpServerRefs` plus the DNS-1123 constraint
+  on ref names keeps total volume names ≤ 63 chars.
+
+- **Legacy env-var contract preserved.** The first entry (idx 0)
+  continues to set `MCP_JWKS_PATH=/etc/azureclaw/mcp/<name0>/jwks.json`
+  and `MCP_SIGNING_KEY_DIR=/etc/azureclaw/mcp-signing/<name0>` so the
+  existing single-JWKS OAuth verifier in
+  `inference-router/src/main.rs::build_mcp_router()` keeps working
+  unchanged. New env `MCP_JWKS_DIR=/etc/azureclaw/mcp` is set once
+  per pod whenever any McpServer ref mirrored — the discovery hook
+  consumes it.
+
+- **`inject_container_env` helper** in
+  `controller/src/reconciler/governance_mounts.rs:362` — idempotent
+  env-var injection on a named container without requiring a volume
+  mount. Used to land `MCP_JWKS_DIR` after per-server volumes have
+  been added in a loop. 4 dedicated unit tests cover happy path,
+  idempotence, missing-env-array creation, and absent-container
+  no-op.
+
+- **Router — startup discovery scan.** New `inference-router/src/mcp/registry.rs`
+  with `scan(dir)` + `discover_from_env()`. At process start `main.rs`
+  reads `MCP_JWKS_DIR`, enumerates immediate subdirectories that
+  contain a parseable RFC-7517-shaped `jwks.json`, and emits:
+
+  ```text
+  Discovered 3 McpServer JWKS file(s)
+    mcp_jwks_dir = "/etc/azureclaw/mcp"
+    count = 3
+    servers = ["foundry-builtins", "github", "internal-knowledge"]
+  ```
+
+  Candidates that fail validation (missing `jwks.json`, malformed JSON,
+  missing `keys` array) are surfaced via `tracing::warn!` with the
+  exact rejection reason — never silently dropped (principles §3). 7
+  unit tests cover empty dir, missing dir, three-server happy path,
+  empty-subdir skip, malformed JSON skip, top-level file ignore, and
+  path correctness.
+
+- **Stale-file sweep (DoD #6) by reconcile.** Each reconciliation
+  pass rebuilds the Deployment pod-spec from the *current*
+  `effective_mcp_server_refs()`. Refs removed from the CR produce no
+  volume/mount in the next SSA patch — kube-apiserver-side
+  reconciliation naturally drops them. No explicit sweep code
+  needed; in-process hot removal (without pod restart) is a 4d.3
+  enrichment when the inotify watcher arrives.
+
+- **Removed `PLURAL_MCP_SERVERS_UNSUPPORTED_YET`** condition reason
+  constant — its single call site disappeared with the loop
+  refactor. The 4d.1 placeholder did its job; the gap it described
+  is closed.
+
+- **CRD doc comment** on `mcp_server_refs` now describes the 4d.2
+  mount layout and forward-references 4d.3 for multi-JWKS OAuth +
+  namespaced tool dispatch.
+
+What is explicitly **not** in this slice (deferred to Slice 4d.3):
+
+- Multi-JWKS OAuth verification (`/mcp` route still validates against
+  the first ref's `jwks.json` via the legacy `MCP_JWKS_PATH`).
+- Namespaced tool dispatch (`{server}.{tool}` routing).
+- In-process inotify-driven hot reload of the registry.
+- Per-server signing-key selection for outbound tool calls.
+
+The discovery log surface is the operator-facing closure of DoD #1:
+operators apply a `ClawSandbox` with N `mcpServerRefs`, then verify
+via `kubectl logs` that the inference router enumerates exactly N
+server names. This is a real consumer (principles §5 — no
+scaffolding) even though OAuth verification is single-JWKS today.
+
+Verified: 559 controller + 804 router tests pass, clippy
+`-D warnings` clean across workspace, `cargo fmt --check` clean.
+
+### Slice 4d.1 — `mcpServerRefs` plural (DoD #2 deprecation)
+
+Slice 4 DoD #2 says: *"`mcpServerRef` (singular) emits a Warning event
+deprecating in favor of `mcpServerRefs`."* This slice ships the plural
+CRD field + a backward-compat shim that keeps the singular working
+as a length-1 alias, alongside admission-CEL guard rails for the
+plural form. The router-side per-server file scheme (DoD #1, #3, #6)
+lands in **Slice 4d.2**.
+
+What this PR adds:
+
+- `controller/src/crd.rs` — new `GovernanceConfig.mcp_server_refs:
+  Vec<LocalObjectRef>` field with `#[serde(default,
+  skip_serializing_if = "Vec::is_empty")]` so empty lists don't
+  pollute serialized CRs. The legacy singular `mcp_server_ref`
+  carries a deprecation doc-comment but remains honored.
+- `controller/src/crd.rs::GovernanceConfig` — two new helpers:
+  `effective_mcp_server_refs()` returns the unified list (plural
+  wins; singular degrades to length-1; both empty → empty list),
+  and `uses_singular_mcp_server_ref()` is true iff the deprecated
+  path is being used. Every downstream consumer goes through this
+  pair so the shim doesn't scatter.
+- `controller/src/status/conditions.rs::reason` — two new constants:
+  `McpSingularDeprecated` (Warning surface for singular use) and
+  `PluralMcpServersUnsupportedYet` (Degraded reason emitted when
+  `mcpServerRefs.len() > 1` until 4d.2 wires per-server addressing).
+- `controller/src/reconciler/mod.rs` — refactored the
+  McpServer mirror loop to iterate `effective_mcp_server_refs()`.
+  When the singular field is in use, emits a `tracing::warn` with
+  `reason = McpSingularDeprecated` every reconcile. When the list
+  length exceeds 1, short-circuits via the existing `degrade!`
+  macro with `reason=PluralMcpServersUnsupportedYet` — refusing to
+  reconcile is the most honest surface until Slice 4d.2 lands
+  (principles §3: typed contract with truthful
+  "not-yet-enforced" signal; never silently drop entries 2..N).
+- `deploy/helm/azureclaw/templates/crd.yaml` — admission CEL:
+  mutex between singular and plural (`!(has(self.mcpServerRef) &&
+  size(self.mcpServerRefs) > 0)`), `maxItems: 8` (router-side
+  scheme is sized for this; beyond that operators should use
+  registry-mode federation), and per-name uniqueness
+  (`all(r, exists_one(s, s.name == r.name))`) to catch
+  copy-paste duplicates at admission instead of at mount-time.
+
+Tests: 6 new unit tests on the helpers + serialization shape (omit-
+when-empty, camelCase wire key, three precedence cases). Controller
+suite: **555 passing** (549 prior + 6 new). `cargo clippy
+--all-targets -- -D warnings` clean, `cargo fmt --check` clean.
+
+Out of scope for 4d.1 (queued for 4d.2):
+
+- Per-server `jwks-{name}.json` / `tools-{name}.json` file scheme.
+- Router-side `McpServerRegistry` for namespaced tool dispatch.
+- Stale-file sweep (DoD #6).
+- e2e fixture with ≥ 3 servers (DoD #1).
+
+### Slice 4c — Azure Monitor remote audit sink (DoD #5)
+
+Slice 4a (PR #287) shipped the sandbox-local JSONL audit log. Slice 4b
+(PR #289) shipped `azureclaw audit tail`. Slice 4c closes Slice 4 DoD
+#5 — *"audit rows reach a remote sink"* — by introducing an
+`AuditSink` trait and a real Azure Monitor (Log Ingestion API) sink
+that delivers rows asynchronously to a Data Collection Endpoint.
+
+What this PR adds:
+
+- New `inference-router/src/audit_sink.rs` (~430 lines):
+  - `AuditSink` trait (sync `write(&entry)`) + `CompositeSink` fan-out.
+  - `LocalJsonlSink` wraps the existing `JsonlAuditWriter` (Slice 4a).
+  - `AzureMonitorSink` posts `[{...}]` batches to
+    `{dce}/dataCollectionRules/{dcr_immutable_id}/streams/{stream}?api-version=2023-01-01`
+    with a Bearer token from `WorkloadIdentityAuth::get_token("https://monitor.azure.com/")`.
+    POSTs are `tokio::spawn`-ed per row so the audit chain stays
+    non-blocking — request handling never waits on the network.
+  - `build_sink_from_env(sandbox, auth)` composes the right sink set
+    from `AZURECLAW_AUDIT_DIR` + `AZURECLAW_AUDIT_AZMON_{DCE,DCR_ID,STREAM}`.
+  - 7 unit tests covering config parsing, composite fan-out, URL
+    composition, and the `TimeGenerated` wire shape.
+- `inference-router/src/governance/mod.rs` — swapped
+  `audit_jsonl: Option<JsonlAuditWriter>` for
+  `audit_sink: Option<Arc<dyn AuditSink>>`. `audit_log()` routes
+  every chained entry through the composite sink. The legacy
+  `open_jsonl_writer()` free function is gone — `audit_sink` owns
+  configuration end-to-end.
+
+Operator surface (env vars, all three required for AzMon to engage;
+any missing → AzMon sink disabled silently, local JSONL still on):
+
+| Var | Meaning |
+|-----|---------|
+| `AZURECLAW_AUDIT_AZMON_DCE` | Data Collection Endpoint URL (e.g. `https://my-dce.eastus-1.ingest.monitor.azure.com`) |
+| `AZURECLAW_AUDIT_AZMON_DCR_ID` | Immutable ID of the Data Collection Rule (`dcr-…`) |
+| `AZURECLAW_AUDIT_AZMON_STREAM` | Custom stream name on the DCR (e.g. `Custom-AzureClawAudit_CL`) |
+
+The sandbox UAMI needs **Monitoring Metrics Publisher** on the DCR.
+
+Wire shape (one JSON object per row in the array body):
+
+```json
+{
+  "TimeGenerated": "2026-05-13T12:34:56.789Z",
+  "sandbox": "demo",
+  "seq": 42,
+  "agent_id": "agent-1",
+  "action": "tool.foundry.memory.search",
+  "decision": "allow",
+  "prev_hash": "…",
+  "hash": "…"
+}
+```
+
+The typed `McpServer.spec.auditSink` CRD field (replacing env-var
+bootstrap) is deferred to **Slice 4d** alongside the plural McpServer
+migration so the CRD shape and the plural namespacing land together.
+
+### Slice 4b — `azureclaw audit tail` CLI (DoD #7)
+
+Slice 4a wrote a durable JSONL audit log to
+`/var/log/azureclaw/audit/{YYYY-MM-DD}.jsonl` inside the
+`inference-router` container. Slice 4b gives operators a first-class
+way to read it — no port-forward, no `kubectl exec` incantation
+memorisation, no jq pipelines on a 50 KB-line file.
+
+What this PR adds:
+
+- New `cli/src/commands/audit.ts` — `azureclaw audit tail <sandbox>`
+  shells into the sandbox pod's `inference-router` container and
+  `tail`s the day-keyed JSONL file. Supports `--follow` for live
+  streams, `--lines N` (cap 10000), `--decision`, `--agent`,
+  `--action` substring filters, `--date YYYY-MM-DD` for historical
+  files, `--json` for machine-readable output, and `--dir` to
+  override the in-pod audit directory when the operator has changed
+  `AZURECLAW_AUDIT_DIR`.
+- Pretty render colours by decision (`allowed`/`success` green,
+  `denied`/`flagged`/`rejected` red, `sanitized` yellow); truncates
+  long agent_ids and actions with `…`; aligns columns for grep.
+- `--date` input is regex-validated (`^\d{4}-\d{2}-\d{2}$`) before
+  the shell escape — shell-metacharacter attempts via `--date` are
+  rejected at the CLI boundary.
+- Wired into `cli.ts` under the Observability command group
+  (`trace`, `eval`, `operator`, `audit`).
+- 26 new vitest cases cover line parsing, filter combinations,
+  date-key validation, lines bounds, pretty rendering, and graceful
+  handling of malformed input lines (the tail keeps going).
+
+**DoD coverage:** Slice 4 DoD #7 satisfied. Remaining 4b deferrals
+(historical multi-day search, jq-friendly raw-row alias) tracked
+under Slice 4c.
+
+### Slice 4a — durable JSONL audit sink (DoD #4)
+
+The router's audit chain has always been an in-memory `Vec<AuditEntry>`
+(via `agentmesh::AuditLogger`). On router restart, every audit row was
+lost — fine for the hash-chain receipt embedded in each response, but
+unworkable for the operator-facing audit story Slice 4 demands
+(`azureclaw audit tail`, remote sinks). This slice closes DoD #4 by
+mirroring every chain entry to a sandbox-local JSONL file as a
+side-effect of the existing `audit.log()` call.
+
+What this PR adds:
+
+- `inference-router/src/audit_jsonl.rs` — `JsonlAuditWriter` with
+  per-date file rotation (`{date_key}.jsonl`, date key derived from
+  the entry's RFC 3339 timestamp), `O_APPEND` writes (atomic for
+  lines ≤ `PIPE_BUF`), and graceful degrade when the directory is
+  not writable. 8 unit tests.
+- `Governance::audit_log(...)` helper — single chokepoint that
+  records into the in-memory chain *and* mirrors to JSONL. All 9
+  production callsites in `governance/mod.rs`,
+  `governance/trust_ops.rs`, and `providers/audit_impl.rs` go
+  through it. The handful of test-only `audit.log(...)` calls
+  remain direct.
+- New env var `AZURECLAW_AUDIT_DIR` (default
+  `/var/log/azureclaw/audit`, set to literal `"disabled"` to
+  short-circuit in tests).
+- JSONL failures degrade to warn-level logs — the audited request
+  is never denied because the disk filled up.
+
+Out of scope for 4a (queued for 4b / 4c):
+
+- `azureclaw audit tail` CLI subcommand → Slice 4b.
+- Remote audit sinks (Azure Monitor, Loki, Storage) →
+  Slice 4c.
+- McpServer plural migration + per-server JWKS + namespaced
+  tools → Slice 4d.
+
+### Slice 2 DoD #6 — sub-agent parent-label inheritance
+
+When a parent `ClawSandbox` spawns a sub-agent (via the router's
+`/spawn` endpoint or via `handoff`), the spawned sub-agent now
+inherits the parent's `metadata.labels` so operators can
+`kubectl get clawsandbox -l tier=prod` and see the parent and
+every descendant in one shot — without walking the
+`azureclaw.azure.com/parent` annotation graph by hand. Closes
+Slice 2 DoD #6.
+
+What this PR adds:
+
+- `inference-router/src/spawn/mod.rs`: new pure helper
+  `inherit_parent_labels(&BTreeMap<String,String>) ->
+  BTreeMap<String,String>` filters out azureclaw-controlled label
+  keys (`azureclaw.azure.com/*` and `app.kubernetes.io/*`) before
+  handing the parent's user labels through to the child. The
+  filter is essential — re-stamping `azureclaw.azure.com/parent`
+  from the parent's own labels would lie about the child's
+  lineage.
+- New builder `build_sub_agent_crd_with_labels` takes
+  `parent_labels: &BTreeMap<…>` and seeds the child's label map
+  from `inherit_parent_labels(parent_labels)`. Spawn-tracking
+  labels (`parent`, `spawned-by`, `predecessor`) are stamped
+  *last*, so they always win on collision and the child's lineage
+  cannot be spoofed by the parent's user labels.
+- `create_sandbox()` now `api.get(parent_name).await`s the parent
+  CR, extracts `metadata.labels`, and passes them to the new
+  builder. Best-effort: if the fetch errors (RBAC, transient API
+  hiccup), we log a warn and fall back to an empty map. Spawn
+  always succeeds — inherited labels are operator quality-of-life,
+  not a governance gate.
+- 5 unit tests covering: filter behaviour (azureclaw keys
+  dropped), regular spawn inheritance, handoff-path inheritance
+  (the alternate label-stamping branch in the same builder),
+  collision precedence (spawn-tracking wins), and the
+  empty-labels noop (pinning the exact label count so any future
+  default label addition trips a test).
+
+The old `build_sub_agent_crd` thin wrapper was removed entirely
+— principles.md §5 forbids no-op scaffolding. Test call sites
+now use `build_sub_agent_crd_with_labels(..., &BTreeMap::new())`
+directly.
+
+### Slice 2 DoD #7 — `inference_policy_digest` on every audit log emission
+
+Every inference-path audit log emitted from the router now carries
+`inference_policy_digest = <hex>` as a structured tracing field, so
+forensics can map a denial / budget-reject / content-safety-floor
+violation back to the exact `InferencePolicy` snapshot the router
+was operating on at the time. Closes Slice 2 DoD #7.
+
+What this PR adds:
+
+- `routes/chat_completions.rs`: snapshot `InferencePolicy` moved
+  above the AGT denial check (was below), so the AGT deny warn,
+  the budget-exceeded warn, the perRequestTokens reject warn, the
+  buffered `contentSafety` floor warn, the streaming `contentSafety`
+  floor warn (digest cloned into the `move` closure), the
+  post-response per-request-limit warn, and the output-policy deny
+  warn all carry `inference_policy_digest` alongside `decision`
+  and `gate` fields under `target: "inference.audit"`.
+- `routes/inference.rs`: same treatment for `responses()`. Snapshot
+  hoisted above the AGT denial branch; the new budget-exceeded
+  audit warn (was previously silent — the handler returned 429
+  without a tracing line) and the per-request "Responses API
+  request" info line both carry the digest.
+- No new dependency on `tracing-test`. The fields are emitted to
+  every subscriber attached to the `inference.audit` target —
+  asserted indirectly by the existing 784 router lib tests + 3
+  failover walk integration tests staying green.
+
+What this PR intentionally does not do:
+
+- No change to the wire format of any handler response — only
+  observability surface.
+- No new structured-log subscriber config in the Helm chart. The
+  `inference.audit` target is reachable from the default
+  tracing-subscriber pipeline (env-filter `info,inference.audit=info`
+  works out of the box); operators wanting to ship audit JSON to a
+  separate sink can add a per-target layer in a follow-up slice.
+- No change to the governance hash-chain `audit.log()` path —
+  that's a separate audit surface (handoff routes only) and is
+  already tamper-evident.
+
+### Slice 3c.1 — Router-side auto-provision Foundry Memory Store on 404
+
+When a `foundry.memory.{search,update}` MCP call hits a Foundry
+Memory Store that does not exist yet, the router now auto-provisions
+it transparently and retries the original call exactly once. This
+closes Slice 3 DoD #2 ("Router auto-provisions on 404") and turns
+the common "fresh ClawMemory CR, no store created yet" case from a
+Degraded condition into a self-healing first request.
+
+What this PR adds:
+
+- `PlatformDispatcher::ensure_memory_store(&self, store_id) -> EnsureOutcome` —
+  POSTs `/memory_stores` with the same body shape the openclaw runtime
+  uses in `ensureMemoryStore` (kind `default`, chat_model from
+  `OPENCLAW_MODEL` env default `gpt-4.1`, embedding_model
+  `text-embedding-3-small`, full options block enabled).
+- `EnsureOutcome { Ready, AuthFailed(u16), Failed }` — internal enum
+  pinning the three observable provisioning outcomes.
+- `memory()` 404 branch restructured: on `Some(404)`,
+  - `Ready` (2xx or 409 idempotent-exists) → retry original call;
+    on non-404 retry, return that envelope and do not record any
+    error on `PolicyKind::Memory`.
+  - `AuthFailed(401|403)` → record `AuthMisconfigured:` against the
+    POST `/memory_stores` path (controller pre-scan elevates
+    `Degraded=True / reason=AuthMisconfigured`).
+  - `Failed` (transport, 5xx, other 4xx) → fall through to existing
+    `MemoryStoreMissing:` record path so the operator still gets a
+    signal.
+
+Five new tests in `mcp/platform.rs::tests` cover: 404 → 201 → retry
+success, 404 → 409 → retry success, 404 → 403 → AuthMisconfigured,
+404 → 500 → MemoryStoreMissing fallthrough, and an initial 200
+skipping the ensure path entirely. Total router lib tests: 784 (+5).
+
+The wire contract back to the controller is unchanged: same prefix
+strings (`AuthMisconfigured:`, `MemoryStoreMissing:`) on the same
+`PolicyKind::Memory` entry. The `claw_memory_reconciler` pre-scan
+keeps working without modification. The new path is **transparent**
+— successful auto-provision leaves no trail on the CRD, which is
+the correct surface (the store now exists; nothing for the operator
+to fix).
+
+### Slice 2-/3-hot-reload — InferencePolicy + ClawMemory loaders watch their mount dirs
+
+Closes the long-running gap where the InferencePolicy
+(`inference_policy_loader::load_and_install`) and ClawMemory
+(`memory_binding_loader::load_and_install`) loaders were one-shot at
+router startup. After the initial load, the file on disk could change
+(operator `kubectl edit`s the CR, controller recompiles and rewrites
+the ConfigMap, kubelet refreshes the projected mount) and the router
+would happily keep echoing the **first** digest forever — the
+controller-side `/internal/policy-status` echo loop would never close
+`Compiled → Ready` for any change after the first reconcile.
+
+What this PR adds:
+
+- `inference_policy_loader::spawn_inference_policy_watcher(dir, registry, handle)` —
+  background `tokio` task that polls `dir`'s max-mtime every
+  `INFERENCE_POLICY_WATCH_INTERVAL` seconds (default 5s) and re-invokes
+  `load_and_install` whenever a change is detected.
+- `memory_binding_loader::spawn_memory_binding_watcher(dir, registry, handle)` —
+  same shape; env knob `MEMORY_BINDING_WATCH_INTERVAL`. Closes
+  **Slice 3 DoD #4** ("kubectl edit rotates the digest; router
+  reloads within 5s") explicitly; **Slice 2 DoD #1** ("`Ready` after
+  router echo") implicitly (the echo loop now actually closes on
+  every change, not just the first).
+- `load_and_install` semantics tightened in both loaders:
+  - `Loaded` → handle overwritten with new value (unchanged).
+  - `NoBinding` / `NoPolicy` → handle **cleared**. Removing
+    `spec.memoryRef` / `spec.inferenceRef` from a `ClawSandbox` now
+    actually unbinds the in-memory state on the next tick (instead
+    of the router pretending the policy is still in effect until the
+    pod restarts).
+  - `Error` → handle **left intact**. A transient parse error during
+    a partial mount update must not knock the data plane offline; the
+    registry already captured the error so the echo loop notices the
+    digest is stale.
+- Both watchers wired in `main.rs` after `governance::spawn_policy_watcher`.
+  Best-effort: missing directory is fine (mount may appear later when
+  the operator adds the CR reference).
+- 5 new memory_binding_loader unit tests (clear-on-NoBinding,
+  preserve-prior-on-Error, two `dir_max_mtime` shape tests, and a
+  full watcher integration test that crank-runs the watcher with a
+  1s interval, mutates the file, and asserts the digest in the
+  handle rolls forward).
+- 779 router lib tests (+5 — the new mem-binding tests; the
+  inference_policy_loader changes are exercised by the same
+  watcher pattern and tested at integration level via the
+  policy-status echo route).
+
+No CR shape change. No new env vars required for production (5s
+default ticks at exactly the Slice 3 DoD SLO). Other watchers
+(`Governance::spawn_policy_watcher`) untouched.
+
+### Slice 3b.5 — `MemoryStoreMissing` Degraded condition for ClawMemory
+
+When the upstream Foundry Memory Store returns HTTP 404 on a
+`foundry.memory.{search,update}` call — the bound store does not
+exist on the Foundry account yet — the controller now elevates the
+ClawMemory status to `Degraded=True / reason=MemoryStoreMissing /
+Ready=False`. Today the openclaw runtime auto-creates stores lazily
+on first sync via `ensureMemoryStore`, but until that fires any
+direct router-side `foundry.memory.*` call against a fresh
+ClawMemory will 404, and operators need to know. Slice 3c.1 will
+ship router-side auto-provision at binding install, retiring this
+surface.
+
+- New reason constant `reason::MEMORY_STORE_MISSING` + shared wire
+  prefix `MEMORY_STORE_MISSING_PREFIX = "MemoryStoreMissing:"` in
+  `controller/src/status/conditions.rs`. Lives next to the Slice
+  3b.4 `AuthMisconfigured` siblings.
+- `claw_memory_reconciler` factors the auth-misconfigured detector
+  and the new missing-store detector through a shared
+  `first_prefixed_memory_error` helper. Both pre-scan
+  `find_last_error("Memory")` for the prefix and emit a
+  deterministic `"<sandbox>: <error>"` message with multi-hit tail.
+- Precedence in the reconcile pre-scan: `AuthMisconfigured` first,
+  `MemoryStoreMissing` second. RBAC dominates — if we can't read
+  the store, a 404 is not trustworthy as a "missing" signal.
+- Router-side producer in `inference-router/src/mcp/platform.rs::memory()`:
+  on `Some(404)` from the upstream, records
+  `MemoryStoreMissing:` prefixed `last_error` against
+  `PolicyKind::Memory`. 5xx/429 remain unrecorded (transient).
+  `record_error` preserves the prior digest as before.
+- 6 new controller tests (5 detector + 1 build_conditions) and 3
+  new router wiremock tests covering the 404 producer hook and the
+  no-handle legacy path. Controller 549 (+6), router lib 774 (+3).
+
+### Slice 3b.4-producer — router records `AuthMisconfigured:` on Foundry Memory Store 401/403
+
+Closes the wire contract opened in Slice 3b.4. The inference router's
+`foundry.memory.{search,update}` MCP tool now records an
+`AuthMisconfigured:` prefixed `last_error` on the `Memory` policy
+kind when the upstream Foundry Memory Store returns HTTP 401 or 403.
+The controller's Slice 3b.4 consumer-side scan then elevates the
+ClawMemory status to `Degraded=True / AuthMisconfigured`.
+
+- `PlatformDispatcher` gains an optional
+  `policy_status: Arc<PolicyStatusRegistry>` handle wired via a new
+  `with_policy_status` builder. When absent (e.g. legacy unit tests),
+  the producer hook is a silent no-op — additive only.
+- `post_json` and `envelope` are now thin wrappers over new
+  `*_with_status` variants that return `(Option<u16>, ToolCallOutput)`.
+  `None` status means a transport error (DNS/TCP/TLS/serialise) that
+  cannot be classified as auth.
+- Only HTTP 401 and 403 trigger the recording. 5xx and 429 are
+  transient and would over-promote a brief outage to a hard Degraded;
+  they remain unrecorded.
+- `PolicyStatusRegistry::record_error` already preserves the prior
+  entry's `digest` (only `last_error` updates), so the producer hook
+  does not wipe the `Memory` digest the controller is comparing
+  against in `decide_enforcement_state`. The controller's pre-scan
+  elevates `Degraded` before checking enforcement state, so a digest
+  match (Confirmed) is correctly overridden.
+- `McpRouteState::platform` now takes
+  `(memory_binding, policy_status)` and `build_platform_mcp_router`
+  threads the registry through from `main.rs`.
+- 5 new wiremock tests in `mcp/platform.rs` cover the 403/401/500/200
+  matrix and the legacy no-handle path. 771 router lib tests
+  (was 766).
+
+### Slice 3b.4 — `AuthMisconfigured` Degraded condition for ClawMemory
+
+When a referencing sandbox's router reports an upstream authentication
+failure on the compiled ClawMemory binding (today: Foundry Memory Store
+returning 403 on `foundry.memory.{search,update}` because the
+project MI is missing `Azure AI User` on the resource group — see the
+`azureclaw-deployment` skill notes), the controller now elevates the
+status to `Degraded=True / reason=AuthMisconfigured / Ready=False`
+instead of folding it into a generic
+`Awaiting / AwaitingRouterEnforcement` message. Auth misconfigs are
+not transient digest gaps; operators need a clear pointer at RBAC.
+
+- New reason constant `reason::AUTH_MISCONFIGURED` and shared
+  wire-prefix `conditions::AUTH_MISCONFIGURED_PREFIX = "AuthMisconfigured:"`
+  in `controller/src/status/conditions.rs`. The prefix is the
+  producer↔consumer wire contract: routers prepend it to
+  `PolicyStatusRegistry::record_error` messages on the `Memory`
+  policy kind, the controller scans for it on the
+  `/internal/policy-status` echo.
+- `claw_memory_reconciler::first_auth_misconfigured_message` is a
+  pure helper over `&[(String, Result<PolicyStatusResponse,
+  ConfirmError>)]` that scans **before** `decide_enforcement_state`
+  collapses per-sandbox structure into the aggregated Awaiting
+  message. Returns a deterministic `"<sandbox>: <error>"` (with a
+  trailing `(+N more sandbox(es) affected)` when multiple). Skips
+  unrelated `last_error` strings and other policy kinds.
+- Pre-scan runs in `reconcile` after `poll_referencing_sandboxes`;
+  on hit, `degraded = Some((reason::AUTH_MISCONFIGURED, msg))` and
+  the enforcement state short-circuits to `NotApplicable`, which
+  flows naturally through the existing `build_conditions` degraded
+  branch (Ready=False, Degraded=True, Progressing=False/Failed).
+- Controller-side only — the router-side producer (emitting the
+  `AuthMisconfigured:` prefix from the Foundry 403 path in
+  `mcp/platform.rs::post_json`) is a future slice. The contract is
+  pinned now so both sides land additively when the producer ships.
+- 5 new reconciler unit tests: detector returns `None` on clean polls,
+  ignores non-prefixed errors, ignores other policy kinds, returns the
+  first-match with multi-hit annotation, and skips failed polls. Plus
+  a `build_conditions` test asserting the final condition shape.
+
+Verified: 543 controller tests pass (+5 from 538 prior), clippy
+`-D warnings` clean across workspace, fmt clean.
+
+### Slice 3b.3 — `foundry.memory` MCP tool reads ClawMemory binding
+
+The first **real consumer** of the Slice 3a ClawMemory binding: when
+a sandbox attaches a `ClawMemory` via `spec.memoryRef`, the compiled
+binding's `store_name` now wins over the chart-fed
+`FOUNDRY_MEMORY_STORE_ID` env on every `foundry.memory.{search,update}`
+call. CRD is the source of truth; env stays as the backward-compatible
+fallback for sandboxes without `spec.memoryRef`.
+
+- `PlatformDispatcher` gains an optional
+  `memory_binding: LoadedMemoryBindingHandle` field +
+  `with_memory_binding(handle)` builder +
+  `effective_memory_store_id()` resolver. `foundry.memory` calls
+  switched from `self.memory_store_id` direct to the resolver.
+- Resolver precedence: binding loaded with non-empty `store_name` →
+  use binding; otherwise (no handle, no binding loaded, empty/whitespace
+  `store_name`) → fall back to env-fed `memory_store_id`. Other 8
+  Foundry tools are unaffected.
+- `McpRouteState::platform(memory_binding)` and the
+  `build_platform_mcp_router` helper in `main.rs` now thread the
+  handle from `AppState.memory_binding` (clone before `with_state`)
+  into the dispatcher. The handle is the same `Arc<RwLock<…>>` the
+  Slice 3a loader writes into, so a controller-driven re-mirror
+  flips routing on the very next request without restarting the
+  dispatcher.
+- Three new dispatcher tests:
+  `memory_binding_store_name_overrides_env_store_id`,
+  `memory_empty_binding_store_name_falls_back_to_env`,
+  `memory_without_binding_handle_uses_env_store_id`. All against
+  `wiremock`. Lib tests now 766 (+3 above Slice 3b.2 baseline 763).
+
+No CRD/Helm/controller change. Pure router-side consumer of the
+binding contract Slice 3a published.
+
+### Slice 3b.2 — ClawMemory no-inherit invariant for sub-agent spawn
+
+Pins the design rule that ClawMemory bindings are scoped to the agent
+that declared them: a parent's `spec.memoryRef` MUST NOT propagate
+onto sub-agents created via `inference-router/src/spawn` (regular
+spawn or handoff). Today this holds by construction — `SpawnRequest`
+has no `memory_ref` field and `build_sub_agent_crd` writes no
+`spec.memoryRef` key — but it was an implicit invariant. This slice
+makes it explicit:
+
+- Doc comment above `build_sub_agent_crd` calls out the no-inherit
+  rule and points at the test that enforces it.
+- New test `sub_agent_crd_never_inherits_memory_ref` exercises both
+  the regular spawn path and the handoff path and asserts that
+  `spec.memoryRef` and `spec.governance.memoryRef` are absent on the
+  built CRD. A future field addition can't silently break the
+  invariant.
+
+No producer/consumer behaviour change. Pure invariant-pinning slice.
+
+### Slice 3b.1 — ClawMemory operator UX (inspect CLI + Headlamp panel)
+
+Operator-facing surface for the §3 echo loop closed in Slice 3a. The
+producer-side facts (`compiledDigest`, `loadedDigest`, `Ready` reason)
+now light up where operators already look:
+
+* `azureclaw inspect <sandbox>` — the `Memory` wire kind now maps to
+  the user-facing display label `ClawMemory` (was the stale planning
+  name `MemoryStore`). The tree groups Memory entries under their own
+  header next to `ToolPolicy` and `InferencePolicy`.
+* Headlamp plugin `RouterPolicyStatusPanel` — now renders for
+  `clawmemories` (in addition to `toolpolicies` + `inferencepolicies`),
+  surfacing the compiled/loaded digest pair and the `Ready` reason
+  chip. Zero new API traffic — pure read of fields the controller
+  already writes in Slice 3a.
+
+### Slice 3a — ClawMemory router-echo
+
+Closes principles.md §3 ("Ready ⇔ router echo") for the third CRD
+(after ToolPolicy in 1c and InferencePolicy in 2a). Same shape: the
+controller compiles the binding to a ConfigMap, mirrors it into each
+referencing sandbox namespace, mounts it onto the inference-router at
+`/etc/azureclaw/memory/binding.json`, and only promotes
+`phase=Compiled → Ready` once every router echoes the matching digest
+via `GET /internal/policy-status`. Digest-echo only — Foundry Memory
+Store auto-provision + AuthMisconfigured + no-inherit + signed
+`bundleRef` are deferred to Slice 3b/3c.
+
+**Controller (`azureclaw-controller`)**
+
+* `crd.rs` — new `spec.memoryRef: Option<LocalObjectRef>` on
+  `ClawSandboxSpec`; sibling reference, same-namespace only.
+* `claw_memory_compile.rs` — new `MEMORY_BINDING_FILENAME = "binding.json"`
+  + `canonical_bytes_for_digest` + `claw_memory_digest` (length-prefixed
+  sha256 matching the router byte-for-byte; cross-validated by golden
+  vectors). The ConfigMap data key is `binding.json` and the bytes are
+  exactly what the digest covers.
+* `claw_memory.rs` — `ClawMemoryStatus` gains `compiledDigest` and
+  `loadedDigest` (`Option<String>`). The former is the digest the
+  controller published; the latter is what the router last echoed —
+  populated only in the `Confirmed` branch.
+* `claw_memory_reconciler.rs` — full rewrite around the
+  `RouterEnforcementState` enum (`NotApplicable`, `NoSandboxesReferencing`,
+  `Awaiting`, `Confirmed`). `decide_enforcement_state(&compiled, "Memory", &results)`
+  drives phase + conditions; `Compiled→Ready` only fires on `Confirmed`.
+  ConfigMap write stamps annotation `azureclaw.azure.com/claw-memory-digest`.
+  `PolicyNotEnforced` Warning event now fires only while truly awaiting
+  (stops the moment confirmed — no more eternal noise; matches Slice 1c
+  honesty bar). 8 new unit tests.
+* `reconciler/mod.rs` — new ClawMemory mirror+mount block after the
+  InferencePolicy block, gated by `spec.memoryRef`. Mirrors the compiled
+  ConfigMap into the sandbox namespace, mounts onto the
+  `inference-router` container at `paths::MEMORY_BINDING_DIR`, sets env
+  `MEMORY_BINDING_DIR`. Fail-open at mount layer (mount is optional).
+* `reconciler/governance_mounts.rs::paths` — new `MEMORY_BINDING_DIR = "/etc/azureclaw/memory"`
+  constant (matches router default).
+
+**Router (`inference-router`)**
+
+* `policy_status.rs` — new `PolicyKind::Memory` variant
+  (`as_str() = "Memory"`).
+* `memory_binding_loader.rs` (new, ~340 lines) — mirror of
+  `inference_policy_loader.rs` stripped to digest-echo. Reads
+  `/etc/azureclaw/memory/binding.json`, parses optional `storeName` +
+  `scope`, registers digest under `PolicyKind::Memory`. Hot-reload via
+  the existing 5-second mtime poller. 11 unit tests (tempfile fixtures
+  + golden-vector cross-validation against the controller's
+  `claw_memory_digest`).
+* `routes/mod.rs` — `AppState.memory_binding: LoadedMemoryBindingHandle`
+  field; loader installed at startup right after the InferencePolicy
+  loader.
+
+**Helm**
+
+* `crd-clawmemory.yaml` regenerated to include the new
+  `compiledDigest` + `loadedDigest` status fields.
+* `crd.yaml` (hand-maintained) — added `spec.memoryRef` schema with
+  same-namespace CEL validation matching `spec.inferenceRef`.
+
+**Tests**
+
+* 8 new controller unit tests (build_conditions truth table, error
+  classification, RFC3339, field manager).
+* 11 new router unit tests (loader happy path, missing file, malformed
+  JSON, byte-identical digest cross-validation with controller).
+* 2 new integration tests in `tests/policy_status_endpoint.rs`
+  exercising the `PolicyKind::Memory` variant end-to-end through the
+  axum stack.
+* 14 helm_drift tests green (including the new `compiledDigest` /
+  `loadedDigest` shapes).
+
+**Deferred to Slice 3b/3c** (per principles.md §5):
+
+* Foundry Memory Store auto-provision on first reconcile.
+* `AuthMisconfigured` condition for 403 from Memory Store (the
+  project-MI vs AI-Services-MI dance documented in the repo skill).
+* Sub-agent no-inherit rule (memory bindings must not flow through
+  `handoff` spawn).
+* Signed `bundleRef` path (needs the Slice 1c signing infra
+  generalised).
+* MCP `foundry.memory.*` tool rewire from env-fed
+  `FOUNDRY_MEMORY_STORE_ID` to per-policy lookup.
+* `azureclaw inspect` panel + Headlamp UI panel for ClawMemory (mirrors
+  Slice 1d / 1d.2 for ToolPolicy + InferencePolicy).
+
+### Slice 2d.2 — health-aware `modelPreference.fallback[]` failover
+
+Slice 2d.1 added the single-shot deployment override. Slice 2d.2 closes
+the loop: when the primary deployment returns 5xx / 429, the router now
+walks `policy.modelPreference.fallback[]` in order, skipping deployments
+already marked unhealthy, and returns the first 2xx response. All
+within the same Foundry/AOAI client at process start — same-provider,
+deployment-swap only. Cross-provider failover is intentionally
+deferred (one inference provider per process today).
+
+**Router (`inference-router`)**
+
+* `deployment_health.rs` (new) — `DeploymentHealthRegistry` with
+  per-deployment atomic streak counters. 3-strike default with a 60s
+  window: three consecutive failures within 60s mark a deployment
+  unhealthy; a single success resets. Sticky `first_failure_at_ms`
+  anchor + saturating `u8` increment keep the streak well-defined
+  under sustained outages. `RwLock<HashMap>` read path + `Arc<DeploymentHealth>`
+  with atomics — no `dashmap` dep.
+* `failover.rs` (new) — `forward_with_failover` walker. Builds the
+  candidate list (`primary, fallback[…], upstream-default`, dedup,
+  empty-skip, always non-empty), tries each in order, calls
+  `proxy::forward` per attempt, records success/failure into the
+  registry. Returns the first non-retry-worthy result (2xx, 4xx
+  non-429, or transport error after all candidates exhausted).
+  When every candidate is currently marked unhealthy, the walker
+  punches through with the first one anyway so the agent receives a
+  real upstream response rather than a synthetic 503.
+* `routes/inference.rs` (Responses handler) and
+  `routes/chat_completions.rs` (buffered branch) — refactored to call
+  `forward_with_failover` instead of the Slice 2d.1
+  `apply_model_preference_override` + `proxy::forward` pair. Streaming
+  + anthropic_messages + embeddings + images_generations remain on the
+  single-shot override (failover for streaming requires status-gated
+  retry before first SSE byte — deferred to Slice 2d.3).
+* `routes/mod.rs` — new `AppState.deployment_health: Arc<DeploymentHealthRegistry>`
+  field, single instance per process.
+* `routes/internal.rs` — `GET /internal/policy-status` response gains
+  an additive `deployment_health: Vec<DeploymentHealthSnapshot>` field
+  (additive within `schema_version: 1`; clients ignoring it work
+  unchanged). Lets the controller, `azureclaw inspect`, and the
+  Headlamp panel see fallback activity without scraping request logs.
+* Audit logging: a single `tracing::warn!` per failover transition
+  (`from`, `to`, `status`, `digest`, `sandbox`) keeps activity visible
+  in router stdout without flooding on healthy hot paths.
+
+**Tests**
+
+* `deployment_health.rs` — 9 unit tests (unknown / below-threshold /
+  threshold / recovery / window-expiry / isolation / saturation /
+  anchor-stickiness / snapshot).
+* `failover.rs` — 9 unit tests covering the 5xx/429 classifier and
+  candidate-list construction (dedup, empty-skip, primary-first
+  ordering, fallback safety net).
+* `tests/failover_walk.rs` (new) — 3 integration tests with a branching
+  axum upstream that dispatches on the `model` field per request:
+  primary-503-falls-through-to-fallback-200; pre-unhealthy primary is
+  skipped; all-unhealthy still punches through.
+* `tests/policy_status_endpoint.rs` — 2 new tests assert the
+  `deployment_health` field surfaces correctly (populated + empty).
+* `tests/agt_governance_integration.rs`, `tests/egress_blocked_endpoint.rs`,
+  `tests/policy_status_endpoint.rs` — `AppState` initializers gain the
+  new `deployment_health` field.
+
+**Producer→consumer wire (principles.md §3)**
+
+Slice 2a's `InferencePolicy` digest already covers the
+`modelPreference` block byte-for-byte, so the existing
+Compiled → Ready echo gate remains the authoritative correctness
+signal. Slice 2d.2 only *adds* runtime health snapshots to the response
+envelope — the digest contract is untouched.
+
+**Deferred (Slice 2d.3 candidate)**
+
+* Streaming + anthropic_messages failover. Needs status-gated retry
+  before the first SSE byte hits the wire; non-trivial in the current
+  `forward_stream` shape.
+* Cross-provider client registry (one Foundry + one AOAI client at
+  process start today). Out of scope until a real consumer requests it.
+
+---
+
+### Slice 1e §2 — remove bundled `AGT_POLICY_PROFILE` env-var fallback
+
+Phase 2 of Slice 1e closes the deprecation window opened in phase 1 and
+makes `ToolPolicy.spec.agtProfile.inline` the *only* AGT policy source.
+With no live deployments yet, no soft-fail window is needed — missing
+inline now degrades the reconcile with `SpecInvalid`.
+
+**Controller**
+
+* `reconciler/mod.rs` — drop the bundled-profile fallback. If a
+  resolved ToolPolicy lacks `spec.agtProfile.inline`, the sandbox is
+  marked `Degraded / SpecInvalid` (was previously a soft warning that
+  fell back to a profile bundled into the sandbox image).
+* `reconciler/mod.rs` — stop pushing `AGT_POLICY_PROFILE` into the
+  sandbox env at the two former mount points.
+* `status/conditions.rs` — remove `TYPE_BUNDLED_PROFILE_IN_USE`
+  condition type, `BUNDLED_PROFILE_FALLBACK` reason, and the two
+  associated unit tests. The condition is no longer reachable.
+* `mesh_peer/offload.rs` — embed the offload-tier profile at compile
+  time via `include_str!("../../../cli/profiles/agt/azureclaw-offload.yaml")`
+  and inline it into the auto-minted ToolPolicy when honouring a
+  cross-tenant offload request. One source of truth shared with the
+  CLI; no duplication.
+* `crd.rs`, `tool_policy.rs` — rustdoc refreshed: ConfigMap name suffix
+  `toolpolicy-<name>-profile`, AGT reads only from the mount, legacy
+  env-var path documented as removed.
+
+**Sandbox image**
+
+* `entrypoint.sh` — collapse the AGT_POLICY_DIR resolution block to the
+  happy-path-only mount check at `/etc/agt/policies/agt-profile.yaml`;
+  remove the `AGT_POLICY_PROFILE` elif branch entirely.
+* `Dockerfile` (sandbox + controller) — drop the `COPY cli/policies/`
+  step; bundled profiles are no longer baked into images.
+
+**CLI**
+
+* `cli/policies/` moved to `cli/profiles/agt/` to match the existing
+  `cli/profiles/seccomp/` layout; covered by the existing
+  `cp -r profiles dist/profiles` build step.
+* `refs.ts` — new `loadAgtProfile(profile)` helper resolves
+  `azureclaw-<profile>.yaml` from either the `dist/` or `src/` profile
+  directory (depending on how the CLI is invoked). Falls back to
+  `default` on unknown profile names with a console warning; throws a
+  clear error if the assets directory is missing entirely.
+* `refs.ts::buildToolPolicy`, `commands/handoff.ts`, and
+  `migrate/from_kagent.ts` — every CLI-minted ToolPolicy now populates
+  `spec.agtProfile.inline` via `loadAgtProfile()`. The
+  `azureclaw.azure.com/profile` annotation is written unconditionally.
+* `tests/e2e-manual/scenarios/cross_runtime_mesh.sh` and
+  `tests/e2e-manual/scenarios/agt_mesh.sh` — ToolPolicy heredocs gained
+  a minimal allow-all `agtProfile.inline` so they remain reconcilable
+  post-phase-2 (those scenarios exercise mesh wire-up, not per-tool
+  governance).
+
+**Helm**
+
+* `crd-toolpolicy.yaml` regenerated from the updated rustdoc via the
+  `DUMP_TOOLPOLICY_CRD_YAML=1` workflow documented at the top of the
+  file. `helm_drift::tests::helm_toolpolicy_crd_matches_rust_schema`
+  is back to green.
+* `crd.yaml` (ClawSandbox — hand-maintained, no drift check) prose
+  updated for `toolPolicyRef` to drop the stale `AGT_POLICY_PROFILE`
+  mention.
+
+**Behavioural surface**
+
+* No live deployments → no soft-fail / `Compiled-but-not-Ready` window
+  was needed. Hard-fail on missing inline keeps the policy-point story
+  honest: every sandbox either has an explicit policy or doesn't run.
+* Sub-agent spawn is unaffected — `inference-router/src/spawn/mod.rs`
+  references the parent's ToolPolicy by name (`{parent}-toolpolicy`)
+  rather than minting a new CR, so children inherit the parent's
+  profile automatically.
+
+### Slice 5 §7 — docs reframe: router is the policy point, NetworkPolicy + egress-guard are safety nets
+
+Closes one of the eight Slice 5 sub-items (the only one in that slice
+that can ship as a no-code-change PR). Reframes user-facing
+documentation so the conceptual model matches what the code actually
+does:
+
+* **Policy point** = `inference-router` — every byte that leaves the
+  pod is matched against the egress allowlist by the router.
+* **Safety nets** = the K8s `NetworkPolicy` generated per sandbox
+  and the `egress-guard` iptables init container. They limit blast
+  radius if the router process is bypassed or compromised. They do
+  not *decide* what is allowed.
+
+Files reframed:
+
+* `README.md` — ASCII diagram caption, "no network of its own"
+  paragraph, dev-vs-prod isolation table row.
+* `docs/architecture.md` — prod-mode bullet list under
+  "Pod shape" + "Isolation"; the data-path-of-one-external-call
+  numbered list.
+* `docs/egress-proxy.md` — "two enforcement points" → "one
+  enforcement point + one safety net"; "Layer 1 (kernel)" and
+  "Layer 2 (application)" relabelled "Layer 1 (safety net)" and
+  "Layer 2 (the policy point)" with admonitions.
+
+Aligns with the framing already locked in
+`docs/internal/crd-well-oiled-machine/principles.md` §7 (the rest of
+Slice 5 — `EgressApproval` CRD, `BlockedBuffer` surfacing CLI/plugin,
+mode unification — remains queued; each needs its own producer→
+consumer loop and doesn't fit a single overnight PR).
+
+### Slice 1e (phase 1) — `BundledProfileInUse` deprecation condition
+
+Surfaces the deprecated bundled `AGT_POLICY_PROFILE` env-var
+fallback as a Kubernetes status condition on `ClawSandbox` CRs, so
+operators see it in `kubectl describe` / Headlamp / dashboards
+rather than only as a one-line warning buried in entrypoint logs.
+
+**Detection logic** (controller): `governance.enabled=true`,
+`toolPolicyRef` resolves, but the referenced `ToolPolicy` has no
+`spec.agtProfile.inline` (or it's whitespace-only). That sandbox
+runs off `/opt/azureclaw-plugin/policies/azureclaw-<profile>.yaml`
+baked into the image — exactly the path Slice 1e phase 2 will
+remove.
+
+**Wire contract:**
+
+* `Type: BundledProfileInUse`
+* `Status: True`
+* `Reason: BundledProfileFallback`
+* `Message: ToolPolicy lacks spec.agtProfile.inline; sandbox is
+  using the deprecated bundled AGT profile path (…). Migrate to
+  ToolPolicy.spec.agtProfile.inline before the bundled path is
+  removed.`
+
+When the operator adds `agtProfile.inline` to the ToolPolicy, the
+condition is **dropped** on the next reconcile rather than stamped
+`False` — dashboards don't accumulate stale-but-resolved
+deprecation noise (mirrors the §3 "only stamp Suspended=False if
+ever suspended" pattern).
+
+Phase 2 (actual fallback removal) is deferred: existing sandboxes
+without `agtProfile.inline` still function. This phase only adds
+the visibility surface so operators can drive migration on their
+own schedule.
+
+### Slice 1d.2 — Headlamp "Router enforcement" panel
+
+Companion to Slice 1d's CLI. Every ToolPolicy / InferencePolicy
+detail page in the Headlamp dashboard now carries a **Router
+enforcement (data-plane echo)** SectionBox that surfaces, in one
+glance, whether the policy is live in the data plane or merely
+compiled:
+
+* **Compiled digest** — the bytes the controller wrote.
+* **Loaded digest** — the bytes the router echoed back (only present
+  once §3 echo confirms).
+* **Echo** — `✓ matches` / `≠ mismatched` / `(awaiting)`.
+* **Confirmation** — the `Ready` condition's reason rendered as a
+  colored chip: `RouterEnforcing` (green), `NoSandboxesReferencing`
+  (neutral), `AwaitingRouterEnforcement` (amber), anything else
+  (red).
+
+Pure read of `status.compiledDigest` / `status.agtProfileDigest` /
+`status.loadedDigest` / `status.conditions` — fields the controller
+already writes. **Zero new API traffic, no kube-apiserver service
+proxy, no admin-token plumbing in the operator browser.** Mirrors
+the data the `azureclaw inspect <sandbox>` CLI surfaces, but on the
+producer side rather than the consumer side, so an operator can
+diagnose a Compiled-stuck-at-amber CR without leaving the dashboard.
+
+Defensive defaults: unknown phase or condition reason renders as
+amber/warning rather than success. Unknown digest format passes
+through unchanged (no slicing crash on non-sha256 algorithms).
+
+### Slice 1d — `azureclaw inspect <sandbox>` CLI
+
+Operator-facing data-plane view of the policy CRDs a sandbox's
+router is actually enforcing. Hits the router's
+`/internal/policy-status` endpoint (Slice 1a) over a `kubectl exec`
+in-pod curl tunnel — **no `kubectl port-forward` lifecycle**, so the
+command never collides with another agent already bound to 18789
+or any other local port.
+
+Three operator pain points solved at once:
+
+* **No port collisions.** Single-shot `kubectl exec` to the
+  `openclaw` container, curls `127.0.0.1:8443` over loopback, exits.
+  No background tunnel, no port-forward retries.
+* **Admin token never crosses argv.** The token is resolved either
+  from the `router-admin-token` Secret (fast path, same pattern as
+  `azureclaw handoff`'s `getAksAdminToken`) or — when RBAC blocks
+  the secret read — from the `/etc/azureclaw/secrets/admin-token`
+  file inside the pod. It then flows to the in-pod curl on **stdin**
+  (`read -r AZURECLAW_ADMIN_TOKEN <&0`), never `ps`-visible.
+* **Latency-free.** Zero new server-side work — every byte the
+  command renders was already produced by the router's
+  `PolicyStatusRegistry` snapshot. The CLI is a pure consumer.
+
+Default render is a grouped tree: one section per policy kind
+(`AGT profile`, `InferencePolicy`, `ToolPolicy`, …), each row showing
+the source file basename, the 12-hex truncated sha256 digest, and
+the relative load age (`5m ago`, `3h ago`, never-loaded marker for
+the loader's `UNIX_EPOCH` sentinel). `--json` emits the raw
+schema-version-1 envelope for scripting + JQ.
+
+The Headlamp plugin panel — the second deliverable in the Slice 1d
+spec — is deferred to Slice 1d.2; the CLI alone is independently
+shippable and the panel can land against the same wire contract
+without a second round-trip.
+
+### Slice 2d.1 — InferencePolicy `modelPreference.primary.deployment` deployment override
+
+First wire of `modelPreference` end-to-end. When an `InferencePolicy`
+sets `modelPreference.primary.deployment`, every chat-completions /
+responses / anthropic-messages forwarder now overrides the
+env-driven default deployment with the policy-declared deployment
+before reaching out to the upstream. Operators can pin a sandbox to
+e.g. `gpt-5.4-eu` purely through the CR without touching helm
+values.
+
+Latency: the override is applied off the same `InferencePolicySnapshot`
+the Slice 2c handlers already take once per request — zero extra
+lock acquisitions, single-byte `String` clone when (and only when)
+the deployment actually changes.
+
+**Slice 2d.1 deliberately ignores `primary.provider`.** Cross-provider
+routing (`azure-openai` → `anthropic` → `bedrock` failover) requires
+a per-provider client registry the router doesn't carry today;
+Slice 2d.2 will pick it up. Until then `primary.provider` is
+informational-only — the override always flows through the existing
+Foundry / Azure-OpenAI / Copilot endpoint resolved at process start.
+
+**`fallback[]` is captured but not yet consumed.** Slice 2d.2 will
+add health-aware primary → fallback failover (60s TTL health cache,
+mark unhealthy after 3 consecutive 5xx/429); 2d.1 only honours the
+primary so we ship a real bytes-move slice without dragging in
+multi-week infrastructure.
+
+Defence-in-depth:
+
+* Empty-string `primary.deployment` ⇒ no-op (even though the
+  controller schema rejects it).
+* Same-deployment override ⇒ no-op + no audit-log spam.
+* Embeddings (body-driven model) and images-generations (path-driven
+  deployment) deliberately skip the override — the caller already
+  chose a concrete model in those flows.
+* Audit log: `tracing::info!(... from = ..., to = ..., provider, digest, "InferencePolicy modelPreference: overriding deployment")`
+  fires exactly once per effective override per request.
+
+Controller untouched — Slice 2a's digest already hashed the
+`modelPreference` bytes byte-for-byte, so the §3 echo loop
+(Compiled → Ready on router-confirmed digest) is already
+authoritative; no schema or reconciler change required.
+
+### Slice 2c — InferencePolicy `contentSafety` floors + `requirePromptShields` fail-closed
+
+Third axis of `InferencePolicy` now actually enforced. The router
+now compares every Foundry-reported severity (`hate`, `selfHarm`,
+`sexual`, `violence`) against the per-policy ceiling and returns
+`403 content_policy_violation` with the distinct code
+`inference_policy_content_safety_exceeded` when **any** category
+exceeds its floor. When `requirePromptShields: true` is set, the
+router **fail-closes** with code `inference_policy_prompt_shields_required`
+on any response that ships without prompt-filter annotations —
+catching deployments that have silently lost their shield config.
+
+Both the buffered (non-streaming) and streaming branches of
+`chat/completions` enforce identical decisions: a streamed first
+chunk containing a violating `prompt_filter_results` block is
+rewritten into a single SSE `error` frame followed by `data: [DONE]`,
+and every subsequent chunk is swallowed. That parity prevents
+attackers from probing `stream=true` vs `stream=false` to pick the
+laxer evaluation path.
+
+**Latency optimisation** (carried out alongside the new axis):
+the chat / inference / anthropic handlers previously took up to
+**three** `RwLock::read().await`s per request to pull
+daily/monthly limits, `perRequestTokens`, and the content-safety
+floor independently. Slice 2c consolidates those into a single
+`InferencePolicySnapshot` taken once at the top of each handler;
+all downstream branches (budget gate, perRequest gate, streaming
+floor closure, post-response floor enforcement) read from the
+local struct. The snapshot is `<200` bytes (4 × `Option<u64>` +
+4 × `Option<SeverityLevel>` + `bool` + small `String` digest) and
+all-`Copy` / trivially-`Clone`, so handler-internal use is
+allocation-free.
+
+**Router:**
+- `inference-router/src/safety.rs` — new types + enforcement
+  (~270 LOC + 11 unit tests + 1 proptest):
+  - `SeverityLevel { Safe, Low, Medium, High }` with strict
+    ordering (`Safe < Low < Medium < High`) and case-insensitive
+    parsing (controller emits PascalCase `"Medium"`, Foundry emits
+    lowercase `"medium"` — both accepted; unknown strings drop to
+    `None` for defence-in-depth as Azure extends the ladder).
+  - `ContentSafetyFloor { hate, self_harm, sexual, violence:
+    Option<SeverityLevel>, require_prompt_shields: bool }` parsed
+    from compiled JSON via `from_compiled_json`; `is_active()`
+    short-circuits the hot path when no ceilings are configured.
+  - `FloorViolation::{ SeverityExceeded { category, observed, floor },
+    PromptShieldsMissing }` with stable `code()` strings.
+  - `enforce_floor(body_json, &floor) -> Option<FloorViolation>`
+    walks both the 200-shape (`prompt_filter_results[].
+    content_filter_results.<category>.severity`) and the 400-shape
+    (`error.innererror.content_filter_result.<category>.severity`)
+    in a single pass with deterministic category order
+    `hate → self_harm → sexual → violence`. Identical 400/200
+    handling means attackers cannot trigger 400s to bypass the
+    floor.
+  - `first_data_line_violation(chunk_text, &floor)` — streaming
+    counterpart that strips `data: ` prefixes, skips `[DONE]`,
+    parses each line as JSON, and delegates to `enforce_floor`.
+    Cross-validated with `enforce_floor_parity` test so streaming
+    and buffered branches always agree.
+- `inference-router/src/inference_policy_loader.rs`:
+  - `LoadedInferencePolicy` gains `content_safety: ContentSafetyFloor`
+    parsed from `spec.contentSafety`. Digest layout unchanged — the
+    controller already hashed the whole compiled policy in Slice 2a,
+    so existing digests stay byte-stable.
+  - New `InferencePolicySnapshot` struct + `current_snapshot(handle)`
+    helper that returns every enforcement axis under **one** read
+    lock. Replaces the per-axis `current_daily_monthly_limits` /
+    `current_content_safety_floor` helpers removed in this slice.
+- `routes/chat_completions.rs`:
+  - Both the non-streaming and streaming branches take **one**
+    snapshot at the top of the handler and reuse it for every gate.
+  - Non-streaming post-response branch calls `enforce_floor`
+    after the existing Foundry `content_filter` check; returns 403
+    with the new `inference_policy_*` codes on violation.
+  - Streaming branch resolves the floor before wrapping the upstream
+    `Stream` (the `Bytes -> Result<Bytes, _>` map closure must stay
+    sync). A per-stream `Arc<AtomicBool>` short-circuits all bytes
+    after a violation; the first violating chunk is replaced with a
+    single SSE `error` frame so clients see a structured failure
+    rather than a silently-truncated stream.
+- `routes/inference.rs` + `routes/anthropic_messages.rs`:
+  - Switched to the same single-snapshot pattern (one
+    `current_snapshot()` call per request) for parity. Neither
+    handler parses content-safety annotations today; floor
+    enforcement on the Responses-API and Anthropic-Messages paths
+    is queued for a follow-up slice.
+
+**Controller:** untouched. The Slice 2a digest already covered the
+`contentSafety` bytes byte-for-byte — the `Compiled → Ready`
+echo-confirmation loop from Slice 2a remains the authoritative
+gate. The router started honouring those bytes in Slice 2c; no
+schema, no reconciler, no status-condition changes were needed.
+
+**Tests:** 730 router lib tests (+22 from Slice 2b's 708),
+all 3 integration suites green, clippy `-D warnings` clean on
+both crates, fmt + helm_drift green. Controller test count
+unchanged at 531.
+
+### Slice 2b — InferencePolicy `tokenBudget.dailyTokens` / `monthlyTokens` enforcement + UTC-calendar persistence
+
+Second axis of `InferencePolicy` now actually enforced. Combined with
+Slice 2a's `perRequestTokens` gate, the router now rejects inference
+calls pre-forward when **either** the requested `max_tokens` overshoots
+the per-request cap, **or** the running sandbox-keyed daily / monthly
+counter has reached its policy-defined limit. Counters reset on
+**UTC-calendar** boundaries (daily at UTC midnight, monthly on the 1st
+of the month UTC) and survive router restarts via on-disk JSON
+persistence.
+
+**Router:**
+- `inference-router/src/budget.rs` rewritten (~300 LOC + 16 tests):
+  - `TokenBudgetTracker::check_budget(sandbox, daily, monthly)` now
+    takes the limits per-call so callers can source them from the
+    loaded `InferencePolicy` and policy hot-reload takes effect on
+    the next request without the tracker holding stale config.
+  - Daily / monthly counters keyed by `(day_key, month_key)` where
+    `day_key` is unix-days-since-CE and `month_key` is
+    `year*12 + month0` — both strictly monotonic, both roll over
+    cleanly across year boundaries (test
+    `year_boundary_rolls_both_counters` proves it).
+  - Injectable `Clock` trait (`SystemClock` in prod, `FixedClock` in
+    tests) drives all UTC-boundary tests deterministically.
+  - `with_persistence(daily_default, per_request, path)` ctor loads
+    counters on construction and writes atomically (write tmp → fsync
+    → rename) on every `record_usage`. Corrupt / missing file = empty
+    start (logged WARN; over-counting safer than under-counting).
+  - Legacy `check_budget(sandbox)` removed; `check_budget_legacy` kept
+    as a back-compat shim for tests / future-removed paths.
+- `inference-router/src/inference_policy_loader.rs`:
+  - `LoadedInferencePolicy` gains `daily_tokens` + `monthly_tokens`
+    fields (parsed from `tokenBudget.{dailyTokens,monthlyTokens}`).
+    Digest layout unchanged — the controller already hashed the whole
+    `tokenBudget` block, so existing Slice 2a digests stay byte-stable.
+  - New `current_daily_monthly_limits(handle) -> (Option<u64>,
+    Option<u64>)` helper called by all three inference handlers (chat,
+    inference, anthropic) so the budget-tracker lookup is one line at
+    each call site.
+- `routes/{chat_completions,inference,anthropic_messages}.rs` updated
+  to derive daily/monthly limits from the loaded policy before each
+  budget check. Env-driven `TOKEN_BUDGET_DAILY` stays as a fallback
+  default (back-compat) — applied only when no policy is loaded.
+- `routes/mod.rs` AppState init now uses `with_persistence` by default,
+  pointed at `/var/lib/azureclaw/token-budgets.json` (override via
+  `TOKEN_BUDGET_PERSIST_PATH=`; empty string disables persistence for
+  tests). `mkdir -p` is best-effort; falls back to in-memory if the
+  dir cannot be created.
+
+**Controller:**
+- No changes — the digest layout already covered daily/monthly bytes
+  because the canonical JSON serialises the full `tokenBudget` block.
+  Slice 2a's reconciler closure (echo poll → `Compiled → Ready`)
+  remains the authoritative §3 gate.
+
+**Tests + lint:**
+- 708 router lib tests (was 696; +12 budget tests covering UTC
+  rollover, monthly rollover, year boundary, per-sandbox isolation,
+  policy override semantics, persistence roundtrip, corrupt-file
+  recovery, legacy shim).
+- 531 controller tests (unchanged).
+- clippy `-D warnings` clean on both crates. fmt, helm_drift green.
+
+Closes Slice 2b of `docs/internal/crd-well-oiled-machine/slice-2-inference-policy.md`.
+Open follow-ups: Slice 2c (contentSafety floors + requirePromptShields)
+and Slice 2d (modelPreference failover + CLI inspect + Headlamp panel).
+
+### Slice 2a — InferencePolicy `tokenBudget.perRequestTokens` enforcement + router-echo
+
+First end-to-end closure of principles.md §3 ("Ready ⇔ router echo")
+for `InferencePolicy`. The `tokenBudget.perRequestTokens` axis is now
+**actually enforced**: the controller compiles, the router loads + 429s
+on over-request, and the controller only promotes
+`phase=Compiled → Ready` once every referencing sandbox router echoes
+the matching digest on `GET /internal/policy-status`. Other
+InferencePolicy axes (`contentSafety`, `modelPreference`, daily/monthly
+budgets) remain compile-only and stay honest with `Ready=False /
+AwaitingRouterEnforcement` — they land in Slices 2b/2c/2d.
+
+**Router (new wire-contract consumer):**
+- `inference-router/src/inference_policy_loader.rs` (new, ~340 LOC):
+  reads `inference-policy.json` from the mount dir, parses
+  `tokenBudget.perRequestTokens`, computes a `sha256:<full hex>` over
+  length-prefixed canonical bytes
+  (`u64-BE(filename.len()) || filename || u64-BE(body.len()) || body`),
+  registers the digest into `PolicyStatusRegistry`, exposes
+  `Arc<RwLock<Option<LoadedInferencePolicy>>>` to handler code. 8 unit
+  tests.
+- `PolicyKind::InferencePolicy` variant added (closed-set enum — doc
+  notes that adding a variant is a public-API change requiring
+  controller-side wiring in the same PR; Slice 2a satisfies that).
+- `AppState.inference_policy` field; loaded at startup from
+  `INFERENCE_POLICY_DIR` env (default `/etc/azureclaw/inference`).
+- `chat_completions` preflight gate: pure `decide_per_request_gate(cap,
+  requested) -> PerRequestGate` + `extract_requested_max_tokens(body)`
+  (prefers `max_completion_tokens` over legacy `max_tokens`). 9 unit
+  tests. Over-cap requests return HTTP 429 with body
+  `{"code":"per_request_tokens_exceeded", ...}`. Defence-in-depth
+  fast-fail only — does not estimate prompt tokens; the post-response
+  warn-only check remains for the `max_tokens=null` path.
+- Three integration-test fixtures updated to populate the new
+  AppState field via `empty_handle()`.
+- 696 lib tests pass (was 679; +17 new). clippy `-D warnings` clean.
+
+**Controller (producer + echo poller):**
+- `inference_policy_compile`: new `INFERENCE_POLICY_FILENAME`,
+  `canonical_bytes_for_digest`, `inference_policy_digest` (full
+  `sha256:<hex>`). Kept the legacy 16-byte `version_hash` for
+  `PolicyEntry.version` change-detection back-compat. 5 new unit tests
+  (golden-vector cross-validates the router-side layout byte-for-byte).
+- `InferencePolicyStatus`: new `compiledDigest` + `loadedDigest` fields
+  with doc comments tying back to §3.
+- `inference_policy_reconciler`: now lists `ClawSandbox`es by
+  `spec.inferenceRef.name == name`, polls each router's
+  `/internal/policy-status`, runs the shared
+  `decide_enforcement_state(&digest, "InferencePolicy", &results)`
+  aggregator, and only stamps `phase=Ready / reason=RouterEnforcing`
+  when every router echoes the digest. While awaiting, stays at
+  `phase=Compiled / Ready=False / AwaitingRouterEnforcement` and emits
+  a `PolicyNotEnforced` Warning event each pass — the warn stops the
+  moment Confirmed fires, mirroring Slice 1c.
+- Compiled ConfigMap now uses canonical key `inference-policy.json`
+  (was: pretty-printed `profile.json`). Annotation
+  `azureclaw.azure.com/inference-policy-digest` on the CM stamps the
+  digest for human inspection. The bytes written are **exactly** what
+  the digest covers — any reformatting silently breaks the §3 echo
+  contract.
+- Requeue cadence: 15s while Awaiting, 300s once Ready.
+- New `build_conditions` truth-table tests cover all four
+  `RouterEnforcementState` branches (Confirmed → Ready=True, Awaiting
+  → Ready=False with awaiting reason, NoSandboxesReferencing →
+  Ready=False with that reason, degraded → unchanged).
+- Helm CRD `crd-inferencepolicy.yaml` regenerated with the two new
+  status fields.
+
+**Sandbox pod-spec assembly:**
+- `reconciler::mod.rs` mirrors the `inferencepolicy-{name}-profile`
+  ConfigMap from the user namespace into the sandbox namespace and
+  injects an `inject_configmap_mount` against the inference-router
+  container at `/etc/azureclaw/inference` with env
+  `INFERENCE_POLICY_DIR`. Mount path constant added to
+  `governance_mounts::paths`.
+- Failure mode is fail-open at the mount layer (router boots without
+  the loader populated, gate becomes a no-op, env-driven warn-only
+  `TOKEN_BUDGET_PER_REQUEST` stays as a safety net) — mirrors how
+  ToolPolicy degrades when its mirror skips.
+
+All clean: 531 controller tests (was 524; +7), 696 router lib tests,
+clippy `-D warnings` both crates, fmt, helm_drift.
+
+### Slice 2a prep — lift `RouterEnforcementState` + `decide_enforcement_state` shared
+
+Second pure refactor in the Slice 2a runway. Slice 1c put the
+"aggregate per-sandbox poll outcomes → phase decision" pure
+function (`decide_enforcement_state`) inline in
+`tool_policy_reconciler.rs`, hard-coded to the `AgtProfile`
+PolicyKind. Now lifted into `controller/src/status/router_confirmation.rs`
+and generalized over `kind: &str`, so the upcoming
+`InferencePolicy` reconciler can call the same aggregator with
+`"InferencePolicy"` instead of duplicating ~110 LOC of
+state machine + message formatting.
+
+- `RouterEnforcementState` enum moved verbatim into
+  `router_confirmation` module; doc-rewritten to describe the
+  generic contract rather than ToolPolicy specifics.
+- `decide_enforcement_state(expected_digest, kind, results)`
+  now takes the `PolicyKind` string explicitly and routes
+  through `PolicyStatusResponse::find_digest(kind)` /
+  `find_last_error(kind)` (already generalized in the
+  preceding refactor). The "router has not yet loaded …"
+  Awaiting message now carries the kind so operators can
+  tell which bundle a router is missing.
+- `tool_policy_reconciler.rs` loses ~110 LOC of inline enum
+  + function. Sole production call site passes `"AgtProfile"`.
+- The dead `agt_profile_digest()` / `agt_profile_last_error()`
+  one-line wrappers on `PolicyStatusResponse` (kept as
+  back-compat in the previous PR) are now genuinely unused;
+  removed per principles.md §5. All callsites use
+  `find_digest("AgtProfile")` directly.
+- Three new generic-kind tests in `router_confirmation::tests`
+  prove the aggregator confirms only when kind matches, that
+  the kind appears in the "not yet loaded" message, and that
+  the empty-results branch is kind-agnostic.
+
+Net effect: one call site swap, zero behavior change for
+ToolPolicy. 524 controller tests pass (was 522; +3 generic
+tests, -1 deleted wrapper test). clippy `-D warnings` clean.
+
+### Slice 2 prep — shared router-confirmation helper extracted
+
+Pre-refactor to unblock Slice 2 (InferencePolicy) and later
+consumers (ClawMemory, McpServer fleet). The k8s I/O helpers
+that drive the "Ready ⇔ router echo" loop were inlined in
+`controller/src/tool_policy_reconciler.rs` after Slice 1c; they
+now live in a shared module so the next reconciler doesn't
+have to duplicate them.
+
+- New `controller/src/status/router_confirmation_io.rs` module:
+  - `list_sandboxes_matching(client, ns, |cs| …)` — generic
+    discovery helper; the caller supplies the
+    `FnMut(&ClawSandbox) -> bool` predicate so each CRD can
+    bind to its own ref field (`spec.governance.toolPolicyRef`,
+    `spec.inferenceRef`, etc.) without baking a CRD-kind enum
+    into the helper. Replaces the ToolPolicy-only
+    `list_referencing_sandboxes` from Slice 1c.
+  - `read_admin_token(client, sandbox)` — verbatim move; reads
+    `Secret azureclaw-<sandbox>/router-admin-token` key
+    `token`. Now reusable from any reconciler.
+  - `poll_referencing_sandboxes(client, http, sandboxes)` —
+    verbatim move; same `Err(ConfirmError::HttpStatus(0))`
+    sentinel for "token Secret not yet present".
+- `PolicyStatusResponse` gains generic
+  `find_digest(&self, kind: &str)` and
+  `find_last_error(&self, kind: &str)` methods. The existing
+  `agt_profile_digest()` / `agt_profile_last_error()` are now
+  one-line wrappers — back-compat preserved, but new
+  reconcilers (InferencePolicy etc.) call `find_digest("…")`
+  with their own `PolicyKind` string. Cross-checked with a
+  belt-and-braces "wrappers must agree with generic method"
+  test so a future refactor that touches one branch but not
+  the other is caught immediately.
+- `tool_policy_reconciler.rs` now imports from the shared
+  module; the three inline functions (~80 LOC) are deleted,
+  not duplicated.
+- Net effect: one production callsite swap, four net-new
+  unit tests, zero behavior change. 522 controller tests
+  pass (+4 from the previous 518), clippy `-D warnings`
+  clean, helm_drift green.
+
+### Slice 1c — ToolPolicy router-confirmation poller (closes the loop)
+
+Closes the consumer half of the principles.md §3 invariant for
+ToolPolicy: the controller now polls every referencing
+`ClawSandbox`'s inference-router on `GET /internal/policy-status`
+(the endpoint Slice 1a shipped), compares the echoed digest to
+the one the controller published (Slice 1b), and only promotes
+`phase=Compiled → Ready` when every referencing router echoes
+the exact bytes. This is the first complete end-to-end closure
+of "Ready ⇔ router echo" for any AzureClaw CRD.
+
+- New `controller/src/status/router_confirmation.rs` module:
+  `PolicyStatusResponse` / `PolicyStatusEntry` mirror the
+  router's wire contract; `fetch_router_policy_status` performs
+  the HTTP GET with `Authorization: Bearer <admin-token>` and a
+  5s default timeout; `router_admin_url` derives the in-cluster
+  DNS name. Schema-version aware — refuses unknown versions
+  with `ConfirmError::UnknownSchemaVersion` (fail-closed). 11
+  unit + wiremock tests cover happy path, 401/503, malformed
+  body, trailing-slash base URL, unknown schema, missing entry,
+  and null-digest with `last_error` plumbing.
+- New `RouterEnforcementState` enum in
+  `tool_policy_reconciler`:
+  - `NotApplicable` (no `agtProfile`) → back-compat `Ready`.
+  - `NoSandboxesReferencing` (agtProfile set but no sandbox
+    refs it) → `Compiled` + new reason `NoSandboxesReferencing`.
+  - `Awaiting { total, matched, message }` (partial /
+    unreachable / mismatch) → `Compiled` + reason
+    `AwaitingRouterEnforcement`. Message surfaces the
+    `matched/total` count and up to three failing sandboxes'
+    reasons.
+  - `Confirmed { total }` (every referencing router echoes the
+    expected digest) → `Ready` + new reason `RouterEnforcing`.
+- New pure `decide_enforcement_state(expected_digest, results)`
+  function factors out the aggregation logic. 6 unit tests
+  cover all four state transitions, multi-sandbox mismatch,
+  unreachable sandbox, and `last_error` propagation.
+- `list_referencing_sandboxes` lists all `ClawSandbox`es in the
+  ToolPolicy's namespace and filters by
+  `spec.governance.toolPolicyRef.name`.
+- `read_admin_token` reads `Secret
+  azureclaw-<sandbox>/router-admin-token` key `token`; a
+  missing Secret counts as a transient awaiting-router
+  condition (the per-sandbox reconciler may not yet have
+  completed).
+- `poll_referencing_sandboxes` aggregates per-sandbox poll
+  outcomes for the pure decision function.
+- New reason constants in
+  `controller/src/status/conditions.rs::reason`:
+  `ROUTER_ENFORCING`, `NO_SANDBOXES_REFERENCING`.
+- `Ctx` gains a shared `reqwest::Client` built with the
+  poller's default timeout, constructed once at reconciler
+  bootstrap.
+- `build_conditions` now takes a `&RouterEnforcementState`
+  instead of the previous `awaiting_router: bool`. The
+  `Confirmed` branch emits the new `RouterEnforcing` reason
+  with the sandbox count in the message;
+  `NoSandboxesReferencing` emits a dedicated reason so
+  operators can distinguish "nothing to enforce" from
+  "router not responding".
+- `PolicyNotEnforced` Warning event now fires only while the
+  state is actually `Awaiting` or `NoSandboxesReferencing` —
+  the moment a router confirms, the event stops being emitted
+  (instead of forever, as in Slice 1b).
+- Requeue cadence: 15s while Awaiting / NoSandboxesReferencing,
+  default `REQUEUE_OK` once Confirmed.
+- No CRD schema changes — the new behaviour is entirely
+  controller-side. Slice 1b's `status.agtProfileDigest` field
+  is the wire contract; Slice 1c reads it back from the router
+  and matches.
+
+### Slice 1b — `ToolPolicy.spec.agtProfile.inline` (producer side)
+
+Closes the producer half of the principles.md §3 invariant for
+ToolPolicy: the controller now writes a customer-supplied AGT
+policy YAML into the compiled ConfigMap under the wire-contract
+filename `agt-profile.yaml`, computes the matching length-prefixed
+sha256 digest that Slice 1a's router endpoint will echo, and
+honestly stamps `phase=Compiled` + `Ready=False /
+reason=AwaitingRouterEnforcement` until the Slice 1c
+router-confirmation poller lands. ToolPolicies without
+`agtProfile` retain the existing `phase=Ready` back-compat path
+(their enforcement surface is the in-process AGT runtime plugin
+consuming `profile.json` already).
+
+- New `ToolPolicySpec.agtProfile.inline` field (`AgtProfileSource`
+  struct). Inline only; `bundleRef` (signed OCI artifact) lands
+  in Slice 1c with the CLI signing generalization.
+- New `ToolPolicyStatus.agtProfileDigest` field — populated only
+  when `spec.agtProfile.inline` is set; contains the
+  `sha256:<64-hex>` digest of the published bytes computed via
+  the Slice 1a length-prefixed canonical aggregate format so
+  controller and router compute the **same** value.
+- New `tool_policy_compile::agt_profile_digest` pure function +
+  `AGT_PROFILE_FILENAME` constant. 5 unit tests including a
+  golden-vector cross-check against the router's canonical
+  algorithm in `inference-router/src/governance/mod.rs`.
+- `tool_policy_reconciler` now branches the phase decision
+  three ways: `Degraded` on ConfigMap write failure;
+  `Compiled` + `Ready=False / AwaitingRouterEnforcement` +
+  `PolicyNotEnforced` Warning event when `agtProfile` is set;
+  `Ready` for the back-compat (no-agtProfile) path. Requeue
+  cadence shortens to 15s while awaiting router-side echo. 2
+  new unit tests pin the awaiting-router branch and the
+  degraded-overrides-awaiting-router precedence.
+- `ensure_profile_configmap` now writes `agt-profile.yaml` (raw
+  inline bytes) alongside the existing `profile.json` key and
+  stamps the ConfigMap annotation
+  `azureclaw.azure.com/agt-profile-digest` so any observer (the
+  Slice 1c poller, Headlamp, `kubectl describe`) can verify
+  what the controller intended to publish without re-reading the
+  CR.
+- Sandbox `entrypoint.sh` now prefers the controller-mounted
+  `/etc/agt/policies/agt-profile.yaml` over the bundled
+  `AGT_POLICY_PROFILE` fallback. The deprecated bundled path
+  emits a `WARN` line and remains supported through one release
+  window; it is removed in Slice 1e.
+- Helm CRD template `crd-toolpolicy.yaml` regenerated from the
+  Rust schema (caught by the existing `helm_drift` test).
+
+### Slice 1a — router `PolicyStatusRegistry` + `GET /internal/policy-status`
+
+Foundation for the principles.md §3 invariant ("Ready ⇔ router echoes the
+exact published digest"). The controller-side digest-confirmation poller
+ships in Slice 1b; this PR delivers the data-plane half of the contract
+together with its first real producer (AGT).
+
+- New module `inference-router/src/policy_status.rs` exposes
+  `PolicyStatusRegistry` — an in-memory map keyed by `PolicyKind`
+  (only `AgtProfile` today) storing `digest`, `source_path`,
+  `loaded_at`, `last_error`. `record_success` / `record_error`
+  preserve the prior digest on error so transient reload failures
+  don't fake a "no policy loaded" state. 8 unit tests pin the
+  registry behavior including UTF-8-safe error truncation at
+  char boundaries.
+- New route `GET /internal/policy-status` (handler in
+  `inference-router/src/routes/internal.rs`) returns
+  `{schema_version: 1, count, entries: [...]}` with RFC 3339
+  `loaded_at`. Mounted on the `protected` axum router so it
+  inherits admin-token + `ADMIN_ALLOW_IPS` middleware alongside
+  the existing `egress_routes()` / `spawn_routes()`. 5 unit tests
+  cover the response envelope and the hand-rolled RFC 3339
+  formatter (no chrono dep). 4 integration tests in
+  `tests/policy_status_endpoint.rs` exercise the full axum stack
+  including an end-to-end producer→consumer test that loads a real
+  AGT policy file through `Governance::load_policies_from_dir` and
+  asserts the digest surfaces on the route.
+- `Governance::load_policies_from_dir` now records into the
+  registry as a side effect of every reload cycle. Aggregate
+  canonical digest is **length-prefixed**:
+  `u64-BE-len(name) || name || u64-BE-len(bytes) || bytes`
+  concatenated per file, files sorted by path. The length prefix
+  prevents `("ab","c") vs ("a","bc")` collisions; the sort makes
+  the digest deterministic across `read_dir` ordering. The
+  controller poller (Slice 1b) MUST replicate this exact
+  serialization on the publish side.
+- `Governance::new_with_status()` constructor accepts a shared
+  `Arc<PolicyStatusRegistry>`; the existing `new()` continues to
+  work for callers that don't need digest echo (constructs a
+  private registry). `AppState` carries one registry per process,
+  shared with `Governance` so every reload echoes to the route.
+- Empty policy directory → `record_success` with the digest of
+  zero bytes (a real "loaded nothing on purpose" state, distinct
+  from "couldn't read the directory" which records an error with
+  null digest).
+
+### Slice 0 — honesty events
+
+- **`status.phase=Compiled` introduced** as the load-bearing distinction
+  between "controller wrote the artifact" and "data plane is enforcing the
+  artifact". `InferencePolicy` and `ClawMemory` now stamp `Compiled` on the
+  success path (instead of `Ready`) and the `Ready` condition is `False` with
+  reason `AwaitingRouterEnforcement`. Each reconciler also emits a `Warning`
+  Event (`reason=PolicyNotEnforced`) so operators see the gap in
+  `kubectl describe` and `kubectl get events`. `kubectl wait
+  --for=condition=Ready` no longer returns immediately for policies that the
+  router is not yet consuming.
+- **`McpServer` emits a `LimitedSupport` Warning Event** on every successful
+  reconcile pointing at the upcoming Slice 4 plural-MCP migration. The
+  singular `spec.mcp` binding continues to work; the event is purely
+  informational.
+- **`ToolPolicy`** keeps `phase=Ready` (its enforcement is runtime-side, not
+  router-side) but now uses the shared `PHASE_READY`/`PHASE_DEGRADED`
+  constants from `controller/src/status/phase.rs` instead of string literals.
+- New module `controller/src/status/phase.rs` carries the closed phase
+  vocabulary (`Pending`/`Compiled`/`Ready`/`Degraded`/`Failed`) and a
+  `PhaseEventReporter` wrapping `kube::runtime::events::Recorder` for
+  `Warning` Event publishing. 7 unit tests pin the vocabulary, reason
+  constants, and `ObjectReference` shape.
+- New condition reason `AwaitingRouterEnforcement` registered in
+  `controller/src/status/conditions.rs::reason`.
+- Headlamp plugin `phaseToStatus()` now branches explicitly on `Compiled` →
+  amber/warning (previously fell through to the default warning branch).
+- New phase vocabulary table in `docs/api/lifecycle.md`.
+
 ## [Unreleased] — Phase 5 (AGT default + local-k8s mesh)
 
 ### Changed

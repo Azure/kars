@@ -9,7 +9,7 @@
 /cli/                        @AzureClawTeam
 
 # AGT Governance
-/cli/policies/               @AzureClawTeam
+/cli/profiles/              @AzureClawTeam
 
 # Deployment
 /deploy/                     @AzureClawTeam

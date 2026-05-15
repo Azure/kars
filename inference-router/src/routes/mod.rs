@@ -22,6 +22,7 @@ use crate::egress_blocked::BlockedBuffer;
 use crate::governance::Governance;
 use crate::handoff::{DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore};
 use crate::mesh::{MeshInbox, MeshMetrics};
+use crate::policy_status::PolicyStatusRegistry;
 use crate::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
 use crate::proxy::UpstreamConfig;
 
@@ -45,6 +46,9 @@ pub use mesh::mesh_routes;
 
 mod egress;
 pub use egress::egress_routes;
+
+mod internal;
+pub use internal::internal_routes;
 
 mod inference;
 pub use inference::{foundry_agent_routes, foundry_standalone_routes, inference_routes};
@@ -111,6 +115,49 @@ pub struct AppState {
     pub drain_state: DrainState,
     /// Pending handoff confirmation store (§9.9.9 two-stage gate).
     pub pending_handoff: PendingHandoffStore,
+    /// Per-CRD policy load status — populated by every consumer that
+    /// materializes a controller-published artifact into the router's
+    /// memory. Read by `GET /internal/policy-status`, which the
+    /// controller polls to confirm `Compiled → Ready` transitions
+    /// (Slice 1 of `crd-well-oiled-machine`).
+    pub policy_status: Arc<PolicyStatusRegistry>,
+    /// Currently loaded `InferencePolicy` compiled profile, if any.
+    /// Populated at startup by
+    /// `inference_policy_loader::load_and_install` reading the
+    /// `INFERENCE_POLICY_DIR` mount written by the controller's
+    /// `inference_policy_reconciler` + `governance_mounts`. `None`
+    /// means no policy was loaded (no mount, empty mount, or parse
+    /// error — the loader records errors against
+    /// `PolicyStatusRegistry`). Today only `perRequestTokens` is
+    /// enforced; later sub-slices add daily/monthly budgets,
+    /// content-safety floors, and model failover.
+    pub inference_policy: crate::inference_policy_loader::LoadedInferencePolicyHandle,
+    /// Currently loaded `ClawMemory` binding, if any. Populated at
+    /// startup by `memory_binding_loader::load_and_install` reading
+    /// the `MEMORY_BINDING_DIR` mount written by the controller's
+    /// `claw_memory_reconciler` + `governance_mounts`. Slice 3a is
+    /// digest-echo only — the binding loads and the digest shows up
+    /// under `GET /internal/policy-status` with `kind: Memory`, but
+    /// no behaviour changes in the data plane (Slice 3b rewires the
+    /// `foundry.memory.*` MCP tools through this handle).
+    pub memory_binding: crate::memory_binding_loader::LoadedMemoryBindingHandle,
+    /// Slice 5c.1 — currently loaded egress allowlist bundle, if any.
+    /// Populated at startup by
+    /// `egress_allowlist_loader::load_and_install` reading the
+    /// `EGRESS_ALLOWLIST_DIR` mount written by the controller's
+    /// `reconciler::mod` ConfigMap publish path. The loader also
+    /// atomically refreshes `blocklist.allowlist` on every reload so
+    /// the L7 forward-proxy enforces the signed bundle in real time;
+    /// `None` means no bundle was loaded (mount missing or empty —
+    /// fail-closed: zero L7 egress).
+    pub egress_allowlist: crate::egress_allowlist_loader::LoadedEgressAllowlistHandle,
+    /// Slice 2d.2 — per-deployment health cache backing the
+    /// `modelPreference.fallback[]` failover walk in
+    /// [`crate::failover::forward_with_failover`]. Shared across
+    /// every inference handler so a 5xx on `chat/completions`
+    /// against deployment `gpt-4o` also informs the `responses`
+    /// handler's next request.
+    pub deployment_health: Arc<crate::deployment_health::DeploymentHealthRegistry>,
 }
 
 impl AppState {
@@ -121,13 +168,48 @@ impl AppState {
             .build()?;
 
         let config = Config::from_env()?;
-        let budget =
-            TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request);
+        // Slice 2b: persist counters across router restarts so a
+        // crash-loop or rollout doesn't reset daily / monthly
+        // tracking. Default location is under the sandbox state
+        // mount; override with `TOKEN_BUDGET_PERSIST_PATH=` to point
+        // somewhere writable in your dev box. Empty string disables
+        // persistence (in-memory only) — used by integration tests.
+        let persist_path = std::env::var("TOKEN_BUDGET_PERSIST_PATH")
+            .unwrap_or_else(|_| "/var/lib/azureclaw/token-budgets.json".into());
+        let budget = if persist_path.is_empty() {
+            TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
+        } else {
+            if let Some(parent) = std::path::Path::new(&persist_path).parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::warn!(
+                    path = %parent.display(),
+                    error = %e,
+                    "Could not create token-budget persistence dir — falling back to in-memory"
+                );
+                TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
+            } else {
+                TokenBudgetTracker::with_persistence(
+                    config.token_budget_daily,
+                    config.token_budget_per_request,
+                    &persist_path,
+                )
+            }
+        };
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
 
+        // Shared per-CRD policy load status registry. Constructed once
+        // and handed to both the AGT engine (which writes
+        // `PolicyKind::AgtProfile` on every successful reload) and
+        // `AppState` (read by `GET /internal/policy-status`).
+        let policy_status = Arc::new(PolicyStatusRegistry::new());
+
         // Initialize native AGT governance
-        let governance = Arc::new(Governance::new(&sandbox_name));
+        let governance = Arc::new(Governance::new_with_status(
+            &sandbox_name,
+            policy_status.clone(),
+        ));
 
         // Load policy YAML from AGT_POLICY_DIR if set
         let policy_dir = std::env::var("AGT_POLICY_DIR").ok();
@@ -163,14 +245,67 @@ impl AppState {
             Blocklist::disabled()
         };
 
-        // Learn mode: observe all egress domains (blocklist still enforced)
-        let learn_mode = std::env::var("EGRESS_LEARN_MODE")
-            .unwrap_or_else(|_| "false".into())
-            .parse::<bool>()
-            .unwrap_or(false);
+        // Egress mode (Slice 5b): the controller emits `EGRESS_MODE=strict|learn`.
+        // Default = `learn` when unset so a fresh router started without
+        // the controller wiring (e.g. local dev) keeps observing.
+        let learn_mode = match std::env::var("EGRESS_MODE").ok().as_deref() {
+            Some(v) if v.eq_ignore_ascii_case("strict") => false,
+            _ => true,
+        };
         if learn_mode {
             blocklist.set_learn_mode(true);
         }
+
+        // Load the compiled InferencePolicy (Slice 2a). Single JSON
+        // file under `INFERENCE_POLICY_DIR` written by the controller
+        // via `governance_mounts`. Only `perRequestTokens` is consumed
+        // today; the rest of the spec stays parked until later sub-
+        // slices. The loader self-reports through `PolicyStatusRegistry`
+        // so the controller can echo-confirm via
+        // `GET /internal/policy-status`.
+        let inference_policy = crate::inference_policy_loader::empty_handle();
+        let inference_policy_dir = std::env::var("INFERENCE_POLICY_DIR")
+            .unwrap_or_else(|_| "/etc/azureclaw/inference".into());
+        let _ = crate::inference_policy_loader::load_and_install(
+            &inference_policy_dir,
+            &policy_status,
+            &inference_policy,
+        )
+        .await;
+
+        // Slice 3a: ClawMemory compiled binding. Single file mounted
+        // by `governance_mounts` when `ClawSandbox.spec.memoryRef` is
+        // set. The loader registers the canonical digest under
+        // `PolicyKind::Memory` so the controller's
+        // `claw_memory_reconciler` can close the §3 echo loop;
+        // nothing in the data plane consumes the binding yet
+        // (Slice 3b rewires `foundry.memory.*`).
+        let memory_binding = crate::memory_binding_loader::empty_handle();
+        let memory_binding_dir = std::env::var("MEMORY_BINDING_DIR")
+            .unwrap_or_else(|_| crate::memory_binding_loader::MEMORY_BINDING_DIR_DEFAULT.into());
+        let _ = crate::memory_binding_loader::load_and_install(
+            &memory_binding_dir,
+            &policy_status,
+            &memory_binding,
+        )
+        .await;
+
+        // Slice 5c.1: load the signed egress allowlist bundle. Doing
+        // it here (vs. main.rs only) means tests that construct
+        // `AppState` directly also see the bundle installed onto the
+        // shared `Blocklist`. main.rs additionally spawns the
+        // hot-reload watcher for production.
+        let egress_allowlist = crate::egress_allowlist_loader::empty_handle();
+        let egress_allowlist_dir = std::env::var("EGRESS_ALLOWLIST_DIR").unwrap_or_else(|_| {
+            crate::egress_allowlist_loader::EGRESS_ALLOWLIST_DIR_DEFAULT.into()
+        });
+        let _ = crate::egress_allowlist_loader::load_and_install(
+            &egress_allowlist_dir,
+            &policy_status,
+            &egress_allowlist,
+            &blocklist,
+        )
+        .await;
 
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
@@ -201,6 +336,11 @@ impl AppState {
             handoff_session: HandoffSession::new(),
             drain_state: DrainState::new(),
             pending_handoff: PendingHandoffStore::new(),
+            policy_status,
+            inference_policy,
+            memory_binding,
+            egress_allowlist,
+            deployment_health: Arc::new(crate::deployment_health::DeploymentHealthRegistry::new()),
         })
     }
 
@@ -229,6 +369,48 @@ impl AppState {
             sandbox_name: sandbox_name.to_string(),
         }
     }
+}
+
+/// Slice 2d.1 — apply `modelPreference.primary.deployment` from a
+/// loaded `InferencePolicy` snapshot as a deployment override.
+///
+/// Mutates `upstream.deployment` in place when the policy carries a
+/// non-empty `primary.deployment` that differs from the current
+/// deployment. Logs an `info!` event on every effective override so
+/// operators can correlate router-level traffic shaping against the
+/// policy bytes (digest is included).
+///
+/// Fail-open by design:
+/// * `None` snapshot ⇒ no-op (back-compat for sandboxes without an
+///   `InferencePolicy`).
+/// * Empty-string `primary.deployment` ⇒ no-op (defence-in-depth even
+///   though the controller schema rejects empty strings).
+/// * Same-deployment override ⇒ no-op + no log spam.
+///
+/// **Slice 2d.1 deliberately ignores `primary.provider`** — provider-
+/// tagged routing requires a per-provider client registry the router
+/// doesn't carry today; Slice 2d.2 will pick that up. Until then the
+/// provider tag is informational-only.
+pub(crate) fn apply_model_preference_override(
+    upstream: &mut UpstreamConfig,
+    policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+) {
+    let Some(ref pref) = policy.model_preference else {
+        return;
+    };
+    let target = pref.primary.deployment.as_str();
+    if target.is_empty() || target == upstream.deployment {
+        return;
+    }
+    tracing::info!(
+        sandbox = %upstream.sandbox_name,
+        from = %upstream.deployment,
+        to = %target,
+        provider = %pref.primary.provider,
+        digest = %policy.digest,
+        "InferencePolicy modelPreference: overriding deployment"
+    );
+    upstream.deployment = target.to_string();
 }
 
 /// Extract the admin bearer token from either `Authorization: Bearer <token>`

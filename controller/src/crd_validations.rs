@@ -51,6 +51,7 @@ use kube::CustomResourceExt;
 use crate::a2a_agent::A2AAgent;
 use crate::claw_eval::ClawEval;
 use crate::claw_memory::ClawMemory;
+use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
@@ -64,19 +65,30 @@ use crate::tool_policy::ToolPolicy;
 ///    `https://`.
 /// 3. `oauth.pkce`, when present, must be `S256` (RFC 7636 §4.2 — the
 ///    one PKCE method this CRD supports).
+/// 4. `bundleRef` is mutually exclusive with the inline content
+///    fields (`url`, `oauth`, `productionMode`, `scopes`,
+///    `allowedTools`, `displayName`). The CR may either inline the
+///    server identity + tool surface or reference a signed OCI
+///    bundle, never both. (Selector field `allowedSandboxes` stays
+///    on the CR in both modes — it's authoring metadata, not
+///    bundle content.)
 #[must_use]
 pub fn mcp_server_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule:
-                "self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)"
-                    .into(),
+            rule: "has(self.bundleRef) || !has(self.productionMode) || \
+                   self.productionMode == false || \
+                   (has(self.oauth) && size(self.oauth.issuer) > 0)"
+                .into(),
             message: Some("productionMode requires spec.oauth.issuer to be set".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "self.productionMode == false || self.url.startsWith('https://')".into(),
+            rule: "has(self.bundleRef) || !has(self.productionMode) || \
+                   self.productionMode == false || \
+                   (has(self.url) && self.url.startsWith('https://'))"
+                .into(),
             message: Some("productionMode requires spec.url to begin with https://".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
@@ -84,6 +96,20 @@ pub fn mcp_server_validations() -> Vec<ValidationRule> {
         ValidationRule {
             rule: "!has(self.oauth) || !has(self.oauth.pkce) || self.oauth.pkce == 'S256'".into(),
             message: Some("spec.oauth.pkce, when set, must be 'S256' (RFC 7636 §4.2)".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && \
+                   !has(self.productionMode) && !has(self.scopes) && \
+                   !has(self.allowedTools) && !has(self.displayName))"
+                .into(),
+            message: Some(
+                "spec.bundleRef is mutually exclusive with spec.url, spec.oauth, \
+                 spec.productionMode, spec.scopes, spec.allowedTools, and \
+                 spec.displayName"
+                    .into(),
+            ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -104,16 +130,32 @@ pub fn mcp_server_validations() -> Vec<ValidationRule> {
 ///    nothing is almost always an authoring mistake; if truly
 ///    intended, an explicit `disabled: true` field is the right
 ///    escape hatch — not silently empty selectors).
+/// 2. `agtProfile.inline` and `agtProfile.bundleRef` are mutually
+///    exclusive — at most one may be set. Both absent is permitted
+///    (back-compat: no AGT profile attached); both present is an
+///    authoring error.
 #[must_use]
 pub fn tool_policy_validations() -> Vec<ValidationRule> {
-    vec![ValidationRule {
-        rule:
-            "has(self.appliesTo.sandboxMatchLabels) && size(self.appliesTo.sandboxMatchLabels) > 0"
-                .into(),
-        message: Some("spec.appliesTo.sandboxMatchLabels must contain at least one label".into()),
-        reason: Some("FieldValueInvalid".into()),
-        ..ValidationRule::default()
-    }]
+    vec![
+        ValidationRule {
+            rule:
+                "has(self.appliesTo.sandboxMatchLabels) && size(self.appliesTo.sandboxMatchLabels) > 0"
+                    .into(),
+            message: Some("spec.appliesTo.sandboxMatchLabels must contain at least one label".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule:
+                "!has(self.agtProfile) || !(has(self.agtProfile.inline) && has(self.agtProfile.bundleRef))"
+                    .into(),
+            message: Some(
+                "spec.agtProfile.inline and spec.agtProfile.bundleRef are mutually exclusive".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
 }
 
 /// Inject CEL rules onto the `spec` schema node of a generated CRD.
@@ -234,6 +276,12 @@ pub fn inference_policy_validations() -> Vec<ValidationRule> {
     let severities = "['Safe','Low','Medium','High']";
     vec![
         ValidationRule {
+            rule: "!has(self.bundleRef) || (!has(self.tokenBudget) && !has(self.contentSafety) && !has(self.modelPreference) && !has(self.displayName))".into(),
+            message: Some("spec.bundleRef is mutually exclusive with spec.tokenBudget, spec.contentSafety, spec.modelPreference, and spec.displayName; the bundle carries those content fields".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
             rule: "!has(self.tokenBudget) || !has(self.tokenBudget.monthlyTokens) || !has(self.tokenBudget.dailyTokens) || self.tokenBudget.monthlyTokens >= self.tokenBudget.dailyTokens".into(),
             message: Some("spec.tokenBudget.monthlyTokens must be >= spec.tokenBudget.dailyTokens".into()),
             reason: Some("FieldValueInvalid".into()),
@@ -310,9 +358,9 @@ pub fn inference_policy_crd() -> CustomResourceDefinition {
 pub fn claw_memory_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule: "size(self.storeName) > 0 && size(self.storeName) <= 63 && self.storeName.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')".into(),
+            rule: "has(self.bundleRef) || (has(self.storeName) && size(self.storeName) > 0 && size(self.storeName) <= 63 && self.storeName.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))".into(),
             message: Some(
-                "spec.storeName must be a DNS-label (1-63 chars, lowercase alphanumeric + dashes)".into(),
+                "spec.storeName must be a DNS-label (1-63 chars, lowercase alphanumeric + dashes) when spec.bundleRef is not set".into(),
             ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
@@ -324,8 +372,8 @@ pub fn claw_memory_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "size(self.scope) > 0 && size(self.scope) <= 256".into(),
-            message: Some("spec.scope must be 1-256 characters".into()),
+            rule: "has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256)".into(),
+            message: Some("spec.scope must be 1-256 characters when spec.bundleRef is not set".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -333,6 +381,18 @@ pub fn claw_memory_validations() -> Vec<ValidationRule> {
             rule: "!has(self.retentionDays) || self.retentionDays > 0".into(),
             message: Some(
                 "spec.retentionDays must be > 0 when set (use delete_scope for immediate deletion)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        // Slice 1c.4 mutex: bundleRef is mutually exclusive with the
+        // inline content fields (storeName, scope, retentionDays,
+        // deleteOnSandboxDelete, displayName). sandboxRef stays in
+        // the CR in either branch.
+        ValidationRule {
+            rule: "!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))".into(),
+            message: Some(
+                "spec.bundleRef is mutually exclusive with spec.storeName, spec.scope, spec.retentionDays, spec.deleteOnSandboxDelete, and spec.displayName".into(),
             ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
@@ -349,44 +409,55 @@ pub fn claw_memory_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on ClawMemory")
 }
 
-/// `ClawEval.spec` CEL rules. Phase 2 §8 entry 6 (S6).
+/// `ClawEval.spec` CEL rules. Slice 6.3 of `crd-well-oiled-machine`.
 ///
-/// `ClawEval` is a binding/provisioning resource over Azure AI
-/// Foundry Evals (per `docs/implementation-plan.md` §10.5 #6). The CRD
-/// is shape-only — Foundry availability and runtime trigger semantics
-/// are out of admission scope. Rules:
+/// `ClawEval` declares a policy-conformance run against a target
+/// `ClawSandbox`. The reconciler spawns a Kubernetes `Job`/`CronJob`
+/// running the `azureclaw-conformance-runner` image.
 ///
-/// - `sandboxRef.name` non-empty (1-253 chars; same length cap as
-///   K8s object names).
-/// - `evaluators`: each entry 1-256 chars; required (`size >= 1`)
-///   when `suite == "foundry-evals"`. Other suites accept empty.
-/// - `schedule`, when set, looks like a 5-or-6-token cron line. We do
-///   not parse cron at admission (defer to runtime), but we reject
-///   empty strings and impossible token counts.
-/// - `threshold.score`, when set, in `[0.0, 1.0]`.
-/// - `dataset`: at most one of `configMapRef` / `inline` (mutually
-///   exclusive). `inline` capped at 64 entries to keep the CR small.
+/// Rules:
+///
+/// - `targetSandboxRef.name`: non-empty, 1-253 chars (K8s object-name
+///   length cap).
+/// - `corpus`: exactly one of `builtin` / `bundleRef` (mutex).
+/// - `corpus.builtin`, when set, 1-253 chars (corpus names follow
+///   DNS-1123 label conventions but we accept any short token at
+///   admission — the reconciler rejects unknown names with
+///   `CorpusBuiltinMissing`).
+/// - `schedule`, when set, looks like a 5-or-6-token cron expression.
+///   The reconciler does the authoritative parse via
+///   `kube-rs`/`cron` at apply-time; here we just reject empty/long
+///   strings.
 /// - `displayName`, when set, 1-256 chars.
+/// - `runnerImage`, when set, 1-512 chars (room for digest-pinned
+///   `registry.example.com/foo/bar@sha256:...` URIs).
 #[must_use]
 pub fn claw_eval_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule: "size(self.sandboxRef.name) > 0 && size(self.sandboxRef.name) <= 253".into(),
-            message: Some("spec.sandboxRef.name must be 1-253 characters".into()),
+            rule: "size(self.targetSandboxRef.name) > 0 && size(self.targetSandboxRef.name) <= 253"
+                .into(),
+            message: Some("spec.targetSandboxRef.name must be 1-253 characters".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "self.suite != 'foundry-evals' || (has(self.evaluators) && size(self.evaluators) >= 1)".into(),
+            rule:
+                "has(self.corpus.builtin) != has(self.corpus.bundleRef)"
+                    .into(),
             message: Some(
-                "spec.evaluators must contain at least one entry when spec.suite is 'foundry-evals'".into(),
+                "spec.corpus must set exactly one of `builtin` or `bundleRef` (mutually exclusive)".into(),
             ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "!has(self.evaluators) || self.evaluators.all(e, size(e) > 0 && size(e) <= 256)".into(),
-            message: Some("each spec.evaluators entry must be 1-256 characters".into()),
+            rule:
+                "!has(self.corpus.builtin) || (size(self.corpus.builtin) > 0 && size(self.corpus.builtin) <= 253)"
+                    .into(),
+            message: Some(
+                "spec.corpus.builtin, when set, must be 1-253 characters".into(),
+            ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -399,30 +470,14 @@ pub fn claw_eval_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "!has(self.threshold) || (self.threshold.score >= 0.0 && self.threshold.score <= 1.0)".into(),
-            message: Some("spec.threshold.score must be in [0.0, 1.0] when set".into()),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-        ValidationRule {
-            rule: "!has(self.dataset) || !(has(self.dataset.configMapRef) && has(self.dataset.inline) && size(self.dataset.inline) > 0)".into(),
-            message: Some(
-                "spec.dataset.configMapRef and spec.dataset.inline are mutually exclusive".into(),
-            ),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-        ValidationRule {
-            rule: "!has(self.dataset) || !has(self.dataset.inline) || size(self.dataset.inline) <= 64".into(),
-            message: Some(
-                "spec.dataset.inline is capped at 64 entries; use a ConfigMap for larger datasets".into(),
-            ),
-            reason: Some("FieldValueInvalid".into()),
-            ..ValidationRule::default()
-        },
-        ValidationRule {
             rule: "!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 256)".into(),
             message: Some("spec.displayName, when set, must be 1-256 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.runnerImage) || (size(self.runnerImage) > 0 && size(self.runnerImage) <= 512)".into(),
+            message: Some("spec.runnerImage, when set, must be 1-512 characters".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -494,6 +549,131 @@ pub fn trust_graph_crd() -> CustomResourceDefinition {
         trust_graph_validations(),
     )
     .expect("kube-rs derive must produce a spec property on TrustGraph")
+}
+
+/// `EgressApproval.spec` CEL rules. Slice 5e-thin of
+/// `crd-well-oiled-machine`.
+///
+/// `EgressApproval` is an ephemeral, scoped, attributable widening of a
+/// sandbox's baseline egress allowlist. The CRD is shape-only — the
+/// authority decision is K8s RBAC on the `create` verb, and the
+/// reconciler is the runtime enforcer of TTL semantics.
+///
+/// Admission CEL covers what we can verify *without* a cluster
+/// lookup; the reconciler re-checks every rule plus the cluster
+/// invariants (sibling sandbox Ready, TTL ceiling) for
+/// defense-in-depth.
+///
+/// Rules:
+///
+/// - `sandbox`: non-empty, 1–253 chars (k8s object-name length cap).
+/// - `hosts`: 1–16 entries; each `host` non-empty + 1–253 chars; each
+///   `port`, when set, ∈ `[1, 65535]`. The router's egress matcher
+///   defaults missing ports to 443 — `EndpointConfig.port` is
+///   `Option<u16>` upstream so we don't force operators to spell out
+///   the obvious HTTPS case.
+/// - `reason`: 1–512 chars; must not contain ASCII control bytes
+///   (rejected to keep audit log + CLI output safe to render).
+/// - `ticket`: when set, 1–128 chars (loose — no shape constraint
+///   beyond length).
+/// - `ttl`: matches an ISO 8601 positive-duration regex. The
+///   regex is intentionally permissive — the reconciler does the
+///   authoritative parse, including the cluster ceiling check; here
+///   we just reject obviously malformed inputs (`""`, `"forever"`,
+///   negative). Form: `P[<n>D]T[<n>H][<n>M][<n>S]` or `P<n>D` etc.
+#[must_use]
+pub fn egress_approval_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.sandbox) > 0 && size(self.sandbox) <= 253".into(),
+            message: Some("spec.sandbox must be 1-253 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.hosts) >= 1 && size(self.hosts) <= 16".into(),
+            message: Some(
+                "spec.hosts must contain between 1 and 16 entries (small, scoped grants only)"
+                    .into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.hosts.all(h, size(h.host) > 0 && size(h.host) <= 253)".into(),
+            message: Some("each spec.hosts[*].host must be 1-253 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.hosts.all(h, !has(h.port) || (h.port >= 1 && h.port <= 65535))".into(),
+            message: Some("each spec.hosts[*].port, when set, must be 1-65535".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.reason) >= 1 && size(self.reason) <= 512".into(),
+            message: Some("spec.reason must be 1-512 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        // ASCII control byte guard. The regex covers C0 controls
+        // (0x00-0x1F) except tab (0x09), newline (0x0A), and
+        // carriage return (0x0D) — those three are common in
+        // operator-written prose; DEL (0x7F) is also rejected.
+        // The CEL `matches` operator uses RE2 syntax.
+        ValidationRule {
+            rule: "!self.reason.matches('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]')".into(),
+            message: Some(
+                "spec.reason must not contain ASCII control bytes (audit-log injection guard)"
+                    .into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.ticket) || (size(self.ticket) >= 1 && size(self.ticket) <= 128)"
+                .into(),
+            message: Some("spec.ticket, when set, must be 1-128 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        // ISO 8601 positive-duration regex.
+        //
+        // Accepts: P<n>D, P<n>W, P<n>Y[<n>M[<n>D]], PT<n>H[<n>M[<n>S]],
+        // P<n>D T<n>H..., where n ∈ [0-9]+ (no fractional, no
+        // negative). At least one numeric component must be present.
+        // The reconciler does the authoritative parse-and-clamp.
+        //
+        // We disallow the zero-only form (`PT0S`, `P0D`) by requiring
+        // that at least one digit is non-zero — implemented as a
+        // negative-lookahead-free rule: the duration must contain a
+        // digit '1'-'9' somewhere. RE2 supports that as a separate
+        // `matches`.
+        ValidationRule {
+            rule: "self.ttl.matches('^P(\\\\d+Y)?(\\\\d+M)?(\\\\d+W)?(\\\\d+D)?(T(\\\\d+H)?(\\\\d+M)?(\\\\d+S)?)?$')".into(),
+            message: Some(
+                "spec.ttl must be a positive ISO 8601 duration (e.g. PT15M, PT4H, P1D)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.ttl.matches('[1-9]')".into(),
+            message: Some("spec.ttl must be > 0 (e.g. PT15M, not PT0S)".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `EgressApproval` CRD with [`egress_approval_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn egress_approval_crd() -> CustomResourceDefinition {
+    inject_spec_validations(EgressApproval::crd(), egress_approval_validations())
+        .expect("kube-rs derive must produce a spec property on EgressApproval")
 }
 
 /// `ClawSandbox` CRD as produced by the kube-rs derive.
@@ -812,14 +992,14 @@ mod tests {
             .map(|r| r.rule)
             .collect();
         assert!(
-            rules.iter().any(|r| r.contains("sandboxRef.name")),
-            "must validate sandboxRef.name; got rules: {rules:?}"
+            rules.iter().any(|r| r.contains("targetSandboxRef.name")),
+            "must validate targetSandboxRef.name; got rules: {rules:?}"
         );
         assert!(
             rules
                 .iter()
-                .any(|r| r.contains("foundry-evals") && r.contains("evaluators")),
-            "must require evaluators for foundry-evals suite; got rules: {rules:?}"
+                .any(|r| r.contains("corpus.builtin") && r.contains("corpus.bundleRef")),
+            "must enforce corpus builtin/bundleRef mutex; got rules: {rules:?}"
         );
         assert!(
             rules
@@ -828,16 +1008,8 @@ mod tests {
             "must validate schedule cron shape; got rules: {rules:?}"
         );
         assert!(
-            rules
-                .iter()
-                .any(|r| r.contains("threshold.score") && r.contains("1.0")),
-            "must bound threshold.score to [0,1]; got rules: {rules:?}"
-        );
-        assert!(
-            rules
-                .iter()
-                .any(|r| r.contains("configMapRef") && r.contains("inline")),
-            "must enforce dataset configMapRef/inline mutual exclusion; got rules: {rules:?}"
+            rules.iter().any(|r| r.contains("runnerImage")),
+            "must validate runnerImage length; got rules: {rules:?}"
         );
     }
 
@@ -846,9 +1018,86 @@ mod tests {
         let crd = claw_eval_crd();
         let y = serde_yaml::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
-        assert!(y.contains("sandboxRef"));
-        assert!(y.contains("evaluators"));
-        assert!(y.contains("threshold"));
+        assert!(y.contains("targetSandboxRef"));
+        assert!(y.contains("corpus"));
+    }
+
+    // ---- EgressApproval (5e-thin) --------------------------------------
+
+    #[test]
+    fn egress_approval_validations_are_non_empty() {
+        assert!(!egress_approval_validations().is_empty());
+    }
+
+    #[test]
+    fn every_egress_approval_rule_has_message_and_rule() {
+        for rule in egress_approval_validations() {
+            assert!(!rule.rule.is_empty(), "rule body must not be empty");
+            let msg = rule.message.as_deref().unwrap_or("");
+            assert!(!msg.is_empty(), "rule '{}' missing message", rule.rule);
+        }
+    }
+
+    #[test]
+    fn egress_approval_crd_has_spec_validations_after_injection() {
+        let crd = egress_approval_crd();
+        let v = spec_validations(&crd);
+        assert_eq!(v.len(), egress_approval_validations().len());
+    }
+
+    #[test]
+    fn egress_approval_rules_cover_core_invariants() {
+        let rules: Vec<String> = egress_approval_validations()
+            .into_iter()
+            .map(|r| r.rule)
+            .collect();
+        assert!(
+            rules.iter().any(|r| r.contains("self.sandbox")),
+            "must validate sandbox name; got: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("self.hosts") && r.contains("16")),
+            "must cap hosts at 16; got: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.contains("h.port")),
+            "must validate per-host port range; got: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("self.reason") && r.contains("512")),
+            "must cap reason length; got: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("\\x00") || r.contains("control")),
+            "must guard against ASCII control bytes in reason; got: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.contains("self.ticket")),
+            "must validate ticket length; got: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("self.ttl") && r.contains("^P")),
+            "must validate ISO 8601 duration shape; got: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn egress_approval_crd_is_serde_round_trippable() {
+        let crd = egress_approval_crd();
+        let y = serde_yaml::to_string(&crd).expect("serializes");
+        assert!(y.contains("x-kubernetes-validations"));
+        assert!(y.contains("sandbox"));
+        assert!(y.contains("hosts"));
+        assert!(y.contains("reason"));
+        assert!(y.contains("ttl"));
     }
 
     #[test]

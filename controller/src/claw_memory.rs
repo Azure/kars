@@ -94,16 +94,28 @@ pub struct ClawMemorySpec {
     /// (`cli/src/plugin.ts::ensureMemoryStore`) creates the store
     /// on first use if absent. CEL: non-empty,
     /// DNS-label-style (lowercase alphanumeric + dashes).
-    pub store_name: String,
+    ///
+    /// Required when [`Self::bundle_ref`] is absent (the inline
+    /// path); MUST be absent when [`Self::bundle_ref`] is set
+    /// (the bundle supplies the value). Admission CEL enforces
+    /// the mutex.
+    #[serde(default)]
+    pub store_name: Option<String>,
 
-    /// Sandbox this binding applies to.
+    /// Sandbox this binding applies to. Owned by the CR (never the
+    /// signed bundle) — one signed bundle can be referenced by
+    /// multiple `ClawMemory` CRs targeting different sandboxes.
     pub sandbox_ref: SandboxRef,
 
     /// Scope key under which this sandbox writes/reads memories.
     /// Foundry Memory Store partitions data per scope. CEL:
     /// non-empty. Default convention (set by the runtime path if
     /// absent here): `agent:{sandboxName}`.
-    pub scope: String,
+    ///
+    /// Required when [`Self::bundle_ref`] is absent (the inline
+    /// path); MUST be absent when [`Self::bundle_ref`] is set.
+    #[serde(default)]
+    pub scope: Option<String>,
 
     /// Optional retention floor in days. Runtime path may apply a
     /// `delete_scope` sweep when entries exceed this age. CEL:
@@ -115,15 +127,33 @@ pub struct ClawMemorySpec {
     /// deleted. The controller-side cleanup is finalizer-only on the
     /// binding ConfigMap; Foundry-side delete via the router is
     /// wired in S7+.
-    #[serde(default = "default_true")]
-    pub delete_on_sandbox_delete: bool,
+    ///
+    /// When [`Self::bundle_ref`] is set, the bundle supplies this
+    /// value; the CR's inline value MUST be absent in that case.
+    /// Default-true is applied at the reconciler layer (after the
+    /// bundle / inline merge) so `None` here is meaningful (= "use
+    /// bundle value or default").
+    #[serde(default)]
+    pub delete_on_sandbox_delete: Option<bool>,
 
-    /// Optional human-readable label.
+    /// Optional human-readable label. MUST be absent when
+    /// [`Self::bundle_ref`] is set.
     pub display_name: Option<String>,
-}
 
-fn default_true() -> bool {
-    true
+    /// Signed OCI artifact carrying the binding content
+    /// (`storeName`, `scope`, `retentionDays`,
+    /// `deleteOnSandboxDelete`, `displayName`). When set, the
+    /// controller pulls the artifact by digest, verifies its
+    /// cosign signature against the active
+    /// [`crate::signer_policy::SignerPolicy`], and merges the
+    /// bundle content onto `sandboxRef` (always owned by the CR)
+    /// before writing the binding ConfigMap. Slice 1c.4 of the
+    /// `crd-well-oiled-machine` plan.
+    ///
+    /// Mutually exclusive with the inline content fields above.
+    /// Admission CEL enforces the mutex; the reconciler also checks
+    /// as defense-in-depth.
+    pub bundle_ref: Option<crate::crd::OciArtifactRef>,
 }
 
 /// Reference to a sandbox by name (within the same namespace as the
@@ -162,4 +192,31 @@ pub struct ClawMemoryStatus {
     /// Last time the binding was compiled and pushed.
     #[serde(default)]
     pub last_reconciled_at: Option<String>,
+
+    /// `sha256:<hex>` digest of the canonical binding JSON the
+    /// controller published — the value every referencing sandbox's
+    /// router must echo via `GET /internal/policy-status` before the
+    /// CR is promoted to `phase=Ready` (principles.md §3, Slice 3a).
+    /// Stays unset on `phase=Failed`.
+    #[serde(default)]
+    pub compiled_digest: Option<String>,
+
+    /// `sha256:<hex>` digest the inference-router last echoed for
+    /// this CR's compiled binding. Populated only in the
+    /// `RouterEnforcementState::Confirmed` branch — when every
+    /// referencing sandbox returns the matching digest, this equals
+    /// [`Self::compiled_digest`]. `None` otherwise (awaiting echo,
+    /// no sandboxes referencing, or transient poll failure). The
+    /// CLI / `kubectl describe` operator diffs against
+    /// `compiledDigest` here.
+    #[serde(default)]
+    pub loaded_digest: Option<String>,
+
+    /// `sha256:...` of the signed bundle the controller last pulled
+    /// for `spec.bundleRef`. Stamped when the bundle path produced
+    /// the effective spec used in the latest reconcile; `None` when
+    /// the spec used the inline path or no successful fetch has
+    /// happened yet. Slice 1c.4.
+    #[serde(default)]
+    pub bundle_ref_digest: Option<String>,
 }

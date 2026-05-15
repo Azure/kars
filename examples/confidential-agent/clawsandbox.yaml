@@ -53,7 +53,6 @@ spec:
 
   networkPolicy:
     defaultDeny: true
-    approvalRequired: true
     allowedEndpoints:
       - host: "github.com"
         port: 443

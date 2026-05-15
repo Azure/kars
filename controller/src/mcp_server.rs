@@ -32,6 +32,17 @@ use serde::{Deserialize, Serialize};
 /// `McpServer.spec` — declares an MCP 2026 server reachable from sandboxes
 /// in the same namespace (or, if `crossNamespaceAllowed: true` on the
 /// server side, cluster-wide).
+///
+/// ## Two authoring paths
+///
+/// The content fields (`url`, `oauth`, `productionMode`, `scopes`,
+/// `allowedTools`, `displayName`) are mutually exclusive with
+/// [`bundle_ref`](McpServerSpec::bundle_ref): either inline the values
+/// (no supply-chain attestation) or reference a signed OCI artifact
+/// (cosign-verified against the cluster `SignerPolicy`). The
+/// `allowedSandboxes` selector is owned exclusively by the CR — one
+/// signed server bundle can be referenced by multiple `McpServer` CRs
+/// with different sandbox selectors.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
     group = "azureclaw.azure.com",
@@ -49,36 +60,63 @@ use serde::{Deserialize, Serialize};
 pub struct McpServerSpec {
     /// Server endpoint URL. MUST be `https://` when `productionMode: true`.
     /// Validated by admission CEL.
-    pub url: String,
+    ///
+    /// Optional: a signed bundle can supply this via [`bundle_ref`]. At
+    /// reconcile time, exactly one of `url` or `bundle_ref.url` must
+    /// resolve to a non-empty value, otherwise the reconciler stamps
+    /// `Degraded=True/SpecInvalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 
     /// OAuth 2.1 configuration. Required when `productionMode: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuthConfig>,
 
     /// When true, the router rejects calls that are not bearer-token-
     /// authenticated against `oauth.issuer` with a verified PKCE flow.
     /// `false` allows unauthenticated calls — dev-only; admission policy
     /// rejects this for non-dev tenants (mirrors `Null*` provider rule).
-    #[serde(default)]
-    pub production_mode: bool,
+    ///
+    /// Optional: a signed bundle can supply this. When neither inline
+    /// nor bundle sets the field, the effective value defaults to
+    /// `false` (back-compat with the pre-1c.5 schema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_mode: Option<bool>,
 
     /// OAuth 2.1 scopes that the router will request when fronting calls
     /// from sandboxes to this server. The actual per-tool gating is
     /// expressed in `ToolPolicy` resources, not here.
-    #[serde(default)]
-    pub scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
 
     /// Allow-list of tool names. Empty list means "no tools allowed";
     /// to allow all tools, use `["*"]` and lean on `ToolPolicy` for
     /// per-tool governance. Default empty — fail-closed.
-    #[serde(default)]
-    pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
 
     /// Selector restricting which sandboxes can reach this server.
     /// Empty = same-namespace only.
+    ///
+    /// **CR-owned field**: deliberately NOT part of any signed bundle.
+    /// The selector is a deployment-time concern; one signed server
+    /// bundle can be referenced by multiple `McpServer` CRs in
+    /// different environments with different selectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_sandboxes: Option<SandboxSelector>,
 
     /// Optional human-readable label for operator-TUI display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+
+    /// Reference to a signed OCI artifact carrying the policy content
+    /// (`url`, `oauth`, `productionMode`, `scopes`, `allowedTools`,
+    /// `displayName`). Mutually exclusive with inline content fields —
+    /// enforced by admission CEL and re-checked by the reconciler.
+    ///
+    /// Slice 1c.5 of `crd-well-oiled-machine`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_ref: Option<crate::crd::OciArtifactRef>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -149,6 +187,17 @@ pub struct McpServerStatus {
     /// `azureclaw-controller/mcp`.
     #[serde(default)]
     pub jwks_config_map_ref: Option<LocalObjectRef>,
+
+    /// OCI manifest digest of the verified signed bundle, when the
+    /// `bundleRef` authoring path was taken. Operator-visible proof
+    /// that the signature was checked and the bundle's bytes shaped
+    /// the effective server config.
+    ///
+    /// `None` when the inline path was used.
+    ///
+    /// Slice 1c.5 of `crd-well-oiled-machine`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_ref_digest: Option<String>,
 }
 
 /// Minimal `LocalObjectReference`-shaped struct with `name` only — the

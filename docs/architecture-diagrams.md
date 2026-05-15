@@ -85,26 +85,28 @@ sequenceDiagram
   participant Agent as Agent (UID 1000)
   participant Router as Router (UID 1001)
   participant Gov as Governance (AGT + InferencePolicy)
-  participant CS as Content Safety (Foundry)
   participant WI as Workload Identity
-  participant Foundry as Foundry model
+  participant Foundry as Foundry model<br/>(+ inline Content Safety)
 
   Agent->>Router: POST /v1/chat (prompt)
-  Router->>CS: prompt safety scan
-  CS-->>Router: ok
   Router->>Gov: allow? token budget? rate?
   Gov-->>Router: allow + decision audit
   Router->>WI: exchange SA token → AAD
   WI-->>Router: bearer token
-  Router->>Foundry: POST /openai/… + bearer
-  Foundry-->>Router: completion
-  Router->>CS: response safety scan
-  CS-->>Router: ok
+  Router->>Foundry: POST /openai/… + bearer<br/>(Content Safety enforced server-side)
+  Foundry-->>Router: completion + prompt_filter_results
+  Router->>Router: parse prompt_filter_results;<br/>block if jailbreak / category > threshold
   Router-->>Agent: completion
   Note over Router: audit record:<br/>hash-chained, signed
 ```
 
-The agent has no direct path to **Foundry**, **WI**, **CS**, or the audit chain. The router brokers all of them.
+The agent has no direct path to **Foundry**, **WI**, or the audit
+chain. The router brokers all of them. **Content Safety** is enforced
+*inside* the Foundry call — the router does **not** make a separate
+roundtrip; it parses the `prompt_filter_results` field that Foundry
+returns inline and blocks/audits accordingly. On GitHub Copilot and
+GitHub Models providers, inline filters are not returned, so this
+step is a no-op (documented in `cli-reference.md` under `azureclaw dev`).
 
 ---
 
@@ -184,7 +186,7 @@ The A2A gateway is the only inbound public surface. Every request must carry a s
 ```mermaid
 flowchart LR
   User["operator / CLI / GitOps"]
-  CRD[("8 CRDs<br/>ClawSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>ClawMemory · ClawEval · TrustGraph")]
+  CRD[("9 CRDs<br/>ClawSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>ClawMemory · ClawEval · TrustGraph<br/>EgressApproval")]
   Ctrl["azureclaw-controller<br/>(kube-rs)"]
 
   User -->|kubectl apply / azureclaw cli| CRD

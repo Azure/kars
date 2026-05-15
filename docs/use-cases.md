@@ -19,7 +19,7 @@ All use cases share the same trust boundary:
 - All external traffic flows through the per-sandbox **inference router** (UID 1001).
 - All inter-agent traffic flows through the **AgentMesh relay** (Signal Protocol — X3DH + Double Ratchet); the relay sees only ciphertext.
 - Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture.md#four-seam-provider-architecture).
-- All 8 CRDs (`ClawSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `ClawMemory`, `ClawEval`, `TrustGraph`) are first-class and visible in the operator TUI.
+- All 9 CRDs (`ClawSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `ClawMemory`, `ClawEval`, `TrustGraph`, `EgressApproval`) are first-class and visible in the operator TUI. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
 
 ---
 
@@ -30,7 +30,7 @@ All use cases share the same trust boundary:
 
 ### What the operator wants
 
-A single-tenant AKS cluster running one or more OpenClaw agents in fully isolated namespaces. The operator wants the developer inner-loop (`azureclaw up`, `azureclaw add`, `azureclaw connect`) plus an operational dashboard (`azureclaw operator`) covering all 8 CRDs.
+A single-tenant AKS cluster running one or more OpenClaw agents in fully isolated namespaces. The operator wants the developer inner-loop (`azureclaw up`, `azureclaw add`, `azureclaw connect`) plus an operational dashboard (`azureclaw operator`) covering all 9 CRDs.
 
 ### Topology
 
@@ -78,7 +78,7 @@ azureclaw credentials update research-bot \
 # 4. Connect (opens OpenClaw TUI via port-forward)
 azureclaw connect research-bot
 
-# 5. Operator dashboard — shows all 8 CRDs live
+# 5. Operator dashboard — shows all 9 CRDs live
 azureclaw operator
 
 # 6. Learn, review, and enforce egress for analyst
@@ -123,7 +123,7 @@ spec:
     trustThreshold: 500
   networkPolicy:
     defaultDeny: true
-    learnEgress: false
+    egressMode: Strict
     allowlistRef:
       registry: azureclawacr.azurecr.io
       repository: policy/egress-allowlist/research-bot
@@ -140,13 +140,13 @@ spec:
 
 - One pod: **init `egress-guard`** → installs UID-1000 iptables egress block; **`openclaw`** (UID 1000) agent; **`inference-router`** (UID 1001) sole external path.
 - Read-only rootfs, drop ALL caps, non-root, no privilege escalation.
-- Custom strict seccomp profile (219 allowed / 28 blocked syscalls).
+- Custom strict seccomp profile (175 allowed / 41 explicit-deny syscalls).
 - NetworkPolicy default-deny + 51k-domain blocklist auto-refreshed every 6 h.
 - Foundry `Microsoft.DefaultV2` Content Safety + Prompt Shields on every inference.
 - AGT governance: `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` (native Rust, in-process, <1 µs eval latency).
 - Optional `confidential` isolation — Kata VM on AMD SEV-SNP; per-pod dedicated kernel.
 - Signed OCI egress allowlists (`spec.networkPolicy.allowlistRef`) — the controller refuses unsigned artifacts when a `SignerPolicy` is configured.
-- Operator TUI (`azureclaw operator`) renders all 8 CRDs in real time.
+- Operator TUI (`azureclaw operator`) renders all 9 CRDs in real time.
 
 ### Cross-links
 
@@ -567,7 +567,7 @@ spec:
 - Same inference router — `InferencePolicy`, Content Safety, token budgets, Workload Identity auth.
 - Same AGT governance — `ToolPolicy`, `TrustManager`, `AuditLogger`, `RateLimiter`.
 - Same `ClawMemory` (Foundry Memory Store binding) and `ClawEval` CRDs.
-- Same operator TUI — all 8 CRDs visible regardless of runtime kind.
+- Same operator TUI — all 9 CRDs visible regardless of runtime kind.
 - `RuntimeReady` condition reflects per-runtime health; runtime kinds without a shipped adapter stamp `False/AdapterMissing` (currently `SemanticKernel`).
 
 ### Cross-links
