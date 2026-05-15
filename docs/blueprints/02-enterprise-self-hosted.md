@@ -312,6 +312,4 @@ The v1.0 controller ships production-grade operator hygiene relevant to enterpri
 - `inference-router/src/auth.rs` (Workload Identity OIDC exchange)
 - `deploy/helm/azureclaw/values.yaml` (Helm contract)
 - `docs/api/crd-reference.md` (all 9 CRDs)
-- `docs/internal/policy-canonical-format.md` (egress allowlist format + signing modes)
-- `docs/internal/sigs-agent-sandbox-compat.md` (CNCF K8s AI Conformance v1.35+)
 - ADR-0001 — A2A ingress front-edge (`docs/adr/0001-a2a-ingress-front-edge.md`)

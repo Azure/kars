@@ -25,7 +25,7 @@ If you only read one document about how AzureClaw fits together, read this one.
 
 ```mermaid
 flowchart LR
-  CLI["`azureclaw` CLI<br/>or GitOps / kubectl"]
+  CLI["azureclaw CLI<br/>or GitOps / kubectl"]
   CRD[("CRD<br/>(8 kinds)")]
   Ctrl["azureclaw-controller<br/>(kube-rs)"]
   Art[("Cluster artifacts<br/>Namespace · ServiceAccount · NetworkPolicy<br/>Deployment · Service · ConfigMap · Secret<br/>FederatedIdentityCredential")]
@@ -154,14 +154,14 @@ sequenceDiagram
     C->>K: patch_status (Degraded, AdapterMissing)
     Note over C: requeue 5 min
   end
-  C->>K: ensure Namespace azureclaw-&lt;name&gt;
+  C->>K: ensure Namespace azureclaw-[name]
   C->>K: ensure ServiceAccount<br/>(annotated for Workload Identity)
   C->>AAD: ensure federated credential<br/>(maps SA token → AAD)
   C->>K: ensure ClusterRoleBinding<br/>(spawner role for sub-agents)
   C->>K: ensure NetworkPolicy<br/>(default-deny + DNS + IMDS + Foundry + relay)
   C->>K: ensure governance ConfigMap<br/>(AGT profile, sandbox identity)
   C->>K: ensure ConfigMap mounts<br/>(ToolPolicy, InferencePolicy, TrustGraph)
-  C->>K: ensure Deployment<br/>(init: egress-guard ; agent UID 1000 ; router UID 1001)
+  C->>K: ensure Deployment with init egress-guard, agent UID 1000, router UID 1001
   C->>K: ensure Service (ClusterIP, port 8443)
   C->>K: patch_status (phase=Ready, conditions[])
   Note over Pod: kubelet schedules pod
@@ -194,7 +194,7 @@ sequenceDiagram
   participant U as User / CLI
   participant K as Kube API
   participant C as Controller
-  participant CM as ConfigMap<br/>inferencepolicy-&lt;name&gt;-profile
+  participant CM as ConfigMap<br/>inferencepolicy-[name]-profile
   participant R as Inference router
 
   U->>K: kubectl apply InferencePolicy
@@ -223,14 +223,14 @@ sequenceDiagram
   participant K as Kube API
   participant C as Controller
   participant Iss as OAuth issuer<br/>(remote, optional)
-  participant S as Secret<br/>mcp-&lt;name&gt;-signing
-  participant J as ConfigMap<br/>mcp-&lt;name&gt;-jwks
+  participant S as Secret<br/>mcp-[name]-signing
+  participant J as ConfigMap<br/>mcp-[name]-jwks
   participant R as Inference router
 
   U->>K: kubectl apply McpServer
   K-->>C: watch event
   C->>K: ensure finalizer
-  C->>S: ensure Ed25519 signing keypair<br/>(generated once; kid stable)
+  C->>S: ensure Ed25519 signing keypair — generated once, kid stable
   alt productionMode == true
     C->>Iss: GET .well-known/openid-configuration<br/>then jwks_uri
     Iss-->>C: JWKS JSON
@@ -282,7 +282,7 @@ sequenceDiagram
   participant U as User / CLI
   participant K as Kube API
   participant C as Controller
-  participant CM as ConfigMap<br/>a2aagent-&lt;name&gt;-card
+  participant CM as ConfigMap<br/>a2aagent-[name]-card
   participant GW as A2A gateway
 
   U->>K: kubectl apply A2AAgent
@@ -344,7 +344,7 @@ The `status.phase` string is part of the public contract: `azureclaw connect`, `
 | `Degraded` | Spec is valid but a dependency is failing (Foundry 5xx, JWKS fetch timeout, etc.). Retry will help — the reconciler requeues at `REQUEUE_FAIL`. | `False` (reason describes the dependency) | Any reconciler on transient failure. |
 | `Failed` | Spec is invalid and will not converge without user editing the CR (validation, signature mismatch, malformed reference). | `False` | Any reconciler on permanent failure. |
 
-The `Compiled` state is the load-bearing honesty value introduced in `docs/internal/crd-well-oiled-machine/slice-0-honesty-events.md`. Each subsequent slice (2 = `InferencePolicy`, 3 = `ClawMemory`, …) deletes its `Compiled`/`AwaitingRouterEnforcement` call site once the router-side informer or runtime echo is wired, flipping the success path back to `Ready=True`.
+The `Compiled` state is a load-bearing honesty value: it signals "spec is valid and the controller has done all it can; we are now waiting for the consuming component (router informer, runtime echo, etc.) to confirm enforcement". As each downstream consumer's confirmation loop lands, the corresponding reconciler deletes its `Compiled`/`AwaitingRouterEnforcement` call site, flipping the success path back to `Ready=True`.
 
 Requeue cadence is per-reconciler:
 

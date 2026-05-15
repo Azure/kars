@@ -251,8 +251,6 @@ Different session UUIDs confirm independent cryptographic sessions.
 | Router (WebSocket bridge) | Same as relay — opaque forwarding | ❌ No |
 | Gateway (endpoint) | Decrypted plaintext: "16" | ✅ Yes |
 
-Full hex-dump analysis: `docs/internal/e2e-encryption-proof.md` (internal companion).
-
 ---
 
 ## `azureclaw attest` — Spec Hash & Reconcile Trace

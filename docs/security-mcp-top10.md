@@ -206,5 +206,3 @@ confusion attacks fail closed.
 
 * `docs/security.md` — the live security posture (§9 layers, syscall
   counts, component names).
-* `docs/internal/security-audits/` — per-capability audit docs (where present).
-* Internal v1.1 plan §§0.2, 7 — principles and v1.1 scope.

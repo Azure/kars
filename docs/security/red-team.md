@@ -27,11 +27,11 @@ Each finding records: ID, date, surface, severity, summary, status, fix commit /
 
 ### Pre-v1.0 baseline
 
-The pre-v1.0 surface was exercised against the threat model in `docs/internal/threat-model.md` (internal) and [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually — the per-capability sign-off lives under `docs/internal/security-audits/` (internal).
+The pre-v1.0 surface was exercised against [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually.
 
 ### v1.0 surface
 
-v1.0 capabilities were exercised against the per-route threat model. Per-capability audit docs (CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, runtime-CLI hotspots) are committed under `docs/internal/security-audits/`. Each carries two-reviewer sign-off.
+v1.0 capabilities were exercised against the per-route threat model — CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, and runtime-CLI hotspots. Each carries two-reviewer sign-off.
 
 ### v1.0 cut (open list)
 

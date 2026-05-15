@@ -7,11 +7,11 @@ Six fully-shipped use cases covering every deployment pattern from laptop inner-
 | # | Scenario | Where the user runs | Network shape | Status | Reference |
 |---|---|---|---|---|---|
 | 1 | **AzureClaw-native agents (OpenClaw)** | AKS (operator owns the cluster) | Cluster-internal | ✅ Shipping | [`docs/architecture.md`](architecture.md) |
-| 2 | **Any-OpenClaw → AzureClaw cloud offload** | Laptop / NemoClaw / any OpenClaw host (no AzureClaw CLI required) | Host ↔ AKS via AgentMesh relay (E2E-encrypted) | ✅ Shipping | `docs/internal/any-openclaw-cloud-offload.md` (internal) |
-| 3 | **AzureClaw ↔ AzureClaw mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | `docs/internal/e2e-encryption-proof.md` (internal) |
+| 2 | **Any-OpenClaw → AzureClaw cloud offload** | Laptop / NemoClaw / any OpenClaw host (no AzureClaw CLI required) | Host ↔ AKS via AgentMesh relay (E2E-encrypted) | ✅ Shipping | See § 2 below |
+| 3 | **AzureClaw ↔ AzureClaw mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | See § 3 below |
 | 4 | **Multi-runtime hosting** | AKS (same operator, different agent stacks) | Cluster-internal per sandbox | ✅ Shipping (OpenClaw, OpenAIAgents, MAF Python, LangGraph Py+TS, Anthropic, PydanticAi, BYO) | [`docs/runtimes.md`](runtimes.md) |
 | 5 | **A2A federation across organisations** | Foreign agent anywhere; inbound via public a2a-gateway | Internet → A2A gateway → per-sandbox router (mTLS-pinned) | ✅ Shipping | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
-| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → AzureClaw cluster | Translate + apply | ✅ Shipping | `docs/internal/sigs-agent-sandbox-compat.md` (internal) |
+| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → AzureClaw cluster | Translate + apply | ✅ Shipping | See § 6 below |
 
 All use cases share the same trust boundary:
 
@@ -43,20 +43,20 @@ graph TD
     subgraph AKS["AKS cluster (azureclaw namespace)"]
         CTRL[Controller]
         subgraph NS["azureclaw-research-bot"]
-            EG[egress-guard\n(init container, UID 0)]
-            OC[openclaw\n(UID 1000)]
-            IR[inference-router\n(UID 1001, port 8443)]
+            EG["egress-guard<br/>(init container, UID 0)"]
+            OC["openclaw<br/>(UID 1000)"]
+            IR["inference-router<br/>(UID 1001, port 8443)"]
         end
     end
-    Foundry[Azure AI Foundry\n(Workload Identity)]
+    Foundry["Azure AI Foundry<br/>(Workload Identity)"]
     Telegram[Telegram Bot API]
 
     CLI -->|kubectl / Helm| CTRL
     CTRL -->|reconciles| NS
     OC -->|"127.0.0.1:8443"| IR
-    IR -->|Workload Identity (IMDS)| Foundry
+    IR -->|"Workload Identity (IMDS)"| Foundry
     IR -->|"HTTPS (allowlist)"| Telegram
-    EG -.->|"iptables: UID 1000\nblocked except localhost+DNS"| OC
+    EG -.->|"iptables: UID 1000<br/>blocked except localhost+DNS"| OC
     TUI -->|kubectl watch| CTRL
 ```
 
@@ -168,29 +168,29 @@ spec:
 
 ### What the operator wants
 
-The defining property of this scenario is that **the plugin user does not install AzureClaw**. They install the `azureclaw-mesh` plugin into their existing OpenClaw host. An AzureClaw operator runs the AKS cluster, mints a one-time pairing token, and sends it to the user over any secure channel. See `docs/internal/any-openclaw-cloud-offload.md` (internal) for the full walkthrough.
+The defining property of this scenario is that **the plugin user does not install AzureClaw**. They install the `azureclaw-mesh` plugin into their existing OpenClaw host. An AzureClaw operator runs the AKS cluster, mints a one-time pairing token, and sends it to the user over any secure channel. The walkthrough below covers the host-side pairing flow end to end.
 
 ### Topology
 
 ```mermaid
 graph LR
     subgraph Laptop["Plugin user laptop"]
-        HOST[OpenClaw / NemoClaw\nazureclaw-mesh plugin]
+        HOST[OpenClaw / NemoClaw<br/>azureclaw-mesh plugin]
     end
-    subgraph Edge["Operator mesh edge\n(port-forward or LoadBalancer)"]
-        REG[agentmesh-registry\n:18080]
-        RELAY[agentmesh-relay\n:18765]
+    subgraph Edge["Operator mesh edge<br/>(port-forward or LoadBalancer)"]
+        REG[agentmesh-registry<br/>:18080]
+        RELAY[agentmesh-relay<br/>:18765]
     end
     subgraph AKS["Operator AKS cluster"]
         CTRL[Controller]
         subgraph OFFLOAD["azureclaw-offload-<id>"]
-            OC[openclaw\n(UID 1000)]
-            IR[inference-router\n(UID 1001)]
+            OC["openclaw<br/>(UID 1000)"]
+            IR["inference-router<br/>(UID 1001)"]
         end
     end
     Foundry[Azure AI Foundry]
 
-    HOST -- "X3DH + Double Ratchet\n(Signal Protocol, E2E)" --> RELAY
+    HOST -- "X3DH + Double Ratchet<br/>(Signal Protocol, E2E)" --> RELAY
     HOST -- "prekey exchange" --> REG
     RELAY --> CTRL
     CTRL -->|reconciles| OFFLOAD
@@ -267,10 +267,8 @@ spec:
 | Resource | Reference |
 |---|---|
 | Blueprint | [Blueprint 03 — Managed public offload](blueprints/03-managed-public-offload.md) |
-| Full walkthrough | `docs/internal/any-openclaw-cloud-offload.md` (internal) |
 | CLI commands | [`azureclaw mesh`](cli-reference.md#azureclaw-mesh), [`azureclaw pair`](cli-reference.md#azureclaw-pair) |
 | CRD fields | [`ClawPairing`](api/crd-reference.md#clawpairing), [`spec.governance`](api/crd-reference.md#spec-fields--specgovernance) |
-| E2E proof | `docs/internal/e2e-encryption-proof.md` (internal) |
 
 ---
 
@@ -289,7 +287,7 @@ Intra-org multi-agent workflows where each hop is E2E encrypted and policy-gated
 graph LR
     subgraph ClusterA["Cluster A"]
         subgraph NSP["azureclaw-planner"]
-            OCP[openclaw\nplanner]
+            OCP[openclaw<br/>planner]
             IRP[inference-router]
         end
         RELAY_A[agentmesh-relay A]
@@ -297,7 +295,7 @@ graph LR
     end
     subgraph ClusterB["Cluster B (optional)"]
         subgraph NSW["azureclaw-worker"]
-            OCW[openclaw\nworker]
+            OCW[openclaw<br/>worker]
             IRW[inference-router]
         end
         RELAY_B[agentmesh-relay B]
@@ -383,7 +381,6 @@ spec:
 | Blueprint | [Blueprint 04 — Cross-org federation](blueprints/04-cross-org-federation.md) |
 | CLI commands | [`azureclaw mesh`](cli-reference.md#azureclaw-mesh), [`azureclaw pair`](cli-reference.md#azureclaw-pair), [`azureclaw up --expose-registry`](cli-reference.md#azureclaw-up) |
 | CRD fields | [`ClawPairing`](api/crd-reference.md#clawpairing), [`spec.governance.registryMode`](api/crd-reference.md#spec-fields--specgovernance) |
-| E2E proof | `docs/internal/e2e-encryption-proof.md` (internal) |
 | ADR | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
 
 ---
@@ -416,15 +413,15 @@ graph TD
     subgraph AKS["AKS cluster"]
         CTRL[Controller]
         subgraph NS["azureclaw-<name>"]
-            RUNTIME["runtime container\n(any first-class image, UID 1000)"]
-            IR["inference-router\n(UID 1001, port 8443)"]
+            RUNTIME["runtime container<br/>(any first-class image, UID 1000)"]
+            IR["inference-router<br/>(UID 1001, port 8443)"]
         end
         TP[ToolPolicy CR]
         IP[InferencePolicy CR]
         M[ClawMemory CR]
         E[ClawEval CR]
     end
-    Foundry[Azure AI Foundry\n(Workload Identity)]
+    Foundry["Azure AI Foundry<br/>(Workload Identity)"]
 
     CTRL --> NS
     CTRL --> TP
@@ -596,21 +593,21 @@ Inbound A2A 1.0.0 traffic from external (cross-org) agents, routed through a sin
 
 ```mermaid
 graph TD
-    Foreign["Foreign agent\n(any A2A 1.0.0 runtime)"]
+    Foreign["Foreign agent<br/>(any A2A 1.0.0 runtime)"]
     subgraph Internet
-        TLS["Cilium L7 ingress\n(method allow-list, path regex, body cap 4 MiB, rate limit)"]
+        TLS["Cilium L7 ingress<br/>(method allow-list, path regex, body cap 4 MiB, rate limit)"]
     end
-    GW["azureclaw-a2a-gateway\n(Rust, shared across sandboxes)\n- Public TLS terminator\n- Verify caller AgentCard JWS\n- AGT trust score gate\n- Per-caller rate limit + audit\n- Routing table from controller ConfigMap\n- NO Foundry creds, NO IMDS"]
+    GW["azureclaw-a2a-gateway<br/>(Rust, shared across sandboxes)<br/>- Public TLS terminator<br/>- Verify caller AgentCard JWS<br/>- AGT trust score gate<br/>- Per-caller rate limit + audit<br/>- Routing table from controller ConfigMap<br/>- NO Foundry creds, NO IMDS"]
     subgraph NS["azureclaw-research-bot (namespace)"]
-        CNP["CiliumNetworkPolicy\n(TCP 8445, gateway SA only)\nEmitted only when spec.a2a.enabled: true"]
-        IR["inference-router (UID 1001)\n0.0.0.0:8445 A2A inbound\nroutes/a2a/ingress.rs (forbid unsafe_code)\nRe-verifies JWS, body cap, JSON-RPC"]
+        CNP["CiliumNetworkPolicy<br/>(TCP 8445, gateway SA only)<br/>Emitted only when spec.a2a.enabled: true"]
+        IR["inference-router (UID 1001)<br/>0.0.0.0:8445 A2A inbound<br/>routes/a2a/ingress.rs (forbid unsafe_code)<br/>Re-verifies JWS, body cap, JSON-RPC"]
         OC["openclaw (UID 1000)"]
     end
-    Foundry["Azure AI Foundry\n(Workload Identity)"]
+    Foundry["Azure AI Foundry<br/>(Workload Identity)"]
 
     Foreign -->|"HTTPS (TLS)"| TLS
     TLS --> GW
-    GW -->|"cluster-internal mTLS\n(Workload Identity, peer-pinned)"| CNP
+    GW -->|"cluster-internal mTLS<br/>(Workload Identity, peer-pinned)"| CNP
     CNP --> IR
     IR -->|"127.0.0.1:18789"| OC
     IR -->|Workload Identity| Foundry
@@ -742,15 +739,15 @@ spec:
 
 ### What the operator wants
 
-A translator that converts existing agent manifests into AzureClaw resource bundles, with explicit warnings for lossy fields and a dry-run path. See `docs/internal/sigs-agent-sandbox-compat.md` (internal) for the full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`).
+A translator that converts existing agent manifests into AzureClaw resource bundles, with explicit warnings for lossy fields and a dry-run path. The full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`) are documented in the translator source under `cli/src/commands/migrate/`.
 
 ### Topology — migration flow
 
 ```mermaid
 graph LR
     subgraph Source["Source cluster (or local files)"]
-        KA["kagent.dev/v1alpha2\nAgent YAML"]
-        SS["agents.x-k8s.io/v1alpha1\nSandbox YAML"]
+        KA["kagent.dev/v1alpha2<br/>Agent YAML"]
+        SS["agents.x-k8s.io/v1alpha1<br/>Sandbox YAML"]
     end
     subgraph CLI["azureclaw CLI (no cluster required)"]
         MIGRATE["azureclaw migrate from-kagent"]
@@ -874,7 +871,6 @@ All dropped fields default to `disabled` (dev-only label applied automatically) 
 
 | Resource | Reference |
 |---|---|
-| Compat design | `docs/internal/sigs-agent-sandbox-compat.md` (internal) |
 | CLI commands | [`azureclaw migrate from-kagent`](cli-reference.md#azureclaw-migrate), [`azureclaw migrate to-overlay`](cli-reference.md#azureclaw-migrate), [`azureclaw convert`](cli-reference.md#azureclaw-convert) |
 | CRD fields | [`spec.upstreamCompatibility`](api/crd-reference.md#spec-fields--specupstreamcompatibility) |
 | Blueprint | [Blueprint 02 — Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md) |

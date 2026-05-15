@@ -367,5 +367,4 @@ None of these change the trust model. They change the customer-facing UX around 
 - `docs/security.md` § Layer 2 (Kata VM Isolation)
 - `docs/api/crd-reference.md` (all 8 CRDs, especially `InferencePolicy`, `ToolPolicy`, `ClawMemory`, `A2AAgent`)
 - `docs/use-cases.md` Scenario 2 (the customer-side experience)
-- `docs/internal/sigs-agent-sandbox-compat.md` (CNCF K8s AI Conformance v1.35+)
 - ADR-0001 (A2A ingress front-edge, identical pattern for A2A 1.0.0 inbound)
