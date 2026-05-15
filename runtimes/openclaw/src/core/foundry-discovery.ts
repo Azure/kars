@@ -14,6 +14,8 @@
  * Foundry discovery never blocks plugin startup.
  */
 
+import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
+
 export interface FoundryDeployment {
   id: string;
   model: string;
@@ -289,7 +291,8 @@ export async function discoverFoundryProject(
     // Recall prior context from Foundry memory store on startup
     try {
       const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-      const store = `memory-${agentName}`;
+      const store = resolveMemoryStoreName(agentName);
+      const scope = resolveMemoryScope(agentName);
       // Ensure store exists before searching (avoids 404 on first boot)
       await ensureMemoryStore(store);
 
@@ -297,7 +300,7 @@ export async function discoverFoundryProject(
       const staticResult = await routerCall(
         "POST",
         `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
-        { scope: agentName },
+        { scope },
       ).catch(() => null);
 
       // Then: get contextual memories — scope + items
@@ -305,7 +308,7 @@ export async function discoverFoundryProject(
         "POST",
         `/memory_stores/${store}:search_memories?api-version=2025-11-15-preview`,
         {
-          scope: agentName,
+          scope,
           items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "key facts, user preferences, prior context, recent work, handoff history" }] }],
           options: { max_memories: 10 },
         },

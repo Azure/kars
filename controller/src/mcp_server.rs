@@ -117,6 +117,31 @@ pub struct McpServerSpec {
     /// Slice 1c.5 of `crd-well-oiled-machine`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_ref: Option<crate::crd::OciArtifactRef>,
+
+    /// Slice 4d.4.1 — outbound static-bearer authentication.
+    ///
+    /// Name of an environment variable visible to the inference-router
+    /// container whose value should be attached as
+    /// `Authorization: Bearer <value>` on every outbound `tools/list`
+    /// and `tools/call` request to this server.
+    ///
+    /// Designed to reuse pre-existing sandbox env vars without
+    /// introducing new mounts. The primary intended consumer is the
+    /// GitHub Copilot dev-credential path (`COPILOT_GITHUB_TOKEN`),
+    /// which already contains a GitHub OAuth token that authenticates
+    /// against `https://api.githubcopilot.com/mcp`.
+    ///
+    /// Behaviour when the named env var is unset or empty: the router
+    /// records a `skipped` entry and continues — non-fatal. Other
+    /// servers in the registry remain advertised. This keeps Foundry
+    /// deployments (which do not set `COPILOT_GITHUB_TOKEN`) from
+    /// breaking when a github MCP CR is present.
+    ///
+    /// OAuth on-behalf-of (where the *agent's* incoming bearer is
+    /// re-used) is deferred to Slice 4d.5 and tracked as a separate
+    /// CR field there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_from_env: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]

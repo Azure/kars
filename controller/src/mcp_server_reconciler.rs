@@ -297,11 +297,36 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let secret_name = format!("mcp-{name}-signing");
     let signing_kid = ensure_signing_secret(&secrets, &secret_name, &name).await?;
 
-    // 2. Ensure JWKS ConfigMap when productionMode=true.
+    // 2. Ensure metadata/JWKS ConfigMap. The CM (`mcp-{name}-jwks`) is
+    // ALWAYS created — its `meta.json` carries the upstream `url` +
+    // `allowedTools` that the inference-router's `McpServerRegistry`
+    // needs to forward calls, and its presence is also what the sandbox
+    // reconciler mirrors into the sandbox namespace at
+    // `/etc/azureclaw/mcp/<name>/`. When `productionMode=false` we emit
+    // an empty `{"keys": []}` JWKS default (no inbound OAuth
+    // verification needed in dev mode — `/mcp` is mounted on the
+    // loopback-only dev surface) but still register the URL so
+    // outbound forwarding works. When `productionMode=true` the JWKS
+    // is fetched from `oauth.issuer` and replaces the default.
+    let cm_name = format!("mcp-{name}-jwks");
+    let meta = McpServerMeta::from_spec(&effective_spec);
     let mut jwks_ref: Option<LocalObjectRef> = None;
     let mut degraded: Option<(&'static str, String)> = source_degraded;
+    let production = effective_spec.production_mode.unwrap_or(false);
 
-    if degraded.is_none() && effective_spec.production_mode.unwrap_or(false) {
+    if degraded.is_none() && !production {
+        // Dev mode: write metadata + empty JWKS default so the
+        // router can discover the upstream URL even without inbound
+        // OAuth. The router's `/mcp` route is mounted in dev mode
+        // (no OAuth) when no `productionMode=true` McpServer is bound.
+        let empty_jwks = b"{\"keys\":[]}";
+        ensure_jwks_configmap(&configmaps, &cm_name, &name, empty_jwks, &meta).await?;
+        jwks_ref = Some(LocalObjectRef {
+            name: cm_name.clone(),
+        });
+    }
+
+    if degraded.is_none() && production {
         let issuer_opt = effective_spec.oauth.as_ref().map(|o| o.issuer.clone());
         match issuer_opt {
             Some(issuer) if !issuer.is_empty() => {
@@ -617,6 +642,14 @@ pub struct McpServerMeta {
     /// this list before exposing tools to the agent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
+    /// Slice 4d.4.1 — outbound static-bearer source.
+    ///
+    /// When non-empty, names an environment variable that the router
+    /// reads at discovery time and attaches as
+    /// `Authorization: Bearer <env value>` on every outbound MCP call
+    /// to this server. Empty (default) = no outbound auth.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bearer_from_env: String,
 }
 
 impl McpServerMeta {
@@ -635,6 +668,7 @@ impl McpServerMeta {
             scopes: spec.scopes.clone().unwrap_or_default(),
             url: spec.url.clone().unwrap_or_default(),
             allowed_tools: spec.allowed_tools.clone().unwrap_or_default(),
+            bearer_from_env: spec.bearer_from_env.clone().unwrap_or_default(),
         }
     }
 }
@@ -929,6 +963,10 @@ fn merge_bundle_with_selector(
         allowed_sandboxes: cr_spec.allowed_sandboxes.clone(),
         display_name: verified.display_name.clone(),
         bundle_ref: None,
+        // Bundle-sourced spec does not carry outbound bearer config —
+        // bearer hookup is a CR-level concern (per-deployment), not
+        // part of the signed policy bundle.
+        bearer_from_env: cr_spec.bearer_from_env.clone(),
     }
 }
 

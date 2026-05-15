@@ -3,6 +3,38 @@
   "name": "AzureClaw",
   "version": "0.2.0",
   "description": "Secure AI agent runtime on Azure — sandboxed OpenClaw with Azure AI Foundry and Rust inference router",
+  "activation": {
+    "onStartup": true
+  },
+  "enabledByDefault": true,
+  "contracts": {
+    "tools": [
+      "azureclaw_discover",
+      "azureclaw_spawn",
+      "azureclaw_spawn_list",
+      "azureclaw_spawn_status",
+      "azureclaw_spawn_destroy",
+      "azureclaw_mesh_send",
+      "azureclaw_mesh_inbox",
+      "azureclaw_mesh_await",
+      "azureclaw_mesh_transfer_file",
+      "azureclaw_handoff_request",
+      "azureclaw_handoff_confirm",
+      "azureclaw_handoff_status",
+      "http_fetch",
+      "foundry_code_execute",
+      "foundry_image_generation",
+      "foundry_web_search",
+      "foundry_file_search",
+      "foundry_memory",
+      "foundry_conversations",
+      "foundry_evaluations",
+      "foundry_deployments",
+      "foundry_agents",
+      "foundry_download_file",
+      "telegram_status"
+    ]
+  },
   "skills": [
     "skills/foundry-memory",
     "skills/foundry-knowledge",

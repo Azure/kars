@@ -419,6 +419,7 @@ FodyWeavers.xsd
 
 # Rust
 target/
+target-linux-*/
 Cargo.lock
 # Vendor lockfiles needed for reproducible Docker builds
 !vendor/*/Cargo.lock

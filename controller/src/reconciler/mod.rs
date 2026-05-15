@@ -145,6 +145,13 @@ struct Context {
     dev_openai_api_key: String,
     dev_provider: String,
     dev_copilot_github_token: String,
+    /// Optional cluster name (Helm value `meshPeer.clusterName`, env
+    /// `CLUSTER_NAME`). When set, propagated to the openclaw container
+    /// so memory scopes can be partitioned by cluster — preventing two
+    /// installs (e.g. local kind + AKS) that share a Foundry project
+    /// from colliding on agent memories. `None` keeps the legacy
+    /// cluster-less fallback scope (`agent:<sandbox>`).
+    cluster_name: Option<String>,
 }
 
 /// Main reconciliation function — called whenever a ClawSandbox changes.
@@ -1138,6 +1145,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         if is_openclaw {
             openclaw_env.push(json!({"name": "OPENCLAW_MODEL", "value": inference_model.clone()}));
         }
+        openclaw_env.push(json!({"name": "SANDBOX_NAME", "value": &name}));
+        if let Some(ref cluster) = ctx.cluster_name {
+            openclaw_env.push(json!({"name": "CLUSTER_NAME", "value": cluster}));
+        }
         openclaw_env.push(json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}));
         openclaw_env.push(json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}));
         if is_openclaw {
@@ -1684,6 +1695,23 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                         governance_mounts::paths::TOOL_POLICY_DIR,
                         Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
                     );
+                    // Also mount into the openclaw container: its entrypoint
+                    // (`sandbox-images/openclaw/entrypoint.sh`) reads the
+                    // compiled `agt-profile.yaml` so the in-process
+                    // `@microsoft/agent-governance-sdk` engine has a
+                    // ToolPolicy to enforce on agent tool calls. Without
+                    // this mount the openclaw container warns
+                    // "AGT engine will start with an empty policy set and
+                    // fail closed". The volume itself was already added by
+                    // `inject_configmap_mount` above, so this only appends
+                    // the mount + env into the openclaw container.
+                    governance_mounts::inject_container_mount_public(
+                        &mut pod_spec,
+                        "openclaw",
+                        "agt-policy",
+                        governance_mounts::paths::TOOL_POLICY_DIR,
+                        Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
+                    );
                 }
                 Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
                     tracing::warn!(
@@ -2000,6 +2028,17 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                         &signing_mount,
                         legacy_env.as_ref().map(|(k, v)| (*k, v.as_str())),
                     );
+                    // The signing secret is the minimum the router needs
+                    // to forward signed MCP requests upstream on this
+                    // server's behalf. JWKS (used for inbound OAuth
+                    // verification) only exists when productionMode=true.
+                    // So track this server as available to OpenClaw even
+                    // when JWKS was skipped (productionMode=false) —
+                    // otherwise the per-server `mcp.servers.<name>` block
+                    // never lands in openclaw.json and the lane is dead.
+                    if !mirrored_mcp_names.iter().any(|n| n == mcp_name) {
+                        mirrored_mcp_names.push(mcp_name.to_string());
+                    }
                 }
                 Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
                     tracing::warn!(
@@ -2028,6 +2067,22 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "inference-router",
                 "MCP_JWKS_DIR",
                 governance_mounts::paths::MCP_JWKS_DIR,
+            );
+            // Project the list of mirrored MCP server names into the
+            // `openclaw` container so the entrypoint can render an
+            // `mcp.servers.<name>` block in `openclaw.json` pointing each
+            // server at the loopback router (`127.0.0.1:8443/mcp`). The
+            // router resolves the `x-azureclaw-mcp-server` header to the
+            // registered McpServer, signs with the mounted key, filters
+            // by allowedTools, and forwards to the upstream URL.
+            //
+            // Comma-separated list; entrypoint splits on `,`.
+            let names_csv = mirrored_mcp_names.join(",");
+            governance_mounts::inject_container_env(
+                &mut pod_spec,
+                "openclaw",
+                "AZURECLAW_MCP_SERVERS",
+                &names_csv,
             );
         }
 
@@ -2319,18 +2374,59 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "spec": {
                 "podSelector": {"matchLabels": {"azureclaw.azure.com/component": "sandbox"}},
                 "policyTypes": ["Ingress"],
-                "ingress": [{
-                    "from": [{
-                        "namespaceSelector": {
-                            "matchLabels": {"azureclaw.azure.com/role": "sandbox"}
-                        }
-                    }],
-                    "ports": [
-                        {"port": 8443, "protocol": "TCP"},
-                        {"port": 18789, "protocol": "TCP"},
-                        {"port": 18791, "protocol": "TCP"}
-                    ]
-                }]
+                "ingress": [
+                    {
+                        // Mesh ingress: peer sandboxes can talk to AGT relay
+                        // (8443) + gateway WebUX/WebSocket (18789/18791).
+                        "from": [{
+                            "namespaceSelector": {
+                                "matchLabels": {"azureclaw.azure.com/role": "sandbox"}
+                            }
+                        }],
+                        "ports": [
+                            {"port": 8443, "protocol": "TCP"},
+                            {"port": 18789, "protocol": "TCP"},
+                            {"port": 18791, "protocol": "TCP"}
+                        ]
+                    },
+                    {
+                        // Slice 6.5-followup: controller policy-echo ingress.
+                        // The operator namespace (`app.kubernetes.io/name=azureclaw`
+                        // + `app.kubernetes.io/component=system`) needs to reach
+                        // `GET /internal/policy-status` (port 8443) to confirm
+                        // the router has actually applied the signed
+                        // ToolPolicy / InferencePolicy / EgressAllowlist /
+                        // TrustGraph bundles before flipping downstream CRDs
+                        // (EgressApproval, ClawMemory, etc.) to their terminal
+                        // phases.
+                        //
+                        // Defence in depth — three independent gates still
+                        // apply on top of this NP allow:
+                        //   1. The endpoint requires
+                        //      `Authorization: Bearer <ADMIN_TOKEN>`; the
+                        //      token is per-sandbox and stored in the
+                        //      `router-admin-token` Secret (RBAC-gated).
+                        //   2. The middleware uses constant-time-eq for the
+                        //      bearer comparison.
+                        //   3. Optional `ROUTER_ADMIN_ALLOW_IPS` env var on
+                        //      the router can further pin the source IP set.
+                        //
+                        // Gateway ports 18789/18791 are deliberately NOT
+                        // opened here — they're agent WebUX surface and have
+                        // no business being reached from the operator.
+                        "from": [{
+                            "namespaceSelector": {
+                                "matchLabels": {
+                                    "app.kubernetes.io/name": "azureclaw",
+                                    "app.kubernetes.io/component": "system"
+                                }
+                            }
+                        }],
+                        "ports": [
+                            {"port": 8443, "protocol": "TCP"}
+                        ]
+                    }
+                ]
             }
         });
         let _ = np_api
@@ -2740,6 +2836,10 @@ pub async fn run(client: Client) -> Result<()> {
         dev_openai_api_key,
         dev_provider,
         dev_copilot_github_token,
+        cluster_name: std::env::var("CLUSTER_NAME")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())

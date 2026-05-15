@@ -87,6 +87,11 @@ struct ForwarderEntry {
     /// during dispatch to confirm the tool is in this server's
     /// allow-list (defence-in-depth against catalog drift).
     tools: BTreeMap<String, ToolDefinition>,
+    /// Slice 4d.4.1 — optional outbound static bearer token. When
+    /// `Some`, attached as `Authorization: Bearer <token>` on every
+    /// outbound `tools/list` and `tools/call` POST. Resolved at
+    /// discovery time from the env var named by `meta.bearer_from_env`.
+    bearer_token: Option<String>,
 }
 
 /// Namespaced MCP forwarder — the production-mode `AsyncToolDispatcher`
@@ -244,11 +249,41 @@ async fn build_entry_for(
         return Err("meta.url is empty — controller did not publish upstream URL".to_string());
     }
 
+    // Slice 4d.4.1 — outbound static-bearer auth. The OAuth-issuer
+    // refusal below is relaxed when `bearer_from_env` is set: the
+    // server uses static-bearer auth (e.g. a PAT or short-lived
+    // OAuth token sourced from a router env var), which we *can*
+    // drive end-to-end, so it is not the §5 boundary case.
+    //
+    // Pure OAuth (issuer-only, no bearer source) is still deferred
+    // to Slice 4d.5.
+    let bearer_token: Option<String> = if !meta.bearer_from_env.is_empty() {
+        match std::env::var(&meta.bearer_from_env) {
+            Ok(v) if !v.is_empty() => Some(v),
+            Ok(_) => {
+                return Err(format!(
+                    "bearerFromEnv={} is set but empty — outbound bearer unavailable (skipping; \
+                     other McpServers continue)",
+                    meta.bearer_from_env
+                ));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "bearerFromEnv={} not present in router env — outbound bearer unavailable \
+                     (skipping; other McpServers continue)",
+                    meta.bearer_from_env
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     // Slice 4d.4 anti-scaffolding boundary: refuse to expose servers
-    // that require outbound OAuth until 4d.5 wires the credential
-    // source. The router would otherwise call them anonymously and
-    // 401 every request.
-    if !meta.issuer.is_empty() {
+    // that require outbound OAuth WHEN no static bearer is configured.
+    // The router would otherwise call them anonymously and 401 every
+    // request.
+    if !meta.issuer.is_empty() && bearer_token.is_none() {
         return Err(
             "outbound OAuth unsupported in 4d.4 — server requires bearer credentials (defer to 4d.5)"
                 .to_string(),
@@ -262,7 +297,7 @@ async fn build_entry_for(
         );
     }
 
-    let upstream_tools = fetch_upstream_tools(http, &meta.url).await?;
+    let upstream_tools = fetch_upstream_tools(http, &meta.url, bearer_token.as_deref()).await?;
 
     let filtered = filter_by_allowlist(&upstream_tools, &meta.allowed_tools);
     if filtered.is_empty() {
@@ -291,6 +326,7 @@ async fn build_entry_for(
             prefix,
             upstream_url: meta.url.clone(),
             tools: tools_map,
+            bearer_token,
         },
         namespaced_defs,
     ))
@@ -303,6 +339,7 @@ async fn build_entry_for(
 async fn fetch_upstream_tools(
     http: &reqwest::Client,
     url: &str,
+    bearer: Option<&str>,
 ) -> Result<Vec<ToolDefinition>, String> {
     let body = json!({
         "jsonrpc": "2.0",
@@ -310,28 +347,42 @@ async fn fetch_upstream_tools(
         "method": "tools/list",
     });
 
-    let resp = http
+    let mut req = http
         .post(url)
         .header("content-type", "application/json")
-        .header("accept", "application/json")
-        .json(&body)
+        .header("accept", "application/json, text/event-stream")
+        .json(&body);
+    if let Some(token) = bearer {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("tools/list POST failed: {e}"))?;
 
     let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| format!("tools/list body read failed: {e}"))?;
+
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
         return Err(format!(
             "tools/list non-2xx: {} (body trimmed: {})",
             status,
-            text.chars().take(120).collect::<String>()
+            body_text.chars().take(120).collect::<String>()
         ));
     }
 
-    let parsed: ToolsListResponse = resp
-        .json()
-        .await
+    let json_payload = extract_jsonrpc_payload(&content_type, &body_text)
+        .map_err(|e| format!("tools/list response decode failed: {e}"))?;
+    let parsed: ToolsListResponse = serde_json::from_value(json_payload)
         .map_err(|e| format!("tools/list parse failed: {e}"))?;
 
     if let Some(err) = parsed.error {
@@ -386,11 +437,15 @@ async fn forward_tools_call(
         },
     });
 
-    let resp = http
+    let mut req = http
         .post(&entry.upstream_url)
         .header("content-type", "application/json")
-        .header("accept", "application/json")
-        .json(&body)
+        .header("accept", "application/json, text/event-stream")
+        .json(&body);
+    if let Some(token) = entry.bearer_token.as_deref() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| DispatchError::ExecutionFailed {
@@ -399,25 +454,42 @@ async fn forward_tools_call(
         })?;
 
     let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| DispatchError::ExecutionFailed {
+            tool: format!("{}.{}", entry.prefix, upstream_name),
+            reason: format!("upstream body read failed: {e}"),
+        })?;
+
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
         return Err(DispatchError::ExecutionFailed {
             tool: format!("{}.{}", entry.prefix, upstream_name),
             reason: format!(
                 "upstream non-2xx: {} (body trimmed: {})",
                 status,
-                text.chars().take(120).collect::<String>()
+                body_text.chars().take(120).collect::<String>()
             ),
         });
     }
 
+    let json_payload = extract_jsonrpc_payload(&content_type, &body_text).map_err(|e| {
+        DispatchError::ExecutionFailed {
+            tool: format!("{}.{}", entry.prefix, upstream_name),
+            reason: format!("upstream response decode failed: {e}"),
+        }
+    })?;
     let parsed: ToolsCallResponse =
-        resp.json()
-            .await
-            .map_err(|e| DispatchError::ExecutionFailed {
-                tool: format!("{}.{}", entry.prefix, upstream_name),
-                reason: format!("upstream tools/call parse failed: {e}"),
-            })?;
+        serde_json::from_value(json_payload).map_err(|e| DispatchError::ExecutionFailed {
+            tool: format!("{}.{}", entry.prefix, upstream_name),
+            reason: format!("upstream tools/call parse failed: {e}"),
+        })?;
 
     if let Some(err) = parsed.error {
         // Upstream protocol error → surface as an isError content
@@ -448,6 +520,67 @@ async fn forward_tools_call(
         content: result.content,
         is_error: result.is_error.unwrap_or(false),
     })
+}
+
+/// Decode an MCP Streamable HTTP response body into a JSON-RPC payload.
+///
+/// Per the MCP Streamable HTTP transport spec, a server MAY respond
+/// with either `application/json` (single JSON-RPC envelope) or
+/// `text/event-stream` (SSE stream of JSON-RPC events). For request
+/// endpoints like `tools/list` / `tools/call`, we expect exactly one
+/// JSON-RPC response — so on SSE we scan `data:` lines until we find
+/// a JSON-RPC envelope (object with `jsonrpc:"2.0"` AND a matching
+/// `id`) and return it.
+fn extract_jsonrpc_payload(content_type: &str, body: &str) -> Result<serde_json::Value, String> {
+    let is_sse = content_type
+        .split(';')
+        .next()
+        .map(|s| s.trim().eq_ignore_ascii_case("text/event-stream"))
+        .unwrap_or(false);
+
+    if !is_sse {
+        return serde_json::from_str::<serde_json::Value>(body)
+            .map_err(|e| format!("json parse failed: {e}"));
+    }
+
+    // Parse SSE: concatenate consecutive `data:` lines per event,
+    // dispatch on blank line. Stop at the first event whose body
+    // parses as a JSON-RPC response (object with `jsonrpc` field).
+    let mut data_buf = String::new();
+    let mut last_decode_err: Option<String> = None;
+    for line in body.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            if !data_buf.is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&data_buf) {
+                    Ok(v) => {
+                        if v.get("jsonrpc").is_some() {
+                            return Ok(v);
+                        }
+                    }
+                    Err(e) => last_decode_err = Some(format!("sse event json parse: {e}")),
+                }
+                data_buf.clear();
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("data:") {
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            if !data_buf.is_empty() {
+                data_buf.push('\n');
+            }
+            data_buf.push_str(rest);
+        }
+    }
+    // Trailing event with no terminating blank line.
+    if !data_buf.is_empty()
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&data_buf)
+        && v.get("jsonrpc").is_some()
+    {
+        return Ok(v);
+    }
+    Err(last_decode_err
+        .unwrap_or_else(|| "sse body contained no JSON-RPC response event".to_string()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -499,13 +632,14 @@ mod tests {
     use axum::{
         Json, Router,
         extract::State,
-        http::StatusCode,
+        http::{HeaderMap, StatusCode},
         routing::{any, post},
     };
     use std::collections::BTreeMap;
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex as TokioMutex;
 
     fn tool_def(name: &str, desc: &str) -> ToolDefinition {
         ToolDefinition {
@@ -525,6 +659,7 @@ mod tests {
                 scopes: vec![],
                 url: url.to_string(),
                 allowed_tools: allowed.into_iter().map(String::from).collect(),
+                bearer_from_env: String::new(),
             }),
         }
     }
@@ -549,6 +684,9 @@ mod tests {
         force_call_error: Option<(i64, String)>,
         /// If set, the upstream returns this HTTP status for tools/call.
         force_call_http_status: Option<u16>,
+        /// Last `Authorization` header value seen by the mock (used by
+        /// the bearer-attach test to confirm outbound auth wiring).
+        last_auth_header: StdArc<TokioMutex<Option<String>>>,
     }
 
     async fn mock_upstream(state: MockState) -> String {
@@ -570,8 +708,13 @@ mod tests {
 
     async fn mock_handler(
         State(state): State<MockState>,
+        headers: HeaderMap,
         Json(body): Json<serde_json::Value>,
     ) -> (StatusCode, Json<serde_json::Value>) {
+        // Record the inbound Authorization header for assertions.
+        if let Some(v) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+            *state.last_auth_header.lock().await = Some(v.to_string());
+        }
         let method = body.get("method").and_then(|v| v.as_str()).unwrap_or("");
         let id = body.get("id").cloned().unwrap_or(serde_json::json!(1));
         match method {
@@ -755,6 +898,93 @@ mod tests {
                 .1
                 .contains("outbound OAuth unsupported")
         );
+    }
+
+    /// Slice 4d.4.1 — server declares `bearerFromEnv` but the named env
+    /// var is not present in the router process. The server is recorded
+    /// as skipped (with the env var name surfaced) and other servers
+    /// keep working — Foundry-only deployments must NOT crash when a
+    /// github MCP CR is present but no Copilot token is mounted.
+    #[tokio::test]
+    async fn discover_skips_server_when_bearer_env_unset() {
+        // Use a deliberately-unset env var name. SAFETY: single-threaded
+        // env mutation is safe inside #[tokio::test]; we read but never
+        // set this var.
+        let env_name = "AZURECLAW_TEST_UNSET_BEARER_DO_NOT_DEFINE";
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+        let mut server = discovered("github", "http://example.invalid/", vec!["*"]);
+        server.meta.as_mut().unwrap().bearer_from_env = env_name.to_string();
+        let registry = registry_with(vec![server]);
+
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .expect("discover");
+        assert!(dispatcher.is_empty(), "server with unset bearer must skip");
+        assert_eq!(dispatcher.skipped().len(), 1);
+        assert!(
+            dispatcher.skipped()[0].1.contains("bearerFromEnv")
+                && dispatcher.skipped()[0].1.contains(env_name),
+            "skip reason should name the missing env var, got: {}",
+            dispatcher.skipped()[0].1
+        );
+    }
+
+    /// Slice 4d.4.1 — when `bearerFromEnv` is set AND the value is
+    /// non-empty, the server is allowed even with a non-empty issuer
+    /// (static-bearer auth covers the upstream). The Authorization
+    /// header is attached on both tools/list and tools/call.
+    #[tokio::test]
+    async fn discover_with_bearer_attaches_authorization_header() {
+        let env_name = "AZURECLAW_TEST_BEARER_FIXTURE";
+        let token_value = "ghp_test_fixture_token_xyz";
+        unsafe {
+            std::env::set_var(env_name, token_value);
+        }
+
+        let state = MockState {
+            tools: vec![tool_def("search", "")],
+            ..Default::default()
+        };
+        let url = mock_upstream(state.clone()).await;
+
+        let mut server = discovered("gh", &url, vec!["*"]);
+        {
+            let m = server.meta.as_mut().unwrap();
+            // Confirm that bearer relaxes the OAuth refusal.
+            m.issuer = "https://github.com".to_string();
+            m.bearer_from_env = env_name.to_string();
+        }
+        let registry = registry_with(vec![server]);
+
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .expect("discover");
+        assert!(
+            dispatcher.skipped().is_empty(),
+            "bearer should relax OAuth refusal, got skipped: {:?}",
+            dispatcher.skipped()
+        );
+        assert_eq!(dispatcher.catalog().tools().len(), 1);
+
+        // Issue a tools/call and confirm the mock saw a Bearer header.
+        let output = dispatcher
+            .invoke("gh.search", &json!({"q":"hi"}))
+            .await
+            .expect("invoke");
+        assert!(!output.is_error);
+        let seen = state.last_auth_header.lock().await.clone();
+        assert_eq!(
+            seen.as_deref(),
+            Some(format!("Bearer {token_value}").as_str()),
+            "outbound request must include bearer Authorization, saw {:?}",
+            seen
+        );
+
+        unsafe {
+            std::env::remove_var(env_name);
+        }
     }
 
     #[tokio::test]

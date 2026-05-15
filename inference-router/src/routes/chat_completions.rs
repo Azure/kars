@@ -27,7 +27,7 @@ use crate::safety;
 pub(super) async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    mut body: Bytes,
 ) -> impl IntoResponse {
     // Extract sandbox identity from header (set by controller)
     let sandbox_name = headers
@@ -173,6 +173,28 @@ pub(super) async fn chat_completions(
     let mut upstream = state.upstream_config(sandbox_name);
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
     crate::routes::apply_model_preference_override(&mut upstream, &policy);
+
+    // Defence-in-depth tool-schema filter: even when the upstream
+    // runtime (e.g. a raw OpenAI SDK client outside OpenClaw) sends
+    // `tools[]` schemas the AGT plugin would normally never have
+    // surfaced, the router strips entries whose
+    // `tool.invoke:<name>` action is denied by the active AGT
+    // profile. This is opt-in — AGT defaults to Allow for unknown
+    // actions, so operators must add explicit `deny tool.invoke:*`
+    // rules to take effect. Pure passthrough cost is one parse +
+    // one walk when `tools[]` is absent or empty.
+    if let Some((new_body, dropped)) = filter_disallowed_tools(&state, sandbox_name, &body).await {
+        tracing::warn!(
+            target: "inference.audit",
+            sandbox = %sandbox_name,
+            inference_policy_digest = %policy.digest,
+            decision = "filter",
+            gate = "tool_advertise",
+            dropped_tools = ?dropped,
+            "AGT policy stripped disallowed tool schemas from chat.completions body"
+        );
+        body = new_body;
+    }
 
     // Check if this model is known to require Responses API (cached from prior 400s)
     let model_name = serde_json::from_slice::<serde_json::Value>(&body)
@@ -870,6 +892,101 @@ pub(super) fn extract_requested_max_tokens(body: &[u8]) -> Option<u64> {
         .or_else(|| v.get("max_tokens").and_then(|x| x.as_u64()))
 }
 
+/// Extract every advertised tool name from a chat.completions request
+/// body, in original order. Handles both the chat shape
+/// (`{"type":"function","function":{"name":"x"}}`) and the
+/// flattened Responses shape (`{"type":"function","name":"x"}`),
+/// since a non-OpenClaw client may have pre-translated. Returns
+/// the empty vector when `tools[]` is absent / empty / malformed —
+/// nothing to filter.
+pub(super) fn extract_advertised_tool_names(body: &[u8]) -> Vec<String> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(tools) = v.get("tools").and_then(|t| t.as_array()) else {
+        return Vec::new();
+    };
+    tools
+        .iter()
+        .filter_map(|t| {
+            t.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .or_else(|| t.get("name").and_then(|n| n.as_str()))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// Rewrite a chat.completions body, dropping every entry of `tools[]`
+/// whose extracted name is **not** in `allowed`. Returns `None`
+/// (i.e. "no rewrite needed") when the body has no `tools[]` array,
+/// when every advertised tool is allowed, or when the body is not
+/// parseable JSON. Tools with no extractable name are kept (we cannot
+/// gate something we cannot identify; logged at WARN above the call
+/// site for forensics, not here).
+pub(super) fn rewrite_body_dropping_tools(
+    body: &Bytes,
+    allowed: &std::collections::HashSet<String>,
+) -> Option<(Bytes, Vec<String>)> {
+    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let tools_arr = v.get_mut("tools").and_then(|t| t.as_array_mut())?;
+    if tools_arr.is_empty() {
+        return None;
+    }
+    let mut dropped = Vec::new();
+    tools_arr.retain(|t| {
+        let name = t
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .or_else(|| t.get("name").and_then(|n| n.as_str()));
+        match name {
+            Some(n) if !allowed.contains(n) => {
+                dropped.push(n.to_string());
+                false
+            }
+            _ => true,
+        }
+    });
+    if dropped.is_empty() {
+        return None;
+    }
+    let bytes = serde_json::to_vec(&v).ok()?;
+    Some((Bytes::from(bytes), dropped))
+}
+
+/// Async wrapper that ties [`extract_advertised_tool_names`] to the
+/// four-seam `PolicyDecisionProvider` and emits the rewritten body
+/// when any tool was denied. Action format is
+/// `tool.invoke:<name>` — same as the OpenClaw plugin uses
+/// in-process, so a single AGT rule covers both layers.
+async fn filter_disallowed_tools(
+    state: &AppState,
+    sandbox: &str,
+    body: &Bytes,
+) -> Option<(Bytes, Vec<String>)> {
+    let names = extract_advertised_tool_names(body);
+    if names.is_empty() {
+        return None;
+    }
+    let mut allowed: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(names.len());
+    for name in &names {
+        let action = format!("tool.invoke:{name}");
+        if matches!(
+            super::inference_policy::check(state, sandbox, &action).await,
+            super::inference_policy::InferenceDecision::Allow
+        ) {
+            allowed.insert(name.clone());
+        }
+    }
+    if allowed.len() == names.len() {
+        return None;
+    }
+    rewrite_body_dropping_tools(body, &allowed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,5 +1072,120 @@ mod tests {
         // serde_json::Value::as_u64 returns None for non-integer
         // numbers, so we fall through to Allow.
         assert_eq!(extract_requested_max_tokens(body2), None);
+    }
+
+    // ---- tool-schema filter (defence-in-depth) ----
+
+    fn allowed(names: &[&str]) -> std::collections::HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn extract_tool_names_chat_shape() {
+        let body = br#"{"model":"x","tools":[
+            {"type":"function","function":{"name":"shell_exec","parameters":{}}},
+            {"type":"function","function":{"name":"web_search"}}
+        ]}"#;
+        assert_eq!(
+            extract_advertised_tool_names(body),
+            vec!["shell_exec".to_string(), "web_search".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_tool_names_responses_shape() {
+        // Some non-OpenClaw clients pre-flatten to the Responses
+        // shape. The filter must still find the name.
+        let body = br#"{"tools":[{"type":"function","name":"foo"}]}"#;
+        assert_eq!(extract_advertised_tool_names(body), vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn extract_tool_names_handles_missing_and_malformed() {
+        // No tools[] at all → empty.
+        assert!(extract_advertised_tool_names(br#"{"model":"x"}"#).is_empty());
+        // Empty tools[] → empty.
+        assert!(extract_advertised_tool_names(br#"{"tools":[]}"#).is_empty());
+        // Malformed JSON → empty (no crash, no panic).
+        assert!(extract_advertised_tool_names(b"{not json").is_empty());
+        // Tools entries without an extractable name are skipped silently.
+        let body = br#"{"tools":[{"type":"function"}]}"#;
+        assert!(extract_advertised_tool_names(body).is_empty());
+    }
+
+    #[test]
+    fn rewrite_skips_when_all_allowed() {
+        let body =
+            Bytes::from_static(br#"{"tools":[{"type":"function","function":{"name":"a"}}]}"#);
+        assert!(rewrite_body_dropping_tools(&body, &allowed(&["a"])).is_none());
+    }
+
+    #[test]
+    fn rewrite_skips_when_no_tools_array() {
+        let body = Bytes::from_static(br#"{"model":"x"}"#);
+        assert!(rewrite_body_dropping_tools(&body, &allowed(&[])).is_none());
+    }
+
+    #[test]
+    fn rewrite_drops_partial_and_preserves_order() {
+        let body = Bytes::from_static(
+            br#"{"model":"x","tools":[
+                {"type":"function","function":{"name":"keep1"}},
+                {"type":"function","function":{"name":"drop_me"}},
+                {"type":"function","function":{"name":"keep2"}}
+            ]}"#,
+        );
+        let out = rewrite_body_dropping_tools(&body, &allowed(&["keep1", "keep2"]));
+        let (new_body, dropped) = out.expect("should rewrite");
+        assert_eq!(dropped, vec!["drop_me".to_string()]);
+        let parsed: serde_json::Value = serde_json::from_slice(&new_body).unwrap();
+        let names: Vec<&str> = parsed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["keep1", "keep2"]);
+        // Model field survives rewrite.
+        assert_eq!(parsed["model"], "x");
+    }
+
+    #[test]
+    fn rewrite_drops_all_when_none_allowed() {
+        let body = Bytes::from_static(
+            br#"{"tools":[
+                {"type":"function","function":{"name":"a"}},
+                {"type":"function","function":{"name":"b"}}
+            ]}"#,
+        );
+        let (new_body, dropped) =
+            rewrite_body_dropping_tools(&body, &allowed(&[])).expect("rewrite");
+        assert_eq!(dropped.len(), 2);
+        let parsed: serde_json::Value = serde_json::from_slice(&new_body).unwrap();
+        assert!(parsed["tools"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rewrite_keeps_unnamed_entries() {
+        // An entry without an extractable name cannot be gated and
+        // is left in place — operator must fix the upstream client
+        // if they want to deny it.
+        let body = Bytes::from_static(
+            br#"{"tools":[
+                {"type":"function"},
+                {"type":"function","function":{"name":"drop_me"}}
+            ]}"#,
+        );
+        let (new_body, dropped) =
+            rewrite_body_dropping_tools(&body, &allowed(&[])).expect("rewrite");
+        assert_eq!(dropped, vec!["drop_me".to_string()]);
+        let parsed: serde_json::Value = serde_json::from_slice(&new_body).unwrap();
+        assert_eq!(parsed["tools"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rewrite_malformed_body_returns_none() {
+        let body = Bytes::from_static(b"{not json");
+        assert!(rewrite_body_dropping_tools(&body, &allowed(&[])).is_none());
     }
 }

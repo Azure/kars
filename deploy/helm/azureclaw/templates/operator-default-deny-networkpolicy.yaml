@@ -78,4 +78,31 @@ spec:
           port: 8082
         - protocol: TCP
           port: 8083
+    # Per-sandbox router policy-status echo (Slice 6.5-followup).
+    #
+    # The controller polls `GET /internal/policy-status` on every
+    # per-sandbox router (port 8443, plain HTTP, in-cluster only) to
+    # confirm the router has actually applied the signed
+    # ToolPolicy / InferencePolicy / EgressAllowlist / EgressApproval /
+    # TrustGraph / ClawMemory bundles before flipping downstream CRDs
+    # to their terminal phases (§3 of `principles.md` — Ready ⇔ router
+    # echo). Without this egress rule the operator can never reach the
+    # routers and downstream phases are pinned to `AwaitingRouterEcho`
+    # indefinitely.
+    #
+    # Scoped to namespaces labelled
+    # `app.kubernetes.io/name=azureclaw` + `app.kubernetes.io/component=sandbox`
+    # (rendered by the controller per-sandbox), so this rule cannot
+    # leak egress to unrelated namespaces. The corresponding ingress
+    # rule on each sandbox NP only opens 8443 from the operator
+    # namespace, and the endpoint still requires
+    # `Authorization: Bearer <per-sandbox ADMIN_TOKEN>`.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/name: azureclaw
+              app.kubernetes.io/component: sandbox
+      ports:
+        - protocol: TCP
+          port: 8443
 {{- end }}

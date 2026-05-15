@@ -169,15 +169,28 @@ impl PolicyStatusRegistry {
     /// between producers would make digest comparison meaningless.
     pub fn record_success(&self, kind: PolicyKind, source_path: &str, bytes: &[u8]) {
         let digest = format!("sha256:{}", hex_digest(bytes));
+        let loaded_at = SystemTime::now();
         let entry = PolicyStatusEntry {
             kind,
             digest: Some(digest),
             source_path: source_path.to_string(),
-            loaded_at: SystemTime::now(),
+            loaded_at,
             last_error: None,
         };
         if let Ok(mut g) = self.entries.lock() {
             g.insert(kind, entry);
+        }
+        let kind_label = kind.as_str();
+        crate::metrics::POLICY_BUNDLE_HEALTHY
+            .with_label_values(&[kind_label])
+            .set(1);
+        crate::metrics::POLICY_BUNDLE_RELOADS
+            .with_label_values(&[kind_label, "success"])
+            .inc();
+        if let Ok(d) = loaded_at.duration_since(std::time::UNIX_EPOCH) {
+            crate::metrics::POLICY_BUNDLE_LOADED_AT
+                .with_label_values(&[kind_label])
+                .set(d.as_secs() as i64);
         }
     }
 
@@ -197,6 +210,13 @@ impl PolicyStatusRegistry {
             };
             g.insert(kind, entry);
         }
+        let kind_label = kind.as_str();
+        crate::metrics::POLICY_BUNDLE_HEALTHY
+            .with_label_values(&[kind_label])
+            .set(0);
+        crate::metrics::POLICY_BUNDLE_RELOADS
+            .with_label_values(&[kind_label, "error"])
+            .inc();
     }
 
     /// Snapshot of all entries. Returns owned values — the registry
@@ -386,5 +406,91 @@ mod tests {
         let s = serde_json::to_string(&PolicyKind::EgressAllowlist).unwrap();
         assert_eq!(s, "\"EgressAllowlist\"");
         assert_eq!(PolicyKind::EgressAllowlist.as_str(), "EgressAllowlist");
+    }
+
+    #[test]
+    fn record_success_emits_prometheus_audit_metrics() {
+        // Use a kind label that no other test mutates so this assertion
+        // is isolated from cross-test counter accumulation.
+        let kind = PolicyKind::EgressApproval;
+        let label = kind.as_str();
+        let healthy_before = crate::metrics::POLICY_BUNDLE_HEALTHY
+            .with_label_values(&[label])
+            .get();
+        let success_before = crate::metrics::POLICY_BUNDLE_RELOADS
+            .with_label_values(&[label, "success"])
+            .get();
+
+        let reg = PolicyStatusRegistry::new();
+        reg.record_success(kind, "/etc/azureclaw/egress/approvals.json", b"{}");
+
+        assert_eq!(
+            crate::metrics::POLICY_BUNDLE_HEALTHY
+                .with_label_values(&[label])
+                .get(),
+            1,
+            "healthy gauge should be 1 after a successful load (was {healthy_before})"
+        );
+        assert_eq!(
+            crate::metrics::POLICY_BUNDLE_RELOADS
+                .with_label_values(&[label, "success"])
+                .get(),
+            success_before + 1,
+            "success counter should advance exactly once"
+        );
+        let loaded_at = crate::metrics::POLICY_BUNDLE_LOADED_AT
+            .with_label_values(&[label])
+            .get();
+        assert!(
+            loaded_at > 0,
+            "loaded_at gauge should be a positive unix timestamp, got {loaded_at}"
+        );
+    }
+
+    #[test]
+    fn record_error_flips_health_to_zero_and_increments_error_counter() {
+        // Use a fresh, unique kind label to avoid cross-test bleed.
+        let kind = PolicyKind::Memory;
+        let label = kind.as_str();
+        // Seed with a success so we can prove `record_error` flips the
+        // gauge back down (not just sets it from default 0 → 0).
+        let reg = PolicyStatusRegistry::new();
+        reg.record_success(kind, "/etc/azureclaw/memory/binding.json", b"{}");
+        assert_eq!(
+            crate::metrics::POLICY_BUNDLE_HEALTHY
+                .with_label_values(&[label])
+                .get(),
+            1
+        );
+
+        let error_before = crate::metrics::POLICY_BUNDLE_RELOADS
+            .with_label_values(&[label, "error"])
+            .get();
+        reg.record_error(
+            kind,
+            "/etc/azureclaw/memory/binding.json",
+            "permission denied",
+        );
+
+        assert_eq!(
+            crate::metrics::POLICY_BUNDLE_HEALTHY
+                .with_label_values(&[label])
+                .get(),
+            0,
+            "healthy gauge must drop to 0 after a failed load"
+        );
+        assert_eq!(
+            crate::metrics::POLICY_BUNDLE_RELOADS
+                .with_label_values(&[label, "error"])
+                .get(),
+            error_before + 1,
+            "error counter must advance"
+        );
+        // record_error preserves the prior digest so the controller can
+        // distinguish "broken since first attempt" from "broken on
+        // refresh"; verify we didn't accidentally wipe it.
+        let entry = reg.get(kind).expect("entry retained after error");
+        assert!(entry.digest.is_some(), "prior digest preserved on error");
+        assert!(entry.last_error.is_some(), "error text recorded");
     }
 }

@@ -20,6 +20,7 @@ import { sanitizeLog } from "./log-redact.js";
 import { meshSendWithIdentity, type MeshIdentity } from "./mesh-transport.js";
 import { validateMeshPayload } from "./mesh-payload-guard.js";
 import { routerUrl } from "./router-client.js";
+import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyMeshClient = any;
@@ -605,8 +606,8 @@ export async function processTaskWithTools(
           } else if (fnName === "foundry_memory") {
             log.info(`AGT sub-agent foundry_memory: ${args.operation} — ${(args.text as string || "").slice(0, 100)}`);
             const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-            const store = `memory-${agentName}`;
-            const scope = agentName;
+            const store = resolveMemoryStoreName(agentName);
+            const scope = resolveMemoryScope(agentName);
             const apiVer = "api-version=2025-11-15-preview";
             const makeItem = (content: string) => ({
               type: "message", role: "user",

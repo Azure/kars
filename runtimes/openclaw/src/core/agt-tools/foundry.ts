@@ -16,6 +16,7 @@
 
 import { routerCall, routerCallBinary } from "../router-client.js";
 import { safeJson } from "../safe-json.js";
+import { resolveMemoryStoreName, resolveMemoryScope } from "../memory-binding.js";
 import type { FoundryProjectInfo } from "../foundry-discovery.js";
 
 // _routerCall is the historical alias used inside these blocks; keep it for
@@ -631,8 +632,8 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
     async execute(_id: string, params: Record<string, unknown>) {
       try {
         const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-        const store = (params.store_name as string) || `memory-${agentName}`;
-        const scope = (params.scope as string) || agentName;
+        const store = (params.store_name as string) || resolveMemoryStoreName(agentName);
+        const scope = (params.scope as string) || resolveMemoryScope(agentName);
         const op = params.operation as string;
         const text = (params.text as string) || "";
         const apiVer = "api-version=2025-11-15-preview";
@@ -661,34 +662,43 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
           return { status: "timeout", message: "Memory update still processing. It will complete in the background." };
         };
 
-        // Auto-create memory store if it doesn't exist yet
+        const isNotFound = (r: any): boolean => {
+          if (!r || typeof r !== "object") return false;
+          const code = r?.error?.code || r?.code;
+          const msg = r?.error?.message || r?.message;
+          return code === "not_found" || code === 404 ||
+            (typeof msg === "string" && (msg.includes("not found") || msg.includes("not_found")));
+        };
+
         const ensureStore = async () => {
           try {
-            await routerCall("GET", `/memory_stores/${store}?${apiVer}`);
+            const probe = await routerCall("GET", `/memory_stores/${store}?${apiVer}`);
+            if (!isNotFound(probe)) return;
           } catch (e: any) {
-            if (e.message?.includes("404") || e.message?.includes("not_found") || e.message?.includes("not found")) {
-              const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
-              const embeddingModel = getFoundryProject()?.deployments?.find(
-                (d: any) => d.id?.includes("embedding") || d.model?.includes("embedding")
-              )?.id || "text-embedding-3-small";
-              log.info(`Creating memory store '${store}' (chat=${chatModel}, embedding=${embeddingModel})`);
-              await routerCall("POST", `/memory_stores?${apiVer}`, {
-                name: store,
-                description: "AzureClaw agent persistent memory",
-                definition: {
-                  kind: "default",
-                  chat_model: chatModel,
-                  embedding_model: embeddingModel,
-                  options: {
-                    user_profile_enabled: true,
-                    user_profile_details: "Store user preferences, decisions, and project context",
-                    chat_summary_enabled: true,
-                  },
-                },
-              });
-              log.info(`Memory store '${store}' created successfully`);
+            if (!(e.message?.includes("404") || e.message?.includes("not_found") || e.message?.includes("not found"))) {
+              return;
             }
           }
+          const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
+          const embeddingModel = getFoundryProject()?.deployments?.find(
+            (d: any) => d.id?.includes("embedding") || d.model?.includes("embedding")
+          )?.id || "text-embedding-3-small";
+          log.info(`Creating memory store '${store}' (chat=${chatModel}, embedding=${embeddingModel})`);
+          await routerCall("POST", `/memory_stores?${apiVer}`, {
+            name: store,
+            description: "AzureClaw agent persistent memory",
+            definition: {
+              kind: "default",
+              chat_model: chatModel,
+              embedding_model: embeddingModel,
+              options: {
+                user_profile_enabled: true,
+                user_profile_details: "Store user preferences, decisions, and project context",
+                chat_summary_enabled: true,
+              },
+            },
+          });
+          log.info(`Memory store '${store}' created successfully`);
         };
 
         if (op === "search") {
@@ -698,20 +708,25 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
             options: { max_memories: 10 },
           };
           try {
-            const result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
+            let result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
+            if (isNotFound(result)) {
+              await ensureStore();
+              result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
+              if (isNotFound(result)) {
+                return { content: [{ type: "text", text: "Memory store just created — no memories stored yet. Try saving something first." }] };
+              }
+            }
             return { content: [{ type: "text", text: safeJson(result) }] };
           } catch (e: any) {
             if (e.message?.includes("not found") || e.message?.includes("not_found")) {
               try {
                 await ensureStore();
-                // Retry search after store creation
                 const result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
                 return { content: [{ type: "text", text: safeJson(result) }] };
               } catch {
                 return { content: [{ type: "text", text: "Memory store just created — no memories stored yet. Try saving something first." }] };
               }
             }
-            // Don't crash session on memory errors — return graceful message
             log.warn(`Memory search failed: ${e.message}`);
             return { content: [{ type: "text", text: `Memory search failed: ${e.message}. The memory service may still be initializing.` }] };
           }
@@ -734,7 +749,14 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
             return result;
           };
           try {
-            const result = await doUpdate();
+            let result = await doUpdate();
+            if (isNotFound(result)) {
+              await ensureStore();
+              result = await doUpdate();
+            }
+            if (isNotFound(result)) {
+              return { content: [{ type: "text", text: `Memory update failed: store '${store}' could not be created.` }] };
+            }
             const status = result?.status || "submitted";
             return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };
           } catch (e: any) {

@@ -17,6 +17,7 @@ import { amidToName, nameToAmid } from "./amid-cache.js";
 import { routerCall, routerCallStrict } from "./router-client.js";
 import { getMeshRegistry } from "./mesh-registry.js";
 import { routerUrl } from "./router-client.js";
+import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyMeshClient = any;
@@ -141,10 +142,11 @@ export async function runHandoffOrchestration(
   // Collect recent Foundry Memory as conversation context
   try {
     const agentName = process.env.SANDBOX_NAME || "dev-agent";
-    const store = `memory-${agentName}`;
+    const store = resolveMemoryStoreName(agentName);
+    const scope = resolveMemoryScope(agentName);
     const apiVer = "api-version=2025-11-15-preview";
     const memResp = await _routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, {
-      scope: agentName,
+      scope,
       options: { max_memories: 20 },
     }).catch(() => null);
     if (memResp?.memories?.length) {

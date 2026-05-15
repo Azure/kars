@@ -330,6 +330,20 @@ fn inject_volume(pod_spec: &mut Value, volume_name: &str, source: Value) {
     volumes.push(entry);
 }
 
+/// Append only a container `volumeMount` (+ optional env var) to an
+/// already-existing volume. Used when a single volume needs to be
+/// mounted into multiple containers in the same pod (e.g. the compiled
+/// AGT policy goes to both `inference-router` and `openclaw`).
+pub fn inject_container_mount_public(
+    pod_spec: &mut Value,
+    container_name: &str,
+    volume_name: &str,
+    mount_path: &str,
+    env_var: Option<(&str, &str)>,
+) {
+    inject_container_mount(pod_spec, container_name, volume_name, mount_path, env_var);
+}
+
 fn inject_container_mount(
     pod_spec: &mut Value,
     container_name: &str,

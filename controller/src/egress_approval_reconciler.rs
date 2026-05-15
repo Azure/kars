@@ -82,7 +82,7 @@ use crate::egress_approval_compile::{
     approval_file_key, approvals_configmap_name, compile_approval_file, merged_allowlist_digest,
 };
 use crate::status::conditions::{self, status as cond_status};
-use crate::status::phase::{PHASE_ACTIVE, PHASE_EXPIRED, PHASE_PENDING, PHASE_READY};
+use crate::status::phase::{PHASE_ACTIVE, PHASE_EXPIRED, PHASE_PENDING, PHASE_SANDBOX_RUNNING};
 use crate::status::router_confirmation::{RouterEnforcementState, decide_enforcement_state};
 use crate::status::router_confirmation_io::poll_referencing_sandboxes;
 
@@ -634,7 +634,14 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
     let name = approval.name_any();
     let ns = approval.namespace().unwrap_or_else(|| "default".into());
     let api: Api<EgressApproval> = Api::namespaced(ctx.client.clone(), &ns);
-    let configmaps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
+    // The approvals ConfigMap is consumed by the per-sandbox router which
+    // mounts it from the sandbox *pod* namespace (`azureclaw-<sandbox>`),
+    // NOT from the namespace where the EgressApproval CR lives (which is
+    // typically the operator ns `azureclaw-system`). Bind the ConfigMap
+    // Api to the sandbox pod namespace so the CM lands where the router
+    // can read it.
+    let sandbox_pod_ns = format!("azureclaw-{}", approval.spec.sandbox);
+    let configmaps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &sandbox_pod_ns);
     let sandboxes: Api<ClawSandbox> = Api::namespaced(ctx.client.clone(), &ns);
 
     if approval.metadata.deletion_timestamp.is_some() {
@@ -710,9 +717,9 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
         .as_ref()
         .and_then(|s| s.phase.as_deref())
         .unwrap_or("");
-    if sandbox_phase != PHASE_READY {
+    if sandbox_phase != PHASE_SANDBOX_RUNNING {
         let msg = format!(
-            "ClawSandbox '{}' is not Ready (phase='{}')",
+            "ClawSandbox '{}' is not Running (phase='{}')",
             approval.spec.sandbox, sandbox_phase
         );
         let patch = build_status_patch(

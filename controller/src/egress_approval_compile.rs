@@ -346,6 +346,47 @@ mod tests {
     }
 
     #[test]
+    fn merged_body_byte_layout_pinned_to_insertion_order() {
+        // Pin the exact wire bytes the controller hashes into the
+        // merged-allowlist digest. The router's
+        // `compile_merged_endpoints_body` MUST produce the same
+        // bytes for the same input set; if it doesn't, the §3
+        // Ready ⇔ router-echo loop wedges with AwaitingRouterEcho
+        // forever.
+        //
+        // The expected layout is INSERTION order
+        // (`{"schemaVersion":1,"endpoints":[...]}`), matching
+        // serde_json with the `preserve_order` feature enabled. The
+        // workspace pins this feature on the `serde_json` dep so
+        // both binaries unify on the same byte layout regardless of
+        // which downstream crate (`cedar-policy-validator`) would
+        // otherwise toggle it on for the router only.
+        let baseline = vec![];
+        let approvals = vec![ep("example.com", Some(443))];
+        let mut combined: Vec<EndpointConfig> =
+            Vec::with_capacity(baseline.len() + approvals.len());
+        combined.extend_from_slice(&baseline);
+        combined.extend_from_slice(&approvals);
+        let doc = crate::egress_allowlist_compile::compile_to_doc(&combined);
+        let body = serde_json::to_vec(&doc).unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert_eq!(
+            body_str, r#"{"schemaVersion":1,"endpoints":[{"host":"example.com","port":443}]}"#,
+            "merged-allowlist body must serialize in insertion order \
+             (schemaVersion first) so router + controller digests agree; \
+             check Cargo.toml: serde_json must have `preserve_order` enabled"
+        );
+        // Pin the resulting digest too so a refactor that changes
+        // the canonical-bytes layout (filename, length-prefix) also
+        // trips this test.
+        let digest = merged_allowlist_digest(&baseline, &approvals);
+        assert_eq!(
+            digest,
+            "sha256:fe6cf9580a22eaacff45a3c8d3bb06f5f635b34c5981558b4587524c45e9c8a5"
+        );
+    }
+
+    #[test]
     fn merged_filename_distinct_from_baseline_filename() {
         // Domain separator must be distinct from the baseline
         // `allowlist.json` so a baseline digest can never be

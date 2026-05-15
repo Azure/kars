@@ -789,30 +789,36 @@ mod tests {
         // `controller::egress_approval_compile::merged_allowlist_digest`
         // bit-for-bit. The fixture below is mirrored verbatim in
         // `controller/src/egress_approval_compile.rs` —
-        // `digest_is_byte_identical_to_router_layout`. Drift on
-        // either side breaks both tests.
+        // `merged_body_byte_layout_pinned_to_insertion_order`. Drift
+        // on either side breaks both tests.
+        //
+        // The workspace pins `serde_json` with the `preserve_order`
+        // feature so both binaries serialize objects in insertion
+        // order regardless of which downstream crate would otherwise
+        // toggle that feature on for one binary only.
         use sha2::{Digest, Sha256};
-        let endpoints = vec![
-            ("a.example.com".to_string(), 443u16),
-            ("b.example.com".to_string(), 443u16),
-        ];
+        let endpoints = vec![("example.com".to_string(), 443u16)];
         let body = compile_merged_endpoints_body(&endpoints);
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert_eq!(
+            body_str, r#"{"schemaVersion":1,"endpoints":[{"host":"example.com","port":443}]}"#,
+            "merged-allowlist body must serialize in insertion order \
+             (schemaVersion first); check Cargo.toml: serde_json must \
+             have `preserve_order` enabled"
+        );
         let canonical = canonical_bytes_for_digest(EGRESS_APPROVAL_MERGED_FILENAME, &body);
         let mut hex_str = String::with_capacity(64);
         for b in Sha256::digest(&canonical) {
             use std::fmt::Write;
             let _ = write!(hex_str, "{b:02x}");
         }
-        let expected = format!("sha256:{hex_str}");
-        // Now hash again via the same path to confirm determinism.
+        assert_eq!(
+            format!("sha256:{hex_str}"),
+            "sha256:fe6cf9580a22eaacff45a3c8d3bb06f5f635b34c5981558b4587524c45e9c8a5"
+        );
+        // Determinism — re-running same input yields the same body.
         let body2 = compile_merged_endpoints_body(&endpoints);
-        let canonical2 = canonical_bytes_for_digest(EGRESS_APPROVAL_MERGED_FILENAME, &body2);
-        let mut hex_str2 = String::with_capacity(64);
-        for b in Sha256::digest(&canonical2) {
-            use std::fmt::Write;
-            let _ = write!(hex_str2, "{b:02x}");
-        }
-        assert_eq!(expected, format!("sha256:{hex_str2}"));
+        assert_eq!(body, body2);
     }
 
     #[tokio::test]

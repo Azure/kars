@@ -101,6 +101,10 @@ RUN chmod +x /usr/local/bin/stage-extension-deps.sh
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN mkdir -p /opt/openclaw-stage && \
     openclaw doctor --fix --non-interactive --yes 2>&1 | tail -40 && \
+    # Doctor rmdir's /opt/openclaw-stage when it has nothing to stage
+    # (every bundled plugin is disabled because no creds at build time).
+    # Re-create it so the chmod + downstream COPY steps don't break.
+    mkdir -p /opt/openclaw-stage && \
     # Belt-and-suspenders: doctor pre-stages deps for *configured* plugins,
     # but OpenClaw's own bundled chunks (e.g. dist/oauth-*.js, loaded by
     # memory-core in the node-host) have static require chains into deps
@@ -119,7 +123,9 @@ RUN mkdir -p /opt/openclaw-stage && \
       echo "OpenClaw doctor completed cleanly with no staging required"; \
     fi && \
     # Verify the canonical missing-module case so future regressions fail
-    # the build instead of silently breaking the runtime.
+    # the build instead of silently breaking the runtime. Only meaningful
+    # when doctor produced a version dir; if doctor staged nothing, no
+    # bundled-chunk require chain runs at runtime either.
     stage_dir=$(find /opt/openclaw-stage -mindepth 1 -maxdepth 1 -type d | head -n1) && \
     if [ -n "$stage_dir" ] && [ ! -f "$stage_dir/node_modules/@mariozechner/pi-ai/dist/oauth.js" ]; then \
       echo "FATAL: @mariozechner/pi-ai/dist/oauth.js missing from stage tree after doctor + extension-deps fill"; \
@@ -140,10 +146,17 @@ RUN apk add --no-cache git && \
     GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/gifgrep/cmd/gifgrep@latest && \
     GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/ordercli/cmd/ordercli@latest && \
     GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/sonoscli/cmd/sonos@latest && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/wacli/cmd/wacli@latest && \
     GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/camsnap/cmd/camsnap@latest && \
     GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/goplaces/cmd/goplaces@latest && \
     GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/songsee/cmd/songsee@latest
+
+# wacli requires CGO + sqlite (go-sqlite3). Build statically so the binary
+# can be copied into the CGO-less Azure Linux runtime image without libsqlite3.
+RUN apk add --no-cache gcc musl-dev sqlite-static && \
+    GOTOOLCHAIN=auto CGO_ENABLED=1 \
+    go install -tags "sqlite_omit_load_extension" \
+      -ldflags='-linkmode external -extldflags "-static"' \
+      github.com/openclaw/wacli/cmd/wacli@latest
 
 # ─── Base Runtime Stage ──────────────────────────────────────────────────────
 
