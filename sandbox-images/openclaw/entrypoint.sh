@@ -690,6 +690,36 @@ ANTHEOF
   rm -f "${OPENCLAW_CONFIG}.bak" "${OPENCLAW_CONFIG}".clobbered.* \
         "$OPENCLAW_DIR/logs/config-health.json" 2>/dev/null || true
 
+  # Build the `mcp.servers` block from AZURECLAW_MCP_SERVERS (comma-separated
+  # list of McpServer names projected by the controller). Each entry points
+  # at the loopback router (`127.0.0.1:8443/mcp`) and carries an
+  # `x-azureclaw-mcp-server` header naming the registered McpServer. The
+  # router resolves the header → registered server, signs the JWT with the
+  # mounted per-server signing key (mounted at /etc/azureclaw/mcp-signing/<name>),
+  # filters by allowedTools, and forwards to the upstream URL. This is what
+  # gives the McpServer CRD true E2E semantics: an OpenClaw `tool.*` invocation
+  # against `<name>` is governed, signed, allow-listed and audited by the
+  # router before ever leaving the pod.
+  _MCP_BLOCK=""
+  if [ -n "${AZURECLAW_MCP_SERVERS:-}" ]; then
+    _MCP_ENTRIES=""
+    _MCP_SEP=""
+    OLDIFS="$IFS"; IFS=','
+    for _mcp_name in $AZURECLAW_MCP_SERVERS; do
+      _mcp_name=$(echo "$_mcp_name" | tr -d ' ')
+      [ -z "$_mcp_name" ] && continue
+      _MCP_ENTRIES="${_MCP_ENTRIES}${_MCP_SEP}\"${_mcp_name}\": { \"transport\": \"streamable-http\", \"url\": \"http://127.0.0.1:8443/mcp\", \"headers\": { \"x-azureclaw-mcp-server\": \"${_mcp_name}\", \"x-azureclaw-sandbox\": \"${HOSTNAME:-dev-agent}\" } }"
+      _MCP_SEP=", "
+    done
+    IFS="$OLDIFS"
+    if [ -n "$_MCP_ENTRIES" ]; then
+      _MCP_BLOCK=",
+  \"mcp\": {
+    \"servers\": { ${_MCP_ENTRIES} }
+  }"
+    fi
+  fi
+
   # Write openclaw.json (2026.4.x config format — routed through inference router)
   cat > "$OPENCLAW_CONFIG" << EOF
 {
@@ -710,6 +740,9 @@ ANTHEOF
     "exec": {
       "security": "full"
     }
+  },
+  "commands": {
+    "mcp": true
   },
   "plugins": {
     "allow": [PLUGINS_ALLOW_PLACEHOLDER],
@@ -751,7 +784,7 @@ ANTHEOF
       "enabled": true,
       "dangerouslyDisableDeviceAuth": true
     }
-  }
+  }${_MCP_BLOCK}
 }
 EOF
   chmod 600 "$OPENCLAW_CONFIG" 2>/dev/null || true

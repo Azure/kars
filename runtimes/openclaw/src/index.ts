@@ -360,6 +360,7 @@ async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: s
   return _notifyInboxToMemory(agtInbox, log);
 }
 import { discoverFoundryProject, type FoundryProjectInfo } from "./core/foundry-discovery.js";
+import { resolveMemoryStoreName, resolveMemoryScope } from "./core/memory-binding.js";
 import { delegateToNativeAgent } from "./core/agt-task-delegate.js";
 import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MESH_CHUNK_THRESHOLD, MESH_CHUNK_SIZE, MESH_MAX_CHUNKS, MESH_TRANSFER_TTL, type PendingMeshTransfer } from "./core/mesh-transport.js";
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
@@ -1621,7 +1622,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               }
 
               // 2. Store handoff event in Foundry Memory (includes conversation ID for startup recall)
-              const store = `memory-${agentName}`;
+              const store = resolveMemoryStoreName(agentName);
+              const memScope = resolveMemoryScope(agentName);
               const recentSummary = chatMessages.slice(-5).map((m: any) =>
                 `${m.role}: ${String(m.content || "").slice(0, 200)}`
               ).join("\n");
@@ -1637,7 +1639,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
               try {
                 await _routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, {
-                  scope: agentName,
+                  scope: memScope,
                   items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: memoryText }] }],
                   update_delay: 0,
                 });
@@ -2296,10 +2298,11 @@ async function syncToFoundryMemory(
   memorySyncInFlight = true;
   try {
     const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-    const store = `memory-${agentName}`;
+    const store = resolveMemoryStoreName(agentName);
+    const scope = resolveMemoryScope(agentName);
     try {
       await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
-        scope: agentName,
+        scope,
         items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: content }] }],
         update_delay: 0,
       });
@@ -2308,7 +2311,7 @@ async function syncToFoundryMemory(
       if (e?.message?.includes("404")) {
         await ensureMemoryStore(store);
         await _routerCall("POST", `/memory_stores/${store}:update_memories?api-version=2025-11-15-preview`, {
-          scope: agentName,
+          scope,
           items: [{ type: "message", role: "assistant", content: [{ type: "input_text", text: content }] }],
           update_delay: 0,
         });

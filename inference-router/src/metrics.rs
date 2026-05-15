@@ -4,8 +4,8 @@
 //! Prometheus metrics for inference routing and AGT governance.
 
 use prometheus::{
-    Histogram, HistogramVec, IntCounterVec, IntGauge, opts, register_histogram,
-    register_histogram_vec, register_int_counter_vec, register_int_gauge,
+    Histogram, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, opts, register_histogram,
+    register_histogram_vec, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
 };
 use std::sync::LazyLock;
 
@@ -241,6 +241,58 @@ pub static UPSTREAM_RETRIES: LazyLock<IntCounterVec> = LazyLock::new(|| {
             "Upstream Azure OpenAI retries on idempotent requests"
         ),
         &["sandbox", "reason"]
+    )
+    .unwrap()
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Policy-bundle audit metrics (Slice §3 — Ready ⇔ router-echo loop)
+//
+// One gauge per `PolicyKind` (5 bundles total today: AgtProfile,
+// InferencePolicy, Memory, EgressAllowlist, EgressApproval). Cardinality
+// is bounded by the closed `PolicyKind` taxonomy in `policy_status.rs`.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Unix-epoch timestamp (seconds) of the most recent **successful**
+/// load for each policy bundle. Stays put across subsequent failures
+/// so dashboards can show "last good state" age via
+/// `time() - azureclaw_policy_bundle_loaded_at_seconds`.
+pub static POLICY_BUNDLE_LOADED_AT: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        opts!(
+            "azureclaw_policy_bundle_loaded_at_seconds",
+            "Unix timestamp of last successful policy-bundle load, per kind"
+        ),
+        &["kind"]
+    )
+    .unwrap()
+});
+
+/// Health gauge per policy bundle: `1` when the last load attempt
+/// succeeded, `0` when the last attempt failed. Pair with
+/// `azureclaw_policy_bundle_reload_total{outcome="error"}` for
+/// rate-of-failure alerts.
+pub static POLICY_BUNDLE_HEALTHY: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        opts!(
+            "azureclaw_policy_bundle_healthy",
+            "1 if the most recent policy-bundle load succeeded, 0 otherwise"
+        ),
+        &["kind"]
+    )
+    .unwrap()
+});
+
+/// Total policy-bundle reload attempts by kind and outcome.
+/// `outcome` ∈ `{"success", "error"}`. Use the `rate()` of the
+/// `error` series for SLO burn alerts.
+pub static POLICY_BUNDLE_RELOADS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "azureclaw_policy_bundle_reload_total",
+            "Policy-bundle reload attempts by kind and outcome"
+        ),
+        &["kind", "outcome"]
     )
     .unwrap()
 });

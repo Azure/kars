@@ -24,6 +24,7 @@ import * as os from "node:os";
 import { existsSync, writeFileSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { Stepper } from "../../stepper.js";
 import { loadConfig, getSecret, type AzureClawConfig } from "../../config.js";
+import { loadAgtProfile } from "../../refs.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -94,6 +95,142 @@ export interface LocalK8sOptions {
  *     pipe images.
  */
 export type ContainerRuntime = "docker" | "podman" | "nerdctl";
+
+/**
+ * Outcome of the optional first-run "Add GitHub MCP?" prompt
+ * (Slice 4d.4.1 — outbound static-bearer auth for the official
+ * `https://api.githubcopilot.com/mcp` server).
+ *
+ * The mechanism is generic — the controller CRD field `bearerFromEnv`
+ * just names a router-process env var. We standardise on
+ * `COPILOT_GITHUB_TOKEN` here because:
+ *   - github-copilot already wires it (router `copilot_auth.rs` uses it
+ *     for inference auth too), so the MCP wiring is a no-op env-side;
+ *   - github-models can safely reuse the same PAT under that env name;
+ *   - foundry needs us to provision a fresh GitHub token (via `gh auth
+ *     token` or a paste prompt) into a dedicated Secret which the
+ *     controller then projects under the same env name.
+ *
+ * `tokenSecretName` is set only for the foundry path (where we provision
+ * a brand-new Secret); copilot/models reuse the existing `azureclaw-dev-creds`
+ * Secret's api-key. `tokenInline` is set when the user pastes a token
+ * inline (foundry path with no `gh` CLI available).
+ */
+interface GithubMcpDecision {
+  enabled: boolean;
+  /** Env var name the router process should read. Always `COPILOT_GITHUB_TOKEN`. */
+  envVarName: string;
+  /** For foundry path only: name of a Secret to mount the token under. */
+  tokenSecretName?: string;
+  /** For foundry path only: token value to write into the Secret. */
+  tokenInline?: string;
+}
+
+/**
+ * Interactive prompt: should this dev session enable the upstream
+ * GitHub MCP server? Tailored per provider so the UX matches the
+ * user's mental model (copilot: "you already have a token"; foundry:
+ * "we need a fresh GitHub token").
+ *
+ * Non-interactive (no TTY) or `AZURECLAW_MCP_GITHUB=skip` skips the
+ * whole prompt — useful for CI / regression scripts.
+ */
+async function promptForGithubMcp(
+  creds: AzureClawConfig,
+): Promise<GithubMcpDecision> {
+  const envOverride = (process.env.AZURECLAW_MCP_GITHUB ?? "").toLowerCase();
+  if (envOverride === "skip" || envOverride === "no" || envOverride === "false") {
+    return { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" };
+  }
+  if (envOverride === "yes" || envOverride === "true" || envOverride === "on") {
+    // Allowed shortcut only for copilot/models (we already have a token).
+    if (creds.provider === "github-copilot" || creds.provider === "github-models") {
+      return { enabled: true, envVarName: "COPILOT_GITHUB_TOKEN" };
+    }
+  }
+  if (!process.stdin.isTTY) {
+    return { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" };
+  }
+
+  const { default: inquirer } = await import("inquirer");
+
+  if (creds.provider === "github-copilot") {
+    const { reuse } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "reuse",
+        message:
+          "Also use your GitHub Copilot token for the GitHub MCP server (api.githubcopilot.com/mcp)?",
+        default: true,
+      },
+    ]);
+    return { enabled: !!reuse, envVarName: "COPILOT_GITHUB_TOKEN" };
+  }
+
+  if (creds.provider === "github-models") {
+    const { reuse } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "reuse",
+        message:
+          "Reuse your GitHub PAT for the GitHub MCP server (api.githubcopilot.com/mcp)?\n" +
+          "  The PAT must have the same scopes you want the agent to be able to read.",
+        default: true,
+      },
+    ]);
+    return { enabled: !!reuse, envVarName: "COPILOT_GITHUB_TOKEN" };
+  }
+
+  // Foundry path: need a fresh GitHub token. Try `gh auth token` first,
+  // fall back to a paste prompt.
+  const { enable } = await inquirer.prompt([
+    {
+      type: "confirm",
+      name: "enable",
+      message:
+        "Enable the GitHub MCP server (api.githubcopilot.com/mcp) for this sandbox?\n" +
+        "  Needs a GitHub token; we'll try `gh auth token` first.",
+      default: false,
+    },
+  ]);
+  if (!enable) {
+    return { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" };
+  }
+
+  let token: string | undefined;
+  try {
+    const { stdout } = await execa("gh", ["auth", "token"], { stdio: ["ignore", "pipe", "ignore"] });
+    const t = stdout.trim();
+    if (t.length > 0) {
+      token = t;
+      console.log(chalk.dim("  ✓ obtained token via `gh auth token`"));
+    }
+  } catch {
+    // gh not installed or not logged in — fall through to paste prompt.
+  }
+
+  if (!token) {
+    const { pasted } = await inquirer.prompt([
+      {
+        type: "password",
+        name: "pasted",
+        mask: "*",
+        message:
+          "Paste a GitHub token (PAT or OAuth) with the scopes you want the MCP to use:",
+        validate: (v: string) =>
+          v.trim().length > 0 ? true : "token cannot be empty",
+      },
+    ]);
+    token = (pasted as string).trim();
+  }
+
+  return {
+    enabled: true,
+    envVarName: "COPILOT_GITHUB_TOKEN",
+    tokenSecretName: "github-mcp-token",
+    tokenInline: token,
+  };
+}
 
 interface Tooling {
   kind: string;
@@ -618,6 +755,7 @@ async function helmInstall(
 async function provisionDevCreds(
   kubectl: string,
   creds: AzureClawConfig,
+  mcpGithub: GithubMcpDecision = { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" },
 ): Promise<string> {
   const SECRET_NAME = "azureclaw-dev-creds";
   const NS = "azureclaw-system";
@@ -641,6 +779,29 @@ async function provisionDevCreds(
     input: dryRun.stdout,
     stdio: ["pipe", "inherit", "inherit"],
   });
+
+  // For the foundry+MCP path we provision an extra Secret holding the
+  // GitHub token. The controller will reference it via secretKeyRef
+  // below (so the token never lands in the values file).
+  if (mcpGithub.enabled && mcpGithub.tokenSecretName && mcpGithub.tokenInline) {
+    const mcpSecret = await execa(kubectl, [
+      "create",
+      "secret",
+      "generic",
+      mcpGithub.tokenSecretName,
+      "-n",
+      NS,
+      `--from-literal=token=${mcpGithub.tokenInline}`,
+      "--dry-run=client",
+      "-o",
+      "yaml",
+    ]);
+    await execa(kubectl, ["apply", "-f", "-"], {
+      input: mcpSecret.stdout,
+      stdio: ["pipe", "inherit", "inherit"],
+    });
+  }
+
 
   // Build the values fragment. We always set AZURE_OPENAI_ENDPOINT (the
   // controller forwards it to both the OpenClaw container and the router
@@ -688,6 +849,22 @@ async function provisionDevCreds(
           "        secretKeyRef:",
           `          name: ${SECRET_NAME}`,
           "          key: api-key",
+        ]
+      : []),
+    // Slice 4d.4.1 — GitHub MCP outbound bearer wiring. For copilot we
+    // already added COPILOT_GITHUB_TOKEN above (router uses it for
+    // inference too), so the MCP-only path is the foundry / github-models
+    // case. Source:
+    //   • github-models: reuse the existing api-key (it IS a GitHub PAT).
+    //   • foundry: read from the separate `<tokenSecretName>` Secret we
+    //     just provisioned (key=token).
+    ...(mcpGithub.enabled && !isCopilot
+      ? [
+          "    - name: COPILOT_GITHUB_TOKEN",
+          "      valueFrom:",
+          "        secretKeyRef:",
+          `          name: ${mcpGithub.tokenSecretName ?? SECRET_NAME}`,
+          `          key: ${mcpGithub.tokenSecretName ? "token" : "api-key"}`,
         ]
       : []),
     // FOUNDRY_PROJECT_ENDPOINT is emitted by the chart from
@@ -846,6 +1023,29 @@ async function deployAgentMesh(
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   const stepper = new Stepper({ totalSteps: 13 });
 
+  // Fail fast if the user is running outside the azureclaw checkout.
+  // `--target local-k8s` rebuilds the controller, router, and sandbox
+  // images from local source via docker build, which needs the repo
+  // root (Cargo.toml + deploy/helm/azureclaw + sandbox-images/...).
+  // Without this check the failure surfaces only AFTER kind cluster
+  // creation (10+ seconds wasted, orphaned cluster left behind).
+  if (!opts.noBuild) {
+    try {
+      findRepoRoot(process.cwd());
+    } catch {
+      throw new Error(
+        "`azureclaw dev --target local-k8s` must be run from inside the azureclaw " +
+          "repo checkout — the dev flow rebuilds the controller, inference-router, " +
+          "and sandbox images from local source.\n\n" +
+          "Either:\n" +
+          "  • `cd` into your azureclaw checkout and re-run, or\n" +
+          "  • pass `--no-build` to use already-loaded images, or\n" +
+          "  • use `--target docker` (no cluster, no rebuild — fastest dev loop), or\n" +
+          "  • use `azureclaw up` to deploy to an existing AKS cluster (ACR images).",
+      );
+    }
+  }
+
   stepper.step("Checking local tooling (kind / kubectl / helm / container runtime)…");
   const tools = await ensureTooling();
   stepper.done(
@@ -871,6 +1071,22 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         ? "GitHub Models"
         : "Azure Foundry / OpenAI";
   stepper.done(`creds: ${providerLabel} (${creds.endpoint})`);
+
+  // Optional: GitHub MCP wiring (Slice 4d.4.1). Asks the user whether to
+  // attach the upstream `api.githubcopilot.com/mcp` server to this
+  // sandbox. The decision modulates BOTH `provisionDevCreds` (env+secret
+  // wiring on the controller deployment) and `autoCreateSandbox`
+  // (McpServer CR + mcpServerRefs on the ClawSandbox).
+  const mcpGithub = await promptForGithubMcp(creds);
+  if (mcpGithub.enabled) {
+    console.log(
+      chalk.dim(
+        "  GitHub MCP will be wired (bearerFromEnv=" +
+          mcpGithub.envVarName +
+          "; allowedTools = read-only set).",
+      ),
+    );
+  }
 
   stepper.step(`Ensuring kind cluster '${opts.clusterName}' exists…`);
   await ensureCluster(tools.kind, opts.clusterName, tools.env);
@@ -1007,13 +1223,16 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // Provision the dev-creds Secret + per-run overlay BEFORE helm-applying,
   // so the controller deployment picks up the secretKeyRef on its first
   // rollout (no second restart needed).
-  const credsOverlay = await provisionDevCreds(tools.kubectl, creds);
+  const credsOverlay = await provisionDevCreds(tools.kubectl, creds, mcpGithub);
   try {
     const meshProvider = opts.meshProvider ?? "agt";
     await helmInstall(tools.helm, tools.kubectl, opts.name, chartDir, [
       valuesOverlay,
       credsOverlay,
-    ], [`mesh.provider=${meshProvider}`]);
+    ], [
+      `mesh.provider=${meshProvider}`,
+      `meshPeer.clusterName=${opts.clusterName}`,
+    ]);
   } finally {
     // The overlay only references the API key by name (secretKeyRef);
     // the file itself contains no secret material, but we still clean up
@@ -1145,7 +1364,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // sandbox, not just the platform. Saves the manual `kubectl apply
   // -f examples/...` + `azureclaw connect <name>` dance.
   stepper.step(`Creating sandbox '${opts.name}'…`);
-  await autoCreateSandbox(tools, opts, creds);
+  await autoCreateSandbox(tools, opts, creds, mcpGithub);
   stepper.done(`sandbox CR applied (azureclaw-${opts.name})`);
 
   stepper.step("Waiting for sandbox pod to be ready…");
@@ -1161,10 +1380,10 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
 
   console.log("");
   console.log(chalk.bold("  OpenClaw WebUI:"));
-  // Embed the gateway token as a URL fragment so the user can click the
-  // link and skip the manual token paste. Matches docker-mode behavior.
-  const webUrlWithToken = gwToken ? `${webUrl}#token=${gwToken}` : webUrl;
-  console.log(`    ${webUrlWithToken}`);
+  // `startSandboxConnect` already embeds `#token=...` in the returned URL
+  // when the gateway token is known, so we print it as-is. Earlier we
+  // appended a second `#token=...`, producing a malformed double-fragment.
+  console.log(`    ${webUrl}`);
   if (gwToken) {
     console.log("");
     console.log(chalk.dim("  Gateway token (copy if the URL hash is stripped):"));
@@ -1185,7 +1404,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // lands on "unauthorized: gateway token missing" which is worse UX
   // than printing the connect command above.
   if (gwToken) {
-    await openBrowser(webUrlWithToken);
+    await openBrowser(webUrl);
   }
 
   console.log(chalk.bold("  Next steps:"));
@@ -1664,6 +1883,7 @@ async function autoCreateSandbox(
   tools: Tooling,
   opts: LocalK8sOptions,
   creds: AzureClawConfig,
+  mcpGithub: GithubMcpDecision = { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" },
 ): Promise<void> {
   const ns = `azureclaw-${opts.name}`;
   const policyName = `${opts.name}-inference`;
@@ -1703,6 +1923,31 @@ async function autoCreateSandbox(
       : "";
 
   const toolPolicyName = `${opts.name}-toolpolicy`;
+
+  // Slice "well-oiled-machine" — auto-emit a default ClawMemory binding
+  // for the Foundry provider path. github-copilot / github-models don't
+  // have a Foundry Memory Store, so we skip the CR there (and the router
+  // simply omits the memory tools, gracefully). The Foundry path lets the
+  // router auto-provision the store on first 404 (see
+  // claw_memory_reconciler.rs + Slice 6.5 follow-up docs).
+  //
+  // storeName must be a DNS-label (≤63 chars). Sandbox name is already
+  // DNS-1123 (≤63 chars max in practice), but truncate defensively so
+  // `<name>-mem` always fits. CR `metadata.name` has the 253-char budget,
+  // so we use the more readable `<name>-memory` there.
+  const isCopilot = creds.provider === "github-copilot";
+  const isGithubModels = creds.provider === "github-models";
+  const wantMemoryCr = !isCopilot && !isGithubModels;
+  // storeName must match the OpenClaw plugin's hardcoded convention
+  // `memory-${SANDBOX_NAME}` (see runtimes/openclaw/src/core/agt-tools/
+  // foundry.ts:634, agt-task-loop.ts:608, agt-handoff.ts:144, etc.) —
+  // the plugin builds /memory_stores/${store} URLs and the router
+  // proxies them through unchanged, so if the CR and plugin disagree
+  // the plugin auto-creates a second store and the binding goes
+  // unused. Cap at 63 chars (DNS-label). 7-char prefix budget leaves
+  // 56 chars for the sandbox name.
+  const memoryStoreName = `memory-${opts.name.substring(0, 56)}`;
+
   const yaml = [
     "---",
     "apiVersion: v1",
@@ -1740,6 +1985,10 @@ async function autoCreateSandbox(
     // Degraded with `ToolPolicyNotFound`. Permissive default — selector
     // matches the parent's sandbox label only, no rate-limit, no
     // approval, no commerce. Operators tighten via `azureclaw toolpolicy`.
+    //
+    // `agtProfile.inline` is mandatory post-Slice-1e phase 2 (the bundled
+    // sandbox-side fallback at /opt/azureclaw-plugin/policies/ is gone),
+    // so we inline the same default profile that `azureclaw add` uses.
     "apiVersion: azureclaw.azure.com/v1alpha1",
     "kind: ToolPolicy",
     "metadata:",
@@ -1752,12 +2001,80 @@ async function autoCreateSandbox(
     '    tool: "*"',
     "    sandboxMatchLabels:",
     `      azureclaw.azure.com/sandbox: ${opts.name}`,
+    "  agtProfile:",
+    "    inline: |",
+    ...loadAgtProfile("default")
+      .replace(/\r\n/g, "\n")
+      .replace(/\n+$/, "")
+      .split("\n")
+      .map((line) => `      ${line}`),
     "---",
+    // Slice 4d.4.1 — McpServer/github (only emitted when the user opted
+    // in during the dev-flow prompt). `bearerFromEnv=COPILOT_GITHUB_TOKEN`
+    // tells the inference router to read that env var (controller wired
+    // it via secretKeyRef in provisionDevCreds) and attach
+    // `Authorization: Bearer <value>` to every outbound tools/list +
+    // tools/call. allowedTools is intentionally read-only — we never
+    // ship "*" because the bearer inherits Copilot/PAT scope which can
+    // include write access.
+    ...(mcpGithub.enabled
+      ? [
+          "apiVersion: azureclaw.azure.com/v1alpha1",
+          "kind: McpServer",
+          "metadata:",
+          "  name: github",
+          "  namespace: azureclaw-system",
+          "spec:",
+          "  url: https://api.githubcopilot.com/mcp",
+          `  bearerFromEnv: ${mcpGithub.envVarName}`,
+          "  allowedSandboxes:",
+          "    matchLabels:",
+          "      mcp-github: allow",
+          "  allowedTools:",
+          "    - list_pull_requests",
+          "    - get_pull_request",
+          "    - get_repository",
+          "    - search_code",
+          "    - search_issues",
+          "---",
+        ]
+      : []),
+    // well-oiled-machine — Foundry-only ClawMemory binding.
+    // Auto-emits a default scope so the openclaw plugin's memory
+    // tools (search_memories / update_memories / delete_scope in
+    // runtimes/openclaw/src/core/agt-tools/foundry.ts) have a
+    // resolved Memory Store from first boot. The router auto-
+    // provisions the store on first 404 (claw_memory_reconciler.rs +
+    // Slice 6.5 follow-up docs). Skipped for github-copilot /
+    // github-models — no Foundry Memory Store on those paths.
+    ...(wantMemoryCr
+      ? [
+          "apiVersion: azureclaw.azure.com/v1alpha1",
+          "kind: ClawMemory",
+          "metadata:",
+          `  name: ${opts.name}-memory`,
+          "  namespace: azureclaw-system",
+          "  labels:",
+          `    azureclaw.azure.com/sandbox: ${opts.name}`,
+          "spec:",
+          "  sandboxRef:",
+          `    name: ${opts.name}`,
+          `  storeName: ${memoryStoreName}`,
+          `  scope: "agent:${opts.name}"`,
+          "  retentionDays: 30",
+          "  deleteOnSandboxDelete: true",
+          `  displayName: "Default memory for ${opts.name}"`,
+          "---",
+        ]
+      : []),
     "apiVersion: azureclaw.azure.com/v1alpha1",
     "kind: ClawSandbox",
     "metadata:",
     `  name: ${opts.name}`,
     "  namespace: azureclaw-system",
+    ...(mcpGithub.enabled
+      ? ["  labels:", "    mcp-github: allow"]
+      : []),
     "spec:",
     "  runtime:",
     "    kind: OpenClaw",
@@ -1778,6 +2095,13 @@ async function autoCreateSandbox(
     "      - /tmp",
     "  inferenceRef:",
     `    name: ${policyName}`,
+    // well-oiled-machine — wire ClawMemory back-ref so the controller
+    // mounts /etc/azureclaw/memory/binding.json on the router and the
+    // ClawMemory CR promotes from Compiled → Ready (router echo). Same
+    // namespace as the sandbox (azureclaw-system).
+    ...(wantMemoryCr
+      ? ["  memoryRef:", `    name: ${opts.name}-memory`]
+      : []),
     // Enable AGT governance on the parent so the controller injects
     // AGT_RELAY_URL / AGT_REGISTRY_URL / AGT_GOVERNANCE_ENABLED into both
     // the openclaw + inference-router containers (controller/src/reconciler/
@@ -1792,6 +2116,13 @@ async function autoCreateSandbox(
     `      name: ${toolPolicyName}`,
     "    trustThreshold: 500",
     "    registryMode: local",
+    // Slice 4d.4.1 — wire the GitHub MCP server when the user opted
+    // in. The CR itself is emitted separately below; here we just
+    // attach it via mcpServerRefs so the controller materializes
+    // /etc/azureclaw/mcp/github/meta.json into the router pod.
+    ...(mcpGithub.enabled
+      ? ["    mcpServerRefs:", "      - name: github"]
+      : []),
       // Dev profile: run egress in learn mode so the forward proxy
     // (inference-router/src/forward_proxy.rs) logs new domains instead
     // of blocking them. Without this, channel integrations (Telegram,

@@ -65,6 +65,11 @@ pub struct DiscoveredMcpServerMeta {
     /// catalog at startup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
+    /// Slice 4d.4.1 — name of an env var visible to the router that
+    /// holds an outbound static bearer token. The forwarder resolves
+    /// this at discovery time. Empty (the default) = no outbound auth.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bearer_from_env: String,
 }
 
 /// A single McpServer discovered under `MCP_JWKS_DIR`.
@@ -237,10 +242,10 @@ fn load_meta(
         }
     };
     match serde_json::from_str::<DiscoveredMcpServerMeta>(&contents) {
-        Ok(m) if m.issuer.is_empty() => {
+        Ok(m) if m.url.is_empty() => {
             skipped.push((
                 server_name.to_string(),
-                "meta.json has empty issuer".to_string(),
+                "meta.json has empty url".to_string(),
             ));
             None
         }
@@ -408,7 +413,7 @@ mod tests {
         write_jwks(tmp.path(), "github", VALID_JWKS);
         fs::write(
             tmp.path().join("github").join("meta.json"),
-            r#"{"issuer":"https://idp.example/o","audience":"api://github","scopes":["mcp.tools.invoke"]}"#,
+            r#"{"issuer":"https://idp.example/o","audience":"api://github","scopes":["mcp.tools.invoke"],"url":"https://mcp.example/v1"}"#,
         )
         .unwrap();
 
@@ -422,12 +427,12 @@ mod tests {
     }
 
     #[test]
-    fn scan_records_skip_for_meta_with_empty_issuer() {
+    fn scan_records_skip_for_meta_with_empty_url() {
         let tmp = TempDir::new().unwrap();
         write_jwks(tmp.path(), "broken", VALID_JWKS);
         fs::write(
             tmp.path().join("broken").join("meta.json"),
-            r#"{"issuer":"","audience":"api://x"}"#,
+            r#"{"issuer":"https://idp.example/o","audience":"api://x","url":""}"#,
         )
         .unwrap();
 
@@ -435,7 +440,7 @@ mod tests {
         assert!(registry.servers.contains_key("broken"));
         assert!(registry.servers["broken"].meta.is_none());
         assert_eq!(registry.skipped.len(), 1);
-        assert!(registry.skipped[0].1.contains("empty issuer"));
+        assert!(registry.skipped[0].1.contains("empty url"));
     }
 
     #[test]

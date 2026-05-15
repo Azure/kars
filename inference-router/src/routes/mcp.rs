@@ -193,6 +193,9 @@ async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: 
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    let started = std::time::Instant::now();
+    let (method, tool) = peek_request_method_and_tool(&body);
+
     let outcome = process_request_async(
         &body,
         accept.as_deref(),
@@ -202,7 +205,52 @@ async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: 
     )
     .await;
 
+    let status_label: &str = match &outcome {
+        ProcessOutcome::JsonRpcResponse { .. } => "200",
+        ProcessOutcome::Accepted => "202",
+        ProcessOutcome::PayloadTooLarge => "413",
+        ProcessOutcome::NotAcceptable(_) => "406",
+    };
+
+    tracing::info!(
+        method = method.as_deref().unwrap_or("(none)"),
+        tool = tool.as_deref().unwrap_or(""),
+        status = status_label,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "/mcp request"
+    );
+
     outcome_to_response(outcome)
+}
+
+/// Best-effort extraction of `(method, tools/call.name)` from a JSON-RPC
+/// request body for log emission. Returns `(None, None)` on parse
+/// failure — logging must never fail the request.
+fn peek_request_method_and_tool(body: &[u8]) -> (Option<String>, Option<String>) {
+    let v: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    // Batch: take the first request's method/tool.
+    let first = if v.is_array() {
+        v.as_array().and_then(|a| a.first()).cloned().unwrap_or(v)
+    } else {
+        v
+    };
+    let method = first
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
+    let tool = if method.as_deref() == Some("tools/call") {
+        first
+            .get("params")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    (method, tool)
 }
 
 fn outcome_to_response(outcome: ProcessOutcome) -> Response {

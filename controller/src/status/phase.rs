@@ -76,6 +76,17 @@ pub const PHASE_COMPILED: &str = "Compiled";
 /// reconcilers stamp `Compiled` until their slice lands.
 pub const PHASE_READY: &str = "Ready";
 
+/// `.status.phase = "Running"` — `ClawSandbox`-specific terminal
+/// phase indicating the sandbox Deployment is rolled out and the
+/// pod is serving. Distinct from [`PHASE_READY`] because
+/// `ClawSandbox` predates the canonical lifecycle vocabulary and
+/// its phase string is part of the public contract (consumed by
+/// the CLI, Headlamp plugin, and `kubectl wait` invocations in
+/// `cli/src/commands/up/sandbox_bringup.ts`). Gate-lane CRDs that
+/// must wait for the sandbox data plane (e.g. `EgressApproval`)
+/// compare against this constant rather than [`PHASE_READY`].
+pub const PHASE_SANDBOX_RUNNING: &str = "Running";
+
 /// `.status.phase = "Degraded"` — the spec is valid but some
 /// dependency is failing. Reconciler should still attempt progress on
 /// the next requeue.
