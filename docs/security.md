@@ -6,7 +6,9 @@ For threat-model walkthroughs, see **[STRIDE](security/stride.md)** and the **[R
 
 ## The headline guarantees
 
-1. **The agent does not see Azure credentials.** Period. Even if the model emits a perfect prompt-injection payload that exfils every byte the agent process can read, it cannot exfil an Azure key — there are none.
+1. **The agent does not see Azure credentials.** Even if the model emits a perfect prompt-injection payload that exfils every byte the agent process can read, it cannot exfil an Azure key — there are none.<sup>†</sup> Authentication is performed by the inference router via Workload Identity / IMDS.
+
+   <sup>†</sup> In `azureclaw dev` (single-container), agent and router live in the same container with separate UIDs (1000 vs 1001); the router's IMDS-derived token never lands on the agent's filesystem, but a kernel-level container escape would defeat the boundary. The hard kernel-level UID + namespace + NetworkPolicy boundary is the AKS path. See [Two modes →](architecture.md#two-modes).
 2. **The agent has no network of its own.** Every external call is mediated by the router, which is a different process under a different UID inside an iptables-restricted namespace.
 3. **Inter-agent messages are E2E encrypted with forward secrecy.** Compromise of the AgentMesh relay does not expose any past or future message content.
 4. **Every external call is audited in a tamper-evident chain.** Each audit record carries a SHA-256 hash of the previous record, so any deletion or modification — including by the cluster operator — breaks the chain and is detectable on replay. (We do not yet sign the chain head with a separate key; that is on the roadmap. The integrity property today is *detection*, not *non-repudiation*.)
@@ -103,7 +105,7 @@ When `spec.governance.enabled: true`, AGT governance runs **natively inside the 
 | `RateLimiter` | 500 req/sec global, 50/sec per-agent default. Token bucket with burst. |
 | `BehaviorMonitor` | Burst detection (100/60s), failure tracking (20), denial tracking (10/60s). |
 
-Sub-µs evaluation latency. Plugin-side AGT only handles E2E-encrypted mesh transport through `@microsoft/agent-governance-sdk`; every governance decision goes through the router.
+Sub-millisecond evaluation latency on the router hot path. Plugin-side AGT only handles E2E-encrypted mesh transport through `@microsoft/agent-governance-sdk`; every governance decision goes through the router.
 
 The router exposes four provider seams (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`, `MeshProvider`), three with in-tree implementations and one (`MeshProvider`) by-design plugin-side. See **[Architecture — provider seams](architecture.md)** if you need to plug in a custom backend.
 

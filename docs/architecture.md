@@ -20,7 +20,7 @@ AzureClaw has four code components, two languages, and one rule that ties them t
 
 | Component | Language | Crate / package | Responsibility |
 |---|---|---|---|
-| **Controller** | Rust (kube-rs) | `azureclaw-controller` | Watches `ClawSandbox` and the eight peer CRDs; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
+| **Controller** | Rust (kube-rs) | `azureclaw-controller` | Watches `ClawSandbox` and the nine peer CRDs (plus controller-internal `ClawPairing`); reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
 | **Inference router** | Rust (axum) | `azureclaw-inference-router` | Sits in the data path of every external call. Identity, content safety, governance, audit, mesh, A2A — all of it. |
 | **A2A gateway** | Rust (axum) | `azureclaw-a2a-gateway` + `azureclaw-a2a-core` | Public-ingress entry point for A2A 1.0.0 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
 | **CLI** | TypeScript | `@azureclaw/cli` | Lifecycle of clusters, sandboxes, policies. 30+ commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
