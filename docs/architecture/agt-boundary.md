@@ -42,7 +42,7 @@ AzureClaw exposes four provider traits. Two of them (`PolicyDecisionProvider`, `
 | `AuditSink` | `Vendored` · `AgtRustSdk` · `Null` | Append-only audit events → receipt id |
 | `SigningProvider` | `Vendored` · `AgtRustSdk` · `Null` | Sign `(key_ref, payload)` and verify |
 
-`Null*` is test-only and blocked in production by admission policy. The Rust-side AgentMesh vendor was retired in Phase 5.2 — `Cargo.toml` now depends on the published `agentmesh = "3.1.0"` crate. A small dist-only patch set against `@agentmesh/sdk` (TypeScript plugin layer) survives in `vendor/agentmesh-sdk/`; patches are itemised in `vendor/agentmesh-sdk/README.md`.
+`Null*` is test-only and blocked in production by admission policy. The Rust-side AgentMesh vendor was retired — `Cargo.toml` now depends on the published `agentmesh = "3.1.0"` crate. A small dist-only patch set against `@agentmesh/sdk` (TypeScript plugin layer) survives in `vendor/agentmesh-sdk/`; patches are itemised in `vendor/agentmesh-sdk/README.md`.
 
 The remaining vendored paths (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) are a **permanent alternate architecture**, not migration staging — they are never scheduled for deletion.
 

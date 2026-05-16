@@ -9,7 +9,7 @@ For threat-model walkthroughs, see **[STRIDE](security/stride.md)** and the **[R
 1. **The agent does not see Azure credentials.** Period. Even if the model emits a perfect prompt-injection payload that exfils every byte the agent process can read, it cannot exfil an Azure key — there are none.
 2. **The agent has no network of its own.** Every external call is mediated by the router, which is a different process under a different UID inside an iptables-restricted namespace.
 3. **Inter-agent messages are E2E encrypted with forward secrecy.** Compromise of the AgentMesh relay does not expose any past or future message content.
-4. **Every external call is audited in a tamper-evident chain.** Hash-chained, signed by the router. Any modification — including by the cluster operator — breaks the chain.
+4. **Every external call is audited in a tamper-evident chain.** Each audit record carries a SHA-256 hash of the previous record, so any deletion or modification — including by the cluster operator — breaks the chain and is detectable on replay. (We do not yet sign the chain head with a separate key; that is on the roadmap. The integrity property today is *detection*, not *non-repudiation*.)
 
 Everything below explains how those four guarantees are enforced and where the seams are.
 
@@ -77,12 +77,19 @@ In addition, an auto-refreshing **domain blocklist** (OISD + URLhaus, refreshed 
 
 | Control | Implementation | Default |
 |---|---|---|
-| Content filtering | Foundry guardrails (`Microsoft.DefaultV2`) | Always on. Server-side. |
-| Jailbreak / Prompt Shield | Foundry-side | Always on. Server-side. |
-| Token budgets | In-process router enforcement | Per-request token cap enforced today (v1.0); aggregate per-tenant daily/monthly counters are accepted and surfaced for forward compatibility but not yet aggregated (v1.1). HTTP 429 on overrun. |
-| Audit | Prometheus metrics + signed audit chain | Always on. |
+| Content filtering | Foundry guardrails (`Microsoft.DefaultV2`) | Always on for Foundry-provider requests. Server-side. |
+| Jailbreak / Prompt Shield | Foundry-side | Always on for Foundry-provider requests. Server-side. |
+| Token budgets | In-process router enforcement | Per-request token cap, plus per-tenant **daily and monthly UTC counters** with on-disk persistence. HTTP 429 on overrun. |
+| Audit | Prometheus metrics + hash-chained audit log | Always on. |
 
-"Foundry-side" means: Content Safety is applied by the Azure AI Foundry model deployment. The router parses `prompt_filter_results` annotations from model responses and reports detected flags to the governance layer for trust scoring and audit.
+"Foundry-side" means: Content Safety is applied by the Azure AI Foundry model deployment. The router parses `prompt_filter_results` annotations from model responses and reports detected flags to the governance layer for trust scoring and audit. **Provider caveat:** GitHub Copilot and GitHub Models do not return `prompt_filter_results`, so inline Content Safety is *not* enforced on those provider paths — see [What we do *not* defend against](#what-we-do-not-defend-against).
+
+**Operator escape hatches.** Two router env vars let operators tune Content Safety flagging without disabling the underlying Foundry filter:
+
+- `AZURECLAW_CONTENT_FLAG_MIN_SEVERITY` (`safe|low|medium|high`, default `low`) — minimum Foundry severity that raises a category flag. `filtered: true` from Foundry always wins regardless of this threshold.
+- `AZURECLAW_SUPPRESS_CONTENT_FLAGS` (comma-separated, e.g. `violence,sexual`) — listed categories never raise a flag (no trust penalty, no audit entry for the flag). Useful where Foundry's heuristic over-fires on legitimate security/research content. Only affects the four severity-graded categories; `jailbreak` and `indirect_attack` cannot be suppressed.
+
+These are operator-level knobs (set on the router deployment), not agent-reachable settings. They tune sensitivity; they cannot disable the Foundry-side filter itself.
 
 ### Layer 7 — Behavioural governance (AGT)
 

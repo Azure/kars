@@ -14,8 +14,14 @@ surface that:
    trust store.
 3. Enforces per-subject rate limits keyed off the verified JWS
    `sub` claim.
-4. Forwards over mTLS to the router on a dedicated port (8445), so
-   the router's existing :8443 mesh listener stays unchanged.
+4. Forwards to the router. The intended production path is mTLS to a
+   dedicated A2A port (default 8445) so the router's existing :8443
+   mesh listener stays unchanged. The router accepts `A2A_MTLS_ENABLED=1`
+   and the cert/key/CA file paths today; the dedicated TLS listener
+   itself is still being wired and the gateway's `A2A_GATEWAY_UPSTREAM_URL`
+   defaults to in-cluster plaintext. Operators turning on the gateway
+   in production should set `A2A_GATEWAY_UPSTREAM_URL` explicitly until
+   the 8445 listener is generally available.
 
 ## Data flow
 

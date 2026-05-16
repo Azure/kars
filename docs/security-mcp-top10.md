@@ -91,8 +91,8 @@ admission deny. Distinct from CR-spec signing.
 relay/registry image; dropped patch integrity.
 
 **Today.** AzureClaw uses Microsoft AGT AgentMesh only. The historical
-vendored AgentMesh fork was removed in Phase 5.2 after the gap-closing
-patches landed upstream, so dependency review focuses on the AGT SDK
+vendored AgentMesh fork was removed after the gap-closing patches landed
+upstream, so dependency review focuses on the AGT SDK
 version, AGT relay/registry images, and regular SCA gates rather than local
 patch drift.
 

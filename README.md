@@ -20,7 +20,7 @@ Hardened sandbox per agent. Zero credentials in the agent. Every external call g
 
 Giving an AI agent real tools today means giving it real credentials and a real network. That blast radius is unacceptable for any production workload — one prompt-injected agent and your Azure subscription, your GitHub org, your customer data are reachable.
 
-AzureClaw is the runtime that lets you ship agents with the same operational discipline you ship the rest of your services: namespace isolation, NetworkPolicies, signed admission, audit, RBAC. The agent never sees an Azure key. Every model call, every web fetch, every peer message passes through a control plane you can reason about, version, and roll back.
+AzureClaw is the runtime that lets you ship agents with the same operational discipline you ship the rest of your services: namespace isolation, NetworkPolicies, signed admission, audit, RBAC. In production (AKS) the agent process runs under a different UID than the router and never sees an Azure key — the router holds the credential and brokers every call. (In `azureclaw dev` the agent and router are co-located in one container; see [Two modes, one mental model](#two-modes-one-mental-model) for the security boundary in each.) Every model call, every web fetch, every peer message passes through a control plane you can reason about, version, and roll back.
 
 It is built for three audiences:
 
@@ -77,7 +77,7 @@ It is built for three audiences:
 **Pluggable inference backend.** Three providers are wired in today:
 
 - **GitHub Copilot** — recommended for the inner loop. One device-code OAuth login (no Azure account, no PAT to manage). Picks from the full Copilot model catalogue: **Claude Opus / Sonnet, GPT-5/4.1, Gemini, o-series**, etc. Native Anthropic-shape passthrough for Claude (no shape translation, full tool-calling fidelity). Largest context windows in the lineup.
-- **Azure AI Foundry / Azure OpenAI** — the production-grade default. Unlocks the full feature set: Memory Store, agents, evaluations, indexes, inline Content Safety, the 18 Foundry API groups the router proxies. Use this when you need anything beyond plain chat completions, or when running on AKS.
+- **Azure AI Foundry / Azure OpenAI** — the production-grade default. Unlocks the full feature set: Memory Store, Agents, Evaluations, Indexes, Datasets, inline Content Safety, and the rest of the Foundry data-plane the router proxies. Use this when you need anything beyond plain chat completions, or when running on AKS.
 - **GitHub Models** — free, PAT-only, no subscription. Convenient for trivial demos; smaller context windows and tight rate limits make it a poor fit for real agents. Foundry-only routes return `501`; inline Content Safety is not enforced (see [security.md](docs/security.md#what-we-do-not-defend-against)).
 
 Adding more providers (Bedrock, direct Anthropic, third-party OpenAI-compatible gateways) is mostly an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch — please open a GitHub issue / feature request.
@@ -203,7 +203,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 - **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. AzureClaw consumes the upstream [`@agentmesh/sdk`](https://github.com/amitayks/agentmesh) directly on the Rust side, and the TypeScript plugin layer installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time. There is no in-tree fork of the SDK.
 - **A2A 1.0.0 gateway** — public-ingress for peer-to-peer agent traffic with signed `AgentCard` verification, tenant routing, observability.
-- **CLI (`azureclaw …`)** — 31 commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
+- **CLI (`azureclaw …`)** — 30+ commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
 ---
 

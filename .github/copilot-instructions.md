@@ -86,7 +86,7 @@ Never hardcode version tags. The controller defaults to `:latest` (reconciler.rs
 
 ### Plugin singleton guard
 
-OpenClaw loads the plugin twice (tool registry + agent session). The singleton guard `process.env.__AGT_INITIALIZED = '1'` ensures only the first load creates the AGT client. Don't remove this.
+OpenClaw loads the plugin in multiple parallel contexts (gateway + tool registry + agent session — up to 5 contexts). A process-level singleton lock keyed off `Symbol.for("agt-mesh-client")` / `Symbol.for("agt-init-lock")` / `Symbol.for("agt-init-promise")` (see `runtimes/openclaw/src/index.ts` → `initAGT`) ensures only the first caller creates the AGT client; subsequent contexts reuse it. Don't remove this guard or weaken the synchronous lock — without it the plugin races and you get duplicate inbox messages.
 
 ### Sub-agent container lifecycle
 
@@ -154,7 +154,7 @@ Node.js 22's built-in `fetch()` ignores `HTTPS_PROXY`. The sandbox uses `proxy-b
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Duplicate messages in inbox | Plugin loaded twice without singleton | Check `__AGT_INITIALIZED` env guard |
+| Duplicate messages in inbox | Plugin loaded twice without singleton | Check the `Symbol.for("agt-mesh-client")` singleton lock in `runtimes/openclaw/src/index.ts` → `initAGT` |
 | Sub-agent doesn't receive relay messages | No background agent session | Check `entrypoint.sh` relay listener |
 | Old image served despite `:latest` push | AKS node cache | Use `imagePullPolicy: Always` or restart pods |
 | Node.js 22 fetch ignores HTTPS_PROXY | Built-in fetch doesn't use proxy env | Load `proxy-bootstrap.js` via `NODE_OPTIONS` |

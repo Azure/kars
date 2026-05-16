@@ -9,8 +9,15 @@
  * The bare-base58 portion equals the legacy AMID, so registries that
  * index by AMID continue to resolve.
  *
- * Persisted at $HOME/.azureclaw/mesh-identity-agt.json (encrypted at rest
- * with a per-host KEK derived from os.hostname() + os.homedir()).
+ * Persisted at $HOME/.azureclaw/mesh-identity-agt.json. The file is
+ * `chmod 0600` and contains the raw private key material — the
+ * envelope is *not* encrypted at rest. An older revision wrapped the
+ * payload in AES-256-GCM with a KEK derived from `os.hostname() +
+ * os.homedir()`, but both inputs are adversary-readable on the host,
+ * so the wrapping provided obfuscation only and was removed to avoid
+ * implying a stronger guarantee than the code delivers. Operators
+ * who require stronger at-rest protection MUST run on a host with
+ * full-disk encryption.
  */
 
 import * as crypto from "node:crypto";
