@@ -113,8 +113,10 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 
 ## Try it in five minutes
 
+**Fastest path (recommended): GitHub Copilot.** If you have an active Copilot seat (Individual / Business / Enterprise), the only thing you need beyond Docker is one device-code login. No Azure account, no PAT, no key files.
+
 ```bash
-# Build the CLI (Node 22+, Rust 1.88+)
+# Build the CLI (Node 22+, Rust 1.88+, Docker)
 git clone https://github.com/Azure/azureclaw.git && cd azureclaw
 cd cli && npm ci && npm run build && npm link
 
@@ -154,14 +156,14 @@ The first run also prompts for an **agent name** (default `dev-agent` — hit En
 azureclaw connect dev-agent
 ```
 
-Every tool call the agent makes is governed by the same router code path that runs in production.
+The TUI drops you into a chat window. Type *"list the files in my workspace"* or *"write a Python script that prints the current Azure subscription"* — every tool call the agent makes is governed by the same router code path that runs in production.
 
 > **Don't have an Azure AI Foundry deployment yet?** If you picked Copilot or Models above, you don't need one. If you want the full Foundry feature set, two `az` commands get you both — see **[Getting started — prerequisites](docs/getting-started.md#dont-have-an-azure-ai-foundry-deployment-yet)**.
 
 When you are ready for the real thing:
 
 ```bash
-azureclaw up --name prod-agent --location swedencentral
+azureclaw up --name prod-agent --region swedencentral
 ```
 
 `azureclaw up` provisions the AKS cluster, ACR, Foundry resource, Foundry-side Content Safety, controller, A2A gateway, Microsoft AGT AgentMesh relay+registry, and your first sandbox — Workload Identity wired end-to-end. See **[`docs/getting-started.md`](docs/getting-started.md)** for the full walkthrough including how to bring your own AKS / Foundry / ACR.

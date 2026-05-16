@@ -1,23 +1,28 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Signed Merkle audit anchors.
+//! Signed Merkle audit anchors — **library only, not yet wired in**.
 //!
-//! This module upgrades AzureClaw's per-event linear hash chain
-//! (provided by the agentmesh SDK and consumed via
-//! [`crate::providers::audit_impl`]) with a periodic, signed Merkle
-//! root that anchors a contiguous range of audit entries. The chain
-//! itself is unchanged; the anchor is **additive**, providing:
+//! This module is a complete, pure-function library for periodic
+//! signed Merkle anchors over a batch of audit entries. It is
+//! **not** called from the live router audit pipeline today.
+//!
+//! The runtime audit path produces a linear SHA-256 hash chain via
+//! [`crate::audit_jsonl`] / [`crate::audit_sink`]. When (and if)
+//! the project wires Merkle anchoring in, this module is designed
+//! to *augment* — not replace — that chain, providing:
 //!
 //! 1. **Tamper-evidence at scale.** A single SHA-256 root binds every
 //!    entry in the range. If any leaf changes, the root changes.
 //! 2. **Compact inclusion proofs.** Verifying that entry `i` is in a
-//!    range of `n` entries costs O(log n) hashes — much cheaper than
-//!    rescanning the linear chain.
+//!    range of `n` entries costs O(log n) hashes.
 //! 3. **Non-repudiation.** The root is signed with the controller's
 //!    Ed25519 key. A downstream consumer (transparency log, CR
 //!    status, external auditor) can verify integrity without
 //!    trusting the router process that produced the entries.
+//!
+//! Until that wiring lands, do **not** describe the router's audit
+//! output as "signed" or "Merkle-anchored" in user-facing docs.
 //!
 //! ## Design constraints
 //!

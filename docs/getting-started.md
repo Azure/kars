@@ -231,7 +231,7 @@ azureclaw add another-agent --runtime LangGraph --model gpt-4.1
 
 ```bash
 azureclaw destroy prod-agent           # one sandbox
-azureclaw destroy --all --purge-rg     # everything, including the resource group
+azureclaw destroy --all                # everything, including the resource group
 ```
 
 ---

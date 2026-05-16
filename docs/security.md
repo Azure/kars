@@ -105,7 +105,7 @@ When `spec.governance.enabled: true`, AGT governance runs **natively inside the 
 | `RateLimiter` | 500 req/sec global, 50/sec per-agent default. Token bucket with burst. |
 | `BehaviorMonitor` | Burst detection (100/60s), failure tracking (20), denial tracking (10/60s). |
 
-Sub-millisecond evaluation latency on the router hot path. Plugin-side AGT only handles E2E-encrypted mesh transport through `@microsoft/agent-governance-sdk`; every governance decision goes through the router.
+Governance evaluation is on the router hot path, written in Rust, and short-circuits on the first deny so the cost is dominated by the cheapest rule that matches. Plugin-side AGT only handles E2E-encrypted mesh transport through `@microsoft/agent-governance-sdk`; every governance decision goes through the router.
 
 The router exposes four provider seams (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`, `MeshProvider`), three with in-tree implementations and one (`MeshProvider`) by-design plugin-side. See **[Architecture — provider seams](architecture.md)** if you need to plug in a custom backend.
 
