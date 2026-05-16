@@ -118,8 +118,7 @@ Per-sandbox layout (`--per-sandbox`):
 
 ## Provider-status interpretation
 
-The provider panel **never invents data** (plan §0.2 #10 — "verify, don't
-guess"). Possible values:
+The provider panel **never invents data** — every status is the verbatim outcome of a probe. Possible values:
 
 | Status      | Meaning |
 |-------------|---------|

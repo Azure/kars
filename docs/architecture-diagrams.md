@@ -167,7 +167,7 @@ flowchart LR
 
   subgraph Cluster["AKS cluster"]
     Ing["Public ingress<br/>(App Gateway / k8s ingress)"]
-    GW["A2A gateway (Rust)<br/>verifies signed AgentCard<br/>routes to A2AAgent CRD<br/>audit · rate limit · CS"]
+    GW["A2A gateway (Rust)<br/>verifies caller identity<br/>routes to A2AAgent CRD<br/>audit · rate limit · CS"]
     subgraph NS["azureclaw-prod-agent"]
       Pod["ClawSandbox pod<br/>(agent + router)"]
     end
@@ -176,10 +176,12 @@ flowchart LR
   Peer -->|signed AgentCard + payload| Ing
   Ing --> GW
   GW -->|in-cluster only| Pod
-  GW -.->|reject<br/>untrusted card| Peer
+  GW -.->|reject<br/>untrusted caller| Peer
 ```
 
-The A2A gateway is the only inbound public surface. Every request must carry a signed `AgentCard` that the gateway verifies against a configured trust anchor; every request gets the same content-safety / rate-limit treatment as outbound traffic.
+The A2A gateway is the only inbound public surface. Every request gets the same content-safety, rate-limit, and audit treatment as outbound traffic.
+
+> **Verifier status.** Today caller identity is established via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer; AgentCard signature verification (`azureclaw_a2a_core::verify_inbound_card`) ships as a library and is unit-tested, but wiring it as an axum layer inside the gateway is on the v1.1 roadmap. See [A2A gateway](architecture/a2a-gateway.md).
 
 ---
 

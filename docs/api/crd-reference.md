@@ -310,7 +310,7 @@ spec:
 
 ## `ClawMemory` — memory store binding
 
-Binds a sandbox to a Foundry Memory Store. The reconciler compiles the binding into `/etc/azureclaw/memory/binding.json`, the router loads it and echoes its digest back to close the `Ready ⇔ router echo` loop (principles.md §3).
+Binds a sandbox to a Foundry Memory Store. The reconciler compiles the binding into `/etc/azureclaw/memory/binding.json`, the router loads it and echoes its digest back, and the controller marks the CR `Ready` only when those digests match — the same `Ready ⇔ router echo` invariant used by every other policy CRD.
 
 ```yaml
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -452,7 +452,7 @@ Per-sandbox trust threshold remains on `ClawSandbox.spec.governance.trustThresho
 
 ## `EgressApproval` — ephemeral egress grant
 
-Namespaced overlay on a `ClawSandbox`'s baseline `networkPolicy.allowedEndpoints`. The controller unions the approval's hosts into a sibling ConfigMap mounted by the inference-router; the router rebuilds its allowlist on every change, POSTs the loaded digest back, and the controller promotes `phase=Pending → Active` only when the loaded digest matches the compiled merged digest (the same §3 `Ready ⇔ router echo` invariant used by every other policy CRD). On TTL expiry the file is removed, the merged digest is recomputed, and `phase=Expired` is stamped (terminal).
+Namespaced overlay on a `ClawSandbox`'s baseline `networkPolicy.allowedEndpoints`. The controller unions the approval's hosts into a sibling ConfigMap mounted by the inference-router; the router rebuilds its allowlist on every change, POSTs the loaded digest back, and the controller promotes `phase=Pending → Active` only when the loaded digest matches the compiled merged digest (the same `Ready ⇔ router echo` invariant used by every other policy CRD). On TTL expiry the file is removed, the merged digest is recomputed, and `phase=Expired` is stamped (terminal).
 
 ```yaml
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -509,7 +509,7 @@ CLI: `azureclaw egress allow-extra <sandbox> --host … --reason … --ttl PT4H`
 1. You `kubectl apply` (or `azureclaw add`).
 2. Controller creates: namespace → RBAC → ServiceAccount → federated credential → ConfigMap (governance profile) → NetworkPolicy → Deployment → Service.
 3. Pod schedules, init `egress-guard` runs iptables rules, agent + router start.
-4. Router registers with AgentMesh (when `governance.registryMode` is `mtls` or `oauth`).
+4. Router registers with AgentMesh (when `governance.registryMode` is `global`).
 5. Controller updates `status.phase = Ready` and writes the condition chain.
 
 If anything fails, the failing phase is reflected as a condition with a `Reason` documented in **[Conditions reference](conditions.md)**. The controller is idempotent — re-running `kubectl apply` after fixing the cause re-converges.
