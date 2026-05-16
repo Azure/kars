@@ -19,8 +19,8 @@ full round-trip:
 > `controller.byoStrict=true`, the BYO contract is enforced at
 > reconciliation time. A typo in `byo.contractVersion` or a missing
 > image tag will surface as `Degraded=True / Reason=BYOContractInvalid`
-> on the CR instead of a half-rendered Deployment. See [Phase 3 S8
-> notes](../../docs/operations/byo-strict.md) for details.
+> on the CR instead of a half-rendered Deployment. See the
+> [BYO strict-mode notes](../../docs/operations/byo-strict.md) for details.
 
 ## Prerequisites
 
@@ -80,10 +80,10 @@ kubectl delete clawsandbox byo-quickstart
 ## 5. Verify strict-mode admission (recommended for production)
 
 The example above runs cleanly under either `byoStrict=false` (default
-— Phase 2 behaviour, advisory warnings only) or `byoStrict=true`
-(Phase 3 — rejection at admission time). For production we recommend
-the latter. To see strict mode actually reject a malformed CR, use the
-intentionally-invalid demo manifest:
+— advisory warnings only) or `byoStrict=true` (rejection at admission
+time). For production we recommend the latter. To see strict mode
+actually reject a malformed CR, use the intentionally-invalid demo
+manifest:
 
 ```bash
 # Roll the controller with strict mode on:
@@ -107,5 +107,5 @@ kubectl delete -f k8s/clawsandbox-strict-demo.yaml
 ```
 
 See [`docs/operations/byo-strict.md`](../../docs/operations/byo-strict.md)
-for the full list of CR-level checks and the Phase 4 roadmap for
+for the full list of CR-level checks and the roadmap for
 registry-side label introspection.

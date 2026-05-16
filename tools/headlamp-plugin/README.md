@@ -37,7 +37,7 @@ npm install
 npm run build       # → dist/main.js
 ```
 
-The CLI's `azureclaw dev --target local-k8s` (Phase 5+) builds this
+The CLI's `azureclaw dev --target local-k8s` builds this
 automatically and side-loads `dist/` into the Headlamp pod via
 `kubectl cp` to `/headlamp/plugins/azureclaw/`.
 

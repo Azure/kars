@@ -10,8 +10,9 @@ touching MAF code.
 - **Same security posture as the default OpenClaw runtime.** Seccomp profile,
   read-only rootfs, egress guard, AGT governance, AgentMesh E2E, and
   inference router are all identical.
-- **Model selection through `InferencePolicy`** (S13 ref-authority) — adjust
-  the policy CR to swap models without redeploying the agent.
+- **Model selection through `InferencePolicy`** — adjust
+  the policy CR to swap models without redeploying the agent (model choice is
+  referenced from the policy, not inlined in the sandbox spec).
 - **No code changes in the MAF app.** The adapter image
   (`sandbox-images/maf-python/`) sets `AZURE_OPENAI_ENDPOINT` /
   `AZURE_OPENAI_API_KEY` (synthetic, valid only inside the sandbox) so
@@ -54,10 +55,10 @@ entrypoint Python script. Default entrypoint is `python -u agent.py`.
 
 ## Language matrix
 
-| Language | Phase 2 | Notes |
+| Language | Status | Notes |
 |----------|---------|-------|
 | `python` | ✅ shipped | `sandbox-images/maf-python/` adapter |
-| `dotnet` | ⏳ Phase 3 | CRD accepts the value; controller stamps `RuntimeReady=False / AdapterMissing` until the .NET adapter image ships |
+| `dotnet` | ⏳ planned | CRD accepts the value; controller stamps `RuntimeReady=False / AdapterMissing` until the .NET adapter image ships |
 
 ## What's next
 

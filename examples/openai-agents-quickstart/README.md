@@ -9,8 +9,8 @@ provides isolation, governance, and egress control without touching SDK code.
 - **Same security posture as the default OpenClaw runtime.** Seccomp profile,
   read-only rootfs, egress guard, AGT governance, AgentMesh E2E, and
   inference router are all identical.
-- **Model selection through `InferencePolicy`** (S13 ref-authority — not inlined
-  in the sandbox spec). Adjust the policy CR to swap models without redeploying
+- **Model selection through `InferencePolicy`** — not inlined
+  in the sandbox spec. Adjust the policy CR to swap models without redeploying
   the agent.
 - **No code changes in the SDK app.** The adapter image (`sandbox-images/openai-agents/`)
   sets `OPENAI_BASE_URL=http://127.0.0.1:8443/v1` and `HTTPS_PROXY=http://127.0.0.1:8444`
