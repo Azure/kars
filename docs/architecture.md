@@ -4,10 +4,10 @@ This document explains *what AzureClaw is made of* and *why each part exists*. F
 
 ## Design goals (in priority order)
 
-1. **The agent must not see Azure credentials.** Compromise of any agent must not grant access to the Azure subscription.
+1. **The agent must not see Azure credentials in production.** In AKS mode the agent runs under a different UID than the router; only the router holds the Foundry credential. Compromise of any agent must not grant access to the Azure subscription. (`azureclaw dev` co-locates agent + router in one container for inner-loop work — see [Two modes](#two-modes) for the dev-vs-prod boundary.)
 2. **Every external call must pass a policy decision point.** No invisible side effects, no silent network egress.
 3. **Inter-agent communication must be confidential, authenticated, and forward-secret.** No plaintext fallback.
-4. **The same code path runs in dev and in prod.** Local mode is *easier*, not *different*.
+4. **The same data-path code runs in dev and in prod.** A small number of code paths branch on `AZURECLAW_DEV_MODE` to swap auth source (static key vs. Workload Identity) and spawn driver (Docker vs. Kubernetes). The router's policy decision points, content-safety parsing, audit format, and governance hooks do not change between modes — local mode is *easier*, not *different*.
 5. **Operability over cleverness.** Standard Kubernetes primitives (CRDs, NetworkPolicies, RBAC, Helm) so platform teams can operate AzureClaw the way they operate the rest of the cluster.
 
 Everything below follows from those five.
@@ -20,10 +20,10 @@ AzureClaw has four code components, two languages, and one rule that ties them t
 
 | Component | Language | Crate / package | Responsibility |
 |---|---|---|---|
-| **Controller** | Rust (kube-rs) | `azureclaw-controller` | Watches `ClawSandbox` and the eight peer CRDs; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
+| **Controller** | Rust (kube-rs) | `azureclaw-controller` | Watches `ClawSandbox` and the nine peer CRDs (plus controller-internal `ClawPairing`); reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
 | **Inference router** | Rust (axum) | `azureclaw-inference-router` | Sits in the data path of every external call. Identity, content safety, governance, audit, mesh, A2A — all of it. |
 | **A2A gateway** | Rust (axum) | `azureclaw-a2a-gateway` + `azureclaw-a2a-core` | Public-ingress entry point for A2A 1.0.0 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
-| **CLI** | TypeScript | `@azureclaw/cli` | Lifecycle of clusters, sandboxes, policies. 31 commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
+| **CLI** | TypeScript | `@azureclaw/cli` | Lifecycle of clusters, sandboxes, policies. 30+ commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
 
 The rule that ties them together: **the agent has no network of its own**. The router is the only process in the sandbox pod that can talk to the outside. Every other property of AzureClaw is a downstream consequence of holding that line.
 
@@ -41,7 +41,7 @@ The rule that ties them together: **the agent has no network of its own**. The r
 - **Identity:** key-based (the key you provided on first run).
 - **What it is for:** plugin authoring, policy iteration, smoke tests, demos. Inner loop only.
 
-The router still runs the same code path it does in prod. So the policies, the content-safety rejections, the audit format, the governance decisions are all real. What is not real is the network and identity isolation — there is no separate router process to break out *to*. Treat dev mode as a development surface, not a security surface.
+The router still runs the same data-path code it does in prod — the request handlers, policy decision points, content-safety parsing, audit format, and governance hooks are all real. What is *different* is the auth source (a static API key or PAT instead of an exchanged Workload-Identity token) and the spawn driver (Docker instead of Kubernetes). A small number of code paths branch on `AZURECLAW_DEV_MODE` to enable those substitutions. What is *not* real is the network and identity isolation — there is no separate router process to break out *to*. Treat dev mode as a development surface, not a security surface.
 
 ### Prod mode (`azureclaw up` / Helm install)
 

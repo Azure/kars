@@ -97,7 +97,7 @@ sequenceDiagram
   Foundry-->>Router: completion + prompt_filter_results
   Router->>Router: parse prompt_filter_results — block if jailbreak / category > threshold
   Router-->>Agent: completion
-  Note over Router: audit record:<br/>hash-chained, signed
+  Note over Router: audit record:<br/>hash-chained, append-only<br/>(detection, not signing)
 ```
 
 The agent has no direct path to **Foundry**, **WI**, or the audit
@@ -107,6 +107,8 @@ roundtrip; it parses the `prompt_filter_results` field that Foundry
 returns inline and blocks/audits accordingly. On GitHub Copilot and
 GitHub Models providers, inline filters are not returned, so this
 step is a no-op (documented in `cli-reference.md` under `azureclaw dev`).
+The audit record is hash-chained for tamper-*detection*; cryptographic
+signing of the chain head is on the roadmap (see [security.md](security.md#the-headline-guarantees)).
 
 ---
 
@@ -202,13 +204,13 @@ flowchart LR
   Status --> User
 ```
 
-The controller is a vanilla kube-rs reconciler. It owns the eight CRDs, watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
+The controller is a vanilla kube-rs reconciler. It owns the nine user-facing CRDs (plus the controller-internal `ClawPairing`), watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
 
 ---
 
 ## 7. CRD relationships
 
-How the eight CRDs reference each other.
+How the nine CRDs reference each other. Arrow labels show the **actual** field path on the spec (camelCase as serialized).
 
 ```mermaid
 flowchart TB
@@ -220,17 +222,21 @@ flowchart TB
   A2A["A2AAgent<br/>(public-ingress endpoint)"]
   TG["TrustGraph<br/>(mesh trust topology)"]
   CE["ClawEval<br/>(reproducible eval run)"]
+  EA["EgressApproval<br/>(TTL-bounded extra hosts)"]
 
-  CS -->|policyRef| TP
-  CS -->|inferenceRef| IP
-  CS -->|memoryRef| CM
-  CS -->|mcpRefs| Mcp
-  CS -->|trustRef| TG
-  A2A -->|sandboxRef| CS
-  CE -->|sandboxRef| CS
+  CS -->|spec.inferenceRef| IP
+  CS -->|spec.memoryRef| CM
+  CS -->|spec.governance.toolPolicyRef| TP
+  CS -->|spec.governance.mcpServerRefs| Mcp
+  A2A -->|spec.policyRefs.toolPolicy| TP
+  CE -->|spec.targetSandboxRef| CS
+  EA -->|spec.sandbox| CS
+  TG -.->|projected cluster-wide<br/>by controller| CS
 ```
 
-`ClawSandbox` is the unit of work; the other seven CRDs bind policy, identity, peers, or evaluation to it. You can build a complete deployment with just `ClawSandbox` + `ToolPolicy` + `InferencePolicy`; the rest are opt-in for richer scenarios.
+`ClawSandbox` is the unit of work; the other CRDs bind policy, identity, peers, evaluation, or break-glass egress to it. You can build a complete deployment with just `ClawSandbox` + `ToolPolicy` + `InferencePolicy`; the rest are opt-in for richer scenarios.
+
+`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/azureclaw/trustgraph/graph.json`). It is not referenced by name from a `ClawSandbox` spec — it applies cluster-wide. Router-side KNOCK gating against the graph is tracked for v1.1; today the router tracks trust scores from KNOCK outcomes in-memory (see CRD reference §TrustGraph).
 
 Schema details in **[`docs/api/crd-reference.md`](api/crd-reference.md)**.
 

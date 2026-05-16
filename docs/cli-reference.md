@@ -196,7 +196,7 @@ azureclaw dev [options]
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
 | `--build-base` | `false` | Rebuild the sandbox base image (heavy deps; only needed when upgrading OpenClaw/Python/Go) |
 | `--base-image <image>` | `mcr.microsoft.com/azurelinux/base/core:3.0` | Azure Linux base image for building sandbox |
-| `--mesh-provider <provider>` | `agt` | Mesh stack. Only `agt` is supported (vendored Rust relay/registry were removed in Phase 5.2). Flag kept for backward-compatible scripts. |
+| `--mesh-provider <provider>` | `agt` | Mesh stack. Only `agt` is supported (the vendored Rust relay/registry were removed once their upstream AGT equivalents reached parity). Flag kept for backward-compatible scripts. |
 | `--agt-repo <path>` | `$AZURECLAW_AGT_REPO` | Path to the agent-governance-toolkit checkout (used to build relay/registry images). |
 | `--agt-sdk-tarball <path>` | — | Path to a locally-packed `@microsoft/agent-governance-sdk` `.tgz` to install in the sandbox image. Requires `--build`. |
 | `--no-mesh` | — | (local-k8s only) skip mesh relay/registry deployment. Sandboxes lose KNOCK/E2E. Use only for pure controller smoke tests. |

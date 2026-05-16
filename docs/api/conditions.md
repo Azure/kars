@@ -87,10 +87,10 @@ item.
 | Type | Reasons |
 |---|---|
 | `Ready` | `RouterEnforcing` (data-plane echoed back the compiled AGT-profile digest), `NoSandboxesReferencing` (compiled but no consumer), `Reconciled`, `SpecInvalid` |
-| `Progressing` | `AwaitingRouterEnforcement` (Slice 1c invariant — the router has not echoed the digest yet), `Reconciling` |
+| `Progressing` | `AwaitingRouterEnforcement` (the router has not echoed the digest yet), `Reconciling` |
 | `Degraded` | `Failed` |
 
-The `Ready ⇔ router echo` invariant (principles.md §3) is fully wired
+The `Ready ⇔ router echo` invariant is fully wired
 on this CRD. A `ToolPolicy` is `Ready=True / RouterEnforcing` only when
 at least one referencing sandbox's router has confirmed the loaded
 profile digest matches what the controller compiled.
