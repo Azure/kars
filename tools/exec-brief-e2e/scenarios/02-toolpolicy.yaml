@@ -1,0 +1,137 @@
+# 02-toolpolicy.yaml — tool gates required for the exec-brief pipeline.
+#
+# ToolPolicy uses one CR per gated tool (appliesTo.tool is a single
+# field, not a list — see controller/src/tool_policy.rs AppliesToSelector).
+# Each CR sets approval.mode and optional rateLimit + commerce on a
+# single (tool | mcpServer | label-selector) target.
+#
+# What we gate here:
+#   - mesh.send / mesh.transfer_file / mesh.discover — explicit-allow so
+#     sibling-to-sibling traffic is auditable and rate-limited.
+#   - foundry.web_search / foundry.image_generate / foundry.code_execute
+#     — auto-allow but rate-limited (image-gen is expensive).
+#   - telegram.post — auto-allow, no rate cap.
+#   - shell.exec — *denied* outside an explicit allow-list; defence in
+#     depth even though seccomp + non-root already block destructive ops.
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-mesh-send
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  appliesTo:
+    tool: mesh.send
+    sandboxMatchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  approval:
+    mode: auto
+  rateLimit:
+    rps: 5
+    burst: 20
+    window: PT1S
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-mesh-transfer-file
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  appliesTo:
+    tool: mesh.transfer_file
+    sandboxMatchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  approval:
+    mode: auto
+  rateLimit:
+    rps: 2
+    burst: 10
+    window: PT1S
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-mesh-discover
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  appliesTo:
+    tool: mesh.discover
+    sandboxMatchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  approval:
+    mode: auto
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-foundry-web-search
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  appliesTo:
+    tool: foundry.web_search
+    sandboxMatchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  approval:
+    mode: auto
+  rateLimit:
+    rps: 1
+    burst: 30
+    window: PT60S
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-foundry-image-generate
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  appliesTo:
+    tool: foundry.image_generate
+    sandboxMatchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  approval:
+    mode: auto
+  rateLimit:
+    # gpt-image-1 is expensive ($0.04+/image) — cap hard.
+    rps: 1
+    burst: 5
+    window: PT60S
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-foundry-code-execute
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  appliesTo:
+    tool: foundry.code_execute
+    sandboxMatchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  approval:
+    mode: auto
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-telegram-post
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  appliesTo:
+    tool: telegram.post
+    sandboxMatchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  approval:
+    mode: auto

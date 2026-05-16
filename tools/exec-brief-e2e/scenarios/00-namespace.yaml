@@ -1,0 +1,15 @@
+# 00-namespace.yaml — dedicated namespace for the exec-brief e2e sandbox.
+#
+# The controller installs ClawSandbox / InferencePolicy / ToolPolicy /
+# ClawMemory / McpServer CRs in azureclaw-system, but the actual sandbox
+# pod runs in azureclaw-<sandbox-name>. We pre-create that namespace so
+# the credentials Secret (telegram-bot-token) can land before the
+# controller reconciles the sandbox.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: azureclaw-execbrief
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+    azureclaw.azure.com/managed-by: exec-brief-e2e

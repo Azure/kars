@@ -1,0 +1,30 @@
+# 04-mcpserver.yaml — register an external MCP server the analyst can
+# call alongside foundry.web_search. We use the canonical `fetch` MCP
+# (https://github.com/modelcontextprotocol/servers/tree/main/src/fetch)
+# which exposes a single `fetch` tool that pulls a URL and converts to
+# markdown — gives the analyst a way to dive into specific 2026 sources
+# the web search surfaces.
+#
+# Auth: this MCP is public and unauthenticated for the demo. For
+# production, switch `oauth.issuer` to your IDP and the controller will
+# wire JWKS rotation + signed bearer tokens via the inference router.
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: McpServer
+metadata:
+  name: execbrief-fetch
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  # Public reference implementation, no auth required.
+  url: "https://mcp-fetch.modelcontextprotocol.io"
+  # The router only proxies these — anything else is hard-denied at the
+  # MCP gateway layer (inference-router/src/mcp/).
+  allowedTools:
+    - fetch
+  allowedSandboxes:
+    matchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  productionMode: false
+  displayName: "Exec-brief fetch MCP"
