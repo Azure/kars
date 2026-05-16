@@ -134,7 +134,7 @@ export { routerBase, routerWsBase, routerUrl, routerWsUrl };
 export { redactSecrets };
 
 // ---------------------------------------------------------------------------
-// AGT SDK — AgentMesh (amitayks/agentmesh)
+// AGT (Microsoft Agent Governance Toolkit) — `@microsoft/agent-governance-sdk`
 // Full E2E encrypted inter-agent communication via self-hosted relay/registry.
 // Also: tool-level policy, trust scoring, audit logging.
 // Infrastructure controls (NetworkPolicy, token budgets) stay in Rust router.
