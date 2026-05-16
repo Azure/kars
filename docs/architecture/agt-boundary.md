@@ -12,7 +12,7 @@ AGT ships the governance engine. AzureClaw is the AKS operator and data plane th
 
 - **Policy evaluation** — `PolicyEngine.decide(request) -> verdict`. Policy-profile schema is AGT's. We emit profiles from CRDs; we do not redefine the schema.
 - **Signal Protocol primitives** — X3DH key exchange, Double Ratchet, prekey lifecycle, session state machine.
-- **Audit Merkle chain** — `AuditLogger.append(event) -> ReceiptId`. Storage, retention SLA, signing of tree roots, queryability API.
+- **Audit chain** — `AuditLogger.append(event) -> ReceiptId`. Storage, retention SLA, queryability API. The runtime uses AGT's linear SHA-256 hash chain today; Merkle anchoring and signed roots are a planned extension (the library exists in `inference-router/src/audit/merkle.rs` but is not yet wired into the live pipeline).
 - **Trust scoring** — `TrustManager`. Per-peer trust scores, transitive evaluation, decay functions, negative-signal ingestion.
 - **Behavior anomaly detection** — `BehaviorMonitor`. Baseline capture, deviation detection, Shadow-MCP behavioral signals.
 - **Rate-limit token bucket** — per-identity, per-tool, per-mesh counters. We configure caps; AGT enforces.

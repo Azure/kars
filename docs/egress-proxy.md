@@ -539,7 +539,7 @@ encoding) and writes per-approval files into a sibling ConfigMap
 this CM, unions the entries with the baseline allowlist, and POSTs the
 loaded digest back to `controller/internal/policy-status`. **The
 controller only promotes `phase=Pending → Active` when the loaded digest
-exactly matches the compiled merged digest** — the same §3 `Ready ⇔
+exactly matches the compiled merged digest** — the same `Ready ⇔
 router echo` invariant used by `ToolPolicy`, `InferencePolicy`, and
 `ClawMemory`.
 

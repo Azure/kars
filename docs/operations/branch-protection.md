@@ -12,17 +12,17 @@ before merge:
 | Job ID                  | Purpose                                                |
 |-------------------------|--------------------------------------------------------|
 | `rust-build`            | Workspace `cargo build --release` + `cargo test --all` |
-| `cargo-deny`            | `cargo deny check` against `deny.toml` (S17)           |
+| `cargo-deny`            | `cargo deny check` against `deny.toml`                 |
 | `cli-build`             | TypeScript CLI: `npm run lint`, `npm run typecheck`, `npm test`, `npm audit --audit-level=high` |
 | `runtime-openclaw-build`| Sandbox runtime build + `npm audit --audit-level=high` |
-| `mesh-plugin-build`     | AgentMesh plugin build + `npm audit --audit-level=high` (S17.A) |
+| `mesh-plugin-build`     | AgentMesh plugin build + `npm audit --audit-level=high` |
 | `python-sidecar`        | Python sidecar tests                                   |
 | `bicep-validate`        | Bicep template validation                              |
 | `helm-lint`             | `helm lint deploy/helm/azureclaw`                      |
 | `security-scan`         | Trivy filesystem scan                                  |
 | `container-scan`        | Trivy image scan                                       |
 | `dockerfile-lint`       | `hadolint` for every Dockerfile                        |
-| `cosign-verify`         | Cosign keyless verification recipe (dry-run on PRs, S17) |
+| `cosign-verify`         | Cosign keyless verification recipe (dry-run on PRs)    |
 
 `cargo-audit` is **non-blocking** by design (`continue-on-error: true`
 in `ci.yml`); advisories that surface mid-PR cannot block unrelated

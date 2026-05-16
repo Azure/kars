@@ -1,7 +1,7 @@
 [book]
 title = "AzureClaw — Documentation"
-description = "AzureClaw — secure AI agent runtime on Azure AKS. Sandbox isolation, AGT governance, AgentMesh E2E encryption."
-authors = ["AzureClaw Team"]
+description = "AzureClaw: a secure runtime for AI agents on Azure Kubernetes Service. Per-agent sandbox isolation, declarative governance via CRDs, end-to-end encrypted inter-agent messaging, and a Rust router that enforces every external call."
+authors = ["AzureClaw contributors"]
 language = "en"
 
 # The book sources live one level up — the existing docs/ tree is the

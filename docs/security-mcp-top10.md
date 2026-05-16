@@ -111,10 +111,9 @@ in the agent process gives UID 1000 with seccomp-strict and no direct
 egress; Landlock blocks writes to plugin/SDK directories; hijacked
 code cannot exfiltrate without going through the router's proxy and
 Foundry Content Safety. This is the "defense-in-depth" posture summarised
-in `docs/security.md` §9.
+in `docs/security.md` (the layered defenses section).
 
-**Conformance.** `tests/conformance/seccomp-landlock-egress/` (plan
-§5.4 row 6, the v1.0 conformance corpus) asserts that forbidden syscalls return `EPERM`
+**Conformance.** `tests/conformance/seccomp-landlock-egress/` (the v1.0 conformance corpus) asserts that forbidden syscalls return `EPERM`
 **not silently succeed** — directly targeting the class of bug where
 a control looks present but isn't actually wired.
 
@@ -127,7 +126,7 @@ selection, or downstream intent.
 (`Microsoft.DefaultV2`); `prompt_filter_results` parsed from response
 in `inference-router/src/safety.rs` (module docstring lines 1-14).
 There is **no** in-process circuit breaker or cooldown — by design;
-Foundry owns the guardrail (the v1.1 plan non-compete row).
+Foundry owns the guardrail.
 
 **Plan.** v1.1 `InferencePolicy.spec` (minimal) + v1.1 full
 `InferencePolicy` with `guardrails` field expresses *which* Foundry
@@ -140,8 +139,8 @@ spec mutations that weaken Content Safety below the tenant floor.
 assumed trusted.
 
 **Plan.** v1.1 `McpServer.spec.productionMode: true` implies
-`oauth.issuer` set (enforced by CEL `x-kubernetes-validations`, plan
-§7 item 12). Router refuses unauthenticated traffic on any
+`oauth.issuer` set (enforced by CEL `x-kubernetes-validations`).
+Router refuses unauthenticated traffic on any
 production-mode `McpServer`. Dev-mode anonymous requires
 `azureclaw.azure.com/dev-only=true` label (admission-enforced,
 `ci/no-null-provider-prod.sh` is the static mirror).
@@ -204,5 +203,5 @@ confusion attacks fail closed.
 
 ## Related docs
 
-* `docs/security.md` — the live security posture (§9 layers, syscall
-  counts, component names).
+* `docs/security.md` — the live security posture (layered defenses,
+  syscall counts, component names).

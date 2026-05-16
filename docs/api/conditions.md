@@ -49,10 +49,10 @@ end-to-end runtime.
 | `Progressing` | True/False | `Reconciling`, `Creating` |
 | `Degraded` | True/False | `AuthMisconfigured`, `MemoryStoreMissing`, `FailedClosed` |
 | `Suspended` | True/False | `SuspendedBySpec`, `Active` |
-| `RuntimeReady` (S10) | True/False | `AdapterMissing` (Falsey when the runtime adapter isn't wired) |
-| `AllowlistVerified` (S12.b) | True/False | `Verified`, `Unsigned`, `FailedClosed` |
-| `AllowlistAuthoritative` (S12.e) | True/False | `Inline`, `Verified`, `StaleLKG`, `FailedClosed`, `InlineDiffersFromArtifact` |
-| `AllowlistDrift` (S12.e) | True/False | `InlineDiffersFromArtifact`, `InlineCleared` |
+| `RuntimeReady` | True/False | `AdapterMissing` (Falsey when the runtime adapter isn't wired) |
+| `AllowlistVerified` | True/False | `Verified`, `Unsigned`, `FailedClosed` |
+| `AllowlistAuthoritative` | True/False | `Inline`, `Verified`, `StaleLKG`, `FailedClosed`, `InlineDiffersFromArtifact` |
+| `AllowlistDrift` | True/False | `InlineDiffersFromArtifact`, `InlineCleared` |
 
 Plus Warning events (not conditions) for soft deprecations:
 `McpSingularDeprecated` — emitted on a CR that still uses

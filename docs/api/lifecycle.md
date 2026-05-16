@@ -26,7 +26,7 @@ If you only read one document about how AzureClaw fits together, read this one.
 ```mermaid
 flowchart LR
   CLI["azureclaw CLI<br/>or GitOps / kubectl"]
-  CRD[("CRD<br/>(8 kinds)")]
+  CRD[("CRD<br/>(9 kinds)")]
   Ctrl["azureclaw-controller<br/>(kube-rs)"]
   Art[("Cluster artifacts<br/>Namespace · ServiceAccount · NetworkPolicy<br/>Deployment · Service · ConfigMap · Secret<br/>FederatedIdentityCredential")]
   Runtime["Runtime data plane<br/>inference-router · A2A gateway · sandbox pod"]
@@ -50,16 +50,16 @@ This is the whole loop. Everything else on this page is detail.
 
 ## Two reconcile patterns
 
-AzureClaw's eight CRDs split into two operational shapes:
+AzureClaw's nine user-facing CRDs split into two operational shapes:
 
 | Pattern | CRDs | What gets produced |
 |---|---|---|
-| **Compile-to-artifact** | `InferencePolicy`, `ToolPolicy`, `A2AAgent`, `McpServer`, `ClawMemory`, `ClawEval`, `TrustGraph` | A deterministic `ConfigMap` (and sometimes a `Secret`) that the router or gateway mounts. The CRD spec is hashed; the hash is stored in `status.versionHash`. |
+| **Compile-to-artifact** | `InferencePolicy`, `ToolPolicy`, `A2AAgent`, `McpServer`, `ClawMemory`, `ClawEval`, `TrustGraph`, `EgressApproval` | A deterministic `ConfigMap` (and sometimes a `Secret`) that the router or gateway mounts. The CRD spec is hashed; the hash is stored in `status.versionHash` or equivalent. |
 | **Heavyweight namespace** | `ClawSandbox` | A whole tenant namespace: `Namespace` + `ServiceAccount` + Workload-Identity federated credential + `NetworkPolicy` + governance `ConfigMap` + `Deployment` + `Service`. |
 
 ### The reconciler map
 
-All eight reconcilers run in the same controller pod under one leader-election lease, with a separate lease for the mesh-peer reconciler so it can fail independently.
+All reconcilers run in the same controller pod under one leader-election lease, with a separate lease for the mesh-peer reconciler so it can fail independently.
 
 ```mermaid
 graph TD
@@ -76,13 +76,14 @@ graph TD
       R6["ClawMemory<br/>fm: clawmemory"]
       R7["ClawEval<br/>fm: claweval"]
       R8["TrustGraph<br/>fm: trustgraph"]
+      R9["EgressApproval<br/>fm: egressapproval"]
     end
-    R9["ClawPairing reconciler<br/>(internal — bound by ClawSandbox)"]
+    R10["ClawPairing reconciler<br/>(internal — bound by ClawSandbox)"]
     MESH["mesh-peer reconciler<br/>(own lease — agentmesh-mesh-peer-leader)"]
     METR["Metrics + health server<br/>:9091 — /metrics /healthz /readyz"]
   end
   LE --> reconcilers
-  LE --> R9
+  LE --> R10
   LE -.->|independent| MESH
 ```
 

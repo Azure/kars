@@ -151,7 +151,7 @@ See **[`docs/architecture/agt-boundary.md`](architecture/agt-boundary.md)** for 
 A2A (Agent-to-Agent, 1.0.0) is the public-ingress sibling of the mesh. Where the mesh handles intra-fleet traffic with strong cryptographic guarantees, the A2A gateway handles **cross-organisation** traffic where the peer is not part of your AgentMesh.
 
 - **Public ingress** (Azure-managed Kubernetes ingress / Application Gateway).
-- Every inbound request must carry a signed **`AgentCard`** that the gateway verifies against a configured trust anchor.
+- Every inbound request carries a signed **`AgentCard`** and is rejected if the caller's identity is not trusted. Today identity is established via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer; the in-axum `AgentCard` signature verifier ships as a library (`azureclaw_a2a_core::verify_inbound_card`, unit-tested) and is on the v1.1 roadmap to be wired into the gateway request path.
 - The gateway routes to the right `A2AAgent` CRD (which binds the public name to a sandbox + policy).
 - Audit, rate limiting, content safety run on the gateway.
 
@@ -214,8 +214,8 @@ Three properties fall out of treating these as separate CRDs:
   able to stop a workload. These splits are not theoretical — they are the
   reason the CRDs exist.
 - **GitOps works without translation.** Each CRD is independently committed
-  to a repo and reconciled by Argo / Flux. There is no "render these eight
-  things from one mega-template" step, because the eight things are already
+  to a repo and reconciled by Argo / Flux. There is no "render these nine
+  things from one mega-template" step, because the nine things are already
   the API.
 
 ### When this design would be wrong

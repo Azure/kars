@@ -21,14 +21,14 @@ Press **Esc** or **q** to close it.
 
 | ID                  | CRD / source                             | What it shows |
 |---------------------|------------------------------------------|---------------|
-| `clawsandbox`       | `ClawSandbox` (S0)                       | Name, health, model, isolation, age, role |
-| `clawpairing`       | `ClawPairing` (S0)                       | agentA ↔ agentB, trust state, Conditions |
-| `mcpserver`         | `McpServer` (S1)                         | URL, productionMode, tool count, **JWKS Secret presence**, Conditions |
-| `toolpolicy`        | `ToolPolicy` (S2)                        | `appliesTo`, commerce (mandates + floor), approval, rate-limit, Conditions |
-| `inferencepolicy`   | `InferencePolicy` (S4)                   | budgets (daily/per-req), guardrail floor, ordered model preference, Conditions |
-| `a2aagent`          | `A2AAgent` (S3)                          | endpoint URL, productionMode, AgentCard publication status, capabilities |
-| `clawmemory`        | `ClawMemory` (S5)                        | sandboxRef, store, scope, retention, Foundry binding, RBAC scope summary |
-| `claweval`          | `ClawEval` (S6)                          | sandboxRef, suite, schedule, lastRunAt, lastScore, nextScheduledAt |
+| `clawsandbox`       | `ClawSandbox`                            | Name, health, model, isolation, age, role |
+| `clawpairing`       | `ClawPairing`                            | agentA ↔ agentB, trust state, Conditions |
+| `mcpserver`         | `McpServer`                              | URL, productionMode, tool count, **JWKS Secret presence**, Conditions |
+| `toolpolicy`        | `ToolPolicy`                             | `appliesTo`, commerce (mandates + floor), approval, rate-limit, Conditions |
+| `inferencepolicy`   | `InferencePolicy`                        | budgets (daily/per-req), guardrail floor, ordered model preference, Conditions |
+| `a2aagent`          | `A2AAgent`                               | endpoint URL, productionMode, AgentCard publication status, capabilities |
+| `clawmemory`        | `ClawMemory`                             | sandboxRef, store, scope, retention, Foundry binding, RBAC scope summary |
+| `claweval`          | `ClawEval`                               | sandboxRef, suite, schedule, lastRunAt, lastScore, nextScheduledAt |
 | `provider_status`   | derived (router `/healthz`, kubectl events, SA annotations, Gateways) | per-sandbox + cluster-wide provider health |
 
 ## Flags
@@ -118,8 +118,7 @@ Per-sandbox layout (`--per-sandbox`):
 
 ## Provider-status interpretation
 
-The provider panel **never invents data** (plan §0.2 #10 — "verify, don't
-guess"). Possible values:
+The provider panel **never invents data** — every status is the verbatim outcome of a probe. Possible values:
 
 | Status      | Meaning |
 |-------------|---------|
