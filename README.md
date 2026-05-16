@@ -28,6 +28,14 @@ It is built for three audiences:
 - **Security teams** — one opinionated, layered control plane for identity, egress, content safety, governance, mesh trust.
 - **Agent builders** — build the agent, not the boring-but-load-bearing infrastructure underneath it.
 
+### What makes it different
+
+- **The router is the security boundary, not the agent process.** Every external call is mediated by a typed Rust proxy under a different UID, with credentials the agent never sees and a CRD-driven allowlist on every request. iptables + NetworkPolicy are safety nets, not the policy layer.
+- **Governance is a first-class CRD layer.** Approval gates, rate limits, tool allowlists, content-safety floors, token budgets, and trust topology are all declarative Kubernetes resources you commit to a repo and reconcile with Argo / Flux — no out-of-band config store.
+- **End-to-end encrypted agent-to-agent mesh.** Signal Protocol (X3DH + Double Ratchet) with KNOCK trust gating. The relay sees only ciphertext.
+- **Provider- and runtime-agnostic.** Seven first-class runtimes (OpenClaw, OpenAI Agents SDK, Microsoft Agent Framework, LangGraph in Python and TypeScript, Anthropic, Pydantic-AI) plus BYO; GitHub Copilot, Azure AI Foundry, Azure OpenAI, and GitHub Models as backends; native Anthropic-shape passthrough for Claude.
+- **Same code path in dev and prod.** `azureclaw dev` runs the same router, the same audit chain, the same governance profile as `azureclaw up`. The dev-to-prod jump is one CLI command, not a re-architecture.
+
 ---
 
 ## How it works (in one diagram)
@@ -202,7 +210,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 ### One mesh, one gateway, one CLI
 
 - **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. AzureClaw consumes the upstream [`@agentmesh/sdk`](https://github.com/amitayks/agentmesh) directly on the Rust side, and the TypeScript plugin layer installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time. There is no in-tree fork of the SDK.
-- **A2A 1.0.0 gateway** — public-ingress for peer-to-peer agent traffic with signed `AgentCard` verification, tenant routing, observability.
+- **A2A 1.0.0 gateway** — public-ingress for peer-to-peer agent traffic with tenant routing, audit, and rate limiting. AgentCard signature verification (`azureclaw_a2a_core::verify_inbound_card`) ships as a library and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer. Wiring the verifier as an axum layer is on the v1.1 roadmap.
 - **CLI (`azureclaw …`)** — 30+ commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
 ---
