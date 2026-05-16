@@ -33,16 +33,16 @@ AGT ships the governance engine. AzureClaw is the AKS operator and data plane th
 
 ## 2. Provider contracts
 
-AzureClaw exposes four provider traits. Two of them (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) ship a vendored implementation alongside the AGT-Rust-SDK path; one (`MeshProvider`) consumes the upstream `@agentmesh/sdk` directly.
+AzureClaw exposes four provider traits. Three of them (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) ship a vendored implementation alongside the AGT-Rust-SDK path; one (`MeshProvider`) links the `agentmesh` crate (the AGT Rust SDK) from crates.io.
 
 | Trait | Current implementations | Role |
 |---|---|---|
-| `MeshProvider` | upstream `@agentmesh/sdk` (Rust crate `agentmesh = "3.1.0"`) | E2E session establishment + message send/receive |
+| `MeshProvider` | [`agentmesh`](https://crates.io/crates/agentmesh) crate (`agentmesh = "3.1.0"`) — AGT Rust SDK | E2E session establishment + message send/receive |
 | `PolicyDecisionProvider` | `Vendored` · `AgtRustSdk` · `Null` | Allow / Deny / Approval / RateLimit evaluation |
 | `AuditSink` | `Vendored` · `AgtRustSdk` · `Null` | Append-only audit events → receipt id |
 | `SigningProvider` | `Vendored` · `AgtRustSdk` · `Null` | Sign `(key_ref, payload)` and verify |
 
-`Null*` is test-only and blocked in production by admission policy. The Rust-side AgentMesh vendor was retired — `Cargo.toml` now depends on the published `agentmesh = "3.1.0"` crate. A small dist-only patch set against `@agentmesh/sdk` (TypeScript plugin layer) survives in `vendor/agentmesh-sdk/`; patches are itemised in `vendor/agentmesh-sdk/README.md`.
+`Null*` is test-only and blocked in production by admission policy. The Rust-side `Cargo.toml` depends on the published `agentmesh = "3.1.0"` crate; on the TypeScript side, the OpenClaw plugin installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time. There is no in-tree fork of either SDK — the historical `vendor/agentmesh-*` overlay has been retired.
 
 The remaining vendored paths (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) are a **permanent alternate architecture**, not migration staging — they are never scheduled for deletion.
 
@@ -76,4 +76,4 @@ Per-tenant override via `ClawSandbox.spec.agt.outageMode`.
 
 - This file is shared with the AGT team for confirmation as a living seam document.
 - Disagreements are resolved by: (a) AGT's ownership wins if they commit to shipping; (b) AzureClaw picks it up temporarily if they cannot commit; (c) the scope is documented here and in the relevant security-audit doc.
-- AGT Rust SDK releases trigger a manual audit pass against `vendor/agentmesh-sdk/README.md` to verify each listed patch is either upstreamed or still needed.
+- AGT Rust SDK releases trigger a manual audit pass to verify behaviour against our `MeshProvider` integration tests.

@@ -211,7 +211,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 ### One mesh, one gateway, one CLI
 
-- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. AzureClaw consumes the upstream [`@agentmesh/sdk`](https://github.com/amitayks/agentmesh) directly on the Rust side, and the TypeScript plugin layer installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time. There is no in-tree fork of the SDK.
+- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. The inference router links the [`agentmesh`](https://crates.io/crates/agentmesh) crate (the AGT Rust SDK) from crates.io, and the OpenClaw plugin layer installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time. There is no in-tree fork of the SDK.
 - **A2A 1.0.0 gateway** — public-ingress for peer-to-peer agent traffic with tenant routing, audit, and rate limiting. AgentCard signature verification (`azureclaw_a2a_core::verify_inbound_card`) ships as a library and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer. Wiring the verifier as an axum layer is on the v1.1 roadmap.
 - **CLI (`azureclaw …`)** — 30+ commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
