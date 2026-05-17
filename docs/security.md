@@ -134,7 +134,7 @@ flowchart LR
 
 ### Layer 8 — End-to-end encrypted mesh
 
-Inter-agent communication uses [Signal Protocol](https://signal.org/docs/) (X3DH + Double Ratchet) over a small relay/registry that AzureClaw operates. The relay sees only ciphertext and routing metadata. KNOCK-gated session establishment evaluates per-peer trust score against `AGT_TRUST_THRESHOLD`.
+Inter-agent communication uses [Signal Protocol](https://signal.org/docs/) (X3DH + Double Ratchet) over a small relay/registry that AzureClaw operates. **The Signal session is owned by the agent process** (the AGT SDK runs plugin-side, inside the sandbox container under UID 1000); the inference router is a transparent WebSocket bridge to the relay and holds no session keys, and the relay sees only ciphertext and routing metadata. KNOCK-gated session establishment evaluates per-peer trust score against `AGT_TRUST_THRESHOLD`.
 
 Failed decrypt is a `security_event`, not a downgrade — there is no plaintext fallback. The cryptographic primitives are provided by the AGT mesh stack; AzureClaw no longer carries a forked AgentMesh SDK.
 
