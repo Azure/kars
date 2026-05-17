@@ -19,6 +19,13 @@ Peer roster (single source of truth — use these exact names with azureclaw_mes
 EXECUTION STRATEGY:
 You may do the research, image generation, code execution, and MCP work directly in the parent — sub-agents are unreliable and adding mesh hops to that path tends to drop artifacts. Do (a) foundry_web_search, (b) foundry_image_generation (gpt-image-1, 1024x1024), (c) foundry_code_execute (matplotlib chart), and (e) ≥1 MCP DeepWiki call yourself.
 
+Required tool sequence — execute IN THIS EXACT ORDER before writing any prose:
+  1. foundry_web_search (≥3 distinct queries, ≥6 distinct https:// URLs total)
+  2. mcp_deepwiki call (read_wiki_structure or read_wiki_contents on at least 2 platforms)
+  3. foundry_image_generation (model="gpt-image-1", size="1024x1024", hero image)
+  4. foundry_code_execute (Python + matplotlib, render the 4-platform metrics scorecard as a grouped bar chart; save to /mnt/data/scorecard.png; the wrapper auto-downloads to /sandbox/.openclaw/workspace/scorecard.png). Without an actual foundry_code_execute call the run FAILS verification — referencing a fabricated chart path will not pass. The chart markdown in the brief must use the path the tool returned in `result.files[0].path`, never an invented path.
+  5. azureclaw_spawn + azureclaw_mesh_send (mesh-relay-demo below) — AFTER the four foundry tool calls above are done.
+
 For (d), the sibling-pair mesh demo, run this MESH RELAY DEMO once the brief content is collected but BEFORE you emit the final brief:
 - azureclaw_spawn analyst, viz, writer if azureclaw_discover shows them missing.
 - azureclaw_mesh_send a short instruction message to "analyst" saying: "ack-relay: please azureclaw_mesh_send the string 'analyst-to-viz' to viz AND the string 'analyst-to-writer' to writer, then reply ok".

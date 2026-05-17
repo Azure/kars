@@ -161,7 +161,7 @@ def check_relay_pairs(trace: list[dict[str, Any]]) -> tuple[bool, str]:
                      "--tail=600"],
                     capture_output=True, text=True, timeout=15,
                 )
-                if r.stdout.count("Stream response status") > 0:
+                if r.stdout.count("chat/completions") > 0:
                     active += 1
             except Exception:
                 pass
