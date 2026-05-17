@@ -23,7 +23,34 @@ Required tool sequence — execute IN THIS EXACT ORDER before writing any prose:
   1. foundry_web_search (≥3 distinct queries, ≥6 distinct https:// URLs total)
   2. mcp_deepwiki call (read_wiki_structure or read_wiki_contents on at least 2 platforms)
   3. foundry_image_generation (model="gpt-image-1", size="1024x1024", hero image)
-  4. foundry_code_execute (Python + matplotlib, render the 4-platform metrics scorecard as a grouped bar chart; save to /mnt/data/scorecard.png; the wrapper auto-downloads to /sandbox/.openclaw/workspace/scorecard.png). Without an actual foundry_code_execute call the run FAILS verification — referencing a fabricated chart path will not pass. The chart markdown in the brief must use the path the tool returned in `result.files[0].path`, never an invented path.
+  4. foundry_code_execute — THIS STEP IS NON-NEGOTIABLE. Call it with the exact code below (substitute your real scores from step 1's research; placeholders OK if research data is thin). Do not write the brief without first seeing this tool's response — referencing /sandbox/.openclaw/workspace/scorecard.png or any other chart path that you have not literally seen returned by foundry_code_execute is fabrication and fails verification. Use this code template:
+        ```python
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        platforms = ["AzureClaw", "AWS AgentCore", "OpenAI Sandbox", "Cloudflare Sandbox"]
+        metrics  = ["Isolation", "Egress", "Attestation", "Governance"]
+        scores = np.array([
+            [9, 9, 8, 9],   # AzureClaw
+            [8, 8, 6, 9],   # AWS AgentCore
+            [7, 6, 4, 7],   # OpenAI Sandbox
+            [8, 7, 5, 7],   # Cloudflare Sandbox
+        ])
+        x = np.arange(len(platforms)); w = 0.18
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for i, m in enumerate(metrics):
+            ax.bar(x + (i - 1.5) * w, scores[:, i], w, label=m)
+        ax.set_xticks(x); ax.set_xticklabels(platforms)
+        ax.set_ylim(0, 10); ax.set_ylabel("Score (0-10)")
+        ax.set_title("Agentic AI Sandboxing 2026 — Scorecard")
+        ax.legend(loc="upper right", ncol=4)
+        plt.tight_layout()
+        out = "/mnt/data/scorecard.png"
+        plt.savefig(out, dpi=130)
+        print(out)
+        ```
+     Then quote the path the tool returned (something like `/sandbox/.openclaw/workspace/scorecard.png`) verbatim in your chart markdown.
   5. azureclaw_spawn + azureclaw_mesh_send (mesh-relay-demo below) — AFTER the four foundry tool calls above are done.
 
 For (d), the sibling-pair mesh demo, run this MESH RELAY DEMO once the brief content is collected but BEFORE you emit the final brief:
