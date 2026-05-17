@@ -79,10 +79,18 @@ def check_hero(transcript: str, router: list[str]) -> tuple[bool, str]:
 
 
 def check_chart(transcript: str, router: list[str]) -> tuple[bool, str]:
-    # Foundry code-exec leaves a /code/sessions/... route in the router log.
-    code_calls = [l for l in router if "/code/sessions" in l or "code_interpreter" in l.lower()]
-    ok = bool(code_calls)
-    return ok, f"foundry code-exec calls={len(code_calls)}"
+    # Foundry code-exec uses the Responses API with a `code_interpreter` tool
+    # type. The router sees POST /openai/responses for the call itself and
+    # then GET /openai/containers/cntr_<...>/files{,/<id>/content} for each
+    # produced artifact. Counting those container hits is the cleanest signal
+    # without parsing request bodies.
+    container_hits = [l for l in router if "/openai/containers/cntr_" in l]
+    legacy_hits = [l for l in router if "/code/sessions" in l
+                   or "code_interpreter" in l.lower()]
+    total = len(container_hits) + len(legacy_hits)
+    ok = total > 0
+    return ok, (f"foundry code-exec container hits={len(container_hits)}, "
+                f"legacy hits={len(legacy_hits)}")
 
 
 def check_relay_pairs(trace: list[dict[str, Any]]) -> tuple[bool, str]:

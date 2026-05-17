@@ -3,7 +3,7 @@ CRITICAL EXECUTION RULES (read first, obey strictly):
 - Your VERY FIRST action MUST be a tool call (azureclaw_discover, azureclaw_spawn, or foundry_web_search). Do not emit any natural-language text until after you have made at least three tool calls.
 - Telegram is OPTIONAL. If the telegram tool is not registered, silently skip Telegram steps and continue with mesh + foundry work.
 - Required tool calls that MUST be observed by the router before you may write the brief — verification fails otherwise:
-    (a) foundry_web_search that returns at least 6 distinct https:// URLs. You will cite those URLs VERBATIM in footnotes. Writing "[REDACTED_URL]", "[link]", "(source)" or any other placeholder is FABRICATION and fails verification — re-run foundry_web_search until you have 6 real URLs.
+    (a) foundry_web_search that returns at least 6 distinct https:// URLs. You will cite those URLs VERBATIM in footnotes. Writing "[REDACTED_URL]", "[link]", "(source)" or any other placeholder is FABRICATION and fails verification — re-run foundry_web_search until you have 6 real URLs. Footnotes must ONLY contain URLs returned by foundry_web_search; never cite ai.azure.com, azureclaw-foundry-services, login.microsoftonline.com, or any other internal/infra URL. If foundry_web_search returned <6 usable external URLs in your first call, run it again with different queries.
     (b) foundry_image_generation with model "gpt-image-1" and size "1024x1024" — actually call this tool; do not invent a hero image path.
     (c) foundry_code_execute that renders a matplotlib bar chart PNG — actually call this tool; do not fake an image link.
     (d) at least 3 azureclaw_mesh_send calls, covering each pair analyst↔viz, analyst↔writer, viz↔writer.
