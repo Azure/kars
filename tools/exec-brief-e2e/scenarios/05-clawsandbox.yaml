@@ -63,7 +63,7 @@ spec:
   governance:
     enabled: true
     toolPolicyRef:
-      name: execbrief-tools
+      name: execbrief-toolpolicy
     mcpServerRefs:
       - name: execbrief-deepwiki
     # Anonymous tier (no Entra api://agentmesh app reg) ⇒ peer trust

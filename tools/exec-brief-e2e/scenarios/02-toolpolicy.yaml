@@ -18,7 +18,7 @@
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
-  name: execbrief-tools
+  name: execbrief-toolpolicy
   namespace: azureclaw-system
   labels:
     azureclaw.azure.com/sandbox: execbrief
