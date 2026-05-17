@@ -31,8 +31,17 @@ echo "[run] RUN_ID=${RUN_ID}  OUT_DIR=${OUT_DIR}"
 MONITOR_PID=$!
 
 cleanup() {
+    # Kill the whole monitor process group: the trap fires in the parent
+    # shell and ${MONITOR_PID} is the `tee` PID, not the underlying
+    # `kubectl logs -f` grandchildren. Sending SIGTERM to the negative
+    # of the parent PID hits the whole pipeline.
     if kill -0 "${MONITOR_PID}" 2>/dev/null; then
-        kill "${MONITOR_PID}" 2>/dev/null || true
+        kill -TERM "-${MONITOR_PID}" 2>/dev/null || kill "${MONITOR_PID}" 2>/dev/null || true
+        # Stop kubectl logs followers explicitly (macOS has no pkill in
+        # sandbox profiles; use ps + kill -PID on the literal PIDs).
+        for pid in $(ps -o pid=,command= | awk '/kubectl[[:space:]]+logs[[:space:]]+-f/ {print $1}'); do
+            kill "${pid}" 2>/dev/null || true
+        done
         wait "${MONITOR_PID}" 2>/dev/null || true
     fi
 }

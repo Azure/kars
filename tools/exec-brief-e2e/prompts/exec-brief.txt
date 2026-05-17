@@ -1,16 +1,16 @@
 CRITICAL EXECUTION RULES (read first, obey strictly):
 - This is a real execution task, not a planning exercise. Do not respond with text describing what you will do.
-- Your VERY FIRST action MUST be a tool call (mesh_discover, spawn_agent, or foundry_web_search). Do not emit any natural-language text until after you have made at least three tool calls.
+- Your VERY FIRST action MUST be a tool call (azureclaw_discover, azureclaw_spawn, or foundry_web_search). Do not emit any natural-language text until after you have made at least three tool calls.
 - Telegram is OPTIONAL. If the telegram tool is not registered, silently skip Telegram steps and continue with mesh + foundry work.
 - Only after analyst, viz, and writer have each completed their work and writer has produced the final brief should you emit any prose. Your final text response must be the full assembled brief itself (hero image link + chart link + ~900 words), nothing else.
 - "I'll orchestrate…" / "I will now…" preambles are forbidden. Just call the tools.
 
-Peer roster (single source of truth — use these exact names with mesh_send / mesh_transfer_file, never invent variants, never self-send):
+Peer roster (single source of truth — use these exact names with azureclaw_mesh_send / azureclaw_mesh_transfer_file, never invent variants, never self-send):
   analyst — research analyst, runs first
   viz     — data-viz engineer, runs after analyst
   writer  — senior technical writer, assembles the final brief
 
-Make sure that the agents use mesh_discover to discover their peers and use the mesh to communicate directly with each other or use mesh_transfer_file to transfer files amongst themselves. That is the only way they can talk to each other — do not relay sibling traffic through me.
+Make sure that the agents use azureclaw_discover to discover their peers and use the mesh to communicate directly with each other or use azureclaw_mesh_transfer_file to transfer files amongst themselves. That is the only way they can talk to each other — do not relay sibling traffic through me.
 
 I want a 2-page executive brief on the state of agentic AI sandboxing in 2026, with a hero image and a real chart. Use three sub-agents that talk to each other directly via the AGT mesh. There is a dedicated mesh messaging API and a mesh file-transfer API available to each agent. Throughout the run, post short status pings to the Telegram channel I have open so I can watch progress on my phone. Make sure every agent is properly instructed to use Foundry tools when it executes its work — Foundry image generation for image work, Foundry web search for research, and Foundry code execution for the chart. For every file transfer use the mesh file transfer tool.
 
@@ -18,16 +18,16 @@ Sub-agent 1 — analyst
 System prompt: "You are a research analyst. Use foundry_web_search to find material published in 2026 on agentic sandbox runtimes (AzureClaw, OpenAI Sandboxes, Anthropic Computer Use isolation, Google Project Astra runtime, AWS Bedrock AgentCore, Cloudflare AI Sandbox, AKS Confidential Containers for AI). For at least TWO of those platforms, follow up with the DeepWiki MCP (tools: read_wiki_structure, read_wiki_contents, ask_question) to pull structured project docs — citation must include both the foundry_web_search URL and the deepwiki ref so the trace shows real MCP traffic. Produce a structured JSON artifact with: (1) trends: 5–8 key trends, (2) attack-surface categories: 3 named attack-surface categories with citations, (3) platforms: comparison table of ≥4 platforms × 4 columns {isolation_primitive, egress_model, attestation_story, governance_integration}, (4) metrics: a 4-platform numeric scorecard (0–10) for each of the four columns — this drives the chart downstream. Cite every claim with URL + publication date. No prose narrative."
 
 Sub-agent 2 — viz
-System prompt: "You are a data-viz engineer. You will receive analyst's JSON artifact directly over AGT. Use the Foundry code execution skill to run a Python snippet (matplotlib, no seaborn) that renders the metrics scorecard as a 4-platform grouped bar chart, exporting a 1024×640 PNG. Then use the Foundry image generation skill (gpt-image-1) to produce a 1024×1024 hero image titled 'Agentic Sandboxes 2026 — Defense in Depth' in the visual style of an isometric data-center cutaway with subtle Azure cyan accents. Hand BOTH images plus analyst's artifact directly to writer over AGT (base64-inline or as attached blobs using mesh_transfer_file — your choice, just confirm in the message which is which). It might take some time for the analyst to finish, so periodically check your mesh inbox to receive the json."
+System prompt: "You are a data-viz engineer. You will receive analyst's JSON artifact directly over AGT. Use the Foundry code execution skill to run a Python snippet (matplotlib, no seaborn) that renders the metrics scorecard as a 4-platform grouped bar chart, exporting a 1024×640 PNG. Then use the Foundry image generation skill (gpt-image-1) to produce a 1024×1024 hero image titled 'Agentic Sandboxes 2026 — Defense in Depth' in the visual style of an isometric data-center cutaway with subtle Azure cyan accents. Hand BOTH images plus analyst's artifact directly to writer over AGT (base64-inline or as attached blobs using azureclaw_mesh_transfer_file — your choice, just confirm in the message which is which). It might take some time for the analyst to finish, so periodically check your mesh inbox to receive the json."
 
 Sub-agent 3 — writer
 System prompt: "You are a senior technical writer. You will receive analyst's JSON artifact and viz's two images directly over AGT. Produce a 2-page executive brief: hero image at the top, opening hook (≤80 words), 3 numbered sections (Trends / Attack-Surface / Platform Landscape with the bar chart inline), and a 'So what for AzureClaw?' closing paragraph. Preserve every citation as footnotes. Reject and ask the upstream sibling for clarification — over AGT — if any claim is uncited, any platform row has gaps, the chart is unreadable, or the hero image is off-brief. It might take some time, so periodically check your mesh inbox to receive the json and the two images."
 
 Coordination protocol (must verify on the wire):
-1. Check first whether the three sub-agents already exist using mesh_discover. If they exist, verify mesh connectivity with a single ping each; otherwise spawn all three sub-agents in parallel. Analyst runs first, then fans out to viz and writer.
-2. analyst → viz:    JSON artifact, AGT direct using mesh_transfer_file.
-3. analyst → writer: same JSON artifact, AGT direct using mesh_transfer_file.
-4. viz → writer:     chart PNG + hero PNG, AGT direct using mesh_transfer_file.
+1. Check first whether the three sub-agents already exist using azureclaw_discover. If they exist, verify mesh connectivity with a single ping each; otherwise spawn all three sub-agents in parallel. Analyst runs first, then fans out to viz and writer.
+2. analyst → viz:    JSON artifact, AGT direct using azureclaw_mesh_transfer_file.
+3. analyst → writer: same JSON artifact, AGT direct using azureclaw_mesh_transfer_file.
+4. viz → writer:     chart PNG + hero PNG, AGT direct using azureclaw_mesh_transfer_file.
 5. Any rejection / clarification rounds also stay sibling-to-sibling.
 6. Only the final assembled brief (with images embedded) comes back to me.
 
