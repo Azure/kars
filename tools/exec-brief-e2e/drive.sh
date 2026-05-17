@@ -135,12 +135,31 @@ PY
 }
 
 post_prompt() {
-    log "posting executive-brief prompt to ${SANDBOX_NAME} gateway"
-    # The CLI 'connect' command port-forwards 18789 to the openclaw gateway
-    # and pipes the prompt into the agent session. We use --no-tty +
-    # stdin for non-interactive use, captured to out/transcript.log.
+    log "posting executive-brief prompt to ${SANDBOX_NAME} (kubectl exec → openclaw agent)"
+    # `azureclaw connect` is a port-forward + browser-open flow with no
+    # stdin pipe mode — it never accepted `--no-tty` and was never the
+    # right vehicle for an unattended harness. We drive the agent the
+    # same way sub-agent spawn does: `kubectl exec` into the openclaw
+    # container and call the local CLI in one-shot mode
+    # (`openclaw agent --local -m "<prompt>" --session-id <fresh>`),
+    # which sends a single message, prints the agent's full response to
+    # stdout, and exits.
+    #
+    # We copy the prompt into the pod via stdin and read it from there
+    # to avoid shell-quoting the entire multi-paragraph prompt as a CLI
+    # argument (it contains backticks, quotes, and newlines that would
+    # be a quoting nightmare).
+    local ns="azureclaw-${SANDBOX_NAME}"
+    local session_id="execbrief-$(date -u +%Y%m%dT%H%M%SZ)"
+    log "session_id=${session_id}"
+    # shellcheck disable=SC2002
     run_with_watchdog "${WATCHDOG_SECS}" \
-        azureclaw connect "${SANDBOX_NAME}" --no-tty < "${PROMPT_FILE}" \
+        kubectl exec -i -n "${ns}" "deploy/${SANDBOX_NAME}" -c openclaw -- \
+            sh -c "cat > /tmp/exec-brief-prompt.txt && \
+                   openclaw agent --agent main --local \
+                       --session-id '${session_id}' \
+                       -m \"\$(cat /tmp/exec-brief-prompt.txt)\"" \
+        < "${PROMPT_FILE}" \
         | tee "${OUT_DIR}/transcript.log"
     local rc=${PIPESTATUS[0]}
     if [ "${rc}" -eq 124 ]; then
