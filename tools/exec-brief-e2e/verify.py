@@ -82,18 +82,25 @@ def check_chart(transcript: str, router: list[str]) -> tuple[bool, str]:
     return ok, f"foundry code-exec calls={len(code_calls)}"
 
 
-def check_relay_pairs(relay: list[str]) -> tuple[bool, str]:
-    # Each sibling pair appears as send/recv between two named agents.
-    # The relay logs route lines like 'route from=analyst to=viz' (exact format
-    # in vendor/agentmesh-relay/src/connection.rs). We count unique unordered
-    # pairs.
-    pat = re.compile(r"from=(\w+)\s+to=(\w+)")
-    pairs: set[frozenset[str]] = set()
+def check_relay_pairs(trace: list[dict[str, Any]]) -> tuple[bool, str]:
+    # Encrypted blobs flow over a persistent /ws connection; the relay does
+    # NOT log per-message routes in plaintext (we'd see HTTP /health lines
+    # only). So we infer sibling pairs from the OpenClaw plugin's own log
+    # line `AGT relay: sent to <agentName>` emitted at agt-tools/agt.ts:694.
+    # Each sub-agent pod gets its own monitor source tag `POD-<sender>`.
+    pat = re.compile(r"AGT relay:\s*sent to\s+([A-Za-z0-9_-]+)")
     siblings = {"analyst", "viz", "writer"}
-    for line in relay:
-        for a, b in pat.findall(line):
-            if a in siblings and b in siblings and a != b:
-                pairs.add(frozenset((a, b)))
+    pairs: set[frozenset[str]] = set()
+    for entry in trace:
+        src = entry.get("src", "")
+        if not src.startswith("POD-"):
+            continue
+        sender = src[len("POD-"):]
+        if sender not in siblings:
+            continue
+        for target in pat.findall(entry.get("msg", "")):
+            if target in siblings and target != sender:
+                pairs.add(frozenset((sender, target)))
     expected = {frozenset(("analyst", "viz")),
                 frozenset(("analyst", "writer")),
                 frozenset(("viz", "writer"))}
@@ -181,7 +188,7 @@ def main() -> int:
         elif fn is check_scorecard:       ok, detail = fn(transcript)
         elif fn is check_hero:            ok, detail = fn(transcript, router_lines)
         elif fn is check_chart:           ok, detail = fn(transcript, router_lines)
-        elif fn is check_relay_pairs:     ok, detail = fn(relay_lines)
+        elif fn is check_relay_pairs:     ok, detail = fn(trace)
         elif fn is check_telegram:        ok, detail = fn(router_lines)
         elif fn is check_brief:           ok, detail = fn(transcript)
         elif fn is check_egress_clean:    ok, detail = fn(trace)

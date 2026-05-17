@@ -118,5 +118,25 @@ PIDS+=($!)
 } &
 PIDS+=($!)
 
+# 7. Sub-agent openclaw containers — dynamic discovery. Each sub-agent sandbox
+# lands in its own azureclaw-<name> namespace. Tail each one's openclaw
+# container with a source tag of POD-<name> so verify.py can attribute
+# 'AGT relay: sent to X' lines to a specific sender.
+SUBAGENT_NAMES=("analyst" "viz" "writer")
+for sub in "${SUBAGENT_NAMES[@]}"; do
+    (
+        # Wait up to 10 minutes for the sub-agent deployment to appear.
+        deadline=$(( $(date +%s) + 600 ))
+        until kubectl get deploy -n "azureclaw-${sub}" "${sub}" >/dev/null 2>&1; do
+            [ "$(date +%s)" -gt "${deadline}" ] && exit 0
+            sleep 5
+        done
+        kubectl logs -n "azureclaw-${sub}" "deploy/${sub}" \
+            -c openclaw -f --tail=5 2>/dev/null \
+            | while IFS= read -r line; do emit "POD-${sub}" "${C_POD}" "${line}"; done
+    ) &
+    PIDS+=($!)
+done
+
 # Block until SIGINT.
 wait
