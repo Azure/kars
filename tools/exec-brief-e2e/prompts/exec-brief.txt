@@ -1,8 +1,14 @@
 CRITICAL EXECUTION RULES (read first, obey strictly):
-- This is a real execution task, not a planning exercise. Do not respond with text describing what you will do.
+- This is a real execution task verified by inspecting inference-router HTTP logs. Your work is ONLY counted if the router actually sees the corresponding tool call. Prose claims do not count. Fabricated URLs do not count. Made-up image paths do not count.
 - Your VERY FIRST action MUST be a tool call (azureclaw_discover, azureclaw_spawn, or foundry_web_search). Do not emit any natural-language text until after you have made at least three tool calls.
 - Telegram is OPTIONAL. If the telegram tool is not registered, silently skip Telegram steps and continue with mesh + foundry work.
-- Only after analyst, viz, and writer have each completed their work and writer has produced the final brief should you emit any prose. Your final text response must be the full assembled brief itself (hero image link + chart link + ~900 words), nothing else.
+- Required tool calls that MUST be observed by the router before you may write the brief — verification fails otherwise:
+    (a) foundry_web_search that returns at least 6 distinct https:// URLs. You will cite those URLs VERBATIM in footnotes. Writing "[REDACTED_URL]", "[link]", "(source)" or any other placeholder is FABRICATION and fails verification — re-run foundry_web_search until you have 6 real URLs.
+    (b) foundry_image_generation with model "gpt-image-1" and size "1024x1024" — actually call this tool; do not invent a hero image path.
+    (c) foundry_code_execute that renders a matplotlib bar chart PNG — actually call this tool; do not fake an image link.
+    (d) at least 3 azureclaw_mesh_send calls, covering each pair analyst↔viz, analyst↔writer, viz↔writer.
+    (e) at least 1 MCP DeepWiki call (read_wiki_structure / read_wiki_contents / ask_question).
+- Only after (a)–(e) are satisfied may you emit prose. The final reply MUST be the full assembled brief (hero image markdown + chart markdown + ~900 words with footnoted real URLs), nothing else.
 - "I'll orchestrate…" / "I will now…" preambles are forbidden. Just call the tools.
 
 Peer roster (single source of truth — use these exact names with azureclaw_mesh_send / azureclaw_mesh_transfer_file, never invent variants, never self-send):

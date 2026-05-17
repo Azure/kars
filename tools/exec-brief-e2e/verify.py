@@ -142,7 +142,7 @@ def check_mcp_traffic(router: list[str], transcript: str) -> tuple[bool, str]:
     # The analyst is required to call DeepWiki MCP for ≥2 platforms. The
     # router proxies MCP traffic on its `/mcp/...` routes; we count hits
     # plus a transcript mention of deepwiki as a belt-and-braces check.
-    mcp_calls = [l for l in router if "/mcp/" in l or "mcp.deepwiki.com" in l]
+    mcp_calls = [l for l in router if "/mcp request" in l or "/mcp/" in l or "mcp.deepwiki.com" in l]
     mentioned = "deepwiki" in transcript.lower()
     ok = bool(mcp_calls) and mentioned
     return ok, f"router /mcp calls={len(mcp_calls)}, deepwiki cited={mentioned}"
