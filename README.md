@@ -185,7 +185,7 @@ azureclaw up --name prod-agent --region swedencentral
 | **`InferencePolicy`** | Per-tenant model routing, content-safety floor, and token budgets. |
 | **`ClawMemory`** | Foundry Memory Store binding with project-MI auth (operator-provisioned today). |
 | **`ClawEval`** | Reproducible evaluation runs against a sandbox spec. |
-| **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. *(v1alpha1 — reconciler-only; router-side KNOCK gating tracked for v1.1.)* |
+| **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. *(v1alpha1 — reconciler-only; router-side **mesh-admission gating** against the projected graph tracked for v1.1. Note: KNOCK accept/deny stays agent-side — the router cannot decrypt the Signal session.)* |
 | **`EgressApproval`** | Ephemeral, TTL-bounded extra egress hosts overlaid on the baseline allowlist. |
 
 Plus the controller-internal `ClawPairing` record (10th kind) used to bind sandboxes to AgentMesh registry IDs.

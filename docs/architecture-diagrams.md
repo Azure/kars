@@ -245,7 +245,7 @@ flowchart TB
 
 `ClawSandbox` is the unit of work; the other CRDs bind policy, identity, peers, evaluation, or break-glass egress to it. You can build a complete deployment with just `ClawSandbox` + `ToolPolicy` + `InferencePolicy`; the rest are opt-in for richer scenarios.
 
-`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/azureclaw/trustgraph/graph.json`). It is not referenced by name from a `ClawSandbox` spec — it applies cluster-wide. Router-side KNOCK gating against the graph is tracked for v1.1; today the router tracks trust scores from KNOCK outcomes in-memory (see CRD reference §TrustGraph).
+`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/azureclaw/trustgraph/graph.json`). It is not referenced by name from a `ClawSandbox` spec — it applies cluster-wide. **Router-side mesh-admission gating** against the projected graph (refuse to bridge a WS for an edge not in the graph) is tracked for v1.1. This is not KNOCK gating — KNOCK lives inside the Signal session the agent owns end-to-end and the router never sees it. Today the router keeps a post-decision trust-score map populated from KNOCK outcomes the agent reports out-of-band, for audit and rate-limit purposes only (see CRD reference §TrustGraph).
 
 Schema details in **[`docs/api/crd-reference.md`](api/crd-reference.md)**.
 
