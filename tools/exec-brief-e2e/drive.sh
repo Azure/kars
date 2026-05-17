@@ -135,39 +135,111 @@ PY
 }
 
 post_prompt() {
-    log "posting executive-brief prompt to ${SANDBOX_NAME} (kubectl exec → openclaw agent)"
-    # `azureclaw connect` is a port-forward + browser-open flow with no
-    # stdin pipe mode — it never accepted `--no-tty` and was never the
-    # right vehicle for an unattended harness. We drive the agent the
-    # same way sub-agent spawn does: `kubectl exec` into the openclaw
-    # container and call the local CLI in one-shot mode
-    # (`openclaw agent --local -m "<prompt>" --session-id <fresh>`),
-    # which sends a single message, prints the agent's full response to
-    # stdout, and exits.
+    log "posting executive-brief prompt to ${SANDBOX_NAME} gateway (/v1/chat/completions)"
+    # Operator-mode delivery, matching `azureclaw connect`'s security model:
     #
-    # We copy the prompt into the pod via stdin and read it from there
-    # to avoid shell-quoting the entire multi-paragraph prompt as a CLI
-    # argument (it contains backticks, quotes, and newlines that would
-    # be a quoting nightmare).
+    #   1. Read the gateway-token Secret (RBAC-gated, namespaced) — same
+    #      Secret the WebUI flow uses (`cli/src/commands/connect.ts:142`).
+    #   2. `kubectl port-forward` deploy/<name> :18789. The exec-ban VAP
+    #      does NOT block port-forward (see admission-pod-exec-ban.yaml
+    #      comment "We do NOT block pods/portforward").
+    #   3. POST the prompt to the gateway's OpenAI-shape
+    #      `/v1/chat/completions` endpoint with `Authorization: Bearer
+    #      <gateway-token>`. The gateway translates this into an
+    #      `agentCommandFromIngress` and runs the full agent pipeline
+    #      (plugins, AGT, mesh, sub-agent spawn) — NOT a model-only
+    #      passthrough (see openai-http-CMbrDoh_.js).
+    #
+    # We must NOT `kubectl exec -c openclaw` — that's blocked by the
+    # `azureclaw-sandbox-exec-ban` ValidatingAdmissionPolicy by design.
     local ns="azureclaw-${SANDBOX_NAME}"
+    local local_port="${GATEWAY_LOCAL_PORT:-28789}"
+
+    log "fetching gateway token from Secret ${ns}/gateway-token"
+    local token_b64
+    token_b64=$(kubectl get secret -n "${ns}" gateway-token \
+        -o jsonpath='{.data.token}' 2>/dev/null || true)
+    if [ -z "${token_b64}" ]; then
+        log "ERR gateway-token Secret missing or empty in ${ns}"; exit 4
+    fi
+    local gateway_token
+    gateway_token=$(printf '%s' "${token_b64}" | base64 -d | tr -d '\n')
+    if [ -z "${gateway_token}" ]; then
+        log "ERR gateway token decoded to empty string"; exit 4
+    fi
+
+    log "starting kubectl port-forward localhost:${local_port} → ${ns}/${SANDBOX_NAME}:18789"
+    kubectl port-forward -n "${ns}" "deploy/${SANDBOX_NAME}" \
+        "${local_port}:18789" \
+        > "${OUT_DIR}/port-forward.log" 2>&1 &
+    local pf_pid=$!
+    # shellcheck disable=SC2064
+    trap "kill ${pf_pid} 2>/dev/null || true" EXIT INT TERM
+
+    local i=0
+    while [ $i -lt 30 ]; do
+        if curl -sf --max-time 1 "http://127.0.0.1:${local_port}/healthz" \
+                > /dev/null 2>&1; then
+            break
+        fi
+        i=$((i+1)); sleep 1
+    done
+    if [ $i -ge 30 ]; then
+        log "ERR port-forward never started serving HTTP on localhost:${local_port}"
+        cat "${OUT_DIR}/port-forward.log" >&2 || true
+        exit 4
+    fi
+    log "gateway reachable at localhost:${local_port}"
+
     local session_id="execbrief-$(date -u +%Y%m%dT%H%M%SZ)"
     log "session_id=${session_id}"
-    # shellcheck disable=SC2002
+
+    # Build the JSON body. Use python to JSON-encode the prompt safely
+    # (preserves newlines, backticks, quotes — bash heredoc + jq -Rs would
+    # also work but python avoids the jq dependency).
+    local body_file="${OUT_DIR}/request.json"
+    python3 - "${PROMPT_FILE}" "${session_id}" > "${body_file}" <<'PY'
+import json, sys
+prompt = open(sys.argv[1]).read()
+session_id = sys.argv[2]
+print(json.dumps({
+    "model": "gpt-4o",  # gateway resolves to configured upstream regardless of name
+    "messages": [{"role": "user", "content": prompt}],
+    "stream": False,
+    "user": session_id,
+}))
+PY
+
     run_with_watchdog "${WATCHDOG_SECS}" \
-        kubectl exec -i -n "${ns}" "deploy/${SANDBOX_NAME}" -c openclaw -- \
-            sh -c "cat > /tmp/exec-brief-prompt.txt && \
-                   openclaw agent --agent main --local \
-                       --session-id '${session_id}' \
-                       -m \"\$(cat /tmp/exec-brief-prompt.txt)\"" \
-        < "${PROMPT_FILE}" \
-        | tee "${OUT_DIR}/transcript.log"
+        curl -sS --no-buffer --fail-with-body \
+            -H "Authorization: Bearer ${gateway_token}" \
+            -H "Content-Type: application/json" \
+            --data-binary "@${body_file}" \
+            "http://127.0.0.1:${local_port}/v1/chat/completions" \
+        | tee "${OUT_DIR}/response.json"
     local rc=${PIPESTATUS[0]}
+    kill "${pf_pid}" 2>/dev/null || true
+
     if [ "${rc}" -eq 124 ]; then
         log "ERR prompt timed out after ${WATCHDOG_SECS}s"; exit 4
     elif [ "${rc}" -ne 0 ]; then
-        log "ERR prompt exited rc=${rc}"; exit 4
+        log "ERR gateway request failed rc=${rc}"; exit 4
     fi
-    log "prompt completed"
+
+    # Extract the assistant text into transcript.log for verify.py.
+    python3 - "${OUT_DIR}/response.json" "${OUT_DIR}/transcript.log" <<'PY'
+import json, sys
+resp = json.load(open(sys.argv[1]))
+out = open(sys.argv[2], 'w')
+for choice in resp.get('choices', []):
+    msg = choice.get('message', {})
+    txt = msg.get('content', '')
+    if isinstance(txt, list):
+        txt = ''.join(p.get('text','') for p in txt if isinstance(p, dict))
+    out.write(txt + '\n')
+out.close()
+PY
+    log "prompt completed — transcript at ${OUT_DIR}/transcript.log"
 }
 
 main() {
