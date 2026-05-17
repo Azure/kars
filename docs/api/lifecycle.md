@@ -129,7 +129,7 @@ Every CLI command is a thin wrapper around `kubectl apply`. The CLI does no orch
 | `azureclaw mcp add` | `McpServer` | `Secret` `mcp-<name>-signing` (Ed25519 keypair) <br/> `ConfigMap` `mcp-<name>-jwks` (when `productionMode=true`) | Inference router (`/mcp` proxy — multi-issuer OAuth verifier + namespaced `{server}.{tool}` dispatch) |
 | `azureclaw a2a-agent apply` | `A2AAgent` | `ConfigMap` `a2aagent-<name>-card` (signed AgentCard) | A2A gateway (inbound JWS verification) |
 | `azureclaw eval` | `ClawEval` | `ConfigMap` `claweval-<name>-spec` <br/> `Job` (when run-now) | Eval harness |
-| `azureclaw mesh ...` | `TrustGraph` | `ConfigMap` `trustgraph-<name>-graph` | Inference router (KNOCK accept/deny + AGT trust score) |
+| `azureclaw mesh ...` | `TrustGraph` | `ConfigMap` `trustgraph-<name>-graph` | Sandbox agent SDK (KNOCK accept/deny via `@microsoft/agent-governance-sdk`); inference router tracks the post-decision trust-score map for audit/governance |
 
 > The CLI's `apply` and `get` verbs round-trip through `kubectl` for parity with GitOps. There is no hidden CLI-only state.
 
@@ -311,7 +311,7 @@ Each follows the compile-to-ConfigMap pattern with one added wrinkle:
 | `ToolPolicy` | Compiles allow / deny / approval rules into a flat decision profile | Inference router on every tool dispatch (`/v1/mcp/*`, `/v1/spawn`, `/v1/handoff`) |
 | `ClawMemory` | Resolves storage backend (Cosmos / blob / in-memory) and stamps a binding token | Inference router on `/v1/memory/*` proxy |
 | `ClawEval` | Compiles spec into a `Job` template; spawns one `Job` per `run-now` request | Eval harness pod; results PVC-mounted |
-| `TrustGraph` | Snapshots peer identities + trust scores into a ConfigMap | Inference router on KNOCK accept/deny path (mesh ingress) |
+| `TrustGraph` | Snapshots peer identities + trust scores into a ConfigMap | Sandbox agent SDK on the KNOCK accept/deny path (mesh ingress); inference router only mirrors the post-decision trust-score map |
 
 **Code references**:
 
