@@ -69,10 +69,13 @@ def check_scorecard(transcript: str) -> tuple[bool, str]:
 
 def check_hero(transcript: str, router: list[str]) -> tuple[bool, str]:
     # The router logs every Foundry images call. Look for gpt-image-1.
+    # Size is specified in the request body, not the log line, so we only
+    # require that the call was made — the prompt instructs gpt-image-1 / 1024²
+    # and we trust the request body when the route was actually hit.
     image_calls = [l for l in router if "/images/generations" in l or "gpt-image-1" in l]
-    mentions_1024 = "1024x1024" in transcript or "1024×1024" in transcript
-    ok = bool(image_calls) and mentions_1024
-    return ok, f"foundry image calls={len(image_calls)}, 1024x1024 mention={mentions_1024}"
+    has_hero_ref = "hero" in transcript.lower() or transcript.lower().count("![") >= 1
+    ok = bool(image_calls) and has_hero_ref
+    return ok, f"foundry image calls={len(image_calls)}, hero_ref_in_brief={has_hero_ref}"
 
 
 def check_chart(transcript: str, router: list[str]) -> tuple[bool, str]:

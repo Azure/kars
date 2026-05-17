@@ -16,7 +16,16 @@ Peer roster (single source of truth — use these exact names with azureclaw_mes
   viz     — data-viz engineer, runs after analyst
   writer  — senior technical writer, assembles the final brief
 
-Make sure that the agents use azureclaw_discover to discover their peers and use the mesh to communicate directly with each other or use azureclaw_mesh_transfer_file to transfer files amongst themselves. That is the only way they can talk to each other — do not relay sibling traffic through me.
+MANDATORY ORCHESTRATION ORDER (deviation fails verification):
+Step 1. azureclaw_discover to confirm analyst, viz, writer exist (they were pre-spawned). If any is missing, azureclaw_spawn it.
+Step 2. ONE azureclaw_mesh_send to "analyst" with the analyst system prompt + task. Then azureclaw_mesh_await for its reply (JSON artifact).
+Step 3. ONE azureclaw_mesh_send to "viz" handing over analyst's artifact. The viz prompt MUST instruct viz to call foundry_code_execute (matplotlib bar chart, PNG output) AND foundry_image_generation (gpt-image-1, 1024x1024 hero). Then azureclaw_mesh_await for viz's reply (two image references).
+Step 4. ONE azureclaw_mesh_send to "writer" handing over analyst's artifact + viz's images. Then azureclaw_mesh_await for writer's draft.
+Step 5. Emit the final brief verbatim (writer's draft, unchanged).
+
+You are FORBIDDEN from calling foundry_web_search, foundry_image_generation, foundry_code_execute, or MCP tools yourself in the parent. Those calls must happen INSIDE the sub-agent pods — the router records them per-pod and verification reads each pod's log. If the parent does the work itself, the sibling-pair, code-exec, and per-pod evidence checks ALL fail.
+
+You ARE allowed to call azureclaw_discover, azureclaw_spawn, azureclaw_mesh_send, azureclaw_mesh_await, azureclaw_mesh_transfer_file, and azureclaw_mesh_inbox in the parent — those are the only tools the parent should touch.
 
 I want a 2-page executive brief on the state of agentic AI sandboxing in 2026, with a hero image and a real chart. Use three sub-agents that talk to each other directly via the AGT mesh. There is a dedicated mesh messaging API and a mesh file-transfer API available to each agent. Throughout the run, post short status pings to the Telegram channel I have open so I can watch progress on my phone. Make sure every agent is properly instructed to use Foundry tools when it executes its work — Foundry image generation for image work, Foundry web search for research, and Foundry code execution for the chart. For every file transfer use the mesh file transfer tool.
 
