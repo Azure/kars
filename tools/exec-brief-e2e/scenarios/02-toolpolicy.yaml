@@ -1,27 +1,19 @@
-# 02-toolpolicy.yaml — single ToolPolicy CR carrying the AGT policy
-# profile the in-pod governance plugin enforces for the exec-brief
-# sandbox.
+# 02-toolpolicy.yaml — single ToolPolicy CR for the exec-brief sandbox.
 #
-# Why one CR (and not eight):
-# `ClawSandbox.spec.governance.toolPolicyRef` is **singular** (see
-# controller/src/crd.rs `GovernanceConfig` and reconciler/mod.rs §S13:
-# resolve the sandbox's ToolPolicy ref). The controller resolves
-# exactly one ToolPolicy by name in the same namespace as the
-# ClawSandbox CR; there is no aggregation across multiple ToolPolicy
-# CRs. The way to express *per-tool* gates today is via
-# `spec.agtProfile.inline` — the raw AGT policy YAML the in-process
-# AGT engine (`@microsoft/agent-governance-sdk`, loaded by the
-# OpenClaw plugin under UID 1000) parses and enforces.
+# `agtProfile.inline` is the **verbatim** contents of the canonical
+# `azureclaw-default` AGT profile that the CLI inlines whenever you
+# run `azureclaw add --governance` (see cli/src/refs.ts::loadAgtProfile
+# and cli/profiles/agt/azureclaw-default.yaml). Keeping the bytes in
+# sync with that file means the harness exercises the same policy
+# surface a real user would get — no custom drift.
 #
-# Without `spec.agtProfile.inline` the controller fails closed with
-# `SpecInvalid` (the bundled fallback at /opt/azureclaw-plugin/policies
-# was removed in Slice 1e phase 2), so a non-empty inline body is
-# mandatory whenever governance is enabled.
-#
-# Schema (validated by controller/src/policy_canonical/tools.rs::parse):
-# `version: "1.0"`, non-empty `agent:`, and `policies:` as a list. The
-# AGT engine interprets the list entries — see the
-# @microsoft/agent-governance-sdk policy docs for the rule surface.
+# Why one CR (and not eight): `ClawSandbox.spec.governance.toolPolicyRef`
+# is singular (controller/src/crd.rs `GovernanceConfig`) and the
+# controller resolves exactly one ToolPolicy by name in the same
+# namespace as the ClawSandbox CR. Per-tool granularity lives inside
+# the AGT profile body below, which the in-pod
+# `@microsoft/agent-governance-sdk` engine interprets using
+# action-pattern globs (`mesh:*`, `foundry:*`, `tool:*`, …).
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ToolPolicy
@@ -30,71 +22,154 @@ metadata:
   namespace: azureclaw-system
   labels:
     azureclaw.azure.com/sandbox: execbrief
+  annotations:
+    azureclaw.azure.com/profile: default
 spec:
-  # `appliesTo.tool: "*"` + sandboxMatchLabels = "this ToolPolicy
-  # carries the AGT profile for every tool call from any pod labelled
-  # azureclaw.azure.com/sandbox=execbrief". `sandboxMatchLabels` must
-  # be non-empty (CEL: crd_validations.rs:142).
   appliesTo:
-    tool: "*"
     sandboxMatchLabels:
       azureclaw.azure.com/sandbox: execbrief
-
-  # CR-level approval/rateLimit fields are NOT used when agtProfile is
-  # set — the AGT engine reads the rate-limit / approval semantics out
-  # of the profile YAML body below. Leaving them here would be dead
-  # weight and was the source of the original "8 separate ToolPolicy
-  # CRs" confusion. Express all per-tool policy inside `policies:`.
-
   agtProfile:
     inline: |
+      # AzureClaw AGT Governance Policy — agentmesh PolicyEngine format
+      #
+      # Uses agentmesh PolicyEngine action-pattern matching (glob: shell:*, inference:*).
+      # Rules are evaluated by priority (higher = first); first match wins.
+      # Type: capability (allow/deny lists), approval, rate_limit.
+      #
+      # Action format used by AzureClaw router:
+      #   inference:chat_completions:<model>   inference:responses:<model>
+      #   image_generation:<deployment>        spawn:create:<name>
+      #   shell:<command>                      tool:<tool_name>
+      #   mesh:send:<peer>   mesh:receive      admin:<operation>
+      #
+      # Infrastructure controls (network, filesystem, IMDS, content safety, tokens)
+      # are handled by AzureClaw at kernel/router level — not duplicated here.
+
       version: "1.0"
-      agent: execbrief
-      # Default-allow profile with explicit per-tool rate caps. The
-      # AGT engine in-pod treats an empty `rules:` as allow-all for a
-      # tool, so we only list tools that need a cap or an approval.
-      # No `commerce:` rules — this demo moves no money.
+      agent: azureclaw-default
+
       policies:
-        # ── Mesh primitives (no caps — sub-agents need them flowing) ──
-        - tool: azureclaw_spawn
-          # Parent agent spawns 3 sub-agents in parallel; allow a small
-          # burst so retries don't trip the gate.
-          rateLimit: { rps: 1, burst: 5, window: "60s" }
-        - tool: azureclaw_spawn_status
-        - tool: azureclaw_spawn_list
-        - tool: azureclaw_spawn_destroy
-        - tool: azureclaw_discover
-        - tool: azureclaw_mesh_send
-          rateLimit: { rps: 5, burst: 20, window: "1s" }
-        - tool: azureclaw_mesh_inbox
-        - tool: azureclaw_mesh_await
-        - tool: azureclaw_mesh_transfer_file
-          rateLimit: { rps: 2, burst: 10, window: "1s" }
+        # ── Shell safety ─────────────────────────────────────────────────────
+        # Deny dangerous shell patterns before allowing safe ones.
+        - name: shell-destructive-deny
+          type: capability
+          denied_actions:
+            - "shell:rm"
+            - "shell:mkfs"
+            - "shell:shutdown"
+            - "shell:reboot"
+            - "shell:dd"
+            - "shell:nmap"
+            - "shell:nc"
+            - "shell:netcat"
+            - "shell:socat"
+            - "shell:nsenter"
+            - "shell:unshare"
+            - "shell:chroot"
+          priority: 100
 
-        # ── Foundry data-plane tools the demo exercises ──
-        - tool: foundry_web_search
-          rateLimit: { rps: 1, burst: 30, window: "60s" }
-        - tool: foundry_image_generation
-          # gpt-image-1 is ~$0.04/image — hard cap.
-          rateLimit: { rps: 1, burst: 5, window: "60s" }
-        - tool: foundry_code_execute
-          rateLimit: { rps: 1, burst: 10, window: "60s" }
-        - tool: foundry_download_file
-        - tool: foundry_memory
+        - name: shell-safe-commands
+          type: capability
+          allowed_actions:
+            - "shell:ls"
+            - "shell:cat"
+            - "shell:grep"
+            - "shell:find"
+            - "shell:echo"
+            - "shell:head"
+            - "shell:tail"
+            - "shell:wc"
+            - "shell:sort"
+            - "shell:uniq"
+            - "shell:diff"
+            - "shell:python"
+            - "shell:python3"
+            - "shell:pip"
+            - "shell:node"
+            - "shell:npm"
+            - "shell:git"
+            - "shell:curl"
+            - "shell:jq"
+            - "shell:sed"
+            - "shell:awk"
+          priority: 90
 
-        # ── MCP (DeepWiki) tools — namespaced by McpServer.name. The
-        # router-side McpServerRegistry rejects unlisted MCP tool calls
-        # at the gateway, so this list must mirror McpServer.spec.
-        # allowedTools (see scenarios/04-mcpserver.yaml). ──
-        - tool: read_wiki_structure
-          mcpServer: execbrief-deepwiki
-        - tool: read_wiki_contents
-          mcpServer: execbrief-deepwiki
-        - tool: ask_question
-          mcpServer: execbrief-deepwiki
+        # ── Inference ────────────────────────────────────────────────────────
+        - name: inference-allow
+          type: capability
+          allowed_actions:
+            - "inference:*"
+            - "image_generation:*"
+          priority: 80
 
-        # ── Telegram channel — status pings the prompt demands ──
-        - tool: telegram_status
-          rateLimit: { rps: 1, burst: 10, window: "60s" }
+        # ── Foundry tools ────────────────────────────────────────────────────
+        - name: foundry-allow
+          type: capability
+          allowed_actions:
+            - "foundry:web_search:*"
+            - "foundry:code_execute:*"
+            - "foundry:file_search:*"
+            - "foundry:memory:*"
+            - "foundry:image_generation:*"
+            - "foundry:conversations:*"
+            - "foundry:evaluations:*"
+            - "foundry:deployments:*"
+            - "foundry:agents:*"
+          priority: 80
 
-  displayName: "Exec-brief tool gates"
+        # ── Sub-agent spawning ──────────────────────────────────────────────
+        - name: spawn-allow
+          type: capability
+          allowed_actions:
+            - "spawn:*"
+          priority: 80
+
+        # ── Mesh messaging ──────────────────────────────────────────────────
+        - name: mesh-allow
+          type: capability
+          allowed_actions:
+            - "mesh:*"
+          priority: 80
+
+        # ── Tool calls ──────────────────────────────────────────────────────
+        # Handoff tools are allowed — the handoff flow itself has a two-step
+        # confirmation code mechanism (request → code → confirm) that prevents
+        # unauthorized handoff via prompt injection.  A separate approval gate
+        # can be re-enabled once the native approval UI is wired up.
+        - name: tool-allow
+          type: capability
+          allowed_actions:
+            - "tool:*"
+          priority: 70
+
+        # ── Admin operations ────────────────────────────────────────────────
+        # Bulk/promote operations need human approval.
+        - name: admin-bulk-approval
+          type: approval
+          actions:
+            - "admin:bulk*"
+            - "admin:promote*"
+          min_approvals: 1
+          priority: 60
+
+        - name: admin-allow
+          type: capability
+          allowed_actions:
+            - "admin:*"
+          priority: 50
+
+        # ── Inference rate limit (per-agent, 60s window) ────────────────────
+        - name: inference-rate-limit
+          type: rate_limit
+          actions:
+            - "inference:*"
+          max_calls: 500
+          window: "60s"
+          priority: 40
+
+      # NOT included — AzureClaw handles these at infrastructure level:
+      # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
+      # ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
+      # ✗ content-safety (Azure AI Content Safety — router-level enforcement)
+      # ✗ token-budgets (inference router — router-level enforcement)
+      # ✗ IMDS-blocking (iptables UID-based — kernel-level enforcement)
