@@ -94,15 +94,60 @@ wait_for_sandbox() {
 }
 
 # ─── Post the prompt ─────────────────────────────────────────────────────────
+# Resolve a portable watchdog. macOS lacks GNU `timeout` by default; many
+# users have `gtimeout` via `brew install coreutils`. Fall back to a
+# python-based watchdog so the harness still works on a bare macOS without
+# brew. We avoid `perl -e 'alarm'` because some macOS perl builds drop
+# alarm() in the default profile.
+resolve_timeout_cmd() {
+    if command -v timeout >/dev/null 2>&1; then
+        echo "timeout"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        echo "gtimeout"
+    else
+        echo ""
+    fi
+}
+
+run_with_watchdog() {
+    local secs="$1"; shift
+    local tcmd
+    tcmd="$(resolve_timeout_cmd)"
+    if [ -n "${tcmd}" ]; then
+        "${tcmd}" "${secs}s" "$@"
+        return $?
+    fi
+    # Fallback: python-based watchdog. Exit 124 mirrors GNU timeout.
+    python3 - "${secs}" "$@" <<'PY'
+import os, signal, subprocess, sys
+secs = int(sys.argv[1])
+argv = sys.argv[2:]
+proc = subprocess.Popen(argv, stdin=sys.stdin)
+def kill(_signum=None, _frame=None):
+    try:
+        proc.send_signal(signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+signal.signal(signal.SIGALRM, lambda *_: (kill(), sys.exit(124)))
+signal.alarm(secs)
+sys.exit(proc.wait())
+PY
+}
+
 post_prompt() {
     log "posting executive-brief prompt to ${SANDBOX_NAME} gateway"
     # The CLI 'connect' command port-forwards 18789 to the openclaw gateway
     # and pipes the prompt into the agent session. We use --no-tty +
     # stdin for non-interactive use, captured to out/transcript.log.
-    timeout "${WATCHDOG_SECS}s" \
+    run_with_watchdog "${WATCHDOG_SECS}" \
         azureclaw connect "${SANDBOX_NAME}" --no-tty < "${PROMPT_FILE}" \
-        | tee "${OUT_DIR}/transcript.log" \
-        || { log "ERR prompt timed out after ${WATCHDOG_SECS}s"; exit 4; }
+        | tee "${OUT_DIR}/transcript.log"
+    local rc=${PIPESTATUS[0]}
+    if [ "${rc}" -eq 124 ]; then
+        log "ERR prompt timed out after ${WATCHDOG_SECS}s"; exit 4
+    elif [ "${rc}" -ne 0 ]; then
+        log "ERR prompt exited rc=${rc}"; exit 4
+    fi
     log "prompt completed"
 }
 
