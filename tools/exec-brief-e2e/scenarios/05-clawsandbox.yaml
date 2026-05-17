@@ -22,7 +22,13 @@ spec:
     kind: OpenClaw
     openclaw:
       version: "2026.3.13"
-      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+      # Do NOT pin `image:` here — the controller fills it from the
+      # `SANDBOX_IMAGE` env var on its own deployment (set by
+      # `azureclaw up` to `<your-acr>/openclaw-sandbox:latest`). A
+      # hard-coded image with the wrong ACR registry causes
+      # ImagePullBackOff and is the kind of drift the
+      # "image tags: always use :latest, never hardcode" convention
+      # exists to prevent.
       config:
         agent:
           model: "azure/gpt-5.4"
