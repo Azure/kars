@@ -780,6 +780,12 @@ ANTHEOF
     "auth": {
       "mode": "token"
     },
+    "http": {
+      "endpoints": {
+        "chatCompletions": { "enabled": true },
+        "responses": { "enabled": true }
+      }
+    },
     "controlUi": {
       "enabled": true,
       "dangerouslyDisableDeviceAuth": true

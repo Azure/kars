@@ -203,7 +203,7 @@ import json, sys
 prompt = open(sys.argv[1]).read()
 session_id = sys.argv[2]
 print(json.dumps({
-    "model": "gpt-4o",  # gateway resolves to configured upstream regardless of name
+    "model": "openclaw",  # gateway dispatches to the configured agent runtime
     "messages": [{"role": "user", "content": prompt}],
     "stream": False,
     "user": session_id,
