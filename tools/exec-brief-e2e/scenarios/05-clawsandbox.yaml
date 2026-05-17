@@ -40,6 +40,31 @@ spec:
   inferenceRef:
     name: execbrief-inference
 
+  # Behavioral governance: turn the AGT in-pod plugin on and bind it
+  # to the single ToolPolicy CR that carries the AGT profile. The
+  # controller resolves `toolPolicyRef.name` in this ClawSandbox's
+  # namespace (azureclaw-system) and mounts the compiled profile at
+  # /etc/agt/policies/agt-profile.yaml inside the sandbox; the runtime
+  # plugin reads it and gates every tool call. Without this block the
+  # ToolPolicy CR is dead weight (reconciler/mod.rs:570 — governance
+  # off ⇒ ref unread).
+  #
+  # `mcpServerRefs` is the consumer side of the McpServer CRD — it
+  # tells the controller to mirror the DeepWiki MCP's per-server
+  # ConfigMap/Secret into the sandbox namespace and mount them into
+  # the inference-router so it can dispatch `read_wiki_*` /
+  # `ask_question` calls to https://mcp.deepwiki.com/mcp.
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: execbrief-tools
+    mcpServerRefs:
+      - name: execbrief-deepwiki
+    # Anonymous tier (no Entra api://agentmesh app reg) ⇒ peer trust
+    # score is 0. Threshold 0 keeps KNOCK accept-all for the demo;
+    # production should set this to 500+ once mesh setup-trust is run.
+    trustThreshold: 0
+
   # Egress: actively enforced. Foundry, AgentMesh relay/registry, and
   # the McpServer fetch endpoint are all reached via the inference
   # router proxy on loopback (127.0.0.1), so they do NOT appear here —

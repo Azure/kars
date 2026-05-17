@@ -1,157 +1,100 @@
-# 02-toolpolicy.yaml — tool gates required for the exec-brief pipeline.
+# 02-toolpolicy.yaml — single ToolPolicy CR carrying the AGT policy
+# profile the in-pod governance plugin enforces for the exec-brief
+# sandbox.
 #
-# Canonical tool names come from runtimes/openclaw/src/core/agt-tools/{agt,foundry}.ts:
-#   azureclaw_spawn / _spawn_status / _spawn_destroy / _spawn_list
-#   azureclaw_mesh_send / _mesh_inbox / _mesh_await / _mesh_transfer_file
-#   azureclaw_discover
-#   foundry_web_search / foundry_code_execute / foundry_image_generation
-#   telegram_status
+# Why one CR (and not eight):
+# `ClawSandbox.spec.governance.toolPolicyRef` is **singular** (see
+# controller/src/crd.rs `GovernanceConfig` and reconciler/mod.rs §S13:
+# resolve the sandbox's ToolPolicy ref). The controller resolves
+# exactly one ToolPolicy by name in the same namespace as the
+# ClawSandbox CR; there is no aggregation across multiple ToolPolicy
+# CRs. The way to express *per-tool* gates today is via
+# `spec.agtProfile.inline` — the raw AGT policy YAML the in-process
+# AGT engine (`@microsoft/agent-governance-sdk`, loaded by the
+# OpenClaw plugin under UID 1000) parses and enforces.
 #
-# Per controller/src/tool_policy.rs::AppliesToSelector, `appliesTo.tool`
-# is a single string — one CR per gate. ApprovalPolicy.mode values are
-# `never` | `always` | `aboveThreshold` (default `aboveThreshold` when
-# commerce is set). RateLimitPolicy.window is a Go-duration string
-# (`"1s"`, `"60s"`, `"1m"`, `"1h"`), NOT ISO-8601.
+# Without `spec.agtProfile.inline` the controller fails closed with
+# `SpecInvalid` (the bundled fallback at /opt/azureclaw-plugin/policies
+# was removed in Slice 1e phase 2), so a non-empty inline body is
+# mandatory whenever governance is enabled.
+#
+# Schema (validated by controller/src/policy_canonical/tools.rs::parse):
+# `version: "1.0"`, non-empty `agent:`, and `policies:` as a list. The
+# AGT engine interprets the list entries — see the
+# @microsoft/agent-governance-sdk policy docs for the rule surface.
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
-  name: execbrief-mesh-send
+  name: execbrief-tools
   namespace: azureclaw-system
   labels:
     azureclaw.azure.com/sandbox: execbrief
 spec:
+  # `appliesTo.tool: "*"` + sandboxMatchLabels = "this ToolPolicy
+  # carries the AGT profile for every tool call from any pod labelled
+  # azureclaw.azure.com/sandbox=execbrief". `sandboxMatchLabels` must
+  # be non-empty (CEL: crd_validations.rs:142).
   appliesTo:
-    tool: azureclaw_mesh_send
+    tool: "*"
     sandboxMatchLabels:
       azureclaw.azure.com/sandbox: execbrief
-  approval:
-    mode: never
-  rateLimit:
-    rps: 5
-    burst: 20
-    window: "1s"
----
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ToolPolicy
-metadata:
-  name: execbrief-mesh-transfer-file
-  namespace: azureclaw-system
-  labels:
-    azureclaw.azure.com/sandbox: execbrief
-spec:
-  appliesTo:
-    tool: azureclaw_mesh_transfer_file
-    sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: execbrief
-  approval:
-    mode: never
-  rateLimit:
-    rps: 2
-    burst: 10
-    window: "1s"
----
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ToolPolicy
-metadata:
-  name: execbrief-discover
-  namespace: azureclaw-system
-  labels:
-    azureclaw.azure.com/sandbox: execbrief
-spec:
-  appliesTo:
-    tool: azureclaw_discover
-    sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: execbrief
-  approval:
-    mode: never
----
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ToolPolicy
-metadata:
-  name: execbrief-spawn
-  namespace: azureclaw-system
-  labels:
-    azureclaw.azure.com/sandbox: execbrief
-spec:
-  appliesTo:
-    tool: azureclaw_spawn
-    sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: execbrief
-  approval:
-    mode: never
-  rateLimit:
-    # The parent spawns 3 sub-agents in parallel; 5 burst gives margin
-    # for any auto-retry without exceeding the cap.
-    rps: 1
-    burst: 5
-    window: "60s"
----
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ToolPolicy
-metadata:
-  name: execbrief-foundry-web-search
-  namespace: azureclaw-system
-  labels:
-    azureclaw.azure.com/sandbox: execbrief
-spec:
-  appliesTo:
-    tool: foundry_web_search
-    sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: execbrief
-  approval:
-    mode: never
-  rateLimit:
-    rps: 1
-    burst: 30
-    window: "60s"
----
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ToolPolicy
-metadata:
-  name: execbrief-foundry-image-generation
-  namespace: azureclaw-system
-  labels:
-    azureclaw.azure.com/sandbox: execbrief
-spec:
-  appliesTo:
-    tool: foundry_image_generation
-    sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: execbrief
-  approval:
-    mode: never
-  rateLimit:
-    # gpt-image-1 is expensive (~$0.04/image) — cap hard.
-    rps: 1
-    burst: 5
-    window: "60s"
----
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ToolPolicy
-metadata:
-  name: execbrief-foundry-code-execute
-  namespace: azureclaw-system
-  labels:
-    azureclaw.azure.com/sandbox: execbrief
-spec:
-  appliesTo:
-    tool: foundry_code_execute
-    sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: execbrief
-  approval:
-    mode: never
----
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ToolPolicy
-metadata:
-  name: execbrief-telegram-status
-  namespace: azureclaw-system
-  labels:
-    azureclaw.azure.com/sandbox: execbrief
-spec:
-  appliesTo:
-    tool: telegram_status
-    sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: execbrief
-  approval:
-    mode: never
+
+  # CR-level approval/rateLimit fields are NOT used when agtProfile is
+  # set — the AGT engine reads the rate-limit / approval semantics out
+  # of the profile YAML body below. Leaving them here would be dead
+  # weight and was the source of the original "8 separate ToolPolicy
+  # CRs" confusion. Express all per-tool policy inside `policies:`.
+
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: execbrief
+      # Default-allow profile with explicit per-tool rate caps. The
+      # AGT engine in-pod treats an empty `rules:` as allow-all for a
+      # tool, so we only list tools that need a cap or an approval.
+      # No `commerce:` rules — this demo moves no money.
+      policies:
+        # ── Mesh primitives (no caps — sub-agents need them flowing) ──
+        - tool: azureclaw_spawn
+          # Parent agent spawns 3 sub-agents in parallel; allow a small
+          # burst so retries don't trip the gate.
+          rateLimit: { rps: 1, burst: 5, window: "60s" }
+        - tool: azureclaw_spawn_status
+        - tool: azureclaw_spawn_list
+        - tool: azureclaw_spawn_destroy
+        - tool: azureclaw_discover
+        - tool: azureclaw_mesh_send
+          rateLimit: { rps: 5, burst: 20, window: "1s" }
+        - tool: azureclaw_mesh_inbox
+        - tool: azureclaw_mesh_await
+        - tool: azureclaw_mesh_transfer_file
+          rateLimit: { rps: 2, burst: 10, window: "1s" }
+
+        # ── Foundry data-plane tools the demo exercises ──
+        - tool: foundry_web_search
+          rateLimit: { rps: 1, burst: 30, window: "60s" }
+        - tool: foundry_image_generation
+          # gpt-image-1 is ~$0.04/image — hard cap.
+          rateLimit: { rps: 1, burst: 5, window: "60s" }
+        - tool: foundry_code_execute
+          rateLimit: { rps: 1, burst: 10, window: "60s" }
+        - tool: foundry_download_file
+        - tool: foundry_memory
+
+        # ── MCP (DeepWiki) tools — namespaced by McpServer.name. The
+        # router-side McpServerRegistry rejects unlisted MCP tool calls
+        # at the gateway, so this list must mirror McpServer.spec.
+        # allowedTools (see scenarios/04-mcpserver.yaml). ──
+        - tool: read_wiki_structure
+          mcpServer: execbrief-deepwiki
+        - tool: read_wiki_contents
+          mcpServer: execbrief-deepwiki
+        - tool: ask_question
+          mcpServer: execbrief-deepwiki
+
+        # ── Telegram channel — status pings the prompt demands ──
+        - tool: telegram_status
+          rateLimit: { rps: 1, burst: 10, window: "60s" }
+
+  displayName: "Exec-brief tool gates"
