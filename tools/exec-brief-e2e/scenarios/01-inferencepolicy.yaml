@@ -19,7 +19,7 @@ spec:
     # via the inference router on 127.0.0.1:8443 inside the sandbox.
     primary:
       provider: azure-openai
-      deployment: gpt-4.1
+      deployment: gpt-5.4
   contentSafety:
     # Prompt Shields are inline-enforced by the router on every
     # /chat/completions request; agents cannot opt out.

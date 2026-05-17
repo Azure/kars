@@ -138,6 +138,16 @@ def check_egress_clean(trace: list[dict[str, Any]]) -> tuple[bool, str]:
     return ok, f"controller blocked={len(denials)}, k8s netpol drops={len(drops)}"
 
 
+def check_mcp_traffic(router: list[str], transcript: str) -> tuple[bool, str]:
+    # The analyst is required to call DeepWiki MCP for ≥2 platforms. The
+    # router proxies MCP traffic on its `/mcp/...` routes; we count hits
+    # plus a transcript mention of deepwiki as a belt-and-braces check.
+    mcp_calls = [l for l in router if "/mcp/" in l or "mcp.deepwiki.com" in l]
+    mentioned = "deepwiki" in transcript.lower()
+    ok = bool(mcp_calls) and mentioned
+    return ok, f"router /mcp calls={len(mcp_calls)}, deepwiki cited={mentioned}"
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 CHECKS = [
     ("≥6 distinct 2026 sources cited",      check_sources),
@@ -148,6 +158,7 @@ CHECKS = [
     ("≥5 telegram status posts",            check_telegram),
     ("brief ~900 words, hero+chart present", check_brief),
     ("egress: 0 NetworkPolicy denials",     check_egress_clean),
+    ("MCP (DeepWiki) traffic observed",     check_mcp_traffic),
 ]
 
 
@@ -174,6 +185,7 @@ def main() -> int:
         elif fn is check_telegram:        ok, detail = fn(router_lines)
         elif fn is check_brief:           ok, detail = fn(transcript)
         elif fn is check_egress_clean:    ok, detail = fn(trace)
+        elif fn is check_mcp_traffic:     ok, detail = fn(router_lines, transcript)
         else:                             ok, detail = (False, "unknown check")
 
         results.append({"check": label, "passed": ok, "detail": detail})

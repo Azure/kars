@@ -18,6 +18,9 @@ metadata:
   labels:
     azureclaw.azure.com/sandbox: execbrief
 spec:
+  # storeName: DNS-label, becomes the Foundry Memory Store partition for
+  # everything this sandbox writes. Required when bundleRef is absent.
+  storeName: execbrief-store
   sandboxRef:
     name: execbrief
   # Project-scoped: every agent in the execbrief sandbox sees the same

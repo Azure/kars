@@ -25,7 +25,7 @@ spec:
       image: azureclaw.azurecr.io/openclaw-sandbox:latest
       config:
         agent:
-          model: "azure/gpt-4.1"
+          model: "azure/gpt-5.4"
 
   sandbox:
     isolation: "enhanced"
@@ -64,10 +64,10 @@ spec:
       # through the router, so it needs a real sandbox egress rule.
       - host: "api.telegram.org"
         port: 443
-      # Public fetch MCP — the McpServer CR points at this host; the
-      # router forwards MCP traffic but does name-resolution + connect
-      # from the pod's network namespace.
-      - host: "mcp-fetch.modelcontextprotocol.io"
+      # DeepWiki MCP — the McpServer CR points at this host; the
+      # router forwards MCP traffic but name-resolution + connect
+      # happen from the pod's network namespace.
+      - host: "mcp.deepwiki.com"
         port: 443
 
   # Azure services accessible via Managed Identity from inside the

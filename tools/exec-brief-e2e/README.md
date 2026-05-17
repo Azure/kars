@@ -57,7 +57,7 @@ Each run lands in `out/<UTC-timestamp>/` (with `out/latest` symlinked):
 | `transcript.log`  | what the agent posted back to `azureclaw connect`       |
 | `verify.json`     | machine-readable acceptance-check results               |
 
-## What the 8 acceptance checks look at
+## What the 9 acceptance checks look at
 
 1. **≥6 distinct 2026 sources cited** — unique non-infra URLs in the transcript.
 2. **4×4 metrics scorecard** — `"metrics"` JSON block + the four axis labels.
@@ -72,6 +72,20 @@ Each run lands in `out/<UTC-timestamp>/` (with `out/latest` symlinked):
 8. **Egress clean under Strict mode** — zero NetworkPolicy denials and zero
    controller `BlockedBuffer` entries. Proves the inline allowlist on
    `ClawSandbox.spec.networkPolicy` matched real traffic exactly.
+9. **MCP traffic observed** — the analyst hit the DeepWiki MCP for ≥1
+   platform deep-dive; the router proxied `/mcp/` calls and the brief
+   cites at least one deepwiki reference.
+
+## Why there is no separate `NetworkEgress` CRD
+
+Egress allowlists live **inline** on `ClawSandbox.spec.networkPolicy`,
+not in a sibling CR. The controller renders a real K8s `NetworkPolicy`
+from the closure of `allowedEndpoints` when `egressMode: Strict`. The
+production pattern replaces the inline list with `allowlistRef`
+pointing at a cosign-signed OCI artifact (see `azureclaw egress sign`)
+so the policy is content-addressed and tamper-evident, but it is still
+the same field on the same parent CR. (There is an `EgressApproval`
+CRD, but that one carries runtime *approval requests* — not policy.)
 
 Exit code 0 ⇒ all checks passed, 1 ⇒ at least one failed.
 
