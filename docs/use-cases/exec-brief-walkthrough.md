@@ -104,6 +104,20 @@ done
 
 `status.bundleRefDigest` equals `policies.inference.loaded_digest` on each sandbox's router — see **[CRD trust model](../security/crd-trust-model.md)** for the full verification loop and negative tests. If those drift, the CR will not be `Ready`.
 
+The producer half of the loop is just as concrete. Each sandbox's egress allowlist was sealed by the operator with a single command before enforcement turned on; the same `--enforce --sign` / `--approve --sign` shape works for incremental updates:
+
+```bash
+# Author + sign the analyst's allowlist in one gesture (canonicalise →
+# oras push → cosign sign → patch ClawSandbox.spec.networkPolicy.allowlistRef).
+azureclaw egress execbrief-analyst --enforce \
+  --registry myacr.azurecr.io \
+  --repository policy/egress-allowlist/execbrief-analyst
+# Auto-detects sign mode (TTY → keyless, CI → identity-token,
+# add --sign-mode keyed --sign-key azurekms://... for production).
+```
+
+The four other signed kinds (`ToolPolicy`, `InferencePolicy`, `ClawMemory`, `McpServer`, `ClawEval`) follow the generic surface — see [CRD trust model → operator-authoring half](../security/crd-trust-model.md#the-operator-authoring-half).
+
 ### 2. iptables egress-guard — kernel-level outbound firewall
 
 Every sandbox pod has an `egress-guard` init container that installs iptables rules restricting UID 1000 (the agent process) to loopback + DNS + a NAT-redirect of TCP/80,443 → `127.0.0.1:8444`. The agent process **cannot** open a direct TCP connection to anything else — the kernel drops it. Proof:

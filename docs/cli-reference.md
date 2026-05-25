@@ -1024,6 +1024,7 @@ azureclaw policy <subcommand> [arguments] [options]
 | `get <name>` | Show the active policy for a sandbox |
 | `deny <name> <host>` | Remove an allowed endpoint from a running sandbox |
 | `learn <name>` | Alias for `azureclaw egress <name> --learned` (kept for backward compatibility) |
+| `sign --kind <kind> --file <path> --registry <r> --repository <repo>` | Sign a canonical-form policy artifact (any of the 6 signed kinds), push it to OCI, cosign-sign the manifest, and optionally print the `bundleRef` snippet for the consuming CRD. This is the operator-authoring half of the trust loop documented in [security/crd-trust-model.md](security/crd-trust-model.md). |
 
 **Arguments for `allow` / `deny`:**
 | Name | Required | Description |
@@ -1042,6 +1043,19 @@ azureclaw policy <subcommand> [arguments] [options]
 | `--apply` | `false` | Apply learned domains as the sandbox allowlist |
 | `--clear` | `false` | Clear learned domains after export |
 
+**Options for `sign`:**
+| Flag | Default | Description |
+|---|---|---|
+| `--kind <kind>` | *(required)* | One of: `egress-allowlist`, `agt-profile`, `inference-policy`, `memory-binding`, `mcp-server-bundle`, `eval-corpus` |
+| `--file <path>` | *(required)* | Path to the **canonical-form** bytes for the kind (see [docs/internal/policy-canonical-format.md](internal/policy-canonical-format.md)) |
+| `--registry <host>` | *(required)* | OCI registry hostname (e.g. `myacr.azurecr.io`) |
+| `--repository <repo>` | *(required)* | OCI repository path under the registry |
+| `--tag <tag>` | `latest` | Tag to push under (informational — cosign signs by digest) |
+| `--sign-mode <mode>` | *(auto-detect)* | `keyless` / `identity-token` / `keyed` |
+| `--sign-key <ref>` | — | Cosign key reference (required for `--sign-mode keyed`, e.g. `azurekms://...`) |
+| `--print-bundle-ref` | `false` | Emit a YAML `bundleRef` snippet ready to paste into the consuming CRD |
+| `--json` | `false` | Emit a JSON envelope instead of human-readable output |
+
 **Examples:**
 ```bash
 # Allow GitHub API for a sandbox
@@ -1055,6 +1069,14 @@ azureclaw policy get my-agent
 
 # Remove a domain
 azureclaw policy deny my-agent api.github.com
+
+# Sign a pre-built canonical InferencePolicy bundle and emit the bundleRef
+azureclaw policy sign \
+  --kind inference-policy \
+  --file ./inference.canonical.json \
+  --registry myacr.azurecr.io \
+  --repository policy/inference/my-agent \
+  --print-bundle-ref
 ```
 
 **See also:** [docs/egress-proxy.md](egress-proxy.md)
