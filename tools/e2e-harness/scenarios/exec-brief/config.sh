@@ -24,7 +24,7 @@
 SCENARIO_SANDBOX="execbrief"
 SCENARIO_SUB_SANDBOXES=("analyst" "viz" "writer")
 SCENARIO_PROMPT_FILE="prompt.txt"
-SCENARIO_WATCHDOG_SECS=1500
+SCENARIO_WATCHDOG_SECS=2400
 
 # Patterns harvested from each sub-agent's in-pod gateway log. The
 # break-glass label is briefly applied (then removed) so the driver can

@@ -74,9 +74,15 @@ mkdir -p "${OUT_DIR}"
 # Keep a symlink to the latest run so verify.py's default OUT_DIR works.
 ln -sfn "${OUT_DIR}" "${SCRIPT_DIR}/out/latest" 2>/dev/null || true
 
+# RFC3339 timestamp captured BEFORE manifests are applied, so post-hoc
+# `kubectl logs --since-time=…` windowed log collection covers the full
+# run (apply → ready → prompt → response) and excludes noise from
+# previous runs sharing the same long-lived pods.
+RUN_START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 # Export everything platform helpers need.
 export SCRIPT_DIR REPO_ROOT SCENARIO PLATFORM SCENARIO_DIR MANIFESTS_DIR \
-       PROMPT_FILE SCENARIO_SANDBOX WATCHDOG_SECS OUT_DIR \
+       PROMPT_FILE SCENARIO_SANDBOX WATCHDOG_SECS OUT_DIR RUN_START_TS \
        SCENARIO_INCOMING_SANDBOX SCENARIO_INCOMING_PATH
 
 log() { printf '[drive %s] %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
