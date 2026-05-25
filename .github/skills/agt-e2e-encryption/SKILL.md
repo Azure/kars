@@ -62,3 +62,31 @@ All originally fixed via patches in `vendor/` (removed in 2026-05). Listed here 
 - KNOCK handler evaluates peer trust score via registry lookup
 - Anonymous agents (no OAuth) have score 0 — fail open when registry lookup fails
 - Verified agents (Tier 1, GitHub OAuth) have score 600+
+
+## Mesh-message metrics
+
+The inference router exports two Prometheus counters that the
+Headlamp Mesh Topology and operator-CLI topology use:
+
+- `azureclaw_mesh_messages_sent_total`
+- `azureclaw_mesh_messages_received_total`
+
+Defined in `inference-router/src/metrics.rs` (`AGT_MESH_MESSAGES_*`) and
+incremented in `inference-router/src/routes/mesh.rs` next to the
+atomic `MeshMetrics::messages_{sent,received}` counters. The
+`sandbox=<name>` label is added at scrape time by
+`deploy/monitoring/podmonitor-sandbox-router.yaml`.
+
+**Counted**: KNOCK frames, X3DH bundle exchange, each `mesh_send`
+call, explicit `sendHeartbeat()` ticks (every 30 s, scheduled from
+`mesh-plugin/src/agt-transport.ts` — vanilla AGT doesn't auto-heartbeat).
+
+**Not counted**: WebSocket Ping/Pong keepalives (short-circuited with
+`continue` before the counter increments), and registry HTTP calls
+(`/v1/agents/...`, `/v1/agents/{did}/heartbeat`) which go over HTTP,
+not the WS relay.
+
+**Why sent ≫ received early on**: a fresh sandbox emits ≥ 1 KNOCK
+per known peer plus a 30 s heartbeat tick, but only receives back
+the relay's KNOCK-ack until a real bidirectional conversation
+starts. Counters live in the router process and **reset on pod restart**.

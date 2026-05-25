@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentmesh-json-exporter-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agentmesh-json-exporter
+data:
+  config.yml: |
+    modules:
+      default:
+        metrics:
+          - name: agentmesh_relay_connected_agents
+            type: value
+            help: Number of agents currently connected to the relay WebSocket
+            path: '{ .connected_agents }'
+          - name: agentmesh_relay_messages_routed_total
+            type: value
+            help: Total messages routed by the relay since startup
+            path: '{ .stats.messages_routed }'
+          - name: agentmesh_relay_messages_stored_total
+            type: value
+            help: Messages stored offline (peer unreachable when sent)
+            path: '{ .stats.messages_stored }'
+          - name: agentmesh_relay_messages_delivered_total
+            type: value
+            help: Stored messages delivered after peer reconnected
+            path: '{ .stats.messages_delivered }'
+          - name: agentmesh_relay_up
+            type: object
+            help: Relay /health status (1=healthy)
+            path: '{ .status }'
+            valuetype: untyped
+            values:
+              healthy: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentmesh-json-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agentmesh-json-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentmesh-json-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentmesh-json-exporter
+    spec:
+      containers:
+      - name: exporter
+        image: quay.io/prometheuscommunity/json-exporter:v0.7.0
+        args:
+          - --config.file=/config/config.yml
+        ports:
+        - name: metrics
+          containerPort: 7979
+        volumeMounts:
+        - name: config
+          mountPath: /config
+        resources:
+          limits: {cpu: 100m, memory: 64Mi}
+          requests: {cpu: 10m, memory: 16Mi}
+      volumes:
+      - name: config
+        configMap:
+          name: agentmesh-json-exporter-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-json-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agentmesh-json-exporter
+spec:
+  selector:
+    app.kubernetes.io/name: agentmesh-json-exporter
+  ports:
+  - name: metrics
+    port: 7979
+    targetPort: 7979
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agentmesh-relay-health
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agentmesh-json-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentmesh-json-exporter
+  endpoints:
+  - port: metrics
+    interval: 10s
+    path: /probe
+    params:
+      target:
+        - http://agentmesh-relay.agentmesh.svc:8765/health
+    relabelings:
+    - sourceLabels: [__param_target]
+      targetLabel: target
+    - sourceLabels: [__address__]
+      targetLabel: instance

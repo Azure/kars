@@ -158,6 +158,7 @@ async fn relay_websocket_bridge(
             out_count.fetch_add(1, Ordering::Relaxed);
             out_bytes.fetch_add(size as u64, Ordering::Relaxed);
             sent_metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
+            crate::metrics::AGT_MESH_MESSAGES_SENT.inc();
             // Hex-dump first 128 bytes for traffic capture / E2E encryption proof.
             // The relay only ever sees ciphertext — readable plaintext here means encryption failed.
             let raw_bytes: Vec<u8> = match &tung_msg {
@@ -228,6 +229,7 @@ async fn relay_websocket_bridge(
             recv_metrics
                 .messages_received
                 .fetch_add(1, Ordering::Relaxed);
+            crate::metrics::AGT_MESH_MESSAGES_RECEIVED.inc();
             // Hex-dump first 128 bytes of each inbound frame for traffic capture.
             let raw_bytes: Vec<u8> = match &msg {
                 tungstenite::Message::Text(t) => t.as_bytes().to_vec(),

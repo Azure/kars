@@ -44,6 +44,7 @@ import {
   SimpleTable,
   StatusLabel,
 } from "@kinvolk/headlamp-plugin/lib/CommonComponents";
+import { useTheme } from "@mui/material/styles";
 import * as React from "react";
 
 const GROUP = "azureclaw.azure.com";
@@ -111,6 +112,21 @@ registerRoute({
   name: "azureclaw-overview",
   exact: true,
   component: () => <Overview />,
+});
+
+registerSidebarEntry({
+  parent: "azureclaw",
+  name: "azureclaw-mesh",
+  label: "Mesh Topology",
+  url: "/azureclaw/mesh",
+});
+
+registerRoute({
+  path: "/azureclaw/mesh",
+  sidebar: "azureclaw-mesh",
+  name: "azureclaw-mesh",
+  exact: true,
+  component: () => <MeshTopology />,
 });
 
 for (const crd of AZURECLAW_CRDS) {
@@ -709,6 +725,8 @@ function Overview() {
           ]}
         />
       </SectionBox>
+
+      <TokenBudgetOverview sandboxes={sandboxes ?? []} inferencePolicies={inferencePolicies ?? []} />
     </>
   );
 }
@@ -898,6 +916,9 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
       </SectionBox>
 
       {crd.plural === "clawsandboxes" && <SandboxExtras item={item} />}
+      {crd.plural === "inferencepolicies" && <InferencePolicyMetricsCard policyName={item.metadata.name} />}
+      {crd.plural === "toolpolicies" && <ToolPolicyMetricsCard policyName={item.metadata.name} />}
+      {crd.plural === "trustgraphs" && <TrustGraphMetricsCard />}
 
       <AllowlistDriftBanner item={item} />
 
@@ -1264,6 +1285,751 @@ function SandboxExtras({ item }: { item: KubeObject }) {
           ]}
         />
       </SectionBox>
+
+      <SandboxBudgetCard sandboxName={name} inferenceRefName={spec.inferenceRef?.name} />
+      <SandboxMetricsCard sandboxName={name} />
     </>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Grafana iframe embed for per-sandbox metrics.
+// Anonymous viewer + allow_embedding enabled on the kube-prometheus-stack
+// Grafana so the panel renders without auth. The Grafana base URL is
+// configurable via window.AZURECLAW_GRAFANA_URL — defaults to the local
+// port-forward used during dev (http://127.0.0.1:3000).
+// ──────────────────────────────────────────────────────────────────────
+function SandboxMetricsCard({ sandboxName }: { sandboxName: string }) {
+  const theme = useTheme();
+  const grafanaTheme = theme.palette.mode === "dark" ? "dark" : "light";
+  const grafanaBase =
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (typeof window !== "undefined" && (window as any).AZURECLAW_GRAFANA_URL) ||
+    "http://127.0.0.1:3000";
+  const url =
+    `${grafanaBase}/d/azureclaw-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}` +
+    `&var-sandbox=${encodeURIComponent(sandboxName)}`;
+  return (
+    <SectionBox title={`Metrics (Grafana) — ${sandboxName}`}>
+      <div style={{ marginBottom: 8 }}>
+        <a href={url} target="_blank" rel="noopener noreferrer">
+          Open full dashboard in Grafana ↗
+        </a>
+      </div>
+      <iframe
+        src={url}
+        title={`Grafana metrics for ${sandboxName}`}
+        style={{ width: "100%", height: "720px", border: "0" }}
+        loading="lazy"
+      />
+    </SectionBox>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// MeshTopology — native SVG visualization of the AGT mesh with
+// parent→sub-agent hierarchy. Uses ClawSandbox CRs (label
+// `azureclaw.azure.com/parent`) to build the tree, and Prometheus
+// queries to overlay live token/activity stats and inter-agent
+// communication. Configurable via window.AZURECLAW_PROMETHEUS_URL.
+// ──────────────────────────────────────────────────────────────────────
+interface MeshNodeData {
+  name: string;
+  parent: string;     // "" if controller
+  knownPeers: number;
+  meshSent: number;       // mesh messages sent (5m increase)
+  meshRecv: number;       // mesh messages received (5m increase)
+  meshSentLife: number;   // mesh messages sent (lifetime counter value)
+  meshRecvLife: number;   // mesh messages received (lifetime counter value)
+}
+
+async function promQuery(base: string, q: string): Promise<{metric: Record<string,string>, value: number}[]> {
+  const url = `${base}/api/v1/query?query=${encodeURIComponent(q)}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`prom ${r.status}`);
+  const j = await r.json();
+  return (j?.data?.result || []).map((row: {metric: Record<string,string>, value: [number, string]}) => ({
+    metric: row.metric || {},
+    value: Number(row.value?.[1] || 0),
+  }));
+}
+
+function usePromBase(): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (typeof window !== "undefined" && (window as any).AZURECLAW_PROMETHEUS_URL) || "http://127.0.0.1:19091";
+}
+
+function usePromPoll<T>(initial: T, loader: (base: string) => Promise<T>, intervalMs = 5000): { data: T; err: string } {
+  const base = usePromBase();
+  const [data, setData] = React.useState<T>(initial);
+  const [err, setErr] = React.useState("");
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    let cancelled = false;
+    loader(base).then((d) => { if (!cancelled) { setData(d); setErr(""); } }).catch((e) => { if (!cancelled) setErr(String(e)); });
+    const id = setInterval(() => setTick((t) => t + 1), intervalMs);
+    return () => { cancelled = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [base, tick]);
+  return { data, err };
+}
+
+function MeshTopology() {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  const bg = isDark ? "#1e1e1e" : "#fafafa";
+  const muted = isDark ? "#aaa" : "#555";
+  const stroke = isDark ? "#cfd8dc" : "#37474f";
+  const textOnNode = "#fff";
+
+  const [sandboxes] = (ClawSandboxClass as any).useList() as [KubeObject[] | null];
+
+  const { data: live, err } = usePromPoll(
+    { peers: [] as { metric: Record<string,string>; value: number }[],
+      sentLife: [] as { metric: Record<string,string>; value: number }[],
+      recvLife: [] as { metric: Record<string,string>; value: number }[],
+      sentRate: [] as { metric: Record<string,string>; value: number }[],
+      recvRate: [] as { metric: Record<string,string>; value: number }[],
+      relayConn: 0,
+      relayRouted: 0,
+      relayStored: 0,
+      relayDelivered: 0,
+      relayMsgsPerSec: 0 },
+    async (base) => {
+      const [peers, sentLife, recvLife, sentRate, recvRate, relayConn, relayRouted, relayStored, relayDelivered, relayMsgs] = await Promise.all([
+        promQuery(base, 'azureclaw_agt_known_agents'),
+        promQuery(base, 'azureclaw_mesh_messages_sent_total'),
+        promQuery(base, 'azureclaw_mesh_messages_received_total'),
+        promQuery(base, 'sum by (sandbox) (increase(azureclaw_mesh_messages_sent_total[5m]))'),
+        promQuery(base, 'sum by (sandbox) (increase(azureclaw_mesh_messages_received_total[5m]))'),
+        promQuery(base, 'sum(agentmesh_relay_connected_agents)'),
+        promQuery(base, 'sum(agentmesh_relay_messages_routed_total)'),
+        promQuery(base, 'sum(agentmesh_relay_messages_stored_total)'),
+        promQuery(base, 'sum(agentmesh_relay_messages_delivered_total)'),
+        promQuery(base, 'sum(rate(agentmesh_relay_messages_routed_total[5m]))'),
+      ]);
+      return {
+        peers, sentLife, recvLife, sentRate, recvRate,
+        relayConn: relayConn[0]?.value || 0,
+        relayRouted: relayRouted[0]?.value || 0,
+        relayStored: relayStored[0]?.value || 0,
+        relayDelivered: relayDelivered[0]?.value || 0,
+        relayMsgsPerSec: relayMsgs[0]?.value || 0,
+      };
+    }
+  );
+
+  // Index Prometheus results by sandbox name.
+  const peerByName = Object.fromEntries(live.peers.map((p) => [p.metric.sandbox || "", p.value]));
+  const sentLifeByName = Object.fromEntries(live.sentLife.map((p) => [p.metric.sandbox || "", p.value]));
+  const recvLifeByName = Object.fromEntries(live.recvLife.map((p) => [p.metric.sandbox || "", p.value]));
+  const sentRateByName = Object.fromEntries(live.sentRate.map((p) => [p.metric.sandbox || "", p.value]));
+  const recvRateByName = Object.fromEntries(live.recvRate.map((p) => [p.metric.sandbox || "", p.value]));
+
+  // Build hierarchy from CR labels.
+  const nodes: MeshNodeData[] = (sandboxes || []).map((sb) => {
+    const name = sb.metadata.name;
+    const parent = (sb.metadata.labels || {})["azureclaw.azure.com/parent"] || "";
+    return {
+      name,
+      parent,
+      knownPeers: peerByName[name] || 0,
+      meshSent: sentRateByName[name] || 0,
+      meshRecv: recvRateByName[name] || 0,
+      meshSentLife: sentLifeByName[name] || 0,
+      meshRecvLife: recvLifeByName[name] || 0,
+    };
+  });
+
+  const controllers = nodes.filter((n) => !n.parent).sort((a, b) => a.name.localeCompare(b.name));
+  const childrenByParent: Record<string, MeshNodeData[]> = {};
+  for (const n of nodes) {
+    if (!n.parent) continue;
+    childrenByParent[n.parent] = childrenByParent[n.parent] || [];
+    childrenByParent[n.parent].push(n);
+  }
+
+  // Layout: relay at top center, controllers in a row below, each controller's
+  // children fanned out below it.
+  const W = 1100;
+  const ctrlGap = Math.max(220, W / Math.max(1, controllers.length));
+  const relayX = W / 2;
+  const relayY = 70;
+  const ctrlRowY = 220;
+  const childRowY = 400;
+  const nodeR = 36;
+  const relayR = 50;
+
+  // Pre-compute positions.
+  const ctrlPos: Record<string, { x: number; y: number; n: MeshNodeData }> = {};
+  controllers.forEach((c, i) => {
+    const x = ctrlGap * (i + 0.5) + (W - ctrlGap * controllers.length) / 2;
+    ctrlPos[c.name] = { x, y: ctrlRowY, n: c };
+  });
+
+  const childPos: Record<string, { x: number; y: number; n: MeshNodeData; parent: string }> = {};
+  for (const c of controllers) {
+    const kids = childrenByParent[c.name] || [];
+    const parentX = ctrlPos[c.name].x;
+    const kidGap = 130;
+    kids.forEach((k, i) => {
+      const offset = (i - (kids.length - 1) / 2) * kidGap;
+      childPos[k.name] = { x: parentX + offset, y: childRowY, n: k, parent: c.name };
+    });
+  }
+
+  // Orphans (parent missing from CR list).
+  const orphans = nodes.filter((n) => n.parent && !ctrlPos[n.parent]);
+
+  // Drive sizing / edge styling off mesh message activity instead of tokens.
+  const traffic = (n: MeshNodeData) => n.meshSent + n.meshRecv;
+  const maxTraffic = Math.max(0.001, ...nodes.map(traffic));
+  const maxLife = Math.max(1, ...nodes.map((n) => n.meshSentLife + n.meshRecvLife));
+  const H = (orphans.length > 0 ? 600 : 520);
+
+  function nodeFill(n: MeshNodeData): string {
+    const t = traffic(n);
+    if (t > 5) return "#43a047";
+    if (t > 0.5) return "#9ccc65";
+    if (t > 0) return "#ffd54f";
+    if (n.knownPeers > 0) return "#90caf9";
+    return isDark ? "#555" : "#bdbdbd";
+  }
+  function nodeSize(n: MeshNodeData): number {
+    return nodeR + Math.min(14, ((n.meshSentLife + n.meshRecvLife) / maxLife) * 14);
+  }
+  function edgeWidth(t: number): number {
+    return 1 + (t / maxTraffic) * 5;
+  }
+  function edgeOpacity(t: number): number {
+    return 0.3 + (t / maxTraffic) * 0.7;
+  }
+  function pulseDur(t: number): number {
+    return t > 0 ? Math.max(0.6, 3 - (t / maxTraffic) * 2.4) : 0;
+  }
+
+  return (
+    <SectionBox title="🕸️ Mesh Topology (live)">
+      <div style={{ marginBottom: 12, fontSize: 13, color: muted }}>
+        Tree view of the AGT mesh: AGT Relay (top), controllers (mid row), sub-agents (bottom row).
+        Polled from Prometheus every 5s. Edge thickness & pulse speed ∝ mesh messages
+        in/out (5m). Node size ∝ lifetime mesh-message volume. <b>children</b> = sub-agent
+        CRs labeled <code>azureclaw.azure.com/parent=&lt;name&gt;</code>; <b>trust</b> = peers in
+        this router's local AGT trust graph (only populated after live traffic; resets on pod restart).
+        {err && <div style={{ color: "#ef5350", marginTop: 6 }}>Prometheus unreachable: {err} (configure window.AZURECLAW_PROMETHEUS_URL)</div>}
+      </div>
+      <div style={{ display: "flex", gap: 16, marginBottom: 12, flexWrap: "wrap" }}>
+        <StatusLabel status="">🔗 Relay connected: <b>{live.relayConn}</b></StatusLabel>
+        <StatusLabel status="">📨 Relay msg/s (5m): <b>{live.relayMsgsPerSec.toFixed(2)}</b></StatusLabel>
+        <StatusLabel status="">📬 Routed total: <b>{Math.round(live.relayRouted).toLocaleString()}</b></StatusLabel>
+        <StatusLabel status="">📦 Stored (offline): <b>{Math.round(live.relayStored).toLocaleString()}</b></StatusLabel>
+        <StatusLabel status="">✉️ Delivered (after reconnect): <b>{Math.round(live.relayDelivered).toLocaleString()}</b></StatusLabel>
+        <StatusLabel status="">🤖 Sandboxes: <b>{nodes.length}</b></StatusLabel>
+        <StatusLabel status="">👨‍👩‍👧 Controllers: <b>{controllers.length}</b></StatusLabel>
+        <StatusLabel status="">🧒 Sub-agents: <b>{Object.keys(childPos).length}</b></StatusLabel>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: W, background: bg, borderRadius: 8 }}>
+        <defs>
+          <radialGradient id="relayGrad" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="#fff59d" />
+            <stop offset="100%" stopColor="#fbc02d" />
+          </radialGradient>
+          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+        </defs>
+
+        {/* relay → controller edges */}
+        {controllers.map((c) => {
+          const p = ctrlPos[c.name];
+          const t = traffic(c);
+          return (
+            <g key={`r-${c.name}`}>
+              <line x1={relayX} y1={relayY} x2={p.x} y2={p.y}
+                stroke="#42a5f5" strokeWidth={edgeWidth(t)}
+                strokeOpacity={edgeOpacity(t)} />
+              {/* Outbound pulse: relay → sandbox (recv direction for the sandbox) */}
+              {c.meshRecv > 0 && (
+                <circle r="4" fill="#81d4fa" filter="url(#glow)">
+                  <animateMotion dur={`${pulseDur(c.meshRecv)}s`} repeatCount="indefinite"
+                    path={`M${relayX},${relayY} L${p.x},${p.y}`} />
+                </circle>
+              )}
+              {/* Inbound pulse: sandbox → relay (sent direction) */}
+              {c.meshSent > 0 && (
+                <circle r="4" fill="#ffeb3b" filter="url(#glow)">
+                  <animateMotion dur={`${pulseDur(c.meshSent)}s`} repeatCount="indefinite"
+                    path={`M${p.x},${p.y} L${relayX},${relayY}`} />
+                </circle>
+              )}
+              <text x={(relayX + p.x) / 2} y={(relayY + p.y) / 2 - 4} textAnchor="middle"
+                fontSize="10" fill={muted} style={{ pointerEvents: "none" }}>
+                ↑{Math.round(c.meshSent * 60 / 5) || 0} ↓{Math.round(c.meshRecv * 60 / 5) || 0} /min
+              </text>
+            </g>
+          );
+        })}
+
+        {/* controller → child edges (logical parent relationship; mesh traffic
+            still flows via the relay, so we pulse based on the child's traffic) */}
+        {Object.values(childPos).map((cp) => {
+          const par = ctrlPos[cp.parent];
+          if (!par) return null;
+          const t = traffic(cp.n);
+          return (
+            <g key={`pc-${cp.n.name}`}>
+              <line x1={par.x} y1={par.y} x2={cp.x} y2={cp.y}
+                stroke="#7e57c2" strokeWidth={edgeWidth(t)}
+                strokeOpacity={edgeOpacity(t)} strokeDasharray="6,4" />
+              {pulseDur(t) > 0 && (
+                <circle r="3" fill="#ce93d8" filter="url(#glow)">
+                  <animateMotion dur={`${pulseDur(t)}s`} repeatCount="indefinite"
+                    path={`M${par.x},${par.y} L${cp.x},${cp.y}`} />
+                </circle>
+              )}
+            </g>
+          );
+        })}
+
+        {/* AGT Relay (top) */}
+        <g>
+          <circle cx={relayX} cy={relayY} r={relayR} fill="url(#relayGrad)" stroke="#f57f17" strokeWidth="3" filter="url(#glow)" />
+          <text x={relayX} y={relayY - 8} textAnchor="middle" fontSize="13" fontWeight="bold" fill="#212121">AGT Relay</text>
+          <text x={relayX} y={relayY + 6} textAnchor="middle" fontSize="10" fill="#212121">{live.relayConn} connected</text>
+          <text x={relayX} y={relayY + 20} textAnchor="middle" fontSize="10" fill="#212121">{live.relayMsgsPerSec.toFixed(2)} msg/s</text>
+          <text x={relayX} y={relayY + 34} textAnchor="middle" fontSize="9" fill="#212121">
+            {Math.round(live.relayRouted).toLocaleString()} routed
+          </text>
+        </g>
+
+        {/* Controllers */}
+        {controllers.map((c) => {
+          const p = ctrlPos[c.name];
+          const sz = nodeSize(c);
+          const childCount = (childrenByParent[c.name] || []).length;
+          return (
+            <g key={`c-${c.name}`}>
+              <circle cx={p.x} cy={p.y} r={sz} fill={nodeFill(c)} stroke={stroke} strokeWidth="2.5" />
+              <text x={p.x} y={p.y - 8} textAnchor="middle" fontSize="13" fontWeight="bold" fill={textOnNode}>{c.name}</text>
+              <text x={p.x} y={p.y + 4} textAnchor="middle" fontSize="9" fill={textOnNode}>controller</text>
+              <text x={p.x} y={p.y + 18} textAnchor="middle" fontSize="10" fill={textOnNode}>
+                ↑{Math.round(c.meshSentLife).toLocaleString()} ↓{Math.round(c.meshRecvLife).toLocaleString()}
+              </text>
+              <text x={p.x} y={p.y + 30} textAnchor="middle" fontSize="9" fill={textOnNode}>
+                {childCount} child{childCount === 1 ? "" : "ren"} · {c.knownPeers} trust
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Sub-agents */}
+        {Object.values(childPos).map((cp) => {
+          const n = cp.n;
+          const sz = nodeSize(n) - 6;
+          return (
+            <g key={`s-${n.name}`}>
+              <circle cx={cp.x} cy={cp.y} r={sz} fill={nodeFill(n)} stroke={stroke} strokeWidth="1.5" />
+              <text x={cp.x} y={cp.y - 6} textAnchor="middle" fontSize="11" fontWeight="bold" fill={textOnNode}>{n.name}</text>
+              <text x={cp.x} y={cp.y + 6} textAnchor="middle" fontSize="9" fill={textOnNode}>sub-agent</text>
+              <text x={cp.x} y={cp.y + 20} textAnchor="middle" fontSize="10" fill={textOnNode}>
+                ↑{Math.round(n.meshSentLife).toLocaleString()} ↓{Math.round(n.meshRecvLife).toLocaleString()}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Orphan sub-agents (parent missing from CR list) */}
+        {orphans.length > 0 && (
+          <g>
+            <text x={W / 2} y={H - 80} textAnchor="middle" fontSize="11" fill={muted}>— Orphan sub-agents (parent CR not found) —</text>
+            {orphans.map((o, i) => {
+              const x = (W / (orphans.length + 1)) * (i + 1);
+              return (
+                <g key={`o-${o.name}`}>
+                  <circle cx={x} cy={H - 40} r={nodeR - 8} fill={isDark ? "#616161" : "#9e9e9e"} stroke={isDark ? "#9e9e9e" : "#616161"} strokeWidth="1.5" strokeDasharray="3,3" />
+                  <text x={x} y={H - 44} textAnchor="middle" fontSize="11" fontWeight="bold" fill={textOnNode}>{o.name}</text>
+                  <text x={x} y={H - 30} textAnchor="middle" fontSize="9" fill={textOnNode}>parent:{o.parent}</text>
+                </g>
+              );
+            })}
+          </g>
+        )}
+      </svg>
+      <div style={{ marginTop: 12 }}>
+        <SimpleTable
+          data={nodes
+            .map((n) => ({
+              name: n.name,
+              kind: n.parent ? `sub-agent ← ${n.parent}` : "controller",
+              peers: n.knownPeers,
+              sent5m: Math.round(n.meshSent),
+              recv5m: Math.round(n.meshRecv),
+              sentLife: Math.round(n.meshSentLife),
+              recvLife: Math.round(n.meshRecvLife),
+            }))
+            .sort((a, b) => (b.sent5m + b.recv5m) - (a.sent5m + a.recv5m))}
+          columns={[
+            { label: "Sandbox", getter: (r: { name: string }) => r.name },
+            { label: "Role", getter: (r: { kind: string }) => r.kind },
+            { label: "Peers", getter: (r: { peers: number }) => r.peers },
+            { label: "↑ Sent (5m)", getter: (r: { sent5m: number }) => r.sent5m },
+            { label: "↓ Recv (5m)", getter: (r: { recv5m: number }) => r.recv5m },
+            { label: "↑ Sent (life)", getter: (r: { sentLife: number }) => r.sentLife.toLocaleString() },
+            { label: "↓ Recv (life)", getter: (r: { recvLife: number }) => r.recvLife.toLocaleString() },
+          ]}
+        />
+      </div>
+    </SectionBox>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Per-CRD Prometheus metric cards. These embed a focused Grafana
+// dashboard view (filtered by the relevant entity) instead of duplicating
+// the Grafana queries client-side. The router metrics
+// `azureclaw_inference_*` and `azureclaw_agt_policy_evaluations_total`
+// surface model/policy/decision labels that map naturally to the
+// InferencePolicy and ToolPolicy CRDs.
+// ──────────────────────────────────────────────────────────────────────
+function grafanaBaseUrl(): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (typeof window !== "undefined" && (window as any).AZURECLAW_GRAFANA_URL) || "http://127.0.0.1:3000";
+}
+
+function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
+  const theme = useTheme();
+  const grafanaTheme = theme.palette.mode === "dark" ? "dark" : "light";
+  const muted = theme.palette.text.secondary;
+  const { data, err } = usePromPoll(
+    { byModel: [] as { metric: Record<string,string>; value: number }[],
+      bySandbox: [] as { metric: Record<string,string>; value: number }[],
+      reqRate: [] as { metric: Record<string,string>; value: number }[],
+      latency: 0 },
+    async (base) => {
+      const [byModel, bySandbox, reqRate, latency] = await Promise.all([
+        promQuery(base, 'sum by (model, direction) (increase(azureclaw_tokens_total[1h]))'),
+        promQuery(base, 'sum by (sandbox) (increase(azureclaw_tokens_total[1h]))'),
+        promQuery(base, 'sum by (model, status) (rate(azureclaw_inference_requests_total[5m]))'),
+        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(azureclaw_inference_latency_seconds_bucket[5m])))'),
+      ]);
+      return { byModel, bySandbox, reqRate, latency: latency[0]?.value || 0 };
+    }
+  );
+  const url = `${grafanaBaseUrl()}/d/azureclaw-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}`;
+  const modelRows = data.byModel.map((r) => ({
+    model: r.metric.model || "?",
+    direction: r.metric.direction || "?",
+    tokens: Math.round(r.value).toLocaleString(),
+  })).sort((a, b) => Number(b.tokens.replace(/,/g,"")) - Number(a.tokens.replace(/,/g,"")));
+  const sandboxRows = data.bySandbox.map((r) => ({
+    sandbox: r.metric.sandbox || "?",
+    tokens: Math.round(r.value).toLocaleString(),
+  })).sort((a, b) => Number(b.tokens.replace(/,/g,"")) - Number(a.tokens.replace(/,/g,"")));
+  return (
+    <SectionBox title={`📊 Inference Metrics (policy: ${policyName})`}>
+      <div style={{ marginBottom: 8, fontSize: 13, color: muted }}>
+        Live aggregates across all sandboxes routed through this policy class. {err && <span style={{color:"#ef5350"}}>{err}</span>}
+      </div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+        <StatusLabel status="">⏱ p95 latency (5m): <b>{(data.latency * 1000).toFixed(0)} ms</b></StatusLabel>
+        <StatusLabel status="">🧮 Models active: <b>{new Set(data.byModel.map((r) => r.metric.model)).size}</b></StatusLabel>
+        <StatusLabel status="">🤖 Sandboxes consuming: <b>{sandboxRows.length}</b></StatusLabel>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div>
+          <h4 style={{ margin: "4px 0" }}>Tokens by model (1h)</h4>
+          <SimpleTable data={modelRows} columns={[
+            { label: "Model", getter: (r: { model: string }) => r.model },
+            { label: "Dir", getter: (r: { direction: string }) => r.direction },
+            { label: "Tokens", getter: (r: { tokens: string }) => r.tokens },
+          ]} />
+        </div>
+        <div>
+          <h4 style={{ margin: "4px 0" }}>Top consumers (1h)</h4>
+          <SimpleTable data={sandboxRows.slice(0, 10)} columns={[
+            { label: "Sandbox", getter: (r: { sandbox: string }) => r.sandbox },
+            { label: "Tokens", getter: (r: { tokens: string }) => r.tokens },
+          ]} />
+        </div>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <a href={url} target="_blank" rel="noopener noreferrer">Open full Grafana dashboard ↗</a>
+      </div>
+    </SectionBox>
+  );
+}
+
+function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
+  const theme = useTheme();
+  const muted = theme.palette.text.secondary;
+  const { data, err } = usePromPoll(
+    { decisions: [] as { metric: Record<string,string>; value: number }[],
+      bySandbox: [] as { metric: Record<string,string>; value: number }[],
+      latencyP95: 0 },
+    async (base) => {
+      const [decisions, bySandbox, latP95] = await Promise.all([
+        promQuery(base, 'sum by (decision) (increase(azureclaw_agt_policy_evaluations_total[1h]))'),
+        promQuery(base, 'sum by (sandbox, decision) (increase(azureclaw_agt_policy_evaluations_total[1h]))'),
+        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(azureclaw_agt_eval_latency_seconds_bucket[5m])))'),
+      ]);
+      return { decisions, bySandbox, latencyP95: latP95[0]?.value || 0 };
+    }
+  );
+  const total = data.decisions.reduce((s, r) => s + r.value, 0) || 1;
+  const decisionRows = data.decisions.map((r) => ({
+    decision: r.metric.decision || "?",
+    count: Math.round(r.value).toLocaleString(),
+    pct: ((r.value / total) * 100).toFixed(1) + "%",
+  }));
+  const sandboxRows = data.bySandbox.map((r) => ({
+    sandbox: r.metric.sandbox || "?",
+    decision: r.metric.decision || "?",
+    count: Math.round(r.value).toLocaleString(),
+  })).sort((a, b) => Number(b.count.replace(/,/g,"")) - Number(a.count.replace(/,/g,"")));
+  return (
+    <SectionBox title={`🛡️ Policy Evaluations (policy: ${policyName})`}>
+      <div style={{ marginBottom: 8, fontSize: 13, color: muted }}>
+        AGT policy evaluation counters scoped to all sandboxes referencing this policy. {err && <span style={{color:"#ef5350"}}>{err}</span>}
+      </div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+        <StatusLabel status="">⏱ p95 eval latency (5m): <b>{(data.latencyP95 * 1e6).toFixed(0)} µs</b></StatusLabel>
+        <StatusLabel status="">📊 Total evals (1h): <b>{Math.round(total).toLocaleString()}</b></StatusLabel>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 16 }}>
+        <div>
+          <h4 style={{ margin: "4px 0" }}>Decision mix (1h)</h4>
+          <SimpleTable data={decisionRows} columns={[
+            { label: "Decision", getter: (r: { decision: string }) => r.decision },
+            { label: "Count", getter: (r: { count: string }) => r.count },
+            { label: "Share", getter: (r: { pct: string }) => r.pct },
+          ]} />
+        </div>
+        <div>
+          <h4 style={{ margin: "4px 0" }}>Top deniers/allowers (1h)</h4>
+          <SimpleTable data={sandboxRows.slice(0, 15)} columns={[
+            { label: "Sandbox", getter: (r: { sandbox: string }) => r.sandbox },
+            { label: "Decision", getter: (r: { decision: string }) => r.decision },
+            { label: "Count", getter: (r: { count: string }) => r.count },
+          ]} />
+        </div>
+      </div>
+    </SectionBox>
+  );
+}
+
+function TrustGraphMetricsCard() {
+  const theme = useTheme();
+  const muted = theme.palette.text.secondary;
+  const { data, err } = usePromPoll(
+    { peers: [] as { metric: Record<string,string>; value: number }[],
+      auditEntries: [] as { metric: Record<string,string>; value: number }[],
+      bundleHealth: [] as { metric: Record<string,string>; value: number }[] },
+    async (base) => {
+      const [peers, audit, bundle] = await Promise.all([
+        promQuery(base, 'azureclaw_agt_known_agents'),
+        promQuery(base, 'azureclaw_agt_audit_entries_total'),
+        promQuery(base, 'azureclaw_policy_bundle_healthy'),
+      ]);
+      return { peers, auditEntries: audit, bundleHealth: bundle };
+    }
+  );
+  const peerRows = data.peers.map((r) => ({
+    sandbox: r.metric.sandbox || "?",
+    knownPeers: r.value,
+  })).sort((a, b) => b.knownPeers - a.knownPeers);
+  const totalPeers = data.peers.reduce((s, r) => s + r.value, 0);
+  const totalAudit = data.auditEntries.reduce((s, r) => s + r.value, 0);
+  return (
+    <SectionBox title="🔐 Trust Graph Metrics">
+      <div style={{ marginBottom: 8, fontSize: 13, color: muted }}>
+        AGT trust graph: peers known per sandbox + tamper-evident audit log size. {err && <span style={{color:"#ef5350"}}>{err}</span>}
+      </div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+        <StatusLabel status="">🤝 Total known peers: <b>{totalPeers}</b></StatusLabel>
+        <StatusLabel status="">📜 Audit entries: <b>{Math.round(totalAudit).toLocaleString()}</b></StatusLabel>
+        <StatusLabel status="">📦 Healthy bundles: <b>{data.bundleHealth.filter((r) => r.value > 0).length}/{data.bundleHealth.length}</b></StatusLabel>
+      </div>
+      <SimpleTable data={peerRows} columns={[
+        { label: "Sandbox", getter: (r: { sandbox: string }) => r.sandbox },
+        { label: "Known peers", getter: (r: { knownPeers: number }) => r.knownPeers },
+      ]} />
+    </SectionBox>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Token budget panels — overview-wide aggregate + per-sandbox utilization.
+// Budgets live on InferencePolicy.spec.tokenBudget.dailyTokens; consumption
+// is tracked by the router metric `azureclaw_tokens_total{sandbox,direction}`.
+// Each sandbox references its policy via spec.inferenceRef.name (same ns).
+// ──────────────────────────────────────────────────────────────────────
+function utilizationTone(pct: number): StatusKind {
+  if (pct >= 90) return "error";
+  if (pct >= 70) return "warning";
+  if (pct > 0) return "success";
+  return "";
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return Math.round(n).toLocaleString();
+}
+
+function BudgetBar({ used, total, height = 14 }: { used: number; total: number; height?: number }) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  const trackBg = isDark ? "#333" : "#eee";
+  const textColor = isDark ? "#eee" : "#333";
+  const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+  const color = pct >= 90 ? "#c62828" : pct >= 70 ? "#ef6c00" : "#2e7d32";
+  return (
+    <div style={{ background: trackBg, borderRadius: 4, height, overflow: "hidden", position: "relative" }}>
+      <div style={{ background: color, height: "100%", width: `${pct}%`, transition: "width .3s ease" }} />
+      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 11, fontWeight: 600, color: pct > 50 ? "#fff" : textColor }}>
+        {pct.toFixed(1)}%
+      </div>
+    </div>
+  );
+}
+
+function TokenBudgetOverview({ sandboxes, inferencePolicies }: { sandboxes: KubeObject[]; inferencePolicies: KubeObject[] }) {
+  const theme = useTheme();
+  const muted = theme.palette.text.secondary;
+  // Per-sandbox consumption from Prometheus (24h window aligns with dailyTokens budget).
+  const { data, err } = usePromPoll(
+    [] as { metric: Record<string,string>; value: number }[],
+    async (base) => promQuery(base, 'sum by (sandbox) (increase(azureclaw_tokens_total[24h]))'),
+    10000
+  );
+  const consumedBySandbox: Record<string, number> = {};
+  for (const row of data) consumedBySandbox[row.metric.sandbox || "?"] = row.value;
+
+  // Resolve each sandbox → its InferencePolicy daily budget.
+  const ipByName: Record<string, KubeObject> = {};
+  for (const ip of inferencePolicies) ipByName[ip.metadata.name] = ip;
+
+  const rows = sandboxes.map((sb) => {
+    const spec = (sb as any).jsonData?.spec || (sb as any).spec || {};
+    const refName: string = spec.inferenceRef?.name || "";
+    const ip = ipByName[refName];
+    const dailyBudget = ((ip as any)?.jsonData?.spec || (ip as any)?.spec || {})?.tokenBudget?.dailyTokens || 0;
+    const used = consumedBySandbox[sb.metadata.name] || 0;
+    return {
+      name: sb.metadata.name,
+      policy: refName || "—",
+      budget: dailyBudget,
+      used,
+      pct: dailyBudget > 0 ? (used / dailyBudget) * 100 : 0,
+    };
+  });
+
+  const fleetBudget = rows.reduce((s, r) => s + r.budget, 0);
+  const fleetUsed = rows.reduce((s, r) => s + r.used, 0);
+  const fleetPct = fleetBudget > 0 ? (fleetUsed / fleetBudget) * 100 : 0;
+  const atRisk = rows.filter((r) => r.pct >= 70).length;
+  const over = rows.filter((r) => r.pct >= 100).length;
+
+  return (
+    <SectionBox title="💰 Token Budget (24h)">
+      <div style={{ marginBottom: 12, fontSize: 13, color: muted }}>
+        Aggregate daily budget across all InferencePolicy CRs vs. actual consumption pulled from
+        Prometheus. {err && <span style={{ color: "#ef5350" }}>{err}</span>}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem", marginBottom: 16 }}>
+        <Stat label="Fleet budget (24h)" value={formatTokens(fleetBudget)} />
+        <Stat label="Fleet consumed (24h)" value={formatTokens(fleetUsed)} tone={utilizationTone(fleetPct)} />
+        <Stat label="Fleet utilization" value={`${fleetPct.toFixed(1)}%`} tone={utilizationTone(fleetPct)} />
+        <Stat label="Sandboxes ≥70% used" value={atRisk} tone={atRisk > 0 ? "warning" : ""} />
+        <Stat label="Sandboxes over budget" value={over} tone={over > 0 ? "error" : ""} />
+      </div>
+      <div style={{ marginBottom: 8, fontSize: 13, fontWeight: 600 }}>Fleet utilization</div>
+      <BudgetBar used={fleetUsed} total={fleetBudget} height={20} />
+      <div style={{ marginTop: 16 }}>
+        <SimpleTable
+          data={rows.sort((a, b) => b.pct - a.pct).map((r) => ({
+            name: r.name,
+            policy: r.policy,
+            budget: formatTokens(r.budget),
+            used: formatTokens(r.used),
+            bar: r,
+          }))}
+          columns={[
+            { label: "Sandbox", getter: (r: { name: string }) => r.name },
+            { label: "Policy", getter: (r: { policy: string }) => r.policy },
+            { label: "Budget", getter: (r: { budget: string }) => r.budget },
+            { label: "Used", getter: (r: { used: string }) => r.used },
+            { label: "Utilization", getter: (r: { bar: { used: number; budget: number } }) => (
+              <div style={{ width: 160 }}><BudgetBar used={r.bar.used} total={r.bar.budget} /></div>
+            )},
+          ]}
+        />
+      </div>
+    </SectionBox>
+  );
+}
+
+function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxName: string; inferenceRefName?: string }) {
+  const theme = useTheme();
+  const muted = theme.palette.text.secondary;
+  // Pull both the bound InferencePolicy CR (for the budget) and the live counter.
+  const [policies] = (CRD_CLASSES.inferencepolicies as any).useList() as [KubeObject[] | null];
+  const policy = (policies || []).find((p) => p.metadata.name === inferenceRefName);
+  const spec = (policy as any)?.jsonData?.spec || (policy as any)?.spec || {};
+  const dailyBudget = spec?.tokenBudget?.dailyTokens || 0;
+  const perRequestCap = spec?.tokenBudget?.perRequestTokens || 0;
+
+  const { data: used24h } = usePromPoll(
+    0,
+    async (base) => {
+      const r = await promQuery(base, `sum(increase(azureclaw_tokens_total{sandbox="${sandboxName}"}[24h]))`);
+      return r[0]?.value || 0;
+    },
+    10000
+  );
+  const { data: split } = usePromPoll(
+    [] as { metric: Record<string,string>; value: number }[],
+    async (base) => promQuery(base, `sum by (direction) (increase(azureclaw_tokens_total{sandbox="${sandboxName}"}[24h]))`),
+    10000
+  );
+
+  const pct = dailyBudget > 0 ? (used24h / dailyBudget) * 100 : 0;
+  const remaining = Math.max(0, dailyBudget - used24h);
+  const inputTok = split.find((r) => r.metric.direction === "input")?.value || 0;
+  const outputTok = split.find((r) => r.metric.direction === "output")?.value || 0;
+
+  return (
+    <SectionBox title={`💰 Token Budget — ${sandboxName}`}>
+      {!inferenceRefName && (
+        <div style={{ color: muted, fontSize: 13 }}>No <code>inferenceRef</code> set on this sandbox; no enforced budget.</div>
+      )}
+      {inferenceRefName && !policy && (
+        <div style={{ color: "#ef6c00", fontSize: 13 }}>InferencePolicy <code>{inferenceRefName}</code> not found.</div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.75rem", marginBottom: 12 }}>
+        <Stat label="Daily budget" value={dailyBudget > 0 ? formatTokens(dailyBudget) : "unlimited"} />
+        <Stat label="Consumed (24h)" value={formatTokens(used24h)} tone={utilizationTone(pct)} />
+        <Stat label="Remaining" value={dailyBudget > 0 ? formatTokens(remaining) : "—"} tone={utilizationTone(pct)} />
+        <Stat label="Per-request cap" value={perRequestCap > 0 ? formatTokens(perRequestCap) : "unlimited"} />
+        <Stat label="Input tokens" value={formatTokens(inputTok)} />
+        <Stat label="Output tokens" value={formatTokens(outputTok)} />
+      </div>
+      {dailyBudget > 0 && (
+        <div>
+          <div style={{ marginBottom: 6, fontSize: 13, fontWeight: 600 }}>Utilization</div>
+          <BudgetBar used={used24h} total={dailyBudget} height={22} />
+        </div>
+      )}
+      {inferenceRefName && (
+        <div style={{ marginTop: 12, fontSize: 12, color: muted }}>
+          Policy: <Link routeName="inferencepolicies-detail" params={{ namespace: (policy as any)?.metadata?.namespace || "default", name: inferenceRefName }}>
+            {inferenceRefName}
+          </Link>
+        </div>
+      )}
+    </SectionBox>
   );
 }
