@@ -1,0 +1,35 @@
+# 01-inferencepolicy.yaml — Foundry / Azure-OpenAI provider for the
+# executive-brief sandbox. Must use a provider that unlocks the Foundry
+# data-plane (web search, image generation via gpt-image-1, code
+# execution); github-copilot and github-models providers return 501 for
+# those Foundry-only routes (see docs/security.md).
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: execbrief-inference
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  appliesTo:
+    sandboxName: execbrief
+  modelPreference:
+    # Primary: Foundry-backed deployment. The 3 sub-agents inherit this
+    # via the inference router on 127.0.0.1:8443 inside the sandbox.
+    primary:
+      provider: azure-openai
+      deployment: gpt-5.4
+  contentSafety:
+    # Prompt Shields enforcement requires upstream prompt_filter_results
+    # annotations, which the Foundry data-plane stream does not emit.
+    # The harness exercises agent orchestration, sub-agent mesh, and the
+    # router enforcement surface as a whole — not the AOAI-specific
+    # prompt-shields signal. Leave the toggle off so the agent actually
+    # runs to completion; see docs/security.md for the AOAI-only case.
+    requirePromptShields: false
+  tokenBudget:
+    # Generous budget — analyst + viz + writer each burn ~30-80k for the
+    # whole pipeline depending on how much context they share over mesh.
+    dailyTokens: 4000000
+    perRequestTokens: 200000

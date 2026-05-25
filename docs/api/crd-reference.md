@@ -6,21 +6,111 @@ AzureClaw exposes its API through **nine** first-class CustomResourceDefinitions
 
 ## At a glance
 
-| CRD | Kind | Short names | Scope | What it represents |
-|---|---|---|---|---|
-| `clawsandboxes.azureclaw.azure.com` | `ClawSandbox` | `cs`, `claw` | Namespaced | One agent. The unit of work. |
-| `a2aagents.azureclaw.azure.com` | `A2AAgent` | `a2a` | Namespaced | A public-ingress endpoint a peer can call. |
-| `mcpservers.azureclaw.azure.com` | `McpServer` | `mcp` | Namespaced | An external MCP server the sandbox may call. |
-| `toolpolicies.azureclaw.azure.com` | `ToolPolicy` | `tp` | Namespaced | Per-tool allow/approval/rate-limit/commerce gate. |
-| `inferencepolicies.azureclaw.azure.com` | `InferencePolicy` | `ip` | Namespaced | Model preference, content-safety floor, token budgets. |
-| `clawmemories.azureclaw.azure.com` | `ClawMemory` | `cmem` | Namespaced | Memory-store binding (Foundry Memory Store). |
-| `clawevals.azureclaw.azure.com` | `ClawEval` | `ceval` | Namespaced | Reproducible evaluation run. |
-| `trustgraphs.azureclaw.azure.com` | `TrustGraph` | `tg` | Cluster | Cross-namespace / cross-cluster mesh trust topology. |
-| `egressapprovals.azureclaw.azure.com` | `EgressApproval` | `eappr` | Namespaced | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
+| CRD | Kind | Short names | Scope | Signing surface | What it represents |
+|---|---|---|---|---|---|
+| `clawsandboxes.azureclaw.azure.com` | `ClawSandbox` | `cs`, `claw` | Namespaced | `spec.networkPolicy.allowlistRef` (signed OCI egress bundle, optional) | One agent. The unit of work. |
+| `a2aagents.azureclaw.azure.com` | `A2AAgent` | `a2a` | Namespaced | Inline `spec.signingKeys[]` (Ed25519, peer-callable JWS verification) | A public-ingress endpoint a peer can call. |
+| `mcpservers.azureclaw.azure.com` | `McpServer` | `mcp` | Namespaced | `spec.bundleRef` (signed OCI tool-allow-list bundle, optional) | An external MCP server the sandbox may call. |
+| `toolpolicies.azureclaw.azure.com` | `ToolPolicy` | `tp` | Namespaced | `spec.bundleRef` (signed OCI tool-policy bundle, optional) | Per-tool allow/approval/rate-limit/commerce gate. |
+| `inferencepolicies.azureclaw.azure.com` | `InferencePolicy` | `ip` | Namespaced | `spec.bundleRef` (signed OCI inference-policy bundle, optional) | Model preference, content-safety floor, token budgets. |
+| `clawmemories.azureclaw.azure.com` | `ClawMemory` | `cmem` | Namespaced | `spec.bundleRef` (signed OCI memory-binding bundle, optional) | Memory-store binding (Foundry Memory Store). |
+| `clawevals.azureclaw.azure.com` | `ClawEval` | `ceval` | Namespaced | `spec.corpus.bundleRef` (signed OCI eval-corpus bundle, mutex with `corpus.builtin`) | Reproducible evaluation run. |
+| `trustgraphs.azureclaw.azure.com` | `TrustGraph` | `tg` | Cluster | Inline `spec.edges[].signature` (Ed25519 per edge, domain-separated payload) | Cross-namespace / cross-cluster mesh trust topology. |
+| `egressapprovals.azureclaw.azure.com` | `EgressApproval` | `eappr` | Namespaced | None on the CR itself (it's a sibling overlay); the sandbox's signed `allowlistRef` is the cryptographic baseline | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
 
 A tenth CRD, `clawpairings.azureclaw.azure.com` (`ClawPairing`, `cp`), is a controller-internal record used to bind sandboxes to AgentMesh registry IDs. It is created by the controller; you generally do not write it directly.
 
 The full Kubernetes schema lives in `deploy/helm/azureclaw/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
+
+---
+
+## Signing and verification
+
+Five of these CRDs accept their *content* (the allow-list, the policy, the memory-store binding, the eval corpus, the MCP tool allow-list) by **OCI digest reference** instead of inline YAML. Two more carry Ed25519 signatures inline (the per-edge attestations in `TrustGraph`, the per-key peer JWS verification material in `A2AAgent`). Everywhere a payload is "signed" in this API surface, the controller verifies it before the router ever loads it, and the router echoes the loaded digest back so the controller can flip the CR to a `Ready` phase only when the wire matches the spec.
+
+This section explains the shape that applies to all six policy kinds. The per-CRD sections below add only the kind-specific schema details (which field names, which media type, which mutex rules).
+
+### Authoring path
+
+```bash
+azureclaw policy sign --kind {egress|tools|inference|memory|mcp-tools|eval-corpus} \
+  --file my-policy.yaml \
+  --registry <oci-registry> \
+  --repository <repo-path>
+# → emits sha256:<digest>
+```
+
+The CLI does six things in order: validate against the kind's JSON Schema → canonicalise to deterministic bytes (per-kind rules; see [`docs/internal/policy-canonical-format.md`](../internal/policy-canonical-format.md)) → `oras push` to the registry with the kind's pinned `artifactType` media type → `cosign sign --registry-referrers-mode=legacy` → emit the resulting manifest digest for the human to paste into the CR's `bundleRef`/`allowlistRef`/`corpus.bundleRef` field.
+
+The digest the CLI prints is the OCI **manifest** digest, not a layer hash. The controller pulls by that digest, so a tampered registry cannot serve different bytes than what the signer signed.
+
+### Verification path (every reconcile)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Op as Operator (you)
+  participant K as Kubernetes API
+  participant C as Controller (policy_fetcher)
+  participant R as OCI Registry
+  participant S as SignerPolicy (cluster CR)
+  participant CM as ConfigMap (sandbox NS)
+  participant Rt as Inference router
+
+  Op->>K: kubectl apply CR with bundleRef { digest, registry, repository }
+  K-->>C: Reconcile event
+  C->>R: Pull artifact by digest (immutable address)
+  R-->>C: Manifest + layer bytes
+  C->>C: artifactType must equal pinned media type for kind
+  C->>S: Load active SignerPolicy
+  S-->>C: Fulcio issuer + SAN/subject pattern
+  C->>C: cosign verify against SignerPolicy
+  C->>C: Re-canonicalise + verify byte digest matches manifest digest
+  C->>C: Parse canonical YAML through kind's typed deserializer
+  C->>CM: Project bytes into sandbox-NS ConfigMap with bundleRefDigest label
+  CM-->>Rt: Volume-mount or hot-reload picks up new bytes
+  Rt->>Rt: Re-canonicalise locally, POST {loaded_digest} to /internal/policy-status
+  C->>Rt: Compare router's loaded_digest vs controller's compiled digest
+  C->>K: status.bundleRefDigest = digest; condition Ready=True only on match
+```
+
+Two crypto checks always fire, and both must pass:
+
+1. **Signature check** — cosign verifies the artifact's signature was produced by an identity matching the active `SignerPolicy` (Fulcio issuer + SAN/subject pattern). A valid signature alone is not authority; the identity must match.
+2. **Canonical-format check** — the controller re-canonicalises the bytes it pulled and confirms the resulting digest equals the manifest digest the registry served. This makes registry-side tampering structurally impossible: the bytes that pass canonicalisation are byte-identical to the bytes that were signed.
+
+If either check fails, the CR is stamped `Degraded` with a specific reason (`SignerPolicyMismatch`, `CanonicalFormatViolation`, `ArtifactTypeMismatch`, `OciPullError`, …) and the controller does **not** project the bytes. The previously-projected (verified) bundle stays in place; the router keeps enforcing whatever it last verified.
+
+### Ready ⇔ router echo
+
+For every kind in this signing surface, the controller flips the CR's `Ready` condition to `True` only when the router has POSTed back the **same digest** the controller compiled. The router's POST to `/internal/policy-status` is bearer-token gated (per-sandbox secret, constant-time comparison, optional source-IP pin). This closes the loop end-to-end: "what's in the YAML" → "what the controller verified and projected" → "what the runtime is actually enforcing" must agree, or the CR is not `Ready`.
+
+You can verify the loop on any deployed CR:
+
+```bash
+# Controller's compiled digest (what was verified)
+kubectl get inferencepolicy <name> -n <ns> -o jsonpath='{.status.bundleRefDigest}'
+
+# Router's loaded digest (what's enforcing)
+kubectl exec deploy/<sandbox> -c inference-router -n azureclaw-<sandbox> -- \
+  curl -sf -H "Authorization: Bearer $TOKEN" http://localhost:8443/internal/policy-status \
+  | jq '.policies.inference.loaded_digest'
+```
+
+If those two values disagree, the CR will not be `Ready` — by construction.
+
+### Inline-signed CRDs (A2AAgent, TrustGraph)
+
+Two CRDs carry their cryptographic material inline rather than via OCI:
+
+* **`A2AAgent.spec.signingKeys[]`** — Ed25519 public keys (`alg: EdDSA`, base64url-encoded, 32 bytes after decode, unique `kid` per CR). The router builds an in-memory verifier keyed by `kid` and rejects inbound A2A 1.0.0 requests whose JWS detached signature doesn't verify against one of these keys.
+* **`TrustGraph.spec.edges[].signature`** — Ed25519 signature per edge, computed over canonical bytes prefixed by the domain separator `trustgraph.v1\n`. Each edge's signature is checked against the source vertex's `publicKeyB64u`; invalid edges are dropped silently from the projected graph.
+
+Both inline paths avoid OCI for the same operational reason: the material is small, sandbox-scoped, and benefits from being editable in the YAML you already have under review. The OCI/cosign path exists for bundles where the *content* is large, evolves on its own schedule, and is worth pinning by immutable digest (the policy kinds above).
+
+### Hot-reload, never-trust-bytes-twice
+
+The router watches its mounted ConfigMaps. When the controller updates the projection (because you bumped a `bundleRef` to a new digest, or because the cluster's `SignerPolicy` changed and an old bundle stopped passing verification), the router re-canonicalises the new bytes locally and POSTs the freshly-loaded digest back to the controller. The controller flips `Ready` only on a match. There is no "trust on first load" — the router re-validates on every reload.
 
 ---
 
@@ -406,7 +496,7 @@ To trigger a one-shot run without a schedule, add the `azureclaw.azure.com/run-n
 
 Cluster-scoped. Declares vertices (agent identities + Ed25519 public keys) and **signed** edges (`from → to` attestations carrying a trust score). The reconciler verifies each edge's signature against the source vertex's public key, drops invalid edges, and projects the verified subset into a per-sandbox ConfigMap at `/etc/azureclaw/trustgraph/graph.json`.
 
-> **Status — v1alpha1 (reconciler-only).** The controller validates the graph and projects it into every sandbox that references it. The **router does not yet read the projected graph**; trust scores are managed in-router from KNOCK accept/deny outcomes and persisted to `/tmp/agt/trust_scores.json`. Live edge updates require a sandbox roll. Closing this loop (router-side reload on graph mutation + KNOCK gate using the projected graph) is tracked as **v1.1** — see [`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades). Today this CRD is useful as a declarative source-of-record for trust intent and as a static projection at sandbox creation time; **it is not yet a runtime enforcement surface**.
+> **Status — v1alpha1 (reconciler-only).** The controller validates the graph and projects it into every sandbox that references it. The **router does not yet read the projected graph**. The router keeps a post-decision trust-score map at `/tmp/agt/trust_scores.json`, populated from KNOCK outcomes the agent SDK reports out-of-band — this is for audit and rate-limit only; the actual KNOCK accept/deny decision lives inside the Signal session the agent owns (the router cannot decrypt it). Live edge updates require a sandbox roll. Closing this loop in **v1.1** adds router-side **mesh-admission gating** against the projected graph (refuse to WS-bridge an edge not in the graph — a separate, coarser layer that complements agent-side KNOCK, never replaces it) — see [`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades). Today this CRD is useful as a declarative source-of-record for trust intent and as a static projection at sandbox creation time; **it is not yet a runtime enforcement surface**.
 
 ```yaml
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -519,6 +609,7 @@ If anything fails, the failing phase is reflected as a condition with a `Reason`
 ## See also
 
 - **[Architecture](../architecture.md)** — the prose explanation.
+- **[CRD trust model](../security/crd-trust-model.md)** — the threat model and verification proof behind the [Signing and verification](#signing-and-verification) section above.
 - **[Runtimes](../runtimes.md)** — the runtime catalog and BYO contract.
 - **[Conditions reference](conditions.md)** — every status condition.
 - **[Backwards compatibility](backwards-compatibility.md)** — what we promise to keep.

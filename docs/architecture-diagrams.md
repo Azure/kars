@@ -62,7 +62,7 @@ flowchart TB
   Router -->|exchange SA→AAD| WI
   WI -.->|no keys on disk| Router
   Router -->|HTTPS, AAD token| Foundry
-  Router -->|WS, encrypted| Mesh
+  Router -->|WS, opaque ciphertext (agent-sourced)| Mesh
   Router -->|HTTPS| A2A
 
   classDef cluster fill:#e6f0ff,stroke:#0078d4
@@ -114,42 +114,49 @@ signing of the chain head is on the roadmap (see [security.md](security.md#the-h
 
 ## 4. The mesh — encrypted inter-agent messaging
 
-Two AzureClaw agents in (possibly) different clusters that need to talk.
+Two AzureClaw agents in (possibly) different clusters that need to talk. The Signal-Protocol session (X3DH key agreement, Double Ratchet, KNOCK trust evaluation) lives **entirely inside the agent process** via `@microsoft/agent-governance-sdk`. The router is a transparent WebSocket bridge to the AgentMesh relay — it forwards opaque ciphertext, never holds a session key, and cannot decrypt. The relay is the same: ciphertext in, ciphertext out.
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant A as Alice agent
-  participant Ar as Alice router
+  participant A as Alice agent<br/>(holds Signal session)
+  participant Ar as Alice router<br/>(WS bridge only)
   participant Reg as AgentMesh registry
   participant Rel as AgentMesh relay
-  participant Br as Bob router
-  participant B as Bob agent
+  participant Br as Bob router<br/>(WS bridge only)
+  participant B as Bob agent<br/>(holds Signal session)
 
   Note over A,B: Setup (once per agent)
-  A->>Ar: register identity + prekeys
-  Ar->>Reg: PUT /agents/alice (Ed25519 sig)
-  B->>Br: register identity + prekeys
-  Br->>Reg: PUT /agents/bob
+  A->>A: generate Ed25519 + X25519 + prekeys
+  A->>Ar: PUT /agt/registry/agents/alice (signed prekey bundle)
+  Ar->>Reg: forward (HTTPS)
+  B->>B: generate identity + prekeys
+  B->>Br: PUT /agt/registry/agents/bob
+  Br->>Reg: forward
 
-  Note over A,B: Session
-  A->>Ar: send msg → bob
-  Ar->>Reg: GET /agents/bob/prekeys
+  Note over A,B: Session establishment + send
+  A->>Ar: GET /agt/registry/agents/bob/prekeys
+  Ar->>Reg: forward
   Reg-->>Ar: signed prekeys
-  Ar->>Ar: X3DH → shared secret
-  Ar->>Rel: KNOCK + ciphertext (E2E)
+  Ar-->>A: signed prekeys
+  A->>A: X3DH → shared secret · init Double Ratchet · encrypt
+  A->>Ar: WS /agt/relay → KNOCK + ciphertext
+  Ar->>Rel: WS bytes (opaque)
   Rel->>Br: forward ciphertext (relay sees nothing)
-  Br->>Br: trust score check (AGT_TRUST_THRESHOLD)
+  Br->>B: WS bytes (opaque)
+  B->>B: trust score check (AGT_TRUST_THRESHOLD) · X3DH responder · decrypt
   alt accept
-    Br->>B: deliver plaintext
-    B-->>Br: reply
-    Br->>Rel: ratcheted ciphertext
-    Rel->>Ar: forward
-    Ar-->>A: plaintext reply
+    B-->>Br: ratcheted ciphertext (reply)
+    Br-->>Rel: WS bytes (opaque)
+    Rel-->>Ar: forward
+    Ar-->>A: WS bytes (opaque)
+    A->>A: decrypt with current ratchet key
   else deny
-    Br-->>Rel: KNOCK denied (audit)
+    B-->>Rel: KNOCK denied (audit)
   end
 ```
+
+**Session ownership:** the SDK is loaded by the agent's runtime (e.g., `runtimes/openai-agents/.../mesh.py::MeshClient`, the OpenClaw plugin), under UID 1000 in its own container. The router (UID 1001) runs `inference-router/src/routes/mesh.rs::relay_websocket_bridge` — pure byte-shuffling, no crypto. A compromise of the router (or the relay) leaks routing metadata only.
 
 **Forward secrecy:** every message after the first uses a fresh key derived by the Double Ratchet. **Authenticated:** every message carries a libsodium MAC. **Relay-blind:** the relay can route, count, and rate-limit, but cannot read. **Trust-gated:** AGT decides per-peer whether the KNOCK is accepted.
 
@@ -238,7 +245,7 @@ flowchart TB
 
 `ClawSandbox` is the unit of work; the other CRDs bind policy, identity, peers, evaluation, or break-glass egress to it. You can build a complete deployment with just `ClawSandbox` + `ToolPolicy` + `InferencePolicy`; the rest are opt-in for richer scenarios.
 
-`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/azureclaw/trustgraph/graph.json`). It is not referenced by name from a `ClawSandbox` spec — it applies cluster-wide. Router-side KNOCK gating against the graph is tracked for v1.1; today the router tracks trust scores from KNOCK outcomes in-memory (see CRD reference §TrustGraph).
+`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/azureclaw/trustgraph/graph.json`). It is not referenced by name from a `ClawSandbox` spec — it applies cluster-wide. **Router-side mesh-admission gating** against the projected graph (refuse to bridge a WS for an edge not in the graph) is tracked for v1.1. This is not KNOCK gating — KNOCK lives inside the Signal session the agent owns end-to-end and the router never sees it. Today the router keeps a post-decision trust-score map populated from KNOCK outcomes the agent reports out-of-band, for audit and rate-limit purposes only (see CRD reference §TrustGraph).
 
 Schema details in **[`docs/api/crd-reference.md`](api/crd-reference.md)**.
 
@@ -272,8 +279,8 @@ flowchart TB
 
   CtrlPod -.->|reconciles| Tenant1
   CtrlPod -.->|reconciles| TenantN
-  Pod1 -->|encrypted| Relay
-  PodN -->|encrypted| Relay
+  Pod1 -->|WS, opaque ciphertext| Relay
+  PodN -->|WS, opaque ciphertext| Relay
   Pod1 -->|HTTPS, WI| Foundry
   PodN -->|HTTPS, WI| Foundry
   GwPod -->|in-cluster| Pod1

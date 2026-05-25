@@ -1,0 +1,37 @@
+# 04-mcpserver.yaml — register an external MCP server the analyst can
+# call alongside foundry_web_search. We use DeepWiki's hosted MCP
+# (https://mcp.deepwiki.com/mcp), which serves
+# `read_wiki_structure` / `read_wiki_contents` / `ask_question` over
+# Streamable HTTP. It is public, no-auth, and lets the analyst pull
+# structured docs for any indexed GitHub repo — perfect complement to
+# foundry_web_search for the platform deep-dives the prompt requires
+# (AzureClaw, OpenAI Sandboxes, AKS Confidential Containers, …).
+#
+# Auth: this MCP is public and unauthenticated. For production, switch
+# `oauth.issuer` to your IDP and the controller will wire JWKS rotation
+# and signed bearer tokens via the inference router.
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: McpServer
+metadata:
+  name: execbrief-deepwiki
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/sandbox: execbrief
+spec:
+  # Real, hosted, public Streamable-HTTP MCP. Validated in browser as of
+  # 2026-Q2; if it ever goes down, swap for any other hosted MCP in
+  # https://github.com/modelcontextprotocol/servers or stand up the
+  # `fetch` reference server in-cluster.
+  url: "https://mcp.deepwiki.com/mcp"
+  # Tools advertised by deepwiki — pin explicitly so an upstream change
+  # cannot widen the surface without a CR edit.
+  allowedTools:
+    - read_wiki_structure
+    - read_wiki_contents
+    - ask_question
+  allowedSandboxes:
+    matchLabels:
+      azureclaw.azure.com/sandbox: execbrief
+  productionMode: false
+  displayName: "DeepWiki (exec-brief platform docs)"

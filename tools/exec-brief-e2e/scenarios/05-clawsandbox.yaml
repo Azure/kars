@@ -1,0 +1,117 @@
+# 05-clawsandbox.yaml — the actual sandbox that runs the executive-brief
+# pipeline. Three sub-agents (analyst, viz, writer) are spawned at
+# runtime by the parent agent based on the prompt's coordination
+# protocol; they share the inference router on 127.0.0.1:8443, the
+# AgentMesh relay (proxied through /agt/relay), and the Foundry
+# data-plane (proxied through /foundry/*).
+#
+# Channels: Telegram is enabled so the parent agent can post the
+# milestone status pings the prompt asks for. The bot token lives in a
+# K8s Secret named "execbrief-credentials" (created by `azureclaw
+# credentials update execbrief --telegram-token ...` or out of band).
+---
+apiVersion: azureclaw.azure.com/v1alpha1
+kind: ClawSandbox
+metadata:
+  name: execbrief
+  namespace: azureclaw-system
+  labels:
+    azureclaw.azure.com/channels: telegram
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      version: "2026.3.13"
+      # Do NOT pin `image:` here — the controller fills it from the
+      # `SANDBOX_IMAGE` env var on its own deployment (set by
+      # `azureclaw up` to `<your-acr>/openclaw-sandbox:latest`). A
+      # hard-coded image with the wrong ACR registry causes
+      # ImagePullBackOff and is the kind of drift the
+      # "image tags: always use :latest, never hardcode" convention
+      # exists to prevent.
+      config:
+        agent:
+          model: "azure/gpt-5.4"
+
+  sandbox:
+    isolation: "enhanced"
+    seccompProfile: "azureclaw-strict"
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    writablePaths:
+      - /sandbox
+      - /tmp
+
+  inferenceRef:
+    name: execbrief-inference
+
+  # Behavioral governance: turn the AGT in-pod plugin on and bind it
+  # to the single ToolPolicy CR that carries the AGT profile. The
+  # controller resolves `toolPolicyRef.name` in this ClawSandbox's
+  # namespace (azureclaw-system) and mounts the compiled profile at
+  # /etc/agt/policies/agt-profile.yaml inside the sandbox; the runtime
+  # plugin reads it and gates every tool call. Without this block the
+  # ToolPolicy CR is dead weight (reconciler/mod.rs:570 — governance
+  # off ⇒ ref unread).
+  #
+  # `mcpServerRefs` is the consumer side of the McpServer CRD — it
+  # tells the controller to mirror the DeepWiki MCP's per-server
+  # ConfigMap/Secret into the sandbox namespace and mount them into
+  # the inference-router so it can dispatch `read_wiki_*` /
+  # `ask_question` calls to https://mcp.deepwiki.com/mcp.
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: execbrief-toolpolicy
+    mcpServerRefs:
+      - name: execbrief-deepwiki
+    # Anonymous tier (no Entra api://agentmesh app reg) ⇒ peer trust
+    # score is 0. Threshold 0 keeps KNOCK accept-all for the demo;
+    # production should set this to 500+ once mesh setup-trust is run.
+    trustThreshold: 0
+
+  # Egress: actively enforced. Foundry, AgentMesh relay/registry, and
+  # the McpServer fetch endpoint are all reached via the inference
+  # router proxy on loopback (127.0.0.1), so they do NOT appear here —
+  # this list is sandbox→external direct egress only.
+  #
+  # egressMode: Strict ⇒ the controller renders a real K8s NetworkPolicy
+  # whose egress rules are the closure of allowedEndpoints; anything off
+  # the list is dropped at the pod boundary. Flipping to Learn temporarily
+  # is the right move while bootstrapping a new channel/plugin so you can
+  # see what it actually reaches in `BlockedBuffer`.
+  #
+  # In production this list is typically replaced by an `allowlistRef`
+  # pointing at a cosign-signed OCI artifact (see `azureclaw egress sign`)
+  # so the policy is content-addressed and tamper-evident. We keep it
+  # inline here so the harness needs no out-of-band signing step.
+  networkPolicy:
+    defaultDeny: true
+    egressMode: Strict
+    allowedEndpoints:
+      # Telegram Bot API — channel plugin posts the status pings the
+      # prompt requires. The channel runs in-process in openclaw, not
+      # through the router, so it needs a real sandbox egress rule.
+      - host: "api.telegram.org"
+        port: 443
+      # DeepWiki MCP — the McpServer CR points at this host; the
+      # router forwards MCP traffic but name-resolution + connect
+      # happen from the pod's network namespace.
+      - host: "mcp.deepwiki.com"
+        port: 443
+
+  # Azure services accessible via Managed Identity from inside the
+  # sandbox. ai-foundry covers inference + memory + image-gen + code-exec.
+  azureServices:
+    - service: ai-foundry
+      permissions: [inference, evaluate, memory]
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      # Sub-agent fan-out spikes CPU during the analyst's web crawl.
+      cpu: "4"
+      memory: "8Gi"

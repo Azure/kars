@@ -138,8 +138,13 @@ accepted and surfaced but not yet aggregated — see
 `status.validEdges` / `invalidEdges` count what passed and what was
 dropped; failing edge IDs are surfaced in controller logs (the count
 is also surfaced in events). v1alpha1 is reconciler-only — Ready does
-**not** today imply the router consumes the projection (KNOCK still
-uses an in-router score map). See the [`TrustGraph` CRD entry](crd-reference.md#trustgraph--mesh-trust-topology).
+**not** today imply the router consumes the projection. KNOCK
+accept/deny stays agent-side (the router cannot decrypt the Signal
+session); the router-side post-decision score map exists for audit
+only. **v1.1** adds router-side mesh-admission gating against the
+projected graph — a separate, coarser pre-handshake layer that
+complements agent-side KNOCK, not a replacement for it. See the
+[`TrustGraph` CRD entry](crd-reference.md#trustgraph--mesh-trust-topology).
 
 ## EgressApproval
 

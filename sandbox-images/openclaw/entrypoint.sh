@@ -761,7 +761,7 @@ ANTHEOF
     "defaults": {
       "model": { "primary": "${_PRIMARY_MODEL_REF}" },
       "imageGenerationModel": "azure-openai/gpt-image-1",
-      "timeoutSeconds": 300,
+      "timeoutSeconds": 1500,
       "systemPromptOverride": ${SYSTEM_PROMPT_JSON},
       "memorySearch": {
         "enabled": true,
@@ -779,6 +779,12 @@ ANTHEOF
     "bind": "lan",
     "auth": {
       "mode": "token"
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": { "enabled": true },
+        "responses": { "enabled": true }
+      }
     },
     "controlUi": {
       "enabled": true,

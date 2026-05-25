@@ -351,7 +351,10 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
     label: "Foundry Image Generation",
     description:
       "Generate images from text prompts via Azure AI Foundry's image_generation tool. " +
-      "Supports any deployed image model (gpt-image-1, FLUX.2-pro, etc.). Returns base64-encoded image data. " +
+      "Supports any deployed image model (gpt-image-1, FLUX.2-pro, etc.). " +
+      "Images are decoded from base64 and saved under " +
+      "`/sandbox/.openclaw/workspace/<output_filename>` (default `image-<ts>.png`) " +
+      "so the returned `path` is directly usable with `azureclaw_mesh_transfer_file`. " +
       "Use when the user asks to create, draw, or generate an image, diagram, or visual.",
     parameters: {
       type: "object",
@@ -373,6 +376,13 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
         image_model: {
           type: "string",
           description: "Image generation model deployment name (default: 'gpt-image-1').",
+        },
+        output_filename: {
+          type: "string",
+          description:
+            "Optional stable filename (no directory components, .png recommended) under " +
+            "/sandbox/.openclaw/workspace/. Defaults to image-<ts>.png. Use a stable name " +
+            "like 'hero.png' when you need to mesh_transfer_file the result downstream.",
         },
       },
       required: ["prompt"],
@@ -397,18 +407,35 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
         const parts: string[] = [];
         const fs = await import("node:fs");
         const nodePath = await import("node:path");
-        const os = await import("node:os");
-        const imgDir = nodePath.join(os.tmpdir(), "azureclaw-images");
-        fs.mkdirSync(imgDir, { recursive: true });
+        // Persist into the sandbox workspace so the file is directly visible
+        // to the agent FS and can be handed to azureclaw_mesh_transfer_file
+        // without a copy step. Matches the foundry_code_execute download path.
+        const workspaceDir = "/sandbox/.openclaw/workspace";
+        try { fs.mkdirSync(workspaceDir, { recursive: true }); } catch { /* exists */ }
 
+        // Sanitise caller-supplied filename: keep basename only, default to .png
+        const rawName = typeof params.output_filename === "string" ? params.output_filename.trim() : "";
+        const safeBase = rawName
+          ? nodePath.basename(rawName).replace(/[^A-Za-z0-9._-]+/g, "_")
+          : "";
+        const defaultName = `image-${Date.now()}.png`;
+        const baseName = safeBase || defaultName;
+
+        let idx = 0;
         for (const img of images) {
           if (img.b64_json) {
-            // Save image to temp file so user can view it
-            const ts = Date.now();
-            const imgFile = nodePath.join(imgDir, `image-${ts}.png`);
-            fs.writeFileSync(imgFile, Buffer.from(img.b64_json, "base64"));
-            parts.push(`📁 Image saved: ${imgFile}`);
+            // When multiple images come back, suffix the stable name with -N
+            // so the caller never silently overwrites a previous file.
+            const fileName = images.length > 1 && idx > 0
+              ? baseName.replace(/(\.[A-Za-z0-9]+)?$/, (m: string) => `-${idx}${m || ".png"}`)
+              : baseName;
+            const imgFile = nodePath.join(workspaceDir, fileName);
+            const bytes = Buffer.from(img.b64_json, "base64");
+            fs.writeFileSync(imgFile, bytes);
+            parts.push(`📁 Image saved: ${imgFile} (${bytes.length} bytes)`);
+            parts.push(`path: ${imgFile}`);
             if (img.revised_prompt) parts.push(`Revised prompt: ${img.revised_prompt}`);
+            idx++;
           } else if (img.url) {
             parts.push(`![Generated Image](${img.url})`);
             parts.push(`Image URL: ${img.url}`);
