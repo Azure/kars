@@ -136,6 +136,21 @@ for sub in "${SUBAGENT_NAMES[@]}"; do
             | while IFS= read -r line; do emit "POD-${sub}" "${C_POD}" "${line}"; done
     ) &
     PIDS+=($!)
+    (
+        # Also tail the sub-agent's inference-router so foundry tool usage
+        # (code_execute, image_generation, /openai/responses, /openai/containers)
+        # shows up in trace.jsonl for verify.py. Without this, sub-agent
+        # foundry calls are invisible and check_hero / check_chart misfire.
+        deadline=$(( $(date +%s) + 600 ))
+        until kubectl get deploy -n "azureclaw-${sub}" "${sub}" >/dev/null 2>&1; do
+            [ "$(date +%s)" -gt "${deadline}" ] && exit 0
+            sleep 5
+        done
+        kubectl logs -n "azureclaw-${sub}" "deploy/${sub}" \
+            -c inference-router -f --tail=5 2>/dev/null \
+            | while IFS= read -r line; do emit "ROUTER" "${C_ROUTER}" "${line}"; done
+    ) &
+    PIDS+=($!)
 done
 
 # Block until SIGINT.
