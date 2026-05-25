@@ -56,15 +56,63 @@ platform_credentials() {
 }
 
 platform_wait_for_sandbox() {
+    # Sticky-inbox guard: sandbox pods accumulate state across runs (the
+    # AGT mesh inbox holds peer messages until the container restarts).
+    # A stale `from_agent: analyst` message left by a prior run can make
+    # the new run's mesh_await(senders=['analyst']) match instantly,
+    # which causes the consumer agent to skip waiting and surface a
+    # false-positive `blocked: file_read unavailable` to the parent
+    # (the file simply hasn't arrived yet from THIS run's analyst). We
+    # rollout-restart the parent and any declared sub-agents to force
+    # fresh containers before posting the prompt. Disable by setting
+    # SKIP_SANDBOX_RESTART=1 (e.g. for iterating on the harness itself).
+    if [ "${SKIP_SANDBOX_RESTART:-0}" != "1" ]; then
+        log "rollout-restarting sandbox pods for clean inbox state"
+        local targets=("${SCENARIO_SANDBOX}" "${SCENARIO_SUB_SANDBOXES[@]}")
+        for name in "${targets[@]}"; do
+            local ns="azureclaw-${name}"
+            kubectl get deploy -n "${ns}" "${name}" >/dev/null 2>&1 || continue
+            kubectl rollout restart -n "${ns}" "deploy/${name}" \
+                >>"${OUT_DIR}/apply.log" 2>&1 || true
+        done
+    else
+        log "SKIP_SANDBOX_RESTART=1 — reusing existing pods (inbox may be stale)"
+    fi
+
     log "waiting for ClawSandbox/${SCENARIO_SANDBOX} → Ready (timeout 600s)"
     kubectl wait --for=condition=Ready \
         "clawsandbox/${SCENARIO_SANDBOX}" \
         --namespace azureclaw-system \
         --timeout=600s || { log "ERR sandbox not Ready in time"; exit 3; }
+
+    if [ "${SKIP_SANDBOX_RESTART:-0}" != "1" ]; then
+        # `kubectl wait deploy --for=Available` can flip true on the OLD
+        # replicaset while the rollout-restart's NEW replicaset is still
+        # spinning up — the harness then port-forwards onto a terminating
+        # pod and gets "Empty reply from server". Block on rollout status
+        # for the PARENT deploy first so we are talking to the new pod.
+        kubectl rollout status \
+            -n "azureclaw-${SCENARIO_SANDBOX}" \
+            "deploy/${SCENARIO_SANDBOX}" \
+            --timeout=300s >>"${OUT_DIR}/apply.log" 2>&1 || true
+    fi
+
     kubectl wait --for=condition=Available \
         "deploy/${SCENARIO_SANDBOX}" \
         --namespace "azureclaw-${SCENARIO_SANDBOX}" \
         --timeout=300s || { log "ERR deployment not Available in time"; exit 3; }
+
+    if [ "${SKIP_SANDBOX_RESTART:-0}" != "1" ]; then
+        # Also wait for sub-agent deployments to settle after the
+        # rollout-restart so they are reachable by the time the parent
+        # spawns its first peer message.
+        for name in "${SCENARIO_SUB_SANDBOXES[@]}"; do
+            local ns="azureclaw-${name}"
+            kubectl get deploy -n "${ns}" "${name}" >/dev/null 2>&1 || continue
+            kubectl rollout status -n "${ns}" "deploy/${name}" \
+                --timeout=300s >>"${OUT_DIR}/apply.log" 2>&1 || true
+        done
+    fi
     log "sandbox Ready"
 }
 
@@ -221,5 +269,42 @@ platform_collect_artifacts() {
             azureclaw.azure.com/break-glass- \
             >/dev/null 2>&1 || true
     done
+
+    # ── Build trace.jsonl that verify.py's check suite consumes ──────────
+    # We dump time-windowed kubectl logs for every source verify.py is
+    # interested in (ROUTER, RELAY, CTRL, POD-*) as JSONL lines tagged
+    # with `src`. The window starts at RUN_START_TS (captured by drive.sh
+    # before manifests were applied), so log noise from prior runs on the
+    # same long-lived pods is excluded — this is the key fix for the
+    # router_lines-empty drift that made image/MCP/code-exec checks fall
+    # to 0 despite the run actually succeeding.
+    local trace="${OUT_DIR}/trace.jsonl"
+    : >"${trace}"
+    _emit_logs_as_trace() {
+        local src="$1" ns="$2" selector="$3"
+        kubectl logs -n "${ns}" "${selector}" \
+            --since-time="${RUN_START_TS}" \
+            --all-containers=true --prefix=false --tail=-1 \
+            2>/dev/null \
+        | python3 -c '
+import json, sys
+src = sys.argv[1]
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    print(json.dumps({"src": src, "msg": line}))
+' "${src}" >>"${trace}" || true
+    }
+    # Per-sandbox routers (each sandbox has its own inference-router sidecar)
+    for s in "${SCENARIO_SANDBOX}" "${SCENARIO_SUB_SANDBOXES[@]}"; do
+        [ -z "$s" ] && continue
+        _emit_logs_as_trace "ROUTER" "azureclaw-${s}" "deploy/${s}"
+    done
+    # Cluster-shared services
+    _emit_logs_as_trace "RELAY" "agentmesh" "deploy/agentmesh-relay"
+    _emit_logs_as_trace "REGISTRY" "agentmesh" "deploy/agentmesh-registry"
+    _emit_logs_as_trace "CTRL" "azureclaw-system" "deploy/azureclaw-controller"
+    log "trace.jsonl assembled ($(wc -l <"${trace}" | tr -d ' ') lines)"
     log "artifacts collected"
 }
