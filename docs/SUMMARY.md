@@ -7,6 +7,7 @@
 - [Getting started](getting-started.md)
 - [CLI reference](cli-reference.md)
 - [Use cases](use-cases.md)
+  - [Exec-brief walkthrough](use-cases/exec-brief-walkthrough.md)
 
 # Architecture
 
@@ -24,6 +25,7 @@
 - [Security overview](security.md)
 - [STRIDE × trust boundaries](security/stride.md)
 - [Red team playbook](security/red-team.md)
+- [CRD trust model](security/crd-trust-model.md)
 - [Security validation](security-validation.md)
 - [MCP top-10](security-mcp-top10.md)
 - [Upstream alignment](upstream-alignment.md)
