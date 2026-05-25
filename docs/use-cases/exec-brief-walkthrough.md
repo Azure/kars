@@ -192,33 +192,59 @@ kubectl get secret -n azureclaw-execbrief-analyst telegram-credentials 2>&1 | he
 
 ## Platform support — what runs where today
 
-This scenario was validated on **AKS**. The platform matrix below is honest about what already works on each platform and what's pending.
+This scenario has been validated **9/9 PASS on both AKS and local-k8s**. The platform matrix below is honest about what already works on each platform and what's pending.
 
 | Layer | AKS | `local-k8s` (kind + controller) | `docker` (single-host) |
 |---|---|---|---|
 | Signed-CRD verification (controller + router echo) | ✅ | ✅ (same controller image, same cosign chain) | n/a (no CRDs; router still loads signed bundles from disk) |
 | iptables egress-guard (init container) | ✅ | ✅ | ✅ (requires NET_ADMIN on the container — granted by `azureclaw dev`) |
 | Router L7 allow-list | ✅ | ✅ | ✅ (mounted from disk, same allow-list shape) |
-| K8s NetworkPolicy ingress | ✅ (Cilium dataplane) | ⚠ (kindnetd doesn't enforce NP; toggle Cilium chart for parity — pending) | n/a |
+| K8s NetworkPolicy ingress | ✅ (Cilium dataplane) | ✅ (kindnet enforces NetworkPolicy — verified via PodMonitor allow-list) | n/a |
 | Mesh E2E encryption | ✅ (cluster-internal relay) | ✅ (local relay + registry in the kind cluster) | ✅ (local relay + registry as docker containers) |
 | Foundry hosted tools | ✅ (Workload Identity) | ⚠ (works if you wire an Azure connection string; no WI inside kind) | ⚠ (same — works with an env-var key for dev only) |
 | seccomp profile | ✅ | ✅ | ⚠ (depends on docker's default seccomp; matches AKS for `RuntimeDefault`) |
 | Telegram + other channels | ✅ | ✅ | ✅ |
+| Observability (Prometheus + Grafana + Headlamp plugin) | ⚠ (Azure Monitor managed Prometheus — wiring pending) | ✅ (bundled with `azureclaw dev`) | n/a |
 
-The reproducible end-to-end harness is currently AKS-only. Generalising it to `local-k8s` (a kind cluster with the controller + Cilium) and `docker` (no CRDs; signed bundles loaded from disk) is the next milestone — see the open todos `harness-generalize`, `harness-local-k8s`, and `harness-docker` in the [project board](https://github.com/Azure/azureclaw/issues).
+The reproducible end-to-end harness now runs on **AKS** and **local-k8s** (kind + controller). The `docker` platform is scaffolded in `tools/e2e-harness/platforms/docker.sh` and pending its first 9/9 validation run.
+
+## What you can see while it runs (Headlamp + Grafana)
+
+The four sub-agents and their inter-agent traffic are observable end-to-end without any extra setup on local-k8s — `azureclaw dev` installs Prometheus + Grafana + the AzureClaw Headlamp plugin on first run.
+
+| View | URL (after `azureclaw dev`) | Shows |
+|---|---|---|
+| Headlamp → AzureClaw → **Overview** | `http://localhost:4466/` | Cluster-wide rollup: sandbox count, aggregate token budget vs spend, AGT decisions over time. |
+| Headlamp → AzureClaw → **Mesh Topology** | same | Parent → sub-agent hierarchy as a live SVG. Edge thickness ∝ mesh-message rate; two-direction animated pulses (yellow=sent, light-blue=received) show real KNOCK + X3DH + `mesh_send` + heartbeat traffic; node labels show lifetime `↑sent ↓recv` counts. Controllers are decorated with `N children · M trust` from the AGT trust graph. |
+| Headlamp → any **ClawSandbox** | same | Per-sandbox detail page with the embedded Grafana ops dashboard filtered to that sandbox, plus a Token Budget card backed by `azureclaw_tokens_total` and `TOKEN_BUDGET_DAILY`. Dark-mode aware. |
+| Grafana — "AzureClaw — Agent Fleet Operations" | `http://localhost:3000/d/azureclaw-ops` | Enterprise NOC layout: fleet health (req/sec, error rate, P95, 24h tokens, est. cost), token & cost economy, latency SLO heatmap, AGT decisions over time with color-coded allow/deny/approval/rate-limit, bundle health matrix. |
+| Grafana — "AzureClaw — Sandbox Fleet Overview" | `http://localhost:3000/d/azureclaw-fleet` | Simpler 10-panel quick fleet view. |
+| Prometheus | `http://localhost:19091/` | Ad-hoc PromQL — `azureclaw_tokens_total`, `azureclaw_mesh_messages_{sent,received}_total`, `azureclaw_agt_policy_evaluations_total{decision}`, `agentmesh_relay_*`. |
+
+The mesh traffic counters (`azureclaw_mesh_messages_sent_total` / `azureclaw_mesh_messages_received_total`) are emitted by the router and count KNOCK + X3DH + `mesh_send` + 30s heartbeats. They exclude WS Ping/Pong by design — see [`.github/skills/agt-e2e-encryption/SKILL.md`](../../.github/skills/agt-e2e-encryption/SKILL.md) for the full counter semantics. On AKS the same metrics flow via Azure Monitor managed Prometheus (wiring pending).
 
 ## Running it yourself
 
-Prerequisites: an AKS cluster with AzureClaw installed (`make install`), a Telegram bot token, and an Azure AI Foundry project with web-search + code-execute + image-generation enabled. Then:
+`azureclaw dev` on **local-k8s** brings up the whole stack — controller + sandbox + AGT relay + Headlamp + Prometheus + Grafana — and the exec-brief harness can then be pointed at the running cluster:
 
 ```bash
 # from repo root
+azureclaw dev --target local-k8s        # ~3-4 min on first run (kube-prometheus-stack image pulls)
+# observe at http://localhost:4466/ (Headlamp), http://localhost:3000/ (Grafana)
+
+cd tools/e2e-harness
+SCENARIO=exec-brief PLATFORM=local-k8s ./run.sh
+```
+
+For **AKS**, prerequisites: an AKS cluster with AzureClaw installed (`make install`), a Telegram bot token, and an Azure AI Foundry project with web-search + code-execute + image-generation enabled. Then:
+
+```bash
 cd tools/e2e-harness
 SCENARIO=exec-brief PLATFORM=aks ./run.sh
 # (run.sh chains monitor + drive + verify)
 ```
 
-A passing run looks like `9/9 PASS` on stdout and `verify.json` with each check's evidence. The full transcript, JSONL trace, and any artifacts the agents produced are in `out/<timestamp>/`.
+A passing run looks like `9/9 PASS` on stdout and `verify.json` with each check's evidence. The full transcript, JSONL trace, and any artifacts the agents produced are in `out/<timestamp>/`. While the run is in progress, the Headlamp Mesh Topology view animates the parent→sub-agent traffic in real time.
 
 ## See also
 
