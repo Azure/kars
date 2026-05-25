@@ -2,7 +2,7 @@
 
 This page walks a real, reproducible end-to-end scenario: **one parent agent orchestrates three sub-agents to produce a two-page executive brief on the 2026 state of agentic AI runtimes.** It exists for one reason: when somebody asks "what does AzureClaw actually do, and what is it enforcing for me?", this is the answer you can point at, run, and observe.
 
-The scenario lives at [`tools/exec-brief-e2e/`](https://github.com/Azure/azureclaw/tree/main/tools/exec-brief-e2e). It currently runs on AKS. The platform matrix below is honest about what works where today.
+The scenario lives at [`tools/e2e-harness/scenarios/exec-brief/`](https://github.com/Azure/azureclaw/tree/main/tools/e2e-harness/scenarios/exec-brief). It currently runs on AKS. The platform matrix below is honest about what works where today.
 
 ## Scenario in one sentence
 
@@ -43,7 +43,7 @@ Every arrow that leaves a sandbox box is enforced by the runtime. Section "Per-l
 | `viz` | `azureclaw_mesh_await`, `file_read`, `foundry_code_execute` (matplotlib), `foundry_image_generation`, `azureclaw_mesh_transfer_file` × 3 | `scorecard.png` (1024×640 grouped bar chart), `hero.png` (1024×1024 generated image) |
 | `writer` | `azureclaw_mesh_await`, `file_read`, `file_write`, `azureclaw_mesh_transfer_file` × 1 | `brief.md` (~700–800 words, two pages) |
 
-The choice of tools is deliberate: the scenario is meant to make at least one of each category fire (MCP, web search, sandboxed code execution, hosted image generation, sandbox FS, encrypted mesh, channel egress). The harness's [`verify.py`](https://github.com/Azure/azureclaw/blob/main/tools/exec-brief-e2e/verify.py) checks all nine acceptance conditions and exits non-zero if any layer is silent.
+The choice of tools is deliberate: the scenario is meant to make at least one of each category fire (MCP, web search, sandboxed code execution, hosted image generation, sandbox FS, encrypted mesh, channel egress). The harness's [`verify.py`](https://github.com/Azure/azureclaw/blob/main/tools/e2e-harness/verify.py) checks all nine acceptance conditions and exits non-zero if any layer is silent.
 
 ## The 4-agent sequence
 
@@ -213,9 +213,9 @@ Prerequisites: an AKS cluster with AzureClaw installed (`make install`), a Teleg
 
 ```bash
 # from repo root
-cd tools/exec-brief-e2e
-./drive.sh        # provisions sandboxes, sends the prompt, captures trace + transcript + apply.log
-python3 verify.py # runs the 9 acceptance checks (sources, scorecard, hero, brief, mesh, MCP, foundry tools…)
+cd tools/e2e-harness
+SCENARIO=exec-brief PLATFORM=aks ./run.sh
+# (run.sh chains monitor + drive + verify)
 ```
 
 A passing run looks like `9/9 PASS` on stdout and `verify.json` with each check's evidence. The full transcript, JSONL trace, and any artifacts the agents produced are in `out/<timestamp>/`.
