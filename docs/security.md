@@ -4,6 +4,8 @@ AzureClaw is a layered control plane. Each layer enforces a specific property; t
 
 For threat-model walkthroughs, see **[STRIDE](security/stride.md)** and the **[Red-team playbook](security/red-team.md)**. For the OWASP MCP Top 10 mapping, see **[`security-mcp-top10.md`](security-mcp-top10.md)**.
 
+> **Looking for proof, not just claims?** The **[Exec-brief walkthrough →](use-cases/exec-brief-walkthrough.md#per-layer-proof)** is a live four-agent showcase that exercises every layer documented below (signed CRDs, iptables egress-guard, router L7 allow-list, K8s NetworkPolicy, mesh E2E encryption, Foundry Workload Identity, seccomp, MCP scoping, channel scoping) and prints the verify command + expected output for each. Validated 9/9 on both AKS and local-k8s.
+
 ## The headline guarantees
 
 1. **The agent does not see Azure credentials.** Even if the model emits a perfect prompt-injection payload that exfils every byte the agent process can read, it cannot exfil an Azure key — there are none.<sup>†</sup> Authentication is performed by the inference router via Workload Identity / IMDS.
