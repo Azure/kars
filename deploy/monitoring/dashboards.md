@@ -57,3 +57,46 @@ InsightsMetrics
     Tokens * 0.001 / 1000)
 | summarize TotalCost = sum(CostUSD) by sandbox, model, bin(TimeGenerated, 1d)
 ```
+
+## Mesh message counters
+
+The router exports two `IntCounter` metrics, scraped by the
+`azureclaw-sandbox-router` PodMonitor:
+
+- `azureclaw_mesh_messages_sent_total`
+- `azureclaw_mesh_messages_received_total`
+
+The `sandbox=<name>` label is injected at scrape time (relabel from
+`__meta_kubernetes_pod_label_azureclaw_azure_com_sandbox`). Each
+counter ticks **once per WebSocket frame proxied through the relay**
+(KNOCK, X3DH bundle, encrypted `mesh_send`, and the explicit
+30 s `sendHeartbeat()` tick). WebSocket Ping/Pong keepalives and
+registry HTTP calls (`/v1/agents/...`) are **not** counted.
+
+Counters live in the router process and reset on pod restart.
+A fresh sandbox typically shows `sent ≫ received` because it emits
+≥ 1 KNOCK per known peer + a 30 s heartbeat tick, while inbound is
+just the relay's KNOCK-ack until a real conversation starts.
+
+```promql
+# Per-sandbox sent rate (PromQL)
+sum by (sandbox) (rate(azureclaw_mesh_messages_sent_total[5m]))
+
+# Per-sandbox received rate
+sum by (sandbox) (rate(azureclaw_mesh_messages_received_total[5m]))
+
+# Fleet totals over 24 h
+sum(increase(azureclaw_mesh_messages_sent_total[24h]))
+sum(increase(azureclaw_mesh_messages_received_total[24h]))
+```
+
+For per-peer message attribution (sender→receiver pairs) the Rust
+router currently only exposes this via the in-process atomic
+counters reported on `/agt/status` (`trust_states[].interactions`)
+— there is no Prometheus per-pair metric yet. The Headlamp Mesh
+Topology and operator CLI both fall back to:
+
+1. **Children count** from the `azureclaw.azure.com/parent=<name>`
+   label on sub-agent CRs (deterministic, derived from the K8s API).
+2. **Trust-graph size** = `azureclaw_agt_known_agents` (populates
+   only after live traffic; resets on pod restart).

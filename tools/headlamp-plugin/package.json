@@ -1,6 +1,6 @@
 {
   "name": "azureclaw",
-  "version": "0.1.0",
+  "version": "0.5.1",
   "private": true,
   "description": "AzureClaw sidebar + CRD views for the Headlamp dashboard.",
   "license": "MIT",

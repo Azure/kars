@@ -95,6 +95,28 @@ pub static AGT_CONTENT_FLAGS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Total AGT mesh messages sent by this router (egress to relay). The `sandbox`
+/// label is added at scrape time by the PodMonitor relabeling, so the metric
+/// itself has no extra labels — one counter per router process. Used by the
+/// Headlamp Mesh Topology view + operator CLI for per-sandbox traffic.
+pub static AGT_MESH_MESSAGES_SENT: LazyLock<prometheus::IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(opts!(
+        "azureclaw_mesh_messages_sent_total",
+        "Total AGT mesh messages sent by this router to the relay"
+    ))
+    .unwrap()
+});
+
+/// Total AGT mesh messages received by this router (ingress from relay).
+/// Same labelling story as `AGT_MESH_MESSAGES_SENT`.
+pub static AGT_MESH_MESSAGES_RECEIVED: LazyLock<prometheus::IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(opts!(
+        "azureclaw_mesh_messages_received_total",
+        "Total AGT mesh messages received by this router from the relay"
+    ))
+    .unwrap()
+});
+
 /// Total TrustGraph-projection-driven trust bootstraps. Incremented
 /// once per peer whose initial AGT trust score was seeded from a
 /// controller-verified TrustGraph edge (Phase F2). Never incremented
