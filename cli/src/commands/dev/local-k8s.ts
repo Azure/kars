@@ -1341,12 +1341,29 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   await installAzureclawPlugin(tools, opts.clusterName);
   stepper.done("AzureClaw plugin installed");
 
+  // Phase 5b: Prometheus + Grafana stack so the Headlamp plugin's
+  // metric panels (mesh topology msg counts, token budgets, AGT decisions,
+  // policy bundle health) have data on first run — no manual helm dance.
+  stepper.step("Installing Prometheus + Grafana stack…");
+  await installPrometheus(tools, opts.clusterName);
+  stepper.done("Prometheus + Grafana installed");
+
   // Open Headlamp in the user's browser. Port-forward runs detached so
   // it survives the CLI command exiting; user kills it via `azureclaw dev down`
   // (Phase 6) or `pkill -f 'port-forward.*headlamp'`.
   const headlampPort = 4466;
   const headlampUrl = `http://localhost:${headlampPort}/`;
   await startHeadlampPortForward(tools, headlampPort);
+
+  // Grafana + Prometheus port-forwards so the Headlamp plugin embeds work
+  // out of the box. Grafana is exposed at :3000 (anonymous Viewer, allow_embedding
+  // enabled in the chart values below). Prometheus at :19091 for ad-hoc PromQL.
+  const grafanaPort = 3000;
+  const grafanaUrl = `http://localhost:${grafanaPort}/`;
+  const prometheusPort = 19091;
+  const prometheusUrl = `http://localhost:${prometheusPort}/`;
+  await startMonitoringPortForwards(tools, grafanaPort, prometheusPort);
+
   await openBrowser(headlampUrl);
 
   console.log("");
@@ -1356,6 +1373,16 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   console.log(`    ${chalk.cyan(headlampUrl)}  (token printed below)`);
   console.log("");
   await printHeadlampToken(tools);
+  console.log("");
+  console.log(chalk.bold("  Observability stack:"));
+  console.log(`    Grafana:    ${chalk.cyan(grafanaUrl)}   (anonymous Viewer)`);
+  console.log(`    Prometheus: ${chalk.cyan(prometheusUrl)}`);
+  console.log(
+    chalk.dim(
+      `    Default dashboards: 'AzureClaw — Sandbox Fleet Overview' (uid azureclaw-fleet)\n` +
+        `                        'AzureClaw — Agent Fleet Operations' (uid azureclaw-ops)`,
+    ),
+  );
   console.log("");
 
   // ── Phase 9: auto-create sandbox + WebUI port-forward ─────────────
@@ -1526,6 +1553,280 @@ async function installHeadlamp(tools: Tooling, clusterName: string): Promise<voi
   // Headlamp's Helm chart already creates a ClusterRoleBinding 'headlamp-admin'
   // that binds the 'headlamp' ServiceAccount to cluster-admin, so we don't
   // need to create our own. We just need to mint tokens against that SA.
+}
+
+/**
+ * Install kube-prometheus-stack + apply our PodMonitor/json-exporter/dashboard
+ * manifests so observability is wired end-to-end on first run. Mirrors the
+ * Headlamp pattern (helm template → kubectl apply, idempotent).
+ *
+ * Defaults are tuned for a kind cluster:
+ *   - AlertManager off (no UI, no PVC)
+ *   - 2d retention (kind disks are ephemeral anyway)
+ *   - Grafana: anonymous Viewer + allow_embedding so the Headlamp iframe
+ *     works without auth
+ *   - podMonitorSelectorNilUsesHelmValues=false so our PodMonitor is
+ *     discovered without label gymnastics
+ *
+ * The chart version is pinned for reproducibility. The matching Headlamp
+ * plugin (tools/headlamp-plugin) reads
+ *   azureclaw_mesh_messages_{sent,received}_total
+ *   azureclaw_tokens_total
+ *   azureclaw_agt_policy_evaluations_total
+ *   agentmesh_relay_*
+ * which all light up once the PodMonitor + json-exporter manifests below
+ * are applied.
+ */
+async function installPrometheus(tools: Tooling, clusterName: string): Promise<void> {
+  const ctx = `kind-${clusterName}`;
+
+  // Ensure namespace exists + has the labels the sandbox NetworkPolicy
+  // ingress allows scraping from (app.kubernetes.io/name=azureclaw,
+  // component=system). Without these labels kindnet would block the
+  // PodMonitor scrape on :8443.
+  try {
+    await execa(tools.kubectl, ["--context", ctx, "create", "namespace", "monitoring"]);
+  } catch {
+    // already exists — fine
+  }
+  await execa(tools.kubectl, [
+    "--context",
+    ctx,
+    "label",
+    "namespace",
+    "monitoring",
+    "app.kubernetes.io/name=azureclaw",
+    "app.kubernetes.io/component=system",
+    "--overwrite",
+  ]);
+
+  // Add the prometheus-community helm repo (idempotent).
+  try {
+    await execa(tools.helm, [
+      "repo",
+      "add",
+      "prometheus-community",
+      "https://prometheus-community.github.io/helm-charts",
+    ]);
+  } catch {
+    // already added — fine
+  }
+  await execa(tools.helm, ["repo", "update", "prometheus-community"]);
+
+  // Write a tmp values file — kube-prometheus-stack has nested keys with
+  // dots ("grafana.ini") that are painful to express via --set. Yaml is
+  // clearer and survives chart upgrades.
+  const valuesYaml = `
+alertmanager:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    # Pick up PodMonitors created elsewhere in the cluster (our deploy/monitoring/*.yaml)
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+
+grafana:
+  adminPassword: admin
+  defaultDashboardsTimezone: browser
+  service:
+    type: ClusterIP
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer
+    security:
+      allow_embedding: true
+      cookie_samesite: none
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+# Trim down for kind — full kube-state-metrics + node-exporter are kept
+# because the in-image Grafana dashboards reference them.
+defaultRules:
+  create: false
+
+kubeApiServer:
+  enabled: true
+kubelet:
+  enabled: true
+kubeControllerManager:
+  enabled: false
+coreDns:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+`.trimStart();
+
+  const KPS_CHART_VERSION = "85.3.3";
+  const tmpdir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-kps-"));
+  const valuesPath = path.join(tmpdir, "values.yaml");
+  writeFileSync(valuesPath, valuesYaml);
+
+  try {
+    const { stdout } = await execa(tools.helm, [
+      "template",
+      "kps",
+      "prometheus-community/kube-prometheus-stack",
+      "--version",
+      KPS_CHART_VERSION,
+      "--namespace",
+      "monitoring",
+      "--include-crds",
+      "--values",
+      valuesPath,
+    ]);
+    await execa(
+      tools.kubectl,
+      [
+        "--context",
+        ctx,
+        "apply",
+        "-f",
+        "-",
+        "--server-side",
+        "--force-conflicts",
+      ],
+      { input: stdout, stdio: ["pipe", "inherit", "inherit"] },
+    );
+  } finally {
+    try {
+      rmSync(tmpdir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
+  }
+
+  // Wait for Grafana to be ready (best-effort 180s — kube-prometheus-stack
+  // pulls several images on first install). Don't fail the whole dev
+  // command if it overruns; the Operator may still be reconciling Prometheus.
+  try {
+    await execa(
+      tools.kubectl,
+      [
+        "--context",
+        ctx,
+        "rollout",
+        "status",
+        "deployment/kps-grafana",
+        "-n",
+        "monitoring",
+        "--timeout=180s",
+      ],
+      { stdio: "inherit" },
+    );
+  } catch {
+    console.warn(
+      chalk.yellow(
+        "  ⚠ Grafana deployment did not become ready within 180s — observability panels may be empty until 'kubectl get pods -n monitoring' shows kps-grafana Ready.",
+      ),
+    );
+  }
+
+  // Apply our AzureClaw-specific monitoring manifests: PodMonitor for
+  // every sandbox router, prometheus-json-exporter for the AGT relay
+  // /health endpoint, and the two Grafana dashboards (fleet + ops).
+  const repoRoot = findRepoRoot(process.cwd());
+  const monitoringDir = path.join(repoRoot, "deploy", "monitoring");
+  for (const f of [
+    "podmonitor-sandbox-router.yaml",
+    "agentmesh-json-exporter.yaml",
+    "grafana-dashboard-configmap.yaml",
+  ]) {
+    const p = path.join(monitoringDir, f);
+    if (!existsSync(p)) {
+      console.warn(chalk.yellow(`  ⚠ missing ${f} — skipping`));
+      continue;
+    }
+    await execa(
+      tools.kubectl,
+      [
+        "--context",
+        ctx,
+        "apply",
+        "-f",
+        p,
+        "--server-side",
+        "--force-conflicts",
+      ],
+      { stdio: "inherit" },
+    );
+  }
+}
+
+/**
+ * Start detached `kubectl port-forward` for Grafana (3000) and Prometheus
+ * (19091) so the Headlamp plugin's iframe + ad-hoc PromQL just work
+ * after `azureclaw dev`. Same kill-existing-then-spawn pattern as the
+ * Headlamp port-forward.
+ */
+async function startMonitoringPortForwards(
+  tools: Tooling,
+  grafanaLocalPort: number,
+  prometheusLocalPort: number,
+): Promise<void> {
+  const { spawn } = await import("node:child_process");
+  const startOne = async (
+    localPort: number,
+    target: string,
+    targetPort: number,
+  ): Promise<void> => {
+    try {
+      const { stdout } = await execa("lsof", ["-ti", `:${localPort}`]);
+      for (const pid of stdout.trim().split(/\s+/).filter(Boolean)) {
+        try {
+          await execa("kill", [pid]);
+        } catch {
+          // process already gone
+        }
+      }
+    } catch {
+      // lsof returns non-zero when nothing matches — fine
+    }
+    const child = spawn(
+      tools.kubectl,
+      [
+        "port-forward",
+        "-n",
+        "monitoring",
+        target,
+        `${localPort}:${targetPort}`,
+      ],
+      {
+        detached: true,
+        stdio: "ignore",
+      },
+    );
+    child.unref();
+  };
+
+  // kps-grafana service is on :80, kps-kube-prometheus-stack-prometheus on :9090.
+  await startOne(grafanaLocalPort, "service/kps-grafana", 80);
+  await startOne(prometheusLocalPort, "service/kps-kube-prometheus-stack-prometheus", 9090);
+
+  // Give the forwards a moment to bind.
+  await new Promise((r) => setTimeout(r, 1500));
 }
 
 /**
