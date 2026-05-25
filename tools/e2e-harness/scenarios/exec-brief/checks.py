@@ -1,53 +1,40 @@
-#!/usr/bin/env python3
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 """
-verify.py — run the 7 acceptance checks from the exec-brief prompt against
-the artifacts produced by drive.sh + monitor.sh.
+scenarios/exec-brief/checks.py — the nine acceptance checks for the
+exec-brief scenario.
 
-Inputs (env or argv):
-  OUT_DIR — directory containing trace.jsonl, transcript.log, apply.log
-            (default: tools/exec-brief-e2e/out/latest)
+Loaded dynamically by `tools/e2e-harness/verify.py` via
+`SCENARIO=exec-brief` (the default). Exposes a single entry point:
 
-Output:
-  - human-readable check list to stdout
-  - machine-readable JSON to OUT_DIR/verify.json
-  - exit 0 if all 7 pass, 1 otherwise
+    get_checks() -> list[Check]
+
+Where each `Check` is a `(label, callable)` pair. The callable receives
+a `Context` (defined in `verify.py`) and returns `(ok: bool, detail: str)`.
+
+Splitting the checks into a per-scenario module keeps the generic
+harness free of scenario-specific knowledge (URL counts, foundry
+endpoints, expected sibling pairs). The harness only knows how to load
+the trace, transcript, and the scenario module.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
-import sys
+import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TYPE_CHECKING
 
-
-def load_trace(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
-
-
-def lines_for(trace: list[dict[str, Any]], src: str) -> list[str]:
-    return [e.get("msg", "") for e in trace if e.get("src") == src]
+if TYPE_CHECKING:
+    # Avoid a circular import — Context is defined in the generic verify.py.
+    from verify import Context  # type: ignore[import-not-found]
 
 
 # ─── Individual checks ────────────────────────────────────────────────────────
-def check_sources(transcript: str) -> tuple[bool, str]:
+def check_sources(ctx: "Context") -> tuple[bool, str]:
     # Distinct URLs cited in the final reply that look like they reference 2026
     # publications. Heuristic: count unique http(s) URLs in the transcript.
-    urls = set(re.findall(r"https?://[^\s)>\]]+", transcript))
+    urls = set(re.findall(r"https?://[^\s)>\]]+", ctx.transcript))
     # Drop any obvious infra noise (registry/relay/telegram api)
     noise = ("api.telegram.org", "modelcontextprotocol.io",
              "ai.azure.com", "login.microsoftonline.com", "agentmesh")
@@ -56,43 +43,43 @@ def check_sources(transcript: str) -> tuple[bool, str]:
     return ok, f"{len(clean)} distinct external URLs cited (need ≥6)"
 
 
-def check_scorecard(transcript: str) -> tuple[bool, str]:
+def check_scorecard(ctx: "Context") -> tuple[bool, str]:
     # The analyst is asked for a 4×4 scorecard. We look for either a JSON
     # block with a "metrics" key OR a markdown table mentioning the four
     # columns.
     cols = ("isolation", "egress", "attestation", "governance")
-    found = sum(1 for c in cols if c in transcript.lower())
-    has_metrics = '"metrics"' in transcript or "scorecard" in transcript.lower()
+    found = sum(1 for c in cols if c in ctx.transcript.lower())
+    has_metrics = '"metrics"' in ctx.transcript or "scorecard" in ctx.transcript.lower()
     ok = has_metrics and found == 4
     return ok, f"metrics block present={has_metrics}, axis labels found={found}/4"
 
 
-def _transfer_evidence_text(router: list[str]) -> str:
+def _transfer_evidence_text(ctx: "Context") -> str:
     """Aggregate text from sources that can witness mesh file transfers:
     - monitor.log (kubectl logs stdout; rarely contains the lines)
     - writer-incoming.txt (definitive: writer's incoming/ directory listing)
     - writer-gateway.log (file_transfer_ack JSON the writer plugin logged)
     - viz-gateway.log (mesh_transfer_file lines the viz plugin logged)
     drive.sh's collect_artifacts step writes the last three via break-glass."""
-    out_dir = Path(os.environ.get("OUT_DIR",
-        Path(__file__).parent / "out" / "latest"))
     chunks: list[str] = []
     for name in ("monitor.log", "writer-incoming.txt",
                  "writer-gateway.log", "viz-gateway.log"):
-        p = out_dir / name
+        p = ctx.out_dir / name
         if p.exists():
             chunks.append(p.read_text(errors="replace"))
     return "\n".join(chunks)
 
 
-def check_hero(transcript: str, router: list[str]) -> tuple[bool, str]:
+def check_hero(ctx: "Context") -> tuple[bool, str]:
     # Three signals, all required:
     # (1) the router actually saw a /images/generations call (with gpt-image-1)
     # (2) the brief references the hero markdown
     # (3) viz actually mesh-transferred hero.png to writer and writer ACKed it
-    image_calls = [l for l in router if "/images/generations" in l or "gpt-image-1" in l]
-    has_hero_ref = "hero" in transcript.lower() or transcript.lower().count("![") >= 1
-    evidence = _transfer_evidence_text(router)
+    image_calls = [l for l in ctx.router_lines
+                   if "/images/generations" in l or "gpt-image-1" in l]
+    has_hero_ref = ("hero" in ctx.transcript.lower()
+                    or ctx.transcript.lower().count("![") >= 1)
+    evidence = _transfer_evidence_text(ctx)
     hero_xfer = (
         ("mesh_transfer_file" in evidence and "hero.png" in evidence and "→ writer OK" in evidence)
         or ("file_name\":\"hero.png\"" in evidence and "saved_to" in evidence)
@@ -106,17 +93,17 @@ def check_hero(transcript: str, router: list[str]) -> tuple[bool, str]:
     )
 
 
-def check_chart(transcript: str, router: list[str]) -> tuple[bool, str]:
+def check_chart(ctx: "Context") -> tuple[bool, str]:
     # Foundry code-exec uses the Responses API with a `code_interpreter` tool
     # type. The router sees POST /openai/responses for the call itself and
     # then GET /openai/containers/cntr_<...>/files{,/<id>/content} for each
     # produced artifact. Counting those container hits is the cleanest signal
     # without parsing request bodies. We also verify writer received the PNG.
-    container_hits = [l for l in router if "/openai/containers/cntr_" in l]
-    legacy_hits = [l for l in router if "/code/sessions" in l
+    container_hits = [l for l in ctx.router_lines if "/openai/containers/cntr_" in l]
+    legacy_hits = [l for l in ctx.router_lines if "/code/sessions" in l
                    or "code_interpreter" in l.lower()]
     total = len(container_hits) + len(legacy_hits)
-    evidence = _transfer_evidence_text(router)
+    evidence = _transfer_evidence_text(ctx)
     chart_xfer = (
         ("mesh_transfer_file" in evidence and "scorecard.png" in evidence and "→ writer OK" in evidence)
         or ("file_name\":\"scorecard.png\"" in evidence and "saved_to" in evidence)
@@ -130,7 +117,7 @@ def check_chart(transcript: str, router: list[str]) -> tuple[bool, str]:
     )
 
 
-def check_relay_pairs(trace: list[dict[str, Any]]) -> tuple[bool, str]:
+def check_relay_pairs(ctx: "Context") -> tuple[bool, str]:
     # Encrypted blobs flow over a persistent /ws connection and the OpenClaw
     # plugin's `log.info("AGT relay: sent to X")` does NOT reach kubectl logs
     # (it goes to the in-pod gateway log file). So we fall back to live
@@ -140,10 +127,6 @@ def check_relay_pairs(trace: list[dict[str, Any]]) -> tuple[bool, str]:
     # *non-self* peer DIDs each sub-agent's plugin looked up in the registry.
     siblings = ["analyst", "viz", "writer"]
     pairs: set[frozenset[str]] = set()
-    try:
-        import subprocess
-    except Exception:
-        return False, "subprocess unavailable"
     # 1. Discover each sub-agent's pod IP so we can attribute REGISTRY lines.
     pod_ip: dict[str, str] = {}
     for sub in siblings:
@@ -179,7 +162,7 @@ def check_relay_pairs(trace: list[dict[str, Any]]) -> tuple[bool, str]:
         r"INFO:\s+(\d+\.\d+\.\d+\.\d+):\d+\s+-\s+"
         r"\"GET /v1/agents/did%3Aagentmesh%3A([a-f0-9]+)"
     )
-    reg_lines = lines_for(trace, "REGISTRY")
+    reg_lines = ctx.lines_for("REGISTRY")
     ip_to_sub = {v: k for k, v in pod_ip.items()}
     for line in reg_lines:
         m = pat.search(line)
@@ -218,53 +201,59 @@ def check_relay_pairs(trace: list[dict[str, Any]]) -> tuple[bool, str]:
                 f"{sorted(map(sorted, missing))})")
 
 
-def check_telegram(router: list[str]) -> tuple[bool, str]:
+def check_telegram(ctx: "Context") -> tuple[bool, str]:
     # Telegram channel plugin posts go through the router as outbound
     # https://api.telegram.org/bot.../sendMessage calls.
     if not any("TELEGRAM" in os.environ.get(k, "") for k in os.environ) \
        and not os.environ.get("TELEGRAM_BOT_TOKEN"):
         return True, "skipped (no TELEGRAM_BOT_TOKEN in env)"
-    posts = [l for l in router if "api.telegram.org" in l and "sendMessage" in l]
+    posts = [l for l in ctx.router_lines
+             if "api.telegram.org" in l and "sendMessage" in l]
     ok = len(posts) >= 5
     return ok, f"{len(posts)} telegram sendMessage calls (need ≥5)"
 
 
-def check_brief(transcript: str) -> tuple[bool, str]:
-    # Loose: the final reply should be ≥600 and ≤1400 words and mention both
+def check_brief(ctx: "Context") -> tuple[bool, str]:
+    # Loose: the final reply should be ≥600 and ≤1500 words and mention both
     # "hero" placement and a chart.
-    words = len(transcript.split())
-    has_chart = "chart" in transcript.lower() or "![" in transcript
-    has_hero = "hero" in transcript.lower() or transcript.lower().count("![") >= 2
+    words = len(ctx.transcript.split())
+    has_chart = "chart" in ctx.transcript.lower() or "![" in ctx.transcript
+    has_hero = ("hero" in ctx.transcript.lower()
+                or ctx.transcript.lower().count("![") >= 2)
     ok = 600 <= words <= 1500 and has_chart and has_hero
     return ok, f"{words} words; chart_ref={has_chart}; hero_ref={has_hero}"
 
 
-def check_egress_clean(trace: list[dict[str, Any]]) -> tuple[bool, str]:
+def check_egress_clean(ctx: "Context") -> tuple[bool, str]:
     # With egressMode: Strict, any sandbox→external connection to a host
     # not in `allowedEndpoints` shows up either as a NetworkPolicy drop
     # event on the pod or as a "BlockedBuffer" entry in the controller log.
     # If the run was clean (only telegram + mcp-fetch were touched), we
     # expect zero of either.
-    ctrl = lines_for(trace, "CTRL")
-    evt = lines_for(trace, "K8S-EVT")
+    ctrl = ctx.lines_for("CTRL")
+    evt = ctx.lines_for("K8S-EVT")
     denials = [l for l in ctrl if "BlockedBuffer" in l or "egress.*denied" in l.lower()]
-    drops = [l for l in evt if "NetworkPolicy" in l and ("deny" in l.lower() or "drop" in l.lower())]
+    drops = [l for l in evt if "NetworkPolicy" in l
+             and ("deny" in l.lower() or "drop" in l.lower())]
     total = len(denials) + len(drops)
     ok = total == 0
     return ok, f"controller blocked={len(denials)}, k8s netpol drops={len(drops)}"
 
 
-def check_mcp_traffic(router: list[str], transcript: str) -> tuple[bool, str]:
+def check_mcp_traffic(ctx: "Context") -> tuple[bool, str]:
     # The parent is required (Step 1a) to invoke a real DeepWiki MCP
     # `tools/call` against execbrief-deepwiki. The router proxies MCP on its
     # `/mcp/...` routes; we require at least ONE `tools/call` line (handshake
     # `initialize` / `notifications/initialized` / `tools/list` alone is no
     # longer sufficient — those happen on every router startup). DeepWiki
     # must also be cited in the brief.
-    mcp_lines = [l for l in router if "/mcp request" in l or "/mcp/" in l or "mcp.deepwiki.com" in l]
+    mcp_lines = [l for l in ctx.router_lines
+                 if "/mcp request" in l or "/mcp/" in l
+                 or "mcp.deepwiki.com" in l]
     mcp_tools_call = [l for l in mcp_lines
-                      if '"method":"tools/call"' in l or "method=tools/call" in l]
-    mentioned = "deepwiki" in transcript.lower()
+                      if '"method":"tools/call"' in l
+                      or "method=tools/call" in l]
+    mentioned = "deepwiki" in ctx.transcript.lower()
     ok = bool(mcp_tools_call) and mentioned
     return ok, (
         f"router /mcp calls={len(mcp_lines)}, "
@@ -273,57 +262,16 @@ def check_mcp_traffic(router: list[str], transcript: str) -> tuple[bool, str]:
     )
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
-CHECKS = [
-    ("≥6 distinct 2026 sources cited",      check_sources),
-    ("metrics scorecard 4×4 + axis labels", check_scorecard),
-    ("hero image via gpt-image-1 (1024²)",  check_hero),
-    ("chart via Foundry code-exec",         check_chart),
-    ("≥3 distinct sibling pairs on relay",  check_relay_pairs),
-    ("≥5 telegram status posts",            check_telegram),
-    ("brief ~900 words, hero+chart present", check_brief),
-    ("egress: 0 NetworkPolicy denials",     check_egress_clean),
-    ("MCP (DeepWiki) traffic observed",     check_mcp_traffic),
-]
-
-
-def main() -> int:
-    out_dir = Path(os.environ.get("OUT_DIR",
-        Path(__file__).parent / "out" / "latest"))
-    trace = load_trace(out_dir / "trace.jsonl")
-    transcript = (out_dir / "transcript.log").read_text(errors="replace") \
-        if (out_dir / "transcript.log").exists() else ""
-
-    router_lines = lines_for(trace, "ROUTER")
-    relay_lines = lines_for(trace, "RELAY")
-
-    results: list[dict[str, Any]] = []
-    all_ok = True
-    print(f"\nVerifying exec-brief run in {out_dir}\n" + "─" * 60)
-    for label, fn in CHECKS:
-        # adapt signature per-check
-        if fn is check_sources:           ok, detail = fn(transcript)
-        elif fn is check_scorecard:       ok, detail = fn(transcript)
-        elif fn is check_hero:            ok, detail = fn(transcript, router_lines)
-        elif fn is check_chart:           ok, detail = fn(transcript, router_lines)
-        elif fn is check_relay_pairs:     ok, detail = fn(trace)
-        elif fn is check_telegram:        ok, detail = fn(router_lines)
-        elif fn is check_brief:           ok, detail = fn(transcript)
-        elif fn is check_egress_clean:    ok, detail = fn(trace)
-        elif fn is check_mcp_traffic:     ok, detail = fn(router_lines, transcript)
-        else:                             ok, detail = (False, "unknown check")
-
-        results.append({"check": label, "passed": ok, "detail": detail})
-        mark = "✅" if ok else "❌"
-        print(f"{mark}  {label}\n      {detail}")
-        all_ok &= ok
-
-    summary = {"all_passed": all_ok, "checks": results}
-    (out_dir / "verify.json").write_text(json.dumps(summary, indent=2))
-    print("─" * 60)
-    print(f"OVERALL: {'PASS' if all_ok else 'FAIL'}  → {out_dir / 'verify.json'}")
-    return 0 if all_ok else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+# ─── Public entry point (the harness calls this) ──────────────────────────────
+def get_checks() -> list[tuple[str, Callable[["Context"], tuple[bool, str]]]]:
+    return [
+        ("≥6 distinct 2026 sources cited",       check_sources),
+        ("metrics scorecard 4×4 + axis labels",  check_scorecard),
+        ("hero image via gpt-image-1 (1024²)",   check_hero),
+        ("chart via Foundry code-exec",          check_chart),
+        ("≥3 distinct sibling pairs on relay",   check_relay_pairs),
+        ("≥5 telegram status posts",             check_telegram),
+        ("brief ~900 words, hero+chart present", check_brief),
+        ("egress: 0 NetworkPolicy denials",      check_egress_clean),
+        ("MCP (DeepWiki) traffic observed",      check_mcp_traffic),
+    ]

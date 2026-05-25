@@ -78,6 +78,21 @@ export const TASK_TOOLS: any[] = [
   {
     type: "function" as const,
     function: {
+      name: "file_read",
+      description: "Read text content from a file inside the sandbox. Path must be absolute and resolve under /sandbox/ or /tmp/. Use this to read artifacts delivered by other agents over the mesh (typically under /sandbox/.openclaw/workspace/incoming/) BEFORE embedding their content in a downstream tool call such as foundry_code_execute. Returns the file as UTF-8 text. Symlinks and paths that escape the sandbox via `..` are rejected. For binary files use foundry_code_execute with python (open(p,'rb')) — file_read decodes as UTF-8 and is intended for JSON, markdown, and other text artifacts.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Absolute path to read (e.g. /sandbox/.openclaw/workspace/incoming/analyst.json). Must resolve under /sandbox/ or /tmp/." },
+          max_bytes: { type: "number", description: "Optional cap on bytes returned. Default 1048576 (1 MiB). Files larger than this are truncated and the truncation is noted in the response." },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "http_fetch",
       description: "Make an HTTP request to an external URL through the security proxy. The request goes through blocklist checking and allowlist enforcement. Use this for any external API calls (Telegram, HackerNews, web APIs, etc.).",
       parameters: {

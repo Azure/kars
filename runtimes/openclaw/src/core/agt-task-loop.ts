@@ -234,6 +234,48 @@ export async function processTaskWithTools(
                 result = `file_write error: ${err.message}`;
               }
             }
+          } else if (fnName === "file_read") {
+            // Companion to file_write. Declared in AGT_POLICY (see
+            // runtimes/openclaw/src/index.ts), so every agent expects it to
+            // be invocable. Reads any regular file under /sandbox/ or /tmp/
+            // (after path.resolve, so .. traversal is blocked) up to
+            // max_bytes (default 1 MiB, ceiling 16 MiB) and returns a JSON
+            // envelope with the UTF-8 content plus a truncated flag.
+            const filePath = String(args.path || "");
+            const maxBytesRaw = typeof args.max_bytes === "number" ? args.max_bytes : 1048576;
+            const maxBytes = Math.min(Math.max(Math.floor(maxBytesRaw), 1), 16 * 1024 * 1024);
+            try {
+              const fs = await import("node:fs");
+              const path = await import("node:path");
+              const resolved = path.resolve(filePath);
+              if (!resolved.startsWith("/sandbox/") && !resolved.startsWith("/tmp/")) {
+                result = `file_read error: path must resolve under /sandbox/ or /tmp/ (got: ${resolved})`;
+              } else if (!fs.existsSync(resolved)) {
+                result = `file_read error: not found: ${resolved}`;
+              } else {
+                const stat = fs.statSync(resolved);
+                if (!stat.isFile()) {
+                  result = `file_read error: not a regular file: ${resolved}`;
+                } else {
+                  const buf = fs.readFileSync(resolved);
+                  const totalBytes = buf.length;
+                  const sliced = buf.length > maxBytes ? buf.subarray(0, maxBytes) : buf;
+                  const truncated = buf.length > maxBytes;
+                  const text = sliced.toString("utf-8");
+                  log.info(`AGT sub-agent file_read: ${resolved} (${totalBytes} bytes${truncated ? `, truncated to ${maxBytes}` : ""})`);
+                  result = JSON.stringify({
+                    path: resolved,
+                    bytes: totalBytes,
+                    truncated,
+                    returned_bytes: sliced.length,
+                    content: text,
+                  });
+                }
+              }
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } catch (err: any) {
+              result = `file_read error: ${err.message}`;
+            }
           } else if (fnName === "http_fetch") {
             log.info(`AGT sub-agent http_fetch: ${args.method || "GET"} ${args.url}`);
             const fetchBody = JSON.stringify({
@@ -720,9 +762,14 @@ export async function processTaskWithTools(
               const parts: string[] = [];
               const fs = await import("node:fs");
               const nodePath = await import("node:path");
-              const os = await import("node:os");
-              const imgDir = nodePath.join(os.tmpdir(), "azureclaw-images");
-              fs.mkdirSync(imgDir, { recursive: true });
+              // Save under the shared sandbox workspace so mesh_transfer_file
+              // (which restricts file_path to /sandbox/**) can ship the result
+              // to siblings. Previously we wrote to os.tmpdir(), which lives
+              // outside /sandbox and made the artifact non-transferable —
+              // viz then surfaced this as "blocked: file unavailable" because
+              // hero.png couldn't leave the container.
+              const imgDir = "/sandbox/.openclaw/workspace";
+              try { fs.mkdirSync(imgDir, { recursive: true }); } catch { /* exists */ }
               for (const img of images) {
                 if (img.b64_json) {
                   const ts = Date.now();

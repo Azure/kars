@@ -3,9 +3,13 @@
 # Licensed under the MIT License.
 #
 # monitor.sh — concurrent live tail of every relevant signal during an
-# exec-brief run. Writes one JSONL line per event to out/<run>/trace.jsonl
-# AND prints a colour-coded timeline to stdout so a human can watch the
-# execution unfold.
+# e2e-harness run on a K8s platform (AKS or local-k8s). Writes one JSONL
+# line per event to out/<run>/trace.jsonl AND prints a colour-coded
+# timeline to stdout so a human can watch the execution unfold.
+#
+# This script is kubectl-based and only applicable to K8s platforms.
+# For PLATFORM=docker, run.sh skips this step and the docker helper
+# relies on docker-exec artifact collection instead.
 #
 # Tails:
 #   K8S-EVT  kubectl get events -A --watch        (CRD lifecycle)

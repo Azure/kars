@@ -46,6 +46,15 @@ spec:
   inferenceRef:
     name: execbrief-inference
 
+  # ClawMemory binding (top-level memoryRef, NOT under governance — the
+  # controller reads cs.spec.memoryRef.name; without this the ClawMemory
+  # CR stays Compiled/NoSandboxesReferencing forever and the
+  # /etc/azureclaw/memory/binding.json ConfigMap is never projected,
+  # so plugin falls back to "memory-<sandbox>" instead of the
+  # CR-declared storeName). See controller/src/claw_memory_reconciler.rs.
+  memoryRef:
+    name: execbrief-memory
+
   # Behavioral governance: turn the AGT in-pod plugin on and bind it
   # to the single ToolPolicy CR that carries the AGT profile. The
   # controller resolves `toolPolicyRef.name` in this ClawSandbox's
