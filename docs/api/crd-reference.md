@@ -71,7 +71,7 @@ sequenceDiagram
   CM-->>Rt: Volume-mount or hot-reload picks up new bytes
   Rt->>Rt: Re-canonicalise locally, POST {loaded_digest} to /internal/policy-status
   C->>Rt: Compare router's loaded_digest vs controller's compiled digest
-  C->>K: status.bundleRefDigest = digest; condition Ready=True only on match
+  C->>K: status.bundleRefDigest = digest. Condition Ready=True only on match
 ```
 
 Two crypto checks always fire, and both must pass:

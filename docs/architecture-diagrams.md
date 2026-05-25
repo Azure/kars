@@ -62,7 +62,7 @@ flowchart TB
   Router -->|exchange SA→AAD| WI
   WI -.->|no keys on disk| Router
   Router -->|HTTPS, AAD token| Foundry
-  Router -->|WS, opaque ciphertext (agent-sourced)| Mesh
+  Router -->|"WS, opaque ciphertext (agent-sourced)"| Mesh
   Router -->|HTTPS| A2A
 
   classDef cluster fill:#e6f0ff,stroke:#0078d4
