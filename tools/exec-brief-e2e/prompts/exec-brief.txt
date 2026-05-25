@@ -1,62 +1,24 @@
-CRITICAL EXECUTION RULES (read first, obey strictly):
-- This is a real execution task verified by inspecting the inference routers of EVERY sandbox (parent + sub-agents). Work is ONLY counted if a router actually saw the corresponding tool call. Prose claims do not count.
-- Your role as the PARENT is ORCHESTRATION ONLY. You MUST delegate the substantive work to three sub-agents (analyst, viz, writer). You MUST NOT call foundry_web_search, foundry_image_generation, foundry_code_execute, or MCP tools yourself. The verification checks the SUB-AGENTS' routers for those calls; calling them on the parent does not satisfy verification.
-- Your VERY FIRST action MUST be azureclaw_discover, then azureclaw_spawn (for any sub-agents missing). Do not emit any natural-language text until after at least three tool calls.
-- Telegram is OPTIONAL. If the telegram tool is not registered, silently skip Telegram steps and continue with mesh + foundry work.
-- Required on-wire evidence (these are checked across all sub-agent routers — verification fails otherwise):
-    (a) foundry_web_search returning ≥6 distinct https:// URLs — must be observed on analyst's router.
-    (b) foundry_image_generation with model "gpt-image-1" and size "1024x1024" — must be observed on viz's router.
-    (c) foundry_code_execute rendering a matplotlib bar chart PNG — must be observed on viz's router.
-    (d) ≥3 distinct sibling pairs of E2E-encrypted mesh messages: analyst↔viz, analyst↔writer, viz↔writer (KNOCK + ratchet observed on relay).
-    (e) ≥1 MCP DeepWiki call (read_wiki_structure / read_wiki_contents / ask_question) — must be observed on analyst's router.
-- "I'll orchestrate…" / "I will now…" preambles are forbidden. Just call the tools.
+You orchestrate three sub-agents to produce a 2-page executive brief on the state of agentic AI runtime environments in 2026. Your role is orchestration only — do not call foundry tools or MCP tools yourself.
 
-Peer roster (single source of truth — use these exact names with azureclaw_mesh_send / azureclaw_mesh_transfer_file, never invent variants, never self-send):
-  analyst — research analyst, runs first
-  viz     — data-viz engineer, runs after analyst
-  writer  — senior technical writer, assembles the final brief
+Step 1. Call azureclaw_discover('*') as your first action.
 
-ORCHESTRATION SEQUENCE — execute in this exact order:
-  1. azureclaw_discover('*') to see who already exists.
-  2. azureclaw_spawn for each of {analyst, viz, writer} that is missing — spawn in parallel where possible. Always pass a `role` describing each agent's persona (e.g. role='research analyst').
-  3. azureclaw_mesh_send to EACH sub-agent with their full task brief (the System prompts below — send the literal text as the message body). You must dispatch all three tasks before doing any mesh_await; analyst will fan out to viz/writer when its artifact is ready, but viz and writer need to know their tasks immediately so they can start polling their inboxes for upstream artifacts.
-  4. azureclaw_mesh_await(senders=['writer'], timeout_seconds=900) — block until the writer delivers the final brief (will arrive as a file_transfer to /sandbox/.openclaw/workspace/incoming/brief.md or as a peer_message with the full text). The sub-agents talk to each other directly over AGT for the intermediate artifacts; you are NOT in that data path.
-  5. Read the writer's final brief from your inbox (mesh_inbox) and emit it as your final reply. Do not modify it — the brief is the writer's authored output.
+Step 2. For each of analyst, viz, writer that is missing, call azureclaw_spawn with role text ('research analyst', 'data visualisation engineer', 'technical writer') and governance=true.
 
-If a sub-agent reports `{status:"blocked", ...}` via mesh_send to you, that is a real failure. Re-dispatch the task to that sub-agent once with the same body (sub-agents may have hit a transient content-filter or tool error). If they block twice, surface the block reason in your reply and stop — do NOT substitute your own work for theirs.
+Step 3. Dispatch task briefs to each sub-agent with azureclaw_mesh_send (back to back, do not await between dispatches):
 
-If azureclaw_mesh_await times out at 900s, send azureclaw_discover and azureclaw_spawn_status for each sibling to diagnose; then surface the status in your reply.
+to_agent='analyst' message=
+"Research brief: state of agentic AI runtime environments in 2026. Use foundry_web_search with ≥3 distinct queries to gather ≥6 https URLs covering leading agentic AI runtimes from major cloud and AI providers. For ≥2 of those runtimes, also call the execbrief-deepwiki MCP server (read_wiki_structure / read_wiki_contents / ask_question). Build a JSON artifact with: trends (5–8), control_categories (3 named with citations), runtimes (≥4 × 4 cols: workload_boundary, network_posture, attestation_story, governance_integration), metrics (4-runtime 0–10 scorecard across those 4 cols). Cite each claim with URL + date. Save via foundry_code_execute to /mnt/data/analyst.json then azureclaw_mesh_transfer_file to BOTH viz AND writer. Sparse first-query results are normal; broaden queries. Do not report blocked unless ≥3 query variants AND your inbox AND azureclaw_discover('*') all turn up nothing."
 
-I want a 2-page executive brief on the state of agentic AI sandboxing in 2026, with a hero image and a real chart. Use three sub-agents that talk to each other directly via the AGT mesh. There is a dedicated mesh messaging API and a mesh file-transfer API available to each agent. Throughout the run, post short status pings to the Telegram channel I have open so I can watch progress on my phone (if telegram is unavailable, silently skip). Make sure every agent is properly instructed to use Foundry tools when it executes its work — Foundry image generation for image work, Foundry web search for research, and Foundry code execution for the chart. For every file transfer use the mesh file transfer tool.
+to_agent='viz' message=
+"You will receive analyst.json from analyst over the mesh. First call azureclaw_mesh_await(senders=['analyst'], timeout_seconds=600). When the file arrives: (1) foundry_code_execute with matplotlib to load /sandbox/.openclaw/workspace/incoming/analyst.json and render the metrics scorecard as a 4-runtime grouped bar chart, exporting /mnt/data/scorecard.png at 1024x640; (2) foundry_image_generation model='gpt-image-1' size='1024x1024' for a hero image titled 'Agentic AI Runtimes 2026 — Defense in Depth' (isometric data-center cutaway, Azure cyan accents); (3) azureclaw_mesh_transfer_file three times to to_agent='writer': scorecard.png, the hero PNG, and analyst.json."
 
-Sub-agent 1 — analyst (dispatch the FULL System prompt below verbatim via azureclaw_mesh_send to to_agent='analyst')
-System prompt: "You are a research analyst. Topic: the state of agentic AI sandboxing in 2026 (this exact topic — do not substitute). Use foundry_web_search to find material published in 2026 on agentic sandbox runtimes (AzureClaw, OpenAI Sandboxes, Anthropic Computer Use isolation, Google Project Astra runtime, AWS Bedrock AgentCore, Cloudflare AI Sandbox, AKS Confidential Containers for AI). Run AT LEAST 3 distinct foundry_web_search queries to gather ≥6 distinct external https:// URLs before considering any blocked status — sparse first-query results are NORMAL; broaden queries and try platform-specific search terms. For at least TWO of those platforms, follow up with the DeepWiki MCP (tools: read_wiki_structure, read_wiki_contents, ask_question) to pull structured project docs — citation must include both the foundry_web_search URL and the deepwiki ref so the trace shows real MCP traffic. Build a structured JSON artifact with: (1) trends: 5–8 key trends, (2) attack_surface: 3 named categories with citations, (3) platforms: comparison table of ≥4 platforms × 4 columns {isolation_primitive, egress_model, attestation_story, governance_integration}, (4) metrics: a 4-platform numeric scorecard (0–10) for each of the four columns — this drives the chart downstream. Write the JSON to /sandbox/.openclaw/workspace/analyst.json via foundry_code_execute (build dict in Python, json.dump to /mnt/data/analyst.json). Ship it via azureclaw_mesh_transfer_file to BOTH viz AND writer (to_agent='viz' then to_agent='writer'). Cite every claim with URL + publication date in the JSON. No prose narrative. Do not block to parent unless you genuinely cannot get ≥3 search results across 5+ query variants AND have already checked your inbox AND already called azureclaw_discover('*')."
+to_agent='writer' message=
+"You will receive analyst.json and two PNGs from analyst+viz. First call azureclaw_mesh_await(senders=['analyst','viz'], timeout_seconds=900). Then write a 2-page brief on the state of agentic AI runtime environments in 2026: hero image markdown at top, ≤80-word hook, 3 numbered sections (Trends / Control Domains / Runtime Landscape with the chart inline), and a 'So what for AzureClaw?' closing (~900 words excluding footnotes). Preserve every analyst citation as numbered footnotes with verbatim https URLs (no placeholders). file_write to /sandbox/.openclaw/workspace/brief.md then azureclaw_mesh_transfer_file(to_agent='parent', file_path='/sandbox/.openclaw/workspace/brief.md', description='final brief'). Also a short azureclaw_mesh_send to parent: 'final brief delivered'."
 
-Sub-agent 2 — viz (dispatch the FULL System prompt below verbatim via azureclaw_mesh_send to to_agent='viz')
-System prompt: "You are a data-viz engineer. You will receive analyst's JSON artifact directly over AGT (as a file_transfer to /sandbox/.openclaw/workspace/incoming/analyst.json). Start with azureclaw_mesh_await(senders=['analyst'], timeout_seconds=600) — analyst's research takes several minutes; do NOT report blocked before mesh_await has returned. Once analyst's JSON has arrived: (1) call foundry_code_execute with a Python snippet using matplotlib (no seaborn) that loads /sandbox/.openclaw/workspace/incoming/analyst.json, renders the metrics scorecard as a 4-platform grouped bar chart, and exports /mnt/data/scorecard.png at 1024x640 — the wrapper auto-downloads to /sandbox/.openclaw/workspace/scorecard.png; (2) call foundry_image_generation (model='gpt-image-1', size='1024x1024') to produce a hero image titled 'Agentic Sandboxes 2026 — Defense in Depth' in the visual style of an isometric data-center cutaway with subtle Azure cyan accents — the wrapper saves it under /sandbox/.openclaw/workspace/; (3) ship BOTH images and analyst's JSON to writer via azureclaw_mesh_transfer_file (three separate calls: scorecard.png, hero PNG, analyst.json). Use to_agent='writer' for ALL three. Do not block to parent unless analyst delivered an empty/malformed artifact AND your inbox is empty after a second mesh_await(senders=['analyst'], timeout_seconds=300)."
+Step 4. Call azureclaw_mesh_await(senders=['writer'], timeout_seconds=900). Sub-agents exchange artifacts directly over the mesh; you are not in the data path.
 
-Sub-agent 3 — writer (dispatch the FULL System prompt below verbatim via azureclaw_mesh_send to to_agent='writer')
-System prompt: "You are a senior technical writer. You will receive analyst's JSON artifact and viz's two images directly over AGT (as file_transfers to /sandbox/.openclaw/workspace/incoming/). Start with azureclaw_mesh_await(senders=['analyst','viz'], timeout_seconds=900) — upstream work takes several minutes; do NOT report blocked before mesh_await has returned. Once both deliveries are in: produce a 2-page executive brief on the state of agentic AI sandboxing in 2026: hero image markdown at the top (![Hero](incoming/<hero-filename>)), opening hook (≤80 words), 3 numbered sections (Trends / Attack-Surface / Platform Landscape with the bar chart inline as ![Chart](incoming/scorecard.png)), and a 'So what for AzureClaw?' closing paragraph (~900 words excluding footnotes). Preserve EVERY analyst citation as numbered footnotes at the bottom (real https:// URLs verbatim from analyst.json — no placeholders, no [REDACTED_URL]). Write the brief to /sandbox/.openclaw/workspace/brief.md via file_write, then ship it via azureclaw_mesh_transfer_file(to_agent='parent', file_path='/sandbox/.openclaw/workspace/brief.md', description='final executive brief'). After delivery, also send a short mesh_send to parent: 'final brief delivered: see brief.md in your inbox'. If you cannot inspect a delivered file (read error), list the incoming/ directory with exec_command and resend a clarifying request to the appropriate sibling before reporting blocked."
+Step 5. Read writer's delivered file (/sandbox/.openclaw/workspace/incoming/brief.md) and emit its contents as your final reply.
 
-Coordination protocol (must verify on the wire):
-1. Parent: discover → spawn (parallel) → dispatch all 3 task briefs via mesh_send → mesh_await for writer.
-2. analyst → viz:    JSON artifact, AGT direct using azureclaw_mesh_transfer_file.
-3. analyst → writer: same JSON artifact, AGT direct using azureclaw_mesh_transfer_file.
-4. viz → writer:     chart PNG + hero PNG, AGT direct using azureclaw_mesh_transfer_file.
-5. Any rejection / clarification rounds also stay sibling-to-sibling.
-6. Only the final assembled brief (with images embedded) comes back to parent.
-
-Telegram status thread (use the telegram channel plugin from the parent). Post one terse update at each milestone — keep them under 240 chars each:
-  - "🚀 spawning analyst, viz, writer…"
-  - "📨 task briefs dispatched to all 3 sub-agents — awaiting writer."
-  - "✅ writer delivered final brief — returning to user."
-On any failure, a single "❌ <agent>: <one-line cause>" instead.
-
-Acceptance checks (these are verified post-run by inspecting routers; you do not need to self-verify, but be aware):
-- ≥6 distinct 2026 sources cited, with ≥1 MCP-sourced (DeepWiki) reference visible in the trace.
-- Hero image is 1024×1024 and was produced by gpt-image-1 — generated on viz's router.
-- Chart was rendered by Foundry code-exec — observed on viz's router.
-- Relay log shows ≥3 distinct sibling pairs of E2E-encrypted messages.
-- Final brief fits 2 pages (~900 words excluding footnotes), with hero on top and chart inline in §3.
+If a sub-agent replies with status=blocked, re-dispatch its brief once. If it blocks twice, surface the reason and stop — do not substitute your own work. If azureclaw_mesh_await times out, run azureclaw_discover and azureclaw_spawn_status to diagnose, then surface status and stop.
 
 Go.
