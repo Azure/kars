@@ -1,6 +1,8 @@
-You orchestrate three sub-agents to produce a 2-page executive brief on the state of agentic AI runtime environments in 2026. Your role is orchestration only — do not call foundry tools or MCP tools yourself.
+You orchestrate three sub-agents to produce a 2-page executive brief on the state of agentic AI runtime environments in 2026. Your role is orchestration only — do not call foundry tools yourself except for the single DeepWiki MCP query in Step 1a.
 
 Step 1. Call azureclaw_discover('*') as your first action.
+
+Step 1a. Call the DeepWiki MCP tool via the execbrief-deepwiki MCP server: invoke `ask_question` (or the equivalent MCP tool exposed by execbrief-deepwiki) with question="How does AzureClaw enforce isolation, egress, attestation, and governance for sandboxed agents? Cite the relevant docs." and repository="microsoft/agent-governance-toolkit". Capture the answer into a short variable you can paste into the analyst dispatch. This step is mandatory — the run is verified to require ≥1 real MCP tools/call on the parent router.
 
 Step 2. For each of analyst, viz, writer that is missing, call azureclaw_spawn with role text ('research analyst', 'data visualisation engineer', 'technical writer') and governance=true.
 
@@ -8,6 +10,9 @@ Step 3. Dispatch task briefs to each sub-agent with azureclaw_mesh_send (back to
 
 to_agent='analyst' message=
 "Research brief: state of agentic AI runtime environments in 2026. Use foundry_web_search with ≥3 distinct queries to gather ≥6 https URLs covering leading agentic AI runtimes from major cloud and AI providers. Build a JSON artifact with: trends (5–8), control_categories (3 named with citations), runtimes (≥4 × 4 cols: workload_boundary, network_posture, attestation_story, governance_integration), metrics (4-runtime 0–10 scorecard across those 4 cols). Cite each claim with URL + date.
+
+Grounding context from the parent's DeepWiki query about AzureClaw's own posture (use to calibrate the 'control_categories' framing, not as a citation):
+<<DEEPWIKI_ANSWER>>
 
 CRITICAL — file persistence: foundry_code_execute runs in an EPHEMERAL Foundry container — files at /mnt/data/* are NOT visible to your sandbox FS and CANNOT be mesh-transferred. To produce analyst.json:
   1. Build the JSON object incrementally in your reasoning (do NOT try to write 8 KB inside a single tool argument — that blows the JSON-arg parse limit).
@@ -19,18 +24,20 @@ Do NOT use foundry_code_execute for writing analyst.json — that path is unreli
 
 Sparse first-query results are normal; broaden queries. Do NOT attempt any MCP tools — they are not available in your sandbox; web_search is sufficient. Do not report blocked unless ≥3 query variants AND your inbox AND azureclaw_discover('*') all turn up nothing."
 
+NOTE: Before sending the analyst dispatch, substitute `<<DEEPWIKI_ANSWER>>` with the actual answer text you received in Step 1a (trim to ≤800 chars if needed). If Step 1a failed, replace the placeholder with the literal string 'Step 1a DeepWiki query failed; analyst should rely on web_search only.' and proceed.
+
 to_agent='viz' message=
 "You will receive analyst.json from analyst over the mesh. First call azureclaw_mesh_await(senders=['analyst'], timeout_seconds=600). When the file arrives:
 
-CRITICAL: foundry_code_execute runs in a Foundry-managed container; it CANNOT see /sandbox/.openclaw/workspace/incoming/. So read the analyst JSON LOCALLY first via file_read (path /sandbox/.openclaw/workspace/incoming/analyst.json), then EMBED the JSON content as a python string literal inside the code argument to foundry_code_execute.
+CRITICAL: foundry_code_execute runs in a Foundry-managed container; it CANNOT see /sandbox/.openclaw/workspace/incoming/. So read the analyst JSON LOCALLY first via file_read (path /sandbox/.openclaw/workspace/incoming/analyst.json), then EMBED the JSON content as a python string literal inside the code argument to foundry_code_execute. foundry_image_generation, by contrast, persists the PNG directly into your sandbox FS at /sandbox/.openclaw/workspace/<output_filename> — use the output_filename parameter to pick a stable name.
 
 MANDATORY tool sequence:
 (1) file_read /sandbox/.openclaw/workspace/incoming/analyst.json — capture the contents.
-(2) foundry_code_execute (python, matplotlib) — pass a code argument that begins with `data = json.loads(r'''<paste the JSON contents verbatim>''')` then render the metrics scorecard as a 4-runtime grouped bar chart with x-axis tick labels for the four columns (workload_boundary, network_posture, attestation_story, governance_integration) and y-axis 0–10. Use matplotlib savefig to /mnt/data/scorecard.png at 1024x640.
-(3) foundry_image_generation model='gpt-image-1' size='1024x1024' for a hero image titled 'Agentic AI Runtimes 2026 — Defense in Depth' (isometric data-center cutaway, Azure cyan accents). Save the PNG bytes as /mnt/data/hero.png.
-(4) azureclaw_mesh_transfer_file three times to to_agent='writer': /mnt/data/scorecard.png, /mnt/data/hero.png, and /sandbox/.openclaw/workspace/incoming/analyst.json (re-forwarded).
+(2) foundry_code_execute (python, matplotlib) — pass a code argument that begins with `data = json.loads(r'''<paste the JSON contents verbatim>''')` then render the metrics scorecard as a 4-runtime grouped bar chart with x-axis tick labels for the four columns (workload_boundary, network_posture, attestation_story, governance_integration) and y-axis 0–10. Use matplotlib savefig to /mnt/data/scorecard.png at 1024x640. The runtime wrapper auto-downloads /mnt/data outputs to /sandbox/.openclaw/workspace/scorecard.png — that is the path you mesh_transfer.
+(3) foundry_image_generation model='gpt-image-1' size='1024x1024' output_filename='hero.png' for a hero image titled 'Agentic AI Runtimes 2026 — Defense in Depth' (isometric data-center cutaway, Azure cyan accents). The PNG will land at /sandbox/.openclaw/workspace/hero.png — do NOT pass /mnt/data anywhere for this tool.
+(4) azureclaw_mesh_transfer_file three times to to_agent='writer': /sandbox/.openclaw/workspace/scorecard.png, /sandbox/.openclaw/workspace/hero.png, and /sandbox/.openclaw/workspace/incoming/analyst.json (re-forwarded).
 
-DO NOT fall back to local matplotlib or SVG: this run is verified by checking that foundry_code_execute and foundry_image_generation appear in your router log."
+DO NOT fall back to local matplotlib or SVG: this run is verified by checking that foundry_code_execute and foundry_image_generation appear in your router log AND that the mesh-transfer of both PNGs is acknowledged by writer."
 
 to_agent='writer' message=
 "You will receive analyst.json and two PNGs from analyst+viz. First call azureclaw_mesh_await(senders=['analyst','viz'], timeout_seconds=900). Then produce a 2-page brief on the state of agentic AI runtime environments in 2026.
@@ -45,6 +52,7 @@ The brief MUST include (in this order):
 - closing 'So what for AzureClaw?' (~130 words)
 - numbered footnotes with each analyst citation as a verbatim https URL (no placeholders). Include one footnote citing https://github.com/microsoft/agent-governance-toolkit and explicitly use the word DeepWiki in that footnote line so the governance posture is visible.
 - The four control-domain terms MUST appear verbatim in the body at least once each: `isolation`, `egress`, `attestation`, `governance` — the Runtime Landscape section is the natural place when describing the scorecard columns.
+- The hero and scorecard PNGs are real attachments at /sandbox/.openclaw/workspace/incoming/{hero.png,scorecard.png} — assume they are present and reference them; do NOT add caveats like 'missing image' to the body.
 
 Procedure:
 1. azureclaw_mesh_await(senders=['analyst','viz'], timeout_seconds=900) — wait for both deliveries.

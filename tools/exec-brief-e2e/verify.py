@@ -67,15 +67,43 @@ def check_scorecard(transcript: str) -> tuple[bool, str]:
     return ok, f"metrics block present={has_metrics}, axis labels found={found}/4"
 
 
+def _transfer_evidence_text(router: list[str]) -> str:
+    """Aggregate text from sources that can witness mesh file transfers:
+    - monitor.log (kubectl logs stdout; rarely contains the lines)
+    - writer-incoming.txt (definitive: writer's incoming/ directory listing)
+    - writer-gateway.log (file_transfer_ack JSON the writer plugin logged)
+    - viz-gateway.log (mesh_transfer_file lines the viz plugin logged)
+    drive.sh's collect_artifacts step writes the last three via break-glass."""
+    out_dir = Path(os.environ.get("OUT_DIR",
+        Path(__file__).parent / "out" / "latest"))
+    chunks: list[str] = []
+    for name in ("monitor.log", "writer-incoming.txt",
+                 "writer-gateway.log", "viz-gateway.log"):
+        p = out_dir / name
+        if p.exists():
+            chunks.append(p.read_text(errors="replace"))
+    return "\n".join(chunks)
+
+
 def check_hero(transcript: str, router: list[str]) -> tuple[bool, str]:
-    # The router logs every Foundry images call. Look for gpt-image-1.
-    # Size is specified in the request body, not the log line, so we only
-    # require that the call was made — the prompt instructs gpt-image-1 / 1024²
-    # and we trust the request body when the route was actually hit.
+    # Three signals, all required:
+    # (1) the router actually saw a /images/generations call (with gpt-image-1)
+    # (2) the brief references the hero markdown
+    # (3) viz actually mesh-transferred hero.png to writer and writer ACKed it
     image_calls = [l for l in router if "/images/generations" in l or "gpt-image-1" in l]
     has_hero_ref = "hero" in transcript.lower() or transcript.lower().count("![") >= 1
-    ok = bool(image_calls) and has_hero_ref
-    return ok, f"foundry image calls={len(image_calls)}, hero_ref_in_brief={has_hero_ref}"
+    evidence = _transfer_evidence_text(router)
+    hero_xfer = (
+        ("mesh_transfer_file" in evidence and "hero.png" in evidence and "→ writer OK" in evidence)
+        or ("file_name\":\"hero.png\"" in evidence and "saved_to" in evidence)
+        or ("hero.png" in evidence and "incoming" in evidence)
+    )
+    ok = bool(image_calls) and has_hero_ref and hero_xfer
+    return ok, (
+        f"foundry image calls={len(image_calls)}, "
+        f"hero_ref_in_brief={has_hero_ref}, "
+        f"hero_png_transferred_to_writer={hero_xfer}"
+    )
 
 
 def check_chart(transcript: str, router: list[str]) -> tuple[bool, str]:
@@ -83,14 +111,23 @@ def check_chart(transcript: str, router: list[str]) -> tuple[bool, str]:
     # type. The router sees POST /openai/responses for the call itself and
     # then GET /openai/containers/cntr_<...>/files{,/<id>/content} for each
     # produced artifact. Counting those container hits is the cleanest signal
-    # without parsing request bodies.
+    # without parsing request bodies. We also verify writer received the PNG.
     container_hits = [l for l in router if "/openai/containers/cntr_" in l]
     legacy_hits = [l for l in router if "/code/sessions" in l
                    or "code_interpreter" in l.lower()]
     total = len(container_hits) + len(legacy_hits)
-    ok = total > 0
-    return ok, (f"foundry code-exec container hits={len(container_hits)}, "
-                f"legacy hits={len(legacy_hits)}")
+    evidence = _transfer_evidence_text(router)
+    chart_xfer = (
+        ("mesh_transfer_file" in evidence and "scorecard.png" in evidence and "→ writer OK" in evidence)
+        or ("file_name\":\"scorecard.png\"" in evidence and "saved_to" in evidence)
+        or ("scorecard.png" in evidence and "incoming" in evidence)
+    )
+    ok = total > 0 and chart_xfer
+    return ok, (
+        f"foundry code-exec container hits={len(container_hits)}, "
+        f"legacy hits={len(legacy_hits)}, "
+        f"scorecard_png_transferred_to_writer={chart_xfer}"
+    )
 
 
 def check_relay_pairs(trace: list[dict[str, Any]]) -> tuple[bool, str]:
@@ -218,13 +255,22 @@ def check_egress_clean(trace: list[dict[str, Any]]) -> tuple[bool, str]:
 
 
 def check_mcp_traffic(router: list[str], transcript: str) -> tuple[bool, str]:
-    # The analyst is required to call DeepWiki MCP for ≥2 platforms. The
-    # router proxies MCP traffic on its `/mcp/...` routes; we count hits
-    # plus a transcript mention of deepwiki as a belt-and-braces check.
-    mcp_calls = [l for l in router if "/mcp request" in l or "/mcp/" in l or "mcp.deepwiki.com" in l]
+    # The parent is required (Step 1a) to invoke a real DeepWiki MCP
+    # `tools/call` against execbrief-deepwiki. The router proxies MCP on its
+    # `/mcp/...` routes; we require at least ONE `tools/call` line (handshake
+    # `initialize` / `notifications/initialized` / `tools/list` alone is no
+    # longer sufficient — those happen on every router startup). DeepWiki
+    # must also be cited in the brief.
+    mcp_lines = [l for l in router if "/mcp request" in l or "/mcp/" in l or "mcp.deepwiki.com" in l]
+    mcp_tools_call = [l for l in mcp_lines
+                      if '"method":"tools/call"' in l or "method=tools/call" in l]
     mentioned = "deepwiki" in transcript.lower()
-    ok = bool(mcp_calls) and mentioned
-    return ok, f"router /mcp calls={len(mcp_calls)}, deepwiki cited={mentioned}"
+    ok = bool(mcp_tools_call) and mentioned
+    return ok, (
+        f"router /mcp calls={len(mcp_lines)}, "
+        f"/mcp tools/call={len(mcp_tools_call)} (require ≥1), "
+        f"deepwiki cited={mentioned}"
+    )
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

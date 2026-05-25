@@ -242,6 +242,46 @@ PY
     log "prompt completed — transcript at ${OUT_DIR}/transcript.log"
 }
 
+collect_artifacts() {
+    # Capture sub-agent gateway logs and writer's incoming/ listing as
+    # post-run artifacts so verify.py has authoritative evidence of mesh
+    # file transfers (which live in /tmp/gateway.log inside the container,
+    # not in kubectl logs stdout). Uses break-glass label, removes it after.
+    log "collecting post-run artifacts (writer incoming + gateway tails)"
+    for ns in azureclaw-writer azureclaw-viz; do
+        kubectl label namespace "${ns}" azureclaw.azure.com/break-glass=true \
+            --overwrite >/dev/null 2>&1 || true
+    done
+    # Give the validating policy a moment to refresh.
+    sleep 2
+
+    WRITER_POD=$(kubectl get pod -n azureclaw-writer \
+        -l azureclaw.azure.com/sandbox=writer -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    VIZ_POD=$(kubectl get pod -n azureclaw-viz \
+        -l azureclaw.azure.com/sandbox=viz -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+    if [ -n "${WRITER_POD}" ]; then
+        kubectl exec -n azureclaw-writer "${WRITER_POD}" -c openclaw -- \
+            ls -la /sandbox/.openclaw/workspace/incoming/ 2>/dev/null \
+            >"${OUT_DIR}/writer-incoming.txt" || true
+        kubectl exec -n azureclaw-writer "${WRITER_POD}" -c openclaw -- \
+            sh -c 'grep -E "file_transfer_ack|mesh_transfer_file" /tmp/gateway.log 2>/dev/null || true' \
+            >"${OUT_DIR}/writer-gateway.log" || true
+    fi
+    if [ -n "${VIZ_POD}" ]; then
+        kubectl exec -n azureclaw-viz "${VIZ_POD}" -c openclaw -- \
+            sh -c 'grep -E "mesh_transfer_file|foundry_image_generation|downloaded_files" /tmp/gateway.log 2>/dev/null || true' \
+            >"${OUT_DIR}/viz-gateway.log" || true
+    fi
+
+    # Remove break-glass labels.
+    for ns in azureclaw-writer azureclaw-viz; do
+        kubectl label namespace "${ns}" azureclaw.azure.com/break-glass- \
+            >/dev/null 2>&1 || true
+    done
+    log "artifacts collected"
+}
+
 main() {
     preflight
     apply_scenarios
@@ -249,6 +289,7 @@ main() {
     credentials
     wait_for_sandbox
     post_prompt
+    collect_artifacts
     log "driver done — OUT_DIR=${OUT_DIR}"
 }
 
