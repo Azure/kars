@@ -60,6 +60,32 @@ flowchart LR
 
 Two crypto checks (signature + canonical bytes) and one operational check (router echo) must all pass before the CR is `Ready`. Any failure stamps a specific reason on the CR's `Degraded` / `Ready=False` condition; the previously-verified bundle stays in place.
 
+## The operator-authoring half
+
+The trust loop is symmetric: every digest the controller verifies has to be **produced and signed by an operator** somewhere. Two CLI surfaces cover all six signed kinds; pick the one that matches the artifact you already have.
+
+| You have… | Use | What it does |
+|---|---|---|
+| A live `ClawSandbox` whose `allowedEndpoints` you want to seal (or have just edited with `--approve` / `--enforce`) | `azureclaw egress <sandbox> --enforce --sign` (or `--approve <host> --sign`) | Reads the inline allowlist, builds the canonical YAML for you, pushes via `oras`, signs with `cosign`, and patches `spec.networkPolicy.allowlistRef` in-place. Auto-detects sign mode (TTY → `keyless`, CI → `identity-token`, KMS key → `keyed`). |
+| A pre-built canonical bundle on disk (any of the 6 kinds) | `azureclaw policy sign --kind <k> --file <path> --registry <r> --repository <repo>` | Pushes the bytes as the kind's pinned `artifactType`, signs the manifest digest with `cosign`, and (`--print-bundle-ref`) emits the YAML snippet for you to paste into the consuming CRD's `bundleRef`. |
+
+Both paths end in the same place — a cosign-signed OCI artifact whose digest you (or your CI) record on the CR. Everything downstream of that digest is what the verification loop above walks.
+
+**Operator approve-and-sign in one command (egress example):**
+
+```bash
+# After reviewing pending domains, grant one and seal the resulting allowlist
+# in a single operator gesture. The CLI does canonicalise → oras push →
+# cosign sign → patch ClawSandbox.spec.networkPolicy.allowlistRef.
+azureclaw egress my-agent --approve api.github.com
+# (--sign is implicit with --approve; pass --no-sign only for explicit
+#  dry-runs — the controller refuses unsigned artifacts in authoritative mode.)
+```
+
+The same `--sign-mode` / `--sign-key` flags accepted by `policy sign` are accepted here. CI runs should pass `--sign-mode identity-token` (the workflow's OIDC token is picked up automatically when `SIGSTORE_ID_TOKEN` / `OIDC_TOKEN` is set); production usually pins a KMS key (`--sign-mode keyed --sign-key azurekms://…`).
+
+See [docs/cli-reference.md → `azureclaw policy sign`](../cli-reference.md#azureclaw-policy) and [docs/egress-proxy.md → Signed OCI egress allowlist](../egress-proxy.md#signed-oci-egress-allowlist) for the full flag and behaviour reference.
+
 ## Proof on a live cluster
 
 The two values that must agree are the controller's `status.bundleRefDigest` and the router's `/internal/policy-status` echo. Pick any signed-CR-backed sandbox and run:

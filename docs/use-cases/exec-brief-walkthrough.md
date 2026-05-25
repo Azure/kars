@@ -91,104 +91,313 @@ The point of the showcase is not "look, the agents talked to each other". The po
 ### 1. Signed CRDs — what's enforced is what's signed
 
 ```bash
-# The four sub-agents are each governed by their own ToolPolicy / InferencePolicy / EgressApproval.
-# Pick any one, verify the controller's compiled digest equals the router's loaded digest.
-for ns in azureclaw-execbrief-parent azureclaw-execbrief-analyst \
-          azureclaw-execbrief-viz   azureclaw-execbrief-writer; do
-  echo "=== $ns ==="
-  kubectl get inferencepolicy -n "$ns" -o json \
-    | jq '.items[] | {ready: (.status.conditions[]?|select(.type=="Ready")|.status),
-                      digest: .status.bundleRefDigest}'
-done
+# Pick any signed-CRD-backed policy and check the Ready/Reason/Message triple.
+# The controller flips Ready=True only after every referencing sandbox's
+# inference-router has echoed back the digest it actually loaded.
+kubectl get inferencepolicy execbrief-inference -n azureclaw-system -o json \
+  | jq '{name: .metadata.name,
+         ready:   (.status.conditions[]|select(.type=="Ready")|.status),
+         reason:  (.status.conditions[]|select(.type=="Ready")|.reason),
+         message: (.status.conditions[]|select(.type=="Ready")|.message)}'
 ```
 
-`status.bundleRefDigest` equals `policies.inference.loaded_digest` on each sandbox's router — see **[CRD trust model](../security/crd-trust-model.md)** for the full verification loop and negative tests. If those drift, the CR will not be `Ready`.
+<details><summary>Live output from this scenario</summary>
+
+```json
+{
+  "name": "execbrief-inference",
+  "ready": "True",
+  "reason": "RouterEnforcing",
+  "message": "all 4 referencing sandbox router(s) confirmed inference-policy digest"
+}
+```
+
+Same shape for the `ToolPolicy`:
+
+```json
+{
+  "name": "execbrief-toolpolicy",
+  "ready": "True",
+  "reason": "RouterEnforcing",
+  "message": "all 4 referencing sandbox router(s) confirmed agt-profile digest"
+}
+```
+
+`RouterEnforcing` is the success terminal — the controller's compiled bytes match the router's `/internal/policy-status` echo on every one of the 4 sandboxes referencing this policy. If those drift, the condition flips to `Ready=False` with `reason=DigestMismatch` and the previously-verified bundle stays mounted.
+</details>
+
+`status.bundleRefDigest` equals `policies.inference.loaded_digest` on each sandbox's router — see **[CRD trust model](../security/crd-trust-model.md)** for the full verification loop and negative tests. If those drift, the CR will not be `Ready`. Inline-spec policies (no `bundleRef`) follow the same controller-→-router echo path — only the supply-chain provenance differs.
+
+The producer half of the loop is just as concrete. Each sandbox's egress allowlist was sealed by the operator with a single command before enforcement turned on; the same `--enforce --sign` / `--approve --sign` shape works for incremental updates:
+
+```bash
+# Author + sign the analyst's allowlist in one gesture (canonicalise →
+# oras push → cosign sign → patch ClawSandbox.spec.networkPolicy.allowlistRef).
+azureclaw egress execbrief-analyst --enforce \
+  --registry myacr.azurecr.io \
+  --repository policy/egress-allowlist/execbrief-analyst
+# Auto-detects sign mode (TTY → keyless, CI → identity-token,
+# add --sign-mode keyed --sign-key azurekms://... for production).
+```
+
+The four other signed kinds (`ToolPolicy`, `InferencePolicy`, `ClawMemory`, `McpServer`, `ClawEval`) follow the generic surface — see [CRD trust model → operator-authoring half](../security/crd-trust-model.md#the-operator-authoring-half).
 
 ### 2. iptables egress-guard — kernel-level outbound firewall
 
-Every sandbox pod has an `egress-guard` init container that installs iptables rules restricting UID 1000 (the agent process) to loopback + DNS + a NAT-redirect of TCP/80,443 → `127.0.0.1:8444`. The agent process **cannot** open a direct TCP connection to anything else — the kernel drops it. Proof:
+Every sandbox pod has an `egress-guard` init container that installs iptables rules restricting UID 1000 (the agent process) to loopback + DNS + a NAT-redirect of TCP/80,443 → `127.0.0.1:8444`. The agent process **cannot** open a direct TCP connection to anything else — the kernel drops it. (Exec into the agent container itself is blocked by a `ValidatingAdmissionPolicy`, so the proof is the init-container spec; the rules in `command` are what actually got applied.)
 
 ```bash
-kubectl exec deploy/execbrief-analyst -n azureclaw-execbrief-analyst \
-  -c openclaw -- iptables -t nat -L OUTPUT -n 2>/dev/null || true
-# (privileged inspection from the inference-router container, which has CAP_NET_ADMIN)
+kubectl get pod -n azureclaw-analyst \
+  -l azureclaw.azure.com/sandbox=analyst \
+  -o json | jq '.items[0].spec.initContainers[]
+                | select(.name=="egress-guard")
+                | {securityContext, command: .command[2]}'
 ```
+
+<details><summary>Live output from this scenario</summary>
+
+```json
+{
+  "securityContext": {
+    "capabilities": { "add": ["NET_ADMIN", "NET_RAW"], "drop": ["ALL"] },
+    "runAsNonRoot": false,
+    "runAsUser": 0,
+    "seccompProfile": { "type": "Unconfined" }
+  },
+  "command": "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
+}
+```
+
+The init container is short-lived and privileged on purpose — it installs the filter + NAT chain and exits. From that point on, the long-running `openclaw` container runs unprivileged at UID 1000 and is subject to the rules. The exact `OUTPUT` filter chain (DNS/loopback ACCEPT, everything else DROP) plus the `nat OUTPUT` REDIRECT to `:8444` are visible in the `command` string above.
+</details>
 
 This layer is independent of the K8s NetworkPolicy and the L7 allow-list. The agent runs at UID 1000; no amount of in-process trickery can route around iptables.
 
 ### 3. Router L7 allow-list — by-hostname forward proxy
 
-The redirected traffic lands at the inference-router on `127.0.0.1:8444`. The router checks the destination hostname against a signed allow-list (the same OCI + cosign pipeline as everything else):
+The redirected traffic lands at the inference-router on `127.0.0.1:8444`. The router checks the destination hostname against the projected allow-list ConfigMap (the same OCI + cosign pipeline as everything else when `allowlistRef` is set; inline `allowedEndpoints` in this scenario):
 
 ```bash
-kubectl get configmap egress-allowlist -n azureclaw-execbrief-analyst -o yaml \
-  | yq '.data["allowlist.json"]' | jq
-# → {"endpoints":[{"host":"api.azureml.ms","port":443},{"host":"api.search.bing.com","port":443}, …]}
+# Parent — has Telegram + DeepWiki
+kubectl get configmap clawsandbox-execbrief-egress-allowlist \
+  -n azureclaw-execbrief -o jsonpath='{.data.allowlist\.json}' | jq
+
+# Analyst — no Telegram, no DeepWiki
+kubectl get configmap clawsandbox-analyst-egress-allowlist \
+  -n azureclaw-analyst -o jsonpath='{.data.allowlist\.json}' | jq
 ```
+
+<details><summary>Live output from this scenario</summary>
+
+```json
+// parent (execbrief)
+{
+  "schemaVersion": 1,
+  "endpoints": [
+    {"host": "api.telegram.org",  "port": 443},
+    {"host": "mcp.deepwiki.com", "port": 443}
+  ]
+}
+
+// analyst
+{
+  "schemaVersion": 1,
+  "endpoints": []
+}
+```
+
+`analyst`'s endpoint list is **empty** — everything outbound goes through Foundry hosted tools (the inference-router authenticates as its Workload Identity; the agent never sees an API key), so no direct host needs to be allowed. The parent has exactly two: `api.telegram.org` (its only channel) and `mcp.deepwiki.com` (its single declared MCP server). Any other host the agent's plugin tries to dial returns a 403 from the router with `egress.deny` in the audit log.
+</details>
 
 The `analyst`'s allow-list does **not** include `api.telegram.org` — only `parent`'s does. So even if `analyst` were compromised, it could not directly post to Telegram; it would have to route the message through `parent` via the mesh, and `parent`'s `ToolPolicy` decides whether `telegram_send_message` is exposed. This is a textbook capability split.
 
 ### 4. K8s NetworkPolicy — ingress isolation
 
 ```bash
-kubectl get netpol sandbox-policy -n azureclaw-execbrief-analyst -o yaml \
-  | yq '.spec | {policyTypes, ingress, egress}'
+kubectl get netpol sandbox-policy -n azureclaw-analyst -o json \
+  | jq '.spec | {policyTypes, ingress, podSelector}'
 ```
 
-The policy restricts ingress to peer sandbox namespaces (8443 / 18789 / 18791) and the operator namespace (8443 for the `/internal/policy-status` echo). It is enforced by the Cilium dataplane on AKS clusters labelled `kubernetes.azure.com/network-policy: cilium`. *(Egress was historically dropped in field-ownership drift; the [NP-egress fix](https://github.com/Azure/azureclaw/pull/336) consolidated this into a single SSA.)*
+<details><summary>Live output from this scenario</summary>
+
+```json
+{
+  "policyTypes": ["Ingress"],
+  "podSelector": {
+    "matchLabels": {
+      "azureclaw.azure.com/component": "sandbox"
+    }
+  },
+  "ingress": [
+    {
+      "from": [{"namespaceSelector": {"matchLabels": {"azureclaw.azure.com/role": "sandbox"}}}],
+      "ports": [
+        {"port": 8443,  "protocol": "TCP"},
+        {"port": 18789, "protocol": "TCP"},
+        {"port": 18791, "protocol": "TCP"}
+      ]
+    },
+    {
+      "from": [{"namespaceSelector": {"matchLabels": {
+        "app.kubernetes.io/component": "system",
+        "app.kubernetes.io/name":      "azureclaw"
+      }}}],
+      "ports": [{"port": 8443, "protocol": "TCP"}]
+    }
+  ]
+}
+```
+
+Two ingress sources, no `egress` clause (egress is controlled by the iptables guard + the router L7 allow-list in layers 2 + 3, not duplicated here): peer **sandbox** namespaces may reach inference (`8443`) + OpenClaw gateway (`18789`) + mesh listener (`18791`); the **operator** namespace `azureclaw-system` may reach `8443` for the controller's `/internal/policy-status` echo. The policy is enforced by Cilium on AKS and by `kindnet` on local-k8s.
+</details>
+
+It is enforced by the Cilium dataplane on AKS clusters labelled `kubernetes.azure.com/network-policy: cilium`. *(Egress was historically dropped in field-ownership drift; the [NP-egress fix](https://github.com/Azure/azureclaw/pull/336) consolidated this into a single SSA.)*
 
 ### 5. Mesh E2E encryption — relay sees ciphertext only
 
 The four sandboxes register with the AgentMesh registry, exchange X3DH key bundles, and run a Double Ratchet for every message. The relay only forwards encrypted blobs. Proof:
 
 ```bash
-kubectl logs -n agentmesh -l app=agentmesh-relay --tail=50 | grep route
-# → "routed 412 bytes from <did:agt:analyst…> to <did:agt:viz…>" (no plaintext, just sizes + DIDs)
+# Relay's /health surfaces counters but no plaintext.
+kubectl exec -n agentmesh deploy/relay -- \
+  sh -c 'curl -sf http://localhost:8083/health' | jq
 ```
+
+<details><summary>Live output from this scenario</summary>
+
+```json
+{
+  "status": "healthy",
+  "service": "agentmesh-relay",
+  "connected_agents": 6,
+  "stats": {
+    "messages_routed":   511,
+    "messages_stored":   0,
+    "messages_delivered": 0
+  }
+}
+```
+
+`connected_agents: 6` is the 4 exec-brief sandboxes + 2 background test agents; the relay knows their DIDs and current ratchet state, but every byte it has routed has been ciphertext. `messages_routed: 511` includes KNOCK + X3DH + `mesh_send` + 30 s heartbeats; `messages_stored: 0` means no delivery was deferred (everyone was online); `messages_delivered: 0` is the offline-replay counter — irrelevant in a healthy cluster.
+</details>
 
 The KNOCK handler on the receiver decides whether to accept based on the `TrustGraph` projection and the sandbox's `governance.trustThreshold`. Sub-agents inherit the parent's spawn relationship as a baseline affinity boost; siblings are not auto-trusted.
 
 ### 6. Foundry hosted tools — workload-identity, no API keys
 
-`foundry_web_search`, `foundry_code_execute`, and `foundry_image_generation` are dispatched by the router using the per-sandbox Workload Identity. The agent process never sees a Foundry key. Proof:
+`foundry_web_search`, `foundry_code_execute`, and `foundry_image_generation` are dispatched by the router using the per-sandbox Workload Identity. The agent process never sees a Foundry API key — only the router does. Proof comes from the pod spec (exec into the `openclaw` container is blocked by `ValidatingAdmissionPolicy/azureclaw-sandbox-exec-ban`, so we read the spec):
 
 ```bash
-kubectl exec deploy/execbrief-viz -n azureclaw-execbrief-viz \
-  -c openclaw -- env | grep -i foundry || echo "(none — correct)"
+# agent (openclaw) container — must NOT contain a key
+kubectl get pod -n azureclaw-viz -l azureclaw.azure.com/sandbox=viz -o json \
+  | jq -r '.items[0].spec.containers[]
+           | select(.name=="openclaw")
+           | .env[]?
+           | select(.name|test("AZURE_OPENAI_API_KEY|OPENAI_API_KEY|FOUNDRY_KEY"))
+           | .name' | sort -u
+# (empty above = openclaw has no Foundry credential)
+
+# router (inference-router) container — IS the credential holder
+kubectl get pod -n azureclaw-viz -l azureclaw.azure.com/sandbox=viz -o json \
+  | jq -r '.items[0].spec.containers[]
+           | select(.name=="inference-router")
+           | .env[]?
+           | select(.name|test("AZURE_OPENAI|FOUNDRY"))
+           | .name' | sort -u
 ```
+
+<details><summary>Live output from this scenario</summary>
+
+```text
+# agent (openclaw):
+(empty — no API_KEY-bearing env var)
+
+# router (inference-router):
+AZURE_OPENAI_API_KEY
+AZURE_OPENAI_DEPLOYMENT
+AZURE_OPENAI_ENDPOINT
+FOUNDRY_ENDPOINT
+FOUNDRY_PROJECT_ENDPOINT
+```
+
+Both containers see the **endpoint** (URL only — needed for OTel attributes on the agent side); only the router sees `AZURE_OPENAI_API_KEY`. The router is the credential boundary. On AKS the API key is replaced by an IMDS-acquired Workload Identity token whose audience is `https://ai.azure.com/`; the local-k8s scenario above uses a static key for dev convenience but the split between agent and router is identical.
+</details>
 
 The router signs every Foundry call with an IMDS-acquired token whose audience is `https://ai.azure.com/`. The Memory Store + Content Safety floor + per-request token budget all fire on the router side, before the bytes leave the cluster.
 
 ### 7. seccomp profile — syscall blast-radius
 
-Each agent container runs under a `RuntimeDefault` seccomp profile with additional hardening (no `ptrace`, no `mount`, no `unshare`, no `bpf`, no `module_*`). Proof:
+Each agent container runs unprivileged with all capabilities dropped, a read-only root filesystem, and `allowPrivilegeEscalation: false`. The pod-level seccomp profile is `RuntimeDefault` (set on the PodSpec; per-container override is `nil`, so they all inherit).
 
 ```bash
-kubectl get pod -n azureclaw-execbrief-analyst -l azureclaw.azure.com/component=sandbox \
-  -o jsonpath='{.items[0].spec.securityContext.seccompProfile.type}'
-# → RuntimeDefault
+kubectl get pod -n azureclaw-analyst -l azureclaw.azure.com/sandbox=analyst -o json \
+  | jq '.items[0].spec
+        | {podSeccompProfile: .securityContext.seccompProfile,
+           agentSecurityContext: (.containers[]|select(.name=="openclaw")|.securityContext)}'
 ```
+
+<details><summary>Live output from this scenario</summary>
+
+```json
+{
+  "podSeccompProfile": { "type": "RuntimeDefault" },
+  "agentSecurityContext": {
+    "allowPrivilegeEscalation": false,
+    "capabilities":            { "drop": ["ALL"] },
+    "readOnlyRootFilesystem":  true,
+    "runAsUser":               1000
+  }
+}
+```
+
+`RuntimeDefault` blocks the kernel's blast-radius syscalls (`mount`, `ptrace`, `unshare`, `bpf`, `module_*`, `keyctl`, `kexec_*`, `init_module`, `delete_module`, `personality`, etc.) by default. `capabilities.drop: ["ALL"]` revokes every Linux capability (so even if a privesc bug surfaced, there's nothing to escalate **to**). `readOnlyRootFilesystem: true` removes the most common persistence vector. The agent runs as UID 1000 (the same UID the iptables guard binds its rules to — these two layers compose).
+</details>
 
 ### 8. MCP — only what's declared
 
 `parent`'s `McpServer/execbrief-deepwiki` declares the DeepWiki endpoint and OAuth issuer. The router exposes its tools as `execbrief_deepwiki.ask_question` etc.; any other MCP host the agent tries to dial is denied at the router. The sub-agents have **no** `mcpServerRefs` — they cannot call MCP at all. (`analyst`'s prompt explicitly says "Do NOT attempt any MCP tools — they are not available in your sandbox; web_search is sufficient.")
 
 ```bash
-kubectl get clawsandbox execbrief-analyst -n azureclaw-execbrief-analyst \
-  -o jsonpath='{.spec.governance.mcpServerRefs}'
-# → (empty)
+kubectl get clawsandbox execbrief -n azureclaw-system \
+  -o jsonpath='{"parent: "}{.spec.governance.mcpServerRefs}{"\n"}'
+kubectl get clawsandbox analyst -n azureclaw-system \
+  -o jsonpath='{"analyst: ["}{.spec.governance.mcpServerRefs}{"]\n"}'
 ```
+
+<details><summary>Live output from this scenario</summary>
+
+```text
+parent:  [{"name":"execbrief-deepwiki"}]
+analyst: []
+```
+
+The parent has exactly one MCP server declared. The analyst has **none** — there is no shape of agent-side prompt injection that could make it call an MCP tool, because the router has nothing wired up to dispatch to. The same is true for `viz` and `writer`.
+</details>
 
 ### 9. Telegram channel — only the parent
 
 `parent` has the `telegram-credentials` Secret mounted; the sub-agents do not. The `telegram_send_message` tool is registered only in `parent`'s plugin set. This is enforced by the controller's pod-spec generation (Secret `envFrom` is conditional on the channel flag), not just by convention.
 
 ```bash
-kubectl get secret -n azureclaw-execbrief-parent telegram-credentials -o jsonpath='{.metadata.name}'
-# → telegram-credentials
-kubectl get secret -n azureclaw-execbrief-analyst telegram-credentials 2>&1 | head -1
-# → Error from server (NotFound)
+for ns in azureclaw-execbrief azureclaw-analyst azureclaw-viz azureclaw-writer; do
+  printf '%-22s' "$ns"
+  kubectl get secret telegram-credentials -n "$ns" \
+    -o jsonpath='{.metadata.name}{"\n"}' 2>&1 \
+    | sed 's/^Error from server.*/(none)/'
+done
 ```
+
+<details><summary>Live output from a Telegram-wired cluster</summary>
+
+```text
+azureclaw-execbrief    telegram-credentials
+azureclaw-analyst      (none)
+azureclaw-viz          (none)
+azureclaw-writer       (none)
+```
+
+Only the parent has the Secret mounted, which means only the parent's `inference-router` and `openclaw` containers see `TELEGRAM_BOT_TOKEN`. The `entrypoint.sh` auto-config logic short-circuits the Telegram channel registration when that env var is unset, so the sub-agents' plugin sets do not even list `telegram_send_message`. The capability is structurally absent — not just denied at policy evaluation time. *(On a cluster without Telegram wired at all, every namespace shows `(none)` and the parent's plugin set drops the Telegram tool too.)*
+</details>
 
 ## Platform support — what runs where today
 
