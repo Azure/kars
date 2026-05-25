@@ -908,6 +908,58 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     }
 
+    // Compute ingress rules up front. When governance is enabled the sandbox
+    // exposes :8443 (mesh inference) and :18789/:18791 (gateway WebUX/WebSocket)
+    // to peer sandbox namespaces, plus :8443 to the operator namespace for
+    // `GET /internal/policy-status` echo. When governance is disabled, ingress
+    // stays default-deny (empty rule list with `policyTypes: ["Ingress"]`).
+    //
+    // This MUST be written together with the egress rules below in a SINGLE
+    // Server-Side Apply call, because both fields are owned by the same
+    // field manager (`CLAWSANDBOX`). Splitting it across two Apply calls
+    // makes the second call drop the fields the first call owned — that
+    // exact bug caused `policyTypes: [Ingress]` only to land in the
+    // deployed object until this refactor.
+    let ingress_rules: Vec<serde_json::Value> = if governance_config.enabled {
+        vec![
+            json!({
+                // Mesh + gateway ingress from peer sandbox namespaces.
+                "from": [{
+                    "namespaceSelector": {
+                        "matchLabels": {"azureclaw.azure.com/role": "sandbox"}
+                    }
+                }],
+                "ports": [
+                    {"port": 8443, "protocol": "TCP"},
+                    {"port": 18789, "protocol": "TCP"},
+                    {"port": 18791, "protocol": "TCP"}
+                ]
+            }),
+            json!({
+                // Operator-namespace policy-echo ingress (router :8443).
+                // Three independent gates still apply on top of this NP
+                // allow: (1) bearer token in `router-admin-token` Secret,
+                // (2) constant-time comparison in the middleware,
+                // (3) optional `ROUTER_ADMIN_ALLOW_IPS` IP pinning.
+                // Gateway ports 18789/18791 are intentionally NOT opened
+                // to the operator namespace.
+                "from": [{
+                    "namespaceSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "azureclaw",
+                            "app.kubernetes.io/component": "system"
+                        }
+                    }
+                }],
+                "ports": [
+                    {"port": 8443, "protocol": "TCP"}
+                ]
+            }),
+        ]
+    } else {
+        Vec::new()
+    };
+
     let netpol: NetworkPolicy = serde_json::from_value(json!({
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -920,7 +972,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "podSelector": {"matchLabels": {"azureclaw.azure.com/component": "sandbox"}},
             "policyTypes": ["Egress", "Ingress"],
             "egress": egress_rules,
-            "ingress": []
+            "ingress": ingress_rules
         }
     }))?;
     np_api
@@ -2350,80 +2402,15 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // `SpecInvalid` before they reach this point.
         let cm_name = format!("toolpolicy-{}-profile", &tool_policy_profile);
 
-        // Patch NetworkPolicy to allow ingress on port 8443 for mesh messages
-        // and ports 18789/18791 for the gateway WebUX + WebSocket
-        let mesh_ingress_patch = json!({
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "NetworkPolicy",
-            "metadata": {
-                "name": "sandbox-policy",
-                "namespace": &sandbox_ns
-            },
-            "spec": {
-                "podSelector": {"matchLabels": {"azureclaw.azure.com/component": "sandbox"}},
-                "policyTypes": ["Ingress"],
-                "ingress": [
-                    {
-                        // Mesh ingress: peer sandboxes can talk to AGT relay
-                        // (8443) + gateway WebUX/WebSocket (18789/18791).
-                        "from": [{
-                            "namespaceSelector": {
-                                "matchLabels": {"azureclaw.azure.com/role": "sandbox"}
-                            }
-                        }],
-                        "ports": [
-                            {"port": 8443, "protocol": "TCP"},
-                            {"port": 18789, "protocol": "TCP"},
-                            {"port": 18791, "protocol": "TCP"}
-                        ]
-                    },
-                    {
-                        // Slice 6.5-followup: controller policy-echo ingress.
-                        // The operator namespace (`app.kubernetes.io/name=azureclaw`
-                        // + `app.kubernetes.io/component=system`) needs to reach
-                        // `GET /internal/policy-status` (port 8443) to confirm
-                        // the router has actually applied the signed
-                        // ToolPolicy / InferencePolicy / EgressAllowlist /
-                        // TrustGraph bundles before flipping downstream CRDs
-                        // (EgressApproval, ClawMemory, etc.) to their terminal
-                        // phases.
-                        //
-                        // Defence in depth — three independent gates still
-                        // apply on top of this NP allow:
-                        //   1. The endpoint requires
-                        //      `Authorization: Bearer <ADMIN_TOKEN>`; the
-                        //      token is per-sandbox and stored in the
-                        //      `router-admin-token` Secret (RBAC-gated).
-                        //   2. The middleware uses constant-time-eq for the
-                        //      bearer comparison.
-                        //   3. Optional `ROUTER_ADMIN_ALLOW_IPS` env var on
-                        //      the router can further pin the source IP set.
-                        //
-                        // Gateway ports 18789/18791 are deliberately NOT
-                        // opened here — they're agent WebUX surface and have
-                        // no business being reached from the operator.
-                        "from": [{
-                            "namespaceSelector": {
-                                "matchLabels": {
-                                    "app.kubernetes.io/name": "azureclaw",
-                                    "app.kubernetes.io/component": "system"
-                                }
-                            }
-                        }],
-                        "ports": [
-                            {"port": 8443, "protocol": "TCP"}
-                        ]
-                    }
-                ]
-            }
-        });
-        let _ = np_api
-            .patch(
-                "sandbox-policy",
-                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
-                &Patch::Apply(serde_json::from_value::<NetworkPolicy>(mesh_ingress_patch)?),
-            )
-            .await;
+        // The mesh/gateway/operator ingress rules used to be patched here
+        // as a separate `Patch::Apply` against `sandbox-policy`. That
+        // caused a Server-Side-Apply field-ownership bug: both Applies
+        // used the same field manager (`CLAWSANDBOX`), so the second
+        // Apply dropped the `Egress` policyType and egress rules owned
+        // by the first Apply, leaving deployed objects with
+        // `policyTypes: [Ingress]` only. The rules are now built into
+        // the single Apply earlier in this function (search:
+        // "Compute ingress rules up front").
 
         tracing::info!(
             sandbox = %name,
