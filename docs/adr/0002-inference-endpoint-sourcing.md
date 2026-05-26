@@ -76,8 +76,8 @@ controller compile → router lookup).
   `inference-router/src/config.rs:44`. It exists so customers with
   AOAI-only deployments (no Foundry project) can still point the router
   somewhere. The route handlers chain `azure_openai_endpoint` first, then
-  fall back to `foundry_endpoint` — this is for backward compatibility
-  with the pre-S13 deployment shape, not architectural preference.
+  fall back to `foundry_endpoint` — this preserves the AOAI-only
+  deployment shape rather than expressing an architectural preference.
 
 When AOAI-only deployments are no longer in scope, the chain should
 flip (or the legacy field should be removed). That's a future ADR.

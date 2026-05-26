@@ -254,8 +254,8 @@ Reserved. Schema lands in Slice 6 when ClawEval is repurposed.
   recognize, the producer fails — never silently strips. This prevents
   "looks like it worked" bugs where the consumer ignores a field the
   operator thought was being enforced.
-- **Schema additions require a new artifactType.** Even backwards-compatible
-  additions (e.g., a new optional field) require `.v2+yaml` — because the
+- **Schema additions require a new artifactType.** Even additive
+  changes (e.g., a new optional field) require `.v2+yaml` — because the
   byte canonical form is part of the digest, and any new key changes the
   digest deterministically.
 

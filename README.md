@@ -185,7 +185,7 @@ azureclaw up --name prod-agent --region swedencentral
 | **`InferencePolicy`** | Per-tenant model routing, content-safety floor, and token budgets. |
 | **`ClawMemory`** | Foundry Memory Store binding with project-MI auth (operator-provisioned today). |
 | **`ClawEval`** | Reproducible evaluation runs against a sandbox spec. |
-| **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. *(v1alpha1 — reconciler-only; router-side **mesh-admission gating** against the projected graph tracked for v1.1. Note: KNOCK accept/deny stays agent-side — the router cannot decrypt the Signal session.)* |
+| **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. *(`v1alpha1` — reconciler-only; router-side **mesh-admission gating** against the projected graph is on the [roadmap](docs/roadmap.md). KNOCK accept/deny stays agent-side — the router cannot decrypt the Signal session.)* |
 | **`EgressApproval`** | Ephemeral, TTL-bounded extra egress hosts overlaid on the baseline allowlist. |
 
 Plus the controller-internal `ClawPairing` record (10th kind) used to bind sandboxes to AgentMesh registry IDs.
@@ -212,7 +212,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 ### One mesh, one gateway, one CLI
 
 - **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. **The Signal session lives in the agent process**, not the router: the OpenClaw plugin layer (and every other supported runtime) installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time and owns X3DH / Double Ratchet / KNOCK end to end. The inference router links the [`agentmesh`](https://crates.io/crates/agentmesh) crate from crates.io only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — never for mesh crypto — and acts as a transparent WebSocket bridge to the relay for the encrypted bytes. There is no in-tree fork of either SDK.
-- **A2A 1.0.0 gateway** — public-ingress for peer-to-peer agent traffic with tenant routing, audit, and rate limiting. AgentCard signature verification (`azureclaw_a2a_core::verify_inbound_card`) ships as a library and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer. Wiring the verifier as an axum layer is on the v1.1 roadmap.
+- **A2A gateway** — public-ingress for peer-to-peer agent traffic with tenant routing, audit, and rate limiting. AgentCard signature verification (`azureclaw_a2a_core::verify_inbound_card`) ships as a library and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer. Wiring the verifier as an axum layer inside the gateway binary is tracked in the [roadmap](docs/roadmap.md).
 - **CLI (`azureclaw …`)** — 30+ commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
 ---
@@ -244,7 +244,7 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 
 ## Project status
 
-`v0.1.0` — pre-1.0 development. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E + manual matrix), but the project is still tracking towards its first stable release; expect minor breaking changes on the CRD surface. See **[`CHANGELOG.md`](CHANGELOG.md)** for the per-release change log and **[`docs/api/backwards-compatibility.md`](docs/api/backwards-compatibility.md)** for the API stability contract.
+`v0.1.0`. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E + manual matrix). See **[`CHANGELOG.md`](CHANGELOG.md)** for the change log and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
 
 ## Known limitations
 

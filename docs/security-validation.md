@@ -276,7 +276,7 @@ fields and Deployment annotations.
 | **Observed-generation lineage** | `status.observedGeneration` vs `metadata.generation` | Drift = pending reconcile |
 | **Policy version hashes** | `status.versionHash` per referenced policy | Changes when referenced `ToolPolicy` / `InferencePolicy` is updated |
 | **Reconcile trace ID** | `azureclaw.azure.com/last-trace-id` annotation on Deployment | Prints `(pending)` if the controller has not yet annotated the Deployment |
-| **AGT audit-receipt id** | Reserved for v1.1 | Currently `(pending)` in shipped builds |
+| **AGT audit-receipt id** | Not yet wired into the surface | Currently `(pending)` in shipped builds |
 
 ```bash
 # Human-readable summary

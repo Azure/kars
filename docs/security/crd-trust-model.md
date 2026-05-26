@@ -182,7 +182,6 @@ Two operational points it's worth being explicit about:
 ## See also
 
 * **[CRD reference → Signing and verification](../api/crd-reference.md#signing-and-verification)** — the schema and per-CRD details.
-* **[Policy canonical format](../api/policy-canonical-format.md)** — the per-kind canonicalisation rules.
-* **[Signed CRD bundles](../architecture/crd-versioning.md)** — the OCI artifact layout and why `cosign --registry-referrers-mode=legacy`.
+* **[Policy canonical format](../api/policy-canonical-format.md)** — the per-kind canonicalisation rules and OCI artifact layout.
 * **[STRIDE model](stride.md)** — the broader threat model.
 * **[Red team writeups](red-team.md)** — adversarial findings from internal exercises.

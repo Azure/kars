@@ -2,7 +2,7 @@
 
 AzureClaw is a host for *agent runtimes*. The runtime is the framework your agent code is written against (OpenClaw, OpenAI Agents SDK, LangGraph, …) plus the small adapter that wires it to the AzureClaw sandbox shape.
 
-This page documents the first-class adapters that ship with v1.0 and the **BYO** contract for bringing your own. The table below is the authoritative count — when a runtime is added or deferred, this table changes.
+This page documents the first-class adapters that ship today and the **BYO** contract for bringing your own. The table below is the authoritative count — when a runtime is added or deferred, this table changes.
 
 The same router, the same governance profile, the same audit chain, the same NetworkPolicy apply to all of them. Switching runtime is a one-field change in `ClawSandbox.spec.runtime.kind`.
 
@@ -159,7 +159,7 @@ If a runtime is popular enough that you find yourself maintaining a BYO image fo
 4. Add a `runtimes/<kind>/` adapter and a `sandbox-images/<kind>/Dockerfile`.
 5. Add tests; cover the kind in the manual E2E suite under `tests/e2e/`.
 
-The seven existing adapters are the reference. CrewAI is on the v1.1 roadmap; AutoGen 0.2 is consciously not — MAF is its successor.
+The existing adapters are the reference. CrewAI is tracked in the [roadmap](roadmap.md); AutoGen 0.2 is consciously not — MAF is its successor.
 
 ---
 

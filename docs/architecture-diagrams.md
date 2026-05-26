@@ -188,7 +188,7 @@ flowchart LR
 
 The A2A gateway is the only inbound public surface. Every request gets the same content-safety, rate-limit, and audit treatment as outbound traffic.
 
-> **Verifier status.** Today caller identity is established via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer; AgentCard signature verification (`azureclaw_a2a_core::verify_inbound_card`) ships as a library and is unit-tested, but wiring it as an axum layer inside the gateway is on the v1.1 roadmap. See [A2A gateway](architecture/a2a-gateway.md).
+> **Verifier status.** Today caller identity is established via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer; AgentCard signature verification (`azureclaw_a2a_core::verify_inbound_card`) ships as a library and is unit-tested, but wiring it as an axum layer inside the gateway is tracked in the [roadmap](roadmap.md). See [A2A gateway](architecture/a2a-gateway.md).
 
 ---
 
@@ -245,7 +245,7 @@ flowchart TB
 
 `ClawSandbox` is the unit of work; the other CRDs bind policy, identity, peers, evaluation, or break-glass egress to it. You can build a complete deployment with just `ClawSandbox` + `ToolPolicy` + `InferencePolicy`; the rest are opt-in for richer scenarios.
 
-`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/azureclaw/trustgraph/graph.json`). It is not referenced by name from a `ClawSandbox` spec — it applies cluster-wide. **Router-side mesh-admission gating** against the projected graph (refuse to bridge a WS for an edge not in the graph) is tracked for v1.1. This is not KNOCK gating — KNOCK lives inside the Signal session the agent owns end-to-end and the router never sees it. Today the router keeps a post-decision trust-score map populated from KNOCK outcomes the agent reports out-of-band, for audit and rate-limit purposes only (see CRD reference §TrustGraph).
+`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/azureclaw/trustgraph/graph.json`). It is not referenced by name from a `ClawSandbox` spec — it applies cluster-wide. **Router-side mesh-admission gating** against the projected graph (refuse to bridge a WS for an edge not in the graph) is tracked in the [roadmap](roadmap.md). This is not KNOCK gating — KNOCK lives inside the Signal session the agent owns end-to-end and the router never sees it. Today the router keeps a post-decision trust-score map populated from KNOCK outcomes the agent reports out-of-band, for audit and rate-limit purposes only (see CRD reference §TrustGraph).
 
 Schema details in **[`docs/api/crd-reference.md`](api/crd-reference.md)**.
 

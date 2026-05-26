@@ -27,12 +27,10 @@ A secure runtime for AI agents on Azure Kubernetes Service. This is the document
 - [Architecture diagrams](architecture-diagrams.md) — dev, prod, mesh, A2A, MCP.
 - [A2A gateway](architecture/a2a-gateway.md) — public-ingress topology and trust model.
 - [AGT boundary](architecture/agt-boundary.md) — what AGT enforces vs what AzureClaw enforces.
-- [CRD versioning](architecture/crd-versioning.md) — v1.0 stability commitments.
-
 ### API
 - [CRD reference](api/crd-reference.md) — all eight CRDs with schema and examples.
 - [Conditions reference](api/conditions.md) — every status condition the controller emits.
-- [Backwards compatibility](api/backwards-compatibility.md) — what we promise and what we do not.
+- [Policy canonical format](api/policy-canonical-format.md) — signing canonicalization rules.
 
 ### Runtimes
 - [Runtime catalog](runtimes.md) — seven first-class adapters and the BYO contract.

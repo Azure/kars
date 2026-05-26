@@ -16,7 +16,6 @@
 - [Runtimes](runtimes.md)
 - [A2A gateway (architecture)](architecture/a2a-gateway.md)
 - [AGT boundary](architecture/agt-boundary.md)
-- [CRD versioning](architecture/crd-versioning.md)
 - [Multi-tenant model](multi-tenant.md)
 - [Egress proxy](egress-proxy.md)
 
@@ -56,7 +55,6 @@
 - [ClawEval (operator guide)](api/claweval.md)
 - [Lifecycle & reconciliation](api/lifecycle.md)
 - [Conditions](api/conditions.md)
-- [Backwards compatibility](api/backwards-compatibility.md)
 - [Policy canonical format](api/policy-canonical-format.md)
 
 # Blueprints

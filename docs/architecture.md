@@ -151,7 +151,7 @@ See **[`docs/architecture/agt-boundary.md`](architecture/agt-boundary.md)** for 
 A2A (Agent-to-Agent, 1.0.0) is the public-ingress sibling of the mesh. Where the mesh handles intra-fleet traffic with strong cryptographic guarantees, the A2A gateway handles **cross-organisation** traffic where the peer is not part of your AgentMesh.
 
 - **Public ingress** (Azure-managed Kubernetes ingress / Application Gateway).
-- Every inbound request carries a signed **`AgentCard`** and is rejected if the caller's identity is not trusted. Today identity is established via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer; the in-axum `AgentCard` signature verifier ships as a library (`azureclaw_a2a_core::verify_inbound_card`, unit-tested) and is on the v1.1 roadmap to be wired into the gateway request path.
+- Every inbound request carries a signed **`AgentCard`** and is rejected if the caller's identity is not trusted. Today identity is established via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer; the in-axum `AgentCard` signature verifier ships as a library (`azureclaw_a2a_core::verify_inbound_card`, unit-tested) and is tracked in the [roadmap](roadmap.md) to be wired into the gateway request path.
 - The gateway routes to the right `A2AAgent` CRD (which binds the public name to a sandbox + policy).
 - Audit, rate limiting, content safety run on the gateway.
 
@@ -190,7 +190,7 @@ Anything that fails all three tests is a `ClawSandbox` field, not its own CRD.
 | **`A2AAgent`** | The agent itself, but the **public-ingress identity** has its own lifecycle (TLS cert, public route, rate-limit, agent-card). | The Kubernetes `Service` / cert / ingress wiring would be tangled into the agent CRD. With `A2AAgent` separate, the agent can come and go while the public endpoint and its trust anchors stay stable. |
 | **`ClawMemory`** | Whoever owns the memory store. Outlives the agent. | Memory bindings would die with each agent restart; cross-agent memory sharing would require duplicating store IDs in every sandbox. |
 | **`ClawEval`** | Eval / QA. Run on demand. | Eval runs would be pods or jobs without a reproducible record; you'd lose the `status` history that lets `azureclaw eval` show "this prompt regressed at commit X". |
-| **`TrustGraph`** | Cluster admin. Cross-namespace, cross-cluster. | Sibling-trust at scale collapses: every sandbox would need a list of every peer's AMID. `TrustGraph` is the *only* cluster-scoped CRD precisely because trust topology is a cluster concern. <br><br> **Status — v1alpha1 reconciler-only.** The graph is projected to `/etc/azureclaw/trustgraph/graph.json` in each sandbox; the router does not yet consume it for mesh-admission gating. KNOCK accept/deny is — and stays — agent-side (the router cannot decrypt the Signal session). The router-side post-decision trust-score map exists for audit/governance only. **v1.1** adds router-side **mesh-admission gating** against the projected graph (pre-handshake, refuse to bridge a WS for an edge not in the graph) — a separate, coarser layer that complements agent-side KNOCK rather than replacing it. See [`api/crd-reference.md` §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology). |
+| **`TrustGraph`** | Cluster admin. Cross-namespace, cross-cluster. | Sibling-trust at scale collapses: every sandbox would need a list of every peer's AMID. `TrustGraph` is the *only* cluster-scoped CRD precisely because trust topology is a cluster concern. <br><br> **Status — reconciler-only.** The graph is projected to `/etc/azureclaw/trustgraph/graph.json` in each sandbox; the router does not yet consume it for mesh-admission gating. KNOCK accept/deny is — and stays — agent-side (the router cannot decrypt the Signal session). The router-side post-decision trust-score map exists for audit/governance only. **Tracked in the [roadmap](roadmap.md):** router-side **mesh-admission gating** against the projected graph (pre-handshake, refuse to bridge a WS for an edge not in the graph) — a separate, coarser layer that complements agent-side KNOCK rather than replacing it. See [`api/crd-reference.md` §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology). |
 | **`EgressApproval`** | On-call / SRE. Ephemeral, TTL-bounded. | A single inline overlay would mix permanent allowlist drift with short-lived break-glass grants. As a separate CRD, the grant carries its own audit record, TTL, and revocation path. |
 
 A tenth resource, `ClawPairing`, is **controller-internal** — it records the
@@ -229,12 +229,9 @@ release. If your deployment never references a CRD other than `ClawSandbox`,
 the others cost you nothing — they only exist as registered types, not
 running workloads.
 
-### Stability contract
+### Version
 
-The CRDs are at `v1alpha1` for `v1.0.0`. What we promise to keep working,
-what we may change, and how we will migrate is documented in
-**[`docs/api/backwards-compatibility.md`](api/backwards-compatibility.md)**
-and **[`docs/architecture/crd-versioning.md`](architecture/crd-versioning.md)**.
+The CRDs are served at `azureclaw.azure.com/v1alpha1`. The project is at `v0.1.0`; see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](roadmap.md) for what's next.
 
 ---
 

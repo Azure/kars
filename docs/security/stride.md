@@ -64,15 +64,15 @@
 
 ---
 
-## Residual risk (deferred to v1.1)
+## Residual risk
 
-Items accepted for v1.0 with explicit user-visible markers in source/docs:
+Items accepted today with explicit user-visible markers in source/docs:
 
 - **Cosign-on-admission** — image signatures are produced and verifiable; admission does not yet *require* a signature on `ClawSandbox` reconciliation. Mitigation: cluster admins gate image pulls at the registry (ACR signed-content policy).
 - **Static TrustGraph projection** — captured at sandbox creation; live edge changes require a sandbox roll. Mitigation: operators can roll affected sandboxes.
 - **Per-cluster token budget** — only per-tenant budgets exist. A noisy tenant cannot starve the cluster but could starve its own peers. Mitigation: namespace ResourceQuota.
 
-These gaps are tracked in [`docs/roadmap.md`](../roadmap.md) under v1.1.
+These gaps are tracked in [`docs/roadmap.md`](../roadmap.md).
 
 ---
 

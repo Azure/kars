@@ -79,8 +79,8 @@ calls.
 
 `Ready=True` means the controller successfully mirrored OAuth metadata
 and JWKS into the per-sandbox `mcp/<name>/` directories. **It does not
-prove the upstream MCP host is reachable** — health probing is a v1.1
-item.
+prove the upstream MCP host is reachable** — health probing is tracked
+in the [roadmap](../roadmap.md).
 
 ## ToolPolicy
 
@@ -137,13 +137,14 @@ accepted and surfaced but not yet aggregated — see
 
 `status.validEdges` / `invalidEdges` count what passed and what was
 dropped; failing edge IDs are surfaced in controller logs (the count
-is also surfaced in events). v1alpha1 is reconciler-only — Ready does
+is also surfaced in events). The CRD is reconciler-only today — Ready does
 **not** today imply the router consumes the projection. KNOCK
 accept/deny stays agent-side (the router cannot decrypt the Signal
 session); the router-side post-decision score map exists for audit
-only. **v1.1** adds router-side mesh-admission gating against the
-projected graph — a separate, coarser pre-handshake layer that
-complements agent-side KNOCK, not a replacement for it. See the
+only. Tracked in the [roadmap](../roadmap.md): router-side
+mesh-admission gating against the projected graph — a separate,
+coarser pre-handshake layer that complements agent-side KNOCK, not a
+replacement for it. See the
 [`TrustGraph` CRD entry](crd-reference.md#trustgraph--mesh-trust-topology).
 
 ## EgressApproval
