@@ -285,7 +285,7 @@ azureclaw trace research-bot --network
 - **Multi-runtime, single governance plane.** Teams can run `OpenClaw`, `OpenAIAgents`, or `MicrosoftAgentFramework` agents side-by-side on the same cluster with identical `InferencePolicy` + `ToolPolicy` governance and the same audit chain. Switch runtimes by changing `spec.runtime.kind`.
 - **Signed OCI egress allowlist as the production network policy path.** Inline `allowedEndpoints` are fine for day-0; sign and pin allowlist artifacts in CI for auditable, GitOps-managed network policy. The `SignerPolicy` ConfigMap in `azureclaw-system` pins the authoritative signer identity; the controller fails closed if the policy is absent or the signature doesn't match.
 - **You can scale Confidential Containers in.** AKS supports kata + AMD SEV-SNP node pools today. Set `ClawSandbox.spec.sandbox.isolation: confidential` per-agent for sensitive workloads; sub-agents inherit and cannot downgrade.
-- **CNCF Kubernetes AI Conformance v1.35+.** The cluster and all nine CRDs pass the CNCF AI Conformance suite (`tests/cncf-conformance/`). This gives you a reproducible, vendor-neutral benchmark and audit evidence for your security reviewers.
+- **CNCF Kubernetes AI Conformance.** The cluster and all CRDs are validated against the CNCF AI Conformance suite (`tests/cncf-conformance/`); the README pins the exact upstream tag the suite tracks. This gives you a reproducible, vendor-neutral benchmark and audit evidence for your security reviewers.
 
 ## Operator polish
 

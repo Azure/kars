@@ -26,13 +26,13 @@ If you have a GitHub Copilot seat — Individual, Business, or Enterprise — `a
 
 1. Run `azureclaw dev`. The CLI prints a **device code** and a URL.
 2. Open <https://github.com/login/device> in your browser, paste the code, approve the AzureClaw client.
-3. Pick a model from the catalogue the CLI shows you — **Claude Opus 4.7**, **Claude Sonnet 4.5**, **GPT-5**, **GPT-4.1**, **Gemini 2.5 Pro**, **o4-mini**, etc. The router will use it for every chat completion the agent makes.
+3. Pick a model from the catalogue the CLI shows you — current Claude, GPT, Gemini, and reasoning-class models are exposed; run `azureclaw models` to see today's list. The router will use the selected model for every chat completion the agent makes.
 
 That's it. No PAT to rotate, no API key on disk, no subscription to provision. The OAuth token is stored in `~/.azureclaw/` and refreshed automatically.
 
 **Why we recommend Copilot for the inner loop:**
 
-- **Frontier models, large contexts.** Claude Opus 4.7 / GPT-5 / Gemini 2.5 Pro through one auth surface — exactly the catalogue you'd compose by hand against three vendors.
+- **Frontier models, large contexts.** Current Claude, GPT, and Gemini frontier tiers through one auth surface — exactly the catalogue you'd compose by hand against three vendors.
 - **Native Anthropic shape for Claude.** AzureClaw routes Claude requests to Copilot's `/v1/messages` endpoint with no shape translation, preserving full tool-calling fidelity (no lossy OpenAI-to-Anthropic rewrites).
 - **One credential, no key sprawl.** The same OAuth token works for the parent agent and every sub-agent it spawns; the router refreshes it on its own.
 - **Sub-agent inheritance.** Spawned sub-agents automatically inherit the parent's provider, model, and credentials — no per-agent wiring.
