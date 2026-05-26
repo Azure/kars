@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
 # scenarios/exec-brief/config.sh — exec-brief-specific knobs the
 # generic driver picks up via `source $SCENARIO_DIR/config.sh`.
 #
