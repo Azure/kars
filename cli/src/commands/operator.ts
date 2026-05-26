@@ -27,7 +27,7 @@ import type {
   ClusterHealth,
   MeshHealth,
 } from "./operator/types.js";
-import { timeSince, kctl, platformTag } from "./operator/helpers.js";
+import { timeSince, kctl, platformTag, clusterOriginTag } from "./operator/helpers.js";
 import { fetchSandboxes } from "./operator/fetchers/sandboxes.js";
 import {
   fetchEgressDomains,
@@ -84,7 +84,6 @@ export function operatorCommand(): Command {
 }
 
 // Helper to build kubectl args with optional context
-
 
 async function startDashboard(refreshInterval: number, kubeContext?: string, devMode = false, panelOpts: { panels?: string; perSandbox?: boolean } = {}) {
   // ── Resolve cluster ───────────────────────────────────────────────
@@ -436,16 +435,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         rk === "PydanticAi" ? "PydAI" :
         rk === "BYO" ? "BYO" :
         rk;
-      // Compact cluster origin: one-letter platform tag (D/K/C) +
-      // short cluster name. Lets the user tell at a glance whether a
-      // row came from Docker, kind, or a real cloud cluster, and
-      // which cluster specifically when more than one is present.
-      const tag = platformTag(s);
-      const clusterName =
-        s.runtime === "docker" ? "" :
-        s.kubeContext ? s.kubeContext.replace(/^kind-/, "") :
-        "";
-      const clusterTag = clusterName ? `${tag} ${clusterName}` : tag;
+      const clusterTag = clusterOriginTag(s);
       return [hIcon, displayName, statusStr, rkTag, s.model, s.isolation, s.channels, s.age, clusterTag];
     });
     (agentTable as any).setData({

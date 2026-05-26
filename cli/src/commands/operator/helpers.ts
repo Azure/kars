@@ -116,3 +116,20 @@ export function platformLabel(s: {
   if (s.kubeContext && s.kubeContext.startsWith("kind-")) return "kind";
   return "cloud";
 }
+
+/**
+ * Compact "<tag> <cluster-name>" used in the agent-table Cluster column
+ * and the CRD snapshot status line. Docker sandboxes show just "D"
+ * (no cluster name). Kube sandboxes show "K azureclaw-dev" or
+ * "C azureclaw-aks" — the kubeContext with the `kind-` prefix stripped.
+ */
+export function clusterOriginTag(s: {
+  runtime: "docker" | "aks";
+  kubeContext?: string;
+}): string {
+  const tag = platformTag(s);
+  const clusterName = s.runtime === "docker"
+    ? ""
+    : s.kubeContext?.replace(/^kind-/, "") ?? "";
+  return clusterName ? `${tag} ${clusterName}` : tag;
+}
