@@ -93,9 +93,14 @@ sequenceDiagram
   Gov-->>Router: allow + decision audit
   Router->>WI: exchange SA token → AAD
   WI-->>Router: bearer token
-  Router->>Foundry: POST /openai/… + bearer<br/>(Content Safety enforced server-side)
-  Foundry-->>Router: completion + prompt_filter_results
-  Router->>Router: parse prompt_filter_results — block if jailbreak / category > threshold
+  alt provider == Foundry / Azure OpenAI
+    Router->>Foundry: POST /openai/… + bearer<br/>(Content Safety enforced server-side)
+    Foundry-->>Router: completion + prompt_filter_results
+    Router->>Router: parse prompt_filter_results — block if jailbreak / category > threshold
+  else provider == Copilot or GitHub Models
+    Router->>Foundry: POST upstream + bearer<br/>(no inline Content Safety returned)
+    Foundry-->>Router: completion (no prompt_filter_results)
+  end
   Router-->>Agent: completion
   Note over Router: audit record:<br/>hash-chained, append-only<br/>(detection, not signing)
 ```

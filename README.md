@@ -28,13 +28,15 @@ It is built for three audiences:
 - **Security teams** — one opinionated, layered control plane for identity, egress, content safety, governance, mesh trust.
 - **Agent builders** — build the agent, not the boring-but-load-bearing infrastructure underneath it.
 
+> **Status — pre-launch (v0.1.0).** AzureClaw is an open-source project from Microsoft. We don't yet have public reference customers to list — if your team is running governed agents on AKS and wants to be one, we'd love to hear from you ([SUPPORT.md](SUPPORT.md)). The design assumes platform teams operating roughly ten or more agents on AKS with an Azure-AI-Foundry-or-Copilot model backend; below that, `azureclaw dev` on a laptop is probably the right shape.
+
 ### What makes it different
 
-- **The router is the security boundary, not the agent process.** Every external call is mediated by a typed Rust proxy under a different UID, with credentials the agent never sees and a CRD-driven allowlist on every request. iptables + NetworkPolicy are safety nets, not the policy layer.
-- **Governance is a first-class CRD layer.** Approval gates, rate limits, tool allowlists, content-safety floors, token budgets, and trust topology are all declarative Kubernetes resources you commit to a repo and reconcile with Argo / Flux — no out-of-band config store.
-- **End-to-end encrypted agent-to-agent mesh.** Signal Protocol (X3DH + Double Ratchet) with KNOCK trust gating. The relay sees only ciphertext.
-- **Provider- and runtime-agnostic.** Seven first-class runtimes (OpenClaw, OpenAI Agents SDK, Microsoft Agent Framework, LangGraph in Python and TypeScript, Anthropic, Pydantic-AI) plus BYO; GitHub Copilot, Azure AI Foundry, Azure OpenAI, and GitHub Models as backends; native Anthropic-shape passthrough for Claude.
-- **Same code path in dev and prod.** `azureclaw dev` runs the same router, the same audit chain, the same governance profile as `azureclaw up`. The dev-to-prod jump is one CLI command, not a re-architecture.
+- **A prompt-injected agent cannot leak your Azure credentials** — because the agent process runs under a different UID than the Rust router that holds them, on a different network, and never sees the bearer token. (iptables + NetworkPolicy back this up; they are not the primary control.)
+- **Your security and platform teams review YAML, not Python.** Approval gates, rate limits, tool allowlists, content-safety floors, token budgets, and trust topology are declarative Kubernetes resources — commit them to a repo, reconcile with Argo / Flux, audit with `git log`. No out-of-band config store, no per-agent code review for policy.
+- **Two agents that talk cannot be eavesdropped by you, by us, or by the relay.** Agent-to-agent messaging is end-to-end encrypted with Signal Protocol (X3DH + Double Ratchet) and KNOCK trust gating. The relay sees only ciphertext.
+- **You are not locked to one runtime or one model provider.** Seven first-class runtimes (OpenClaw, OpenAI Agents SDK, Microsoft Agent Framework, LangGraph in Python and TypeScript, Anthropic, Pydantic-AI) plus BYO. GitHub Copilot, Azure AI Foundry, Azure OpenAI, and GitHub Models as backends — switching is a one-field CRD change, not a re-architecture. Native Anthropic-shape passthrough for Claude.
+- **What runs on your laptop is what runs in production.** `azureclaw dev` and `azureclaw up` share the same router binary, the same audit chain, the same governance profile. The dev-to-prod jump is one CLI command — no separate stack to learn or debug.
 
 ---
 
