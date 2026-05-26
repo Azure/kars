@@ -142,7 +142,7 @@ In prose:
 
 > **More providers later.** Copilot, Foundry, and GitHub Models are the three backends wired in today. Adding more (direct Anthropic, Bedrock, AWS Q, third-party OpenAI-compatible gateways) is mostly a matter of an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch. We're tracking provider-expansion through GitHub issues — please open a feature request describing the provider, auth model, and which Foundry-only features (if any) you'd want preserved.
 
-Every other external call (web fetch, MCP tool, sub-agent spawn, A2A peer message) goes through the same shape with a different policy module. Code: `inference-router/src/routes/chat_completions.rs:27-100`.
+Every other external call (web fetch, MCP tool, sub-agent spawn, A2A peer message) goes through the same shape with a different policy module. The handler is `chat_completions_handler` in [`inference-router/src/routes/chat_completions.rs`](../inference-router/src/routes/chat_completions.rs).
 
 ---
 

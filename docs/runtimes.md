@@ -163,6 +163,19 @@ The existing adapters are the reference. CrewAI is tracked in the [roadmap](road
 
 ---
 
+## Running OpenClaw locally and offloading to AzureClaw (no in-cluster runtime)
+
+The runtimes above describe agents that run **inside** an AzureClaw sandbox pod. There is a second, complementary shape: a local OpenClaw (or OpenClaw variant, e.g. NVIDIA's `nemoclaw`) running on your laptop or a non-AzureClaw host that uses the AzureClaw **mesh-plugin** to delegate heavy work to a governed AKS sandbox over the encrypted mesh.
+
+- **The local OpenClaw is not operated by AzureClaw.** You install it yourself, configure it yourself, run it under your shell. AzureClaw governs only the cloud-side environment that receives the offloaded task.
+- **The mesh-plugin (`@azureclaw/mesh`) installs into your local OpenClaw.** It registers the local agent on AGT, pairs to your AzureClaw cluster with a one-time token, and exposes tools (`mesh_send`, `mesh_offload`, `mesh_transfer_file`, etc.) that your agent can call.
+- **All traffic is E2E encrypted.** The relay sees only ciphertext (same Signal Protocol stack as in-cluster mesh, see [`architecture.md` → The mesh](architecture.md#the-mesh)).
+- **Variants ship as flavored builds of the same plugin.** `mesh-plugin/` is the canonical `@azureclaw/mesh` for stock OpenClaw; `mesh-plugin/nemoclaw/` is the NVIDIA NeMo / `nemoclaw` flavored build (policy presets + `setup.sh` that fits the nemoclaw container shape). The `sandbox-images/nemoclaw/Dockerfile` is the convenience image that bundles nemoclaw + the plugin together for users who want a pre-wired local container.
+
+Setup, pairing, and troubleshooting for the local-OpenClaw-with-offload pattern live in **[`mesh-plugin/README.md`](../mesh-plugin/README.md)** — that is the operator-facing reference for this shape.
+
+---
+
 ## See also
 
 - **[CRD reference — `ClawSandbox`](api/crd-reference.md#clawsandbox--the-agent)** — the spec field structure for each runtime.

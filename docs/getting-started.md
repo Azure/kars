@@ -269,8 +269,12 @@ Then submit `ClawSandbox` resources directly with `kubectl apply`. The CLI is co
 |---|---|---|
 | `azureclaw dev` hangs on first run | Docker Desktop is not running | Start Docker. |
 | `azureclaw up` fails on `az login` | Stale CLI session | `az logout && az login --use-device-code`. |
+| `azureclaw connect` fails with `address already in use` | Leftover `kubectl port-forward` from a previous session is still holding the local port | `lsof -ti:18789 \| xargs kill` (or restart your terminal). Then retry. |
+| `azureclaw dev` errors with `Unsupported engine` on `npm ci` | Node.js < 22 | Install Node 22+ (we test against the LTS line; see [`cli/package.json`](../cli/package.json) for the exact engines pin). |
+| `kind create cluster` fails with `cluster "kind" already exists` | A previous `azureclaw dev --target local-k8s` run did not clean up | `kind delete cluster --name <name>` and retry. |
+| GitHub Copilot provider returns `401` | The token is a classic PAT, not a Copilot-enabled OAuth token; or your Copilot seat is inactive | Verify your seat at [github.com/settings/copilot](https://github.com/settings/copilot). See [`cli-reference.md#azureclaw-dev`](cli-reference.md#azureclaw-dev) for the OAuth flow. |
 | Sandbox stays `Pending` | Foundry quota / model not deployed | `kubectl describe clawsandbox <name>` — the controller surfaces the cause as a `Condition`. |
-| Agent gets `403` on tool call | `ToolPolicy` denies it | `azureclaw policy show <name>` and adjust. |
+| Agent gets `403` on tool call | `ToolPolicy` denies it | `azureclaw policy show <name>` and adjust. See [`cli-reference.md#azureclaw-policy`](cli-reference.md#azureclaw-policy). |
 | Mesh KNOCK fails | Trust score below threshold | See **[AGT boundary](architecture/agt-boundary.md#trust-scoring)**. |
 
 The complete operational runbook is in **[`docs/operations/`](operations/)**.
