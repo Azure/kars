@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](LICENSE)
 [![CI](https://github.com/Azure/azureclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/Azure/azureclaw/actions/workflows/ci.yml)
-[![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry%20%7C%20Kata-0078D4)](https://azure.microsoft.com)
+[![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry-0078D4)](https://azure.microsoft.com)
 
 Hardened sandbox per agent. Zero credentials in the agent. Every external call goes through a Rust router that enforces identity, content safety, governance, and audit. End-to-end encrypted inter-agent messaging. One CLI for the whole loop — laptop to AKS.
 
@@ -104,8 +104,10 @@ You write the same `ClawSandbox` YAML for both. The difference is where it runs 
 | Pod shape | **Single container** — agent + router co-located in one image | **Multi-container pod** — agent (UID 1000) + router (UID 1001) + init `egress-guard` |
 | Network isolation | Docker network, no egress guard | Router is the policy point; `NetworkPolicy` + `egress-guard` initContainer act as safety nets containing blast radius |
 | Identity | Provider credential — Copilot OAuth token, Foundry resource key, or GitHub PAT (mounted from a local secret) | Workload Identity (federated, no keys on disk) |
-| Optional VM isolation | n/a | Kata + AMD SEV-SNP (Confidential Containers) |
+| Optional VM isolation | n/a | Kata + AMD SEV-SNP (Confidential Containers) — requires a Kata-enabled node pool |
 | Use it for | Inner-loop dev, plugin authoring, demos | Real workloads, multi-tenant, production |
+
+There is also a third option for when Docker dev is too simple but AKS is too heavy: **`azureclaw dev --target local-k8s`** runs a real Kubernetes cluster locally (kind) with the same Helm chart, the same controller, the same multi-container pod shape, and the same NetworkPolicies as AKS. The only differences from prod are static-key auth (no Workload Identity) and the absence of cloud node pools. See [Architecture → Local Kubernetes mode](docs/architecture.md#local-kubernetes-mode-azureclaw-dev---target-local-k8s) and [Blueprint 02 — Local Kubernetes dev loop](docs/blueprints/02-local-k8s-dev-loop.md).
 
 Same CRDs. Same router code path. Same audit format. Same governance profiles. The graduation from `dev` to `up` is a one-line CLI change, not a port to a new system.
 
@@ -115,8 +117,10 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 
 **Fastest path (recommended): GitHub Copilot.** If you have an active Copilot seat (Individual / Business / Enterprise), the only thing you need beyond Docker is one device-code login. No Azure account, no PAT, no key files.
 
+> **Prerequisites:** Docker Desktop · Node.js 22+ · Rust 1.88+ (for building the CLI from source) · one of: an active GitHub Copilot seat, an Azure AI Foundry deployment, or a GitHub PAT with `models:read`.
+
 ```bash
-# Build the CLI (Node 22+, Rust 1.88+, Docker)
+# Build the CLI
 git clone https://github.com/Azure/azureclaw.git && cd azureclaw
 cd cli && npm ci && npm run build && npm link
 
@@ -244,7 +248,7 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 
 ## Project status
 
-`v0.1.0`. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E + manual matrix). See **[`CHANGELOG.md`](CHANGELOG.md)** for the change log and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
+`v0.1.0`. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E, chaos-tier fault injection, CNCF conformance self-assessment, plus a documented manual matrix on AKS — see [`tests/`](tests/)). The CRD surface is served at `v1alpha1` and may change between minor releases; the data path, security model, and audit chain are stable. See **[`CHANGELOG.md`](CHANGELOG.md)** for the change log and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
 
 ## Known limitations
 

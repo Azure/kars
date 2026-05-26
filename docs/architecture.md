@@ -31,7 +31,7 @@ The rule that ties them together: **the agent has no network of its own**. The r
 
 ## Two modes
 
-`azureclaw dev` and `azureclaw up` produce sandboxes that are observably the same to the agent code, but architecturally very different to a security reviewer.
+`azureclaw dev` and `azureclaw up` produce sandboxes that are observably the same to the agent code, but architecturally very different to a security reviewer. There is also a local-Kubernetes middle ground (`azureclaw dev --target local-k8s`) for when you want production-shaped infrastructure on a laptop. All three are first-class.
 
 ### Dev mode (`azureclaw dev`)
 
@@ -42,6 +42,24 @@ The rule that ties them together: **the agent has no network of its own**. The r
 - **What it is for:** plugin authoring, policy iteration, smoke tests, demos. Inner loop only.
 
 The router still runs the same data-path code it does in prod — the request handlers, policy decision points, content-safety parsing, audit format, and governance hooks are all real. What is *different* is the auth source (a static API key or PAT instead of an exchanged Workload-Identity token) and the spawn driver (Docker instead of Kubernetes). A small number of code paths branch on `AZURECLAW_DEV_MODE` to enable those substitutions. What is *not* real is the network and identity isolation — there is no separate router process to break out *to*. Treat dev mode as a development surface, not a security surface.
+
+### Local Kubernetes mode (`azureclaw dev --target local-k8s`)
+
+Between Docker-only dev and full AKS there is a third option: a real Kubernetes cluster running locally via [kind](https://kind.sigs.k8s.io/).
+
+- **Pod shape:** multi-container Kubernetes pod — the same shape as prod. Agent (UID 1000), router (UID 1001), egress-guard init container.
+- **Inside:** the controller, router, and AgentMesh relay + registry run inside the kind cluster. The same Helm chart that installs to AKS is installed locally with dev-friendly defaults.
+- **Isolation:** real Kubernetes `NetworkPolicy`, real UID separation, real iptables egress-guard. The only differences from AKS are the auth source (a static provider credential instead of Workload Identity) and the infrastructure (kind nodes instead of cloud node pools).
+- **Identity:** key-based (same as Docker dev mode).
+- **What it is for:** testing CRD changes, validating `NetworkPolicy` generation, running the chaos test suite locally, validating Helm changes, exercising the operator TUI against a real cluster — anything where Docker-only dev is too simple but AKS is too heavy.
+
+```bash
+azureclaw dev --target local-k8s
+```
+
+The kind cluster is created if it does not already exist, the locally-built images are loaded into kind, and the Helm chart is installed. See **[Blueprint 02 — Local Kubernetes dev loop](blueprints/02-local-k8s-dev-loop.md)** for the full walkthrough (including the Headlamp dashboard).
+
+This mode runs the same controller reconciliation loop and the same router data path as prod. What is different is the auth source and the infrastructure. What is *not* different is the pod shape, the `NetworkPolicy`, the UID separation, the egress-guard, the CRD schemas, or the audit chain.
 
 ### Prod mode (`azureclaw up` / Helm install)
 
@@ -235,7 +253,7 @@ The CRDs are served at `azureclaw.azure.com/v1alpha1`. The project is at `v0.1.0
 
 ---
 
-## The boring parts that matter
+## Implementation conventions
 
 - **Image tags are always `:latest` in source.** Pinning happens at install time via Helm values or env vars (e.g. `MAF_RUNTIME_IMAGE`). Earlier versions of the project drifted across version tags `v11`–`v25`; we chose convention over per-tag pins to make the tag mismatch class of bug impossible.
 - **The controller default-image lookup is centralised** in `controller/src/reconciler/runtime.rs`. Adding a new runtime is one match arm and one default-image function. The CRD enum is the source of truth for which runtimes exist.

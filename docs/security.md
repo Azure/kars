@@ -17,6 +17,13 @@ For threat-model walkthroughs, see **[STRIDE](security/stride.md)** and the **[R
 
 Everything below explains how those four guarantees are enforced and where the seams are.
 
+> **What is not yet enforced in this release.** Trying to be explicit so reviewers do not have to hunt:
+> - **TrustGraph mesh-admission gating** — the CRD is reconciler-only today; router-side enforcement of the topology is tracked in the [roadmap](roadmap.md).
+> - **A2A `AgentCard` verification in the gateway** — the verifier ships as a library; wiring it into the gateway request path is tracked in the roadmap.
+> - **Signed-OCI egress allowlists** — advisory today (the controller fetches and logs); the egress proxy will become the authority — see [egress-proxy.md](egress-proxy.md) and the roadmap.
+> - **Audit-chain head signing** — entries are hash-chained for tamper *detection* today; cryptographic signing of the chain head (for non-repudiation) is on the roadmap.
+> - **`attest sign` / `attest verify`** — scaffolded CLI commands; the full attestation flow is on the roadmap.
+
 ---
 
 ## The nine layers

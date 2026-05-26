@@ -18,7 +18,7 @@ flowchart TB
       Router["Inference router (Rust)<br/>127.0.0.1:8443"]
       Agent -->|localhost| Router
     end
-    Secret["mounted secret<br/>(your Foundry key)"]
+    Secret["mounted secret<br/>(provider credential)"]
     Secret -.-> Router
   end
 

@@ -28,7 +28,7 @@ A secure runtime for AI agents on Azure Kubernetes Service. This is the document
 - [A2A gateway](architecture/a2a-gateway.md) — public-ingress topology and trust model.
 - [AGT boundary](architecture/agt-boundary.md) — what AGT enforces vs what AzureClaw enforces.
 ### API
-- [CRD reference](api/crd-reference.md) — all eight CRDs with schema and examples.
+- [CRD reference](api/crd-reference.md) — all nine CRDs with schema and examples.
 - [Conditions reference](api/conditions.md) — every status condition the controller emits.
 - [Policy canonical format](api/policy-canonical-format.md) — signing canonicalization rules.
 

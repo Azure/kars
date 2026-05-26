@@ -18,7 +18,7 @@ listing (<https://owasp.org/www-project-mcp-top-10/>), re-verified on
 | 01 | Token Mismanagement & Secret Exposure | Router auth path, ConfigMap/Secret custody, OAuth 2.1 | Partial today; hardens on the roadmap |
 | 02 | Privilege Escalation via Scope Creep | `ToolPolicy` CRD, AGT policy profile, scopes-per-tool | Partial today; broadens on the roadmap |
 | 03 | Tool Poisoning | Sandbox image supply chain, cosign on pod images | Cosign verification tracked on the roadmap |
-| 04 | Supply Chain & Dependency Tampering | SBOM per release, SLSA-v1, vendored-patch audit | Vendored audit today; SLSA on the roadmap |
+| 04 | Supply Chain & Dependency Tampering | SBOM per release, SLSA build provenance (BuildKit), cosign keyless image signing, vendored-patch audit | SBOM + SLSA + cosign live on tag pushes; CR-spec attestation tracked on the roadmap |
 | 05 | Command Injection & Execution | Seccomp-strict, Landlock, egress-guard | Live today |
 | 06 | Intent Flow Subversion (prompt injection) | Foundry Content Safety + `InferencePolicy` guardrails | Content Safety live; CRD broadens on the roadmap |
 | 07 | Insufficient Authentication & Authorization | OAuth 2.1 on MCP, AGT `PolicyDecisionProvider` | OAuth 2.1 on the roadmap |
@@ -96,9 +96,7 @@ upstream, so dependency review focuses on the AGT SDK
 version, AGT relay/registry images, and regular SCA gates rather than local
 patch drift.
 
-**Plan.** Planned (see roadmap): SBOM per release and SLSA-v1 provenance on CR
-specs. `trivy` + `cosign-verify` + SCA gates enter
-permanent CI on the roadmap.
+**Plan.** SBOM (SPDX via Syft) and SLSA build-provenance attestations (BuildKit `provenance: true`) ship today on tag pushes; cosign keyless signing covers every published image. `trivy fs` + `trivy image` + `cosign-verify` run in CI on every PR; `cargo deny` and `npm audit` gate Rust and Node dependency intake. **SLSA / cosign provenance on the CR spec itself** (signing `kubectl apply` intent) is on the roadmap.
 
 ### MCP05 — Command injection & execution
 
