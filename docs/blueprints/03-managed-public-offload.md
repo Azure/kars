@@ -323,7 +323,7 @@ azureclaw operator --tenant tenant-acme        # operator TUI scoped to one tena
 - **Pairing tokens are commerce-aware.** `--token-budget`, `--slots`, `--expires`, `--capabilities`, `--required-isolation` map directly to your billing plan. Plan upgrade = new Pairing CR with bigger limits; old token revoked.
 - **Provider observability without decryption.** You can see *that* tenant `acme` exchanged 142 mesh frames in the last hour and consumed 1.2M Foundry tokens. You cannot see *what was in those frames* — neither in flight (Signal Protocol) nor at rest in the sandbox (SEV-SNP).
 - **Operator HA out of the box.** Two controller replicas with leader election and jittered requeue are the cluster-level defaults. `azureclaw_controller_reconcile_errors_total` and `_retries_total` on `:9091` give you per-tenant incident signals.
-- **CNCF Kubernetes AI Conformance v1.35+.** The platform and all eight CRDs pass the CNCF AI Conformance suite — a vendor-neutral benchmark for enterprise and ISV customers who require auditable AI infrastructure.
+- **CNCF Kubernetes AI Conformance v1.35+.** The platform and all nine CRDs pass the CNCF AI Conformance suite — a vendor-neutral benchmark for enterprise and ISV customers who require auditable AI infrastructure.
 - **Future:** managed AP2 (Agent Payments Protocol) lets your customers spend their token budget through signed mandates with audit. Schema present today; mounting deferred to a future phase.
 
 ## Productization checklist (the "🚧" part)

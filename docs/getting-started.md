@@ -78,7 +78,7 @@ az cognitiveservices account show     -n my-foundry -g my-rg --query properties.
 az cognitiveservices account keys list -n my-foundry -g my-rg --query key1            -o tsv
 ```
 
-Use `--kind AIServices` (not `--kind OpenAI`) — Foundry is what AzureClaw integrates with end-to-end (Content Safety, Memory Store, the 18 Foundry API groups the router proxies). Standalone `--kind OpenAI` accounts work for `dev` mode's model calls too, but you lose the rest of the surface. Full reference: [Azure AI Foundry quickstart](https://learn.microsoft.com/azure/ai-foundry/).
+Use `--kind AIServices` (not `--kind OpenAI`) — Foundry is what AzureClaw integrates with end-to-end (Content Safety, Memory Store, the full Foundry data-plane API surface the router proxies). Standalone `--kind OpenAI` accounts work for `dev` mode's model calls too, but you lose the rest of the surface. Full reference: [Azure AI Foundry quickstart](https://learn.microsoft.com/azure/ai-foundry/).
 
 If you'd rather skip provisioning by hand, jump to **[Step 2 — Deploy to AKS](#step-2--deploy-to-aks)** — `azureclaw up` provisions the Foundry resource, project, Content Safety binding, and a model deployment for you.
 

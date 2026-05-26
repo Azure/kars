@@ -8,7 +8,7 @@ The current public surface — exercised by CI (Kind E2E + manual matrix) on eve
 
 - **`ClawSandbox` CRD** (`azureclaw.azure.com/v1alpha1`) plus eight sibling CRDs covering inference policy, tool policy, A2A agents, MCP servers, memory, evaluation, egress approval, and trust topology.
 - **Six first-class agent runtimes:** OpenClaw, OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python + TypeScript), Pydantic-AI. Plus a documented **BYO runtime** path with strict-mode admission gating ([`operations/byo-strict.md`](operations/byo-strict.md)).
-- **Inference router** with IMDS / Workload-Identity broker, content-safety floor, per-sandbox token budgets, 18 Foundry API groups, MCP Streamable-HTTP + SSE compat, A2A transport.
+- **Inference router** with IMDS / Workload-Identity broker, content-safety floor, per-sandbox token budgets, the full Foundry data-plane API surface, MCP Streamable-HTTP + SSE compat, A2A transport.
 - **E2E-encrypted inter-agent messaging** via AgentMesh (Signal Protocol — X3DH + Double Ratchet). The Signal session is owned end-to-end by the agent processes; the inference router only WebSocket-bridges opaque ciphertext.
 - **Defense-in-depth sandbox:** read-only rootfs, UID-1000 + UID-1001 split, drop-ALL caps, custom seccomp (`azureclaw-strict`), Landlock, iptables UID-based egress, optional Kata.
 - **AGT integration:** `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` consumed via four provider traits (`MeshProvider`, `PolicyDecisionProvider`, `AuditSink`, `SigningProvider`).

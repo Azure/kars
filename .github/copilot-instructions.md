@@ -11,7 +11,7 @@ Four components, two languages:
 | Component | Language | Package Name | Role |
 |-----------|----------|-------------|------|
 | **Controller** | Rust (kube-rs) | `azureclaw-controller` | K8s operator — reconciles `ClawSandbox` CRDs into isolated sandboxes (namespace, deployment, service, NetworkPolicy, ConfigMap) |
-| **Inference Router** | Rust (axum) | `azureclaw-inference-router` | Per-sandbox proxy — the **only** network path for agents. Handles IMDS auth, Content Safety, token budgets, 18 Foundry API groups, AGT governance, sub-agent spawn |
+| **Inference Router** | Rust (axum) | `azureclaw-inference-router` | Per-sandbox proxy — the **only** network path for agents. Handles IMDS auth, Content Safety, token budgets, the full Foundry data-plane API surface, AGT governance, sub-agent spawn |
 | **CLI** | TypeScript | `@azureclaw/cli` | 18 CLI commands (`azureclaw up/add/dev/connect/handoff/mesh/...`) + OpenClaw plugin + 10 Foundry skills |
 | **Policy Engine** | YAML profiles | — | AGT governance policy profiles (allow/deny/approval/rate-limit) |
 

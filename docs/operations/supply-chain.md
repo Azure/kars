@@ -15,8 +15,12 @@ actually check, and how to extend them.
 | Filesystem CVE       | `trivy fs`            | `security-scan` job                    | **Yes**  |
 | Image CVE            | `trivy image`         | `container-scan` job                   | **Yes**  |
 | Image signature      | `cosign verify`       | `cosign-verify` job (PR dry-run)       | **Yes** (recipe pinned) |
-| SBOM                 | `syft`                | `image-cache-publish.yml` (recommended) | No (best-effort) |
+| SLSA build provenance | BuildKit (`provenance: true` on `docker/build-push-action`) | `image-sign-sbom.yml` | **Yes** (tag push) |
+| SBOM (SPDX)          | `syft` (anchore/sbom-action) | `image-sign-sbom.yml`           | **Yes** (tag push) |
+| Image signing        | `cosign` keyless OIDC | `image-sign-sbom.yml`                  | **Yes** (tag push) |
 | Dockerfile lint      | `hadolint`            | `dockerfile-lint` job                  | **Yes**  |
+
+> **About SLSA.** On tagged release builds, `docker/build-push-action` runs with `provenance: true`, which makes BuildKit emit a SLSA-format build-provenance attestation alongside the image (attached to the registry as an OCI attestation manifest). Combined with the cosign keyless signature and the SPDX SBOM, every signed image has a verifiable record of *what* was built, *how* it was built, and *with what dependencies*. Verification recipes are below.
 
 ## `deny.toml`
 

@@ -115,7 +115,7 @@ sequenceDiagram
 
 ### Runtime and CRD model in air-gap
 
-All eight CRDs work offline. The runtime adapter and model connection are configured via Helm values, not by choosing a different CRD schema:
+All nine CRDs work offline. The runtime adapter and model connection are configured via Helm values, not by choosing a different CRD schema:
 
 | CRD | Air-gap role |
 |---|---|
