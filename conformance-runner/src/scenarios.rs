@@ -67,10 +67,21 @@ pub async fn replay(
             })
         }
         Scenario::ChatCompletion { messages, model } => {
-            let body = json!({
-                "messages": messages_to_json(messages),
-                "model": model,
-            });
+            // Omit `model` when the corpus didn't specify one — sending
+            // `"model": null` causes Azure OpenAI to route to a default
+            // deployment that may strip prompt_filter_results
+            // annotations, which then fail Prompt-Shields-required
+            // policies and produce a false-positive Block on benign
+            // controls. The corpus author can pin a model when needed.
+            let body = match model {
+                Some(m) => json!({
+                    "messages": messages_to_json(messages),
+                    "model": m,
+                }),
+                None => json!({
+                    "messages": messages_to_json(messages),
+                }),
+            };
             single_call(
                 transport,
                 "/v1/chat/completions",

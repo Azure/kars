@@ -491,11 +491,27 @@ fn reason_from_body(body: &str) -> Option<String> {
     }
     let v: Value = serde_json::from_str(body).ok()?;
     let obj = v.as_object()?;
+    // First pass: flat string field on the envelope.
     for key in ["reason", "error", "message", "detail"] {
         if let Some(s) = obj.get(key).and_then(|v| v.as_str())
             && !s.is_empty()
         {
             return Some(s.to_string());
+        }
+    }
+    // Second pass: descend into nested `error` / `detail` objects to
+    // pull out `error.message` (Azure OpenAI, OpenAI, JSON-RPC) or
+    // `error.reason`. This covers responses like:
+    //   {"error": {"message": "filtered", "code": "content_filter"}}
+    for key in ["error", "detail"] {
+        if let Some(inner) = obj.get(key).and_then(|v| v.as_object()) {
+            for nested in ["message", "reason", "detail"] {
+                if let Some(s) = inner.get(nested).and_then(|v| v.as_str())
+                    && !s.is_empty()
+                {
+                    return Some(s.to_string());
+                }
+            }
         }
     }
     None
