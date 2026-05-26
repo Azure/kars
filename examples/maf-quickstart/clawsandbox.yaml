@@ -13,9 +13,10 @@
 #   - AzureClaw control plane installed (`azureclaw up`)
 #   - InferencePolicy below references an Azure OpenAI deployment named
 #     `gpt-4.1`. Adjust if needed.
-#   - Your MAF agent code is published to a public OCI image. The example
-#     uses `ghcr.io/microsoft/maf-quickstart:latest` as a placeholder —
-#     swap for your image, or use `git:` for dev iteration.
+#   - You publish your MAF agent code to an OCI registry and replace the
+#     `REPLACE-ME/your-maf-agent:latest` placeholder below. There is no
+#     upstream image — this YAML will not pull as-is. Use `git:` instead
+#     of `oci:` for dev iteration without a container build.
 
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -52,7 +53,11 @@ spec:
       language: python
       agentCode:
         oci:
-          image: ghcr.io/microsoft/maf-quickstart:latest
+          # REPLACE this with the image you built and pushed for your
+          # MAF agent. There is no upstream `ghcr.io/microsoft/maf-quickstart`
+          # image — this is a placeholder. Use `git:` instead of `oci:` for
+          # in-repo iteration without rebuilding a container.
+          image: REPLACE-ME/your-maf-agent:latest
       # entrypoint: ["python", "-u", "agent.py"]
       extraEnv:
         AGENT_LOG_LEVEL: "INFO"

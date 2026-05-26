@@ -133,7 +133,22 @@ spec:
 
 ### Reference example
 
-A reference BYO image (a tiny FastAPI agent) is in `examples/byo-agent/`. The README walks through building it locally, pushing it to ACR, and applying a `ClawSandbox` against it.
+A reference BYO image (a tiny FastAPI agent) is in [`examples/byo-quickstart/`](../examples/byo-quickstart/). The README walks through building it locally, pushing it to a registry, and applying a `ClawSandbox` against it.
+
+### Worked examples — full catalogue
+
+Eight end-to-end examples ship under [`examples/`](../examples/README.md) — one per runtime, plus two multi-tenant attack-simulation demos:
+
+| Example | Runtime | Shows |
+|---|---|---|
+| [`basic-agent`](../examples/basic-agent/) | OpenClaw | Minimal sandbox with default isolation |
+| [`telegram-agent`](../examples/telegram-agent/) | OpenClaw | Channel-plugin wiring (Telegram bot) |
+| [`confidential-agent`](../examples/confidential-agent/) | OpenClaw + Confidential Containers | CVM workers + attested boot |
+| [`openai-agents-quickstart`](../examples/openai-agents-quickstart/) | OpenAIAgents | Unmodified OpenAI Agents SDK app |
+| [`maf-quickstart`](../examples/maf-quickstart/) | MicrosoftAgentFramework | Unmodified MAF Python app |
+| [`byo-quickstart`](../examples/byo-quickstart/) | BYO | Any container image under the BYO contract |
+| [`demo-clawshield`](../examples/demo-clawshield/) | OpenClaw ×3 | Multi-tenant isolation proof (poisoned doc, two victim tenants) |
+| [`lethal-trifecta-demo`](../examples/lethal-trifecta-demo/) | OpenClaw ×2 | Reproduces the Jan-2026 Claude Cowork file-exfiltration attack against vanilla OpenClaw vs. an AzureClaw-managed agent — six independent layers each catch the attack. **Recommended launch demo.** |
 
 ---
 

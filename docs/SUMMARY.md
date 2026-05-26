@@ -35,6 +35,7 @@
 - [Operator TUI](operator-tui.md)
 - [Permissions model](permissions.md)
 - [Demo script](demo-script.md)
+- [Examples catalogue](examples.md)
 
 # Operations
 
