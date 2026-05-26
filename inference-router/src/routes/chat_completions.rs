@@ -44,9 +44,7 @@ fn insert_decision_headers(
         response.headers_mut().insert("x-azureclaw-decision", dh);
     }
     if let Ok(bh) = axum::http::HeaderValue::from_str(by_kind) {
-        response
-            .headers_mut()
-            .insert("x-azureclaw-decision-by", bh);
+        response.headers_mut().insert("x-azureclaw-decision-by", bh);
     }
 }
 
