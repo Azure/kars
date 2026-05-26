@@ -1,11 +1,21 @@
-# AzureClaw Security Validation Report
+# AzureClaw Security Validation Report — 2026-03-23 snapshot
+
+> **What this is.** A frozen-in-time evidence dump from one specific validation
+> run against an AKS cluster on 2026-03-23. The cluster, pod, and IP ranges
+> below are historical — they no longer exist. Treat this as **proof that the
+> validation method works end-to-end**, not as the current security posture.
+>
+> **To reproduce on a fresh cluster**, run the exec-brief harness — see
+> [`use-cases/exec-brief-walkthrough.md`](use-cases/exec-brief-walkthrough.md).
+> That walkthrough is the maintained, version-current equivalent of this
+> snapshot.
 
 **Date:** 2026-03-23  
-**Cluster:** `azureclaw-demo-aks` (eastus2)  
+**Cluster:** `azureclaw-demo-aks` (eastus2) — *no longer in service*  
 **Agent:** `demo-agent` (gpt-4.1, confidential isolation)  
-**Pod:** `demo-agent-689b5cc899-ktll9`
+**Pod:** `demo-agent-689b5cc899-ktll9` — *no longer in service*
 
-All 9 security layers validated on a live AKS cluster with evidence captured below.
+All 9 security layers were validated on a live AKS cluster on this date with the evidence captured below.
 
 ---
 

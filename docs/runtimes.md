@@ -2,7 +2,7 @@
 
 AzureClaw is a host for *agent runtimes*. The runtime is the framework your agent code is written against (OpenClaw, OpenAI Agents SDK, LangGraph, …) plus the small adapter that wires it to the AzureClaw sandbox shape.
 
-This page documents the seven first-class adapters that ship with v1.0 and the **BYO** contract for bringing your own.
+This page documents the first-class adapters that ship with v1.0 and the **BYO** contract for bringing your own. The table below is the authoritative count — when a runtime is added or deferred, this table changes.
 
 The same router, the same governance profile, the same audit chain, the same NetworkPolicy apply to all of them. Switching runtime is a one-field change in `ClawSandbox.spec.runtime.kind`.
 

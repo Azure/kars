@@ -1,10 +1,10 @@
 # AzureClaw Roadmap
 
-> Living document. Updated each release. Items in **v1.0.0 (current)** are shipped; everything else is intent, not commitment.
+> Living document. Updated each release. The project is currently **`v0.1.0` — pre-1.0 development**; the v1.0.0 target below describes the runtime substrate we are tracking towards as the first stable release. Everything beyond v1.0.0 is intent, not commitment.
 
-## v1.0.0 — General Availability of the runtime substrate
+## v1.0.0 — General Availability of the runtime substrate (target)
 
-Shipped capabilities (high-level):
+Capabilities feature-complete on `main` and exercised by CI; pending a formal `v1.0.0` tag once the public CRD surface is frozen:
 
 - ClawSandbox CRD `v1alpha1` (frozen for v1) — see [`docs/architecture/crd-versioning.md`](architecture/crd-versioning.md).
 - Six first-class agent runtimes: OpenClaw, OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python + TypeScript), Pydantic-AI.

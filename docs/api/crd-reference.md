@@ -40,7 +40,7 @@ azureclaw policy sign --kind {egress|tools|inference|memory|mcp-tools|eval-corpu
 # → emits sha256:<digest>
 ```
 
-The CLI does six things in order: validate against the kind's JSON Schema → canonicalise to deterministic bytes (per-kind rules; see [`docs/internal/policy-canonical-format.md`](../internal/policy-canonical-format.md)) → `oras push` to the registry with the kind's pinned `artifactType` media type → `cosign sign --registry-referrers-mode=legacy` → emit the resulting manifest digest for the human to paste into the CR's `bundleRef`/`allowlistRef`/`corpus.bundleRef` field.
+The CLI does six things in order: validate against the kind's JSON Schema → canonicalise to deterministic bytes (per-kind rules; see [`docs/api/policy-canonical-format.md`](policy-canonical-format.md)) → `oras push` to the registry with the kind's pinned `artifactType` media type → `cosign sign --registry-referrers-mode=legacy` → emit the resulting manifest digest for the human to paste into the CR's `bundleRef`/`allowlistRef`/`corpus.bundleRef` field.
 
 The digest the CLI prints is the OCI **manifest** digest, not a layer hash. The controller pulls by that digest, so a tampered registry cannot serve different bytes than what the signer signed.
 

@@ -20,7 +20,7 @@ We expect external contributions from:
 - **Bug fixes** against documented behavior (regressions, incorrect error handling, unmet API contracts)
 - **New MCP servers** that conform to the `McpServer` CRD and do not relax sandbox isolation
 - **New channels** (Telegram/Slack/Discord/WhatsApp pattern) or **web-search plugins** (Brave/Tavily/Exa/Firecrawl/Perplexity/OpenAI pattern)
-- **New Tier-2 BYO runtime adapters** that implement the multi-runtime architecture per `docs/architecture.md` (or `docs/runtime-contract.md` if present)
+- **New Tier-2 BYO runtime adapters** that implement the multi-runtime architecture per [`docs/runtimes.md`](docs/runtimes.md) (the BYO contract)
 - **Egress allowlist contributions** for the signed-OCI workflow (per S12 / `docs/internal/security-audits/`)
 - **Documentation improvements**, especially for use-case blueprints, troubleshooting guides, and architecture clarifications
 - **Test coverage improvements** (chaos tests, conformance tests, unit tests) that increase confidence in isolation or governance
