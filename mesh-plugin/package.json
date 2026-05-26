@@ -45,7 +45,7 @@
   },
   "dependencies": {
     "@microsoft/agent-governance-sdk": "^3.6.0",
-    "ws": "^8.18"
+    "ws": "^8.20"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
