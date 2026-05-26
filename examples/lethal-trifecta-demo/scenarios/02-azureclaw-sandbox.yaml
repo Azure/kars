@@ -41,7 +41,6 @@ spec:
   runtime:
     kind: OpenClaw
     openclaw:
-      version: "2026.3.13"
       config:
         agent:
           model: "azure/gpt-4.1"
@@ -68,14 +67,11 @@ spec:
       # is rejected at this layer alone.
       - host: "api.openai.com"
         port: 443
-        methods: ["GET"]
       - host: "api.github.com"
         port: 443
-        methods: ["GET"]
       # Bait server (cluster-internal, used to fetch the skill itself)
       - host: "bait-server.azureclaw-claw.svc.cluster.local"
         port: 80
-        methods: ["GET"]
   azureServices:
     - service: ai-foundry
       permissions: [inference]

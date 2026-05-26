@@ -20,7 +20,7 @@ Two namespaces, one cluster.
 
 ```bash
 ./scripts/deploy.sh
-kubectl get pods -n naked-claw -n azureclaw-claw
+kubectl get pods -n naked-claw && kubectl get pods -n azureclaw-realestate-agent
 ```
 
 | Namespace | Agent | Defenses |
@@ -75,7 +75,7 @@ firing in production."*
 ## Act 4 — AzureClaw defeats it, six different ways (3:00–6:00)
 
 ```bash
-./scripts/run-attack.sh azureclaw-claw
+./scripts/run-attack.sh azureclaw
 ```
 
 Each layer is shown by toggling off the *previous* layers and watching
@@ -89,7 +89,7 @@ the next one engage. Six independent layers — any one stops the attack.
 ```
 
 The Foundry guardrail catches the injection before the model ever runs.
-**Show:** `kubectl logs -n azureclaw-claw deploy/inference-router | grep prompt_shields`
+**Show:** `kubectl logs -n azureclaw-realestate-agent deploy/realestate-agent -c inference-router | grep prompt_shields`
 
 > *(GitHub-Models mode skips this layer — see [security.md](../../docs/security.md#what-we-do-not-defend-against). The other five layers still fire.)*
 
@@ -130,7 +130,7 @@ Even if all router policy is bypassed, the agent process itself can't
 reach the network:
 
 ```bash
-kubectl exec -n azureclaw-claw deploy/realestate-agent -c openclaw -- \
+kubectl exec -n azureclaw-realestate-agent deploy/realestate-agent -c openclaw -- \
   curl -v https://api.openai.com/v1/files
 # curl: (7) Failed to connect to api.openai.com port 443: Connection refused
 ```

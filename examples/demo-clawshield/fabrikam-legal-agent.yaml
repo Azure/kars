@@ -41,8 +41,7 @@ spec:
   runtime:
     kind: OpenClaw
     openclaw:
-      version: "2026.3.13"
-      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+      # Image intentionally unset: controller resolves from SANDBOX_IMAGE env (set by azureclaw up).
       config:
         agent:
           model: "azure/gpt-4.1"
@@ -74,14 +73,11 @@ spec:
       # Fabrikam internal APIs only
       - host: "docs.fabrikam.com"
         port: 443
-        methods: ["GET"]
       - host: "legal-api.fabrikam.com"
         port: 443
-        methods: ["GET", "POST"]
       # SEC EDGAR for regulatory filings (read-only)
       - host: "efts.sec.gov"
         port: 443
-        methods: ["GET"]
 
   azureServices:
     - service: ai-foundry

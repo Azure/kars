@@ -84,6 +84,25 @@ cd examples/lethal-trifecta-demo
 ./scripts/teardown.sh         # removes everything
 ```
 
+> **What works out of the box** — `deploy.sh` and `teardown.sh` run end-to-end on
+> local-k8s and AKS; both Deployments reach `Ready` and the AzureClaw sandbox
+> stack (egress-guard, inference-router, NetworkPolicy, InferencePolicy) all
+> reconcile.
+>
+> **What `run-attack.sh` additionally requires** —
+> 1. The `naked-claw` container needs a working OpenClaw runtime config (mounted
+>    or templated into `01-naked-claw.yaml`); without it the vanilla pod
+>    crashloops at startup before it can attempt the attack.
+> 2. The `azureclaw-realestate-agent` namespace is governed by the cluster-wide
+>    `ValidatingAdmissionPolicy/azureclaw-sandbox-exec-ban` ValidatingAdmissionPolicy,
+>    so `kubectl exec` into the `openclaw` container is denied by design. For
+>    the demo's exec-driven attack path, label the namespace
+>    `azureclaw.azure.com/break-glass=true` first — every bypass is audited.
+>
+> If either prerequisite isn't met, `deploy.sh` still demonstrates the
+> deploy-time defense posture (network policy, egress guard, governance
+> mounts), which is the bulk of the story.
+
 The full timed walkthrough is in [`WALKTHROUGH.md`](WALKTHROUGH.md) — what to
 say at each second mark for a recorded or live demo.
 

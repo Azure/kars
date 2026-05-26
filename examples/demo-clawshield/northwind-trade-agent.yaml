@@ -37,8 +37,7 @@ spec:
   runtime:
     kind: OpenClaw
     openclaw:
-      version: "2026.3.13"
-      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+      # Image intentionally unset: controller resolves from SANDBOX_IMAGE env (set by azureclaw up).
       config:
         agent:
           model: "azure/gpt-4.1"
