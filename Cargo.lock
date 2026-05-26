@@ -45,9 +45,9 @@ dependencies = [
 
 [[package]]
 name = "agentmesh"
-version = "3.3.0"
+version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbaef94069c2dee3cc60357a787e65b9f875bb326f782181753e1b250189fc38"
+checksum = "c8aad669165e6bd20bdbf06c31f095ea96102586e6c99ed0f64f18e202fe0760"
 dependencies = [
  "base64 0.22.1",
  "cedar-policy",
@@ -2740,7 +2740,7 @@ version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 dependencies = [
- "spin",
+ "spin 0.9.8",
 ]
 
 [[package]]
@@ -4107,9 +4107,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "regorus"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "656c9768f1d2113590ebc05e2e342a9f76baa97a445f2928f24eec9ae1fb14ac"
+checksum = "63642e663bb81698ab7160735bdc831f580022194922d3f24d5c40a913ff3fab"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -4118,7 +4118,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "spin",
+ "spin 0.10.0",
  "thiserror 2.0.18",
 ]
 
@@ -4941,6 +4941,12 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+
+[[package]]
+name = "spin"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
 
 [[package]]
 name = "spki"

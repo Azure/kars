@@ -175,18 +175,17 @@ impl Governance {
         let policy = PolicyEngine::new();
         let policy_rule_count = AtomicU64::new(0);
 
-        // AGT MCP modules (from agentmesh 3.1.0)
-        let redactor = CredentialRedactor::new().unwrap_or_else(|e| {
-            tracing::warn!("CredentialRedactor init failed ({e}), using fallback");
-            CredentialRedactor::new().expect("redactor must initialize")
-        });
+        // AGT MCP modules. As of agentmesh 3.7, `CredentialRedactor::new()` is
+        // infallible — regex literals are validated at compile time via
+        // `.expect()` inside the constructor. See agentmesh-3.7.0
+        // src/mcp/redactor.rs.
+        let redactor = CredentialRedactor::new();
         let mcp_clock: std::sync::Arc<dyn agentmesh::mcp::Clock> = std::sync::Arc::new(SystemClock);
-        let mcp_audit: std::sync::Arc<dyn agentmesh::mcp::McpAuditSink> = std::sync::Arc::new(
-            InMemoryAuditSink::new(CredentialRedactor::new().expect("redactor for audit sink")),
-        );
+        let mcp_audit: std::sync::Arc<dyn agentmesh::mcp::McpAuditSink> =
+            std::sync::Arc::new(InMemoryAuditSink::new(CredentialRedactor::new()));
         let mcp_metrics = McpMetricsCollector::default();
         let response_scanner = McpResponseScanner::new(
-            CredentialRedactor::new().expect("redactor for scanner"),
+            CredentialRedactor::new(),
             mcp_audit,
             mcp_metrics,
             mcp_clock.clone(),
