@@ -45,7 +45,36 @@ use kube::{
     api::{Patch, PatchParams},
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+
+/// Kubernetes label values are limited to 63 bytes (RFC 1123). The owner
+/// label value we want to emit (`<kind>.<name>`) can exceed 63 bytes when
+/// the mirrored resource has a long name (e.g. an InferencePolicy whose
+/// own ConfigMap name is already prefixed with `inferencepolicy-`).
+///
+/// We collapse over-long values to `<truncated-prefix>-<8-hex-digest>`
+/// so the label stays unique-per-source and recognisable in `kubectl get
+/// -l`, without violating the kubelet validator. Nothing reads this
+/// label programmatically (it is a write-only provenance marker —
+/// authoritative kind/namespace is in the sibling annotations) so
+/// truncation is safe.
+fn safe_label_value(raw: &str) -> String {
+    const MAX: usize = 63;
+    if raw.len() <= MAX {
+        return raw.to_string();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    let digest = hasher.finalize();
+    let suffix = format!(
+        "-{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    );
+    let head_len = MAX - suffix.len();
+    let head = &raw[..head_len.min(raw.len())];
+    format!("{head}{suffix}")
+}
 
 /// Owned-resource label key, attached to every mirror by the reconciler
 /// so cleanup/observability can find them. Value format is
@@ -146,7 +175,7 @@ pub async fn mirror_configmap(
     let mut labels: BTreeMap<String, String> = BTreeMap::new();
     labels.insert(
         MIRROR_OWNER_LABEL.into(),
-        format!("{source_kind}.{name}").to_lowercase(),
+        safe_label_value(&format!("{source_kind}.{name}").to_lowercase()),
     );
     labels.insert(MIRROR_SANDBOX_LABEL.into(), sandbox_name.into());
     labels.insert(
@@ -217,7 +246,7 @@ pub async fn mirror_secret(
     let mut labels: BTreeMap<String, String> = BTreeMap::new();
     labels.insert(
         MIRROR_OWNER_LABEL.into(),
-        format!("{source_kind}.{name}").to_lowercase(),
+        safe_label_value(&format!("{source_kind}.{name}").to_lowercase()),
     );
     labels.insert(MIRROR_SANDBOX_LABEL.into(), sandbox_name.into());
     labels.insert(
@@ -663,5 +692,30 @@ mod tests {
         let before = spec.clone();
         inject_container_env(&mut spec, "does-not-exist", "X", "y");
         assert_eq!(spec, before);
+    }
+
+    #[test]
+    fn safe_label_value_passes_through_short_values() {
+        assert_eq!(
+            super::safe_label_value("inferencepolicy.my-policy"),
+            "inferencepolicy.my-policy"
+        );
+        let exact = "a".repeat(63);
+        assert_eq!(super::safe_label_value(&exact), exact);
+    }
+
+    #[test]
+    fn safe_label_value_truncates_with_stable_hash_when_too_long() {
+        // Real-world regression: telegram-agent's InferencePolicy
+        // mirror produced a 64-byte label value before this guard.
+        let long = "inferencepolicy.inferencepolicy-telegram-agent-inference-profile";
+        assert_eq!(long.len(), 64);
+        let safe = super::safe_label_value(long);
+        assert!(safe.len() <= 63, "got {} bytes: {safe}", safe.len());
+        // Stable: same input → same output.
+        assert_eq!(super::safe_label_value(long), safe);
+        // Different inputs → different outputs (collision-resistant).
+        let other = "inferencepolicy.inferencepolicy-different-name-foo-profile";
+        assert_ne!(super::safe_label_value(other), safe);
     }
 }
