@@ -14,8 +14,9 @@
 #   - InferencePolicy below references an Azure OpenAI deployment named
 #     `gpt-4.1` reachable through your project. Adjust if needed.
 #   - Your agent code is published to a public OCI image. The example uses
-#     `ghcr.io/openai/openai-agents-quickstart:latest` as a placeholder —
-#     swap for your image, or use `git:` instead of `oci:` for dev iteration.
+#     `REPLACE-ME/your-openai-agents-app:latest` as a placeholder — there
+#     is no upstream image, this YAML will not pull as-is. Replace with
+#     your own image, or use `git:` instead of `oci:` for dev iteration.
 
 ---
 # S13 phase2-config-authority-refs — InferencePolicy is referenced from
@@ -56,7 +57,12 @@ spec:
       # `git`: dev iteration path — controller clones at pod start.
       agentCode:
         oci:
-          image: ghcr.io/openai/openai-agents-quickstart:latest
+          # REPLACE this with the image you built and pushed for your
+          # OpenAI Agents app. There is no upstream
+          # `ghcr.io/openai/openai-agents-quickstart` image — this is
+          # a placeholder. Use `git:` instead of `oci:` for in-repo
+          # iteration without rebuilding a container.
+          image: REPLACE-ME/your-openai-agents-app:latest
       # Optional: override the entrypoint. Default is `python -u agent.py`.
       # entrypoint: ["python", "-u", "agent.py"]
       extraEnv:
