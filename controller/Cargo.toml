@@ -60,7 +60,7 @@ axum = "0.8"
 # Status-only fetcher; actual NetworkPolicy still derives from inline allowedEndpoints.
 # See `controller/src/policy_fetcher.rs` and `docs/internal/policy-canonical-format.md`.
 sigstore = { version = "0.13", default-features = false, features = ["cosign", "verify", "rustls-tls", "sigstore-trust-root"] }
-oci-client = { version = "0.17", default-features = false, features = ["rustls-tls"] }
+oci-client = { version = "=0.16.1", default-features = false, features = ["rustls-tls"] }
 # Explicit dep so we can install a process-level CryptoProvider at
 # startup. Multiple transitive deps (kube → ring, reqwest →
 # aws-lc-rs) enable both providers, which makes rustls 0.23.40+

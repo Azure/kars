@@ -1,6 +1,6 @@
 # AzureClaw CLI Reference
 
-AzureClaw ships **31 top-level commands** organised by purpose: **Lifecycle**,
+AzureClaw ships **dozens of top-level commands** organised by purpose: **Lifecycle**,
 **Operations**, **Configuration**, **Observability**, and the
 **Multi-Agent / Federation** family (Agent mobility, Interop, Governance).
 Everything you need to go from zero to a production-hardened, E2E-encrypted
@@ -1047,7 +1047,7 @@ azureclaw policy <subcommand> [arguments] [options]
 | Flag | Default | Description |
 |---|---|---|
 | `--kind <kind>` | *(required)* | One of: `egress-allowlist`, `agt-profile`, `inference-policy`, `memory-binding`, `mcp-server-bundle`, `eval-corpus` |
-| `--file <path>` | *(required)* | Path to the **canonical-form** bytes for the kind (see [docs/internal/policy-canonical-format.md](internal/policy-canonical-format.md)) |
+| `--file <path>` | *(required)* | Path to the **canonical-form** bytes for the kind (see [docs/api/policy-canonical-format.md](api/policy-canonical-format.md)) |
 | `--registry <host>` | *(required)* | OCI registry hostname (e.g. `myacr.azurecr.io`) |
 | `--repository <repo>` | *(required)* | OCI repository path under the registry |
 | `--tag <tag>` | `latest` | Tag to push under (informational — cosign signs by digest) |

@@ -84,7 +84,7 @@ It is built for three audiences:
 
 **Pluggable inference backend.** Three providers are wired in today:
 
-- **GitHub Copilot** — recommended for the [inner loop](docs/architecture.md#dev-mode-azureclaw-dev). One device-code OAuth login (no Azure account, no PAT to manage). Picks from the full Copilot model catalogue: **Claude Opus / Sonnet, GPT-5/4.1, Gemini, o-series**, etc. Native Anthropic-shape passthrough for Claude (no shape translation, full tool-calling fidelity). Largest context windows in the lineup. See [Sandbox pod — dev mode](docs/architecture-diagrams.md#1-sandbox-pod--dev-mode) for the runtime shape.
+- **GitHub Copilot** — recommended for the [inner loop](docs/architecture.md#dev-mode-azureclaw-dev). One device-code OAuth login (no Azure account, no PAT to manage). Picks from the full Copilot model catalogue, including current Claude, GPT, Gemini, and reasoning-class models. Native Anthropic-shape passthrough for Claude (no shape translation, full tool-calling fidelity). Largest context windows in the lineup. See [Sandbox pod — dev mode](docs/architecture-diagrams.md#1-sandbox-pod--dev-mode) for the runtime shape.
 - **Azure AI Foundry / Azure OpenAI** — the [production-grade](docs/architecture.md#prod-mode-azureclaw-up) default. Unlocks the full feature set: Memory Store, Agents, Evaluations, Indexes, Datasets, inline Content Safety, and the rest of the Foundry data-plane the router proxies. Use this when you need anything beyond plain chat completions, or when running on AKS. See [Sandbox pod — prod mode](docs/architecture-diagrams.md#2-sandbox-pod--prod-mode) and [The data path of one model call](docs/architecture-diagrams.md#3-the-data-path-of-one-model-call).
 - **GitHub Models** — free, PAT-only, no subscription. Convenient for trivial demos; smaller context windows and tight rate limits make it a poor fit for real agents. Foundry-only routes return `501`; inline Content Safety is not enforced (see [security.md](docs/security.md#what-we-do-not-defend-against) and the [data path](docs/architecture.md#the-data-path-of-one-external-call) for what each provider routes through).
 
@@ -143,7 +143,7 @@ $ azureclaw dev
   GitHub Models                     (free; just need a GitHub PAT — small context, Foundry features disabled)
 ```
 
-1. **GitHub Copilot** *(default)* — one device-code login at `https://github.com/login/device`, then pick from the Copilot model catalogue (Claude Opus 4.7, GPT-5, Gemini, …). No Azure, no PAT, no key files. **This is the fastest path to a working agent on a real frontier model.**
+1. **GitHub Copilot** *(default)* — one device-code login at `https://github.com/login/device`, then pick from the Copilot model catalogue. No Azure, no PAT, no key files. **This is the fastest path to a working agent on a real frontier model.**
 2. **Azure AI Foundry / Azure OpenAI** — paste an endpoint, deployment, and resource-level API key. Required for Memory Store, agents, evaluations, and inline Content Safety.
 3. **GitHub Models** — paste a GitHub PAT with `models:read`. Free; small context windows.
 

@@ -35,6 +35,7 @@
 - [Channels & plugins](channels-plugins.md)
 - [Operator TUI](operator-tui.md)
 - [Permissions model](permissions.md)
+- [Demo script](demo-script.md)
 
 # Operations
 
@@ -56,11 +57,13 @@
 - [Lifecycle & reconciliation](api/lifecycle.md)
 - [Conditions](api/conditions.md)
 - [Backwards compatibility](api/backwards-compatibility.md)
+- [Policy canonical format](api/policy-canonical-format.md)
 
 # Blueprints
 
 - [Index](blueprints/00-index.md)
 - [Developer inner loop](blueprints/01-developer-inner-loop.md)
+- [Local k8s dev loop](blueprints/02-local-k8s-dev-loop.md)
 - [Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md)
 - [Managed public offload](blueprints/03-managed-public-offload.md)
 - [Cross-org federation](blueprints/04-cross-org-federation.md)
@@ -71,4 +74,5 @@
 - [Roadmap](roadmap.md)
 - [ADR index](adr/README.md)
   - [ADR-0001: A2A ingress front edge](adr/0001-a2a-ingress-front-edge.md)
+  - [ADR-0002: Inference endpoint sourcing](adr/0002-inference-endpoint-sourcing.md)
 

@@ -5792,9 +5792,8 @@ CRD reconciler in the family lands. Phase 2 §14.6 column 12
 This entry covers **186 commits** on `dev` since `main`, structured as Phase 0
 (seams + safety net) and Phase 1 (protocol freshness + minimal schema). Every
 capability cites code; every capability-introducing PR shipped a security-audit
-doc under `docs/internal/security-audits/` (75 docs total). See
-[`docs/phase-0-1-capabilities.md`](docs/phase-0-1-capabilities.md) for the full
-evidence index.
+doc under `docs/internal/security-audits/` (75 docs total at the time of writing;
+see that directory for the full evidence trail).
 
 ### Phase 0 — provider seams + compat suite + CI gates
 

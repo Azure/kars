@@ -7,15 +7,15 @@ coverage for the failure shapes operators actually see in production.
 
 ## Tier composition
 
-| Category | File | Tests | What it injects |
-|---|---|---|---|
-| K8s API flakes | `tests/chaos/tests/k8s_api_flakes.rs` | 8 | 500/503 storms, 429 + Retry-After, 410 GONE, truncated JSON, premature EOF, persistent 500, concurrent watchers |
-| Foundry storms | `tests/chaos/tests/foundry_storms.rs` | 6 | 80/100 429 storm, 429 propagation (not 500), mid-stream 503 SSE close, slow-backend client timeout, blocked-attempt metric, mixed-storm convergence |
-| Entra rotation | `tests/chaos/tests/entra_rotation.rs` | 4 | Token refresh mid-flight, single-flight invariant, JWKS Kid rotation, SA token file rotation |
-| AGT relay | `tests/chaos/tests/agt_relay.rs` | 4 | WS upstream disconnect, handshake timeout (504-class), slow registry deadline, repeated churn (no task leak) |
+| Category | File | What it injects |
+|---|---|---|
+| K8s API flakes | `tests/chaos/tests/k8s_api_flakes.rs` | 500/503 storms, 429 + Retry-After, 410 GONE, truncated JSON, premature EOF, persistent 500, concurrent watchers |
+| Foundry storms | `tests/chaos/tests/foundry_storms.rs` | 80/100 429 storm, 429 propagation (not 500), mid-stream 503 SSE close, slow-backend client timeout, blocked-attempt metric, mixed-storm convergence |
+| Entra rotation | `tests/chaos/tests/entra_rotation.rs` | Token refresh mid-flight, single-flight invariant, JWKS Kid rotation, SA token file rotation |
+| AGT relay | `tests/chaos/tests/agt_relay.rs` | WS upstream disconnect, handshake timeout (504-class), slow registry deadline, repeated churn (no task leak) |
 
-22 chaos tests total. See `tests/chaos/README.md` for the precise
-invariant ↔ test map.
+See [`tests/chaos/README.md`](../../tests/chaos/README.md) for the authoritative
+test inventory and the precise invariant ↔ test map.
 
 ## When does the tier run?
 
