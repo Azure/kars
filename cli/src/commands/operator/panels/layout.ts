@@ -223,7 +223,17 @@ function buildRows(state: ClusterState): CrdRow[] {
   // KarsSandbox — uses SandboxInfo (no conditions; health field is authoritative).
   for (const s of state.sandboxes) {
     const rk = s.runtimeKind || "OpenClaw";
-    const status = `${s.model || "-"}  ·  ${rk}  ·  ${s.isolation || "-"}  ·  ${s.role}`;
+    // Include cluster origin so multi-cluster aggregated views can
+    // distinguish e.g. an `execbrief` on kind-azureclaw-dev from an
+    // `execbrief` on azureclaw-aks — otherwise the two rows look
+    // identical except for AGE, which is misleading.
+    const clusterTag =
+      s.runtime === "docker" ? "docker" :
+      s.kubeContext ? s.kubeContext.replace(/^kind-/, "") :
+      "";
+    const parts = [s.model || "-", rk, s.isolation || "-", s.role];
+    if (clusterTag) parts.push(clusterTag);
+    const status = parts.join("  ·  ");
     rows.push({
       index: next(),
       kind: "KarsSandbox",

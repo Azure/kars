@@ -22,18 +22,80 @@ import type { HealthState, SandboxInfo } from "../types.js";
 import { kctl, timeSince } from "../helpers.js";
 
 /**
- * Unified Docker + AKS sandbox view (concatenated; deduplication is
- * intentionally avoided — same-named sandboxes in both runtimes are a
- * legitimate handoff state, e.g. dormant local + active-successor cloud).
+ * Unified Docker + multi-cluster sandbox view.
+ *
+ * When `kubeContext` is given (legacy `--context <name>` path), only
+ * that one context is queried — preserves the historical behaviour.
+ *
+ * When `kubeContext` is undefined, every kube context in the user's
+ * kubeconfig that's reachable within ~5s is queried in parallel. This
+ * matches what `azureclaw list` already does and means a developer
+ * with both `kind-azureclaw-dev` and `azureclaw-aks` configured sees
+ * both clusters' sandboxes in a single dashboard, without having to
+ * `kubectl config use-context` between them.
+ *
+ * Deduplication is intentionally avoided — same-named sandboxes in
+ * both runtimes are a legitimate handoff state (e.g. dormant local +
+ * active-successor cloud).
  */
 export async function fetchSandboxes(kubeContext?: string): Promise<SandboxInfo[]> {
-  const [dockerResult, aksResult] = await Promise.allSettled([
+  // Decide which kube contexts to query.
+  let contexts: (string | undefined)[];
+  if (kubeContext) {
+    contexts = [kubeContext];
+  } else {
+    contexts = await discoverReachableContexts();
+    // If discovery returned nothing (no kubeconfig / kubectl missing),
+    // fall back to a single undefined → current-context attempt so an
+    // existing kube user without explicit context names still sees
+    // their sandboxes.
+    if (contexts.length === 0) contexts = [undefined];
+  }
+
+  const [dockerResult, ...aksResults] = await Promise.allSettled([
     fetchSandboxesDocker(),
-    fetchSandboxesAKS(kubeContext),
+    ...contexts.map((c) => fetchSandboxesAKS(c)),
   ]);
   const docker = dockerResult.status === "fulfilled" ? dockerResult.value : [];
-  const aks = aksResult.status === "fulfilled" ? aksResult.value : [];
+  const aks = aksResults.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
   return [...docker, ...aks];
+}
+
+/**
+ * List every kube context in the user's kubeconfig that responds to
+ * `kubectl get ns` within ~3 seconds. Probes run in parallel so a
+ * single unreachable AKS doesn't block the local kind cluster.
+ *
+ * Mirrors `cli/src/commands/list.ts:discoverKubeContexts`, but here we
+ * return raw context names (no labels) because the operator UI does
+ * not group by cluster.
+ */
+async function discoverReachableContexts(): Promise<string[]> {
+  let allContexts: string[] = [];
+  try {
+    const { stdout } = await execa("kubectl", ["config", "get-contexts", "-o", "name"], {
+      stdio: "pipe",
+      timeout: 5000,
+    });
+    allContexts = stdout.trim().split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+  const probed = await Promise.all(
+    allContexts.map(async (ctx) => {
+      try {
+        await execa(
+          "kubectl",
+          ["--context", ctx, "get", "ns", "--request-timeout=3s", "--no-headers"],
+          { stdio: "pipe", timeout: 5000 },
+        );
+        return ctx;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return probed.filter((c): c is string => c !== null);
 }
 
 export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxInfo[]> {
@@ -177,6 +239,12 @@ export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxIn
         role, parent: parentLabel, handoffState,
         runtime: "aks",
         runtimeKind: (item.spec?.runtime?.kind as string | undefined) || "OpenClaw",
+        // Tag every kube-sourced sandbox with its origin context so
+        // per-sandbox follow-up fetches (security/egress/agt-quick)
+        // target the same cluster instead of the current kubectl
+        // context. Critical when the operator aggregates multiple
+        // clusters in one view.
+        kubeContext,
       } as SandboxInfo;
     }));
 

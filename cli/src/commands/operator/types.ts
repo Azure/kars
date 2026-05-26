@@ -36,6 +36,16 @@ export interface SandboxInfo {
    * sandboxes that pre-date the `runtime` discriminator (S10).
    */
   runtimeKind?: string;
+  /**
+   * The kube context this sandbox lives in. `undefined` for Docker
+   * sandboxes (no context) and for sandboxes fetched from the current
+   * kubectl context when the operator wasn't given an explicit
+   * `--context` flag. Used by the multi-cluster aggregator (S15.f) so
+   * per-sandbox follow-up fetches (security, egress, agt-quick) target
+   * the SAME cluster the sandbox was discovered on, instead of
+   * silently falling back to the current kubectl context.
+   */
+  kubeContext?: string;
 }
 
 export interface EgressDomain {

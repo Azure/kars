@@ -134,7 +134,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
     columnSpacing: 1,
-    columnWidth: [3, 40, 14, 10, 18, 12, 5, 6],
+    columnWidth: [3, 32, 14, 10, 14, 10, 5, 6, 18],
     interactive: true,
     style: {
       border: { fg: "cyan" },
@@ -436,11 +436,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         rk === "PydanticAi" ? "PydAI" :
         rk === "BYO" ? "BYO" :
         rk;
-      return [hIcon, displayName, statusStr, rkTag, s.model, s.isolation, s.channels, s.age];
+      // Compact cluster origin tag so the user can tell which cluster
+      // each row came from in a multi-cluster operator view. Docker
+      // sandboxes show "docker"; AKS-tagged sandboxes show the last
+      // segment of their kube context name (e.g. "azureclaw-aks" or
+      // "azureclaw-dev"). Empty when no context was tagged (single-
+      // cluster operator runs preserved the historical no-column view).
+      const clusterTag =
+        s.runtime === "docker" ? "docker" :
+        s.kubeContext ? s.kubeContext.replace(/^kind-/, "") :
+        "";
+      return [hIcon, displayName, statusStr, rkTag, s.model, s.isolation, s.channels, s.age, clusterTag];
     });
     (agentTable as any).setData({
-      headers: [" ", " Name", " Status", " Runtime", " Model", " Isolation", " Ch", " Age"],
-      data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", "", ""]],
+      headers: [" ", " Name", " Status", " Runtime", " Model", " Isolation", " Ch", " Age", " Cluster"],
+      data: agentData.length > 0 ? agentData : [["", "(no agents)", "", "", "", "", "", "", ""]],
     });
 
     // Egress list — filtered to selected agent, colored by status
@@ -519,14 +529,14 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
       if (fetchDetail) {
         promises.push(
-          Promise.allSettled(running.map((s) => fetchEgressDomains(s, kubeContext))).then((settled) => {
+          Promise.allSettled(running.map((s) => fetchEgressDomains(s, s.kubeContext ?? kubeContext))).then((settled) => {
             egressByAgent = new Map();
             for (let i = 0; i < running.length; i++) {
               const r = settled[i];
               if (r.status === "fulfilled") egressByAgent.set(running[i].name, r.value);
             }
           }),
-          Promise.allSettled(running.map((s) => fetchSecurityState(s, kubeContext))).then((settled) => {
+          Promise.allSettled(running.map((s) => fetchSecurityState(s, s.kubeContext ?? kubeContext))).then((settled) => {
             securityStates = new Map();
             for (let i = 0; i < running.length; i++) {
               const r = settled[i];
@@ -537,7 +547,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       } else {
         // Fast AGT-only poll on non-detail cycles to keep mesh data alive
         promises.push(
-          Promise.allSettled(running.map((s) => fetchAgtQuick(s, securityStates.get(s.name), kubeContext))),
+          Promise.allSettled(running.map((s) => fetchAgtQuick(s, securityStates.get(s.name), s.kubeContext ?? kubeContext))),
         );
       }
 
