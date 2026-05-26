@@ -577,7 +577,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     }
     agtMeshClient.onKnock(async (fromAmid: string, request: any) => {
       const intent = request?.intent?.capability || '*';
-      const fromName = await resolveAmidToName(fromAmid) || fromAmid.slice(0, 12);
+      // Use full AMID as identifier when name resolution fails — a truncated
+      // prefix (slice(0,12) = "did:agentmes") collapses every unresolved
+      // peer into the SAME trust-store key, producing nonsense
+      // "did:agentmes" entries in the operator's peer view.
+      // The 12-char short form is for **log readability only**.
+      const fromName = await resolveAmidToName(fromAmid) || fromAmid;
       log.info(`AGT KNOCK from ${fromName} (${fromAmid.slice(0, 12)}...) intent=${intent}`);
 
       // Trust score evaluation (when threshold > 0)
@@ -655,7 +660,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
     // Handle E2E decryption failures and KNOCK rejections — log and surface to operator
     agtMeshClient.onError((type: string, fromAmid: string, detail: string) => {
-      const fromName = amidToName.get(fromAmid) || fromAmid.slice(0, 12);
+      // Same rationale as onKnock above: full AMID as fallback identifier,
+      // not a 12-char prefix (which would conflate every unresolved peer).
+      const fromName = amidToName.get(fromAmid) || fromAmid;
       if (type === 'knock_rejected') {
         log.warn(`⛔ Message blocked from '${fromName}': KNOCK not accepted — ${detail}`);
         pushInbox({
@@ -707,7 +714,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
     // Log when E2E encrypted channel is verified with a peer
     agtMeshClient.onE2EVerified((peerAmid: string, isFirstPeer: boolean) => {
-      const peerName = amidToName.get(peerAmid) || peerAmid.slice(0, 12);
+      const peerName = amidToName.get(peerAmid) || peerAmid;
       if (isFirstPeer) {
         log.info(`✅ E2E encrypted channel UP — first verified peer: '${peerName}' (X3DH + Double Ratchet)`);
       } else {
@@ -728,7 +735,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (!fromName) {
         fromName = await resolveAmidToName(fromAmid);
       }
-      if (!fromName) fromName = fromAmid.slice(0, 12);
+      // Fallback to the full AMID, NOT a 12-char prefix — the truncated
+      // form would collapse every unresolved peer into the same
+      // "did:agentmes" trust-store key (and the same inbox.from_agent).
+      if (!fromName) fromName = fromAmid;
 
       // ── Transport layer: intercept chunked transfer messages ──
       // mesh:transfer_manifest and mesh:transfer_chunk are transport-level —

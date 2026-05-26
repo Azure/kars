@@ -210,14 +210,22 @@ export async function fetchSandboxesDocker(): Promise<SandboxInfo[]> {
   try {
     const { stdout } = await execa("docker", [
       "ps", "-a", "--format",
-      "{{.Names}}|{{.Status}}|{{.Label \"kars.parent\"}}|{{.Label \"kars.spawned-by\"}}|{{.CreatedAt}}",
-      "--filter", "name=kars-",
+      "{{.Names}}|{{.Status}}|{{.Label \"azureclaw.parent\"}}|{{.Label \"azureclaw.spawned-by\"}}|{{.CreatedAt}}|{{.Label \"io.x-k8s.kind.cluster\"}}|{{.Label \"io.x-k8s.kind.role\"}}",
+      "--filter", "name=azureclaw-",
     ], { stdio: "pipe" });
 
     const results: SandboxInfo[] = [];
     for (const line of stdout.split("\n").filter(Boolean)) {
-      const [containerName, status, parent, , createdAt] = line.split("|");
-      if (!containerName?.startsWith("kars-")) continue;
+      const [containerName, status, parent, , createdAt, kindCluster, kindRole] = line.split("|");
+      if (!containerName?.startsWith("azureclaw-")) continue;
+      // Skip kind cluster nodes: `kind` names control-plane / worker
+      // containers `<cluster-name>-control-plane`, `<cluster-name>-worker`.
+      // When the kind cluster is named `azureclaw-dev` (default for
+      // `azureclaw dev --target local-k8s`) these containers match our
+      // `name=azureclaw-` filter and get misidentified as sandboxes.
+      // Distinguishing label: `io.x-k8s.kind.cluster` is set by kind on
+      // every node container; we drop any container that carries it.
+      if (kindCluster || kindRole) continue;
       // Skip AGT infrastructure containers
       if (containerName.includes("agt-postgres") || containerName.includes("agt-relay") || containerName.includes("agt-registry")) continue;
 

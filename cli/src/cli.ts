@@ -32,6 +32,7 @@ import { mcpCommand } from "./commands/mcp.js";
 import { memoryCommand } from "./commands/memory.js";
 import { inspectCommand } from "./commands/inspect.js";
 import { auditCommand } from "./commands/audit.js";
+import { headlampCommand } from "./commands/headlamp.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -69,6 +70,7 @@ export function createCli(): Command {
   program.addCommand(evalCommand());
   program.addCommand(operatorCommand());
   program.addCommand(auditCommand());
+  program.addCommand(headlampCommand());
 
   // Agent mobility
   program.addCommand(handoffCommand());
@@ -95,7 +97,7 @@ Command groups:
   Lifecycle       up, dev, add, push, destroy
   Operations      connect, status, list, logs, inspect
   Configuration   credentials, model, policy, egress, config
-  Observability   trace, eval, operator, audit
+  Observability   trace, eval, operator, audit, headlamp
   Agent mobility  handoff, mesh, pair
   Interop         convert, a2a, a2a-agent, migrate
   Governance      toolpolicy, inferencepolicy, mcp, memory
