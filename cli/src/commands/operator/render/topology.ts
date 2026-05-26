@@ -94,9 +94,14 @@ export function renderTopology(ctx: TopologyRenderContext): void {
   // while sandbox names in the operator are the short form
   // ("execbrief", "analyst", ...). Without normalization the
   // sandboxes.some()/subs.some() lookups never match and the peer
-  // count is always 0.
+  // count is always 0. Also filter out the legacy "did:agentmes"
+  // truncation ghost (pre-PR-354 openclaw plugins collapsed every
+  // unresolved peer into that single key; persists until pod restart).
   function shortAgentName(id: string): string {
     return id.replace(/^did:agentmesh:/, "");
+  }
+  function isBogusLegacyKey(id: string): boolean {
+    return id === "did:agentmes";
   }
 
   for (const p of parents) {
@@ -106,6 +111,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
                  sec?.egressMode === "learning" ? "{yellow-fg}learn{/}" : "";
     const meshInfo = sec ? `↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}` : "";
     const peerCount = sec?.agtTrustScores.filter((t) => {
+      if (isBogusLegacyKey(t.agent)) return false;
       const a = shortAgentName(t.agent);
       return a !== p.name && sandboxes.some((s) => s.name === a) && (t.interactions > 0 || t.lastSeen);
     }).length || 0;
@@ -188,6 +194,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
       for (const s of subs) {
         const childSec = securityStates.get(s.name);
         const peers = childSec?.agtTrustScores.filter((t) => {
+          if (isBogusLegacyKey(t.agent)) return false;
           const a = shortAgentName(t.agent);
           return a !== s.name && subs.some((sub) => sub.name === a) && t.interactions > 0;
         }) || [];

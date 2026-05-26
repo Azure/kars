@@ -128,6 +128,70 @@ export function headlampCommand(): Command {
         // Give the forward ~1.5s to bind before opening the browser.
         await new Promise((r) => setTimeout(r, 1500));
 
+        // Best-effort: if the cluster also has kube-prometheus-stack
+        // installed (which `azureclaw dev` ships out of the box), forward
+        // Prometheus on :19091 and Grafana on :3000 so the Headlamp
+        // AzureClaw plugin's metric panels (Mesh Topology, Token
+        // Budget, AGT decisions) light up without manual setup. The
+        // plugin reads `window.AZURECLAW_PROMETHEUS_URL` which defaults
+        // to http://127.0.0.1:19091.
+        const promPort = 19091;
+        const grafanaPort = 3000;
+        let promForwarded = false;
+        let grafanaForwarded = false;
+        try {
+          await execa(
+            "kubectl",
+            kctl(["get", "svc", "kps-kube-prometheus-stack-prometheus", "-n", "monitoring", "--no-headers"]),
+            { stdio: "pipe" },
+          );
+          await freePort(execa, promPort);
+          const pfProm = spawn(
+            "kubectl",
+            kctl([
+              "port-forward",
+              "-n",
+              "monitoring",
+              "service/kps-kube-prometheus-stack-prometheus",
+              `${promPort}:9090`,
+            ]),
+            { detached: true, stdio: "ignore" },
+          );
+          pfProm.unref();
+          promForwarded = true;
+        } catch {
+          // Prometheus not present — plugin panels will show the
+          // "Prometheus unreachable" hint, which is the correct UX
+          // for a cluster without monitoring.
+        }
+        try {
+          await execa(
+            "kubectl",
+            kctl(["get", "svc", "kps-grafana", "-n", "monitoring", "--no-headers"]),
+            { stdio: "pipe" },
+          );
+          await freePort(execa, grafanaPort);
+          const pfGraf = spawn(
+            "kubectl",
+            kctl([
+              "port-forward",
+              "-n",
+              "monitoring",
+              "service/kps-grafana",
+              `${grafanaPort}:80`,
+            ]),
+            { detached: true, stdio: "ignore" },
+          );
+          pfGraf.unref();
+          grafanaForwarded = true;
+        } catch {
+          // Grafana not present — fine.
+        }
+        if (promForwarded || grafanaForwarded) {
+          // Give the forwards a moment to bind.
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+
         const url = `http://localhost:${options.port}/`;
         console.log("");
         console.log(chalk.bold("  Headlamp dashboard:"));
@@ -137,11 +201,17 @@ export function headlampCommand(): Command {
           console.log(chalk.bold("  Login token (paste into Headlamp):"));
           console.log(`    ${chalk.dim(token)}`);
         }
+        if (promForwarded || grafanaForwarded) {
+          console.log("");
+          console.log(chalk.bold("  Observability stack:"));
+          if (promForwarded) console.log(`    Prometheus: ${chalk.cyan(`http://localhost:${promPort}/`)}`);
+          if (grafanaForwarded) console.log(`    Grafana:    ${chalk.cyan(`http://localhost:${grafanaPort}/`)}`);
+        }
         console.log("");
         console.log(
           chalk.dim(
             `  Port-forward runs in the background (PID ${child.pid}).\n` +
-              `  Stop it later with: pkill -f 'port-forward.*headlamp'`,
+              `  Stop it later with: pkill -f 'port-forward.*(headlamp|prometheus|grafana)'`,
           ),
         );
 
