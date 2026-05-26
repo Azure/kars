@@ -34,5 +34,4 @@ For day-to-day work the most useful surfaces are:
 ## See also
 
 - [CLI reference](../cli-reference.md)
-- [Backwards compatibility](../api/backwards-compatibility.md)
 - [Conditions reference](../api/conditions.md)

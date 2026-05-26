@@ -33,11 +33,11 @@ override env var on the controller (e.g. `OPENAI_AGENTS_RUNTIME_IMAGE`,
 Releases are cut by bumping `cli/package.json` and pushing a git tag:
 
 ```bash
-# 1. Bump version in cli/package.json (e.g. 1.0.0)
+# 1. Bump version in cli/package.json (e.g. 0.1.0)
 # 2. Commit + push to dev
 # 3. After dev → main merge:
-git tag v1.0.0
-git push origin v1.0.0
+git tag v0.1.0
+git push origin v0.1.0
 
 # 4. Build + push every image with the pinned tag:
 make images push push-runtimes  # uses VERSION from package.json + GIT_SHA
@@ -73,5 +73,5 @@ cosign verify $(REGISTRY)/azureclaw-controller@sha256:<digest> \
 
 See [`supply-chain.md`](./supply-chain.md) for the full Cosign /
 SBOM / cargo-deny gates. The Cosign **admission** gate (verify on
-`kubectl apply`) is tracked as a v1.1 deliverable — see the v1.1 milestone (`
-cosign-admission` in the release plan.
+`kubectl apply`) is tracked in the [roadmap](../roadmap.md) under
+`cosign-admission`.

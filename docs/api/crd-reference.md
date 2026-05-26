@@ -2,7 +2,7 @@
 
 AzureClaw exposes its API through **nine** first-class CustomResourceDefinitions in the `azureclaw.azure.com` group, all at version `v1alpha1`. This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
 
-> **Stability.** v1alpha1 is the v1.0 contract. We will not remove fields. Optional fields may be added. Behaviour may be tightened (denying things that previously slipped through) but never loosened. The full contract is in **[Backwards compatibility](backwards-compatibility.md)** and **[CRD versioning](../architecture/crd-versioning.md)**.
+> **Version.** All CRDs are served at `azureclaw.azure.com/v1alpha1`. The project is at `v0.1.0`; see [`CHANGELOG.md`](../../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](../roadmap.md) for what's next.
 
 ## At a glance
 
@@ -241,7 +241,7 @@ status:
 | `spec.federation[]` | Peer A2A agents acknowledged as part of the trust circle. Each is either `kind: in-cluster` + `agentRef: <A2AAgent.name>` (same namespace) or `kind: external` + `endpointUrl` + `pinnedKid`. |
 | `spec.policyRefs.toolPolicy` | Name of a sibling `ToolPolicy` whose `commerce` / `approval` / `rateLimit` apply to inbound `message/send`. |
 
-> **AgentCard verifier wiring is library-only today.** `azureclaw_a2a_core::verify_inbound_card` exists and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream Gateway-API mTLS layer. Wiring the verifier as an axum layer in the gateway is on the v1.1 roadmap — see [A2A gateway](../architecture/a2a-gateway.md).
+> **AgentCard verifier wiring is library-only today.** `azureclaw_a2a_core::verify_inbound_card` exists and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream Gateway-API mTLS layer. Wiring the verifier as an axum layer in the gateway is tracked in the [roadmap](../roadmap.md) — see [A2A gateway](../architecture/a2a-gateway.md).
 
 ---
 
@@ -280,7 +280,7 @@ spec:
 | `spec.scopes[]` | OAuth scopes the router will request when fronting calls. |
 | `spec.allowedTools[]` | Allow-list of tool names. `["*"]` exposes everything; an explicit list selects a subset; an **empty** list fails closed and the server is skipped on the registry. |
 | `spec.allowedSandboxes.matchLabels` | Selector restricting which sandboxes can reach this server. Empty = same-namespace only. |
-| `spec.bundleRef` | Signed OCI artifact alternative to inline content fields (see [Signed CRD bundles](../architecture/crd-versioning.md)). |
+| `spec.bundleRef` | Signed OCI artifact alternative to inline content fields (see [Policy canonical format](policy-canonical-format.md)). |
 
 > Content-safety floors are not configured on `McpServer` — they live on [`InferencePolicy.spec.contentSafety`](#inferencepolicy--model-routing-and-budgets).
 
@@ -373,7 +373,7 @@ spec:
         deployment: gpt-4.1-mini
   tokenBudget:
     perRequestTokens: 8000                                # enforced per call (today)
-    dailyTokens: 200000                                   # accepted; aggregate enforcement v1.1
+    dailyTokens: 200000                                   # accepted; aggregate enforcement on roadmap
     monthlyTokens: 5000000
   contentSafety:
     hate: Medium
@@ -496,7 +496,7 @@ To trigger a one-shot run without a schedule, add the `azureclaw.azure.com/run-n
 
 Cluster-scoped. Declares vertices (agent identities + Ed25519 public keys) and **signed** edges (`from → to` attestations carrying a trust score). The reconciler verifies each edge's signature against the source vertex's public key, drops invalid edges, and projects the verified subset into a per-sandbox ConfigMap at `/etc/azureclaw/trustgraph/graph.json`.
 
-> **Status — v1alpha1 (reconciler-only).** The controller validates the graph and projects it into every sandbox that references it. The **router does not yet read the projected graph**. The router keeps a post-decision trust-score map at `/tmp/agt/trust_scores.json`, populated from KNOCK outcomes the agent SDK reports out-of-band — this is for audit and rate-limit only; the actual KNOCK accept/deny decision lives inside the Signal session the agent owns (the router cannot decrypt it). Live edge updates require a sandbox roll. Closing this loop in **v1.1** adds router-side **mesh-admission gating** against the projected graph (refuse to WS-bridge an edge not in the graph — a separate, coarser layer that complements agent-side KNOCK, never replaces it) — see [`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades). Today this CRD is useful as a declarative source-of-record for trust intent and as a static projection at sandbox creation time; **it is not yet a runtime enforcement surface**.
+> **Status — reconciler-only.** The controller validates the graph and projects it into every sandbox that references it. The **router does not yet read the projected graph**. The router keeps a post-decision trust-score map at `/tmp/agt/trust_scores.json`, populated from KNOCK outcomes the agent SDK reports out-of-band — this is for audit and rate-limit only; the actual KNOCK accept/deny decision lives inside the Signal session the agent owns (the router cannot decrypt it). Live edge updates require a sandbox roll. Closing this loop is tracked in the [roadmap](../roadmap.md): router-side **mesh-admission gating** against the projected graph (refuse to WS-bridge an edge not in the graph — a separate, coarser layer that complements agent-side KNOCK, never replaces it). Today this CRD is useful as a declarative source-of-record for trust intent and as a static projection at sandbox creation time; **it is not yet a runtime enforcement surface**.
 
 ```yaml
 apiVersion: azureclaw.azure.com/v1alpha1
@@ -612,4 +612,4 @@ If anything fails, the failing phase is reflected as a condition with a `Reason`
 - **[CRD trust model](../security/crd-trust-model.md)** — the threat model and verification proof behind the [Signing and verification](#signing-and-verification) section above.
 - **[Runtimes](../runtimes.md)** — the runtime catalog and BYO contract.
 - **[Conditions reference](conditions.md)** — every status condition.
-- **[Backwards compatibility](backwards-compatibility.md)** — what we promise to keep.
+- **[Roadmap](../roadmap.md)** — what's next.

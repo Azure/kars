@@ -25,15 +25,15 @@ Each finding records: ID, date, surface, severity, summary, status, fix commit /
 
 ## Findings
 
-### Pre-v1.0 baseline
+### Initial baseline
 
-The pre-v1.0 surface was exercised against [`security/stride.md`](../security/stride.md) before v1.0 cut. Findings closed during that window are not enumerated here individually.
+The earlier surface was exercised against [`security/stride.md`](../security/stride.md). Findings closed during that window are not enumerated here individually.
 
-### v1.0 surface
+### Current surface
 
-v1.0 capabilities were exercised against the per-route threat model — CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, and runtime-CLI hotspots. Each carries two-reviewer sign-off.
+Today's capabilities have been exercised against the per-route threat model — CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, and runtime-CLI hotspots. Each carries two-reviewer sign-off.
 
-### v1.0 cut (open list)
+### Open list
 
 | ID | Date | Surface | Severity | Summary | Status |
 |----|------|---------|----------|---------|--------|
@@ -42,7 +42,7 @@ v1.0 capabilities were exercised against the per-route threat model — CRD, Cla
 | `RT-2026-03` | 2026-04-28 | AgentMesh KNOCK | Medium | Anonymous peer (trust 0) could trigger registry lookups before policy check | **Closed** — by routing trust-evaluation before lookup; see vendored-patch audit |
 | `RT-2026-04` | 2026-04-30 | A2A gateway | Low | Non-allowlisted scheme echoed in error response | **Closed** — sanitised |
 
-### v1.0 — accepted residual gaps
+### Accepted residual gaps
 
 These items were caught and explicitly deferred (each is documented in [`security/stride.md`](../security/stride.md) §Residual risk):
 

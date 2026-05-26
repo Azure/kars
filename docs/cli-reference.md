@@ -196,7 +196,7 @@ azureclaw dev [options]
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
 | `--build-base` | `false` | Rebuild the sandbox base image (heavy deps; only needed when upgrading OpenClaw/Python/Go) |
 | `--base-image <image>` | `mcr.microsoft.com/azurelinux/base/core:3.0` | Azure Linux base image for building sandbox |
-| `--mesh-provider <provider>` | `agt` | Mesh stack. Only `agt` is supported (the vendored Rust relay/registry were removed once their upstream AGT equivalents reached parity). Flag kept for backward-compatible scripts. |
+| `--mesh-provider <provider>` | `agt` | Mesh stack. Only `agt` is supported (the vendored Rust relay/registry were removed once their upstream AGT equivalents reached parity). Flag retained for existing scripts. |
 | `--agt-repo <path>` | `$AZURECLAW_AGT_REPO` | Path to the agent-governance-toolkit checkout (used to build relay/registry images). |
 | `--agt-sdk-tarball <path>` | — | Path to a locally-packed `@microsoft/agent-governance-sdk` `.tgz` to install in the sandbox image. Requires `--build`. |
 | `--no-mesh` | — | (local-k8s only) skip mesh relay/registry deployment. Sandboxes lose KNOCK/E2E. Use only for pure controller smoke tests. |
@@ -302,7 +302,7 @@ azureclaw add <name> [options]
 | `--runtime <kind>` | `openclaw` | Runtime: `openclaw`, `openai-agents`, `microsoft-agent-framework`, `langgraph`, `anthropic`, `pydantic-ai`, `byo` |
 | `--byo-image <image>` | — | Container image for `--runtime byo` (must declare `org.azureclaw.runtime.contract=v1`) |
 | `--byo-contract-version <version>` | `v1` | BYO contract version |
-| `--maf-language <lang>` | `python` | Microsoft Agent Framework language (`python`; `dotnet` is deferred to v1.1) |
+| `--maf-language <lang>` | `python` | Microsoft Agent Framework language (`python`; `dotnet` is tracked in the [roadmap](roadmap.md)) |
 | `--dry-run` | `false` | Print the ClawSandbox YAML without applying |
 
 **Examples:**
@@ -801,7 +801,7 @@ field owners, referenced policy versions, and reconcile trace. Pass
 `--baseline` to diff against a previously saved attestation; exit code
 reflects drift (0 = match, 2 = drift, 3 = baseline missing).
 
-Full signature and AGT receipt are deferred to v1.1.
+Full signature and AGT receipt are tracked in the [roadmap](roadmap.md).
 
 **Usage:**
 ```
@@ -1009,8 +1009,8 @@ azureclaw model list my-agent
 ### `azureclaw policy`
 
 Manages sandbox network and security policies. Hot-reload capable: `allow`
-and `deny` take effect without a pod restart. `learn` is kept as a
-backward-compatible alias for `azureclaw egress <name> --learned`.
+and `deny` take effect without a pod restart. `learn` is an alias for
+`azureclaw egress <name> --learned`.
 
 **Usage:**
 ```
@@ -1023,7 +1023,7 @@ azureclaw policy <subcommand> [arguments] [options]
 | `allow <name> <host>` | Add an allowed egress endpoint (hot-reload) |
 | `get <name>` | Show the active policy for a sandbox |
 | `deny <name> <host>` | Remove an allowed endpoint from a running sandbox |
-| `learn <name>` | Alias for `azureclaw egress <name> --learned` (kept for backward compatibility) |
+| `learn <name>` | Alias for `azureclaw egress <name> --learned` |
 | `sign --kind <kind> --file <path> --registry <r> --repository <repo>` | Sign a canonical-form policy artifact (any of the 6 signed kinds), push it to OCI, cosign-sign the manifest, and optionally print the `bundleRef` snippet for the consuming CRD. This is the operator-authoring half of the trust loop documented in [security/crd-trust-model.md](security/crd-trust-model.md). |
 
 **Arguments for `allow` / `deny`:**

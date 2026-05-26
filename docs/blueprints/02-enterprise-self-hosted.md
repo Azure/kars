@@ -132,7 +132,7 @@ sequenceDiagram
 
 ### CRDs in use
 
-Blueprint 02 uses the full v1.0 CRD stack. Apply these in the sandbox namespace (`azureclaw-<name>`) before creating the `ClawSandbox`:
+Blueprint 02 uses the full shipped CRD stack. Apply these in the sandbox namespace (`azureclaw-<name>`) before creating the `ClawSandbox`:
 
 | CRD | Role in this blueprint |
 |---|---|
@@ -289,7 +289,7 @@ azureclaw trace research-bot --network
 
 ## Operator polish
 
-The v1.0 controller ships production-grade operator hygiene relevant to enterprise deployments:
+The controller ships production-grade operator hygiene relevant to enterprise deployments:
 
 - **Leader election.** The controller Deployment runs two replicas (`replicas: 2`) with a `coordination.k8s.io/v1` Lease (`azureclaw-leader-election`). Exactly one pod reconciles at a time; leadership loss triggers a pod restart and immediate re-election. Opt out with `LEADER_ELECTION_ENABLED=false` for single-replica dev clusters.
 - **Jittered requeue.** Every error-requeue duration carries ±20% multiplicative jitter (module `controller::backoff`). This prevents thundering-herd API-server bursts when many CRs fail simultaneously (e.g., after a Foundry outage).

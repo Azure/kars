@@ -69,7 +69,7 @@ The gateway runs as **UID 1002**, distroless static, read-only filesystem. Privi
 |---|---|
 | Eavesdropping on the public path | TLS 1.2/1.3 via rustls. |
 | Stolen TLS leaf | `notify::Watcher` triggers `Arc<ServerConfig>` swap on cert rotation; old sessions drain. |
-| Forged AgentCard | JWS Ed25519 verify in `azureclaw_a2a_core::verify_inbound_card` against a pinned trust store; `alg` allow-list is hard-coded to `EdDSA`. The gateway today consumes the verified subject from the `X-A2A-Agent-Subject` header populated by the upstream Gateway API mTLS handshake; wiring the verifier directly as an axum layer is a v1.1 task. |
+| Forged AgentCard | JWS Ed25519 verify in `azureclaw_a2a_core::verify_inbound_card` against a pinned trust store; `alg` allow-list is hard-coded to `EdDSA`. The gateway today consumes the verified subject from the `X-A2A-Agent-Subject` header populated by the upstream Gateway API mTLS handshake; wiring the verifier directly as an axum layer is tracked in the [roadmap](../roadmap.md). |
 | Replay of a valid envelope | Nonce cache with 5 min TTL and 100k entry cap. |
 | Untrusted gateway impersonating router | Router :8445 verifies client cert against the gateway-only CA bundle at `/etc/azureclaw/a2a-gateway-ca.pem`. |
 | Burst flood from one subject | Per-subject token bucket (60 burst / 5 rps); over-budget calls return 429. |

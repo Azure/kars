@@ -393,7 +393,7 @@ spec:
 
 ### What the operator wants — now SHIPPED
 
-v1.0 ships full support for seven first-class runtimes and a BYO contract for everything else. The same `ClawSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `ClawMemory` / `ClawEval` CRDs, and the same operator TUI apply regardless of runtime kind.
+Today the platform supports seven first-class runtimes and a BYO contract for everything else. The same `ClawSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `ClawMemory` / `ClawEval` CRDs, and the same operator TUI apply regardless of runtime kind.
 
 | `spec.runtime.kind` | Status |
 |---|---|

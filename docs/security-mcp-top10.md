@@ -8,23 +8,23 @@ listing (<https://owasp.org/www-project-mcp-top-10/>), re-verified on
 
 > **Scope:** this document covers MCP calls originating *from* sandboxed
 > agents and MCP servers *hosted in AKS* via the forthcoming `McpServer`
-> CRD (the v1.1 plan). Managed SaaS MCP servers published by Foundry are out
+> CRD. Managed SaaS MCP servers published by Foundry are out
 > of scope (Foundry hosts those).
 
 ## Summary table
 
 | # | OWASP MCP (2025) | Primary surface | Status |
 |---|---|---|---|
-| 01 | Token Mismanagement & Secret Exposure | Router auth path, ConfigMap/Secret custody, OAuth 2.1 | Partial today; hardens in v1.1 |
-| 02 | Privilege Escalation via Scope Creep | `ToolPolicy` CRD, AGT policy profile, scopes-per-tool | Partial today; broadens in v1.1 |
-| 03 | Tool Poisoning | Sandbox image supply chain, cosign on pod images | Cosign verification deferred to v1.1 |
-| 04 | Supply Chain & Dependency Tampering | SBOM per release, SLSA-v1, vendored-patch audit | Vendored audit today; SLSA in v1.1 |
+| 01 | Token Mismanagement & Secret Exposure | Router auth path, ConfigMap/Secret custody, OAuth 2.1 | Partial today; hardens on the roadmap |
+| 02 | Privilege Escalation via Scope Creep | `ToolPolicy` CRD, AGT policy profile, scopes-per-tool | Partial today; broadens on the roadmap |
+| 03 | Tool Poisoning | Sandbox image supply chain, cosign on pod images | Cosign verification tracked on the roadmap |
+| 04 | Supply Chain & Dependency Tampering | SBOM per release, SLSA-v1, vendored-patch audit | Vendored audit today; SLSA on the roadmap |
 | 05 | Command Injection & Execution | Seccomp-strict, Landlock, egress-guard | Live today |
-| 06 | Intent Flow Subversion (prompt injection) | Foundry Content Safety + `InferencePolicy` guardrails | Content Safety live; CRD broadens in v1.1 |
-| 07 | Insufficient Authentication & Authorization | OAuth 2.1 on MCP, AGT `PolicyDecisionProvider` | OAuth 2.1 in v1.1 |
-| 08 | Lack of Audit and Telemetry | AGT `AuditLogger`, OTel GenAI SemConv spans | Audit live; SemConv in v1.1 |
-| 09 | Shadow MCP Servers | Shadow-MCP admission policy (VAP) | v1.1 |
-| 10 | Context Injection & Over-Sharing | Per-sandbox namespace isolation, `Mcp-Session-Id`, tenancy boundary | Namespace live; session ID in v1.1 |
+| 06 | Intent Flow Subversion (prompt injection) | Foundry Content Safety + `InferencePolicy` guardrails | Content Safety live; CRD broadens on the roadmap |
+| 07 | Insufficient Authentication & Authorization | OAuth 2.1 on MCP, AGT `PolicyDecisionProvider` | OAuth 2.1 on the roadmap |
+| 08 | Lack of Audit and Telemetry | AGT `AuditLogger`, OTel GenAI SemConv spans | Audit live; SemConv on the roadmap |
+| 09 | Shadow MCP Servers | Shadow-MCP admission policy (VAP) | tracked on the roadmap |
+| 10 | Context Injection & Over-Sharing | Per-sandbox namespace isolation, `Mcp-Session-Id`, tenancy boundary | Namespace live; session ID on the roadmap |
 
 ## Detail
 
@@ -40,7 +40,7 @@ container; **never mounted into the inference-router**; `UID 1000`
 agent code reads its own bindings but not router identity.
 
 **Gap.** Inbound MCP calls today run through the vendored trust path
-(handoff-style KNOCK); OAuth 2.1 short-lived token flow is a v1.1
+(handoff-style KNOCK); OAuth 2.1 short-lived token flow is tracked on the roadmap
 deliverable.
 
 **Plan.** A planned `inference-router/src/mcp/oauth.rs` module
@@ -52,7 +52,7 @@ token reject / expired token reject / audience mismatch reject
 
 **Refs.** `sandbox-images/openclaw/entrypoint.sh` (credential mount),
 `deploy/helm/azureclaw/templates/` (secret shape),
-the v1.1 milestone.
+tracked on the roadmap.
 
 ### MCP02 — Privilege escalation via scope creep
 
@@ -66,7 +66,7 @@ allowed, 28 explicit denies), Landlock read-only enforced on
 through `127.0.0.1:8443` via iptables UID filter.
 
 **Today.** `ToolPolicy.spec` carries `appliesTo` selector
-and AP2 commerce caps; v1.1 will add `approval` and `rateLimit`
+and AP2 commerce caps; the roadmap adds `approval` and `rateLimit`
 precedence. Policy evaluation is an AGT call
 (`PolicyDecisionProvider`) — we surface scopes, AGT decides.
 
@@ -81,7 +81,7 @@ injected; tool binary swapped post-deploy.
 `imagePullPolicy: Always` used across controller-managed deployments;
 ACR content-trust available but not enforced at admission.
 
-**Plan.** v1.1 ships **cosign admission verification** on pod images against the release key, with a Rekor
+**Plan.** Planned (see roadmap): **cosign admission verification** on pod images against the release key, with a Rekor
 transparency-log freshness window. Unsigned or stale images →
 admission deny. Distinct from CR-spec signing.
 
@@ -96,9 +96,9 @@ upstream, so dependency review focuses on the AGT SDK
 version, AGT relay/registry images, and regular SCA gates rather than local
 patch drift.
 
-**Plan.** v1.1 ships SBOM per release and SLSA-v1 provenance on CR
-specs (the v1.1 plan). `trivy` + `cosign-verify` + SCA gates enter
-permanent CI (the v1.1 plan "Security regression" row) in v1.1.
+**Plan.** Planned (see roadmap): SBOM per release and SLSA-v1 provenance on CR
+specs. `trivy` + `cosign-verify` + SCA gates enter
+permanent CI on the roadmap.
 
 ### MCP05 — Command injection & execution
 
@@ -113,7 +113,7 @@ code cannot exfiltrate without going through the router's proxy and
 Foundry Content Safety. This is the "defense-in-depth" posture summarised
 in `docs/security.md` (the layered defenses section).
 
-**Conformance.** `tests/conformance/seccomp-landlock-egress/` (the v1.0 conformance corpus) asserts that forbidden syscalls return `EPERM`
+**Conformance.** `tests/conformance/seccomp-landlock-egress/` (the conformance corpus) asserts that forbidden syscalls return `EPERM`
 **not silently succeed** — directly targeting the class of bug where
 a control looks present but isn't actually wired.
 
@@ -128,7 +128,7 @@ in `inference-router/src/safety.rs` (module docstring lines 1-14).
 There is **no** in-process circuit breaker or cooldown — by design;
 Foundry owns the guardrail.
 
-**Plan.** v1.1 `InferencePolicy.spec` (minimal) + v1.1 full
+**Plan.** Planned (see roadmap): `InferencePolicy.spec` (minimal) + tracked on the roadmap full
 `InferencePolicy` with `guardrails` field expresses *which* Foundry
 safety levels apply per-sandbox; a VAP denies
 spec mutations that weaken Content Safety below the tenant floor.
@@ -138,7 +138,7 @@ spec mutations that weaken Content Safety below the tenant floor.
 **Threat.** Unauthenticated MCP endpoint exposed; anonymous callers
 assumed trusted.
 
-**Plan.** v1.1 `McpServer.spec.productionMode: true` implies
+**Plan.** Planned (see roadmap): `McpServer.spec.productionMode: true` implies
 `oauth.issuer` set (enforced by CEL `x-kubernetes-validations`).
 Router refuses unauthenticated traffic on any
 production-mode `McpServer`. Dev-mode anonymous requires
@@ -157,11 +157,8 @@ trail.
 `inference-router/src/providers/policy.rs`. Names frozen in
 `docs/security.md` §Governance (lines ~153-170) and `CHANGELOG.md`.
 
-**Plan.** v1.1 adds OTel GenAI SemConv 1.x emission on every router
-span (the v1.1 plan; constants module already landed in
-`inference-router/src/telemetry/gen_ai.rs` with audit doc
-(internal audit doc)). v1.1
-`kubectl claw attest <name>` returns fresh
+**Plan.** Planned (see roadmap): OTel GenAI SemConv 1.x emission on every router
+span. `kubectl claw attest <name>` returns fresh
 attestation including AGT audit-receipt id.
 
 ### MCP09 — Shadow MCP servers
@@ -169,10 +166,9 @@ attestation including AGT audit-receipt id.
 **Threat.** Undocumented or orphaned MCP endpoints running somewhere
 in the cluster; no CR surface, no policy binding.
 
-**Plan.** v1.1 `controller/src/admission/shadow_mcp.rs` (the v1.1 plan
-item 5) — ValidatingAdmissionPolicy denies any MCP call (observed
+**Plan.** Planned (see roadmap): `controller/src/admission/shadow_mcp.rs` — ValidatingAdmissionPolicy denies any MCP call (observed
 by the router) to a server without a matching `McpServer` CR. Signal
-sourced from AGT `BehaviorMonitor` (the v1.1 plan). Paired with the
+sourced from AGT `BehaviorMonitor`. Paired with the
 admission block so detection → enforcement is one loop.
 
 ### MCP10 — Context injection & over-sharing
@@ -182,12 +178,12 @@ another; context merges across boundaries.
 
 **Today.** Each sandbox gets its own K8s namespace (`azureclaw-<name>`)
 with NetworkPolicy + seccomp + Landlock. `ClawMemory` is a **binding
-resource** over Foundry Memory Store (the v1.1 plan non-compete row); no
+resource** over Foundry Memory Store; no
 in-cluster memory backend shipped, so no cross-sandbox leak surface
 to defend.
 
-**Plan.** v1.1 MCP Streamable HTTP enforces `Mcp-Session-Id`
-semantics (the v1.1 plan row MCP 2026) — session id is scoped per
+**Plan.** Planned (see roadmap): MCP Streamable HTTP enforces `Mcp-Session-Id`
+semantics — session id is scoped per
 `McpServer` CR; `tests/conformance/mcp-2026/` asserts session
 confusion attacks fail closed.
 
@@ -195,13 +191,13 @@ confusion attacks fail closed.
 
 * Upstream OWASP MCP list issues 2026 update — re-verify every row.
 * Any new MCP transport lands (HTTP/3, gRPC, alt-stream) → re-map
-  MCP05 / MCP07 controls.
+ MCP05 / MCP07 controls.
 * AGT AgentMesh replaces vendored mesh for a tenant → MCP08 telemetry
-  path changes; re-check span emission coverage.
+ path changes; re-check span emission coverage.
 * `ClawMemory` backend ever gains in-cluster storage → MCP10 must
-  add cross-tenant isolation controls.
+ add cross-tenant isolation controls.
 
 ## Related docs
 
 * `docs/security.md` — the live security posture (layered defenses,
-  syscall counts, component names).
+ syscall counts, component names).

@@ -56,5 +56,4 @@ Publishing the chart tarball to OCI (e.g. `oci://ghcr.io/azure/charts`) or a Hel
 ## See also
 
 - [`docs/operations/image-versioning.md`](image-versioning.md) — image tag policy that drives `appVersion`.
-- [`docs/architecture/crd-versioning.md`](../architecture/crd-versioning.md) — CRD storage version freeze + `v1alpha2` plan.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — release notes.

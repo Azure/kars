@@ -17,7 +17,7 @@ spec:
       - api.telegram.org
       - api.openai.com
     allowlistRef:                    # optional: cosign-signed OCI artifact
-      registry: myacr.azurecr.io     # advisory today, becomes authoritative in v1.1
+      registry: myacr.azurecr.io     # advisory today; authoritative mode tracked in the roadmap
       repository: policy/egress-allowlist/my-agent
       digest: sha256:abc123…
 ```
@@ -37,7 +37,8 @@ The controller compiles this into **one enforcement point with one safety net**:
 for supply-chain integrity); when set, the controller verifies it on every
 reconcile and surfaces `AllowlistVerified` / `AllowlistDrift` conditions on the
 `ClawSandbox`. Inline `allowedEndpoints` remains the runtime source of truth
-until v1.1 flips authority. See **Signed OCI egress allowlist** below.
+until the authority flip lands — tracked in [`roadmap.md`](roadmap.md). See
+**Signed OCI egress allowlist** below.
 
 ## How outbound traffic actually leaves a sandbox
 
@@ -443,7 +444,7 @@ reachable.
 | Mode | Behaviour |
 |-------|-----------|
 | **Advisory** (current) | Non-authoritative — inline `spec.networkPolicy.allowedEndpoints` is still the source of truth. Signed artifact is advisory. |
-| **Authoritative** (planned, v1.1) | Signed artifact becomes the only source of truth; inline field is read-only. |
+| **Authoritative** (on roadmap) | Signed artifact becomes the only source of truth; inline field is read-only. |
 
 ### GitOps mode (`--emit-manifest`)
 
