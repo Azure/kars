@@ -79,5 +79,5 @@ Every release includes the standard sections (see [`r5-changelog`](../../CHANGEL
 
 ## Forward-looking notes
 
-- A CRD `v1alpha2` is planned for v1.1 (additive only). The conversion webhook ships at the same time. Existing `v1alpha1` clients keep working without change.
+- A CRD `v1alpha2` is on the roadmap (additive only) alongside a conversion webhook so existing `v1alpha1` clients keep working without change. See [`docs/roadmap.md`](../roadmap.md) for the current target window.
 - The provider-trait surface is internal and *will* change between minor versions. External consumers should integrate at the CRD or CLI level, not the trait level.

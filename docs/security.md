@@ -105,7 +105,7 @@ When `spec.governance.enabled: true`, AGT governance runs **natively inside the 
 | `TrustManager` | Ed25519 identities, 0–1000 trust score, 5 tiers, clamped ±200/update. |
 | `AuditLogger` | SHA-256 hash-chained log. Tamper-detectable. Append-only. |
 | `RateLimiter` | 500 req/sec global, 50/sec per-agent default. Token bucket with burst. |
-| `BehaviorMonitor` | Burst detection (100/60s), failure tracking (20), denial tracking (10/60s). |
+| `BehaviorMonitor` | Burst detection, failure tracking, denial tracking — thresholds configured per deployment; see `inference-router/src/behavior_monitor.rs`. |
 
 Governance evaluation is on the router hot path, written in Rust, and short-circuits on the first deny so the cost is dominated by the cheapest rule that matches. Plugin-side AGT only handles E2E-encrypted mesh transport through `@microsoft/agent-governance-sdk`; every governance decision goes through the router.
 

@@ -84,9 +84,11 @@ helm install azureclaw deploy/helm/azureclaw \
   --set controller.image.tag="@sha256:<digest>"
 ```
 
-CNCF conformance criterion **C9** (`tests/cncf-conformance`) enforces
+The CNCF AI Conformance suite under `tests/cncf-conformance/` enforces
 the minimum bar: every `image:` reference must declare an explicit
-tag or digest. Implicit `:latest` (no tag at all) is forbidden.
+tag or digest. Implicit `:latest` (no tag at all) is forbidden. The
+exact criterion identifier tracks the upstream conformance release the
+suite is pinned to — see the suite's README for the current mapping.
 
 ## SBOM
 
