@@ -15,7 +15,7 @@
 //                                  (no heartbeat — relay tracks liveness)
 //
 // Callers in the runtime hardcoded the vendored URLs. When the sandbox runs
-// with AZURECLAW_MESH_PROVIDER=agt the inference router proxies HTTP to the
+// with KARS_MESH_PROVIDER=agt the inference router proxies HTTP to the
 // AGT registry, which 404s those paths — agents go invisible.
 //
 // `IMeshRegistry` normalizes both wire shapes into a common envelope and
@@ -335,16 +335,16 @@ class AgtMeshRegistry implements IMeshRegistry {
 let cached: { provider: string; base: string; impl: IMeshRegistry } | null = null;
 
 /**
- * Resolve the active mesh registry based on AZURECLAW_MESH_PROVIDER. Pass
+ * Resolve the active mesh registry based on KARS_MESH_PROVIDER. Pass
  * a `routerUrl` helper so this module avoids a circular dep on plugin.ts.
  *
- * Cached per (provider, base) pair — flipping AZURECLAW_MESH_PROVIDER at
+ * Cached per (provider, base) pair — flipping KARS_MESH_PROVIDER at
  * runtime (tests do this) invalidates the cache.
  */
 export function getMeshRegistry(
   routerUrl: (path: string) => string,
 ): IMeshRegistry {
-  const provider = (process.env.AZURECLAW_MESH_PROVIDER || "vendored")
+  const provider = (process.env.KARS_MESH_PROVIDER || "vendored")
     .trim()
     .toLowerCase();
   // Runtime (UID 1000) is iptables-confined to localhost. AGT_REGISTRY_URL

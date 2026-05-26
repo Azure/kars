@@ -66,15 +66,15 @@ describe("attestCommand — summariseFieldOwners", () => {
 
   it("aggregates fields per manager and sorts alphabetically", () => {
     const summary = __test.summariseFieldOwners([
-      { manager: "azureclaw-controller", fieldsV1: { "f:status": { "f:phase": {} } } },
+      { manager: "kars-controller", fieldsV1: { "f:status": { "f:phase": {} } } },
       { manager: "kubectl-edit", fieldsV1: { "f:metadata": { "f:labels": { "f:app": {} } } } },
-      { manager: "azureclaw-controller", fieldsV1: { "f:spec": { "f:isolation": {} } } },
+      { manager: "kars-controller", fieldsV1: { "f:spec": { "f:isolation": {} } } },
     ]);
     expect(summary.map((s) => s.manager)).toEqual([
-      "azureclaw-controller",
+      "kars-controller",
       "kubectl-edit",
     ]);
-    const ctl = summary.find((s) => s.manager === "azureclaw-controller")!;
+    const ctl = summary.find((s) => s.manager === "kars-controller")!;
     expect(ctl.fieldsOwned).toBeGreaterThan(0);
   });
 
@@ -124,24 +124,24 @@ describe("attestCommand — extractPolicyRefs", () => {
 
 describe("attestCommand — formatters", () => {
   const sample = {
-    apiVersion: "azureclaw.azure.com/v1alpha1-attest" as const,
+    apiVersion: "kars.azure.com/v1alpha1-attest" as const,
     kind: "Attestation" as const,
     generatedAt: "2026-04-27T12:00:00Z",
     sandbox: {
       name: "demo",
-      namespace: "azureclaw-system",
+      namespace: "kars-system",
       generation: 3,
       observedGeneration: 3,
       phase: "Running",
       specHash: "sha256:" + "a".repeat(64),
       specHashAlgorithm: "sha256-canonical-json" as const,
     },
-    fieldOwners: [{ manager: "azureclaw-controller", fieldsOwned: 7 }],
+    fieldOwners: [{ manager: "kars-controller", fieldsOwned: 7 }],
     policyVersions: [
       {
         kind: "ToolPolicy",
         name: "tp",
-        namespace: "azureclaw-demo",
+        namespace: "kars-demo",
         versionHash: "sha256:" + "b".repeat(64),
         bindingConfigMap: "tp-binding",
       },
@@ -161,7 +161,7 @@ describe("attestCommand — formatters", () => {
     expect(out).toContain("demo");
     expect(out).toContain("Running");
     expect(out).toContain("sha256:" + "a".repeat(8));
-    expect(out).toContain("azureclaw-controller");
+    expect(out).toContain("kars-controller");
     expect(out).toContain("ToolPolicy");
     expect(out).toContain("(not yet stamped)");
   });
@@ -170,24 +170,24 @@ describe("attestCommand — formatters", () => {
 describe("attestCommand — diffAttestations", () => {
   const baseReport = (overrides: Record<string, unknown> = {}) =>
     ({
-      apiVersion: "azureclaw.azure.com/v1alpha1-attest" as const,
+      apiVersion: "kars.azure.com/v1alpha1-attest" as const,
       kind: "Attestation" as const,
       generatedAt: "2026-04-01T00:00:00Z",
       sandbox: {
         name: "demo",
-        namespace: "azureclaw-system",
+        namespace: "kars-system",
         generation: 1,
         observedGeneration: 1,
         phase: "Running",
         specHash: "sha256:" + "a".repeat(64),
         specHashAlgorithm: "sha256-canonical-json" as const,
       },
-      fieldOwners: [{ manager: "azureclaw-controller", fieldsOwned: 5 }],
+      fieldOwners: [{ manager: "kars-controller", fieldsOwned: 5 }],
       policyVersions: [
         {
           kind: "ToolPolicy",
           name: "tp",
-          namespace: "azureclaw-demo",
+          namespace: "kars-demo",
           versionHash: "sha256:" + "b".repeat(64),
           bindingConfigMap: "tp-bind",
         },
@@ -260,7 +260,7 @@ describe("attestCommand — diffAttestations", () => {
         {
           kind: "InferencePolicy",
           name: "ip",
-          namespace: "azureclaw-demo",
+          namespace: "kars-demo",
           versionHash: "sha256:" + "e".repeat(64),
           bindingConfigMap: null,
         },
@@ -275,7 +275,7 @@ describe("attestCommand — diffAttestations", () => {
     const a = baseReport();
     const b = baseReport({
       fieldOwners: [
-        { manager: "azureclaw-controller", fieldsOwned: 99 },
+        { manager: "kars-controller", fieldsOwned: 99 },
         { manager: "kubectl-edit", fieldsOwned: 1 },
       ],
     });
@@ -290,7 +290,7 @@ describe("attestCommand — diffAttestations", () => {
   it("ignores field count fluctuation when manager set is identical", () => {
     const a = baseReport();
     const b = baseReport({
-      fieldOwners: [{ manager: "azureclaw-controller", fieldsOwned: 99 }],
+      fieldOwners: [{ manager: "kars-controller", fieldsOwned: 99 }],
     });
     const diff = __test.diffAttestations(a, b);
     expect(diff.deltas).toEqual([]);
@@ -310,7 +310,7 @@ describe("attestCommand — diffAttestations", () => {
       { type: "policyAdded", kind: "InferencePolicy", name: "ip" },
       { type: "policyRemoved", kind: "A2AAgent", name: "a" },
       { type: "fieldOwnerAdded", manager: "kubectl-edit" },
-      { type: "fieldOwnerRemoved", manager: "azureclaw-controller" },
+      { type: "fieldOwnerRemoved", manager: "kars-controller" },
     ];
     for (const v of variants) {
       const out = __test.describeDelta(v);
@@ -331,12 +331,12 @@ describe("attestCommand — loadBaseline", () => {
     try {
       const path = join(dir, "baseline.json");
       const valid = {
-        apiVersion: "azureclaw.azure.com/v1alpha1-attest",
+        apiVersion: "kars.azure.com/v1alpha1-attest",
         kind: "Attestation",
         generatedAt: "2026-04-01T00:00:00Z",
         sandbox: {
           name: "demo",
-          namespace: "azureclaw-system",
+          namespace: "kars-system",
           generation: 1,
           observedGeneration: 1,
           phase: "Running",
@@ -362,7 +362,7 @@ describe("attestCommand — loadBaseline", () => {
     try {
       const path = join(dir, "bad.json");
       writeFileSync(path, JSON.stringify({ kind: "Attestation" }));
-      await expect(__test.loadBaseline(path)).rejects.toThrow(/not a valid AzureClaw attestation/);
+      await expect(__test.loadBaseline(path)).rejects.toThrow(/not a valid Kars attestation/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

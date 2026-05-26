@@ -2,7 +2,7 @@
 
 **Scope**: PR #338 — `feat/observability-bundle`. Adds Prometheus
 counters for mesh traffic in the inference-router, bundles
-kube-prometheus-stack into `azureclaw dev` local-k8s, and ships the
+kube-prometheus-stack into `kars dev` local-k8s, and ships the
 Headlamp plugin v0.5.1 + Grafana ops dashboard.
 
 Two paths trip the capability-introducing file list:
@@ -36,7 +36,7 @@ consumed. Counter label cardinality is bounded (≤6 message types).
 
 ### 1b. `cli/src/commands/dev/local-k8s.ts`
 
-Two new helpers, only invoked when `azureclaw dev --target local-k8s`
+Two new helpers, only invoked when `kars dev --target local-k8s`
 spins up a fresh kind cluster:
 
 - `installPrometheus()` — `helm upgrade --install kps
@@ -76,7 +76,7 @@ new server-side surface.
 |---|---|---|
 | `/metrics` endpoint on router | Already exposed on :8443, scraped via PodMonitor on cluster | Same — two new IntCounter labels emit on existing endpoint |
 | Mesh routes auth | mTLS + Workload Identity (unchanged) | Same |
-| Sandbox NetworkPolicy | Ingress allow for `app.kubernetes.io/name=azureclaw, component=system` namespaces on :8443 | Same — `monitoring` ns is labeled with those existing labels so scrape traffic is in-policy |
+| Sandbox NetworkPolicy | Ingress allow for `app.kubernetes.io/name=kars, component=system` namespaces on :8443 | Same — `monitoring` ns is labeled with those existing labels so scrape traffic is in-policy |
 | dev kind cluster auth | Local kubeconfig | Same — port-forwards bind to 127.0.0.1 only |
 | CRDs / controller reconciliation | unchanged | unchanged |
 
@@ -100,7 +100,7 @@ No change. The dev Grafana admin password is the literal string
 `admin`, which is the kube-prometheus-stack chart default and is
 **deliberately weak** for the developer's local kind cluster — the
 service is never exposed beyond `127.0.0.1`. Production AKS deployment
-(`azureclaw up`) is **out of scope** for this PR and will be handled
+(`kars up`) is **out of scope** for this PR and will be handled
 in a follow-up with Azure Monitor managed Prometheus or a properly
 secured chart deployment.
 
@@ -109,13 +109,13 @@ env vars consumed in the router.
 
 ## 5. Test Coverage
 
-- `cargo test --package azureclaw-inference-router` — 105/105 PASS,
+- `cargo test --package kars-inference-router` — 105/105 PASS,
   including the new counter increment assertions in `routes/mesh.rs`
   tests.
 - `cd cli && npm test` — 769/769 PASS. The `installPrometheus()` helper
   has a unit test that mocks `helm` + `kubectl` and asserts the chart
   version + namespace + values arguments.
-- Manual end-to-end on local kind: `azureclaw dev` came up with
+- Manual end-to-end on local kind: `kars dev` came up with
   Headlamp + Grafana + Prometheus reachable; PodMonitor target list
   showed 5/5 sandbox routers up; mesh counters incremented in lockstep
   with traced KNOCK + mesh_send envelopes.
@@ -123,13 +123,13 @@ env vars consumed in the router.
 ## 6. Network / NetworkPolicy review
 
 The dev-cluster `monitoring` namespace is **explicitly labeled** with
-`app.kubernetes.io/name=azureclaw, app.kubernetes.io/component=system`
+`app.kubernetes.io/name=kars, app.kubernetes.io/component=system`
 so that the existing sandbox `NetworkPolicy.spec.ingress` rule
 (`controller/src/reconciler/mod.rs:911-925`) permits the scrape. This
 re-uses the existing capability rather than widening it. The label
 selector predates this PR (Slice-6 ingress isolation).
 
-Production NetworkPolicy (`azureclaw up`) is unaffected. The
+Production NetworkPolicy (`kars up`) is unaffected. The
 controller code paths that emit the policy are unchanged.
 
 ## 7. Sign-offs

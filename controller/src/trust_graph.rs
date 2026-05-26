@@ -27,7 +27,7 @@
 //!
 //! For each `TrustGraph/<name>` the reconciler writes a single
 //! `ConfigMap` named `trustgraph-<name>-projection` in the
-//! `azureclaw-system` namespace, keyed by `graph.json`. The router
+//! `kars-system` namespace, keyed by `graph.json`. The router
 //! mounts this ConfigMap (Phase F2) and answers
 //! `trust_score(from, to)` queries against the validated graph.
 
@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 /// `TrustGraph.spec` — the cluster-wide trust topology.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
-    group = "azureclaw.azure.com",
+    group = "kars.azure.com",
     version = "v1alpha1",
     kind = "TrustGraph",
     status = "TrustGraphStatus",
@@ -180,7 +180,7 @@ pub struct TrustGraphStatus {
     pub invalid_edges: Option<i64>,
 
     /// `metadata.namespace/metadata.name` of the projection ConfigMap.
-    /// Always `azureclaw-system/trustgraph-<name>-projection` once
+    /// Always `kars-system/trustgraph-<name>-projection` once
     /// the reconciler has written successfully.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_config_map_ref: Option<crate::mcp_server::LocalObjectRef>,

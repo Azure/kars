@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! ClawSandbox Custom Resource Definition.
+//! KarsSandbox Custom Resource Definition.
 //!
-//! This is the Rust representation of the ClawSandbox CRD.
+//! This is the Rust representation of the KarsSandbox CRD.
 //! kube-rs derives the CRD schema, API bindings, and JSON schema automatically.
 
 use crate::mcp_server::LocalObjectRef;
@@ -12,16 +12,15 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// ClawSandbox spec — declares the desired state for a sandboxed OpenClaw agent.
+/// KarsSandbox spec — declares the desired state for a sandboxed OpenClaw agent.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
-    group = "azureclaw.azure.com",
+    group = "kars.azure.com",
     version = "v1alpha1",
-    kind = "ClawSandbox",
+    kind = "KarsSandbox",
     namespaced,
-    status = "ClawSandboxStatus",
+    status = "KarsSandboxStatus",
     shortname = "cs",
-    shortname = "claw",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Runtime","type":"string","jsonPath":".spec.runtime.kind"}"#,
     printcolumn = r#"{"name":"InferencePolicy","type":"string","jsonPath":".spec.inferenceRef.name"}"#,
@@ -29,7 +28,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
-pub struct ClawSandboxSpec {
+pub struct KarsSandboxSpec {
     /// Agent runtime selector (S10.A1 multi-runtime hosting).
     ///
     /// Replaces the original `spec.openclaw` field. The `kind` discriminator
@@ -49,7 +48,7 @@ pub struct ClawSandboxSpec {
     pub sandbox: Option<SandboxConfig>,
 
     /// Reference to an `InferencePolicy` CR in the **same namespace** as
-    /// this `ClawSandbox`. The referenced CR is the single source of
+    /// this `KarsSandbox`. The referenced CR is the single source of
     /// truth for inference guardrails: model preference, content-safety
     /// floor, prompt-shield requirement, token budgets. The reconciler
     /// resolves the ref at apply time; if the target is missing the
@@ -60,14 +59,14 @@ pub struct ClawSandboxSpec {
     /// privilege-escalation vector. See `docs/crd-precedence.md`.
     pub inference_ref: LocalObjectRef,
 
-    /// Optional reference to a `ClawMemory` CR in the **same namespace**
-    /// as this `ClawSandbox`. When set, the controller mirrors the
-    /// compiled binding `ConfigMap` (`clawmemory-{name}-binding`) into
+    /// Optional reference to a `KarsMemory` CR in the **same namespace**
+    /// as this `KarsSandbox`. When set, the controller mirrors the
+    /// compiled binding `ConfigMap` (`karsmemory-{name}-binding`) into
     /// the sandbox namespace and mounts it into the inference-router
     /// at [`crate::reconciler::governance_mounts::paths::MEMORY_BINDING_DIR`].
     /// The router's `memory_binding_loader` reads the file, registers
     /// the digest under `PolicyKind::Memory`, and echoes it via
-    /// `GET /internal/policy-status` so the `ClawMemory` reconciler
+    /// `GET /internal/policy-status` so the `KarsMemory` reconciler
     /// can close the principles.md §3 "Ready ⇔ router echo" loop
     /// (Slice 3a). Cross-namespace refs are deliberately not supported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,8 +113,8 @@ pub struct ClawSandboxSpec {
     /// When `Some`, the controller will (in a future reconciler branch) accept
     /// inbound traffic in upstream wire formats (e.g. `sigs.k8s.io/agent-sandbox`
     /// SandboxClaim semantics) and translate them into the canonical
-    /// AzureClaw runtime contracts before they reach the agent. The translation
-    /// path is **read-only at the boundary**: AzureClaw never mutates upstream
+    /// Kars runtime contracts before they reach the agent. The translation
+    /// path is **read-only at the boundary**: Kars never mutates upstream
     /// objects in cluster, only mirrors observed state and emits canonical
     /// status conditions.
     ///
@@ -151,7 +150,7 @@ pub struct ClawSandboxSpec {
 ///
 /// **`OverlayMode` (Phase 2 S8).** When `sigs_agent_sandbox == "overlay"`,
 /// the operator already manages an upstream `Sandbox` CR in the same
-/// namespace; AzureClaw provides only the *overlay* (namespace + sandbox
+/// namespace; Kars provides only the *overlay* (namespace + sandbox
 /// ServiceAccount + Workload-Identity binding + NetworkPolicy + governance
 /// ConfigMaps). The controller **skips Deployment/Service/CronJob
 /// creation**: those are owned by the upstream reconciler. The
@@ -167,7 +166,7 @@ pub struct UpstreamCompatibilityConfig {
     /// - `"translate"` — accept SandboxClaim semantics on inbound (P1
     ///   schema-only, runtime path deferred).
     /// - `"overlay"` — operator's upstream `Sandbox` CR owns the Pod;
-    ///   AzureClaw provides governance overlay only. Requires
+    ///   Kars provides governance overlay only. Requires
     ///   [`upstream_sandbox_ref`] (admission-enforced).
     ///
     /// Reconciler refuses unknown strings.
@@ -178,14 +177,14 @@ pub struct UpstreamCompatibilityConfig {
     /// otherwise. The controller does not watch the upstream object's
     /// status today (deferred to a future slice that adds an upstream
     /// CRD discovery / informer); operators read overlay state from
-    /// the upstream CR directly. AzureClaw never mutates the upstream
+    /// the upstream CR directly. Kars never mutates the upstream
     /// object — the relationship is read-only at the boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_sandbox_ref: Option<LocalObjectRef>,
 
     /// CNCF AI Conformance reference-mode toggle. When `true`, the
     /// reconciler emits the canonical conformance status block on the
-    /// ClawSandbox object regardless of other settings. **Schema-only**;
+    /// KarsSandbox object regardless of other settings. **Schema-only**;
     /// no code path consumes this yet.
     #[serde(default)]
     pub ai_conformance_reference: bool,
@@ -280,7 +279,7 @@ mod upstream_compat_tests {
     }
 }
 
-/// `ClawSandbox.spec.a2a` — inbound A2A 1.0.0 exposure block.
+/// `KarsSandbox.spec.a2a` — inbound A2A 1.0.0 exposure block.
 /// All sub-fields are admission-validated via CEL (Phase 1 §7 entry 12).
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -435,7 +434,7 @@ pub enum RuntimeKind {
 }
 
 /// Agent runtime selector. Exactly one variant struct (matching `kind`)
-/// must be set; the others must be absent. See [`ClawSandboxSpec::runtime`].
+/// must be set; the others must be absent. See [`KarsSandboxSpec::runtime`].
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSpec {
@@ -483,7 +482,7 @@ pub struct RuntimeSpec {
 
     /// Bring-your-own runtime. Required iff `kind == BYO`. Image must
     /// honor the BYO contract (UID 1000, inference via `127.0.0.1:8443`,
-    /// `AZURECLAW_*` env, no privileged caps). Phase 2 enforcement is
+    /// `KARS_*` env, no privileged caps). Phase 2 enforcement is
     /// warn-only via `RuntimeReady` Condition; `contractVersion` is
     /// required (no silent default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,7 +521,7 @@ pub struct OpenAIAgentsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Vec<String>>,
     /// Extra env vars merged into the adapter container. Reserved
-    /// prefixes (`AGT_`, `AZURE_`, `AZURECLAW_`, …) are stripped by the
+    /// prefixes (`AGT_`, `AZURE_`, `KARS_`, …) are stripped by the
     /// reconciler — same policy as `OpenClawConfig::extra_env`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_env: Option<std::collections::BTreeMap<String, String>>,
@@ -687,7 +686,7 @@ pub struct GitAgentCode {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ByoRuntimeConfig {
-    /// Container image (must declare `org.azureclaw.runtime.contract`
+    /// Container image (must declare `org.kars.runtime.contract`
     /// label matching `contract_version`).
     pub image: String,
     /// Container entrypoint override.
@@ -742,9 +741,9 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             isolation: "enhanced".into(),
-            seccomp_profile: "azureclaw-strict".into(),
+            seccomp_profile: "kars-strict".into(),
             // Empty = no custom SELinux type, compatible with restricted PodSecurity.
-            // Custom SELinux (e.g. "azureclaw_sandbox_t") requires baseline enforcement
+            // Custom SELinux (e.g. "kars_sandbox_t") requires baseline enforcement
             // and a privileged DaemonSet to install the policy module on nodes.
             selinux_context: String::new(),
             read_only_root_filesystem: true,
@@ -772,7 +771,7 @@ pub struct NetworkPolicyConfig {
     #[serde(default)]
     pub egress_mode: EgressMode,
     /// Reference to a signed OCI artifact containing the canonical egress
-    /// allowlist. Populated by `azureclaw egress … --sign` (S12.c).
+    /// allowlist. Populated by `kars egress … --sign` (S12.c).
     /// **Authoritative** in S12.e — when set, the controller derives
     /// `NetworkPolicy` egress from the verified canonical artifact and
     /// inline `allowed_endpoints` is ignored (a non-empty inline that
@@ -835,7 +834,7 @@ pub struct EndpointConfig {
 pub struct OciArtifactRef {
     /// Registry hostname (e.g. `myacr.azurecr.io`, `ghcr.io`).
     pub registry: String,
-    /// Repository path (e.g. `azureclaw/policies/sandbox-foo`).
+    /// Repository path (e.g. `kars/policies/sandbox-foo`).
     pub repository: String,
     /// Content-addressed digest, including the algorithm prefix
     /// (`sha256:abc…`). The digest covers the canonical artifact bytes —
@@ -843,7 +842,7 @@ pub struct OciArtifactRef {
     /// canonicalization rules.
     pub digest: String,
     /// OCI artifactType media-type, e.g.
-    /// `application/vnd.azureclaw.egress-allowlist.v1+yaml`. Consumers MUST
+    /// `application/vnd.kars.egress-allowlist.v1+yaml`. Consumers MUST
     /// reject artifacts whose pulled `artifactType` doesn't match.
     pub artifact_type: String,
 }
@@ -889,7 +888,7 @@ pub struct GovernanceConfig {
     #[serde(default)]
     pub enabled: bool,
     /// Reference to a `ToolPolicy` CR in the **same namespace** as this
-    /// `ClawSandbox`. Required — the controller resolves the target at
+    /// `KarsSandbox`. Required — the controller resolves the target at
     /// reconcile time; missing target → `Degraded` with reason
     /// `ToolPolicyNotFound` (no inline-fallback path post-S13). The
     /// resolved CR's `metadata.name` is used as the ConfigMap name
@@ -937,8 +936,8 @@ pub struct GovernanceConfig {
     ///
     /// **Slice 4d.1** introduced the typed field + admission CEL +
     /// reconciler shim. **Slice 4d.2** wires per-server CM/Secret
-    /// mounts at `/etc/azureclaw/mcp/{name}/` and
-    /// `/etc/azureclaw/mcp-signing/{name}/` (DoD #1 + #6). Multi-JWKS
+    /// mounts at `/etc/kars/mcp/{name}/` and
+    /// `/etc/kars/mcp-signing/{name}/` (DoD #1 + #6). Multi-JWKS
     /// OAuth verification + namespaced tool dispatch land in
     /// **Slice 4d.3** (DoD #3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -983,10 +982,10 @@ fn default_trust_threshold() -> i32 {
     500
 }
 
-/// ClawSandbox status — reflects the current observed state.
+/// KarsSandbox status — reflects the current observed state.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ClawSandboxStatus {
+pub struct KarsSandboxStatus {
     /// Pending | Creating | Running | Failed | Terminating
     pub phase: Option<String>,
     pub sandbox_pod: Option<String>,
@@ -1026,7 +1025,7 @@ fn default_isolation() -> String {
     "enhanced".into()
 }
 fn default_seccomp() -> String {
-    "azureclaw-strict".into()
+    "kars-strict".into()
 }
 fn default_selinux() -> String {
     String::new()
@@ -1046,9 +1045,9 @@ mod tests {
     }
 
     #[test]
-    fn default_seccomp_is_azureclaw_strict() {
+    fn default_seccomp_is_kars_strict() {
         let cfg = SandboxConfig::default();
-        assert_eq!(cfg.seccomp_profile, "azureclaw-strict");
+        assert_eq!(cfg.seccomp_profile, "kars-strict");
     }
 
     #[test]
@@ -1102,7 +1101,7 @@ mod tests {
 
     #[test]
     fn egress_mode_wire_format_is_pascal_case() {
-        // Match CRD enum convention (capitalised variants, like ClawSandbox phases).
+        // Match CRD enum convention (capitalised variants, like KarsSandbox phases).
         let strict = serde_json::to_string(&EgressMode::Strict).unwrap();
         let learn = serde_json::to_string(&EgressMode::Learn).unwrap();
         assert_eq!(strict, "\"Strict\"");
@@ -1129,10 +1128,10 @@ mod tests {
         // `artifactType` must serialize as such (S12.a contract).
         let r = OciArtifactRef {
             registry: "myacr.azurecr.io".into(),
-            repository: "azureclaw/policies/sandbox-foo".into(),
+            repository: "kars/policies/sandbox-foo".into(),
             digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
                 .into(),
-            artifact_type: "application/vnd.azureclaw.egress-allowlist.v1+yaml".into(),
+            artifact_type: "application/vnd.kars.egress-allowlist.v1+yaml".into(),
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("registry").is_some());
@@ -1172,10 +1171,10 @@ mod tests {
 
     #[test]
     fn sandbox_spec_fields_all_optional() {
-        let spec = ClawSandboxSpec::default();
+        let spec = KarsSandboxSpec::default();
         // S10.A1: `runtime` replaces `openclaw`; default is OpenClaw kind
         // with an empty `OpenClawConfig` (so the spec round-trips through
-        // tests that previously constructed `ClawSandboxSpec::default()`).
+        // tests that previously constructed `KarsSandboxSpec::default()`).
         assert_eq!(spec.runtime.kind, RuntimeKind::OpenClaw);
         assert!(spec.runtime.openclaw.is_some());
         assert!(spec.runtime.openai_agents.is_none());
@@ -1211,7 +1210,7 @@ mod tests {
 
     #[test]
     fn sandbox_status_defaults_empty() {
-        let status = ClawSandboxStatus::default();
+        let status = KarsSandboxStatus::default();
         assert!(status.phase.is_none());
         assert!(status.sandbox_pod.is_none());
         assert!(status.namespace.is_none());
@@ -1224,7 +1223,7 @@ mod tests {
 
     #[test]
     fn sandbox_status_omits_empty_conditions_and_absent_generation_in_json() {
-        let status = ClawSandboxStatus::default();
+        let status = KarsSandboxStatus::default();
         let v = serde_json::to_value(&status).unwrap();
         assert!(
             !v.as_object().unwrap().contains_key("conditions"),
@@ -1239,12 +1238,12 @@ mod tests {
     #[test]
     fn inference_ref_round_trips_via_camel_case() {
         // Wire-format hygiene: K8s uses camelCase. The ref field on the
-        // ClawSandboxSpec must serialize as `inferenceRef`.
-        let spec = ClawSandboxSpec {
+        // KarsSandboxSpec must serialize as `inferenceRef`.
+        let spec = KarsSandboxSpec {
             inference_ref: LocalObjectRef {
                 name: "my-sandbox-inference".into(),
             },
-            ..ClawSandboxSpec::default()
+            ..KarsSandboxSpec::default()
         };
         let v = serde_json::to_value(&spec).unwrap();
         assert!(
@@ -1499,7 +1498,7 @@ mod tests {
 
     #[test]
     fn status_runtime_kind_is_optional_and_omitted_when_none() {
-        let status = ClawSandboxStatus::default();
+        let status = KarsSandboxStatus::default();
         let v = serde_json::to_value(&status).unwrap();
         assert!(
             !v.as_object().unwrap().contains_key("runtimeKind"),

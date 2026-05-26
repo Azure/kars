@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug in AzureClaw
+description: Report a bug in Kars
 body:
   - type: markdown
     attributes:
@@ -57,7 +57,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: AzureClaw Version
+      label: Kars Version
       description: "Version or commit SHA (e.g., v0.3.1 or abc1234)"
       placeholder: v0.x.x
     validations:

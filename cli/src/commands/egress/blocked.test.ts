@@ -69,7 +69,7 @@ describe("egress blocked CLI — renderers", () => {
       since_unix: 0,
       entries: [],
     };
-    renderList("sb1", "azureclaw-sb1", resp);
+    renderList("sb1", "kars-sb1", resp);
     const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(out).toContain("No blocked attempts");
     spy.mockRestore();
@@ -95,7 +95,7 @@ describe("egress blocked CLI — renderers", () => {
         },
       ],
     };
-    renderList("sb1", "azureclaw-sb1", resp);
+    renderList("sb1", "kars-sb1", resp);
     const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(out).toContain("HOST");
     expect(out).toContain("PORT");
@@ -119,7 +119,7 @@ describe("egress blocked CLI — renderers", () => {
       since_unix: 1_705_314_645,
       entries: [],
     };
-    renderList("sb1", "azureclaw-sb1", resp);
+    renderList("sb1", "kars-sb1", resp);
     const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(out).toContain("Filter: since 2024-01-15T10:30:45.000Z");
     spy.mockRestore();
@@ -137,7 +137,7 @@ describe("egress blocked CLI — renderers", () => {
         { host: "b.example.com", count: 2 },
       ],
     };
-    renderTop("sb1", "azureclaw-sb1", resp);
+    renderTop("sb1", "kars-sb1", resp);
     const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(out).toContain("Window: 5m");
     expect(out).toContain("top 10");
@@ -158,7 +158,7 @@ describe("egress blocked CLI — renderers", () => {
       n: 10,
       top: [],
     };
-    renderTop("sb1", "azureclaw-sb1", resp);
+    renderTop("sb1", "kars-sb1", resp);
     const out = spy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(out).toContain("No blocked attempts");
     spy.mockRestore();

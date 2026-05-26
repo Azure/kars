@@ -47,7 +47,7 @@ async fn egress_learned_blocked(
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let limit = headers
-        .get("x-azureclaw-limit")
+        .get("x-kars-limit")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(256)
@@ -153,7 +153,7 @@ async fn egress_fetch(
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": reason,
             "url": url,
-            "action": "Run 'azureclaw egress <name> --pending' to see pending requests, then 'azureclaw egress <name> --approve <domain>' to allow.",
+            "action": "Run 'kars egress <name> --pending' to see pending requests, then 'kars egress <name> --approve <domain>' to allow.",
         }))).into_response();
     }
 

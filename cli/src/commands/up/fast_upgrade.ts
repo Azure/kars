@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 / S15.d.1: `azureclaw up --upgrade` fast-path extracted
+// Phase 2 / S15.d.1: `kars up --upgrade` fast-path extracted
 // from up.ts. Skips all prompts and infra; just re-runs Helm with
 // cached context. Caller invokes when `options.upgrade` is set and
 // returns immediately afterwards.
@@ -25,11 +25,11 @@ const blue = chalk.hex("#0078D4");
 export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void> {
         const ctx = loadContext();
         if (!ctx?.acrLoginServer || !ctx?.aksCluster || !ctx?.resourceGroup) {
-          console.error(chalk.red("\n  No cached deployment context. Run 'azureclaw up' first (without --upgrade).\n"));
+          console.error(chalk.red("\n  No cached deployment context. Run 'kars up' first (without --upgrade).\n"));
           process.exit(1);
         }
 
-        console.log(blue("\n  AzureClaw · Fast Upgrade\n"));
+        console.log(blue("\n  Kars · Fast Upgrade\n"));
 
         // Connect to AKS
         let spin = ora("Connecting to AKS...").start();
@@ -52,20 +52,20 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           }
         }
         if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
-          console.error(chalk.red("\n  Helm chart not found. Run from the AzureClaw repo directory.\n"));
+          console.error(chalk.red("\n  Helm chart not found. Run from the Kars repo directory.\n"));
           process.exit(1);
         }
-        const helmPath = path.join(repoRoot, "deploy", "helm", "azureclaw");
+        const helmPath = path.join(repoRoot, "deploy", "helm", "kars");
 
         // Build Helm args from cached context
         const openAiEndpoint = ctx.foundryEndpoint || "";
         const helmArgs = [
-          "upgrade", "--install", "azureclaw", helmPath,
-          "--namespace", "azureclaw-system",
+          "upgrade", "--install", "kars", helmPath,
+          "--namespace", "kars-system",
           "--create-namespace",
-          "--set", `controller.image.repository=${ctx.acrLoginServer}/azureclaw-controller`,
+          "--set", `controller.image.repository=${ctx.acrLoginServer}/kars-controller`,
           "--set", `controller.image.tag=latest`,
-          "--set", `inferenceRouter.image.repository=${ctx.acrLoginServer}/azureclaw-inference-router`,
+          "--set", `inferenceRouter.image.repository=${ctx.acrLoginServer}/kars-inference-router`,
           "--set", `inferenceRouter.image.tag=latest`,
           "--set", `inferenceRouter.azure.openai.endpoint=${openAiEndpoint}`,
           "--set", `sandbox.image.repository=${ctx.acrLoginServer}/openclaw-sandbox`,
@@ -134,8 +134,8 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
 
         // Rollout restart
         spin = ora("Restarting controller...").start();
-        await execa("kubectl", ["rollout", "restart", "deployment/azureclaw-controller", "-n", "azureclaw-system"], { stdio: "pipe" }).catch(() => {});
-        await execa("kubectl", ["rollout", "status", "deployment/azureclaw-controller", "-n", "azureclaw-system", "--timeout=120s"], { stdio: "pipe" }).catch(() => {});
+        await execa("kubectl", ["rollout", "restart", "deployment/kars-controller", "-n", "kars-system"], { stdio: "pipe" }).catch(() => {});
+        await execa("kubectl", ["rollout", "status", "deployment/kars-controller", "-n", "kars-system", "--timeout=120s"], { stdio: "pipe" }).catch(() => {});
         spin.succeed("Controller restarted");
 
         // Ensure controller SA has a fedcred (so it can get ARM tokens via WI to create sandbox fedcreds)
@@ -148,9 +148,9 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
             "identity", "federated-credential", "create",
             "--identity-name", ctx.identityName,
             "--resource-group", idRg,
-            "--name", "azureclaw-controller-sa",
+            "--name", "kars-controller-sa",
             "--issuer", ctx.oidcIssuerUrl,
-            "--subject", "system:serviceaccount:azureclaw-system:azureclaw-controller",
+            "--subject", "system:serviceaccount:kars-system:kars-controller",
             "--audiences", "api://AzureADTokenExchange",
             "--output", "none",
           ], { stdio: "pipe", timeout: 30000 }).catch(() => {});
@@ -186,19 +186,19 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           spin = ora("Syncing federated credentials for sandboxes...").start();
           try {
             const { stdout: sandboxJson } = await execa("kubectl", [
-              "get", "clawsandbox", "-A", "-o", "json",
+              "get", "karssandbox", "-A", "-o", "json",
             ], { stdio: "pipe", timeout: 15000 });
             const sandboxes = JSON.parse(sandboxJson).items || [];
             let created = 0;
             for (const sb of sandboxes) {
               const sbName = sb.metadata?.name;
               if (!sbName) continue;
-              const sbNs = `azureclaw-${sbName}`;
+              const sbNs = `kars-${sbName}`;
               await execa("az", [
                 "identity", "federated-credential", "create",
                 "--identity-name", ctx.identityName,
                 "--resource-group", ctx.identityResourceGroup || ctx.resourceGroup,
-                "--name", `azureclaw-${sbName}`,
+                "--name", `kars-${sbName}`,
                 "--issuer", ctx.oidcIssuerUrl,
                 "--subject", `system:serviceaccount:${sbNs}:sandbox`,
                 "--audiences", "api://AzureADTokenExchange",

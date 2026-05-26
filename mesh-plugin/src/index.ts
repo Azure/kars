@@ -2,15 +2,15 @@
 // Licensed under the MIT License.
 
 /**
- * @azureclaw/mesh — OpenClaw plugin for mesh federation.
+ * @kars/mesh — OpenClaw plugin for mesh federation.
  *
  * Enables any OpenClaw agent to:
- * 1. Pair with a trusted AzureClaw cluster (one-time)
+ * 1. Pair with a trusted Kars cluster (one-time)
  * 2. Offload tasks to governed cloud sandboxes
  * 3. Communicate with other mesh agents (send/inbox/discover)
  *
  * Dependencies: ws (WebSocket client)
- * No Docker, no Rust, no AzureClaw CLI required.
+ * No Docker, no Rust, no Kars CLI required.
  */
 
 import { loadOrCreateIdentity, getIdentityPath, type MeshIdentity } from "./identity.js";
@@ -69,7 +69,7 @@ interface MeshPluginState {
   initPromise: Promise<string | null> | null;
 }
 
-const STATE_KEY = Symbol.for("azureclaw.mesh-plugin.state");
+const STATE_KEY = Symbol.for("kars.mesh-plugin.state");
 const state: MeshPluginState = (() => {
   const proc = process as unknown as Record<symbol, MeshPluginState | undefined>;
   let s = proc[STATE_KEY];
@@ -226,7 +226,7 @@ function pushNotification(n: Omit<PendingNotification, "at">): void {
   }
   // Always also mirror to stderr so TUIs that tail plugin logs render it.
   try {
-    process.stderr.write(`[azureclaw-mesh] ${n.line}\n`);
+    process.stderr.write(`[kars-mesh] ${n.line}\n`);
   } catch {
     /* best effort */
   }
@@ -245,7 +245,7 @@ function peekPendingNotifications(): string[] {
 // Directory to save incoming files from sandboxes
 const INCOMING_DIR = path.join(
   process.env.HOME || process.env.USERPROFILE || "/tmp",
-  ".azureclaw-mesh",
+  ".kars-mesh",
   "incoming",
 );
 
@@ -260,14 +260,14 @@ const INCOMING_DIR = path.join(
  */
 export function definePluginEntry() {
   return {
-    id: "azureclaw-mesh",
-    name: "AzureClaw Mesh",
+    id: "kars-mesh",
+    name: "Kars Mesh",
     register(api: any) {
       // ── mesh_pair ──
       api.registerTool({
         name: "mesh_pair",
         description:
-          "One-time pairing with an AzureClaw cluster using an admin-provided token. " +
+          "One-time pairing with an Kars cluster using an admin-provided token. " +
           "After pairing, you can use cloud_offload to delegate tasks to governed cloud sandboxes.",
         parameters: {
           type: "object",
@@ -287,7 +287,7 @@ export function definePluginEntry() {
       api.registerTool({
         name: "cloud_offload",
         description:
-          "Delegate a task to a governed AzureClaw cloud sandbox. " +
+          "Delegate a task to a governed Kars cloud sandbox. " +
           "Optionally send workspace files — they are transferred directly to the sandbox via E2E encrypted mesh (up to 30MB each). " +
           "The sandbox runs with full GPU/inference capabilities and AGT governance. " +
           "Results and output files are returned directly via mesh. Requires prior pairing.",
@@ -561,7 +561,7 @@ export function definePluginEntry() {
       // inbox queue — no network call.
       try {
         api.registerService?.({
-          id: "azureclaw-mesh-offload-drain",
+          id: "kars-mesh-offload-drain",
           description: "Drains offload mesh inbox while an offload is active.",
           async start() {
             const INTERVAL_MS = 2000;
@@ -740,7 +740,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
       // Differentiate common failure modes so the user can act.
       const msg = String(err?.message || err);
       if (msg.includes("ECONNREFUSED") || msg.includes("EHOSTUNREACH")) {
-        return `❌ Cannot reach relay at ${payload.relay_url}. The AzureClaw cluster may be offline or the relay address is wrong.`;
+        return `❌ Cannot reach relay at ${payload.relay_url}. The Kars cluster may be offline or the relay address is wrong.`;
       }
       if (msg.includes("timed out")) {
         return `❌ Relay connection timed out (${TIMEOUTS.RELAY_CONNECT / 1000}s). Check your network/proxy to ${payload.relay_url}.`;
@@ -802,8 +802,8 @@ async function meshPairHandler(...args: any[]): Promise<string> {
     return [
       `❌ Pairing timed out after ${PAIR_TIMEOUT_MS / 1000}s — the relay is reachable but the cluster controller (${payload.controller_amid.slice(0, 16)}...) did not respond.`,
       `  Common causes (in order of likelihood):`,
-      `    1. Mesh peer not enabled on the cluster — run \`azureclaw up\` on the cluster host (federation is on by default in current builds)`,
-      `    2. Controller pod is not Running — check \`kubectl get pods -n azureclaw-system\``,
+      `    1. Mesh peer not enabled on the cluster — run \`kars up\` on the cluster host (federation is on by default in current builds)`,
+      `    2. Controller pod is not Running — check \`kubectl get pods -n kars-system\``,
       `    3. Controller is not the leader yet — retry in 15s`,
       `    4. Token belongs to a different cluster/relay — confirm the token is fresh`,
     ].join("\n");
@@ -832,7 +832,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
 
   const budgetStr = (response.token_budget || 500000).toLocaleString();
   return [
-    `✅ Paired successfully with AzureClaw cluster "${clusterName}"`,
+    `✅ Paired successfully with Kars cluster "${clusterName}"`,
     "",
     `  Your AMID:     ${meshIdentity.amid}`,
     `  Identity:      ${identityPath}`,
@@ -850,7 +850,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /**
- * Tell the cluster controller to tear down the offload ClawSandbox CRD so
+ * Tell the cluster controller to tear down the offload KarsSandbox CRD so
  * the reconciler stops keeping the pod alive. Best-effort: if the mesh is
  * down or the controller rejects the message, we log and continue — the
  * controller also has an idle-timeout fallback.
@@ -1224,7 +1224,7 @@ async function cloudOffloadHandler(...args: any[]): Promise<string> {
 
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
-  if (!activePairing) return "❌ Not paired with any AzureClaw cluster. Use mesh_pair first.";
+  if (!activePairing) return "❌ Not paired with any Kars cluster. Use mesh_pair first.";
   if (!connection?.isConnected) {
     // Attempt a one-shot reconnect before failing — avoids hard failure on
     // transient WebSocket flaps. If the connection is still broken, bail with
@@ -1493,7 +1493,7 @@ async function drainOffloadInbox(): Promise<void> {
       kind: "done",
       line: `✅ [offload ${shortId}] complete (${doneMsg.duration_seconds ?? "?"}s${tokenSuffix})${fileSuffix}`,
     });
-    // Fire-and-forget cleanup request to the controller so the ClawSandbox CRD
+    // Fire-and-forget cleanup request to the controller so the KarsSandbox CRD
     // is torn down (and the reconciler stops keeping the offload pod alive).
     try {
       void sendOffloadCleanup(activeOffload.requestId, "done");

@@ -28,22 +28,22 @@ describe("POLICY_KIND_SPECS", () => {
 
   it("declares the canonical media types matching the controller", () => {
     expect(POLICY_KIND_SPECS["egress-allowlist"].mediaType).toBe(
-      "application/vnd.azureclaw.egress-allowlist.v1+yaml",
+      "application/vnd.kars.egress-allowlist.v1+yaml",
     );
     expect(POLICY_KIND_SPECS["agt-profile"].mediaType).toBe(
-      "application/vnd.azureclaw.agt-profile.v1+yaml",
+      "application/vnd.kars.agt-profile.v1+yaml",
     );
     expect(POLICY_KIND_SPECS["inference-policy"].mediaType).toBe(
-      "application/vnd.azureclaw.inference-policy.v1+json",
+      "application/vnd.kars.inference-policy.v1+json",
     );
     expect(POLICY_KIND_SPECS["memory-binding"].mediaType).toBe(
-      "application/vnd.azureclaw.memory-binding.v1+json",
+      "application/vnd.kars.memory-binding.v1+json",
     );
     expect(POLICY_KIND_SPECS["mcp-server-bundle"].mediaType).toBe(
-      "application/vnd.azureclaw.mcp-server-bundle.v1+json",
+      "application/vnd.kars.mcp-server-bundle.v1+json",
     );
     expect(POLICY_KIND_SPECS["eval-corpus"].mediaType).toBe(
-      "application/vnd.azureclaw.eval-corpus.v1+json",
+      "application/vnd.kars.eval-corpus.v1+json",
     );
   });
 
@@ -208,7 +208,7 @@ describe("signPolicyArtifact — pre-flight", () => {
       });
       expect(out.kind).toBe("inference-policy");
       expect(out.mediaType).toBe(
-        "application/vnd.azureclaw.inference-policy.v1+json",
+        "application/vnd.kars.inference-policy.v1+json",
       );
       expect(out.registry).toBe("myacr.azurecr.io");
       expect(out.repository).toBe("policies/inf");

@@ -2,20 +2,20 @@
 // Licensed under the MIT License.
 
 /**
- * AzureClaw plugin for the Headlamp dashboard.
+ * Kars plugin for the Headlamp dashboard.
  *
- * Targets the operator/SRE managing an AzureClaw cluster. Provides:
+ * Targets the operator/SRE managing an Kars cluster. Provides:
  *
  *   1. An **Overview** dashboard with sandbox phase counts, channel
  *      footprint, egress posture summary, and a live recent-sandbox
  *      table — the single page a new shift looks at to triage health.
- *   2. List + detail views for each of the 9 AzureClaw CRDs. The
- *      ClawSandbox detail screen is enhanced with cross-resource links
+ *   2. List + detail views for each of the 9 Kars CRDs. The
+ *      KarsSandbox detail screen is enhanced with cross-resource links
  *      (inference policy, tool policy, memory) plus a typed Network
  *      Policy card so an operator can see egress posture without
  *      hunting through YAML.
  *
- * Why this matters for AzureClaw specifically: agents have a wide blast
+ * Why this matters for Kars specifically: agents have a wide blast
  * radius (sandbox pod, mesh DID, channels, egress, token budget, tool
  * policy). Surfacing those facets in one place reduces the
  * mean-time-to-triage when a customer reports "the agent isn't
@@ -24,7 +24,7 @@
  * without leaving Headlamp.
  *
  * Bug fix (the reason the previous version showed
- * "Error loading clawsandboxes"): extending `KubeObject` with bare
+ * "Error loading karssandboxes"): extending `KubeObject` with bare
  * static fields does NOT register an `apiEndpoint`, so list/get
  * requests fail at runtime. The documented pattern in
  * `@kinvolk/headlamp-plugin@0.13.x` is `makeCustomResourceClass`
@@ -47,7 +47,7 @@ import {
 import { useTheme } from "@mui/material/styles";
 import * as React from "react";
 
-const GROUP = "azureclaw.azure.com";
+const GROUP = "kars.azure.com";
 const VERSION = "v1alpha1";
 
 interface CrdDescriptor {
@@ -58,21 +58,21 @@ interface CrdDescriptor {
   phaseField?: string;
 }
 
-const AZURECLAW_CRDS: CrdDescriptor[] = [
-  { plural: "clawsandboxes",    singular: "clawsandbox",    kind: "ClawSandbox",     label: "Sandboxes",         phaseField: "phase" },
+const KARS_CRDS: CrdDescriptor[] = [
+  { plural: "karssandboxes",    singular: "karssandbox",    kind: "KarsSandbox",     label: "Sandboxes",         phaseField: "phase" },
   { plural: "inferencepolicies", singular: "inferencepolicy", kind: "InferencePolicy", label: "Inference Policies" },
-  { plural: "clawmemories",     singular: "clawmemory",     kind: "ClawMemory",      label: "Memories",          phaseField: "phase" },
+  { plural: "karsmemories",     singular: "karsmemory",     kind: "KarsMemory",      label: "Memories",          phaseField: "phase" },
   { plural: "mcpservers",       singular: "mcpserver",      kind: "McpServer",       label: "MCP Servers",       phaseField: "phase" },
   { plural: "a2aagents",        singular: "a2aagent",       kind: "A2AAgent",        label: "A2A Agents",        phaseField: "phase" },
   { plural: "toolpolicies",     singular: "toolpolicy",     kind: "ToolPolicy",      label: "Tool Policies" },
   { plural: "trustgraphs",      singular: "trustgraph",     kind: "TrustGraph",      label: "Trust Graphs" },
-  { plural: "clawpairings",     singular: "clawpairing",    kind: "ClawPairing",     label: "Pairings" },
-  { plural: "clawevals",        singular: "claweval",       kind: "ClawEval",        label: "Evals",             phaseField: "phase" },
+  { plural: "karspairings",     singular: "karspairing",    kind: "KarsPairing",     label: "Pairings" },
+  { plural: "karsevals",        singular: "karseval",       kind: "KarsEval",        label: "Evals",             phaseField: "phase" },
   { plural: "egressapprovals",  singular: "egressapproval", kind: "EgressApproval",  label: "Egress Approvals",  phaseField: "phase" },
 ];
 
 const CRD_CLASSES: Record<string, KubeObjectClass> = Object.fromEntries(
-  AZURECLAW_CRDS.map(c => [
+  KARS_CRDS.map(c => [
     c.plural,
     makeCustomResourceClass({
       apiInfo: [{ group: GROUP, version: VERSION }],
@@ -85,7 +85,7 @@ const CRD_CLASSES: Record<string, KubeObjectClass> = Object.fromEntries(
   ]),
 );
 
-const ClawSandboxClass = CRD_CLASSES.clawsandboxes!;
+const KarsSandboxClass = CRD_CLASSES.karssandboxes!;
 
 // ──────────────────────────────────────────────────────────────────────
 // Sidebar + routes
@@ -93,52 +93,52 @@ const ClawSandboxClass = CRD_CLASSES.clawsandboxes!;
 
 registerSidebarEntry({
   parent: null,
-  name: "azureclaw",
-  label: "AzureClaw",
+  name: "kars",
+  label: "Kars",
   icon: "mdi:robot-outline",
-  url: "/azureclaw",
+  url: "/kars",
 });
 
 registerSidebarEntry({
-  parent: "azureclaw",
-  name: "azureclaw-overview",
+  parent: "kars",
+  name: "kars-overview",
   label: "Overview",
-  url: "/azureclaw",
+  url: "/kars",
 });
 
 registerRoute({
-  path: "/azureclaw",
-  sidebar: "azureclaw-overview",
-  name: "azureclaw-overview",
+  path: "/kars",
+  sidebar: "kars-overview",
+  name: "kars-overview",
   exact: true,
   component: () => <Overview />,
 });
 
 registerSidebarEntry({
-  parent: "azureclaw",
-  name: "azureclaw-mesh",
+  parent: "kars",
+  name: "kars-mesh",
   label: "Mesh Topology",
-  url: "/azureclaw/mesh",
+  url: "/kars/mesh",
 });
 
 registerRoute({
-  path: "/azureclaw/mesh",
-  sidebar: "azureclaw-mesh",
-  name: "azureclaw-mesh",
+  path: "/kars/mesh",
+  sidebar: "kars-mesh",
+  name: "kars-mesh",
   exact: true,
   component: () => <MeshTopology />,
 });
 
-for (const crd of AZURECLAW_CRDS) {
+for (const crd of KARS_CRDS) {
   registerSidebarEntry({
-    parent: "azureclaw",
+    parent: "kars",
     name: crd.plural,
     label: crd.label,
-    url: `/azureclaw/${crd.plural}`,
+    url: `/kars/${crd.plural}`,
   });
 
   registerRoute({
-    path: `/azureclaw/${crd.plural}`,
+    path: `/kars/${crd.plural}`,
     sidebar: crd.plural,
     name: crd.plural,
     exact: true,
@@ -146,7 +146,7 @@ for (const crd of AZURECLAW_CRDS) {
   });
 
   registerRoute({
-    path: `/azureclaw/${crd.plural}/:namespace/:name`,
+    path: `/kars/${crd.plural}/:namespace/:name`,
     sidebar: crd.plural,
     name: `${crd.plural}-detail`,
     exact: true,
@@ -270,7 +270,7 @@ function urlParams(re: RegExp): RegExpMatchArray | null {
 //
 // Pure read of fields the controller already writes — zero new API
 // traffic, no kube-apiserver proxy round-trips, no admin token
-// plumbing. Mirrors the data the `azureclaw inspect <sandbox>` CLI
+// plumbing. Mirrors the data the `kars inspect <sandbox>` CLI
 // surfaces (Slice 1d) but on the producer side.
 // ──────────────────────────────────────────────────────────────────────
 
@@ -285,7 +285,7 @@ function shortDigest(digest: string | undefined): string {
 // AllowlistDrift banner (crd-well-oiled-machine Slice 5d)
 //
 // The controller emits an `AllowlistDrift=True` condition when a
-// ClawSandbox's CR carries both `allowedEndpoints` (inline) AND
+// KarsSandbox's CR carries both `allowedEndpoints` (inline) AND
 // `allowlistRef` (signed artifact) and the two diverge. The artifact
 // wins and inline is ignored — but operators need to *see* the diff
 // so they can either re-sign the bundle to include the new hosts or
@@ -377,12 +377,12 @@ function reasonChip(reason: string | undefined) {
 
 function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
   // Only the policy CRDs that the router actually loads carry these
-  // fields. ClawSandbox, McpServer, etc. don't participate in the
+  // fields. KarsSandbox, McpServer, etc. don't participate in the
   // digest-echo loop yet.
   if (
     crd.plural !== "toolpolicies" &&
     crd.plural !== "inferencepolicies" &&
-    crd.plural !== "clawmemories"
+    crd.plural !== "karsmemories"
   ) {
     return null;
   }
@@ -429,13 +429,13 @@ function RouterPolicyStatusPanel({ crd, item }: { crd: CrdDescriptor; item: Kube
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// ClawEval status panel (slice 6.4) — surfaces last-run aggregate +
+// KarsEval status panel (slice 6.4) — surfaces last-run aggregate +
 // drift state + corpus reference. Pure read of fields the controller
 // already writes; no router admin token in the browser.
 // ──────────────────────────────────────────────────────────────────────
 
-function ClawEvalStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
-  if (crd.plural !== "clawevals") {
+function KarsEvalStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObject }) {
+  if (crd.plural !== "karsevals") {
     return null;
   }
   const spec = getSpec(item);
@@ -461,7 +461,7 @@ function ClawEvalStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObje
       : <span style={{ opacity: 0.6 }}>—</span>;
 
   return (
-    <SectionBox title="ClawEval (conformance corpus)">
+    <SectionBox title="KarsEval (conformance corpus)">
       <SimpleTable
         data={[
           { k: "Target sandbox", v: (spec.targetSandboxRef as any)?.name ?? "—" },
@@ -480,7 +480,7 @@ function ClawEvalStatusPanel({ crd, item }: { crd: CrdDescriptor; item: KubeObje
         ]}
       />
       <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
-        ClawEvals replay a signed corpus (or a builtin one) against the target
+        KarsEvals replay a signed corpus (or a builtin one) against the target
         sandbox's inference router. The controller stamps each run's verdicts
         on <code>status.lastResult</code> and rolls a history of the most
         recent ones into <code>status.history</code>.
@@ -502,7 +502,7 @@ interface OverviewMetrics {
   totalRuntime: Record<string, number>;
 }
 
-// Map a credentials-secret data key to a channel name. AzureClaw stores
+// Map a credentials-secret data key to a channel name. Kars stores
 // channel tokens in <sandbox>-credentials with conventional keys like
 // TELEGRAM_BOT_TOKEN / SLACK_BOT_TOKEN. Detecting from secrets is the
 // most reliable signal — the openclaw runtime spec itself doesn't
@@ -564,9 +564,9 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
 
     const sbName = sb.metadata?.name ?? "";
     const sbNs = sb.metadata?.namespace ?? "";
-    // Sandbox pod namespace is azureclaw-<name>; credentials secret
+    // Sandbox pod namespace is kars-<name>; credentials secret
     // lives there with the sandbox's bare name.
-    const podNs = `azureclaw-${sbName}`;
+    const podNs = `kars-${sbName}`;
     const channels =
       credsIndex.get(`${podNs}/${sbName}`) ??
       credsIndex.get(`${sbNs}/${sbName}`) ??
@@ -584,11 +584,11 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
 }
 
 function Overview() {
-  const [sandboxes] = (ClawSandboxClass as any).useList() as [KubeObject[] | null];
+  const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
   const [secrets] = (Secret as any).useList() as [KubeObject[] | null];
   const [inferencePolicies] = (CRD_CLASSES.inferencepolicies as any).useList() as [KubeObject[] | null];
   const [toolPolicies] = (CRD_CLASSES.toolpolicies as any).useList() as [KubeObject[] | null];
-  const [memories] = (CRD_CLASSES.clawmemories as any).useList() as [KubeObject[] | null];
+  const [memories] = (CRD_CLASSES.karsmemories as any).useList() as [KubeObject[] | null];
   const [mcpServers] = (CRD_CLASSES.mcpservers as any).useList() as [KubeObject[] | null];
   const [a2aAgents] = (CRD_CLASSES.a2aagents as any).useList() as [KubeObject[] | null];
   const metrics = computeMetrics(sandboxes, secrets);
@@ -625,7 +625,7 @@ function Overview() {
     if (inline) return shortModel(inline);
     const ref = spec.inferenceRef?.name as string | undefined;
     if (!ref) return "—";
-    for (const k of [`${sb.metadata?.namespace ?? ""}/${ref}`, `azureclaw-system/${ref}`]) {
+    for (const k of [`${sb.metadata?.namespace ?? ""}/${ref}`, `kars-system/${ref}`]) {
       const p = policyIndex.get(k);
       if (p) {
         const ps = getSpec(p);
@@ -637,7 +637,7 @@ function Overview() {
   };
   return (
     <>
-      <SectionBox title="AzureClaw — Operator Overview">
+      <SectionBox title="Kars — Operator Overview">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "1rem", padding: "1rem 0" }}>
           <Stat label="Total Sandboxes" value={total} />
           <Stat label="Ready" value={metrics.sandboxesByPhase.Ready ?? 0} tone="success" />
@@ -696,7 +696,7 @@ function Overview() {
               label: "Name",
               getter: (r: KubeObject) => (
                 <Link
-                  routeName={`clawsandboxes-detail`}
+                  routeName={`karssandboxes-detail`}
                   params={{
                     namespace: r.metadata?.namespace ?? "",
                     name: r.metadata?.name ?? "",
@@ -790,10 +790,10 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
     const ref = spec.inferenceRef?.name as string | undefined;
     if (!ref) return "—";
     // InferencePolicy lives in the operator namespace
-    // (azureclaw-system) by convention.
+    // (kars-system) by convention.
     const candidates = [
       `${sb.metadata?.namespace ?? ""}/${ref}`,
-      `azureclaw-system/${ref}`,
+      `kars-system/${ref}`,
     ];
     for (const k of candidates) {
       const p = policyIndex.get(k);
@@ -826,7 +826,7 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
       getter: (r: KubeObject) => r.metadata?.namespace ?? "—",
     },
   ];
-  if (crd.plural === "clawsandboxes") {
+  if (crd.plural === "karssandboxes") {
     columns.push(
       { label: "Runtime", getter: (r: KubeObject) => getSpec(r).runtime?.kind ?? "—" },
       { label: "Model", getter: resolveModel },
@@ -858,12 +858,12 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
   });
 
   return (
-    <SectionBox title={`AzureClaw — ${crd.label}`}>
+    <SectionBox title={`Kars — ${crd.label}`}>
       {items === null ? (
         <p style={{ padding: "1rem" }}>Loading…</p>
       ) : items.length === 0 ? (
         <p style={{ padding: "1rem" }}>
-          No {crd.label.toLowerCase()} found. Create one with the AzureClaw CLI
+          No {crd.label.toLowerCase()} found. Create one with the Kars CLI
           or by applying a CRD manifest.
         </p>
       ) : (
@@ -878,7 +878,7 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
 // ──────────────────────────────────────────────────────────────────────
 
 function CrdDetail({ crd }: { crd: CrdDescriptor }) {
-  const match = urlParams(new RegExp(`/azureclaw/${crd.plural}/([^/]+)/([^/]+)`));
+  const match = urlParams(new RegExp(`/kars/${crd.plural}/([^/]+)/([^/]+)`));
   const namespace = match?.[1] ?? "";
   const name = match?.[2] ?? "";
   const cls = CRD_CLASSES[crd.plural]!;
@@ -915,7 +915,7 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
         />
       </SectionBox>
 
-      {crd.plural === "clawsandboxes" && <SandboxExtras item={item} />}
+      {crd.plural === "karssandboxes" && <SandboxExtras item={item} />}
       {crd.plural === "inferencepolicies" && <InferencePolicyMetricsCard policyName={item.metadata.name} />}
       {crd.plural === "toolpolicies" && <ToolPolicyMetricsCard policyName={item.metadata.name} />}
       {crd.plural === "trustgraphs" && <TrustGraphMetricsCard />}
@@ -924,7 +924,7 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
 
       <RouterPolicyStatusPanel crd={crd} item={item} />
 
-      <ClawEvalStatusPanel crd={crd} item={item} />
+      <KarsEvalStatusPanel crd={crd} item={item} />
 
       <SectionBox title="Spec">
         <pre style={{ maxHeight: "400px", overflow: "auto" }}>
@@ -961,7 +961,7 @@ function CrdDetail({ crd }: { crd: CrdDescriptor }) {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// ClawSandbox-specific sections: network policy, channels, related refs.
+// KarsSandbox-specific sections: network policy, channels, related refs.
 // These are what an operator most often needs at a glance — phase alone
 // doesn't tell you whether Telegram is wired, whether egress is in learn
 // mode, or which ToolPolicy is gating tool calls.
@@ -978,7 +978,7 @@ function SandboxEgressApprovalsCard({
     KubeObject[] | null,
   ];
   if (!approvals) return null;
-  // EgressApprovals live in the same namespace as the ClawSandbox and
+  // EgressApprovals live in the same namespace as the KarsSandbox and
   // reference it by spec.sandbox name (sibling, never cross-ns).
   const matching = approvals.filter(a => {
     const ns = a.metadata?.namespace ?? "";
@@ -1035,14 +1035,14 @@ function SandboxEgressApprovalsCard({
       <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
         Grants unioned with the baseline allowlist on the data plane. <code>Active</code>{" "}
         means the router has echoed the merged digest. Grants auto-expire at{" "}
-        <code>status.expiresAt</code>; revoke early with <code>azureclaw egress revoke</code>.
+        <code>status.expiresAt</code>; revoke early with <code>kars egress revoke</code>.
       </p>
     </SectionBox>
   );
 }
 
 function McpServerFleetCard({ refs }: { refs: Array<{ name?: string }> }) {
-  // Per-MCP-server live status on the ClawSandbox detail. Each server gets a
+  // Per-MCP-server live status on the KarsSandbox detail. Each server gets a
   // row showing phase + reason chip, JWKS digest (router-echoed), and tool
   // count. Previously the operator had to click each server to see drift —
   // now you see the whole referenced fleet at a glance.
@@ -1084,7 +1084,7 @@ function McpServerFleetCard({ refs }: { refs: Array<{ name?: string }> }) {
               ) : (
                 <Link
                   routeName="mcpservers-detail"
-                  params={{ namespace: "azureclaw-system", name: r.name }}
+                  params={{ namespace: "kars-system", name: r.name }}
                 >
                   {r.name}
                 </Link>
@@ -1105,10 +1105,10 @@ function SandboxExtras({ item }: { item: KubeObject }) {
   const namespace = item.metadata?.namespace ?? "";
   const name = item.metadata?.name ?? "";
 
-  // Sandbox pod ns is azureclaw-<name>; the credentials Secret lives
+  // Sandbox pod ns is kars-<name>; the credentials Secret lives
   // there with name "<sandbox>-credentials". Channel state lives
   // there (TELEGRAM_BOT_TOKEN, etc.), not in spec.
-  const podNs = `azureclaw-${name}`;
+  const podNs = `kars-${name}`;
   const [credSecret] = (Secret as any).useGet(`${name}-credentials`, podNs) as [
     KubeObject | null,
     Error | null,
@@ -1170,7 +1170,7 @@ function SandboxExtras({ item }: { item: KubeObject }) {
         {channelEntries.length === 0 ? (
           <p style={{ padding: "0.5rem" }}>
             No channels configured for namespace <code>{podNs}</code>. Use{" "}
-            <code>azureclaw credentials set telegram-token …</code> +{" "}
+            <code>kars credentials set telegram-token …</code> +{" "}
             <code>--channels telegram</code>.
           </p>
         ) : (
@@ -1194,7 +1194,7 @@ function SandboxExtras({ item }: { item: KubeObject }) {
           data={[
             ...(inferenceRef ? [{ kind: "InferencePolicy", name: inferenceRef, route: "inferencepolicies-detail" }] : []),
             ...(toolPolicyRef ? [{ kind: "ToolPolicy", name: toolPolicyRef, route: "toolpolicies-detail" }] : []),
-            ...(memoryRef ? [{ kind: "ClawMemory", name: memoryRef, route: "clawmemories-detail" }] : []),
+            ...(memoryRef ? [{ kind: "KarsMemory", name: memoryRef, route: "karsmemories-detail" }] : []),
             ...mcpRefs.map(r => ({ kind: "McpServer", name: r.name ?? "", route: "mcpservers-detail" })),
           ]}
           columns={[
@@ -1203,7 +1203,7 @@ function SandboxExtras({ item }: { item: KubeObject }) {
               label: "Name",
               getter: (r: any) =>
                 r.name ? (
-                  <Link routeName={r.route} params={{ namespace: "azureclaw-system", name: r.name }}>
+                  <Link routeName={r.route} params={{ namespace: "kars-system", name: r.name }}>
                     {r.name}
                   </Link>
                 ) : (
@@ -1296,7 +1296,7 @@ function SandboxExtras({ item }: { item: KubeObject }) {
 // Grafana iframe embed for per-sandbox metrics.
 // Anonymous viewer + allow_embedding enabled on the kube-prometheus-stack
 // Grafana so the panel renders without auth. The Grafana base URL is
-// configurable via window.AZURECLAW_GRAFANA_URL — defaults to the local
+// configurable via window.KARS_GRAFANA_URL — defaults to the local
 // port-forward used during dev (http://127.0.0.1:3000).
 // ──────────────────────────────────────────────────────────────────────
 function SandboxMetricsCard({ sandboxName }: { sandboxName: string }) {
@@ -1304,10 +1304,10 @@ function SandboxMetricsCard({ sandboxName }: { sandboxName: string }) {
   const grafanaTheme = theme.palette.mode === "dark" ? "dark" : "light";
   const grafanaBase =
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (typeof window !== "undefined" && (window as any).AZURECLAW_GRAFANA_URL) ||
+    (typeof window !== "undefined" && (window as any).KARS_GRAFANA_URL) ||
     "http://127.0.0.1:3000";
   const url =
-    `${grafanaBase}/d/azureclaw-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}` +
+    `${grafanaBase}/d/kars-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}` +
     `&var-sandbox=${encodeURIComponent(sandboxName)}`;
   return (
     <SectionBox title={`Metrics (Grafana) — ${sandboxName}`}>
@@ -1328,10 +1328,10 @@ function SandboxMetricsCard({ sandboxName }: { sandboxName: string }) {
 
 // ──────────────────────────────────────────────────────────────────────
 // MeshTopology — native SVG visualization of the AGT mesh with
-// parent→sub-agent hierarchy. Uses ClawSandbox CRs (label
-// `azureclaw.azure.com/parent`) to build the tree, and Prometheus
+// parent→sub-agent hierarchy. Uses KarsSandbox CRs (label
+// `kars.azure.com/parent`) to build the tree, and Prometheus
 // queries to overlay live token/activity stats and inter-agent
-// communication. Configurable via window.AZURECLAW_PROMETHEUS_URL.
+// communication. Configurable via window.KARS_PROMETHEUS_URL.
 // ──────────────────────────────────────────────────────────────────────
 interface MeshNodeData {
   name: string;
@@ -1356,7 +1356,7 @@ async function promQuery(base: string, q: string): Promise<{metric: Record<strin
 
 function usePromBase(): string {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (typeof window !== "undefined" && (window as any).AZURECLAW_PROMETHEUS_URL) || "http://127.0.0.1:19091";
+  return (typeof window !== "undefined" && (window as any).KARS_PROMETHEUS_URL) || "http://127.0.0.1:19091";
 }
 
 function usePromPoll<T>(initial: T, loader: (base: string) => Promise<T>, intervalMs = 5000): { data: T; err: string } {
@@ -1382,7 +1382,7 @@ function MeshTopology() {
   const stroke = isDark ? "#cfd8dc" : "#37474f";
   const textOnNode = "#fff";
 
-  const [sandboxes] = (ClawSandboxClass as any).useList() as [KubeObject[] | null];
+  const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
 
   const { data: live, err } = usePromPoll(
     { peers: [] as { metric: Record<string,string>; value: number }[],
@@ -1397,11 +1397,11 @@ function MeshTopology() {
       relayMsgsPerSec: 0 },
     async (base) => {
       const [peers, sentLife, recvLife, sentRate, recvRate, relayConn, relayRouted, relayStored, relayDelivered, relayMsgs] = await Promise.all([
-        promQuery(base, 'azureclaw_agt_known_agents'),
-        promQuery(base, 'azureclaw_mesh_messages_sent_total'),
-        promQuery(base, 'azureclaw_mesh_messages_received_total'),
-        promQuery(base, 'sum by (sandbox) (increase(azureclaw_mesh_messages_sent_total[5m]))'),
-        promQuery(base, 'sum by (sandbox) (increase(azureclaw_mesh_messages_received_total[5m]))'),
+        promQuery(base, 'kars_agt_known_agents'),
+        promQuery(base, 'kars_mesh_messages_sent_total'),
+        promQuery(base, 'kars_mesh_messages_received_total'),
+        promQuery(base, 'sum by (sandbox) (increase(kars_mesh_messages_sent_total[5m]))'),
+        promQuery(base, 'sum by (sandbox) (increase(kars_mesh_messages_received_total[5m]))'),
         promQuery(base, 'sum(agentmesh_relay_connected_agents)'),
         promQuery(base, 'sum(agentmesh_relay_messages_routed_total)'),
         promQuery(base, 'sum(agentmesh_relay_messages_stored_total)'),
@@ -1429,7 +1429,7 @@ function MeshTopology() {
   // Build hierarchy from CR labels.
   const nodes: MeshNodeData[] = (sandboxes || []).map((sb) => {
     const name = sb.metadata.name;
-    const parent = (sb.metadata.labels || {})["azureclaw.azure.com/parent"] || "";
+    const parent = (sb.metadata.labels || {})["kars.azure.com/parent"] || "";
     return {
       name,
       parent,
@@ -1514,9 +1514,9 @@ function MeshTopology() {
         Tree view of the AGT mesh: AGT Relay (top), controllers (mid row), sub-agents (bottom row).
         Polled from Prometheus every 5s. Edge thickness & pulse speed ∝ mesh messages
         in/out (5m). Node size ∝ lifetime mesh-message volume. <b>children</b> = sub-agent
-        CRs labeled <code>azureclaw.azure.com/parent=&lt;name&gt;</code>; <b>trust</b> = peers in
+        CRs labeled <code>kars.azure.com/parent=&lt;name&gt;</code>; <b>trust</b> = peers in
         this router's local AGT trust graph (only populated after live traffic; resets on pod restart).
-        {err && <div style={{ color: "#ef5350", marginTop: 6 }}>Prometheus unreachable: {err} (configure window.AZURECLAW_PROMETHEUS_URL)</div>}
+        {err && <div style={{ color: "#ef5350", marginTop: 6 }}>Prometheus unreachable: {err} (configure window.KARS_PROMETHEUS_URL)</div>}
       </div>
       <div style={{ display: "flex", gap: 16, marginBottom: 12, flexWrap: "wrap" }}>
         <StatusLabel status="">🔗 Relay connected: <b>{live.relayConn}</b></StatusLabel>
@@ -1688,13 +1688,13 @@ function MeshTopology() {
 // Per-CRD Prometheus metric cards. These embed a focused Grafana
 // dashboard view (filtered by the relevant entity) instead of duplicating
 // the Grafana queries client-side. The router metrics
-// `azureclaw_inference_*` and `azureclaw_agt_policy_evaluations_total`
+// `kars_inference_*` and `kars_agt_policy_evaluations_total`
 // surface model/policy/decision labels that map naturally to the
 // InferencePolicy and ToolPolicy CRDs.
 // ──────────────────────────────────────────────────────────────────────
 function grafanaBaseUrl(): string {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (typeof window !== "undefined" && (window as any).AZURECLAW_GRAFANA_URL) || "http://127.0.0.1:3000";
+  return (typeof window !== "undefined" && (window as any).KARS_GRAFANA_URL) || "http://127.0.0.1:3000";
 }
 
 function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
@@ -1708,15 +1708,15 @@ function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
       latency: 0 },
     async (base) => {
       const [byModel, bySandbox, reqRate, latency] = await Promise.all([
-        promQuery(base, 'sum by (model, direction) (increase(azureclaw_tokens_total[1h]))'),
-        promQuery(base, 'sum by (sandbox) (increase(azureclaw_tokens_total[1h]))'),
-        promQuery(base, 'sum by (model, status) (rate(azureclaw_inference_requests_total[5m]))'),
-        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(azureclaw_inference_latency_seconds_bucket[5m])))'),
+        promQuery(base, 'sum by (model, direction) (increase(kars_tokens_total[1h]))'),
+        promQuery(base, 'sum by (sandbox) (increase(kars_tokens_total[1h]))'),
+        promQuery(base, 'sum by (model, status) (rate(kars_inference_requests_total[5m]))'),
+        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(kars_inference_latency_seconds_bucket[5m])))'),
       ]);
       return { byModel, bySandbox, reqRate, latency: latency[0]?.value || 0 };
     }
   );
-  const url = `${grafanaBaseUrl()}/d/azureclaw-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}`;
+  const url = `${grafanaBaseUrl()}/d/kars-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}`;
   const modelRows = data.byModel.map((r) => ({
     model: r.metric.model || "?",
     direction: r.metric.direction || "?",
@@ -1769,9 +1769,9 @@ function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
       latencyP95: 0 },
     async (base) => {
       const [decisions, bySandbox, latP95] = await Promise.all([
-        promQuery(base, 'sum by (decision) (increase(azureclaw_agt_policy_evaluations_total[1h]))'),
-        promQuery(base, 'sum by (sandbox, decision) (increase(azureclaw_agt_policy_evaluations_total[1h]))'),
-        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(azureclaw_agt_eval_latency_seconds_bucket[5m])))'),
+        promQuery(base, 'sum by (decision) (increase(kars_agt_policy_evaluations_total[1h]))'),
+        promQuery(base, 'sum by (sandbox, decision) (increase(kars_agt_policy_evaluations_total[1h]))'),
+        promQuery(base, 'histogram_quantile(0.95, sum by (le) (rate(kars_agt_eval_latency_seconds_bucket[5m])))'),
       ]);
       return { decisions, bySandbox, latencyP95: latP95[0]?.value || 0 };
     }
@@ -1827,9 +1827,9 @@ function TrustGraphMetricsCard() {
       bundleHealth: [] as { metric: Record<string,string>; value: number }[] },
     async (base) => {
       const [peers, audit, bundle] = await Promise.all([
-        promQuery(base, 'azureclaw_agt_known_agents'),
-        promQuery(base, 'azureclaw_agt_audit_entries_total'),
-        promQuery(base, 'azureclaw_policy_bundle_healthy'),
+        promQuery(base, 'kars_agt_known_agents'),
+        promQuery(base, 'kars_agt_audit_entries_total'),
+        promQuery(base, 'kars_policy_bundle_healthy'),
       ]);
       return { peers, auditEntries: audit, bundleHealth: bundle };
     }
@@ -1861,7 +1861,7 @@ function TrustGraphMetricsCard() {
 // ──────────────────────────────────────────────────────────────────────
 // Token budget panels — overview-wide aggregate + per-sandbox utilization.
 // Budgets live on InferencePolicy.spec.tokenBudget.dailyTokens; consumption
-// is tracked by the router metric `azureclaw_tokens_total{sandbox,direction}`.
+// is tracked by the router metric `kars_tokens_total{sandbox,direction}`.
 // Each sandbox references its policy via spec.inferenceRef.name (same ns).
 // ──────────────────────────────────────────────────────────────────────
 function utilizationTone(pct: number): StatusKind {
@@ -1902,7 +1902,7 @@ function TokenBudgetOverview({ sandboxes, inferencePolicies }: { sandboxes: Kube
   // Per-sandbox consumption from Prometheus (24h window aligns with dailyTokens budget).
   const { data, err } = usePromPoll(
     [] as { metric: Record<string,string>; value: number }[],
-    async (base) => promQuery(base, 'sum by (sandbox) (increase(azureclaw_tokens_total[24h]))'),
+    async (base) => promQuery(base, 'sum by (sandbox) (increase(kars_tokens_total[24h]))'),
     10000
   );
   const consumedBySandbox: Record<string, number> = {};
@@ -1985,14 +1985,14 @@ function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxName: str
   const { data: used24h } = usePromPoll(
     0,
     async (base) => {
-      const r = await promQuery(base, `sum(increase(azureclaw_tokens_total{sandbox="${sandboxName}"}[24h]))`);
+      const r = await promQuery(base, `sum(increase(kars_tokens_total{sandbox="${sandboxName}"}[24h]))`);
       return r[0]?.value || 0;
     },
     10000
   );
   const { data: split } = usePromPoll(
     [] as { metric: Record<string,string>; value: number }[],
-    async (base) => promQuery(base, `sum by (direction) (increase(azureclaw_tokens_total{sandbox="${sandboxName}"}[24h]))`),
+    async (base) => promQuery(base, `sum by (direction) (increase(kars_tokens_total{sandbox="${sandboxName}"}[24h]))`),
     10000
   );
 

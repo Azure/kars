@@ -39,8 +39,8 @@ Multi-container Kubernetes pod, hard egress isolation, Workload Identity.
 
 ```mermaid
 flowchart TB
-  subgraph Cluster["AKS cluster — namespace: azureclaw-&lt;name&gt;"]
-    subgraph Pod["ClawSandbox pod"]
+  subgraph Cluster["AKS cluster — namespace: kars-&lt;name&gt;"]
+    subgraph Pod["KarsSandbox pod"]
       Init["init: egress-guard<br/>(iptables — only UID 1001 egresses)"]
       Agent["agent — UID 1000<br/>no direct egress<br/>(your runtime)"]
       Router["inference-router — UID 1001<br/>127.0.0.1:8443 + 8444"]
@@ -111,7 +111,7 @@ chain. The router brokers all of them. **Content Safety** is enforced
 roundtrip; it parses the `prompt_filter_results` field that Foundry
 returns inline and blocks/audits accordingly. On GitHub Copilot and
 GitHub Models providers, inline filters are not returned, so this
-step is a no-op (documented in `cli-reference.md` under `azureclaw dev`).
+step is a no-op (documented in `cli-reference.md` under `kars dev`).
 The audit record is hash-chained for tamper-*detection*; cryptographic
 signing of the chain head is on the roadmap (see [security.md](security.md#the-headline-guarantees)).
 
@@ -119,7 +119,7 @@ signing of the chain head is on the roadmap (see [security.md](security.md#the-h
 
 ## 4. The mesh — encrypted inter-agent messaging
 
-Two AzureClaw agents in (possibly) different clusters that need to talk. The Signal-Protocol session (X3DH key agreement, Double Ratchet, KNOCK trust evaluation) lives **entirely inside the agent process** via `@microsoft/agent-governance-sdk`. The router is a transparent WebSocket bridge to the AgentMesh relay — it forwards opaque ciphertext, never holds a session key, and cannot decrypt. The relay is the same: ciphertext in, ciphertext out.
+Two Kars agents in (possibly) different clusters that need to talk. The Signal-Protocol session (X3DH key agreement, Double Ratchet, KNOCK trust evaluation) lives **entirely inside the agent process** via `@microsoft/agent-governance-sdk`. The router is a transparent WebSocket bridge to the AgentMesh relay — it forwards opaque ciphertext, never holds a session key, and cannot decrypt. The relay is the same: ciphertext in, ciphertext out.
 
 ```mermaid
 sequenceDiagram
@@ -180,8 +180,8 @@ flowchart LR
   subgraph Cluster["AKS cluster"]
     Ing["Public ingress<br/>(App Gateway / k8s ingress)"]
     GW["A2A gateway (Rust)<br/>verifies caller identity<br/>routes to A2AAgent CRD<br/>audit · rate limit · CS"]
-    subgraph NS["azureclaw-prod-agent"]
-      Pod["ClawSandbox pod<br/>(agent + router)"]
+    subgraph NS["kars-prod-agent"]
+      Pod["KarsSandbox pod<br/>(agent + router)"]
     end
   end
 
@@ -193,7 +193,7 @@ flowchart LR
 
 The A2A gateway is the only inbound public surface. Every request gets the same content-safety, rate-limit, and audit treatment as outbound traffic.
 
-> **Verifier status.** Today caller identity is established via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer; AgentCard signature verification (`azureclaw_a2a_core::verify_inbound_card`) ships as a library and is unit-tested, but wiring it as an axum layer inside the gateway is tracked in the [roadmap](roadmap.md). See [A2A gateway](architecture/a2a-gateway.md).
+> **Verifier status.** Today caller identity is established via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer; AgentCard signature verification (`kars_a2a_core::verify_inbound_card`) ships as a library and is unit-tested, but wiring it as an axum layer inside the gateway is tracked in the [roadmap](roadmap.md). See [A2A gateway](architecture/a2a-gateway.md).
 
 ---
 
@@ -202,10 +202,10 @@ The A2A gateway is the only inbound public surface. Every request gets the same 
 ```mermaid
 flowchart LR
   User["operator / CLI / GitOps"]
-  CRD[("9 CRDs<br/>ClawSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>ClawMemory · ClawEval · TrustGraph<br/>EgressApproval")]
-  Ctrl["azureclaw-controller<br/>(kube-rs)"]
+  CRD[("9 CRDs<br/>KarsSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>KarsMemory · KarsEval · TrustGraph<br/>EgressApproval")]
+  Ctrl["kars-controller<br/>(kube-rs)"]
 
-  User -->|kubectl apply / azureclaw cli| CRD
+  User -->|kubectl apply / kars cli| CRD
   CRD --> Ctrl
   Ctrl --> NS["Namespace + RBAC"]
   Ctrl --> Dep["Deployment / Pod<br/>(agent + router + egress-guard)"]
@@ -218,7 +218,7 @@ flowchart LR
   Status --> User
 ```
 
-The controller is a vanilla kube-rs reconciler. It owns the nine user-facing CRDs (plus the controller-internal `ClawPairing`), watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
+The controller is a vanilla kube-rs reconciler. It owns the nine user-facing CRDs (plus the controller-internal `KarsPairing`), watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
 
 ---
 
@@ -228,14 +228,14 @@ How the nine CRDs reference each other. Arrow labels show the **actual** field p
 
 ```mermaid
 flowchart TB
-  CS["ClawSandbox<br/>(the agent)"]
+  CS["KarsSandbox<br/>(the agent)"]
   TP["ToolPolicy<br/>(allow / deny / approval)"]
   IP["InferencePolicy<br/>(model · tokens · region)"]
-  CM["ClawMemory<br/>(memory store binding)"]
+  CM["KarsMemory<br/>(memory store binding)"]
   Mcp["McpServer<br/>(allowed MCP backends)"]
   A2A["A2AAgent<br/>(public-ingress endpoint)"]
   TG["TrustGraph<br/>(mesh trust topology)"]
-  CE["ClawEval<br/>(reproducible eval run)"]
+  CE["KarsEval<br/>(reproducible eval run)"]
   EA["EgressApproval<br/>(TTL-bounded extra hosts)"]
 
   CS -->|spec.inferenceRef| IP
@@ -248,24 +248,24 @@ flowchart TB
   TG -.->|projected cluster-wide<br/>by controller| CS
 ```
 
-`ClawSandbox` is the unit of work; the other CRDs bind policy, identity, peers, evaluation, or break-glass egress to it. You can build a complete deployment with just `ClawSandbox` + `ToolPolicy` + `InferencePolicy`; the rest are opt-in for richer scenarios.
+`KarsSandbox` is the unit of work; the other CRDs bind policy, identity, peers, evaluation, or break-glass egress to it. You can build a complete deployment with just `KarsSandbox` + `ToolPolicy` + `InferencePolicy`; the rest are opt-in for richer scenarios.
 
-`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/azureclaw/trustgraph/graph.json`). It is not referenced by name from a `ClawSandbox` spec — it applies cluster-wide. **Router-side mesh-admission gating** against the projected graph (refuse to bridge a WS for an edge not in the graph) is tracked in the [roadmap](roadmap.md). This is not KNOCK gating — KNOCK lives inside the Signal session the agent owns end-to-end and the router never sees it. Today the router keeps a post-decision trust-score map populated from KNOCK outcomes the agent reports out-of-band, for audit and rate-limit purposes only (see CRD reference §TrustGraph).
+`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/kars/trustgraph/graph.json`). It is not referenced by name from a `KarsSandbox` spec — it applies cluster-wide. **Router-side mesh-admission gating** against the projected graph (refuse to bridge a WS for an edge not in the graph) is tracked in the [roadmap](roadmap.md). This is not KNOCK gating — KNOCK lives inside the Signal session the agent owns end-to-end and the router never sees it. Today the router keeps a post-decision trust-score map populated from KNOCK outcomes the agent reports out-of-band, for audit and rate-limit purposes only (see CRD reference §TrustGraph).
 
 Schema details in **[`docs/api/crd-reference.md`](api/crd-reference.md)**.
 
 ---
 
-## 8. Cluster topology — what `azureclaw up` produces
+## 8. Cluster topology — what `kars up` produces
 
 ```mermaid
 flowchart TB
-  subgraph RG["Resource group: azureclaw-&lt;name&gt;-rg"]
+  subgraph RG["Resource group: kars-&lt;name&gt;-rg"]
     ACR["ACR<br/>(your private registry)"]
     Foundry["Azure AI Foundry<br/>+ Content Safety"]
     KV["Key Vault<br/>(optional)"]
     subgraph AKS["AKS cluster (Workload Identity + OIDC issuer)"]
-      subgraph Sys["azureclaw-system"]
+      subgraph Sys["kars-system"]
         CtrlPod["controller"]
         GwPod["a2a-gateway"]
       end
@@ -273,10 +273,10 @@ flowchart TB
         Relay["agentmesh-relay"]
         Reg["agentmesh-registry"]
       end
-      subgraph Tenant1["azureclaw-prod-agent (one per sandbox)"]
-        Pod1["ClawSandbox pod<br/>(agent + router + egress-guard)"]
+      subgraph Tenant1["kars-prod-agent (one per sandbox)"]
+        Pod1["KarsSandbox pod<br/>(agent + router + egress-guard)"]
       end
-      subgraph TenantN["azureclaw-&lt;other&gt;"]
+      subgraph TenantN["kars-&lt;other&gt;"]
         PodN["…"]
       end
     end
@@ -299,7 +299,7 @@ flowchart TB
   class Mesh mesh
 ```
 
-**Three classes of namespace:** `azureclaw-system` (the control plane, one per cluster), `agentmesh` (the relay/registry, one per cluster), and one tenant namespace per `ClawSandbox`. NetworkPolicy isolates them; the controller has Cluster-scoped RBAC; everything else is namespace-scoped.
+**Three classes of namespace:** `kars-system` (the control plane, one per cluster), `agentmesh` (the relay/registry, one per cluster), and one tenant namespace per `KarsSandbox`. NetworkPolicy isolates them; the controller has Cluster-scoped RBAC; everything else is namespace-scoped.
 
 ---
 

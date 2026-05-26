@@ -4,13 +4,13 @@
 # Allowed egress: Northwind APIs, trade data feeds
 
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: northwind-trade-agent-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: northwind-trade-agent
+    kars.azure.com/sandbox: northwind-trade-agent
 spec:
   appliesTo:
     sandboxName: northwind-trade-agent
@@ -24,11 +24,11 @@ spec:
     dailyTokens: 500000
     perRequestTokens: 128000
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: northwind-trade-agent
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
     demo: clawshield
     company: northwind
@@ -37,7 +37,7 @@ spec:
   runtime:
     kind: OpenClaw
     openclaw:
-      # Image intentionally unset: controller resolves from SANDBOX_IMAGE env (set by azureclaw up).
+      # Image intentionally unset: controller resolves from SANDBOX_IMAGE env (set by kars up).
       config:
         agent:
           model: "azure/gpt-4.1"
@@ -49,7 +49,7 @@ spec:
 
   sandbox:
     isolation: "enhanced"
-    seccompProfile: "azureclaw-strict"
+    seccompProfile: "kars-strict"
     readOnlyRootFilesystem: true
     runAsNonRoot: true
     allowPrivilegeEscalation: false

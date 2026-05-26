@@ -4,18 +4,18 @@
 #
 # Manual E2E scenario: CRD admission lane (T0 — schema gate).
 #
-# AzureClaw ships 9 CRDs. The runtime/governance/mesh/failure scenarios
-# only exercise ClawSandbox + InferencePolicy. This scenario applies
+# Kars ships 9 CRDs. The runtime/governance/mesh/failure scenarios
+# only exercise KarsSandbox + InferencePolicy. This scenario applies
 # minimum-valid CRs for the remaining 7 and asserts:
 #
 #   1. The API server accepts the CR (schema + admission webhooks pass).
 #   2. The controller produces the documented status condition within
-#      a bounded wait. Most controllers reach `Ready=True`; ClawMemory
+#      a bounded wait. Most controllers reach `Ready=True`; KarsMemory
 #      stays `Pending` by design (the runtime is responsible for
 #      provisioning the upstream Foundry store, not the operator).
 #
 # What we do NOT do here: functional probes for each CRD (those live
-# in the per-feature scenarios — handoff for ClawPairing, mesh for
+# in the per-feature scenarios — handoff for KarsPairing, mesh for
 # TrustGraph, etc).
 
 set -euo pipefail
@@ -28,7 +28,7 @@ source "$LIB_DIR/common.sh"
 scenario_header "CRD admission lane — minimum-valid CRs for 7 untested CRDs"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
 ns=$(new_ns "crd-admission")
 export MANUAL_E2E_SCENARIO=crd_admission
@@ -59,8 +59,8 @@ _wait_ready() {
     return 1
 }
 
-# Same shape but for status.phase fields (used by ClawMemory which is
-# expected to sit at "Pending" and by ClawPairing which sits at
+# Same shape but for status.phase fields (used by KarsMemory which is
+# expected to sit at "Pending" and by KarsPairing which sits at
 # "PendingPairing").
 _wait_phase() {
     local kind="$1"
@@ -79,13 +79,13 @@ _wait_phase() {
     return 1
 }
 
-label="azureclaw.azure.com/test-suite: manual-e2e"
+label="kars.azure.com/test-suite: manual-e2e"
 
 # ── 1. ToolPolicy ──────────────────────────────────────────────────────
 log_step "[1/7] ToolPolicy: minimum spec (appliesTo: {})"
 metric_start "tp_admit"
 if _apply "
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: tp-min
@@ -111,7 +111,7 @@ fi
 log_step "[2/7] McpServer: minimum spec (just url)"
 metric_start "mcp_admit"
 if _apply "
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: McpServer
 metadata:
   name: mcp-min
@@ -137,7 +137,7 @@ fi
 log_step "[3/7] A2AAgent: minimum spec (endpointUrl + signingKey)"
 metric_start "a2a_admit"
 if _apply "
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: A2AAgent
 metadata:
   name: a2a-min
@@ -167,7 +167,7 @@ fi
 log_step "[4/7] TrustGraph (cluster-scoped): one vertex"
 metric_start "tg_admit"
 if _apply "
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: TrustGraph
 metadata:
   name: tg-crd-admission
@@ -201,14 +201,14 @@ else
     log_fail "TrustGraph admission rejected"
 fi
 
-# ── 5. ClawPairing ─────────────────────────────────────────────────────
-log_step "[5/7] ClawPairing: minimum spec (tokenHash + expiresAt)"
+# ── 5. KarsPairing ─────────────────────────────────────────────────────
+log_step "[5/7] KarsPairing: minimum spec (tokenHash + expiresAt)"
 metric_start "cp_admit"
 expires="$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || \
           date -u -v+1H '+%Y-%m-%dT%H:%M:%SZ')"
 if _apply "
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawPairing
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsPairing
 metadata:
   name: pairing-min
   namespace: ${ns}
@@ -218,30 +218,30 @@ spec:
   tokenHash: c7f5d4f9b3a8e2d1f4c8b6a3e5d7f9b1c3e5d7f9b1c3e5d7f9b1c3e5d7f9b1c3
   expiresAt: \"${expires}\"
 "; then
-    metric_finish "cp_admit" crd_admission admitClawPairing
-    log_pass "ClawPairing admitted"
-    # ClawPairing's documented happy path is phase=PendingPairing — it
+    metric_finish "cp_admit" crd_admission admitKarsPairing
+    log_pass "KarsPairing admitted"
+    # KarsPairing's documented happy path is phase=PendingPairing — it
     # never reports Ready until the partner side completes.
-    if _wait_phase ClawPairing pairing-min "$ns" PendingPairing 60; then
-        log_pass "ClawPairing reached PendingPairing (expected pre-pairing state)"
+    if _wait_phase KarsPairing pairing-min "$ns" PendingPairing 60; then
+        log_pass "KarsPairing reached PendingPairing (expected pre-pairing state)"
     else
-        log_fail "ClawPairing never reached PendingPairing"
-        kubectl -n "$ns" get clawpairing pairing-min -o yaml 2>&1 | tail -20 | sed 's/^/    /' || true
+        log_fail "KarsPairing never reached PendingPairing"
+        kubectl -n "$ns" get karspairing pairing-min -o yaml 2>&1 | tail -20 | sed 's/^/    /' || true
     fi
 else
-    log_fail "ClawPairing admission rejected"
+    log_fail "KarsPairing admission rejected"
 fi
 
-# ── 6. ClawMemory ──────────────────────────────────────────────────────
-# ClawMemory references a sandbox by name. The CR can be admitted
+# ── 6. KarsMemory ──────────────────────────────────────────────────────
+# KarsMemory references a sandbox by name. The CR can be admitted
 # without the sandbox existing; the controller will sit at Pending
 # until a runtime provisions the upstream Foundry store. We only
 # assert admission + the documented Pending phase.
-log_step "[6/7] ClawMemory: minimum spec (storeName + sandboxRef + scope)"
+log_step "[6/7] KarsMemory: minimum spec (storeName + sandboxRef + scope)"
 metric_start "cm_admit"
 if _apply "
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawMemory
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsMemory
 metadata:
   name: memory-min
   namespace: ${ns}
@@ -253,27 +253,27 @@ spec:
     name: nonexistent-sandbox
   scope: agent:nonexistent-sandbox
 "; then
-    metric_finish "cm_admit" crd_admission admitClawMemory
-    log_pass "ClawMemory admitted"
-    if _wait_phase ClawMemory memory-min "$ns" Pending 60; then
-        log_pass "ClawMemory at expected Pending phase (runtime provisions store)"
+    metric_finish "cm_admit" crd_admission admitKarsMemory
+    log_pass "KarsMemory admitted"
+    if _wait_phase KarsMemory memory-min "$ns" Pending 60; then
+        log_pass "KarsMemory at expected Pending phase (runtime provisions store)"
     else
         # Some controllers may use a different phase name on first
         # reconcile; surface the actual value rather than failing hard.
-        actual=$(kubectl -n "$ns" get clawmemory memory-min \
+        actual=$(kubectl -n "$ns" get karsmemory memory-min \
             -o jsonpath='{.status.phase}' 2>/dev/null || true)
-        log_skip "ClawMemory phase='${actual:-<empty>}' (expected Pending) — controller may have changed semantics"
+        log_skip "KarsMemory phase='${actual:-<empty>}' (expected Pending) — controller may have changed semantics"
     fi
 else
-    log_fail "ClawMemory admission rejected"
+    log_fail "KarsMemory admission rejected"
 fi
 
-# ── 7. ClawEval ────────────────────────────────────────────────────────
-log_step "[7/7] ClawEval: minimum spec (sandboxRef + suite)"
+# ── 7. KarsEval ────────────────────────────────────────────────────────
+log_step "[7/7] KarsEval: minimum spec (sandboxRef + suite)"
 metric_start "ce_admit"
 if _apply "
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawEval
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsEval
 metadata:
   name: eval-min
   namespace: ${ns}
@@ -286,16 +286,16 @@ spec:
   evaluators:
     - relevance
 "; then
-    metric_finish "ce_admit" crd_admission admitClawEval
-    log_pass "ClawEval admitted"
-    if _wait_ready ClawEval eval-min "$ns" 60; then
-        log_pass "ClawEval reached Ready"
+    metric_finish "ce_admit" crd_admission admitKarsEval
+    log_pass "KarsEval admitted"
+    if _wait_ready KarsEval eval-min "$ns" 60; then
+        log_pass "KarsEval reached Ready"
     else
-        log_fail "ClawEval never reached Ready"
-        kubectl -n "$ns" get claweval eval-min -o yaml 2>&1 | tail -30 | sed 's/^/    /' || true
+        log_fail "KarsEval never reached Ready"
+        kubectl -n "$ns" get karseval eval-min -o yaml 2>&1 | tail -30 | sed 's/^/    /' || true
     fi
 else
-    log_fail "ClawEval admission rejected"
+    log_fail "KarsEval admission rejected"
 fi
 
 scenario_summary "CRD admission lane"

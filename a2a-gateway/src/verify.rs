@@ -4,7 +4,7 @@
 //! Replay-protection cache for inbound A2A traffic.
 //!
 //! `[GAP-V1]` — this module currently provides only the
-//! [`ReplayCache`]. Wrapping [`azureclaw_a2a_core::verify_inbound_card`]
+//! [`ReplayCache`]. Wrapping [`kars_a2a_core::verify_inbound_card`]
 //! as an axum layer that runs inside this binary is a v1.1 task;
 //! today the verified-caller subject is consumed from the
 //! `X-A2A-Agent-Subject` header populated by the upstream Gateway

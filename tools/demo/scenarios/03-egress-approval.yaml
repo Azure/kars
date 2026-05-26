@@ -4,11 +4,11 @@
 # api.stripe.com that auto-expires. Phase transitions Pending → Active
 # → Expired are observable via kubectl + the operator TUI.
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: EgressApproval
 metadata:
   name: demo-stripe-grant
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   sandbox: demo-agent
   hosts:

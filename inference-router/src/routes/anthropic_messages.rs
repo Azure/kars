@@ -198,7 +198,7 @@ pub(super) async fn anthropic_messages(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name: String = headers
-        .get("x-azureclaw-sandbox")
+        .get("x-kars-sandbox")
         .and_then(|v| v.to_str().ok())
         .filter(|v| {
             !v.is_empty()

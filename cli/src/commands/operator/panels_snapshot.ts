@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * `azureclaw operator --snapshot` — non-interactive panel render.
+ * `kars operator --snapshot` — non-interactive panel render.
  *
  * Prints the same blessed-tag dashboard the live TUI produces, but as
  * a single snapshot to stdout (with blessed tags converted to plain

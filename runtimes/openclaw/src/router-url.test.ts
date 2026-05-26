@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { routerBase, routerUrl, routerWsBase, routerWsUrl } from "./index.js";
 
-const ENV_KEY = "AZURECLAW_ROUTER_URL";
+const ENV_KEY = "KARS_ROUTER_URL";
 
 describe("router URL helpers (q7)", () => {
   let original: string | undefined;
@@ -22,7 +22,7 @@ describe("router URL helpers (q7)", () => {
     expect(routerBase()).toBe("http://127.0.0.1:8443");
   });
 
-  it("honors AZURECLAW_ROUTER_URL override (late-binding)", () => {
+  it("honors KARS_ROUTER_URL override (late-binding)", () => {
     process.env[ENV_KEY] = "http://fake.test:19999";
     expect(routerBase()).toBe("http://fake.test:19999");
     expect(routerUrl("/v1/models")).toBe("http://fake.test:19999/v1/models");

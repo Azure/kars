@@ -42,7 +42,7 @@ two clusters cannot read each other's memories.
   `bearerFromEnv` field for Slice 4d.4.1 outbound static-bearer; emits
   meta+JWKS ConfigMap always (dev-mode uses empty `{"keys":[]}`).
 - **Sandbox reconciler**: dedup `mirrored_mcp_names`; inject
-  `AZURECLAW_MCP_SERVERS` env on the openclaw container.
+  `KARS_MCP_SERVERS` env on the openclaw container.
 - **Router forwarder** (`mcp/forwarder.rs`): `Accept: application/json,
   text/event-stream` + SSE envelope decoder; outbound bearer fetched
   from per-sandbox env (not from CRD).

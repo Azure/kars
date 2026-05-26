@@ -12,9 +12,9 @@ import {
 import { runApply, runDelete, runGet, runList } from "./toolpolicy.js";
 
 /**
- * `azureclaw a2a` — A2A 1.0.0 surfacing commands.
+ * `kars a2a` — A2A 1.0.0 surfacing commands.
  *
- * Implements ADR-0001 D6 sub-point 10 (`azureclaw a2a list-exposed`):
+ * Implements ADR-0001 D6 sub-point 10 (`kars a2a list-exposed`):
  * the surgical opt-in story for A2A ingress requires a one-shot CLI
  * view of every sandbox currently exposed for inbound A2A traffic so
  * operators can verify the blast radius at a glance.
@@ -22,9 +22,9 @@ import { runApply, runDelete, runGet, runList } from "./toolpolicy.js";
  * ## Status: scaffold
  *
  * The actual data source — the controller-owned routing ConfigMap
- * `azureclaw-a2a-routes` in the `azureclaw-system` namespace — does
+ * `kars-a2a-routes` in the `kars-system` namespace — does
  * not exist yet. It lands in `phase1/a2a-controller-revocation` along
- * with the ClawSandbox.spec.a2a CRD extension.
+ * with the KarsSandbox.spec.a2a CRD extension.
  *
  * Until then, this command:
  *   - prints the schema of what `list-exposed` will show
@@ -63,7 +63,7 @@ export function a2aCommand(): Command {
       } else {
         process.stdout.write(
           "No sandboxes are exposed for inbound A2A traffic.\n" +
-            "(Run `azureclaw a2a list-exposed --output json` for machine-readable output.)\n"
+            "(Run `kars a2a list-exposed --output json` for machine-readable output.)\n"
         );
       }
     });
@@ -91,7 +91,7 @@ export function a2aCommand(): Command {
 }
 
 // ---------------------------------------------------------------------------
-// `azureclaw a2a-agent {apply,get,list,delete}` — A2AAgent CR management.
+// `kars a2a-agent {apply,get,list,delete}` — A2AAgent CR management.
 // Lives in this file (not a sibling) so all A2A surfaces share one module
 // per the no-duplicate-modules guidance.
 // ---------------------------------------------------------------------------

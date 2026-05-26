@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AzureClaw sandbox entrypoint
+# Kars sandbox entrypoint
 # Configures OpenClaw automatically from mounted secrets and env vars.
 # The user never needs to manually configure anything.
 #
@@ -99,28 +99,28 @@ fi
 if [ "$IS_ROOT" = "true" ] && command -v iptables >/dev/null 2>&1; then
   # Filter table: allow established, localhost, DNS — reject everything else
   # Flush before append to prevent duplicate rules on container restart (#13)
-  iptables -N AZURECLAW_EGRESS 2>/dev/null || iptables -F AZURECLAW_EGRESS
-  iptables -A AZURECLAW_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  iptables -A AZURECLAW_EGRESS -o lo -j ACCEPT
-  iptables -A AZURECLAW_EGRESS -p udp --dport 53 -j ACCEPT
-  iptables -A AZURECLAW_EGRESS -p tcp --dport 53 -j ACCEPT
+  iptables -N KARS_EGRESS 2>/dev/null || iptables -F KARS_EGRESS
+  iptables -A KARS_EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A KARS_EGRESS -o lo -j ACCEPT
+  iptables -A KARS_EGRESS -p udp --dport 53 -j ACCEPT
+  iptables -A KARS_EGRESS -p tcp --dport 53 -j ACCEPT
   # Allow traffic to the forward proxy port (redirected packets go to localhost)
-  iptables -A AZURECLAW_EGRESS -p tcp --dport 8444 -j ACCEPT
-  iptables -A AZURECLAW_EGRESS -j REJECT --reject-with icmp-port-unreachable
+  iptables -A KARS_EGRESS -p tcp --dport 8444 -j ACCEPT
+  iptables -A KARS_EGRESS -j REJECT --reject-with icmp-port-unreachable
   # Remove stale jump rule before adding (idempotent)
-  iptables -D OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS 2>/dev/null || true
-  iptables -A OUTPUT -m owner --uid-owner 1000 -j AZURECLAW_EGRESS
+  iptables -D OUTPUT -m owner --uid-owner 1000 -j KARS_EGRESS 2>/dev/null || true
+  iptables -A OUTPUT -m owner --uid-owner 1000 -j KARS_EGRESS
 
   # NAT table: redirect HTTP/HTTPS from UID 1000 to the transparent forward proxy.
   # The proxy enforces blocklist, allowlist, and learn mode on every request.
   # Inference (localhost:8443) is unaffected — loopback traffic is ACCEPTed above.
-  iptables -t nat -N AZURECLAW_REDIRECT 2>/dev/null || iptables -t nat -F AZURECLAW_REDIRECT
-  iptables -t nat -A AZURECLAW_REDIRECT -p tcp --dport 80  -j REDIRECT --to-port 8444
-  iptables -t nat -A AZURECLAW_REDIRECT -p tcp --dport 443 -j REDIRECT --to-port 8444
-  iptables -t nat -D OUTPUT -m owner --uid-owner 1000 ! -o lo -j AZURECLAW_REDIRECT 2>/dev/null || true
-  iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -j AZURECLAW_REDIRECT
+  iptables -t nat -N KARS_REDIRECT 2>/dev/null || iptables -t nat -F KARS_REDIRECT
+  iptables -t nat -A KARS_REDIRECT -p tcp --dport 80  -j REDIRECT --to-port 8444
+  iptables -t nat -A KARS_REDIRECT -p tcp --dport 443 -j REDIRECT --to-port 8444
+  iptables -t nat -D OUTPUT -m owner --uid-owner 1000 ! -o lo -j KARS_REDIRECT 2>/dev/null || true
+  iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -j KARS_REDIRECT
 
-  echo "[azureclaw] iptables egress guard active (UID 1000 → transparent proxy on :8444)"
+  echo "[kars] iptables egress guard active (UID 1000 → transparent proxy on :8444)"
 fi
 
 OPENCLAW_DIR="/sandbox/.openclaw"
@@ -230,7 +230,7 @@ elif [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_F
   unset _FED_TOKEN _TOKEN_RESP _ACCESS_TOKEN _DELAY _ELAPSED _MAX_WAIT _ATTEMPT
 fi
 
-# Get config from env vars (set by azureclaw dev/up)
+# Get config from env vars (set by kars dev/up)
 ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
 MODEL="${OPENCLAW_MODEL:-gpt-4.1}"
 
@@ -243,10 +243,10 @@ MODEL="${OPENCLAW_MODEL:-gpt-4.1}"
 # wedge that kept us debugging for hours). All Foundry deployments egress through
 # the router (127.0.0.1:8443) regardless of model kind, so a single unified
 # provider is all we need.
-case "${AZURECLAW_PROVIDER:-}" in
-  github-copilot) _PROVIDER_LABEL="Copilot via AzureClaw" ;;
-  github-models)  _PROVIDER_LABEL="GH Models via AzureClaw" ;;
-  *)              _PROVIDER_LABEL="Azure via AzureClaw" ;;
+case "${KARS_PROVIDER:-}" in
+  github-copilot) _PROVIDER_LABEL="Copilot via Kars" ;;
+  github-models)  _PROVIDER_LABEL="GH Models via Kars" ;;
+  *)              _PROVIDER_LABEL="Azure via Kars" ;;
 esac
 MODELS_JSON="[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (${_PROVIDER_LABEL})\"}]"
 if [ -n "${FOUNDRY_DEPLOYMENTS:-}" ]; then
@@ -259,12 +259,12 @@ try:
     for d in deps:
         name = d.get('name') or d.get('id') or ''
         if name:
-            models.append({'id': name, 'name': f'{name} (Azure via AzureClaw)'})
+            models.append({'id': name, 'name': f'{name} (Azure via Kars)'})
     if not models:
-        models = [{'id': '${MODEL}', 'name': '${MODEL} (Azure via AzureClaw)'}]
+        models = [{'id': '${MODEL}', 'name': '${MODEL} (Azure via Kars)'}]
     print(json.dumps(models))
 except:
-    print('[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (Azure via AzureClaw)\"}]')
+    print('[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (Azure via Kars)\"}]')
 " 2>/dev/null)
   [ -n "$_PARSED" ] && MODELS_JSON="$_PARSED"
 fi
@@ -291,7 +291,7 @@ export OPENCLAW_QA_ALLOW_LOCAL_IMAGE_PROVIDER=1
 
 # Skip OpenClaw's bundled-extension discovery for performance. OpenClaw 2026.4.x
 # loads pi-ai's full provider catalog via models.list every time the gateway
-# starts cold (xAI/Anthropic/Mistral/etc. — providers AzureClaw never uses
+# starts cold (xAI/Anthropic/Mistral/etc. — providers Kars never uses
 # because all model traffic flows through the inference router to Foundry /
 # GitHub Models). Without this flag, models.list takes ~50s and blocks the
 # event loop on every first WebUI connect. With this flag, OpenClaw points at
@@ -328,7 +328,7 @@ fi
 # but on AKS `/sandbox` is a persistent volume and OpenClaw's runtime workspace
 # bootstrap silently rewrites AGENTS.md / SOUL.md with its default scaffold ~minutes
 # after first chat. After a pod restart the guard would skip our write block, leaving
-# the OpenClaw stock scaffold in place — losing the AzureClaw welcome policy and
+# the OpenClaw stock scaffold in place — losing the Kars welcome policy and
 # producing the "just says hey" symptom.
 #
 # The config is fully env-driven and deterministic, so regenerating every boot is
@@ -339,7 +339,7 @@ if true; then
   mkdir -p "$OPENCLAW_DIR" "$WORKSPACE_DIR"
   [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox "$OPENCLAW_DIR"
 
-  # Build the AzureClaw system-prompt override. This is the AUTHORITATIVE source
+  # Build the Kars system-prompt override. This is the AUTHORITATIVE source
   # of agent identity + welcome policy: openclaw config takes precedence over
   # workspace AGENTS.md, so even when OpenClaw's runtime workspace bootstrap
   # rewrites AGENTS.md/SOUL.md with its default scaffold, this prompt remains.
@@ -349,16 +349,16 @@ if true; then
     TELEGRAM_PROMPT_BLOCK="No Telegram bot is configured for this sandbox. Avoid mentioning Telegram capabilities to the user; if they ask for Telegram status pings, reply that the channel isn't set up and proceed without them — do not attempt to call \`telegram_status\`."
   fi
 
-  SYSTEM_PROMPT_FILE="$OPENCLAW_DIR/azureclaw-system-prompt.txt"
-  if [ "${AZURECLAW_PROVIDER:-}" = "github-copilot" ]; then
+  SYSTEM_PROMPT_FILE="$OPENCLAW_DIR/kars-system-prompt.txt"
+  if [ "${KARS_PROVIDER:-}" = "github-copilot" ]; then
     # Copilot mode: large-context provider (Claude / GPT-5 / Gemini), no
     # Foundry tools, full mesh + governance, native Anthropic Messages
     # passthrough through the router. Same trim-down as github-models for
     # the Foundry-only feature claims, but no 16k-cap warning.
     cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
-You are **AzureClaw** — a sandboxed AI assistant powered by **GitHub Copilot**,
+You are **Kars** — a sandboxed AI assistant powered by **GitHub Copilot**,
 running inside an isolated container. Your inference is proxied through the
-AzureClaw inference router which enforces egress policy and AGT governance.
+Kars inference router which enforces egress policy and AGT governance.
 
 Provider: GitHub Copilot (\`${ENDPOINT}\`)
 Model: ${MODEL}
@@ -369,7 +369,7 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 When a user starts a new conversation, include the following in your greeting
 for security transparency:
 
-1. Header: "🔒 AzureClaw Sandbox — Local Dev (GitHub Copilot)"
+1. Header: "🔒 Kars Sandbox — Local Dev (GitHub Copilot)"
 2. Provider: \`GitHub Copilot\`
 3. Model: \`${MODEL}\`
 4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
@@ -393,13 +393,13 @@ Skip filler like "Great question!" — just help.
 
 ## Tool Posture
 
-Copilot mode runs with a focused tool set: HTTP fetch, AzureClaw mesh
+Copilot mode runs with a focused tool set: HTTP fetch, Kars mesh
 tools (spawn / send / await / inbox), and AGT governance hooks. The
 Foundry tool catalog is intentionally NOT loaded here because there's no
 Foundry project bound to this provider. If a user asks for Foundry-style
 features (managed memory, knowledge indexes, deployments, evaluations),
-tell them to switch to Azure AI Foundry by running \`azureclaw credentials\`
-and re-running \`azureclaw dev\`.
+tell them to switch to Azure AI Foundry by running \`kars credentials\`
+and re-running \`kars dev\`.
 
 ## Web Research (IMPORTANT — do this, don't refuse)
 
@@ -425,7 +425,7 @@ Use \`mesh_spawn\` to create a sibling, \`mesh_send\` / \`mesh_await\` to
 exchange messages, and \`mesh_inbox\` to drain pending replies. Always
 include a peer roster in TASK messages when delegating to multiple
 siblings — the LLM should never have to guess which name maps to which
-role. See the \`azureclaw-spawn\` skill for the canonical template.
+role. See the \`kars-spawn\` skill for the canonical template.
 
 ${TELEGRAM_PROMPT_BLOCK}
 
@@ -438,14 +438,14 @@ ${TELEGRAM_PROMPT_BLOCK}
 - Content Safety / Prompt Shields are NOT active in this mode (require an
   Azure Content Safety resource — switch to Foundry to enable them)
 PROMPTEOF
-  elif [ "${AZURECLAW_PROVIDER:-}" = "github-models" ]; then
+  elif [ "${KARS_PROVIDER:-}" = "github-models" ]; then
     # Slim system prompt for GitHub Models mode: no Foundry tools registered,
     # no Azure-specific safety stack, and a 16k input-token cap upstream.
     # Keep the welcome policy + AGT mesh guidance; drop everything Foundry.
     cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
-You are **AzureClaw** — a sandboxed AI assistant powered by **GitHub Models**,
+You are **Kars** — a sandboxed AI assistant powered by **GitHub Models**,
 running inside an isolated container. Your inference is proxied through the
-AzureClaw inference router which enforces egress policy and AGT governance.
+Kars inference router which enforces egress policy and AGT governance.
 
 Provider: GitHub Models (\`${ENDPOINT}\`)
 Model: ${MODEL}
@@ -456,7 +456,7 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 When a user starts a new conversation, include the following in your greeting
 for security transparency:
 
-1. Header: "🔒 AzureClaw Sandbox — Local Dev (GitHub Models)"
+1. Header: "🔒 Kars Sandbox — Local Dev (GitHub Models)"
 2. Provider: \`GitHub Models\`
 3. Model: \`${MODEL}\`
 4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
@@ -480,13 +480,13 @@ Skip filler like "Great question!" — just help.
 
 ## Tool Posture
 
-GitHub Models mode runs with a minimal tool set: HTTP fetch, AzureClaw mesh
+GitHub Models mode runs with a minimal tool set: HTTP fetch, Kars mesh
 tools (spawn / send / await / inbox), and AGT governance hooks. The full
 Foundry tool catalog is intentionally NOT loaded here because GitHub Models
 caps every request at 16,000 input tokens. If a user asks for Foundry-style
 features (managed memory, knowledge indexes, deployments, evaluations), tell
-them to switch to Azure AI Foundry by running \`azureclaw credentials\` and
-re-running \`azureclaw dev\`.
+them to switch to Azure AI Foundry by running \`kars credentials\` and
+re-running \`kars dev\`.
 
 ## Web Research (IMPORTANT — do this, don't refuse)
 
@@ -510,7 +510,7 @@ not apologetic.
 ## Inter-Agent Communication
 
 Sub-agent traffic is E2E encrypted via Signal Protocol over the AGT mesh.
-Read sub-agent replies from \`azureclaw_mesh_inbox\` rather than guessing at
+Read sub-agent replies from \`kars_mesh_inbox\` rather than guessing at
 them.
 
 **When you receive a task from another agent via mesh, EXECUTE IT using your
@@ -521,17 +521,17 @@ the comprehensive result. The parent is waiting on you.
 
 ## Multi-Agent Orchestration — Use Server-Side Blocking
 
-When you spawn multiple sub-agents in parallel (via \`azureclaw_spawn\`) and
+When you spawn multiple sub-agents in parallel (via \`kars_spawn\`) and
 the workflow requires assembling outputs from several of them, prefer
-server-side blocking over polling \`azureclaw_mesh_inbox\` in a loop:
+server-side blocking over polling \`kars_mesh_inbox\` in a loop:
 
-- \`azureclaw_mesh_await(senders=["analyst","viz"], timeout_seconds=300)\`
+- \`kars_mesh_await(senders=["analyst","viz"], timeout_seconds=300)\`
   blocks in a single tool call until all listed senders have delivered at
   least one message (or until timeout returns a partial result).
-- \`azureclaw_mesh_inbox(block_until_message=true, timeout_seconds=180)\`
+- \`kars_mesh_inbox(block_until_message=true, timeout_seconds=180)\`
   blocks until at least one new message arrives.
 
-After mesh_await resolves, call \`azureclaw_mesh_inbox(mark_read=true)\` to
+After mesh_await resolves, call \`kars_mesh_inbox(mark_read=true)\` to
 read the actual content.
 
 ## Telegram Status Updates (when configured)
@@ -541,7 +541,7 @@ ${TELEGRAM_PROMPT_BLOCK}
 ## Security Context
 
 - Non-root user (sandbox:1000), read-only rootfs, seccomp filtered
-- Inference proxied through AzureClaw router: AGT policy gating on tool
+- Inference proxied through Kars router: AGT policy gating on tool
   calls, per-sandbox token budgets, request audit logging
 - Egress: blocklist (51K+ domains) + allowlist; learn mode → enforce
 - Content Safety / Prompt Shields are NOT active in this mode (require an
@@ -549,9 +549,9 @@ ${TELEGRAM_PROMPT_BLOCK}
 PROMPTEOF
   else
     cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
-You are **AzureClaw** — a secure, sandboxed AI assistant powered by Azure AI Foundry,
+You are **Kars** — a secure, sandboxed AI assistant powered by Azure AI Foundry,
 running inside an isolated container on Azure Kubernetes Service (AKS). Your inference
-is routed through the AzureClaw inference router which provides Content Safety,
+is routed through the Kars inference router which provides Content Safety,
 Prompt Shields, token budgets, and egress control.
 
 Connected Foundry project: ${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}
@@ -563,7 +563,7 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 When a user starts a new conversation, include the following in your greeting
 for security transparency:
 
-1. Header: "🔒 AzureClaw Sandbox — Secure AI Runtime on Azure"
+1. Header: "🔒 Kars Sandbox — Secure AI Runtime on Azure"
 2. Foundry Project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
 3. Model: \`${MODEL}\`
 4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
@@ -596,28 +596,28 @@ information can be fetched dynamically.
 ## Inter-Agent Communication
 
 Sub-agent traffic is E2E encrypted via Signal Protocol over the AGT mesh. Read
-sub-agent replies from \`azureclaw_mesh_inbox\` rather than guessing at them.
+sub-agent replies from \`kars_mesh_inbox\` rather than guessing at them.
 When you receive a task from another agent, execute it autonomously using your
 full toolset and return a comprehensive result.
 
 ## Multi-Agent Orchestration — Use Server-Side Blocking
 
-When you spawn multiple sub-agents in parallel (via \`azureclaw_spawn\`) and the
+When you spawn multiple sub-agents in parallel (via \`kars_spawn\`) and the
 workflow requires assembling outputs from several of them, prefer server-side
-blocking over polling \`azureclaw_mesh_inbox\` in a loop (which wastes LLM turns
+blocking over polling \`kars_mesh_inbox\` in a loop (which wastes LLM turns
 and looks like the demo has stalled):
 
-- \`azureclaw_mesh_await(senders=["analyst","viz"], timeout_seconds=300)\` blocks
+- \`kars_mesh_await(senders=["analyst","viz"], timeout_seconds=300)\` blocks
   in a single tool call until all listed senders have delivered at least one
   message (or until timeout returns a partial result). This is the right tool
   for fan-out then wait then assemble patterns.
-- \`azureclaw_mesh_inbox(block_until_message=true, timeout_seconds=180)\` blocks
+- \`kars_mesh_inbox(block_until_message=true, timeout_seconds=180)\` blocks
   until at least one new message arrives. Use when waiting on a single peer.
 
-After mesh_await resolves, call \`azureclaw_mesh_inbox(mark_read=true)\` to read
+After mesh_await resolves, call \`kars_mesh_inbox(mark_read=true)\` to read
 the actual content. The \`<downloaded_files>\` JSON tail block returned by
 \`foundry_code_execute\` lists local paths — pass them directly to
-\`azureclaw_mesh_transfer_file\`. Avoid copying files inside Python; the Foundry
+\`kars_mesh_transfer_file\`. Avoid copying files inside Python; the Foundry
 container cannot see your local /sandbox.
 
 If a Foundry artifact is missing, retry with \`foundry_download_file(file_id, container_id)\`.
@@ -651,7 +651,7 @@ PROMPTEOF
   _ANTHROPIC_PROVIDER_BLOCK=""
   case "$MODEL" in
     claude-*)
-      if [ "${AZURECLAW_PROVIDER:-}" = "github-copilot" ]; then
+      if [ "${KARS_PROVIDER:-}" = "github-copilot" ]; then
         _PRIMARY_MODEL_REF="anthropic/${MODEL}"
         # Drop the model from the azure-openai block — pi-ai's PiModelRegistry
         # otherwise registers two entries with the same id and the OpenAI-shape
@@ -673,7 +673,7 @@ PROMPTEOF
       "anthropic": {
         "baseUrl": "http://127.0.0.1:8443",
         "apiKey": "routed-via-inference-router",
-        "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
+        "headers": { "x-kars-sandbox": "${HOSTNAME:-dev-agent}" },
         "models": [{"id":"${MODEL}","name":"${MODEL} (${_PROVIDER_LABEL})","api":"anthropic-messages","baseUrl":"http://127.0.0.1:8443","reasoning":true}]
       }
 ANTHEOF
@@ -690,25 +690,25 @@ ANTHEOF
   rm -f "${OPENCLAW_CONFIG}.bak" "${OPENCLAW_CONFIG}".clobbered.* \
         "$OPENCLAW_DIR/logs/config-health.json" 2>/dev/null || true
 
-  # Build the `mcp.servers` block from AZURECLAW_MCP_SERVERS (comma-separated
+  # Build the `mcp.servers` block from KARS_MCP_SERVERS (comma-separated
   # list of McpServer names projected by the controller). Each entry points
   # at the loopback router (`127.0.0.1:8443/mcp`) and carries an
-  # `x-azureclaw-mcp-server` header naming the registered McpServer. The
+  # `x-kars-mcp-server` header naming the registered McpServer. The
   # router resolves the header → registered server, signs the JWT with the
-  # mounted per-server signing key (mounted at /etc/azureclaw/mcp-signing/<name>),
+  # mounted per-server signing key (mounted at /etc/kars/mcp-signing/<name>),
   # filters by allowedTools, and forwards to the upstream URL. This is what
   # gives the McpServer CRD true E2E semantics: an OpenClaw `tool.*` invocation
   # against `<name>` is governed, signed, allow-listed and audited by the
   # router before ever leaving the pod.
   _MCP_BLOCK=""
-  if [ -n "${AZURECLAW_MCP_SERVERS:-}" ]; then
+  if [ -n "${KARS_MCP_SERVERS:-}" ]; then
     _MCP_ENTRIES=""
     _MCP_SEP=""
     OLDIFS="$IFS"; IFS=','
-    for _mcp_name in $AZURECLAW_MCP_SERVERS; do
+    for _mcp_name in $KARS_MCP_SERVERS; do
       _mcp_name=$(echo "$_mcp_name" | tr -d ' ')
       [ -z "$_mcp_name" ] && continue
-      _MCP_ENTRIES="${_MCP_ENTRIES}${_MCP_SEP}\"${_mcp_name}\": { \"transport\": \"streamable-http\", \"url\": \"http://127.0.0.1:8443/mcp\", \"headers\": { \"x-azureclaw-mcp-server\": \"${_mcp_name}\", \"x-azureclaw-sandbox\": \"${HOSTNAME:-dev-agent}\" } }"
+      _MCP_ENTRIES="${_MCP_ENTRIES}${_MCP_SEP}\"${_mcp_name}\": { \"transport\": \"streamable-http\", \"url\": \"http://127.0.0.1:8443/mcp\", \"headers\": { \"x-kars-mcp-server\": \"${_mcp_name}\", \"x-kars-sandbox\": \"${HOSTNAME:-dev-agent}\" } }"
       _MCP_SEP=", "
     done
     IFS="$OLDIFS"
@@ -730,7 +730,7 @@ ANTHEOF
         "apiKey": "routed-via-inference-router",
         "api": "openai-completions",
         "authHeader": false,
-        "headers": { "x-azureclaw-sandbox": "${HOSTNAME:-dev-agent}" },
+        "headers": { "x-kars-sandbox": "${HOSTNAME:-dev-agent}" },
         "models": ${MODELS_JSON}
       }${_ANTHROPIC_PROVIDER_BLOCK}
     }
@@ -753,7 +753,7 @@ ANTHEOF
   },
   "ui": {
     "assistant": {
-      "name": "${AZURECLAW_DISPLAY_NAME:-AzureClaw}",
+      "name": "${KARS_DISPLAY_NAME:-Kars}",
       "avatar": "🐾"
     }
   },
@@ -797,7 +797,7 @@ EOF
 
   # Seed auth-profiles.json for the "main" agent. Required by the embedded-mode
   # lane of `openclaw agent --message ...` subprocesses (spawned from the
-  # azureclaw plugin's delegateToNativeAgent / processTaskWithTools paths).
+  # kars plugin's delegateToNativeAgent / processTaskWithTools paths).
   # Without this file, the subprocess's embedded fallback errors out with
   # "No API key found for provider 'openai'" even though the gateway itself
   # routes through the inference router just fine.
@@ -828,8 +828,8 @@ AUTHPROFEOF
   # Built-in channel extensions need BOTH:
   #   1. A channel block in channels.* with credentials
   #   2. An entry in plugins.allow so the gateway loads the extension
-  PLUGINS_LIST='"azureclaw"'
-  PLUGINS_ENTRIES='"azureclaw": { "enabled": true }'
+  PLUGINS_LIST='"kars"'
+  PLUGINS_ENTRIES='"kars": { "enabled": true }'
   CHANNELS_CONFIG=""
 
   # Telegram (built into OpenClaw core, uses grammY)
@@ -928,7 +928,7 @@ AUTHPROFEOF
   AZURE_OPENAI_API_KEY="$(cat /run/secrets/azure-openai-key 2>/dev/null || cat /tmp/azure-openai-key 2>/dev/null || :)"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 
-  # AGT governance is always active in AzureClaw sandboxes (enables agt-governance skill)
+  # AGT governance is always active in Kars sandboxes (enables agt-governance skill)
   export AGT_GOVERNANCE_ENABLED=true
 
   # Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
@@ -939,8 +939,8 @@ AUTHPROFEOF
   # Write env exports to a sandbox-specific file (overwritten every boot, no
   # accumulation across pod restarts on persistent /sandbox volumes). Then ensure
   # .bashrc sources it exactly once.
-  cat > /sandbox/.azureclaw-env.sh << RCEOF
-# AzureClaw: Azure OpenAI credentials (loaded from /run/secrets/)
+  cat > /sandbox/.kars-env.sh << RCEOF
+# Kars: Azure OpenAI credentials (loaded from /run/secrets/)
 # Auto-generated every container boot — do not edit by hand.
 export AZURE_OPENAI_API_KEY="\$(cat /run/secrets/azure-openai-key 2>/dev/null)"
 export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
@@ -948,15 +948,15 @@ export OPENCLAW_MODEL="${MODEL}"
 export FOUNDRY_PROJECT_ENDPOINT="${FOUNDRY_PROJECT_ENDPOINT}"
 export FOUNDRY_AGENT_ID="${FOUNDRY_AGENT_ID}"
 RCEOF
-  if ! grep -q "azureclaw-env.sh" /sandbox/.bashrc 2>/dev/null; then
-    printf '\n# AzureClaw env (managed by entrypoint)\n[ -f /sandbox/.azureclaw-env.sh ] && . /sandbox/.azureclaw-env.sh\n' >> /sandbox/.bashrc
+  if ! grep -q "kars-env.sh" /sandbox/.bashrc 2>/dev/null; then
+    printf '\n# Kars env (managed by entrypoint)\n[ -f /sandbox/.kars-env.sh ] && . /sandbox/.kars-env.sh\n' >> /sandbox/.bashrc
   fi
 
   # Write minimal workspace files so OpenClaw doesn't need onboarding
   cat > "$WORKSPACE_DIR/AGENTS.md" << AGENTSEOF
-# AzureClaw Agent
+# Kars Agent
 
-You are a helpful AI assistant running inside an **AzureClaw** sandbox — a secure,
+You are a helpful AI assistant running inside an **Kars** sandbox — a secure,
 open-source runtime for AI agents on Azure Kubernetes Service (AKS).
 
 ## On First Message (Welcome)
@@ -964,7 +964,7 @@ open-source runtime for AI agents on Azure Kubernetes Service (AKS).
 When a user starts a new conversation, include the following in your greeting
 for security transparency:
 
-1. **Header**: "🔒 AzureClaw Sandbox — Secure AI Runtime on Azure"
+1. **Header**: "🔒 Kars Sandbox — Secure AI Runtime on Azure"
 2. **Foundry Project**: Show the connected project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
 3. **Model**: Show the active model: \`${MODEL}\`
 4. **Sandbox ID**: Show the sandbox name: \`\${HOSTNAME:-dev}\`
@@ -1017,14 +1017,14 @@ encryption. Use the mesh tools for inter-agent communication and read replies
 from the mesh inbox rather than guessing at them.
 
 ### Workflow for sub-agent tasks:
-1. **Spawn**: Call \`azureclaw_spawn\` with a name — it returns when the sub-agent is Running
-2. **Send**: Call \`azureclaw_mesh_send\` with \`to_agent\` and \`content\` — encrypted via AGT relay
-3. **Wait & Read**: Call \`azureclaw_mesh_inbox\` to check for replies (retry if empty)
-4. **Destroy**: Call \`azureclaw_spawn_destroy\` when done
+1. **Spawn**: Call \`kars_spawn\` with a name — it returns when the sub-agent is Running
+2. **Send**: Call \`kars_mesh_send\` with \`to_agent\` and \`content\` — encrypted via AGT relay
+3. **Wait & Read**: Call \`kars_mesh_inbox\` to check for replies (retry if empty)
+4. **Destroy**: Call \`kars_spawn_destroy\` when done
 
 ### Notes:
-- Read sub-agent replies from \`azureclaw_mesh_inbox\` rather than inventing them
-- If \`azureclaw_mesh_inbox\` returns no messages, wait and retry (up to 60 seconds)
+- Read sub-agent replies from \`kars_mesh_inbox\` rather than inventing them
+- If \`kars_mesh_inbox\` returns no messages, wait and retry (up to 60 seconds)
 - All messages are E2E encrypted (Signal Protocol) — the relay cannot read them
 
 ### Files received from other agents
@@ -1063,13 +1063,13 @@ Be thorough — you have the full OpenClaw toolset, so use it.
 
 ## Egress Management
 Network egress starts in **learn mode** — all domains are allowed and recorded.
-The operator can graduate to enforcement with \`azureclaw egress <name> --enforce\`,
+The operator can graduate to enforcement with \`kars egress <name> --enforce\`,
 which promotes learned domains to the allowlist. After that, new domains require approval.
 AGENTSEOF
 
   # Write TOOLS.md describing available Foundry endpoints
   cat > "$WORKSPACE_DIR/TOOLS.md" << 'TOOLSEOF'
-# AzureClaw Tools
+# Kars Tools
 
 All tools are accessed via the inference router at http://localhost:8443.
 Authentication is handled automatically — no API keys needed.
@@ -1121,7 +1121,7 @@ Direct internet access is blocked by security policy. To make external HTTP requ
   Returns: `{"status": 200, "headers": {...}, "body": "..."}`
 
 If a domain is not on the allowlist, the request is denied and a pending approval is
-created. The operator can approve it with `azureclaw egress <name> --approve <domain>`.
+created. The operator can approve it with `kars egress <name> --approve <domain>`.
 
 **Example:**
 ```bash
@@ -1137,17 +1137,17 @@ TOOLSEOF
   cat > "$WORKSPACE_DIR/SOUL.md" << SOULEOF
 # Soul
 
-You are **AzureClaw Agent** — a secure, sandboxed AI assistant powered by Azure AI Foundry.
+You are **Kars Agent** — a secure, sandboxed AI assistant powered by Azure AI Foundry.
 
 You run inside an isolated, hardened container on Azure Linux. Your inference is routed
-through the AzureClaw inference router which provides Content Safety, Prompt Shields,
+through the Kars inference router which provides Content Safety, Prompt Shields,
 token budgets, and egress control.
 
 **Connected project**: ${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}
 **Primary model**: ${MODEL}
 
 When greeting users for the first time, be warm and welcoming. Briefly mention you're
-running in AzureClaw, what model you're using, and what you can help with. Don't be
+running in Kars, what model you're using, and what you can help with. Don't be
 robotic — be genuinely helpful and excited to assist.
 
 You are friendly, concise, and technically excellent. You get things done efficiently.
@@ -1163,19 +1163,19 @@ For memory: write important facts, preferences, and decisions to memory files so
 persist across sessions. Use \`foundry_memory\` for cross-agent/cross-session recall.
 SOULEOF
 
-  echo "[azureclaw] OpenClaw configured — model: ${MODEL}, endpoint: ${ENDPOINT}"
+  echo "[kars] OpenClaw configured — model: ${MODEL}, endpoint: ${ENDPOINT}"
 else
   # Load credentials for existing config
   export AZURE_OPENAI_API_KEY="${API_KEY}"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
-  echo "[azureclaw] OpenClaw already configured"
+  echo "[kars] OpenClaw already configured"
 fi
 
-# Always re-install AzureClaw plugin from the image (plugin code may have changed
+# Always re-install Kars plugin from the image (plugin code may have changed
 # even though config persists on the volume). This is safe because the plugin
 # directory is small and cp is idempotent.
 #
-# IMPORTANT: `/opt/azureclaw-plugin` is chmod -R a-w in the Dockerfile (image-level
+# IMPORTANT: `/opt/kars-plugin` is chmod -R a-w in the Dockerfile (image-level
 # hardening). Default `cp` preserves source mode, so destination files end up
 # read-only (444) and directories 555. That makes subsequent container restarts
 # (emptyDir survives restart — only pod recreation wipes it) fail with
@@ -1183,55 +1183,55 @@ fi
 #   1. Remove the stale install tree up front, so overwrites never happen.
 #   2. Pass `--no-preserve=mode` so newly-copied files are writable by the owner
 #      even if the next restart still needs to write (belt-and-suspenders).
-if [ -d /opt/azureclaw-plugin ]; then
+if [ -d /opt/kars-plugin ]; then
   # Clean slate — the plugin is small and always comes from the image.
-  rm -rf "$OPENCLAW_DIR/extensions/azureclaw" 2>/dev/null || true
-  mkdir -p "$OPENCLAW_DIR/extensions/azureclaw/dist"
+  rm -rf "$OPENCLAW_DIR/extensions/kars" 2>/dev/null || true
+  mkdir -p "$OPENCLAW_DIR/extensions/kars/dist"
   # NOTE: on some Docker Desktop hosts, fchmod(2) on newly-written files in
   # the sandbox volume returns EPERM even though the file content is written
   # successfully. We tolerate cp's non-zero exit (content is what matters; the
   # mode bits are re-applied later by the hardening block at the bottom of
   # this script) via `|| true` on every cp. This keeps `set -e` semantics for
   # the rest of the script.
-  cp --no-preserve=mode /opt/azureclaw-plugin/package.json "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
-  cp --no-preserve=mode /opt/azureclaw-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
+  cp --no-preserve=mode /opt/kars-plugin/package.json "$OPENCLAW_DIR/extensions/kars/" 2>/dev/null || true
+  cp --no-preserve=mode /opt/kars-plugin/openclaw.plugin.json "$OPENCLAW_DIR/extensions/kars/" 2>/dev/null || true
   # Copy built JS/TS output
-  cp -r --no-preserve=mode /opt/azureclaw-plugin/*.js "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
-  cp -r --no-preserve=mode /opt/azureclaw-plugin/*.d.ts "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
-  cp -r --no-preserve=mode /opt/azureclaw-plugin/*.map "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
-  if [ -d /opt/azureclaw-plugin/commands ]; then
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/commands "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  cp -r --no-preserve=mode /opt/kars-plugin/*.js "$OPENCLAW_DIR/extensions/kars/dist/" 2>/dev/null || true
+  cp -r --no-preserve=mode /opt/kars-plugin/*.d.ts "$OPENCLAW_DIR/extensions/kars/dist/" 2>/dev/null || true
+  cp -r --no-preserve=mode /opt/kars-plugin/*.map "$OPENCLAW_DIR/extensions/kars/dist/" 2>/dev/null || true
+  if [ -d /opt/kars-plugin/commands ]; then
+    cp -r --no-preserve=mode /opt/kars-plugin/commands "$OPENCLAW_DIR/extensions/kars/dist/" 2>/dev/null || true
   fi
   # Copy ./core/ subdirectory (Phase 1 hotspot decomposition: foundry-discovery
   # and future extracted modules live under core/). plugin.js requires
   # './core/foundry-discovery.js' (commit a33165b) — without this copy the
   # whole plugin fails to load with "Cannot find module './core/...'".
-  if [ -d /opt/azureclaw-plugin/core ]; then
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/core "$OPENCLAW_DIR/extensions/azureclaw/dist/" 2>/dev/null || true
+  if [ -d /opt/kars-plugin/core ]; then
+    cp -r --no-preserve=mode /opt/kars-plugin/core "$OPENCLAW_DIR/extensions/kars/dist/" 2>/dev/null || true
   fi
   # Copy Foundry skills (SKILL.md files) — but skip foundry-* in GH Models
   # mode. GH Models has a hard 16k input-token cap; the 9 Foundry skills add
   # ~25k bytes of prompt fragments + tool schemas that the LLM never gets to
   # use (no Azure project exists), and they push every chat turn past 413.
-  if [ -d /opt/azureclaw-plugin/skills ]; then
-    cp -r --no-preserve=mode /opt/azureclaw-plugin/skills "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
+  if [ -d /opt/kars-plugin/skills ]; then
+    cp -r --no-preserve=mode /opt/kars-plugin/skills "$OPENCLAW_DIR/extensions/kars/" 2>/dev/null || true
     mkdir -p "$WORKSPACE_DIR/skills"
-    if [ "${AZURECLAW_PROVIDER:-}" = "github-models" ] || [ "${AZURECLAW_PROVIDER:-}" = "github-copilot" ]; then
+    if [ "${KARS_PROVIDER:-}" = "github-models" ] || [ "${KARS_PROVIDER:-}" = "github-copilot" ]; then
       # GH-token providers (Models / Copilot) have no Foundry project — skip
       # all foundry-* skills (they'd just register tools the LLM can't use).
       # Copilot doesn't have the 16k input cap, but the empty-Foundry tool
       # registrations are still pure noise.
-      for skill_dir in /opt/azureclaw-plugin/skills/*/; do
+      for skill_dir in /opt/kars-plugin/skills/*/; do
         name=$(basename "$skill_dir")
         case "$name" in
           foundry-*) continue ;;
         esac
         cp -r --no-preserve=mode "$skill_dir" "$WORKSPACE_DIR/skills/" 2>/dev/null || true
       done
-      echo "[azureclaw] ${AZURECLAW_PROVIDER} mode: governance + spawn skills installed (Foundry skills skipped)"
+      echo "[kars] ${KARS_PROVIDER} mode: governance + spawn skills installed (Foundry skills skipped)"
     else
-      cp -r --no-preserve=mode /opt/azureclaw-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
-      echo "[azureclaw] Foundry + governance skills installed (plugin + workspace)"
+      cp -r --no-preserve=mode /opt/kars-plugin/skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+      echo "[kars] Foundry + governance skills installed (plugin + workspace)"
     fi
   fi
   # Copy pre-installed ClawHub skills (from Docker build)
@@ -1239,26 +1239,26 @@ if [ -d /opt/azureclaw-plugin ]; then
     mkdir -p "$WORKSPACE_DIR/skills"
     cp -r --no-preserve=mode /opt/clawhub-skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
     CLAWHUB_COUNT=$(ls -d /opt/clawhub-skills/*/ 2>/dev/null | wc -l)
-    echo "[azureclaw] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
+    echo "[kars] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
   fi
   # Copy node_modules so the plugin can resolve runtime deps (ws, etc).
-  # `-L` dereferences symlinks: the @azureclaw/mesh entry is a `file:` dep
+  # `-L` dereferences symlinks: the @kars/mesh entry is a `file:` dep
   # symlink → /mesh-plugin. Without -L, cp keeps the symlink and Node fails
-  # to resolve `@azureclaw/mesh` at runtime.
-  if [ -d /opt/azureclaw-plugin/node_modules ]; then
-    cp -rL --no-preserve=mode /opt/azureclaw-plugin/node_modules "$OPENCLAW_DIR/extensions/azureclaw/" 2>/dev/null || true
-    echo "[azureclaw] @azureclaw/mesh runtime deps available"
+  # to resolve `@kars/mesh` at runtime.
+  if [ -d /opt/kars-plugin/node_modules ]; then
+    cp -rL --no-preserve=mode /opt/kars-plugin/node_modules "$OPENCLAW_DIR/extensions/kars/" 2>/dev/null || true
+    echo "[kars] @kars/mesh runtime deps available"
   fi
   # Mesh provider — only `agt` is supported (@microsoft/agent-governance-sdk
-  # via @azureclaw/mesh). The vendored fork was removed in Phase 5.2.
-  AZURECLAW_MESH_PROVIDER="agt"
-  echo "[azureclaw] mesh provider: agt (@microsoft/agent-governance-sdk)"
-  export AZURECLAW_MESH_PROVIDER
+  # via @kars/mesh). The vendored fork was removed in Phase 5.2.
+  KARS_MESH_PROVIDER="agt"
+  echo "[kars] mesh provider: agt (@microsoft/agent-governance-sdk)"
+  export KARS_MESH_PROVIDER
   # Locate the AGT policy directory when governance is enabled.
   #
   # Post-Slice-1e (phase 2): the ToolPolicy mount at
   # `/etc/agt/policies/agt-profile.yaml` is the **sole** source of AGT
-  # policy bytes. The bundled `/opt/azureclaw-plugin/policies/` fallback
+  # policy bytes. The bundled `/opt/kars-plugin/policies/` fallback
   # path was removed; the controller now hard-fails (Degraded /
   # SpecInvalid) any sandbox whose referenced ToolPolicy lacks
   # `spec.agtProfile.inline`. If the mount is somehow missing here, the
@@ -1267,13 +1267,13 @@ if [ -d /opt/azureclaw-plugin ]; then
   if [ "${AGT_GOVERNANCE_ENABLED:-}" = "true" ]; then
     if [ -f /etc/agt/policies/agt-profile.yaml ]; then
       export AGT_POLICY_DIR=/etc/agt/policies
-      echo "[azureclaw] AGT governance enabled (source: ToolPolicy mount /etc/agt/policies, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
+      echo "[kars] AGT governance enabled (source: ToolPolicy mount /etc/agt/policies, trust threshold: ${AGT_TRUST_THRESHOLD:-500})"
     else
-      echo "[azureclaw] WARN: AGT governance enabled but no ToolPolicy mount at /etc/agt/policies/agt-profile.yaml; AGT engine will start with an empty policy set and fail closed."
+      echo "[kars] WARN: AGT governance enabled but no ToolPolicy mount at /etc/agt/policies/agt-profile.yaml; AGT engine will start with an empty policy set and fail closed."
     fi
   fi
   cd /sandbox
-  echo "[azureclaw] Plugin installed → openclaw azureclaw commands available"
+  echo "[kars] Plugin installed → openclaw kars commands available"
 fi
 
 # ── Always-required runtime cores (speech-core, image-generation-core,
@@ -1308,17 +1308,17 @@ echo "${GATEWAY_TOKEN}" > /tmp/gateway-token
 # best-effort; the content is correct either way.
 if [ "$IS_ROOT" = "true" ]; then
   # Plugin code (JS, type defs, source maps, manifests)
-  PLUGIN_DIR="$OPENCLAW_DIR/extensions/azureclaw"
+  PLUGIN_DIR="$OPENCLAW_DIR/extensions/kars"
   if [ -d "$PLUGIN_DIR" ]; then
     chown -R root:sandbox "$PLUGIN_DIR" 2>/dev/null || true
     # Directories: read + execute (traverse) for sandbox group
     find "$PLUGIN_DIR" -type d -exec chmod 750 {} + 2>/dev/null || true
     # Files: read-only for sandbox group
     find "$PLUGIN_DIR" -type f -exec chmod 640 {} + 2>/dev/null || true
-    echo "[azureclaw] Plugin code hardened (root-owned, read-only for sandbox)"
+    echo "[kars] Plugin code hardened (root-owned, read-only for sandbox)"
   fi
 
-  # AGT policy files now live in /etc/azureclaw/policies/ — hardened above
+  # AGT policy files now live in /etc/kars/policies/ — hardened above
   # at copy time (root:root, 0444). No further hardening needed here.
 
   # Curated skills installed into workspace (SKILL.md files)
@@ -1329,11 +1329,11 @@ if [ "$IS_ROOT" = "true" ]; then
   fi
 fi
 
-# Start AzureClaw inference router as UID 1001 (router user) — only in dev mode.
+# Start Kars inference router as UID 1001 (router user) — only in dev mode.
 # UID 1001 is exempt from iptables egress guard, matching the AKS pod model
 # where the router runs in a separate container with internet access.
 # In AKS, the controller deploys the router as a separate container.
-if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
+if [ "${KARS_AUTH_MODE:-}" != "workload-identity" ]; then
   # Generate admin token BEFORE starting any services that need it
   ROUTER_ADMIN_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 64)
   # Token file readable by both sandbox (UID 1000) and router (UID 1001)
@@ -1382,8 +1382,8 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   AZURE_OPENAI_ENDPOINT="$ENDPOINT" \
   AZURE_OPENAI_API_KEY="$API_KEY" \
   DEFAULT_MODEL="$MODEL" \
-  AZURECLAW_PROVIDER="${AZURECLAW_PROVIDER:-}" \
-  COPILOT_GITHUB_TOKEN="$([ "${AZURECLAW_PROVIDER:-}" = "github-copilot" ] && echo "$API_KEY")" \
+  KARS_PROVIDER="${KARS_PROVIDER:-}" \
+  COPILOT_GITHUB_TOKEN="$([ "${KARS_PROVIDER:-}" = "github-copilot" ] && echo "$API_KEY")" \
   CONTENT_SAFETY_ENABLED=true \
   AGT_RELAY_URL="${AGT_RELAY_URL:-}" \
   AGT_REGISTRY_URL="${AGT_REGISTRY_URL:-}" \
@@ -1392,18 +1392,18 @@ if [ "${AZURECLAW_AUTH_MODE:-}" != "workload-identity" ]; then
   AGT_TRUST_THRESHOLD="${AGT_TRUST_THRESHOLD:-500}" \
   SANDBOX_NAME="${SANDBOX_NAME:-$HOSTNAME}" \
   SANDBOX_ISOLATION="${SANDBOX_ISOLATION:-enhanced}" \
-  AZURECLAW_DEV_MODE="${AZURECLAW_DEV_MODE:-}" \
+  KARS_DEV_MODE="${KARS_DEV_MODE:-}" \
   DOCKER_NETWORK="${DOCKER_NETWORK:-}" \
-  $AS_ROUTER azureclaw-inference-router > /tmp/inference-router.log 2>&1 &
+  $AS_ROUTER kars-inference-router > /tmp/inference-router.log 2>&1 &
   ROUTER_PID=$!
   # Wait for router to accept connections (replaces blind sleep 1)
   for _i in $(seq 1 20); do
     if curl -sf http://127.0.0.1:8443/healthz > /dev/null 2>&1; then break; fi
     sleep 0.2
   done
-  echo "[azureclaw] Inference router running (PID: $ROUTER_PID, port: 8443)"
+  echo "[kars] Inference router running (PID: $ROUTER_PID, port: 8443)"
 else
-  echo "[azureclaw] Inference router provided by AKS container (workload-identity mode)"
+  echo "[kars] Inference router provided by AKS container (workload-identity mode)"
 fi
 
 # ── Offload idle timeout enforcement ────────────────────────────────────────
@@ -1411,7 +1411,7 @@ fi
 # start a background idle watcher. The sandbox self-terminates after the idle
 # window elapses with no inbound traffic from OFFLOAD_PARENT_AMID.
 #
-# Activity signal: the azureclaw-mesh plugin touches $OFFLOAD_ACTIVITY_FILE
+# Activity signal: the kars-mesh plugin touches $OFFLOAD_ACTIVITY_FILE
 # on every decrypted inbound message from the parent AMID. This file's mtime
 # is the single source of truth for "last heard from parent".
 #
@@ -1422,9 +1422,9 @@ OFFLOAD_ACTIVITY_FILE=/tmp/offload-last-activity
 export OFFLOAD_ACTIVITY_FILE
 if [ -n "${OFFLOAD_TIMEOUT_MINUTES:-}" ] && [ "$OFFLOAD_TIMEOUT_MINUTES" != "0" ]; then
   OFFLOAD_IDLE_SECONDS=$(( OFFLOAD_TIMEOUT_MINUTES * 60 ))
-  echo "[azureclaw] Offload sandbox — idle timeout ${OFFLOAD_TIMEOUT_MINUTES}m (${OFFLOAD_IDLE_SECONDS}s) since last parent message"
-  echo "[azureclaw] Request ID:  ${OFFLOAD_REQUEST_ID:-unknown}"
-  echo "[azureclaw] Parent AMID: ${OFFLOAD_PARENT_AMID:-unknown}"
+  echo "[kars] Offload sandbox — idle timeout ${OFFLOAD_TIMEOUT_MINUTES}m (${OFFLOAD_IDLE_SECONDS}s) since last parent message"
+  echo "[kars] Request ID:  ${OFFLOAD_REQUEST_ID:-unknown}"
+  echo "[kars] Parent AMID: ${OFFLOAD_PARENT_AMID:-unknown}"
   # Seed the activity file so we don't self-terminate at T=0 before any
   # message arrives. The watcher starts counting from *now*.
   touch "$OFFLOAD_ACTIVITY_FILE"
@@ -1437,7 +1437,7 @@ if [ -n "${OFFLOAD_TIMEOUT_MINUTES:-}" ] && [ "$OFFLOAD_TIMEOUT_MINUTES" != "0" 
       last=$(stat -c %Y "$OFFLOAD_ACTIVITY_FILE" 2>/dev/null || echo "$now")
       idle=$(( now - last ))
       if [ "$idle" -ge "$OFFLOAD_IDLE_SECONDS" ]; then
-        echo "[azureclaw] ⏰ Offload idle ${idle}s ≥ ${OFFLOAD_IDLE_SECONDS}s — shutting down"
+        echo "[kars] ⏰ Offload idle ${idle}s ≥ ${OFFLOAD_IDLE_SECONDS}s — shutting down"
         # Killing the foreground `tail -f` child unblocks PID 1 bash,
         # which then hits the trap below and exits the container.
         # The tail PID is written to /tmp/offload-tail.pid by the main script
@@ -1477,21 +1477,21 @@ GATEWAY_PID=$!
 # Wait for gateway to be ready
 for i in $(seq 1 10); do
   if curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1; then
-    echo "[azureclaw] Gateway running (PID: $GATEWAY_PID)"
+    echo "[kars] Gateway running (PID: $GATEWAY_PID)"
     break
   fi
   sleep 0.5
 done
 
 # Start the node host — provides shell/exec/filesystem tools to the agent.
-# Without this, the agent only has plugin tools (AzureClaw) and no local execution.
+# Without this, the agent only has plugin tools (Kars) and no local execution.
 # Give the node host its own HOME so it generates a separate device fingerprint.
 # Without this, it shares the TUI's device ID and blocks TUI pairing (role conflict).
 NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "sandbox")
 mkdir -p /tmp/node-host-home/.openclaw
 [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox /tmp/node-host-home
 # Create a minimal config for the node-host — it only needs gateway connectivity,
-# NOT our plugins. Using the main config causes "plugin not found: azureclaw" crash loops.
+# NOT our plugins. Using the main config causes "plugin not found: kars" crash loops.
 #
 # `plugins.allow: []` is the original (working) config: bundled plugins load with
 # their own runtime-deps, and the loader resolves those deps from the pre-staged
@@ -1513,7 +1513,7 @@ HOME=/tmp/node-host-home OPENCLAW_STATE_DIR=/tmp/node-host-home/.openclaw \
   --host 127.0.0.1 --port 18789 \
   --node-id "node-${NODE_HOSTNAME}" > /tmp/node-host.log 2>&1 &
 NODE_PID=$!
-echo "[azureclaw] Node host starting (PID: $NODE_PID)"
+echo "[kars] Node host starting (PID: $NODE_PID)"
 
 # Exec approvals are disabled via openclaw.json config (tools.exec.security=full).
 # AGT governance is the sole policy authority — no need for OpenClaw's exec approval layer.

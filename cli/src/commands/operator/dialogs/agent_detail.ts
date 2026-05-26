@@ -6,14 +6,14 @@
  * "all CRDs in the cluster" viewer into an agent-centric control plane.
  *
  * Shows everything attached to ONE sandbox (inference policy, tool policy,
- * MCP servers, ClawMemory bindings, A2A peers, ClawEval history, egress
+ * MCP servers, KarsMemory bindings, A2A peers, KarsEval history, egress
  * counts) and offers three actions, all of which shell out to the existing
- * `azureclaw <subcommand>` CLI so validation and CRD shape stay in one
+ * `kars <subcommand>` CLI so validation and CRD shape stay in one
  * place:
  *
- *   [a] Attach...   pick a kind → minimal-form prompts → `azureclaw <kind> apply`
+ *   [a] Attach...   pick a kind → minimal-form prompts → `kars <kind> apply`
  *   [x] Detach      kubectl delete the highlighted attachment (confirm)
- *   [v] Run eval    prompts for suite → `azureclaw eval run`
+ *   [v] Run eval    prompts for suite → `kars eval run`
  *   [r] Refresh     re-snapshot
  *   [q/Esc]         back to dashboard
  *
@@ -26,7 +26,7 @@ import { execa } from "execa";
 import type { SandboxInfo } from "../types.js";
 import type {
   ClusterState, McpServerItem, ToolPolicyItem, InferencePolicyItem,
-  A2AAgentItem, ClawMemoryItem, ClawEvalItem,
+  A2AAgentItem, KarsMemoryItem, KarsEvalItem,
 } from "../panels/types.js";
 import { KubectlDataSource } from "../panels/datasource.js";
 
@@ -57,7 +57,7 @@ const ATTACH_CHOICES = [
   { label: "Inference policy", kind: "inferencepolicy", cmd: "inferencepolicy" },
   { label: "Tool policy", kind: "toolpolicy", cmd: "toolpolicy" },
   { label: "A2A peer", kind: "a2aagent", cmd: "a2a" },
-  { label: "Memory binding", kind: "clawmemory", cmd: "memory" },
+  { label: "Memory binding", kind: "karsmemory", cmd: "memory" },
 ] as const;
 
 type AttachKind = typeof ATTACH_CHOICES[number]["cmd"];
@@ -100,11 +100,11 @@ export function collectAttachments(state: ClusterState, sandbox: string): RowEnt
     });
   }
 
-  // ClawMemory — sandboxRef
-  for (const cm of state.clawMemories as ClawMemoryItem[]) {
+  // KarsMemory — sandboxRef
+  for (const cm of state.clawMemories as KarsMemoryItem[]) {
     if (cm.sandboxRef && cm.sandboxRef !== sandbox) continue;
     rows.push({
-      category: "Memory binding", kind: "clawmemories",
+      category: "Memory binding", kind: "karsmemories",
       name: cm.name, namespace: cm.namespace,
       summary: `store=${cm.storeName ?? "-"}  scope=${cm.scope ?? "-"}  bound=${cm.foundryBound ?? "?"}`,
     });
@@ -119,11 +119,11 @@ export function collectAttachments(state: ClusterState, sandbox: string): RowEnt
     });
   }
 
-  // ClawEval — sandboxRef
-  for (const ev of state.clawEvals as ClawEvalItem[]) {
+  // KarsEval — sandboxRef
+  for (const ev of state.clawEvals as KarsEvalItem[]) {
     if (ev.sandboxRef && ev.sandboxRef !== sandbox) continue;
     rows.push({
-      category: "Eval history", kind: "clawevals",
+      category: "Eval history", kind: "karsevals",
       name: ev.name, namespace: ev.namespace,
       summary: `suite=${ev.suite ?? "-"}  last=${ev.lastScore ?? "-"}  next=${ev.nextScheduledAt ?? "-"}`,
     });
@@ -313,7 +313,7 @@ function openAttachPicker(ctx: AgentDetailContext, after: () => Promise<void>): 
         selected: { fg: "black", bg: "cyan", bold: true } },
       label: " Attach... ",
       keys: true, tags: true, mouse: true,
-      items: ATTACH_CHOICES.map((c) => `  ${c.label}  {gray-fg}(azureclaw ${c.cmd} apply){/}`),
+      items: ATTACH_CHOICES.map((c) => `  ${c.label}  {gray-fg}(kars ${c.cmd} apply){/}`),
     });
     picker.focus();
     screen.render();
@@ -436,17 +436,17 @@ async function runAttachForm(ctx: AgentDetailContext, kind: AttachKind): Promise
     args.push(`--${k}`, v);
   }
 
-  ctx.activityLog.log(`{cyan-fg}⏳ azureclaw ${args.join(" ")}{/}`);
+  ctx.activityLog.log(`{cyan-fg}⏳ kars ${args.join(" ")}{/}`);
   ctx.screen.render();
   // Final confirm so the operator sees exactly what will be applied —
   // critical for the all-auto cases (e.g. memory) where we never prompted.
-  const ok = await confirmYesNo(ctx, `Attach ${kind}/${values["name"]} to ${ctx.sandbox.name}?\n  azureclaw ${args.join(" ")}`);
+  const ok = await confirmYesNo(ctx, `Attach ${kind}/${values["name"]} to ${ctx.sandbox.name}?\n  kars ${args.join(" ")}`);
   if (!ok) {
     ctx.activityLog.log(`{yellow-fg}attach ${kind}: cancelled at confirm.{/}`);
     return;
   }
   try {
-    await execa("azureclaw", args, { stdio: "pipe" });
+    await execa("kars", args, { stdio: "pipe" });
     ctx.activityLog.log(`{green-fg}✓ attached{/} ${kind}/${values["name"]} → ${ctx.sandbox.name}`);
   } catch (e: unknown) {
     const err = e as { stderr?: string; message?: string };
@@ -478,10 +478,10 @@ async function openEvalPrompt(ctx: AgentDetailContext): Promise<void> {
   if (evaluator === null) return;
   const args = ["eval", ctx.sandbox.name];
   if (evaluator.trim()) args.push("--evaluator", evaluator.trim());
-  ctx.activityLog.log(`{cyan-fg}⏳ azureclaw ${args.join(" ")}{/}`);
+  ctx.activityLog.log(`{cyan-fg}⏳ kars ${args.join(" ")}{/}`);
   ctx.screen.render();
   try {
-    const { stdout } = await execa("azureclaw", args, { stdio: "pipe", timeout: 120_000 });
+    const { stdout } = await execa("kars", args, { stdio: "pipe", timeout: 120_000 });
     ctx.activityLog.log(`{green-fg}✓ eval{/} ${ctx.sandbox.name}: ${stdout.split("\n")[0] || "(no stdout)"}`);
   } catch (e: unknown) {
     const err = e as { stderr?: string; message?: string };

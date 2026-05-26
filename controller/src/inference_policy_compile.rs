@@ -28,7 +28,7 @@
 //!   `BehaviorMonitor` receives flags via
 //!   `safety::report_content_flags_to_agt`).
 //! - **Not** a token-budget enforcer. The runtime tracker today is
-//!   AzureClaw-owned: [`inference-router::budget::TokenBudgetTracker`]
+//!   Kars-owned: [`inference-router::budget::TokenBudgetTracker`]
 //!   fed from env vars. **AGT does NOT currently expose a
 //!   `TokenBudget` interface** (verified against `agentmesh` 3.1.0 on
 //!   crates.io — only `PolicyEngine`, `TrustManager`, `RateLimiter`,
@@ -174,7 +174,7 @@ pub fn canonical_bytes_for_digest(filename: &str, body: &[u8]) -> Vec<u8> {
 /// `inference-policy.json` body. This is the digest the
 /// `InferencePolicy` reconciler stamps in `status.compiledDigest`
 /// and the ConfigMap annotation
-/// `azureclaw.azure.com/inference-policy-digest`. The router echoes
+/// `kars.azure.com/inference-policy-digest`. The router echoes
 /// the same value via `GET /internal/policy-status` once it loads
 /// the file; matching values let `decide_enforcement_state` promote
 /// the CRD from `phase=Compiled` to `phase=Ready`.

@@ -170,17 +170,17 @@ pub fn parse_streaming_prompt_filter(chunk_text: &str) -> ContentFlags {
 /// Check individual filter results and populate flags.
 ///
 /// Two optional env-var knobs (default behaviour unchanged when unset):
-/// * `AZURECLAW_CONTENT_FLAG_MIN_SEVERITY` (`safe|low|medium|high`, default
+/// * `KARS_CONTENT_FLAG_MIN_SEVERITY` (`safe|low|medium|high`, default
 ///   `low`) — minimum Foundry severity that raises a category flag. `filtered:
 ///   true` from Foundry always wins regardless of this threshold.
-/// * `AZURECLAW_SUPPRESS_CONTENT_FLAGS` (comma-separated, e.g.
+/// * `KARS_SUPPRESS_CONTENT_FLAGS` (comma-separated, e.g.
 ///   `violence,sexual`) — listed categories never raise a flag (no trust
 ///   penalty, no audit). Useful where Foundry's `violence` heuristic
 ///   over-fires on legitimate security/research content (e.g. "exploit",
 ///   "attack", "compromise"). Affects only the four severity-graded
 ///   categories; `jailbreak` and `indirect_attack` cannot be suppressed.
 fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags) {
-    let min_sev_level: u8 = match std::env::var("AZURECLAW_CONTENT_FLAG_MIN_SEVERITY")
+    let min_sev_level: u8 = match std::env::var("KARS_CONTENT_FLAG_MIN_SEVERITY")
         .ok()
         .map(|s| s.to_lowercase())
         .as_deref()
@@ -191,7 +191,7 @@ fn check_filter_results(results: &ContentFilterResults, flags: &mut ContentFlags
         _ => 1, // low (default)
     };
     let suppressed: std::collections::HashSet<String> =
-        std::env::var("AZURECLAW_SUPPRESS_CONTENT_FLAGS")
+        std::env::var("KARS_SUPPRESS_CONTENT_FLAGS")
             .ok()
             .map(|v| {
                 v.split(',')

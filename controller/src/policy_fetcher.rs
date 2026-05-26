@@ -12,7 +12,7 @@
 //!
 //! ## Authoritative mode (S12.e)
 //!
-//! When `spec.networkPolicy.allowlistRef` is set on a `ClawSandbox`, the
+//! When `spec.networkPolicy.allowlistRef` is set on a `KarsSandbox`, the
 //! verified canonical artifact is the **authoritative** source of egress
 //! endpoints — inline `allowedEndpoints` is ignored (a non-empty inline
 //! that differs from the artifact surfaces as `AllowlistDrift=True`).
@@ -22,7 +22,7 @@
 //! NetworkPolicy that opens egress beyond the always-allowed defaults.
 //! See [`resolve_allowlist`].
 //!
-//! The S12.b `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate was lifted in
+//! The S12.b `KARS_FEATURE_SIGNED_ALLOWLIST` env gate was lifted in
 //! S12.e — the verification + authoritative resolution path is always-on
 //! when `allowlistRef` is set; existing deployments without `allowlistRef`
 //! observe no behavior change.
@@ -30,14 +30,14 @@
 //! ## SignerPolicy — S12.d (landed)
 //!
 //! The cluster `SignerPolicy` is now sourced from the watched
-//! `azureclaw-signer-policy` ConfigMap in the controller namespace
+//! `kars-signer-policy` ConfigMap in the controller namespace
 //! (see [`crate::signer_policy`]). The env vars
-//! `AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS`
+//! `KARS_SIGNER_FULCIO_ISSUERS` / `KARS_SIGNER_SAN_PATTERNS`
 //! remain as an emergency-override fallback that activates only when
 //! the ConfigMap is absent. A *malformed* ConfigMap surfaces as
 //! [`FetchError::SignerPolicyMalformed`] and does **not** silently
 //! fall back — operators get a hard signal on every affected
-//! `ClawSandbox`.
+//! `KarsSandbox`.
 //!
 //! ## ACR auth via Workload Identity
 //!
@@ -67,9 +67,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// Comma-separated list of Fulcio issuer URLs (e.g.
 /// `https://token.actions.githubusercontent.com`). See [`SignerPolicyConfig`].
-const SIGNER_FULCIO_ISSUERS_ENV: &str = "AZURECLAW_SIGNER_FULCIO_ISSUERS";
+const SIGNER_FULCIO_ISSUERS_ENV: &str = "KARS_SIGNER_FULCIO_ISSUERS";
 /// Comma-separated list of SAN glob patterns. See [`SignerPolicyConfig`].
-const SIGNER_SAN_PATTERNS_ENV: &str = "AZURECLAW_SIGNER_SAN_PATTERNS";
+const SIGNER_SAN_PATTERNS_ENV: &str = "KARS_SIGNER_SAN_PATTERNS";
 
 /// Re-export the egress-allowlist v1 OCI media type from the canonical
 /// module so existing call sites in this crate keep compiling without
@@ -83,7 +83,7 @@ pub use crate::policy_canonical::egress::EGRESS_ALLOWLIST_V1_MEDIA_TYPE;
 pub const CACHE_TTL: Duration = Duration::from_secs(3600);
 
 /// Errors surfaced by the fetcher. Each variant maps 1:1 to a Condition
-/// `reason` value emitted on `ClawSandbox.status` — see
+/// `reason` value emitted on `KarsSandbox.status` — see
 /// [`reason_for_error`].
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
@@ -874,7 +874,7 @@ pub async fn acr_token_for_pull(registry: &str, repository: &str) -> Result<Stri
 // ─────────────────────── reconciler integration (S12.e) ───────────────────────
 //
 // `resolve_allowlist_with_handle` is the single entry point the
-// reconciler calls per reconcile of a `ClawSandbox`. It encapsulates the
+// reconciler calls per reconcile of a `KarsSandbox`. It encapsulates the
 // authoritative-mode decision tree (artifact wins; LKG fallback;
 // fail-closed when no LKG; legacy inline path when no `allowlistRef`)
 // and emits the three S12.e conditions:
@@ -910,7 +910,7 @@ pub struct AllowlistResolution {
     pub fail_closed_no_lkg: bool,
 }
 
-/// Resolve the effective egress allowlist for a `ClawSandbox`.
+/// Resolve the effective egress allowlist for a `KarsSandbox`.
 ///
 /// Decision tree (see slice S12.e):
 ///
@@ -937,7 +937,7 @@ pub struct AllowlistResolution {
 /// condition and re-use the prior LKG (if any) — a network blip must
 /// not collapse a working sandbox.
 pub async fn resolve_allowlist_with_handle(
-    sandbox: &crate::crd::ClawSandbox,
+    sandbox: &crate::crd::KarsSandbox,
     signer_policy_handle: &crate::signer_policy::SharedSignerPolicy,
 ) -> AllowlistResolution {
     use crate::signer_policy::SignerPolicyState;
@@ -1262,7 +1262,7 @@ pub async fn resolve_allowlist_with_handle(
 
 /// Production-side wrapper around [`resolve_allowlist_with_handle`]
 /// using the process-global signer-policy handle.
-pub async fn resolve_allowlist(sandbox: &crate::crd::ClawSandbox) -> AllowlistResolution {
+pub async fn resolve_allowlist(sandbox: &crate::crd::KarsSandbox) -> AllowlistResolution {
     resolve_allowlist_with_handle(sandbox, &crate::signer_policy::global()).await
 }
 
@@ -1281,7 +1281,7 @@ pub async fn resolve_allowlist(sandbox: &crate::crd::ClawSandbox) -> AllowlistRe
 /// preserve.
 #[allow(dead_code)]
 pub async fn maybe_verify_allowlist(
-    sandbox: &crate::crd::ClawSandbox,
+    sandbox: &crate::crd::KarsSandbox,
 ) -> Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
     maybe_verify_allowlist_with_handle(sandbox, &crate::signer_policy::global()).await
 }
@@ -1292,7 +1292,7 @@ pub async fn maybe_verify_allowlist(
 /// [`maybe_verify_allowlist`], which reads the process-global handle.
 #[allow(dead_code)]
 pub async fn maybe_verify_allowlist_with_handle(
-    sandbox: &crate::crd::ClawSandbox,
+    sandbox: &crate::crd::KarsSandbox,
     signer_policy_handle: &crate::signer_policy::SharedSignerPolicy,
 ) -> Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
     use crate::status::conditions::TYPE_ALLOWLIST_VERIFIED;
@@ -1358,7 +1358,7 @@ mod tests {
     fn good_ref() -> OciArtifactRef {
         OciArtifactRef {
             registry: "myacr.azurecr.io".into(),
-            repository: "azureclaw/policies/sandbox-foo".into(),
+            repository: "kars/policies/sandbox-foo".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
             artifact_type: EGRESS_ALLOWLIST_V1_MEDIA_TYPE.to_string(),
         }
@@ -1366,7 +1366,7 @@ mod tests {
 
     fn canonical_doc() -> String {
         // Two endpoints, sorted, deduped, lowercase, explicit ports.
-        "apiVersion: azureclaw.dev/v1alpha1\n\
+        "apiVersion: kars.dev/v1alpha1\n\
          kind: EgressAllowlist\n\
          metadata:\n  generation: 1\n\
          spec:\n  endpoints:\n  \
@@ -1395,7 +1395,7 @@ mod tests {
         );
         let _e2 = EnvGuard::set(
             SIGNER_SAN_PATTERNS_ENV,
-            "https://github.com/Azure/azureclaw/.github/workflows/*.yml@*,signer@example.com",
+            "https://github.com/Azure/kars/.github/workflows/*.yml@*,signer@example.com",
         );
         let p = SignerPolicyConfig::from_env();
         assert_eq!(p.fulcio_issuers.len(), 2);
@@ -1427,7 +1427,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_unsorted_endpoints() {
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
@@ -1441,7 +1441,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_duplicate_endpoints() {
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
@@ -1455,7 +1455,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_missing_generation() {
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  notGeneration: 1\n\
                    spec:\n  endpoints: []\n";
@@ -1467,7 +1467,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_zero_generation() {
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 0\n\
                    spec:\n  endpoints: []\n";
@@ -1477,7 +1477,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_uppercase_host() {
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
@@ -1490,7 +1490,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_wildcard_host() {
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
@@ -1503,7 +1503,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_out_of_range_port() {
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
@@ -1515,7 +1515,7 @@ mod tests {
     #[test]
     fn canonical_parser_rejects_swapped_endpoint_keys() {
         // host then port required (rule #11).
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints:\n  \
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[test]
     fn canonical_parser_rejects_missing_trailing_newline() {
-        let doc = "apiVersion: azureclaw.dev/v1alpha1\n\
+        let doc = "apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints: []";
@@ -1541,7 +1541,7 @@ mod tests {
     #[test]
     fn canonical_parser_rejects_top_level_key_out_of_order() {
         let doc = "kind: EgressAllowlist\n\
-                   apiVersion: azureclaw.dev/v1alpha1\n\
+                   apiVersion: kars.dev/v1alpha1\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints: []\n";
         let err = crate::policy_canonical::egress::parse(doc.as_bytes()).unwrap_err();
@@ -1553,7 +1553,7 @@ mod tests {
     #[test]
     fn canonical_parser_rejects_comments() {
         let doc = "# header\n\
-                   apiVersion: azureclaw.dev/v1alpha1\n\
+                   apiVersion: kars.dev/v1alpha1\n\
                    kind: EgressAllowlist\n\
                    metadata:\n  generation: 1\n\
                    spec:\n  endpoints: []\n";
@@ -1707,7 +1707,7 @@ mod tests {
     //
     // These tests exercise the new `_with_handle` variant directly so
     // they don't touch the OnceLock global (parallel-test safe). Each
-    // case constructs a `ClawSandbox` carrying an `allowlistRef` + an
+    // case constructs a `KarsSandbox` carrying an `allowlistRef` + an
     // injected handle in a specific [`SignerPolicyState`], asserts on
     // the resulting `Condition.reason`. Network IO never executes
     // because we either short-circuit on policy state (Malformed) or
@@ -1715,21 +1715,21 @@ mod tests {
     // refuse before any DNS lookup; the assertion only inspects the
     // mapped reason.
 
-    use crate::crd::{ClawSandbox, ClawSandboxSpec, NetworkPolicyConfig};
+    use crate::crd::{KarsSandbox, KarsSandboxSpec, NetworkPolicyConfig};
     use crate::signer_policy::{
         SharedSignerPolicy, SignerPolicy as ParsedSignerPolicy, SignerPolicyState,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-    fn sandbox_with_allowlist_ref() -> ClawSandbox {
-        ClawSandbox {
+    fn sandbox_with_allowlist_ref() -> KarsSandbox {
+        KarsSandbox {
             metadata: ObjectMeta {
                 name: Some("demo".into()),
-                namespace: Some("azureclaw-demo".into()),
+                namespace: Some("kars-demo".into()),
                 generation: Some(1),
                 ..Default::default()
             },
-            spec: ClawSandboxSpec {
+            spec: KarsSandboxSpec {
                 network_policy: Some(NetworkPolicyConfig {
                     allowlist_ref: Some(good_ref()),
                     ..Default::default()
@@ -1829,15 +1829,15 @@ mod tests {
         }
     }
 
-    fn sandbox_with_inline_only(eps: Vec<crate::crd::EndpointConfig>) -> ClawSandbox {
-        ClawSandbox {
+    fn sandbox_with_inline_only(eps: Vec<crate::crd::EndpointConfig>) -> KarsSandbox {
+        KarsSandbox {
             metadata: ObjectMeta {
                 name: Some("inline".into()),
-                namespace: Some("azureclaw-inline".into()),
+                namespace: Some("kars-inline".into()),
                 generation: Some(1),
                 ..Default::default()
             },
-            spec: ClawSandboxSpec {
+            spec: KarsSandboxSpec {
                 network_policy: Some(NetworkPolicyConfig {
                     allowed_endpoints: if eps.is_empty() { None } else { Some(eps) },
                     allowlist_ref: None,
@@ -1853,15 +1853,15 @@ mod tests {
         name: &str,
         ns: &str,
         inline: Vec<crate::crd::EndpointConfig>,
-    ) -> ClawSandbox {
-        ClawSandbox {
+    ) -> KarsSandbox {
+        KarsSandbox {
             metadata: ObjectMeta {
                 name: Some(name.into()),
                 namespace: Some(ns.into()),
                 generation: Some(1),
                 ..Default::default()
             },
-            spec: ClawSandboxSpec {
+            spec: KarsSandboxSpec {
                 network_policy: Some(NetworkPolicyConfig {
                     allowed_endpoints: if inline.is_empty() {
                         None
@@ -1887,14 +1887,14 @@ mod tests {
     #[tokio::test]
     async fn resolve_no_network_policy_returns_default() {
         let _g = env_lock().lock().unwrap();
-        let sb = ClawSandbox {
+        let sb = KarsSandbox {
             metadata: ObjectMeta {
                 name: Some("nope".into()),
-                namespace: Some("azureclaw-nope".into()),
+                namespace: Some("kars-nope".into()),
                 generation: Some(1),
                 ..Default::default()
             },
-            spec: ClawSandboxSpec {
+            spec: KarsSandboxSpec {
                 network_policy: None,
                 ..Default::default()
             },
@@ -2009,7 +2009,7 @@ mod tests {
         let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
         let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
         lkg_clear();
-        let sb = sandbox_with_ref_and_inline("noLkgSandbox", "azureclaw-fc", vec![]);
+        let sb = sandbox_with_ref_and_inline("noLkgSandbox", "kars-fc", vec![]);
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
         let res = resolve_allowlist_with_handle(&sb, &h).await;
         assert!(
@@ -2033,7 +2033,7 @@ mod tests {
         let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
         lkg_clear();
         lkg_put(
-            "azureclaw-lkg",
+            "kars-lkg",
             "lkgSandbox",
             LkgEntry {
                 endpoints: Some(vec![ep("cached.example.com", Some(443))]),
@@ -2041,7 +2041,7 @@ mod tests {
                 drift_active: false,
             },
         );
-        let sb = sandbox_with_ref_and_inline("lkgSandbox", "azureclaw-lkg", vec![]);
+        let sb = sandbox_with_ref_and_inline("lkgSandbox", "kars-lkg", vec![]);
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
         let res = resolve_allowlist_with_handle(&sb, &h).await;
         let eps = res.endpoints.as_ref().expect("endpoints from LKG");
@@ -2061,7 +2061,7 @@ mod tests {
         let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
         let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
         lkg_put(
-            "azureclaw-restart",
+            "kars-restart",
             "rs",
             LkgEntry {
                 endpoints: Some(vec![ep("a.example", None)]),
@@ -2070,7 +2070,7 @@ mod tests {
             },
         );
         lkg_clear();
-        let sb = sandbox_with_ref_and_inline("rs", "azureclaw-restart", vec![]);
+        let sb = sandbox_with_ref_and_inline("rs", "kars-restart", vec![]);
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
         let res = resolve_allowlist_with_handle(&sb, &h).await;
         assert!(res.fail_closed_no_lkg, "restart must drop LKG");
@@ -2085,7 +2085,7 @@ mod tests {
         lkg_clear();
         let sb = sandbox_with_ref_and_inline(
             "evil",
-            "azureclaw-evil",
+            "kars-evil",
             vec![ep("attacker.example.com", None)],
         );
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
@@ -2228,11 +2228,8 @@ mod tests {
         let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
         let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
         lkg_clear();
-        let sb = sandbox_with_ref_and_inline(
-            "withInline",
-            "azureclaw-wi",
-            vec![ep("inline.example", None)],
-        );
+        let sb =
+            sandbox_with_ref_and_inline("withInline", "kars-wi", vec![ep("inline.example", None)]);
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
         let res = resolve_allowlist_with_handle(&sb, &h).await;
         let a =
@@ -2246,7 +2243,7 @@ mod tests {
         let _e1 = EnvGuard::unset(SIGNER_FULCIO_ISSUERS_ENV);
         let _e2 = EnvGuard::unset(SIGNER_SAN_PATTERNS_ENV);
         lkg_clear();
-        let sb = sandbox_with_ref_and_inline("two", "azureclaw-two", vec![]);
+        let sb = sandbox_with_ref_and_inline("two", "kars-two", vec![]);
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Absent);
         let res = resolve_allowlist_with_handle(&sb, &h).await;
         assert_eq!(
@@ -2260,7 +2257,7 @@ mod tests {
     async fn resolve_malformed_signer_policy_fails_closed_with_specific_reason() {
         let _g = env_lock().lock().unwrap();
         lkg_clear();
-        let sb = sandbox_with_ref_and_inline("malformed", "azureclaw-mal", vec![]);
+        let sb = sandbox_with_ref_and_inline("malformed", "kars-mal", vec![]);
         let h = SharedSignerPolicy::from_state(SignerPolicyState::Malformed("bad yaml".into()));
         let res = resolve_allowlist_with_handle(&sb, &h).await;
         assert!(res.fail_closed_no_lkg);

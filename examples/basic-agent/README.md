@@ -1,7 +1,7 @@
-# Basic Agent — minimal AzureClaw example
+# Basic Agent — minimal Kars example
 
-The smallest possible end-to-end AzureClaw deployment: one OpenClaw
-agent in a `ClawSandbox` with the default isolation posture.
+The smallest possible end-to-end Kars deployment: one OpenClaw
+agent in a `KarsSandbox` with the default isolation posture.
 
 Use this as the **template you copy-paste from** when standing up a new
 agent. The other examples in this directory are variants of this same
@@ -9,20 +9,20 @@ shape.
 
 ## What it ships
 
-A single `clawsandbox.yaml` containing two CRs:
+A single `karssandbox.yaml` containing two CRs:
 
 | Resource | Purpose |
 |---|---|
 | `InferencePolicy/my-assistant-inference` | Provider, model, Content-Safety toggle, token budget |
-| `ClawSandbox/my-assistant` | Runtime kind, isolation level, allowed egress endpoints |
+| `KarsSandbox/my-assistant` | Runtime kind, isolation level, allowed egress endpoints |
 
-The `ClawSandbox` references the `InferencePolicy` by name via
+The `KarsSandbox` references the `InferencePolicy` by name via
 `spec.inferenceRef`. They live in the same namespace
-(`azureclaw-system`) and the controller reconciles the pair into:
+(`kars-system`) and the controller reconciles the pair into:
 
-- A dedicated namespace for the sandbox (`azureclaw-my-assistant`)
+- A dedicated namespace for the sandbox (`kars-my-assistant`)
 - A 3-container Pod: `init: egress-guard` + `openclaw` + `inference-router`
-- `seccomp: azureclaw-strict`, read-only rootfs, non-root, no
+- `seccomp: kars-strict`, read-only rootfs, non-root, no
   privilege-escalation
 - A `NetworkPolicy` allowing only the listed egress endpoints
 - An audit pipeline + governance hooks
@@ -31,9 +31,9 @@ The `ClawSandbox` references the `InferencePolicy` by name via
 
 | Layer | Setting |
 |---|---|
-| Runtime | `OpenClaw` (image resolved by the controller from its `SANDBOX_IMAGE` env, set by `azureclaw up`) |
+| Runtime | `OpenClaw` (image resolved by the controller from its `SANDBOX_IMAGE` env, set by `kars up`) |
 | Isolation | `enhanced` (runc + strict seccomp + RO rootfs) |
-| Model | `azure-openai/gpt-4.1` (via Foundry; switch to GitHub Models with `azureclaw dev`) |
+| Model | `azure-openai/gpt-4.1` (via Foundry; switch to GitHub Models with `kars dev`) |
 | Content Safety | `requirePromptShields: true` |
 | Token budget | 500k/day, 128k/request |
 | Egress | github.com + api.github.com only |
@@ -41,17 +41,17 @@ The `ClawSandbox` references the `InferencePolicy` by name via
 ## Deploy
 
 ```bash
-# Prereq: an AzureClaw cluster (azureclaw up) with kubectl context set
-kubectl apply -f examples/basic-agent/clawsandbox.yaml
+# Prereq: an Kars cluster (kars up) with kubectl context set
+kubectl apply -f examples/basic-agent/karssandbox.yaml
 
 # Watch the controller reconcile the sandbox
-kubectl get clawsandbox my-assistant -n azureclaw-system -w
+kubectl get karssandbox my-assistant -n kars-system -w
 ```
 
 Once `STATUS=Ready`, connect:
 
 ```bash
-azureclaw connect my-assistant
+kars connect my-assistant
 ```
 
 ## Customize
@@ -61,7 +61,7 @@ azureclaw connect my-assistant
   deployment (or be available on GitHub Models if you switched
   providers).
 - **Different egress allowlist** — edit
-  `spec.networkPolicy.allowedEndpoints` in the `ClawSandbox`. **Always
+  `spec.networkPolicy.allowedEndpoints` in the `KarsSandbox`. **Always
   scope by method** (e.g. `methods: ["GET"]`) — domain-only allowlists
   are bypassable by prompt injection, see
   [`examples/lethal-trifecta-demo`](../lethal-trifecta-demo/).
@@ -71,7 +71,7 @@ azureclaw connect my-assistant
 ## Cleanup
 
 ```bash
-kubectl delete -f examples/basic-agent/clawsandbox.yaml
+kubectl delete -f examples/basic-agent/karssandbox.yaml
 ```
 
 ## See also

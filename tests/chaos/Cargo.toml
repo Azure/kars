@@ -1,5 +1,5 @@
 [package]
-name = "azureclaw-chaos-tests"
+name = "kars-chaos-tests"
 description = "Phase 2 S16 — fault-injection chaos tier (K8s API flakes, Foundry 429 storms, Entra rotation, AGT relay timeouts)"
 version.workspace = true
 edition.workspace = true
@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [features]
 # Tests are gated behind the `chaos` feature so default `cargo test --all` is
-# not slowed down. Run with `cargo test --package azureclaw-chaos-tests --features chaos`.
+# not slowed down. Run with `cargo test --package kars-chaos-tests --features chaos`.
 default = []
 chaos = []
 

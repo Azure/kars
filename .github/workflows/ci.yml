@@ -120,7 +120,7 @@ jobs:
   cosign-verify:
     name: Cosign Verify (keyless OIDC)
     # Permanent supply-chain row pinned by S17. Verifies that the latest
-    # AzureClaw container images are signed against a known Fulcio
+    # Kars container images are signed against a known Fulcio
     # certificate-identity (the GitHub Actions OIDC issuer of this repo)
     # before downstream jobs consume them. PRs run in dry-run mode
     # because not every PR re-signs images; the job stays green and
@@ -145,7 +145,7 @@ jobs:
           # `docs/operations/supply-chain.md`.
           cat <<'EOF'
           cosign verify \
-            --certificate-identity-regexp "^https://github.com/Azure/azureclaw/" \
+            --certificate-identity-regexp "^https://github.com/Azure/kars/" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             <image>
           EOF
@@ -255,7 +255,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
-      - run: helm lint deploy/helm/azureclaw
+      - run: helm lint deploy/helm/kars
 
   security-scan:
     name: Security Scan
@@ -359,7 +359,7 @@ jobs:
       # re-execute the full ~1800-test suite already run by `rust-build` and
       # only add 22 chaos tests on top — wasting ~95% of the job's runtime.
       # The fault-injection tests live exclusively in `tests/chaos/`.
-      - run: cargo test --package azureclaw-chaos-tests --features chaos --tests --no-fail-fast
+      - run: cargo test --package kars-chaos-tests --features chaos --tests --no-fail-fast
 
   e2e-kind:
     name: E2E (Kind)
@@ -395,7 +395,7 @@ jobs:
           # Fetch enough history to diff.
           git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
           if git diff --name-only "$base" "$head" 2>/dev/null \
-             | grep -E '^(controller/|inference-router/|a2a-gateway/|azureclaw-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
+             | grep -E '^(controller/|inference-router/|a2a-gateway/|kars-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -453,7 +453,7 @@ jobs:
         with:
           context: .
           file: controller/Dockerfile
-          tags: azureclaw-controller:e2e
+          tags: kars-controller:e2e
           load: true
           cache-from: type=gha,scope=image-controller
           cache-to: type=gha,scope=image-controller,mode=max
@@ -464,7 +464,7 @@ jobs:
         with:
           context: .
           file: inference-router/Dockerfile
-          tags: azureclaw-inference-router:e2e
+          tags: kars-inference-router:e2e
           load: true
           cache-from: type=gha,scope=image-inference-router
           cache-to: type=gha,scope=image-inference-router,mode=max
@@ -475,16 +475,16 @@ jobs:
           # The harness honours this to default to OpenClaw if unset;
           # the variable is plumbed through for future runtime matrix
           # expansion (Phase 3 S4 follow-up).
-          AZURECLAW_E2E_RUNTIME: ${{ vars.AZURECLAW_E2E_RUNTIME || 'all' }}
+          KARS_E2E_RUNTIME: ${{ vars.KARS_E2E_RUNTIME || 'all' }}
           # E2E runs a single-node Kind cluster — multi-replica leader
           # election adds nothing but flake. Force single-replica + no
           # leader lease so the test environment is deterministic.
-          AZURECLAW_E2E_CONTROLLER_REPLICAS: "1"
-          AZURECLAW_E2E_DISABLE_LEADER_ELECTION: "1"
+          KARS_E2E_CONTROLLER_REPLICAS: "1"
+          KARS_E2E_DISABLE_LEADER_ELECTION: "1"
           # Both images were pre-built with buildx GHA cache above —
           # tell the harness to skip its in-process `docker build` and
           # just `kind load` the existing tags.
-          AZURECLAW_E2E_SKIP_IMAGE_BUILD: "1"
+          KARS_E2E_SKIP_IMAGE_BUILD: "1"
         run: |
           set -euo pipefail
           make test-e2e
@@ -495,9 +495,9 @@ jobs:
           mkdir -p e2e-diag
           kubectl get pods -A -o wide > e2e-diag/pods.txt 2>&1 || true
           kubectl get events -A --sort-by='.lastTimestamp' > e2e-diag/events.txt 2>&1 || true
-          kubectl describe pods -n azureclaw-system > e2e-diag/describe.txt 2>&1 || true
-          kubectl logs -n azureclaw-system -l app.kubernetes.io/component=controller --tail=500 > e2e-diag/controller.log 2>&1 || true
-          kubectl logs -n azureclaw-system -l app.kubernetes.io/component=inference-router --tail=500 > e2e-diag/router.log 2>&1 || true
+          kubectl describe pods -n kars-system > e2e-diag/describe.txt 2>&1 || true
+          kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=500 > e2e-diag/controller.log 2>&1 || true
+          kubectl logs -n kars-system -l app.kubernetes.io/component=inference-router --tail=500 > e2e-diag/router.log 2>&1 || true
 
       - name: Upload diagnostics
         if: failure() && steps.paths.outputs.run == 'true'
@@ -526,8 +526,8 @@ jobs:
         # Scope to the two benches we actually execute. `--workspace` would
         # compile every bench target in every crate; we only run two.
         run: |
-          cargo bench --no-run --bench reconciler_bench --package azureclaw-controller
-          cargo bench --no-run --bench proxy_bench --package azureclaw-inference-router
+          cargo bench --no-run --bench reconciler_bench --package kars-controller
+          cargo bench --no-run --bench proxy_bench --package kars-inference-router
       - name: Run controller bench + compare to baseline
         run: |
           cargo bench --bench reconciler_bench -- --save-baseline pr --output-format bencher \

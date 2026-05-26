@@ -1,0 +1,157 @@
+{{- /*
+  Phase 2 S3.5 — public-ingress A2A gateway (ADR-0001 #4).
+
+  Rendered only when `.Values.a2aGateway.enabled` is true. The
+  inference router stays unchanged in the disabled case.
+
+  Hardening summary:
+    - distroless static base (Dockerfile target: scratch)
+    - read-only root filesystem
+    - drop ALL capabilities
+    - run as UID 1002 (not root, not the openclaw 1000, not the
+      router 1001 — three distinct UIDs across the chain)
+    - seccomp profile `kars-strict.json` mounted by the
+      `seccomp-installer` DaemonSet (existing template).
+*/ -}}
+{{- if .Values.a2aGateway.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kars-a2a-gateway
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/name: kars-a2a-gateway
+    app.kubernetes.io/component: a2a-gateway
+    app.kubernetes.io/part-of: kars
+spec:
+  replicas: {{ .Values.a2aGateway.replicas | default 2 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kars-a2a-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kars-a2a-gateway
+        app.kubernetes.io/component: a2a-gateway
+    spec:
+      serviceAccountName: kars-a2a-gateway
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1002
+        runAsGroup: 1002
+        fsGroup: 1002
+        seccompProfile:
+          type: Localhost
+          localhostProfile: kars-strict.json
+      containers:
+        - name: a2a-gateway
+          image: "{{ .Values.a2aGateway.image.repository }}:{{ .Values.a2aGateway.image.tag }}"
+          imagePullPolicy: {{ .Values.a2aGateway.image.pullPolicy | default "Always" }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: admin
+              containerPort: 9090
+              protocol: TCP
+          env:
+            {{- if .Values.a2aGateway.testMode }}
+            - name: A2A_GATEWAY_TEST_MODE
+              value: "1"
+            {{- end }}
+            {{- if .Values.a2aGateway.anonymousOk }}
+            - name: A2A_GATEWAY_ANONYMOUS_OK
+              value: "1"
+            {{- end }}
+            - name: A2A_GATEWAY_TLS_CERT
+              value: /etc/kars/a2a-gateway-tls/tls.crt
+            - name: A2A_GATEWAY_TLS_KEY
+              value: /etc/kars/a2a-gateway-tls/tls.key
+            - name: A2A_GATEWAY_MTLS_CERT
+              value: /etc/kars/a2a-gateway-mtls/tls.crt
+            - name: A2A_GATEWAY_MTLS_KEY
+              value: /etc/kars/a2a-gateway-mtls/tls.key
+            - name: A2A_GATEWAY_ROUTER_HOST
+              value: kars-inference-router.kars-system.svc.cluster.local:8445
+            - name: A2A_GATEWAY_RATE_LIMIT_BURST
+              value: {{ .Values.a2aGateway.rateLimits.perSubjectBurst | default 60 | quote }}
+            - name: A2A_GATEWAY_RATE_LIMIT_REFILL
+              value: {{ .Values.a2aGateway.rateLimits.perSubjectRefillPerSec | default 5 | quote }}
+            - name: A2A_GATEWAY_MAX_SUBJECTS
+              value: {{ .Values.a2aGateway.rateLimits.maxSubjects | default 50000 | quote }}
+            {{- if .Values.a2aGateway.rateLimits.sharedRedisUrl }}
+            # NOTE: shared-Redis sync is unimplemented in S3.5; the
+            # gateway will panic with an explicit message if this is
+            # set. Leave empty.
+            - name: A2A_GATEWAY_SHARED_REDIS_URL
+              value: {{ .Values.a2aGateway.rateLimits.sharedRedisUrl | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/kars/a2a-gateway-tls
+              readOnly: true
+            - name: mtls
+              mountPath: /etc/kars/a2a-gateway-mtls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.a2aGateway.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.a2aGateway.tls.secretName }}
+            optional: false
+        - name: mtls
+          secret:
+            secretName: {{ .Values.a2aGateway.mtls.secretName }}
+            optional: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kars-a2a-gateway
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/name: kars-a2a-gateway
+    app.kubernetes.io/component: a2a-gateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kars-a2a-gateway
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/name: kars-a2a-gateway
+    app.kubernetes.io/component: a2a-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kars-a2a-gateway
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+    - name: admin
+      port: 9090
+      targetPort: admin
+      protocol: TCP
+{{- end -}}

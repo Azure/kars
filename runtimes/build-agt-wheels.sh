@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 #
 # Build local wheels for the upstream agent-governance-toolkit Python
-# packages that the AzureClaw in-pod adapters depend on. Output goes to
+# packages that the Kars in-pod adapters depend on. Output goes to
 # `runtimes/wheels/` (gitignored). The Dockerfiles for the OpenAI-Agents
 # and MAF-Python sandbox images COPY this directory into the build
 # context and `pip install` the resulting wheels — keeping the image

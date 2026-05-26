@@ -20,9 +20,9 @@
 # the test exercises the full governance chain.
 #
 # Env:
-#   AZURECLAW_E2E_GOV_RUNTIME   sandbox runtime to host the test
+#   KARS_E2E_GOV_RUNTIME   sandbox runtime to host the test
 #                               (default openclaw)
-#   AZURECLAW_E2E_BURST         number of requests for the rate-limit
+#   KARS_E2E_BURST         number of requests for the rate-limit
 #                               step (default 60)
 
 set -euo pipefail
@@ -37,9 +37,9 @@ source "$LIB_DIR/cr_factory.sh"
 scenario_header "Governance lane — Content Safety, Policy, Rate-Limit, Trust"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
-runtime="${AZURECLAW_E2E_GOV_RUNTIME:-openclaw}"
+runtime="${KARS_E2E_GOV_RUNTIME:-openclaw}"
 name="gov-${runtime//[._]/-}"
 ns=$(new_ns "gov-${runtime//[._]/-}")
 pod_ns=$(pod_ns_for "$name")
@@ -47,19 +47,19 @@ export MANUAL_E2E_SCENARIO=governance
 
 metric_start "admit_${name}"
 cr_dispatch "$runtime" "$name" "$ns" | kubectl apply -f - >/dev/null
-metric_finish "admit_${name}" governance admitClawSandbox "runtime=${runtime}" "sandbox=${name}"
-wait_for_clawsandbox_ready "$ns" "$name" || {
+metric_finish "admit_${name}" governance admitKarsSandbox "runtime=${runtime}" "sandbox=${name}"
+wait_for_karssandbox_ready "$ns" "$name" || {
     log_fail "sandbox never reached Ready — cannot run governance probes"
     cleanup_sandbox "$ns" "$name"
     scenario_summary "Governance lane"
     exit 1
 }
 
-pod=$(kubectl -n "$pod_ns" get pod -l "azureclaw.azure.com/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
+pod=$(kubectl -n "$pod_ns" get pod -l "kars.azure.com/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
 [[ -n "$pod" ]] || { log_fail "no pod"; cleanup_sandbox "$ns" "$name"; exit 1; }
 
 # The openclaw container is exec-banned by ValidatingAdmissionPolicy
-# (azureclaw-sandbox-exec-ban). Talk to the inference-router via
+# (kars-sandbox-exec-ban). Talk to the inference-router via
 # port-forward — the canonical operator path the policy recommends.
 PF_PORT=18743
 kubectl -n "$pod_ns" port-forward "pod/${pod}" "${PF_PORT}:8443" >/tmp/_pf.log 2>&1 &
@@ -134,7 +134,7 @@ fi
 # 3. Rate limit — repeated /agt/evaluate calls for the same tool should
 # trip the per-tool sliding-window limiter (allowed=false, retry_after_secs > 0).
 log_step "[3/4] Rate limiter: burst tool evaluations beyond per-tool budget"
-burst="${AZURECLAW_E2E_BURST:-60}"
+burst="${KARS_E2E_BURST:-60}"
 hit_limit=0
 for _ in $(seq 1 "$burst"); do
     rc=$(router_call "/agt/evaluate" \
@@ -148,7 +148,7 @@ if [[ "$hit_limit" -eq 1 ]]; then
     log_pass "Per-tool rate limiter tripped within ${burst} evaluations"
 else
     log_warn "no rate-limit verdict within ${burst} evaluations — limiter may be permissive"
-    log_skip "[3/4] increase AZURECLAW_E2E_BURST or lower the per-tool budget"
+    log_skip "[3/4] increase KARS_E2E_BURST or lower the per-tool budget"
 fi
 
 # 4. Trust — GET /agt/trust/<agent_id> returns the score; we just

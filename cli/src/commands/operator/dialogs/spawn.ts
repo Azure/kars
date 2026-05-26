@@ -196,7 +196,7 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
       if (!devMode && state.isolation === "confidential") {
         try {
           const { stdout } = await execa("kubectl", kctl([
-            "get", "nodes", "-l", "azureclaw.azure.com/pool=sandbox-kata", "--no-headers",
+            "get", "nodes", "-l", "kars.azure.com/pool=sandbox-kata", "--no-headers",
           ], kubeContext), { stdio: "pipe" });
           if (!stdout.trim()) throw new Error("no kata nodes");
         } catch {
@@ -245,7 +245,7 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
       activityLog.log(`{cyan-fg}⏳ Spawning {bold}${state.name}{/bold} (${runtimeLabels[state.runtime]}, ${state.model}, ${state.isolation})...{/}`);
       screen.render();
       try {
-        await execa("azureclaw", args, { stdio: "pipe" });
+        await execa("kars", args, { stdio: "pipe" });
         activityLog.log(`{green-fg}✓ Spawned{/} ${state.name}`);
       } catch (e: any) {
         activityLog.log(`{red-fg}✗ Spawn fail:{/} ${(e.stderr || e.message)?.substring(0, 200)}`);

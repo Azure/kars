@@ -1,0 +1,872 @@
+# Kars KarsSandbox CRD
+# This CRD defines the custom resource for managing OpenClaw sandboxes
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karssandboxes.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+spec:
+  group: kars.azure.com
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["runtime", "sandbox", "inferenceRef"]
+              x-kubernetes-validations:
+                # P2 #13: top-level cross-field invariants.
+                #
+                # 1. BYO runtime is mutually exclusive with the
+                #    Foundry-agent path. BYO containers bring their
+                #    own inference + agent loop and don't go through
+                #    the controller-managed Foundry prompt agent
+                #    (see crd.rs KarsSandboxSpec docs and
+                #    reconciler/mod.rs ~line 1017). Without this CEL
+                #    the controller silently no-ops the agent block
+                #    on BYO; the rule turns it into an immediate
+                #    `kubectl apply` error.
+                - rule: "self.runtime.kind != 'BYO' || !has(self.agent)"
+                  message: "spec.agent (Foundry agent) is incompatible with spec.runtime.kind=BYO; BYO runtimes own their own inference + agent loop"
+                  reason: "FieldValueInvalid"
+                # 2. governance.toolPolicyRef is in the same
+                #    namespace as the KarsSandbox (cross-namespace
+                #    refs are forbidden by docs/crd-precedence.md).
+                #    The schema-level pattern already enforces a
+                #    valid DNS label; this rule guards against the
+                #    common authoring mistake of pasting
+                #    "ns/name" or "ns:name".
+                - rule: "!has(self.governance) || !has(self.governance.toolPolicyRef) || !has(self.governance.toolPolicyRef.name) || (!self.governance.toolPolicyRef.name.contains('/') && !self.governance.toolPolicyRef.name.contains(':'))"
+                  message: "spec.governance.toolPolicyRef.name must be a same-namespace name (no '/' or ':' separators); cross-namespace refs are forbidden"
+                  reason: "FieldValueInvalid"
+              properties:
+                runtime:
+                  type: object
+                  required: ["kind"]
+                  description: |
+                    Agent runtime selector (S10.A1 multi-runtime hosting).
+                    The `kind` discriminator selects which sibling struct
+                    (`openclaw` / `openaiAgents` / `microsoftAgentFramework`
+                    / `semanticKernel` / `langGraph` / `anthropic`
+                    / `pydanticAi` / `byo`)
+                    is required; the others must be absent.
+                    Replaces the legacy `spec.openclaw` field — the
+                    Kars v1alpha1 schema is in-place edited (no
+                    conversion webhook; pre-release simplification).
+                    Declared placeholders (`semanticKernel`) parse but the
+                    controller stamps
+                    `RuntimeReady=False / AdapterMissing` until the
+                    respective adapter image ships.
+                  x-kubernetes-validations:
+                    - rule: "(self.kind == 'OpenClaw') == has(self.openclaw)"
+                      message: "spec.runtime.openclaw must be set iff kind is OpenClaw"
+                    - rule: "(self.kind == 'OpenAIAgents') == has(self.openaiAgents)"
+                      message: "spec.runtime.openaiAgents must be set iff kind is OpenAIAgents"
+                    - rule: "(self.kind == 'MicrosoftAgentFramework') == has(self.microsoftAgentFramework)"
+                      message: "spec.runtime.microsoftAgentFramework must be set iff kind is MicrosoftAgentFramework"
+                    - rule: "(self.kind == 'SemanticKernel') == has(self.semanticKernel)"
+                      message: "spec.runtime.semanticKernel must be set iff kind is SemanticKernel"
+                    - rule: "(self.kind == 'LangGraph') == has(self.langGraph)"
+                      message: "spec.runtime.langGraph must be set iff kind is LangGraph"
+                    - rule: "(self.kind == 'Anthropic') == has(self.anthropic)"
+                      message: "spec.runtime.anthropic must be set iff kind is Anthropic"
+                    - rule: "(self.kind == 'PydanticAi') == has(self.pydanticAi)"
+                      message: "spec.runtime.pydanticAi must be set iff kind is PydanticAi"
+                    - rule: "(self.kind == 'BYO') == has(self.byo)"
+                      message: "spec.runtime.byo must be set iff kind is BYO"
+                  properties:
+                    kind:
+                      type: string
+                      enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "BYO"]
+                      description: "Variant discriminator. PascalCase wire values."
+                    openclaw:
+                      type: object
+                      properties:
+                        version:
+                          type: string
+                          description: "OpenClaw version to deploy"
+                        image:
+                          type: string
+                          description: "Container image for the sandbox"
+                        config:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                          description: "OpenClaw configuration (openclaw.json equivalent)"
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                          description: "Extra environment variables (key/value map) injected into the openclaw container. Used by the controller for offload parameters (OFFLOAD_REQUEST_ID, OFFLOAD_PARENT_AMID, OFFLOAD_TASK, OFFLOAD_TIMEOUT_MINUTES)."
+                    openaiAgents:
+                      type: object
+                      description: "OpenAI Agents Python runtime variant."
+                      properties:
+                        pythonVersion:
+                          type: string
+                          description: "Python interpreter version, e.g. '3.12'"
+                        agentCode:
+                          type: object
+                          description: "Where the user's agent code comes from. Exactly one of `oci` / `git`."
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.openaiAgents.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                                  description: "Fully-qualified OCI image reference"
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                  description: "Branch / tag / commit SHA. Defaults to HEAD."
+                                path:
+                                  type: string
+                                  description: "Subdirectory inside the repo. Defaults to repo root."
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                          description: "Container entrypoint override. Defaults to the adapter's stock launcher."
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    microsoftAgentFramework:
+                      type: object
+                      description: "Microsoft Agent Framework runtime variant. Python is wired. .NET is blocked upstream on a `Microsoft.AgentGovernance` .NET package that exposes an `AgentMesh` relay client (the package today ships trust/identity/policy/audit only); it will be re-introduced once upstream lands."
+                      properties:
+                        language:
+                          type: string
+                          enum: ["python"]
+                          description: "Adapter image flavour. v1.0 ships Python only; .NET tracked for v1.1."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.microsoftAgentFramework.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    semanticKernel:
+                      type: object
+                      description: "Semantic Kernel runtime variant (declared placeholder). Schema is locked but the controller stamps `RuntimeReady=False / AdapterMissing` until the SK adapter image ships."
+                      properties:
+                        language:
+                          type: string
+                          enum: ["python", "dotnet", "java"]
+                          description: "Adapter image flavour. Defaults to `python`."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.semanticKernel.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    langGraph:
+                      type: object
+                      description: "LangGraph (LangChain) runtime variant. Both Python (`runtimes/langgraph/`) and TypeScript / Node.js 22 (`runtimes/langgraph-ts/`) ship as first-class adapters in v1.0."
+                      properties:
+                        language:
+                          type: string
+                          enum: ["python", "typescript"]
+                          description: "Adapter image flavour. Defaults to `python`. `typescript` selects the Node.js 22 (LangChain.js) image."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.langGraph.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    anthropic:
+                      type: object
+                      description: "Anthropic Claude Agents SDK runtime variant. Ships in v1.0 (Phase H#1)."
+                      properties:
+                        pythonVersion:
+                          type: string
+                          description: "Python interpreter version, e.g. '3.12'."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.anthropic.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    pydanticAi:
+                      type: object
+                      description: "Pydantic-AI runtime variant (Phase H#3). Type-safe Python agent framework with native multi-provider support."
+                      properties:
+                        pythonVersion:
+                          type: string
+                          description: "Python interpreter version, e.g. '3.12'."
+                        agentCode:
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "has(self.oci) != has(self.git)"
+                              message: "spec.runtime.pydanticAi.agentCode must set exactly one of `oci` or `git`"
+                          properties:
+                            oci:
+                              type: object
+                              required: ["image"]
+                              properties:
+                                image:
+                                  type: string
+                            git:
+                              type: object
+                              required: ["url"]
+                              properties:
+                                url:
+                                  type: string
+                                ref:
+                                  type: string
+                                path:
+                                  type: string
+                        entrypoint:
+                          type: array
+                          items:
+                            type: string
+                        extraEnv:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    byo:
+                      type: object
+                      required: ["image", "contractVersion"]
+                      description: "Bring-your-own runtime. The image must honor the BYO contract. Enforcement is warn-only via `RuntimeReady` Condition unless the cluster operator opts in to strict mode."
+                      properties:
+                        image:
+                          type: string
+                          description: "Container image (must declare org.kars.runtime.contract label)."
+                        command:
+                          type: array
+                          items:
+                            type: string
+                        args:
+                          type: array
+                          items:
+                            type: string
+                        env:
+                          type: array
+                          items:
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                          description: "Raw K8s EnvVar entries (supports valueFrom)."
+                        contractVersion:
+                          type: string
+                          enum: ["v1"]
+                          description: "BYO contract version. REQUIRED — silent default would defeat the declared-contract guard."
+                sandbox:
+                  type: object
+                  properties:
+                    isolation:
+                      type: string
+                      enum: ["standard", "enhanced", "confidential"]
+                      default: "enhanced"
+                      description: "Isolation level"
+                    seccompProfile:
+                      type: string
+                      default: "kars-strict"
+                    selinuxContext:
+                      type: string
+                      default: \"\"
+                    readOnlyRootFilesystem:
+                      type: boolean
+                      default: true
+                    runAsNonRoot:
+                      type: boolean
+                      default: true
+                    allowPrivilegeEscalation:
+                      type: boolean
+                      default: false
+                    writablePaths:
+                      type: array
+                      items:
+                        type: string
+                      default: ["/sandbox", "/tmp"]
+                inferenceRef:
+                  type: object
+                  description: |
+                    Same-namespace reference to an `InferencePolicy` CR
+                    (S13 config-authority refs). The controller resolves
+                    the target at reconcile time; missing target → status
+                    `Degraded` with reason `InferencePolicyNotFound`.
+                    Cross-namespace refs are not supported (security
+                    invariant — see `docs/crd-precedence.md`).
+                  required: ["name"]
+                  properties:
+                    name:
+                      type: string
+                      description: "Name of a sibling InferencePolicy CR in the same namespace as this KarsSandbox."
+                      maxLength: 253
+                      pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                  x-kubernetes-validations:
+                    - rule: "self.name.size() > 0"
+                      message: "spec.inferenceRef.name must not be empty"
+                memoryRef:
+                  type: object
+                  description: |
+                    Optional same-namespace reference to a `KarsMemory` CR
+                    (Slice 3a). When present, the controller mirrors the
+                    compiled memory binding into the sandbox namespace and
+                    mounts it onto the inference-router at
+                    `/etc/kars/memory/binding.json`. The router echoes
+                    the digest via `GET /internal/policy-status` so the
+                    controller can promote the referenced `KarsMemory` to
+                    `phase=Ready` (principles.md §3). Cross-namespace refs
+                    are not supported.
+                  required: ["name"]
+                  properties:
+                    name:
+                      type: string
+                      description: "Name of a sibling KarsMemory CR in the same namespace as this KarsSandbox."
+                      maxLength: 253
+                      pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                  x-kubernetes-validations:
+                    - rule: "self.name.size() > 0"
+                      message: "spec.memoryRef.name must not be empty"
+                agent:
+                  type: object
+                  description: "Foundry Agent Service configuration — controller creates a prompt agent on reconcile"
+                  properties:
+                    instructions:
+                      type: string
+                      description: "System prompt / instructions for the Foundry agent"
+                    tools:
+                      type: array
+                      description: "Foundry tools to enable: file_search, web_search, code_interpreter"
+                      items:
+                        type: string
+                    fileIds:
+                      type: array
+                      description: "Pre-uploaded Foundry file IDs for knowledge retrieval"
+                      items:
+                        type: string
+                governance:
+                  type: object
+                  description: "AGT behavioral governance (opt-in for multi-agent)"
+                  x-kubernetes-validations:
+                    - rule: "!has(self.enabled) || !self.enabled || (has(self.toolPolicyRef) && self.toolPolicyRef.name.size() > 0)"
+                      message: "spec.governance.toolPolicyRef.name must be set when governance.enabled=true"
+                    # P2 #13: trust score domain is 0-1000 (see crd.rs
+                    # GovernanceConfig docstring). Values outside this
+                    # range are silently clamped by the inference router
+                    # but the authoring intent is almost always a typo.
+                    - rule: "!has(self.trustThreshold) || (self.trustThreshold >= 0 && self.trustThreshold <= 1000)"
+                      message: "spec.governance.trustThreshold must be in the range [0, 1000]"
+                      reason: "FieldValueInvalid"
+                    # Slice 4d.1: singular `mcpServerRef` and plural
+                    # `mcpServerRefs` are mutually exclusive — picking
+                    # both is almost always a copy-paste mistake and
+                    # we'd silently drop the singular. Refuse at
+                    # admission.
+                    - rule: "!(has(self.mcpServerRef) && has(self.mcpServerRefs) && self.mcpServerRefs.size() > 0)"
+                      message: "spec.governance.mcpServerRef (singular, deprecated) and spec.governance.mcpServerRefs (plural) are mutually exclusive — use only one"
+                      reason: "FieldValueInvalid"
+                    # Slice 4d.1: cap plural list length at 8 — the
+                    # router-side per-server file scheme (Slice 4d.2)
+                    # is sized for this; beyond that we want operators
+                    # to use the registry-mode federation pattern.
+                    - rule: "!has(self.mcpServerRefs) || self.mcpServerRefs.size() <= 8"
+                      message: "spec.governance.mcpServerRefs may not exceed 8 entries"
+                      reason: "FieldValueInvalid"
+                    # Slice 4d.1: entries must be unique by name —
+                    # duplicates collapse to the same JWKS/signing
+                    # ConfigMap mount path and are almost certainly a
+                    # mistake.
+                    - rule: "!has(self.mcpServerRefs) || self.mcpServerRefs.all(r, self.mcpServerRefs.exists_one(s, s.name == r.name))"
+                      message: "spec.governance.mcpServerRefs entries must be unique by name"
+                      reason: "FieldValueInvalid"
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: "Enable AGT governance (tool-level policy, trust, audit)"
+                    toolPolicyRef:
+                      type: object
+                      description: |
+                        Same-namespace reference to a `ToolPolicy` CR
+                        (S13 config-authority refs). When
+                        `governance.enabled=true`, the controller
+                        resolves the target at reconcile time; missing
+                        target → status `Degraded` with reason
+                        `ToolPolicyNotFound`. The resolved CR's
+                        `metadata.name` is used as the ConfigMap name
+                        suffix (`toolpolicy-<name>-profile`) mounted
+                        into the sandbox at `/etc/agt/policies`; AGT
+                        reads only from that mount post-Slice-1e (the
+                        legacy `AGT_POLICY_PROFILE` env-var path has
+                        been removed). Cross-namespace refs are not
+                        supported.
+                      properties:
+                        name:
+                          type: string
+                          description: "Name of a sibling ToolPolicy CR in the same namespace as this KarsSandbox."
+                          maxLength: 253
+                          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                    trustThreshold:
+                      type: integer
+                      default: 500
+                      description: "Minimum trust score (0-1000) for inter-agent communication"
+                    trustedPeers:
+                      type: string
+                      description: "Pre-seeded trusted peer AMIDs (name:AMID,name:AMID,...). Set by spawner for parent/sibling trust."
+                    registryMode:
+                      type: string
+                      enum: ["local", "global"]
+                      default: "local"
+                      description: "Registry mode: global enables cross-cluster mesh communication and handoff."
+                    mcpServerRef:
+                      type: object
+                      description: |
+                        DEPRECATED (Slice 4d.1): use `mcpServerRefs` instead.
+                        Same-namespace reference to an `McpServer` CR.
+                        When set, the controller mirrors the
+                        `mcp-{name}-jwks` ConfigMap and
+                        `mcp-{name}-signing` Secret from the user namespace
+                        into the sandbox namespace and mounts them into
+                        the inference-router so the sandbox can serve
+                        the customer-facing MCP endpoint. Honored as a
+                        length-1 alias for `mcpServerRefs`; emits a
+                        Warning event `McpSingularDeprecated` each
+                        reconcile until migrated.
+                      properties:
+                        name:
+                          type: string
+                          description: "Name of a sibling McpServer CR in the same namespace as this KarsSandbox."
+                          maxLength: 253
+                          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                    mcpServerRefs:
+                      type: array
+                      maxItems: 8
+                      description: |
+                        Slice 4d.1: plural same-namespace references to
+                        `McpServer` CRs. Supersedes the singular
+                        `mcpServerRef` field. Slice 4d.1 mirrors only
+                        the first entry (and emits Degraded with reason
+                        `PluralMcpServersUnsupportedYet` when more than
+                        one is declared) while the router-side
+                        per-server file scheme lands in Slice 4d.2.
+                        Mutually exclusive with `mcpServerRef`; entries
+                        must be unique by name.
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                            description: "Name of a sibling McpServer CR in the same namespace as this KarsSandbox."
+                            maxLength: 253
+                            pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                azureServices:
+                  type: array
+                  description: "Azure services the sandbox can access via Managed Identity"
+                  items:
+                    type: object
+                    required: ["service"]
+                    properties:
+                      service:
+                        type: string
+                        description: "Service type: storage, ai-search, cosmos-db, ai-foundry, keyvault, service-bus, event-hubs, sql"
+                      account:
+                        type: string
+                        description: "Account/resource name"
+                      permissions:
+                        type: array
+                        items:
+                          type: string
+                        description: "Permissions: read, write, search, inference, evaluate"
+                networkPolicy:
+                  type: object
+                  properties:
+                    defaultDeny:
+                      type: boolean
+                      default: true
+                    egressMode:
+                      type: string
+                      enum: [Strict, Learn]
+                      default: Learn
+                      description: |
+                        Egress enforcement mode (Slice 5b):
+                        - `Learn` (default): allow + record every host.
+                          Blocklist still applied.
+                        - `Strict`: deny anything outside the resolved
+                          allowlist. Blocklist still applied.
+                        Reserved future variant `Approval` lands together
+                        with the EgressApproval CRD.
+                    allowedEndpoints:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          host:
+                            type: string
+                          port:
+                            type: integer
+                        required: [host, port]
+                    allowlistRef:
+                      type: object
+                      description: |
+                        Reference to a signed OCI artifact containing the
+                        canonical egress allowlist. Populated by
+                        `kars egress … --sign`. **Authoritative**:
+                        when set, the verified canonical artifact is the
+                        source of truth for NetworkPolicy egress; on
+                        verify failure the controller fails closed
+                        (last-known-good cache fallback, then
+                        no-broad-egress).
+                        See docs/egress-proxy.md for the canonical format.
+                      required:
+                        - registry
+                        - repository
+                        - digest
+                        - artifactType
+                      properties:
+                        registry:
+                          type: string
+                          description: "Registry hostname (e.g. myacr.azurecr.io, ghcr.io)."
+                        repository:
+                          type: string
+                          description: "Repository path (e.g. kars/policies/sandbox-foo)."
+                        digest:
+                          type: string
+                          pattern: "^sha(256|384|512):[a-f0-9]+$"
+                          description: |
+                            Content-addressed digest including algorithm
+                            prefix. Covers the canonical artifact bytes
+                            per docs/internal/policy-canonical-format.md.
+                        artifactType:
+                          type: string
+                          description: |
+                            OCI artifactType media-type, e.g.
+                            application/vnd.kars.egress-allowlist.v1+yaml.
+                            Consumers MUST reject mismatched artifactTypes.
+                resources:
+                  type: object
+                  properties:
+                    requests:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    limits:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                suspended:
+                  type: boolean
+                  description: |
+                    When `true`, the controller scales the sandbox
+                    Deployment to `replicas: 0` and stamps
+                    `Suspended=True / Reason=SuspendedBySpec`. The
+                    namespace, NetworkPolicy, ServiceAccount, and all
+                    governance overlay objects are preserved
+                    byte-identical, so flipping this field back to
+                    `false` (or removing it) restores the agent
+                    in-place. Default `false`.
+
+                    Distinct from the `Suspended=True / Reason=OverlayMode`
+                    transition, which is induced by
+                    `spec.upstreamCompatibility.sigsAgentSandbox=overlay`
+                    (operator delegates Pod ownership to an upstream
+                    `Sandbox` CR). Spec-level suspension is the
+                    operator-driven graceful pause; OverlayMode is the
+                    architectural reason the controller doesn't own
+                    the Pod at all.
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Pending", "Creating", "Running", "Failed", "Terminating", "Degraded"]
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                sandboxPod:
+                  type: string
+                  description: "Name of the sandbox pod"
+                namespace:
+                  type: string
+                  description: "Namespace created for this sandbox"
+                inferenceEndpoint:
+                  type: string
+                tokensUsed:
+                  type: object
+                  properties:
+                    input:
+                      type: integer
+                    output:
+                      type: integer
+                foundryAgentId:
+                  type: string
+                  description: "Foundry Agent Service agent ID (created by controller)"
+                runtimeKind:
+                  type: string
+                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "BYO"]
+                  description: "Runtime kind the controller observed for the current observedGeneration (S10.A1)."
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Runtime
+          type: string
+          jsonPath: .spec.runtime.kind
+        - name: InferencePolicy
+          type: string
+          jsonPath: .spec.inferenceRef.name
+        - name: Isolation
+          type: string
+          jsonPath: .spec.sandbox.isolation
+        - name: Allowlist
+          type: string
+          description: "Authoritative-allowlist condition status"
+          jsonPath: .status.conditions[?(@.type=="AllowlistAuthoritative")].status
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: karssandboxes
+    singular: karssandbox
+    kind: KarsSandbox
+    shortNames:
+      - cs
+---
+# KarsPairing CRD — federation trust relationships
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karspairings.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+spec:
+  group: kars.azure.com
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["tokenHash", "expiresAt"]
+              properties:
+                tokenHash:
+                  type: string
+                  description: "SHA-256 hash of the pairing token secret (hex-encoded)"
+                expiresAt:
+                  type: string
+                  description: "ISO 8601 timestamp when this pairing expires"
+                slotsMax:
+                  type: integer
+                  default: 1
+                  description: "Maximum concurrent offload sandboxes"
+                tokenBudget:
+                  type: integer
+                  default: 500000
+                  description: "Maximum total tokens the paired agent can consume"
+                capabilities:
+                  type: array
+                  items:
+                    type: string
+                  default: ["offload", "handoff"]
+                  description: "Granted capabilities"
+                displayName:
+                  type: string
+                  description: "Admin-friendly display name"
+                model:
+                  type: string
+                  description: "Inference model for offload sandboxes"
+                isolation:
+                  type: string
+                  enum: ["standard", "enhanced", "confidential"]
+                  description: "Isolation level for offload sandboxes"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["PendingPairing", "Active", "Expired", "Revoked"]
+                boundAmid:
+                  type: string
+                  description: "External agent AMID (set on pairing)"
+                boundPubkeyEd25519:
+                  type: string
+                  description: "External agent Ed25519 public key (base64)"
+                pairedAt:
+                  type: string
+                  format: date-time
+                slotsUsed:
+                  type: integer
+                tokensUsed:
+                  type: integer
+                lastOffloadAt:
+                  type: string
+                  format: date-time
+                offloadsCompleted:
+                  type: integer
+                offloadsFailed:
+                  type: integer
+                activeSandbox:
+                  type: string
+                conditions:
+                  type: array
+                  description: "Standard Kubernetes conditions for KarsPairing"
+                  items:
+                    type: object
+                    required: ["type", "status", "lastTransitionTime", "reason", "message"]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+          x-kubernetes-validations:
+            - rule: "!has(self.spec.slotsMax) || self.spec.slotsMax >= 1"
+              message: "spec.slotsMax must be >= 1"
+            - rule: "!has(self.spec.tokenBudget) || self.spec.tokenBudget >= 0"
+              message: "spec.tokenBudget must be >= 0"
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: AMID
+          type: string
+          jsonPath: .status.boundAmid
+        - name: Budget
+          type: integer
+          jsonPath: .spec.tokenBudget
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: karspairings
+    singular: karspairing
+    kind: KarsPairing
+    shortNames:
+      - cp

@@ -1,8 +1,8 @@
 # Exec-brief walkthrough — a four-agent showcase
 
-This page walks a real, reproducible end-to-end scenario: **one parent agent orchestrates three sub-agents to produce a two-page executive brief on the 2026 state of agentic AI runtimes.** It exists for one reason: when somebody asks "what does AzureClaw actually do, and what is it enforcing for me?", this is the answer you can point at, run, and observe.
+This page walks a real, reproducible end-to-end scenario: **one parent agent orchestrates three sub-agents to produce a two-page executive brief on the 2026 state of agentic AI runtimes.** It exists for one reason: when somebody asks "what does Kars actually do, and what is it enforcing for me?", this is the answer you can point at, run, and observe.
 
-The scenario lives at [`tools/e2e-harness/scenarios/exec-brief/`](https://github.com/Azure/azureclaw/tree/main/tools/e2e-harness/scenarios/exec-brief). It currently runs on AKS. The platform matrix below is honest about what works where today.
+The scenario lives at [`tools/e2e-harness/scenarios/exec-brief/`](https://github.com/Azure/kars/tree/main/tools/e2e-harness/scenarios/exec-brief). It currently runs on AKS. The platform matrix below is honest about what works where today.
 
 ## Scenario in one sentence
 
@@ -38,12 +38,12 @@ Every arrow that leaves a sandbox box is enforced by the runtime. Section "Per-l
 
 | Agent | Tools used | Output |
 |---|---|---|
-| `parent` | `azureclaw_discover`, `azureclaw_spawn`, `azureclaw_mesh_send`, `azureclaw_mesh_await`, MCP `ask_question` (DeepWiki), `telegram_send_message` | Dispatch + final delivery |
-| `analyst` | `foundry_web_search` × ≥3 queries, `file_write`, `azureclaw_mesh_transfer_file` × 2 | `analyst.json` (≤4 KB) with trends, control categories, runtimes, metrics |
-| `viz` | `azureclaw_mesh_await`, `file_read`, `foundry_code_execute` (matplotlib), `foundry_image_generation`, `azureclaw_mesh_transfer_file` × 3 | `scorecard.png` (1024×640 grouped bar chart), `hero.png` (1024×1024 generated image) |
-| `writer` | `azureclaw_mesh_await`, `file_read`, `file_write`, `azureclaw_mesh_transfer_file` × 1 | `brief.md` (~700–800 words, two pages) |
+| `parent` | `kars_discover`, `kars_spawn`, `kars_mesh_send`, `kars_mesh_await`, MCP `ask_question` (DeepWiki), `telegram_send_message` | Dispatch + final delivery |
+| `analyst` | `foundry_web_search` × ≥3 queries, `file_write`, `kars_mesh_transfer_file` × 2 | `analyst.json` (≤4 KB) with trends, control categories, runtimes, metrics |
+| `viz` | `kars_mesh_await`, `file_read`, `foundry_code_execute` (matplotlib), `foundry_image_generation`, `kars_mesh_transfer_file` × 3 | `scorecard.png` (1024×640 grouped bar chart), `hero.png` (1024×1024 generated image) |
+| `writer` | `kars_mesh_await`, `file_read`, `file_write`, `kars_mesh_transfer_file` × 1 | `brief.md` (~700–800 words, two pages) |
 
-The choice of tools is deliberate: the scenario is meant to make at least one of each category fire (MCP, web search, sandboxed code execution, hosted image generation, sandbox FS, encrypted mesh, channel egress). The harness's [`verify.py`](https://github.com/Azure/azureclaw/blob/main/tools/e2e-harness/verify.py) checks all nine acceptance conditions and exits non-zero if any layer is silent.
+The choice of tools is deliberate: the scenario is meant to make at least one of each category fire (MCP, web search, sandboxed code execution, hosted image generation, sandbox FS, encrypted mesh, channel egress). The harness's [`verify.py`](https://github.com/Azure/kars/blob/main/tools/e2e-harness/verify.py) checks all nine acceptance conditions and exits non-zero if any layer is silent.
 
 ## The 4-agent sequence
 
@@ -59,7 +59,7 @@ sequenceDiagram
   participant F as Foundry
 
   U->>P: telegram_send: "produce exec brief"
-  P->>P: azureclaw_discover('*')
+  P->>P: kars_discover('*')
   P->>DW: ask_question (governance posture)
   DW-->>P: answer
   P->>A: spawn + mesh_send(brief + deepwiki excerpt)
@@ -86,7 +86,7 @@ Each `mesh_send` and `mesh_transfer_file` is an X3DH KNOCK + Double-Ratchet mess
 
 ## Per-layer proof
 
-The point of the showcase is not "look, the agents talked to each other". The point is: **every claim AzureClaw makes about defence in depth shows up as an artefact you can read.** For each enforcement layer below, the proof is a concrete command you run and what you see.
+The point of the showcase is not "look, the agents talked to each other". The point is: **every claim Kars makes about defence in depth shows up as an artefact you can read.** For each enforcement layer below, the proof is a concrete command you run and what you see.
 
 ### 1. Signed CRDs — what's enforced is what's signed
 
@@ -94,7 +94,7 @@ The point of the showcase is not "look, the agents talked to each other". The po
 # Pick any signed-CRD-backed policy and check the Ready/Reason/Message triple.
 # The controller flips Ready=True only after every referencing sandbox's
 # inference-router has echoed back the digest it actually loaded.
-kubectl get inferencepolicy execbrief-inference -n azureclaw-system -o json \
+kubectl get inferencepolicy execbrief-inference -n kars-system -o json \
   | jq '{name: .metadata.name,
          ready:   (.status.conditions[]|select(.type=="Ready")|.status),
          reason:  (.status.conditions[]|select(.type=="Ready")|.reason),
@@ -132,23 +132,23 @@ The producer half of the loop is just as concrete. Each sandbox's egress allowli
 
 ```bash
 # Author + sign the analyst's allowlist in one gesture (canonicalise →
-# oras push → cosign sign → patch ClawSandbox.spec.networkPolicy.allowlistRef).
-azureclaw egress execbrief-analyst --enforce \
+# oras push → cosign sign → patch KarsSandbox.spec.networkPolicy.allowlistRef).
+kars egress execbrief-analyst --enforce \
   --registry myacr.azurecr.io \
   --repository policy/egress-allowlist/execbrief-analyst
 # Auto-detects sign mode (TTY → keyless, CI → identity-token,
 # add --sign-mode keyed --sign-key azurekms://... for production).
 ```
 
-The four other signed kinds (`ToolPolicy`, `InferencePolicy`, `ClawMemory`, `McpServer`, `ClawEval`) follow the generic surface — see [CRD trust model → operator-authoring half](../security/crd-trust-model.md#the-operator-authoring-half).
+The four other signed kinds (`ToolPolicy`, `InferencePolicy`, `KarsMemory`, `McpServer`, `KarsEval`) follow the generic surface — see [CRD trust model → operator-authoring half](../security/crd-trust-model.md#the-operator-authoring-half).
 
 ### 2. iptables egress-guard — kernel-level outbound firewall
 
 Every sandbox pod has an `egress-guard` init container that installs iptables rules restricting UID 1000 (the agent process) to loopback + DNS + a NAT-redirect of TCP/80,443 → `127.0.0.1:8444`. The agent process **cannot** open a direct TCP connection to anything else — the kernel drops it. (Exec into the agent container itself is blocked by a `ValidatingAdmissionPolicy`, so the proof is the init-container spec; the rules in `command` are what actually got applied.)
 
 ```bash
-kubectl get pod -n azureclaw-analyst \
-  -l azureclaw.azure.com/sandbox=analyst \
+kubectl get pod -n kars-analyst \
+  -l kars.azure.com/sandbox=analyst \
   -o json | jq '.items[0].spec.initContainers[]
                 | select(.name=="egress-guard")
                 | {securityContext, command: .command[2]}'
@@ -179,12 +179,12 @@ The redirected traffic lands at the inference-router on `127.0.0.1:8444`. The ro
 
 ```bash
 # Parent — has Telegram + DeepWiki
-kubectl get configmap clawsandbox-execbrief-egress-allowlist \
-  -n azureclaw-execbrief -o jsonpath='{.data.allowlist\.json}' | jq
+kubectl get configmap karssandbox-execbrief-egress-allowlist \
+  -n kars-execbrief -o jsonpath='{.data.allowlist\.json}' | jq
 
 # Analyst — no Telegram, no DeepWiki
-kubectl get configmap clawsandbox-analyst-egress-allowlist \
-  -n azureclaw-analyst -o jsonpath='{.data.allowlist\.json}' | jq
+kubectl get configmap karssandbox-analyst-egress-allowlist \
+  -n kars-analyst -o jsonpath='{.data.allowlist\.json}' | jq
 ```
 
 <details><summary>Live output from this scenario</summary>
@@ -214,7 +214,7 @@ The `analyst`'s allow-list does **not** include `api.telegram.org` — only `par
 ### 4. K8s NetworkPolicy — ingress isolation
 
 ```bash
-kubectl get netpol sandbox-policy -n azureclaw-analyst -o json \
+kubectl get netpol sandbox-policy -n kars-analyst -o json \
   | jq '.spec | {policyTypes, ingress, podSelector}'
 ```
 
@@ -225,12 +225,12 @@ kubectl get netpol sandbox-policy -n azureclaw-analyst -o json \
   "policyTypes": ["Ingress"],
   "podSelector": {
     "matchLabels": {
-      "azureclaw.azure.com/component": "sandbox"
+      "kars.azure.com/component": "sandbox"
     }
   },
   "ingress": [
     {
-      "from": [{"namespaceSelector": {"matchLabels": {"azureclaw.azure.com/role": "sandbox"}}}],
+      "from": [{"namespaceSelector": {"matchLabels": {"kars.azure.com/role": "sandbox"}}}],
       "ports": [
         {"port": 8443,  "protocol": "TCP"},
         {"port": 18789, "protocol": "TCP"},
@@ -240,7 +240,7 @@ kubectl get netpol sandbox-policy -n azureclaw-analyst -o json \
     {
       "from": [{"namespaceSelector": {"matchLabels": {
         "app.kubernetes.io/component": "system",
-        "app.kubernetes.io/name":      "azureclaw"
+        "app.kubernetes.io/name":      "kars"
       }}}],
       "ports": [{"port": 8443, "protocol": "TCP"}]
     }
@@ -248,10 +248,10 @@ kubectl get netpol sandbox-policy -n azureclaw-analyst -o json \
 }
 ```
 
-Two ingress sources, no `egress` clause (egress is controlled by the iptables guard + the router L7 allow-list in layers 2 + 3, not duplicated here): peer **sandbox** namespaces may reach inference (`8443`) + OpenClaw gateway (`18789`) + mesh listener (`18791`); the **operator** namespace `azureclaw-system` may reach `8443` for the controller's `/internal/policy-status` echo. The policy is enforced by Cilium on AKS and by `kindnet` on local-k8s.
+Two ingress sources, no `egress` clause (egress is controlled by the iptables guard + the router L7 allow-list in layers 2 + 3, not duplicated here): peer **sandbox** namespaces may reach inference (`8443`) + OpenClaw gateway (`18789`) + mesh listener (`18791`); the **operator** namespace `kars-system` may reach `8443` for the controller's `/internal/policy-status` echo. The policy is enforced by Cilium on AKS and by `kindnet` on local-k8s.
 </details>
 
-It is enforced by the Cilium dataplane on AKS clusters labelled `kubernetes.azure.com/network-policy: cilium`. *(Egress was historically dropped in field-ownership drift; the [NP-egress fix](https://github.com/Azure/azureclaw/pull/336) consolidated this into a single SSA.)*
+It is enforced by the Cilium dataplane on AKS clusters labelled `kubernetes.azure.com/network-policy: cilium`. *(Egress was historically dropped in field-ownership drift; the [NP-egress fix](https://github.com/Azure/kars/pull/336) consolidated this into a single SSA.)*
 
 ### 5. Mesh E2E encryption — relay sees ciphertext only
 
@@ -285,11 +285,11 @@ The KNOCK handler on the receiver decides whether to accept based on the `TrustG
 
 ### 6. Foundry hosted tools — workload-identity, no API keys
 
-`foundry_web_search`, `foundry_code_execute`, and `foundry_image_generation` are dispatched by the router using the per-sandbox Workload Identity. The agent process never sees a Foundry API key — only the router does. Proof comes from the pod spec (exec into the `openclaw` container is blocked by `ValidatingAdmissionPolicy/azureclaw-sandbox-exec-ban`, so we read the spec):
+`foundry_web_search`, `foundry_code_execute`, and `foundry_image_generation` are dispatched by the router using the per-sandbox Workload Identity. The agent process never sees a Foundry API key — only the router does. Proof comes from the pod spec (exec into the `openclaw` container is blocked by `ValidatingAdmissionPolicy/kars-sandbox-exec-ban`, so we read the spec):
 
 ```bash
 # agent (openclaw) container — must NOT contain a key
-kubectl get pod -n azureclaw-viz -l azureclaw.azure.com/sandbox=viz -o json \
+kubectl get pod -n kars-viz -l kars.azure.com/sandbox=viz -o json \
   | jq -r '.items[0].spec.containers[]
            | select(.name=="openclaw")
            | .env[]?
@@ -298,7 +298,7 @@ kubectl get pod -n azureclaw-viz -l azureclaw.azure.com/sandbox=viz -o json \
 # (empty above = openclaw has no Foundry credential)
 
 # router (inference-router) container — IS the credential holder
-kubectl get pod -n azureclaw-viz -l azureclaw.azure.com/sandbox=viz -o json \
+kubectl get pod -n kars-viz -l kars.azure.com/sandbox=viz -o json \
   | jq -r '.items[0].spec.containers[]
            | select(.name=="inference-router")
            | .env[]?
@@ -330,7 +330,7 @@ The router signs every Foundry call with an IMDS-acquired token whose audience i
 Each agent container runs unprivileged with all capabilities dropped, a read-only root filesystem, and `allowPrivilegeEscalation: false`. The pod-level seccomp profile is `RuntimeDefault` (set on the PodSpec; per-container override is `nil`, so they all inherit).
 
 ```bash
-kubectl get pod -n azureclaw-analyst -l azureclaw.azure.com/sandbox=analyst -o json \
+kubectl get pod -n kars-analyst -l kars.azure.com/sandbox=analyst -o json \
   | jq '.items[0].spec
         | {podSeccompProfile: .securityContext.seccompProfile,
            agentSecurityContext: (.containers[]|select(.name=="openclaw")|.securityContext)}'
@@ -358,9 +358,9 @@ kubectl get pod -n azureclaw-analyst -l azureclaw.azure.com/sandbox=analyst -o j
 `parent`'s `McpServer/execbrief-deepwiki` declares the DeepWiki endpoint and OAuth issuer. The router exposes its tools as `execbrief_deepwiki.ask_question` etc.; any other MCP host the agent tries to dial is denied at the router. The sub-agents have **no** `mcpServerRefs` — they cannot call MCP at all. (`analyst`'s prompt explicitly says "Do NOT attempt any MCP tools — they are not available in your sandbox; web_search is sufficient.")
 
 ```bash
-kubectl get clawsandbox execbrief -n azureclaw-system \
+kubectl get karssandbox execbrief -n kars-system \
   -o jsonpath='{"parent: "}{.spec.governance.mcpServerRefs}{"\n"}'
-kubectl get clawsandbox analyst -n azureclaw-system \
+kubectl get karssandbox analyst -n kars-system \
   -o jsonpath='{"analyst: ["}{.spec.governance.mcpServerRefs}{"]\n"}'
 ```
 
@@ -379,7 +379,7 @@ The parent has exactly one MCP server declared. The analyst has **none** — the
 `parent` has the `telegram-credentials` Secret mounted; the sub-agents do not. The `telegram_send_message` tool is registered only in `parent`'s plugin set. This is enforced by the controller's pod-spec generation (Secret `envFrom` is conditional on the channel flag), not just by convention.
 
 ```bash
-for ns in azureclaw-execbrief azureclaw-analyst azureclaw-viz azureclaw-writer; do
+for ns in kars-execbrief kars-analyst kars-viz kars-writer; do
   printf '%-22s' "$ns"
   kubectl get secret telegram-credentials -n "$ns" \
     -o jsonpath='{.metadata.name}{"\n"}' 2>&1 \
@@ -390,10 +390,10 @@ done
 <details><summary>Live output from a Telegram-wired cluster</summary>
 
 ```text
-azureclaw-execbrief    telegram-credentials
-azureclaw-analyst      (none)
-azureclaw-viz          (none)
-azureclaw-writer       (none)
+kars-execbrief    telegram-credentials
+kars-analyst      (none)
+kars-viz          (none)
+kars-writer       (none)
 ```
 
 Only the parent has the Secret mounted, which means only the parent's `inference-router` and `openclaw` containers see `TELEGRAM_BOT_TOKEN`. The `entrypoint.sh` auto-config logic short-circuits the Telegram channel registration when that env var is unset, so the sub-agents' plugin sets do not even list `telegram_send_message`. The capability is structurally absent — not just denied at policy evaluation time. *(On a cluster without Telegram wired at all, every namespace shows `(none)` and the parent's plugin set drops the Telegram tool too.)*
@@ -406,46 +406,46 @@ This scenario has been validated **9/9 PASS on both AKS and local-k8s**. The pla
 | Layer | AKS | `local-k8s` (kind + controller) | `docker` (single-host) |
 |---|---|---|---|
 | Signed-CRD verification (controller + router echo) | ✅ | ✅ (same controller image, same cosign chain) | n/a (no CRDs; router still loads signed bundles from disk) |
-| iptables egress-guard (init container) | ✅ | ✅ | ✅ (requires NET_ADMIN on the container — granted by `azureclaw dev`) |
+| iptables egress-guard (init container) | ✅ | ✅ | ✅ (requires NET_ADMIN on the container — granted by `kars dev`) |
 | Router L7 allow-list | ✅ | ✅ | ✅ (mounted from disk, same allow-list shape) |
 | K8s NetworkPolicy ingress | ✅ (Cilium dataplane) | ✅ (kindnet enforces NetworkPolicy — verified via PodMonitor allow-list) | n/a |
 | Mesh E2E encryption | ✅ (cluster-internal relay) | ✅ (local relay + registry in the kind cluster) | ✅ (local relay + registry as docker containers) |
 | Foundry hosted tools | ✅ (Workload Identity) | ⚠ (works if you wire an Azure connection string; no WI inside kind) | ⚠ (same — works with an env-var key for dev only) |
 | seccomp profile | ✅ | ✅ | ⚠ (depends on docker's default seccomp; matches AKS for `RuntimeDefault`) |
 | Telegram + other channels | ✅ | ✅ | ✅ |
-| Observability (Prometheus + Grafana + Headlamp plugin) | ⚠ (Azure Monitor managed Prometheus — wiring pending) | ✅ (bundled with `azureclaw dev`) | n/a |
+| Observability (Prometheus + Grafana + Headlamp plugin) | ⚠ (Azure Monitor managed Prometheus — wiring pending) | ✅ (bundled with `kars dev`) | n/a |
 
 The reproducible end-to-end harness now runs on **AKS** and **local-k8s** (kind + controller). The `docker` platform is scaffolded in `tools/e2e-harness/platforms/docker.sh` and pending its first 9/9 validation run.
 
 ## What you can see while it runs (Headlamp + Grafana)
 
-The four sub-agents and their inter-agent traffic are observable end-to-end without any extra setup on local-k8s — `azureclaw dev` installs Prometheus + Grafana + the AzureClaw Headlamp plugin on first run.
+The four sub-agents and their inter-agent traffic are observable end-to-end without any extra setup on local-k8s — `kars dev` installs Prometheus + Grafana + the Kars Headlamp plugin on first run.
 
-| View | URL (after `azureclaw dev`) | Shows |
+| View | URL (after `kars dev`) | Shows |
 |---|---|---|
-| Headlamp → AzureClaw → **Overview** | `http://localhost:4466/` | Cluster-wide rollup: sandbox count, aggregate token budget vs spend, AGT decisions over time. |
-| Headlamp → AzureClaw → **Mesh Topology** | same | Parent → sub-agent hierarchy as a live SVG. Edge thickness ∝ mesh-message rate; two-direction animated pulses (yellow=sent, light-blue=received) show real KNOCK + X3DH + `mesh_send` + heartbeat traffic; node labels show lifetime `↑sent ↓recv` counts. Controllers are decorated with `N children · M trust` from the AGT trust graph. |
-| Headlamp → any **ClawSandbox** | same | Per-sandbox detail page with the embedded Grafana ops dashboard filtered to that sandbox, plus a Token Budget card backed by `azureclaw_tokens_total` and `TOKEN_BUDGET_DAILY`. Dark-mode aware. |
-| Grafana — "AzureClaw — Agent Fleet Operations" | `http://localhost:3000/d/azureclaw-ops` | Enterprise NOC layout: fleet health (req/sec, error rate, P95, 24h tokens, est. cost), token & cost economy, latency SLO heatmap, AGT decisions over time with color-coded allow/deny/approval/rate-limit, bundle health matrix. |
-| Grafana — "AzureClaw — Sandbox Fleet Overview" | `http://localhost:3000/d/azureclaw-fleet` | Simpler 10-panel quick fleet view. |
-| Prometheus | `http://localhost:19091/` | Ad-hoc PromQL — `azureclaw_tokens_total`, `azureclaw_mesh_messages_{sent,received}_total`, `azureclaw_agt_policy_evaluations_total{decision}`, `agentmesh_relay_*`. |
+| Headlamp → Kars → **Overview** | `http://localhost:4466/` | Cluster-wide rollup: sandbox count, aggregate token budget vs spend, AGT decisions over time. |
+| Headlamp → Kars → **Mesh Topology** | same | Parent → sub-agent hierarchy as a live SVG. Edge thickness ∝ mesh-message rate; two-direction animated pulses (yellow=sent, light-blue=received) show real KNOCK + X3DH + `mesh_send` + heartbeat traffic; node labels show lifetime `↑sent ↓recv` counts. Controllers are decorated with `N children · M trust` from the AGT trust graph. |
+| Headlamp → any **KarsSandbox** | same | Per-sandbox detail page with the embedded Grafana ops dashboard filtered to that sandbox, plus a Token Budget card backed by `kars_tokens_total` and `TOKEN_BUDGET_DAILY`. Dark-mode aware. |
+| Grafana — "Kars — Agent Fleet Operations" | `http://localhost:3000/d/kars-ops` | Enterprise NOC layout: fleet health (req/sec, error rate, P95, 24h tokens, est. cost), token & cost economy, latency SLO heatmap, AGT decisions over time with color-coded allow/deny/approval/rate-limit, bundle health matrix. |
+| Grafana — "Kars — Sandbox Fleet Overview" | `http://localhost:3000/d/kars-fleet` | Simpler 10-panel quick fleet view. |
+| Prometheus | `http://localhost:19091/` | Ad-hoc PromQL — `kars_tokens_total`, `kars_mesh_messages_{sent,received}_total`, `kars_agt_policy_evaluations_total{decision}`, `agentmesh_relay_*`. |
 
-The mesh traffic counters (`azureclaw_mesh_messages_sent_total` / `azureclaw_mesh_messages_received_total`) are emitted by the router and count KNOCK + X3DH + `mesh_send` + 30s heartbeats. They exclude WS Ping/Pong by design — see [`.github/skills/agt-e2e-encryption/SKILL.md`](../../.github/skills/agt-e2e-encryption/SKILL.md) for the full counter semantics. On AKS the same metrics flow via Azure Monitor managed Prometheus (wiring pending).
+The mesh traffic counters (`kars_mesh_messages_sent_total` / `kars_mesh_messages_received_total`) are emitted by the router and count KNOCK + X3DH + `mesh_send` + 30s heartbeats. They exclude WS Ping/Pong by design — see [`.github/skills/agt-e2e-encryption/SKILL.md`](../../.github/skills/agt-e2e-encryption/SKILL.md) for the full counter semantics. On AKS the same metrics flow via Azure Monitor managed Prometheus (wiring pending).
 
 ## Running it yourself
 
-`azureclaw dev` on **local-k8s** brings up the whole stack — controller + sandbox + AGT relay + Headlamp + Prometheus + Grafana — and the exec-brief harness can then be pointed at the running cluster:
+`kars dev` on **local-k8s** brings up the whole stack — controller + sandbox + AGT relay + Headlamp + Prometheus + Grafana — and the exec-brief harness can then be pointed at the running cluster:
 
 ```bash
 # from repo root
-azureclaw dev --target local-k8s        # ~3-4 min on first run (kube-prometheus-stack image pulls)
+kars dev --target local-k8s        # ~3-4 min on first run (kube-prometheus-stack image pulls)
 # observe at http://localhost:4466/ (Headlamp), http://localhost:3000/ (Grafana)
 
 cd tools/e2e-harness
 SCENARIO=exec-brief PLATFORM=local-k8s ./run.sh
 ```
 
-For **AKS**, prerequisites: an AKS cluster with AzureClaw installed (`make install`), a Telegram bot token, and an Azure AI Foundry project with web-search + code-execute + image-generation enabled. Then:
+For **AKS**, prerequisites: an AKS cluster with Kars installed (`make install`), a Telegram bot token, and an Azure AI Foundry project with web-search + code-execute + image-generation enabled. Then:
 
 ```bash
 cd tools/e2e-harness
@@ -460,5 +460,5 @@ A passing run looks like `9/9 PASS` on stdout and `verify.json` with each check'
 * **[CRD reference](../api/crd-reference.md)** — the schema for every CRD this scenario uses.
 * **[CRD trust model](../security/crd-trust-model.md)** — the threat model and verification proof for the signed CRDs above.
 * **[Architecture](../architecture.md)** — the prose explanation of how the controller, router, and runtime fit together.
-* **[AGT boundary](../architecture/agt-boundary.md)** — what the runtime delegates to the Agent Governance Toolkit and what stays in AzureClaw.
+* **[AGT boundary](../architecture/agt-boundary.md)** — what the runtime delegates to the Agent Governance Toolkit and what stays in Kars.
 * **[Security overview](../security.md)** — the catalog of layered controls this scenario exercises.

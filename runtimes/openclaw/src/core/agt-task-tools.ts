@@ -279,7 +279,7 @@ export const TASK_TOOLS: any[] = [
 /**
  * Returns the tool list visible to a sub-agent's LLM.
  *
- * In GH-token slim modes (`AZURECLAW_PROVIDER=github-models` or
+ * In GH-token slim modes (`KARS_PROVIDER=github-models` or
  * `github-copilot`), Foundry-only tools (foundry_web_search,
  * foundry_code_execute, foundry_file_search, foundry_memory,
  * foundry_image_generation, foundry_download_file) are hidden because the
@@ -288,7 +288,7 @@ export const TASK_TOOLS: any[] = [
  * that will 404. A DuckDuckGo-backed `web_search` tool is appended so the
  * model still has live web access.
  *
- * **Strict mode** (`AZURECLAW_STRICT_TOOLS=1`): adds `strict: true` +
+ * **Strict mode** (`KARS_STRICT_TOOLS=1`): adds `strict: true` +
  * `additionalProperties: false` to tools whose schemas already satisfy the
  * OpenAI strict-mode constraints (all params required, no free-form objects).
  * This makes the model's outer tool-call arguments JSON grammar-constrained
@@ -438,7 +438,7 @@ function applyStrict(tool: any): any {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getTaskTools(): any[] {
-  const provider = process.env.AZURECLAW_PROVIDER;
+  const provider = process.env.KARS_PROVIDER;
   const slim = provider === "github-models" || provider === "github-copilot";
   // Strict mode is opt-in (env-flag) AND only applied on the Foundry path
   // because slim-mode providers vary in strict-schema support.
@@ -448,10 +448,10 @@ export function getTaskTools(): any[] {
   // shim do NOT implement strict and the shim's behaviour is version-
   // dependent (silent ignore vs schema reject). Default to off for anything
   // outside the GPT family.
-  const model = (process.env.AZURECLAW_MODEL || process.env.OPENCLAW_MODEL || process.env.OPENAI_MODEL || "").toLowerCase();
+  const model = (process.env.KARS_MODEL || process.env.OPENCLAW_MODEL || process.env.OPENAI_MODEL || "").toLowerCase();
   const STRICT_MODEL_RE = /^(gpt-4o|gpt-4\.1|gpt-5|o1|o3|o4)/;
   const modelOk = STRICT_MODEL_RE.test(model);
-  const strict = !slim && modelOk && process.env.AZURECLAW_STRICT_TOOLS === "1";
+  const strict = !slim && modelOk && process.env.KARS_STRICT_TOOLS === "1";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const maybeStrict = (t: any) => (strict ? applyStrict(t) : t);
 

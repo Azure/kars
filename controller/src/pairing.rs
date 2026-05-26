@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! ClawPairing Custom Resource Definition.
+//! KarsPairing Custom Resource Definition.
 //!
 //! Represents a trust relationship between an external OpenClaw agent and this
-//! AzureClaw cluster. Admin generates a one-time pairing token; the external
+//! Kars cluster. Admin generates a one-time pairing token; the external
 //! agent presents it to bind their mesh identity (AMID) to the cluster.
 //!
 //! Two offload modes are supported:
@@ -16,14 +16,14 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// ClawPairing spec — declares the desired pairing configuration.
+/// KarsPairing spec — declares the desired pairing configuration.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
-    group = "azureclaw.azure.com",
+    group = "kars.azure.com",
     version = "v1alpha1",
-    kind = "ClawPairing",
+    kind = "KarsPairing",
     namespaced,
-    status = "ClawPairingStatus",
+    status = "KarsPairingStatus",
     shortname = "cp",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"AMID","type":"string","jsonPath":".status.boundAmid"}"#,
@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
-pub struct ClawPairingSpec {
+pub struct KarsPairingSpec {
     /// SHA-256 hash of the pairing token secret (hex-encoded).
     /// The plaintext token is never stored — only the hash for verification.
     pub token_hash: String,
@@ -62,10 +62,10 @@ pub struct ClawPairingSpec {
     pub isolation: Option<String>,
 }
 
-/// ClawPairing status — reflects the current observed state.
+/// KarsPairing status — reflects the current observed state.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ClawPairingStatus {
+pub struct KarsPairingStatus {
     /// PendingPairing | Active | Expired | Revoked
     pub phase: Option<String>,
 
@@ -132,7 +132,7 @@ pub mod phase {
     pub const REVOKED: &str = "Revoked";
 }
 
-/// Release one offload slot on whichever `ClawPairing` is bound to the
+/// Release one offload slot on whichever `KarsPairing` is bound to the
 /// given external requester AMID.
 ///
 /// Looks up the pairing by `status.boundAmid`, decrements `slotsUsed`
@@ -144,7 +144,7 @@ pub async fn release_offload_slot(client: kube::Client, requester: &str, sandbox
         Api, ResourceExt,
         api::{ListParams, Patch, PatchParams},
     };
-    let pairings_api: Api<ClawPairing> =
+    let pairings_api: Api<KarsPairing> =
         Api::namespaced(client, crate::mesh_peer::IDENTITY_NAMESPACE);
     let Ok(list) = pairings_api.list(&ListParams::default()).await else {
         return;
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn default_slots_is_one() {
-        let spec: ClawPairingSpec = serde_json::from_value(serde_json::json!({
+        let spec: KarsPairingSpec = serde_json::from_value(serde_json::json!({
             "tokenHash": "abc123",
             "expiresAt": "2026-07-14T00:00:00Z"
         }))
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn default_token_budget_is_500k() {
-        let spec: ClawPairingSpec = serde_json::from_value(serde_json::json!({
+        let spec: KarsPairingSpec = serde_json::from_value(serde_json::json!({
             "tokenHash": "abc123",
             "expiresAt": "2026-07-14T00:00:00Z"
         }))
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn default_capabilities_include_both_modes() {
-        let spec: ClawPairingSpec = serde_json::from_value(serde_json::json!({
+        let spec: KarsPairingSpec = serde_json::from_value(serde_json::json!({
             "tokenHash": "abc123",
             "expiresAt": "2026-07-14T00:00:00Z"
         }))
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn status_defaults_empty() {
-        let status = ClawPairingStatus::default();
+        let status = KarsPairingStatus::default();
         assert!(status.phase.is_none());
         assert!(status.bound_amid.is_none());
         assert!(status.paired_at.is_none());
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn custom_budget_and_slots() {
-        let spec: ClawPairingSpec = serde_json::from_value(serde_json::json!({
+        let spec: KarsPairingSpec = serde_json::from_value(serde_json::json!({
             "tokenHash": "abc123",
             "expiresAt": "2026-07-14T00:00:00Z",
             "slotsMax": 3,
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn display_name_is_optional() {
-        let spec: ClawPairingSpec = serde_json::from_value(serde_json::json!({
+        let spec: KarsPairingSpec = serde_json::from_value(serde_json::json!({
             "tokenHash": "abc123",
             "expiresAt": "2026-07-14T00:00:00Z"
         }))

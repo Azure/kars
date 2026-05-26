@@ -190,7 +190,7 @@ describe("federation protocol roundtrip", () => {
     });
 
     // Boundary guard: cloud-offload uses its own wire protocol
-    // (`OffloadRequestMessage` → controller → ClawSandbox CRD, built directly
+    // (`OffloadRequestMessage` → controller → KarsSandbox CRD, built directly
     // in `controller/src/mesh_peer.rs::handle_offload_request`). It does
     // *not* go through the router's `POST /sandbox/spawn` endpoint or
     // `SpawnRequest` struct, which is why the q4 rename of

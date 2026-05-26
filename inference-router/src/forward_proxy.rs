@@ -283,7 +283,7 @@ async fn handle_connect(
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
         tracing::warn!(domain = %log_dom, reason = %reason, "CONNECT blocked");
         blocked_egress.record(sandbox, &domain, port);
-        send_response(&mut stream, 403, "Blocked by AzureClaw egress policy").await?;
+        send_response(&mut stream, 403, "Blocked by Kars egress policy").await?;
         return Ok(());
     }
 
@@ -365,7 +365,7 @@ async fn handle_http(
         tracing::warn!(domain = %log_dom, reason = %reason, "HTTP blocked");
         let (_h, p) = parse_host_port(&domain, 80);
         blocked_egress.record(sandbox, &domain, p);
-        send_response(&mut stream, 403, "Blocked by AzureClaw egress policy").await?;
+        send_response(&mut stream, 403, "Blocked by Kars egress policy").await?;
         return Ok(());
     }
 

@@ -14,11 +14,11 @@ pub mod phase;
 pub mod router_confirmation;
 pub mod router_confirmation_io;
 
-use crate::crd::ClawSandbox;
+use crate::crd::KarsSandbox;
 use kube::ResourceExt;
 use serde_json::{Value, json};
 
-/// Build the `status` patch for a `ClawSandbox` that has reached the
+/// Build the `status` patch for a `KarsSandbox` that has reached the
 /// Running phase. Includes `observedGeneration` (per KEP-1623 status
 /// semantics) and a Ready=True condition whose `lastTransitionTime` is
 /// preserved across same-status reconciles.
@@ -38,13 +38,13 @@ use serde_json::{Value, json};
 /// foundryAgentId preservation) that are easy to get subtly wrong.
 /// Centralising the logic keeps reconcile bodies focused on side-effects
 /// and gives us one place to unit-test the wire shape.
-/// Build the `status` patch for a `ClawSandbox` that has reached the
+/// Build the `status` patch for a `KarsSandbox` that has reached the
 /// Running phase. See [`build_running_status_patch_with_extras`] for
 /// the additive variant; this convenience wrapper passes no extras and
 /// matches the pre-S12.b call-site shape used in unit tests.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn build_running_status_patch(
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     sandbox_ns: &str,
     runtime_kind: &str,
 ) -> Value {
@@ -60,7 +60,7 @@ pub fn build_running_status_patch(
 /// safely pass the freshly-computed condition without de-duplicating
 /// against the standard set above.
 pub fn build_running_status_patch_with_extras(
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     sandbox_ns: &str,
     runtime_kind: &str,
     extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
@@ -118,7 +118,7 @@ pub fn build_running_status_patch_with_extras(
             "phase": "Running",
             "namespace": sandbox_ns,
             "sandboxPod": format!("{name}-*"),
-            "inferenceEndpoint": "https://azureclaw-inference-router.azureclaw-system.svc.cluster.local:8443",
+            "inferenceEndpoint": "https://kars-inference-router.kars-system.svc.cluster.local:8443",
             "observedGeneration": generation,
             "runtimeKind": runtime_kind,
             "conditions": conditions_vec,
@@ -153,7 +153,7 @@ pub fn build_running_status_patch_with_extras(
 /// `tokensUsed` updater) may differ — those would not be touched by our
 /// merge patch anyway.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, runtime_kind: &str) -> bool {
+pub fn running_status_matches(sandbox: &KarsSandbox, sandbox_ns: &str, runtime_kind: &str) -> bool {
     running_status_matches_with_extras(sandbox, sandbox_ns, runtime_kind, &[])
 }
 
@@ -165,7 +165,7 @@ pub fn running_status_matches(sandbox: &ClawSandbox, sandbox_ns: &str, runtime_k
 /// Condition stable across same-result reconciles without churning
 /// `resourceVersion`.
 pub fn running_status_matches_with_extras(
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     sandbox_ns: &str,
     runtime_kind: &str,
     extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
@@ -235,9 +235,9 @@ pub fn running_status_matches_with_extras(
     true
 }
 
-/// Build the `status` patch for a `ClawSandbox` running in
+/// Build the `status` patch for a `KarsSandbox` running in
 /// **`OverlayMode`** (Phase 2 S8). In this mode the operator's upstream
-/// `Sandbox` CR owns the Pod lifecycle; AzureClaw skipped Deployment +
+/// `Sandbox` CR owns the Pod lifecycle; Kars skipped Deployment +
 /// Service creation and only laid down the overlay (namespace, SA with
 /// Workload-Identity binding, NetworkPolicy, governance ConfigMaps).
 ///
@@ -245,18 +245,18 @@ pub fn running_status_matches_with_extras(
 /// - `phase: "Overlay"` — distinct from `Running` so dashboards can
 ///   surface "this CR is intentionally not driving a Pod".
 /// - `Ready=True, Reason=OverlayMode` — overlay reconciled cleanly
-///   from AzureClaw's perspective; `kubectl wait --for=condition=Ready`
+///   from Kars's perspective; `kubectl wait --for=condition=Ready`
 ///   still works.
-/// - `Progressing=False, Reason=OverlayMode` — no further AzureClaw work
+/// - `Progressing=False, Reason=OverlayMode` — no further Kars work
 ///   pending.
 /// - `Suspended=True, Reason=OverlayMode` — explicit signal that we are
 ///   not driving a Pod here (operators querying `Suspended` see why).
 ///
 /// `sandbox_pod` is set to the upstream CR name (with a `upstream/`
-/// prefix so it's unambiguous in `kubectl get clawsandbox`) so operators
-/// can pivot from `kubectl describe clawsandbox` to the upstream object.
+/// prefix so it's unambiguous in `kubectl get karssandbox`) so operators
+/// can pivot from `kubectl describe karssandbox` to the upstream object.
 pub fn build_overlay_status_patch(
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     sandbox_ns: &str,
     upstream_ref: &str,
     runtime_kind: &str,
@@ -291,7 +291,7 @@ pub fn build_overlay_status_patch(
         &format!("Pod owned by upstream Sandbox CR `{upstream_ref}`"),
         generation,
     );
-    // In overlay mode, AzureClaw doesn't drive the Pod; the runtime
+    // In overlay mode, Kars doesn't drive the Pod; the runtime
     // adapter is therefore not stamped True (we have not deployed it),
     // but we still record `runtimeKind` so the printer column matches the
     // user's intent and we surface a `RuntimeReady=False/OverlayMode`
@@ -302,7 +302,7 @@ pub fn build_overlay_status_patch(
         conditions::TYPE_RUNTIME_READY,
         conditions::status::FALSE,
         conditions::reason::OVERLAY_MODE,
-        &format!("runtime `{runtime_kind}` not driven by AzureClaw in overlay mode"),
+        &format!("runtime `{runtime_kind}` not driven by Kars in overlay mode"),
         generation,
     );
     json!({
@@ -323,7 +323,7 @@ pub fn build_overlay_status_patch(
 /// [`running_status_matches`].
 #[must_use]
 pub fn overlay_status_matches(
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     sandbox_ns: &str,
     upstream_ref: &str,
     runtime_kind: &str,
@@ -370,7 +370,7 @@ pub fn overlay_status_matches(
 /// that hasn't seen the CR yet. KEP-1623 §Conditions explicitly calls
 /// this out as a bug.
 pub fn build_degraded_status_patch(
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     reason_value: &'static str,
     message: &str,
 ) -> Value {
@@ -425,7 +425,7 @@ pub fn build_degraded_status_patch(
 /// originally-intended `Action`.
 pub async fn stamp_degraded(
     client: &kube::Client,
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     name: &str,
     reason_value: &'static str,
     message: &str,
@@ -434,7 +434,7 @@ pub async fn stamp_degraded(
         Api, ResourceExt,
         api::{Patch, PatchParams},
     };
-    let sandbox_api: Api<ClawSandbox> =
+    let sandbox_api: Api<KarsSandbox> =
         Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
     let patch = build_degraded_status_patch(sandbox, reason_value, message);
     if let Err(e) = sandbox_api
@@ -445,7 +445,7 @@ pub async fn stamp_degraded(
     }
 }
 
-/// Build the `status` patch for a `ClawSandbox` whose `spec.runtime.kind`
+/// Build the `status` patch for a `KarsSandbox` whose `spec.runtime.kind`
 /// has no controller-side adapter wired (S10.A1: `OpenAIAgents` /
 /// `MicrosoftAgentFramework` / `BYO`). Stamps:
 /// - `phase: Degraded`
@@ -458,7 +458,7 @@ pub async fn stamp_degraded(
 /// `ctx.sandbox_image` (the OpenClaw image) for these kinds would
 /// silently run the wrong runtime; the controller refuses instead.
 pub fn build_runtime_unsupported_status_patch(
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     runtime_kind: &str,
     message: &str,
 ) -> Value {
@@ -514,7 +514,7 @@ pub fn build_runtime_unsupported_status_patch(
 
 /// Idempotency guard for [`build_runtime_unsupported_status_patch`].
 #[must_use]
-pub fn runtime_unsupported_status_matches(sandbox: &ClawSandbox, runtime_kind: &str) -> bool {
+pub fn runtime_unsupported_status_matches(sandbox: &KarsSandbox, runtime_kind: &str) -> bool {
     use crate::status::conditions::{
         TYPE_DEGRADED, TYPE_PROGRESSING, TYPE_READY, TYPE_RUNTIME_READY,
         reason::ADAPTER_MISSING,
@@ -564,7 +564,7 @@ pub fn runtime_unsupported_status_matches(sandbox: &ClawSandbox, runtime_kind: &
 /// but non-fatal so the reconciler can still return the requeue action.
 pub async fn stamp_runtime_unsupported(
     client: &kube::Client,
-    sandbox: &ClawSandbox,
+    sandbox: &KarsSandbox,
     name: &str,
     runtime_kind: &str,
     message: &str,
@@ -576,7 +576,7 @@ pub async fn stamp_runtime_unsupported(
     if runtime_unsupported_status_matches(sandbox, runtime_kind) {
         return;
     }
-    let sandbox_api: Api<ClawSandbox> =
+    let sandbox_api: Api<KarsSandbox> =
         Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
     let patch = build_runtime_unsupported_status_patch(sandbox, runtime_kind, message);
     if let Err(e) = sandbox_api
@@ -590,18 +590,18 @@ pub async fn stamp_runtime_unsupported(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{ClawSandbox, ClawSandboxSpec, ClawSandboxStatus};
+    use crate::crd::{KarsSandbox, KarsSandboxSpec, KarsSandboxStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-    fn new_sandbox(generation: Option<i64>, status: Option<ClawSandboxStatus>) -> ClawSandbox {
-        ClawSandbox {
+    fn new_sandbox(generation: Option<i64>, status: Option<KarsSandboxStatus>) -> KarsSandbox {
+        KarsSandbox {
             metadata: ObjectMeta {
                 name: Some("demo".into()),
-                namespace: Some("azureclaw-demo".into()),
+                namespace: Some("kars-demo".into()),
                 generation,
                 ..Default::default()
             },
-            spec: ClawSandboxSpec::default(),
+            spec: KarsSandboxSpec::default(),
             status,
         }
     }
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn running_patch_emits_generation_and_ready_condition() {
         let sb = new_sandbox(Some(7), None);
-        let patch = build_running_status_patch(&sb, "azureclaw-demo", "OpenClaw");
+        let patch = build_running_status_patch(&sb, "kars-demo", "OpenClaw");
         let st = &patch["status"];
         assert_eq!(st["phase"], "Running");
         assert_eq!(st["observedGeneration"], 7);
@@ -648,12 +648,12 @@ mod tests {
 
     #[test]
     fn running_patch_preserves_foundry_agent_id() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             foundry_agent_id: Some("asst-abc".into()),
             ..Default::default()
         };
         let sb = new_sandbox(Some(3), Some(prior));
-        let patch = build_running_status_patch(&sb, "azureclaw-demo", "OpenClaw");
+        let patch = build_running_status_patch(&sb, "kars-demo", "OpenClaw");
         assert_eq!(patch["status"]["foundryAgentId"], "asst-abc");
     }
 
@@ -667,13 +667,13 @@ mod tests {
             Some(1),
         );
         let prior_ts = existing_ready.last_transition_time.clone();
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             conditions: vec![existing_ready],
             ..Default::default()
         };
         std::thread::sleep(std::time::Duration::from_millis(5));
         let sb = new_sandbox(Some(2), Some(prior));
-        let patch = build_running_status_patch(&sb, "azureclaw-demo", "OpenClaw");
+        let patch = build_running_status_patch(&sb, "kars-demo", "OpenClaw");
         let emitted_ts = patch["status"]["conditions"][0]["lastTransitionTime"]
             .as_str()
             .expect("timestamp must be stringified");
@@ -685,21 +685,21 @@ mod tests {
     #[test]
     fn running_patch_emits_null_observed_generation_when_metadata_missing() {
         let sb = new_sandbox(None, None);
-        let patch = build_running_status_patch(&sb, "azureclaw-demo", "OpenClaw");
+        let patch = build_running_status_patch(&sb, "kars-demo", "OpenClaw");
         assert!(patch["status"]["observedGeneration"].is_null());
     }
 
     #[test]
     fn running_status_matches_returns_false_when_status_missing() {
         let sb = new_sandbox(Some(1), None);
-        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
+        assert!(!running_status_matches(&sb, "kars-demo", "OpenClaw"));
     }
 
     #[test]
     fn running_status_matches_returns_false_when_phase_differs() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Pending".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             conditions: vec![conditions::new_condition(
                 conditions::TYPE_READY,
@@ -711,14 +711,14 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
+        assert!(!running_status_matches(&sb, "kars-demo", "OpenClaw"));
     }
 
     #[test]
     fn running_status_matches_returns_false_when_namespace_differs() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Running".into()),
-            namespace: Some("azureclaw-other".into()),
+            namespace: Some("kars-other".into()),
             observed_generation: Some(1),
             conditions: vec![conditions::new_condition(
                 conditions::TYPE_READY,
@@ -730,14 +730,14 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
+        assert!(!running_status_matches(&sb, "kars-demo", "OpenClaw"));
     }
 
     #[test]
     fn running_status_matches_returns_false_when_generation_stale() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Running".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             conditions: vec![conditions::new_condition(
                 conditions::TYPE_READY,
@@ -749,14 +749,14 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(2), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
+        assert!(!running_status_matches(&sb, "kars-demo", "OpenClaw"));
     }
 
     #[test]
     fn running_status_matches_returns_false_when_ready_false() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Running".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             conditions: vec![conditions::new_condition(
                 conditions::TYPE_READY,
@@ -768,14 +768,14 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
+        assert!(!running_status_matches(&sb, "kars-demo", "OpenClaw"));
     }
 
     #[test]
     fn running_status_matches_returns_true_for_settled_status() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Running".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             runtime_kind: Some("OpenClaw".into()),
             conditions: vec![
@@ -804,7 +804,7 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
+        assert!(running_status_matches(&sb, "kars-demo", "OpenClaw"));
     }
 
     #[test]
@@ -814,9 +814,9 @@ mod tests {
         // upgrade, that prior shape must be considered stale so the
         // first reconcile back-fills the new Progressing condition
         // instead of being short-circuited as a no-op.
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Running".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             runtime_kind: Some("OpenClaw".into()),
             conditions: vec![
@@ -838,7 +838,7 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!running_status_matches(&sb, "azureclaw-demo", "OpenClaw"));
+        assert!(!running_status_matches(&sb, "kars-demo", "OpenClaw"));
     }
 
     #[test]
@@ -887,7 +887,7 @@ mod tests {
             Some(1),
         );
         let prior_ts = prior_degraded.last_transition_time.clone();
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             conditions: vec![prior_degraded],
             ..Default::default()
         };
@@ -923,10 +923,10 @@ mod tests {
     #[test]
     fn overlay_patch_emits_overlay_phase_and_three_conditions() {
         let sb = new_sandbox(Some(4), None);
-        let patch = build_overlay_status_patch(&sb, "azureclaw-demo", "upstream-1", "OpenClaw");
+        let patch = build_overlay_status_patch(&sb, "kars-demo", "upstream-1", "OpenClaw");
         let st = &patch["status"];
         assert_eq!(st["phase"], "Overlay");
-        assert_eq!(st["namespace"], "azureclaw-demo");
+        assert_eq!(st["namespace"], "kars-demo");
         assert_eq!(st["sandboxPod"], "upstream/upstream-1");
         assert_eq!(st["observedGeneration"], 4);
         assert_eq!(st["runtimeKind"], "OpenClaw");
@@ -969,19 +969,14 @@ mod tests {
     #[test]
     fn overlay_status_matches_rejects_when_status_missing() {
         let sb = new_sandbox(Some(1), None);
-        assert!(!overlay_status_matches(
-            &sb,
-            "azureclaw-demo",
-            "u1",
-            "OpenClaw"
-        ));
+        assert!(!overlay_status_matches(&sb, "kars-demo", "u1", "OpenClaw"));
     }
 
     #[test]
     fn overlay_status_matches_rejects_when_phase_is_running() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Running".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             sandbox_pod: Some("upstream/u1".into()),
             conditions: vec![conditions::new_condition(
@@ -994,19 +989,14 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(!overlay_status_matches(
-            &sb,
-            "azureclaw-demo",
-            "u1",
-            "OpenClaw"
-        ));
+        assert!(!overlay_status_matches(&sb, "kars-demo", "u1", "OpenClaw"));
     }
 
     #[test]
     fn overlay_status_matches_rejects_when_upstream_ref_differs() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Overlay".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             sandbox_pod: Some("upstream/old-name".into()),
             conditions: vec![conditions::new_condition(
@@ -1021,7 +1011,7 @@ mod tests {
         let sb = new_sandbox(Some(1), Some(prior));
         assert!(!overlay_status_matches(
             &sb,
-            "azureclaw-demo",
+            "kars-demo",
             "new-name",
             "OpenClaw"
         ));
@@ -1029,9 +1019,9 @@ mod tests {
 
     #[test]
     fn overlay_status_matches_rejects_when_generation_stale() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Overlay".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             sandbox_pod: Some("upstream/u1".into()),
             conditions: vec![conditions::new_condition(
@@ -1044,19 +1034,14 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(2), Some(prior));
-        assert!(!overlay_status_matches(
-            &sb,
-            "azureclaw-demo",
-            "u1",
-            "OpenClaw"
-        ));
+        assert!(!overlay_status_matches(&sb, "kars-demo", "u1", "OpenClaw"));
     }
 
     #[test]
     fn overlay_status_matches_returns_true_for_settled_overlay_status() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Overlay".into()),
-            namespace: Some("azureclaw-demo".into()),
+            namespace: Some("kars-demo".into()),
             observed_generation: Some(1),
             sandbox_pod: Some("upstream/u1".into()),
             runtime_kind: Some("OpenClaw".into()),
@@ -1070,12 +1055,7 @@ mod tests {
             ..Default::default()
         };
         let sb = new_sandbox(Some(1), Some(prior));
-        assert!(overlay_status_matches(
-            &sb,
-            "azureclaw-demo",
-            "u1",
-            "OpenClaw"
-        ));
+        assert!(overlay_status_matches(&sb, "kars-demo", "u1", "OpenClaw"));
     }
 
     #[test]
@@ -1088,13 +1068,13 @@ mod tests {
             Some(1),
         );
         let prior_ts = existing_ready.last_transition_time.clone();
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             conditions: vec![existing_ready],
             ..Default::default()
         };
         std::thread::sleep(std::time::Duration::from_millis(5));
         let sb = new_sandbox(Some(2), Some(prior));
-        let patch = build_overlay_status_patch(&sb, "azureclaw-demo", "u1", "OpenClaw");
+        let patch = build_overlay_status_patch(&sb, "kars-demo", "u1", "OpenClaw");
         let ready = patch["status"]["conditions"]
             .as_array()
             .unwrap()
@@ -1160,7 +1140,7 @@ mod tests {
 
     #[test]
     fn runtime_unsupported_status_matches_rejects_when_runtime_kind_differs() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Degraded".into()),
             observed_generation: Some(1),
             runtime_kind: Some("MicrosoftAgentFramework".into()),
@@ -1195,7 +1175,7 @@ mod tests {
 
     #[test]
     fn runtime_unsupported_status_matches_returns_true_for_settled_status() {
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             phase: Some("Degraded".into()),
             observed_generation: Some(1),
             runtime_kind: Some("OpenAIAgents".into()),
@@ -1245,7 +1225,7 @@ mod tests {
             Some(1),
         );
         let prior_ts = prior_degraded.last_transition_time.clone();
-        let prior = ClawSandboxStatus {
+        let prior = KarsSandboxStatus {
             conditions: vec![prior_degraded],
             ..Default::default()
         };

@@ -1,15 +1,15 @@
-# AzureClaw Example: Confidential Agent
+# Kars Example: Confidential Agent
 # Uses Kata VM isolation for per-pod dedicated kernel.
 # Container escape attacks are trapped inside the VM, not the host.
 
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: confidential-assistant-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: confidential-assistant
+    kars.azure.com/sandbox: confidential-assistant
 spec:
   appliesTo:
     sandboxName: confidential-assistant
@@ -23,17 +23,17 @@ spec:
     dailyTokens: 1000000
     perRequestTokens: 128000
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: confidential-assistant
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: OpenClaw
     openclaw:
       # Image and version intentionally unset: the controller resolves
-      # the sandbox image from its SANDBOX_IMAGE env (set by `azureclaw
+      # the sandbox image from its SANDBOX_IMAGE env (set by `kars
       # up`). Pinning a registry path here breaks the example for users
       # who haven't pushed to the same registry.
       config:
@@ -42,7 +42,7 @@ spec:
 
   sandbox:
     isolation: "confidential"        # Kata VM with dedicated kernel
-    seccompProfile: "azureclaw-strict"
+    seccompProfile: "kars-strict"
     readOnlyRootFilesystem: true
     runAsNonRoot: true
     allowPrivilegeEscalation: false

@@ -24,7 +24,7 @@ describe("agent_detail — collectAttachments", () => {
     expect(rows.find((r) => r.name === "ip-b")).toBeUndefined();
   });
 
-  it("filters ClawMemory by sandboxRef", () => {
+  it("filters KarsMemory by sandboxRef", () => {
     const s = emptyClusterState();
     s.clawMemories = [
       { name: "m-a", namespace: "default", conditions: [], sandboxRef: "agent-a", storeName: "ep", scope: "agent:agent-a" },
@@ -34,7 +34,7 @@ describe("agent_detail — collectAttachments", () => {
     expect(rows.map((r) => r.name)).toEqual(["m-a"]);
   });
 
-  it("filters ClawEval by sandboxRef", () => {
+  it("filters KarsEval by sandboxRef", () => {
     const s = emptyClusterState();
     s.clawEvals = [
       { name: "e-a", namespace: "default", conditions: [], sandboxRef: "agent-a", suite: "smoke" },
@@ -111,7 +111,7 @@ describe("agent_detail — autoDefaults", () => {
 });
 
 describe("agent_detail — ATTACH_CHOICES wiring", () => {
-  it("each choice has an azureclaw subcommand mapping", () => {
+  it("each choice has an kars subcommand mapping", () => {
     const cmds = ATTACH_CHOICES.map((c) => c.cmd).sort();
     expect(cmds).toEqual(["a2a", "inferencepolicy", "mcp", "memory", "toolpolicy"]);
   });

@@ -23,7 +23,7 @@
 //!   audit persistence failing must not deny in-flight requests. The
 //!   in-memory chain remains the authoritative short-term log.
 //! - **Sandbox name is denormalised.** Every record carries `sandbox` so
-//!   `azureclaw audit tail` can multiplex multi-sandbox forensic queries
+//!   `kars audit tail` can multiplex multi-sandbox forensic queries
 //!   without parsing the file path.
 //!
 //! ## Why not a tokio task?
@@ -127,7 +127,7 @@ impl JsonlAuditWriter {
     }
 
     /// Resolve the on-disk path for a given date key. Exposed for tests
-    /// and the `azureclaw audit tail` CLI (Slice 4b) which needs to
+    /// and the `kars audit tail` CLI (Slice 4b) which needs to
     /// enumerate the directory.
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -173,7 +173,7 @@ mod tests {
     fn tmp_dir(label: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "azureclaw-jsonl-{label}-{}-{}",
+            "kars-jsonl-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

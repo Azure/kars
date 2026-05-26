@@ -28,10 +28,10 @@
 //! 1. Resolves the allowlist via the existing
 //!    [`crate::policy_fetcher::resolve_allowlist`] (same verify path).
 //! 2. Compiles it to `allowlist.json` via [`compile_to_doc`] here.
-//! 3. Publishes as `ConfigMap` `clawsandbox-{name}-egress-allowlist`
-//!    with annotation `azureclaw.azure.com/egress-allowlist-digest`.
+//! 3. Publishes as `ConfigMap` `karssandbox-{name}-egress-allowlist`
+//!    with annotation `kars.azure.com/egress-allowlist-digest`.
 //! 4. Mounts into the inference-router container at
-//!    `/etc/azureclaw/egress/allowlist.json`.
+//!    `/etc/kars/egress/allowlist.json`.
 //!
 //! The router-side loader (`egress_allowlist_loader.rs`) reads the
 //! mount, replaces its in-memory allowlist atomically, and registers
@@ -56,7 +56,7 @@ use sha2::{Digest, Sha256};
 use crate::crd::EndpointConfig;
 
 /// Canonical filename the controller writes into the
-/// `clawsandbox-{name}-egress-allowlist` ConfigMap. Kept in lockstep
+/// `karssandbox-{name}-egress-allowlist` ConfigMap. Kept in lockstep
 /// with the router-side
 /// `inference_router::egress_allowlist_loader::EGRESS_ALLOWLIST_FILENAME`
 /// — the byte layout of [`canonical_bytes_for_digest`] includes this
@@ -117,8 +117,8 @@ pub fn compile_to_doc(endpoints: &[EndpointConfig]) -> Value {
 ///
 /// Matches the router-side
 /// `egress_allowlist_loader::canonical_bytes_for_digest`. Identical
-/// helper-by-helper to `claw_memory_compile::canonical_bytes_for_digest`
-/// — the layout is a project-wide convention for `/etc/azureclaw/*`
+/// helper-by-helper to `kars_memory_compile::canonical_bytes_for_digest`
+/// — the layout is a project-wide convention for `/etc/kars/*`
 /// mounts that closes the §3 echo loop.
 #[must_use]
 pub fn canonical_bytes_for_digest(filename: &str, body: &[u8]) -> Vec<u8> {
@@ -135,7 +135,7 @@ pub fn canonical_bytes_for_digest(filename: &str, body: &[u8]) -> Vec<u8> {
 /// [`canonical_bytes_for_digest`]) for the supplied compiled
 /// `allowlist.json` body. This is the digest the sandbox
 /// reconciler stamps in the ConfigMap annotation
-/// `azureclaw.azure.com/egress-allowlist-digest`. The router echoes
+/// `kars.azure.com/egress-allowlist-digest`. The router echoes
 /// the same value via `GET /internal/policy-status` once it loads
 /// the file.
 ///

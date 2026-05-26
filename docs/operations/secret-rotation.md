@@ -1,8 +1,8 @@
 # Secret Rotation Runbook
 
-This runbook covers rotation of every secret AzureClaw materialises: per-sandbox credentials, TLS certs, AgentMesh identities, and Azure-side credentials. Rotation never requires recompiling the controller or router.
+This runbook covers rotation of every secret Kars materialises: per-sandbox credentials, TLS certs, AgentMesh identities, and Azure-side credentials. Rotation never requires recompiling the controller or router.
 
-> **Scope.** Production AKS clusters running AzureClaw `v1alpha1`. Local `azureclaw dev` stacks rotate by deleting the ephemeral cluster.
+> **Scope.** Production AKS clusters running Kars `v1alpha1`. Local `kars dev` stacks rotate by deleting the ephemeral cluster.
 
 ---
 
@@ -10,13 +10,13 @@ This runbook covers rotation of every secret AzureClaw materialises: per-sandbox
 
 | Secret | Where it lives | Owner | Rotation cadence |
 |---|---|---|---|
-| Sandbox channel/plugin credentials | K8s `Secret` `<name>-credentials` in `azureclaw-<name>` | Tenant operator | On token issuance / leak |
+| Sandbox channel/plugin credentials | K8s `Secret` `<name>-credentials` in `kars-<name>` | Tenant operator | On token issuance / leak |
 | Inference Router TLS cert | cert-manager `Certificate` (chart default) or external SecretStoreCSI | Cluster admin | 90 days (cert-manager auto) |
 | AgentMesh identity (Ed25519 + X25519) | Sandbox in-memory; prekey bundle in registry | Per-sandbox, ephemeral | On each sandbox roll |
 | Foundry / Azure RBAC | Workload Identity federated credential | Cluster admin | When the project changes |
 | Cosign signing key (if static-key signing is enabled) | Azure Key Vault | Release engineer | 180 days |
 | Webhook signing keys (admission webhook) | cert-manager-managed | Cluster admin | 90 days |
-| `azureclaw up` operator AAD client (if used) | Azure Key Vault → Helm value | Cluster admin | 90 days |
+| `kars up` operator AAD client (if used) | Azure Key Vault → Helm value | Cluster admin | 90 days |
 
 ---
 
@@ -25,8 +25,8 @@ This runbook covers rotation of every secret AzureClaw materialises: per-sandbox
 Update a single channel/plugin secret without restarting the sandbox:
 
 ```bash
-azureclaw credentials update <name> --telegram-token <new-token>
-azureclaw credentials update <name> --brave-key      <new-key>
+kars credentials update <name> --telegram-token <new-token>
+kars credentials update <name> --brave-key      <new-key>
 ```
 
 The CLI patches the `Secret` and triggers a rolling restart of the sandbox `Deployment`. Pods read the new value via `envFrom` (`optional: true` so the rollout is non-blocking even if the secret is briefly missing).
@@ -34,8 +34,8 @@ The CLI patches the `Secret` and triggers a rolling restart of the sandbox `Depl
 Verification:
 
 ```bash
-kubectl -n azureclaw-<name> rollout status deploy/<name>
-kubectl -n azureclaw-<name> exec deploy/<name> -c openclaw -- env | grep <CREDENTIAL_PREFIX>
+kubectl -n kars-<name> rollout status deploy/<name>
+kubectl -n kars-<name> exec deploy/<name> -c openclaw -- env | grep <CREDENTIAL_PREFIX>
 ```
 
 If the sandbox has multiple channels/plugins, run `update` for each — the CLI is idempotent.
@@ -47,7 +47,7 @@ If the sandbox has multiple channels/plugins, run `update` for each — the CLI 
 cert-manager handles automatic rotation. To force a manual rotation:
 
 ```bash
-kubectl -n cert-manager annotate certificate azureclaw-router-tls \
+kubectl -n cert-manager annotate certificate kars-router-tls \
     cert-manager.io/issue-temporary-certificate=true --overwrite
 ```
 
@@ -60,7 +60,7 @@ The controller picks up the renewed `Secret` automatically (no restart needed); 
 Identities are ephemeral per sandbox. To rotate:
 
 ```bash
-kubectl -n azureclaw-<name> rollout restart deploy/<name>
+kubectl -n kars-<name> rollout restart deploy/<name>
 ```
 
 This causes the sandbox to:
@@ -78,11 +78,11 @@ Use the federated-credential model (default), not static client secrets. To rota
 
 ```bash
 az identity federated-credential update \
-    --name azureclaw-controller \
+    --name kars-controller \
     --identity-name <controller-uami> \
     --resource-group <rg> \
     --issuer https://<aks-oidc-issuer>/ \
-    --subject system:serviceaccount:azureclaw-system:azureclaw-controller
+    --subject system:serviceaccount:kars-system:kars-controller
 ```
 
 Static-secret rotation (deprecated path):
@@ -90,9 +90,9 @@ Static-secret rotation (deprecated path):
 ```bash
 az ad sp credential reset --id <appId> --years 1
 # update K8s secret
-kubectl -n azureclaw-system create secret generic azureclaw-azure-creds \
+kubectl -n kars-system create secret generic kars-azure-creds \
   --from-literal=clientSecret='<new>' --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n azureclaw-system rollout restart deploy/azureclaw-controller
+kubectl -n kars-system rollout restart deploy/kars-controller
 ```
 
 ---
@@ -102,10 +102,10 @@ kubectl -n azureclaw-system rollout restart deploy/azureclaw-controller
 If `cosign.signing.mode=keyless` (default), nothing to rotate. For static-key signing:
 
 ```bash
-az keyvault key rotate --vault-name <kv> --name azureclaw-cosign
+az keyvault key rotate --vault-name <kv> --name kars-cosign
 # update Helm values to the new key URI
-helm upgrade azureclaw deploy/helm/azureclaw \
-  --set cosign.signing.keyRef=azurekms://<kv>.vault.azure.net/azureclaw-cosign/<new-version>
+helm upgrade kars deploy/helm/kars \
+  --set cosign.signing.keyRef=azurekms://<kv>.vault.azure.net/kars-cosign/<new-version>
 ```
 
 The next image build uses the new key. Old images stay valid until their tag is overwritten.

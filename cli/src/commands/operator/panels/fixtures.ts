@@ -6,13 +6,13 @@
  */
 import type {
   ClusterState,
-  ClawPairingItem,
+  KarsPairingItem,
   McpServerItem,
   ToolPolicyItem,
   InferencePolicyItem,
   A2AAgentItem,
-  ClawMemoryItem,
-  ClawEvalItem,
+  KarsMemoryItem,
+  KarsEvalItem,
   ProviderState,
 } from "./types.js";
 import type { SandboxInfo } from "../types.js";
@@ -21,7 +21,7 @@ import { emptyClusterState } from "./types.js";
 export function fixtureSandbox(name = "sb-1"): SandboxInfo {
   return {
     name,
-    namespace: `azureclaw-${name}`,
+    namespace: `kars-${name}`,
     status: "Running (1/1)",
     health: "healthy",
     model: "gpt-4.1",
@@ -36,10 +36,10 @@ export function fixtureSandbox(name = "sb-1"): SandboxInfo {
   };
 }
 
-export function fixturePairing(): ClawPairingItem {
+export function fixturePairing(): KarsPairingItem {
   return {
     name: "alice-bob",
-    namespace: "azureclaw",
+    namespace: "kars",
     age: "1h",
     agentA: "alice",
     agentB: "bob",
@@ -54,9 +54,9 @@ export function fixturePairing(): ClawPairingItem {
 export function fixtureMcp(): McpServerItem {
   return {
     name: "mcp-fs",
-    namespace: "azureclaw-sb-1",
+    namespace: "kars-sb-1",
     age: "20m",
-    url: "http://mcp-fs.azureclaw-sb-1.svc:8080",
+    url: "http://mcp-fs.kars-sb-1.svc:8080",
     productionMode: true,
     jwksSecretPresent: "present",
     allowedToolCount: 4,
@@ -70,7 +70,7 @@ export function fixtureMcp(): McpServerItem {
 export function fixtureToolPolicy(): ToolPolicyItem {
   return {
     name: "tp-default",
-    namespace: "azureclaw",
+    namespace: "kars",
     age: "2h",
     appliesToSandbox: "sb-1",
     commerce: { mandates: true, floorUsd: 5 },
@@ -85,7 +85,7 @@ export function fixtureToolPolicy(): ToolPolicyItem {
 export function fixtureInferencePolicy(): InferencePolicyItem {
   return {
     name: "ip-default",
-    namespace: "azureclaw",
+    namespace: "kars",
     age: "2h",
     appliesToSandbox: "sb-1",
     dailyTokens: 100_000,
@@ -99,7 +99,7 @@ export function fixtureInferencePolicy(): InferencePolicyItem {
 export function fixtureA2AAgent(): A2AAgentItem {
   return {
     name: "agent-card-1",
-    namespace: "azureclaw-sb-1",
+    namespace: "kars-sb-1",
     age: "10m",
     endpointUrl: "https://example.test/a2a",
     productionMode: true,
@@ -109,10 +109,10 @@ export function fixtureA2AAgent(): A2AAgentItem {
   };
 }
 
-export function fixtureClawMemory(): ClawMemoryItem {
+export function fixtureKarsMemory(): KarsMemoryItem {
   return {
     name: "mem-1",
-    namespace: "azureclaw",
+    namespace: "kars",
     age: "5h",
     sandboxRef: "sb-1",
     storeName: "store-default",
@@ -124,10 +124,10 @@ export function fixtureClawMemory(): ClawMemoryItem {
   };
 }
 
-export function fixtureClawEval(): ClawEvalItem {
+export function fixtureKarsEval(): KarsEvalItem {
   return {
     name: "eval-nightly",
-    namespace: "azureclaw",
+    namespace: "kars",
     age: "1d",
     sandboxRef: "sb-1",
     suite: "rag-quality",
@@ -155,8 +155,8 @@ export function fullFixture(): ClusterState {
   state.toolPolicies = [fixtureToolPolicy()];
   state.inferencePolicies = [fixtureInferencePolicy()];
   state.a2aAgents = [fixtureA2AAgent()];
-  state.clawMemories = [fixtureClawMemory()];
-  state.clawEvals = [fixtureClawEval()];
+  state.clawMemories = [fixtureKarsMemory()];
+  state.clawEvals = [fixtureKarsEval()];
   state.providers.perSandbox.set("sb-1", [
     fixtureProviderHealthy("foundry"),
     fixtureProviderHealthy("agt"),

@@ -1,4 +1,4 @@
-// AzureClaw - Azure Monitor Module
+// Kars - Azure Monitor Module
 
 @description('Resource name prefix')
 param name string

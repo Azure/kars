@@ -18,8 +18,8 @@
 # pulled (large) — fine for a hand-run lab cluster, expensive for Kind.
 #
 # Env:
-#   AZURECLAW_E2E_PEER_A      runtime alias for sandbox A (default openclaw)
-#   AZURECLAW_E2E_PEER_B      runtime alias for sandbox B (default oai-agents)
+#   KARS_E2E_PEER_A      runtime alias for sandbox A (default openclaw)
+#   KARS_E2E_PEER_B      runtime alias for sandbox B (default oai-agents)
 #   MANUAL_E2E_TIMEOUT        per-step wait (default 300)
 
 set -euo pipefail
@@ -34,19 +34,19 @@ source "$LIB_DIR/cr_factory.sh"
 scenario_header "Cross-runtime AgentMesh round-trip"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 require_cli kubectl
 
 if ! kubectl -n agentmesh get deploy relay >/dev/null 2>&1 \
    || ! kubectl -n agentmesh get deploy registry >/dev/null 2>&1; then
-    log_skip "agentmesh relay/registry not installed in 'agentmesh' namespace — install AzureClaw with mesh enabled"
+    log_skip "agentmesh relay/registry not installed in 'agentmesh' namespace — install Kars with mesh enabled"
     scenario_summary "Cross-runtime AgentMesh round-trip"
     exit 0
 fi
 log_info "agentmesh relay + registry detected"
 
-peer_a="${AZURECLAW_E2E_PEER_A:-openclaw}"
-peer_b="${AZURECLAW_E2E_PEER_B:-oai-agents}"
+peer_a="${KARS_E2E_PEER_A:-openclaw}"
+peer_b="${KARS_E2E_PEER_B:-oai-agents}"
 log_info "peer A: ${peer_a}    peer B: ${peer_b}"
 
 name_a="mesh-a-${peer_a//[._]/-}"
@@ -57,8 +57,8 @@ pod_ns_a=$(pod_ns_for "$name_a")
 pod_ns_b=$(pod_ns_for "$name_b")
 
 # Plant peer A with mesh enabled. The factory now emits two docs
-# (InferencePolicy + ClawSandbox); only the ClawSandbox carries the
-# governance block, so use `select(.kind == "ClawSandbox")` to scope
+# (InferencePolicy + KarsSandbox); only the KarsSandbox carries the
+# governance block, so use `select(.kind == "KarsSandbox")` to scope
 # the patch and `with()`/passthrough for the rest.
 #
 # Admission requires `spec.governance.toolPolicyRef.name` whenever
@@ -70,13 +70,13 @@ _apply_mesh_toolpolicy() {
     local cr_ns="$1"
     local tp_name="$2"
     cat <<YAML | kubectl apply -f - >/dev/null
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: ${tp_name}
   namespace: ${cr_ns}
   labels:
-    azureclaw.azure.com/test-suite: manual-e2e
+    kars.azure.com/test-suite: manual-e2e
 spec:
   appliesTo: {}
   agtProfile:
@@ -94,12 +94,12 @@ YAML
 _mesh_overlay() {
     local tp_name="$1"
     yq eval '
-        select(.kind == "ClawSandbox")
+        select(.kind == "KarsSandbox")
             | .spec.governance.enabled = true
             | .spec.governance.registryMode = "global"
             | .spec.governance.toolPolicyRef.name = "'"${tp_name}"'"
         ,
-        select(.kind != "ClawSandbox")
+        select(.kind != "KarsSandbox")
     ' -
 }
 
@@ -122,8 +122,8 @@ cr_dispatch "$peer_b" "$name_b" "$ns_b" \
 
 log_pass "applied both peers"
 
-wait_for_clawsandbox_ready "$ns_a" "$name_a" || true
-wait_for_clawsandbox_ready "$ns_b" "$name_b" || true
+wait_for_karssandbox_ready "$ns_a" "$name_a" || true
+wait_for_karssandbox_ready "$ns_b" "$name_b" || true
 
 # Step 1 — registry registration
 log_step "checking AgentMesh registry for both peers"
@@ -136,7 +136,7 @@ assert_contains "registry registration for peer B" "$name_b" "$relay_logs"
 # `mesh_send` via the OpenClaw plugin (or the runtime's mesh_tools). The
 # exact surface differs per runtime; for openclaw we have a shell tool.
 log_step "triggering mesh_send from peer A → peer B"
-pod_a=$(kubectl -n "$pod_ns_a" get pod -l "azureclaw.azure.com/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
+pod_a=$(kubectl -n "$pod_ns_a" get pod -l "kars.azure.com/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
 # Mesh probe needs to invoke the OpenClaw plugin from inside the agent
 # container — enable break-glass on peer-A's namespace just for that.
 enable_break_glass "$pod_ns_a"

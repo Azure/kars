@@ -1,7 +1,7 @@
-# AzureClaw Conformance Runner — multi-stage Rust build (Azure Linux)
+# Kars Conformance Runner — multi-stage Rust build (Azure Linux)
 #
 # Produces a small image whose single entrypoint is the
-# `azureclaw-conformance-runner` binary (Slice 6.2). A `ClawEval` run
+# `kars-conformance-runner` binary (Slice 6.2). A `KarsEval` run
 # spawns this as an ephemeral Job; the runner replays an EvalCorpus
 # against the live inference router and writes a `RunReport` JSON
 # document to `--output` (and stdout). No kube-apiserver access; no
@@ -27,12 +27,12 @@ COPY eval-corpus/ eval-corpus/
 COPY controller/ controller/
 COPY inference-router/ inference-router/
 COPY a2a-gateway/ a2a-gateway/
-COPY azureclaw-a2a-core/ azureclaw-a2a-core/
+COPY kars-a2a-core/ kars-a2a-core/
 COPY tests/ tests/
 COPY cli/blocklists/ cli/blocklists/
 COPY cli/profiles/agt/ cli/profiles/agt/
 
-RUN cargo build --release --package azureclaw-conformance-runner
+RUN cargo build --release --package kars-conformance-runner
 
 # ─── Runtime ──────────────────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ RUN tdnf install -y ca-certificates shadow-utils && tdnf clean all
 
 RUN groupadd -g 1000 runner && useradd -u 1000 -g runner -s /sbin/nologin runner
 
-COPY --from=builder /build/target/release/azureclaw-conformance-runner /usr/local/bin/azureclaw-conformance-runner
+COPY --from=builder /build/target/release/kars-conformance-runner /usr/local/bin/kars-conformance-runner
 
 # Reports are written here by default; mount a Volume (emptyDir is fine)
 # so the spawning reconciler can read the report back out.
@@ -50,10 +50,10 @@ RUN mkdir -p /var/run/conformance && chown runner:runner /var/run/conformance
 
 USER runner
 
-LABEL org.opencontainers.image.title="AzureClaw Conformance Runner" \
-      org.opencontainers.image.description="Replays an EvalCorpus against the AzureClaw inference router and emits a RunReport JSON document" \
+LABEL org.opencontainers.image.title="Kars Conformance Runner" \
+      org.opencontainers.image.description="Replays an EvalCorpus against the Kars inference router and emits a RunReport JSON document" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT"
 
-ENTRYPOINT ["azureclaw-conformance-runner"]
+ENTRYPOINT ["kars-conformance-runner"]

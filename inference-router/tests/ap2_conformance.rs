@@ -6,7 +6,7 @@
 //! Each `tests/fixtures/ap2_conformance/NNN-*.json` file describes a
 //! self-contained scenario (mandate + ledger pre-state + attempt + clock
 //! + expected verdict). This test loads every fixture, drives
-//!   [`azureclaw_inference_router::a2a::validate_payment_attempt`], and
+//!   [`kars_inference_router::a2a::validate_payment_attempt`], and
 //!   asserts the verdict matches.
 //!
 //! Why a separate corpus file rather than inline `#[test]`s?
@@ -25,12 +25,12 @@
 //! 1. Drop `NNN-name.json` into `tests/fixtures/ap2_conformance/`.
 //! 2. `expected.verdict` must be `"allow"` or `"deny"`; for `"deny"`
 //!    add `expected.kind` matching one of the [`Ap2Denial`] variants.
-//! 3. `cargo test -p azureclaw-inference-router --test ap2_conformance`.
+//! 3. `cargo test -p kars-inference-router --test ap2_conformance`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use azureclaw_inference_router::a2a::{
+use kars_inference_router::a2a::{
     Ap2Denial, InMemoryMandateLedger, IntentMandate, MandateLedgerMut, PaymentAttempt,
     PaymentRecord, validate_payment_attempt,
 };

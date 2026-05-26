@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AzureClaw LangGraph (LangChain.js, TypeScript / Node.js 22) runtime entrypoint.
+# Kars LangGraph (LangChain.js, TypeScript / Node.js 22) runtime entrypoint.
 #
 # Pins each known LLM provider base URL to the router sidecar, points
 # MCP-aware tools at the platform MCP server, then invokes the in-pod
@@ -36,30 +36,30 @@ export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-router-managed}"
 
 # Platform MCP server: 9 Foundry-shim tools every runtime gets for
 # free. LangGraph nodes can call this via any MCP client.
-export AZURECLAW_PLATFORM_MCP_URL="${AZURECLAW_PLATFORM_MCP_URL:-http://127.0.0.1:8443/platform/mcp}"
+export KARS_PLATFORM_MCP_URL="${KARS_PLATFORM_MCP_URL:-http://127.0.0.1:8443/platform/mcp}"
 
 # AGT relay/registry — reverse-proxied by the router so AgentMesh
 # traffic shares the same governance gate as LLM traffic.
-export AZURECLAW_AGT_RELAY_URL="${AZURECLAW_AGT_RELAY_URL:-http://127.0.0.1:8443/agt/relay/}"
-export AZURECLAW_AGT_REGISTRY_URL="${AZURECLAW_AGT_REGISTRY_URL:-http://127.0.0.1:8443/agt/registry/}"
+export KARS_AGT_RELAY_URL="${KARS_AGT_RELAY_URL:-http://127.0.0.1:8443/agt/relay/}"
+export KARS_AGT_REGISTRY_URL="${KARS_AGT_REGISTRY_URL:-http://127.0.0.1:8443/agt/registry/}"
 
 # OTel collector — the router exposes `/v1/traces` and `/v1/metrics`.
 export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:8443/v1/traces}"
 
 # Surface the controller-supplied language flag (typescript here).
 if [ -n "${RUNTIME_LANGGRAPH_LANGUAGE:-}" ]; then
-    echo "[azureclaw-langgraph-ts] language: ${RUNTIME_LANGGRAPH_LANGUAGE}" >&2
+    echo "[kars-langgraph-ts] language: ${RUNTIME_LANGGRAPH_LANGUAGE}" >&2
 fi
 
 # In-pod adapter bootstrap. Idempotent (guarded by
-# `__AZURECLAW_RUNTIME_INITIALIZED__`). Non-fatal if telemetry init
+# `__KARS_RUNTIME_INITIALIZED__`). Non-fatal if telemetry init
 # fails — the adapter logs and continues.
-node -e "require('/opt/azureclaw-runtime-langgraph-ts/dist/index.js').bootstrap().catch((e)=>{console.warn('[azureclaw-langgraph-ts] bootstrap failed:', e); process.exit(0);}).then(()=>{})" || true
+node -e "require('/opt/kars-runtime-langgraph-ts/dist/index.js').bootstrap().catch((e)=>{console.warn('[kars-langgraph-ts] bootstrap failed:', e); process.exit(0);}).then(()=>{})" || true
 
 # Make the adapter resolvable from the user agent code via either the
-# package name (`require('@azureclaw/runtime-langgraph-ts')`) or
+# package name (`require('@kars/runtime-langgraph-ts')`) or
 # absolute path. The package is already installed in
-# /opt/azureclaw-runtime-langgraph-ts/node_modules; expose its parent.
-export NODE_PATH="${NODE_PATH:-}:/opt/azureclaw-runtime-langgraph-ts/node_modules:/opt/azureclaw-runtime-langgraph-ts"
+# /opt/kars-runtime-langgraph-ts/node_modules; expose its parent.
+export NODE_PATH="${NODE_PATH:-}:/opt/kars-runtime-langgraph-ts/node_modules:/opt/kars-runtime-langgraph-ts"
 
 exec "$@"

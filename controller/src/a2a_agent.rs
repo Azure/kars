@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 /// via `inference-router::a2a::snapshot_rebuild::rebuild_snapshot`.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
-    group = "azureclaw.azure.com",
+    group = "kars.azure.com",
     version = "v1alpha1",
     kind = "A2AAgent",
     namespaced,
@@ -229,7 +229,7 @@ pub struct A2AAgentStatus {
 
     /// Reference to the published AgentCard ConfigMap
     /// (`a2aagent-{name}-card`, key `agent.json`). Field-managed by
-    /// `azureclaw-controller/a2aagent`. Reuses the
+    /// `kars-controller/a2aagent`. Reuses the
     /// [`crate::mcp_server::LocalObjectRef`] shape to avoid a
     /// duplicate type — single struct, two semantic names per the
     /// no-duplication rule.

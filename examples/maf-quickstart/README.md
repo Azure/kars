@@ -1,8 +1,8 @@
 # Microsoft Agent Framework (MAF) — Quickstart
 
 This blueprint hosts a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework)
-(Python) agent inside an AzureClaw sandbox. The agent runs unmodified —
-AzureClaw provides isolation, governance, and egress control without
+(Python) agent inside an Kars sandbox. The agent runs unmodified —
+Kars provides isolation, governance, and egress control without
 touching MAF code.
 
 ## What you get
@@ -21,9 +21,9 @@ touching MAF code.
 ## Apply
 
 ```bash
-azureclaw up                                 # one-time control-plane install
-kubectl apply -f examples/maf-quickstart/clawsandbox.yaml
-kubectl get clawsandboxes -n azureclaw-system maf-quickstart
+kars up                                 # one-time control-plane install
+kubectl apply -f examples/maf-quickstart/karssandbox.yaml
+kubectl get karssandboxes -n kars-system maf-quickstart
 ```
 
 ## Bring your own agent code

@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! ClawMemory canonical-form parser + `PolicyKind` impl.
+//! KarsMemory canonical-form parser + `PolicyKind` impl.
 //!
 //! Slice 1c.4 — fourth per-kind implementation after egress (1c.1),
-//! tools (1c.2), and inference (1c.3). A ClawMemory bundle carries
+//! tools (1c.2), and inference (1c.3). A KarsMemory bundle carries
 //! the **Foundry Memory Store binding content** the controller will
 //! merge onto the per-CR `sandboxRef`:
 //!
@@ -15,7 +15,7 @@
 //! - `displayName`
 //!
 //! `sandboxRef` is intentionally NOT a bundle key. The sandbox a
-//! binding applies to is owned by the `ClawMemory` CR — one signed
+//! binding applies to is owned by the `KarsMemory` CR — one signed
 //! bundle can therefore be referenced by multiple CRs (e.g. fleet
 //! rollout of an identical memory configuration to several sandboxes).
 //! This mirrors the inference-policy and tool-policy patterns:
@@ -36,7 +36,7 @@
 //!
 //! Semantic checks (DNS-label-style `storeName`, valid `scope`
 //! prefixes, retention floor sanity) stay in the existing
-//! `crd_validations::claw_memory_validations` admission layer and the
+//! `crd_validations::kars_memory_validations` admission layer and the
 //! runtime path (`cli/src/plugin.ts::ensureMemoryStore`).
 
 use super::{CachedValue, PolicyKind};
@@ -50,11 +50,11 @@ use std::time::{Instant, SystemTime};
 /// `artifactType` MUST match this exactly; consumers reject any other
 /// value (forward-compat: v2 bumps the suffix; v1 consumers MUST
 /// refuse v2 artifacts).
-pub const MEMORY_BINDING_V1_MEDIA_TYPE: &str = "application/vnd.azureclaw.memory-binding.v1+json";
+pub const MEMORY_BINDING_V1_MEDIA_TYPE: &str = "application/vnd.kars.memory-binding.v1+json";
 
 /// Recognised top-level keys in a memory-binding bundle. `sandboxRef`
 /// is intentionally NOT one of them: the binding targets a sandbox
-/// owned by the `ClawMemory.spec`, not the signed artifact.
+/// owned by the `KarsMemory.spec`, not the signed artifact.
 const POLICY_CONTENT_KEYS: &[&str] = &[
     "storeName",
     "scope",
@@ -86,8 +86,8 @@ pub struct MemoryKind;
 
 impl PolicyKind for MemoryKind {
     const MEDIA_TYPE: &'static str = MEMORY_BINDING_V1_MEDIA_TYPE;
-    const API_VERSION: &'static str = "azureclaw.azure.com/v1alpha1";
-    const KIND: &'static str = "ClawMemory";
+    const API_VERSION: &'static str = "kars.azure.com/v1alpha1";
+    const KIND: &'static str = "KarsMemory";
     type Output = VerifiedMemoryBinding;
 
     fn parse(bytes: &[u8]) -> Result<Self::Output, FetchError> {

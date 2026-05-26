@@ -206,7 +206,7 @@ async fn completions(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = headers
-        .get("x-azureclaw-sandbox")
+        .get("x-kars-sandbox")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
@@ -239,7 +239,7 @@ async fn responses(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = headers
-        .get("x-azureclaw-sandbox")
+        .get("x-kars-sandbox")
         .and_then(|v| v.to_str().ok())
         .filter(|v| {
             !v.is_empty()
@@ -377,7 +377,7 @@ async fn embeddings(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = headers
-        .get("x-azureclaw-sandbox")
+        .get("x-kars-sandbox")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
@@ -423,7 +423,7 @@ async fn images_generations(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = headers
-        .get("x-azureclaw-sandbox")
+        .get("x-kars-sandbox")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("self");
 
@@ -645,7 +645,7 @@ async fn foundry_proxy(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = headers
-        .get("x-azureclaw-sandbox")
+        .get("x-kars-sandbox")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
@@ -673,7 +673,7 @@ async fn foundry_proxy(
             Json(serde_json::json!({
                 "error": {
                     "message": format!(
-                        "GitHub Models mode does not support `{}`. This endpoint requires Azure AI Foundry. Re-run `azureclaw dev` without --github-token (or set up Foundry) to enable Memory Stores, agents, evaluations, indexes, and other Foundry-only features.",
+                        "GitHub Models mode does not support `{}`. This endpoint requires Azure AI Foundry. Re-run `kars dev` without --github-token (or set up Foundry) to enable Memory Stores, agents, evaluations, indexes, and other Foundry-only features.",
                         uri.path()
                     ),
                     "type": "unsupported_for_provider",
@@ -826,14 +826,8 @@ async fn foundry_proxy(
     let mut upstream_headers = HeaderMap::new();
     for (name, value) in headers.iter() {
         match name.as_str() {
-            "authorization"
-            | "api-key"
-            | "x-api-key"
-            | "host"
-            | "connection"
-            | "transfer-encoding"
-            | "content-length"
-            | "x-azureclaw-sandbox" => continue,
+            "authorization" | "api-key" | "x-api-key" | "host" | "connection"
+            | "transfer-encoding" | "content-length" | "x-kars-sandbox" => continue,
             _ => {
                 upstream_headers.insert(name.clone(), value.clone());
             }
@@ -897,9 +891,9 @@ mod tests {
     fn strips_foundry_project_prefix() {
         assert_eq!(
             strip_project_prefix(
-                "https://azureclaw-foundry-services.services.ai.azure.com/api/projects/azureclaw"
+                "https://kars-foundry-services.services.ai.azure.com/api/projects/kars"
             ),
-            "https://azureclaw-foundry-services.services.ai.azure.com"
+            "https://kars-foundry-services.services.ai.azure.com"
         );
     }
 

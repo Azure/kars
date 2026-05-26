@@ -31,7 +31,7 @@
 //! `X-Azureclaw-Decision-By`, the transport will prefer that header.
 
 use anyhow::Context;
-use azureclaw_eval_corpus::{Decision, PolicyKindRef};
+use kars_eval_corpus::{Decision, PolicyKindRef};
 use reqwest::{Response, StatusCode};
 use serde_json::Value;
 use std::time::Duration;
@@ -41,13 +41,13 @@ use tokio::net::TcpStream;
 /// Header names the runner reads if present. None of these are required
 /// on the v1 router today; they are read opportunistically so a future
 /// router slice can supply ground truth without a runner image bump.
-pub const DECISION_HEADER: &str = "x-azureclaw-decision";
-pub const DECISION_BY_HEADER: &str = "x-azureclaw-decision-by";
-pub const DECISION_REASON_HEADER: &str = "x-azureclaw-decision-reason";
+pub const DECISION_HEADER: &str = "x-kars-decision";
+pub const DECISION_BY_HEADER: &str = "x-kars-decision-by";
+pub const DECISION_REASON_HEADER: &str = "x-kars-decision-reason";
 
 /// Header echoed back by the router so its logs can be correlated with
 /// runner cases. Set by the runner; the router does not need to read it.
-pub const CASE_ID_HEADER: &str = "x-azureclaw-eval-case-id";
+pub const CASE_ID_HEADER: &str = "x-kars-eval-case-id";
 
 #[derive(Clone)]
 pub struct Transport {
@@ -114,7 +114,7 @@ impl Transport {
 ///
 /// `scenario_default_kind` is the [`PolicyKindRef`] the scenario type
 /// implies (e.g. `EgressConnect` → `EgressAllowlist`). It is used iff
-/// the response carries no `x-azureclaw-decision-by` header.
+/// the response carries no `x-kars-decision-by` header.
 pub async fn response_to_decision(
     response: Response,
     scenario_default_kind: PolicyKindRef,
@@ -476,7 +476,7 @@ fn parse_policy_kind_header(s: &str) -> Option<PolicyKindRef> {
         "EgressAllowlist" => Some(PolicyKindRef::EgressAllowlist),
         "InferencePolicy" => Some(PolicyKindRef::InferencePolicy),
         "ToolPolicy" => Some(PolicyKindRef::ToolPolicy),
-        "ClawMemory" => Some(PolicyKindRef::ClawMemory),
+        "KarsMemory" => Some(PolicyKindRef::KarsMemory),
         "McpServer" => Some(PolicyKindRef::McpServer),
         _ => None,
     }

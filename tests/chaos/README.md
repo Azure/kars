@@ -6,7 +6,7 @@ Self-contained fault-injection test suite under `tests/chaos/`.
 
 | Trigger | What runs |
 |---|---|
-| PR CI — `Chaos Tier` job | `cargo test --package azureclaw-chaos-tests --features chaos --tests` |
+| PR CI — `Chaos Tier` job | `cargo test --package kars-chaos-tests --features chaos --tests` |
 | Nightly perf — `.github/workflows/perf-nightly.yml` | `k6 run tests/k6/router_smoke.js` |
 | PRs touching controller / router src — `Bench Regression` job | criterion benches with regression gate |
 | Default `cargo test --all` | **does not** run chaos tier (feature-gated) |
@@ -29,13 +29,13 @@ parallel job, not a serial dependency.
 
 ```bash
 # Full chaos tier (~2-3s wall time — uses tokio time virtualization).
-cargo test --package azureclaw-chaos-tests --features chaos --tests
+cargo test --package kars-chaos-tests --features chaos --tests
 
 # Single file:
-cargo test --features chaos -p azureclaw-chaos-tests --test foundry_storms
+cargo test --features chaos -p kars-chaos-tests --test foundry_storms
 
 # Single test:
-cargo test --features chaos -p azureclaw-chaos-tests \
+cargo test --features chaos -p kars-chaos-tests \
     --test foundry_storms foundry_429_storm_respects_retry_after
 ```
 

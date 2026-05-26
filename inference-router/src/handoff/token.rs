@@ -6,7 +6,7 @@
 //!
 //! The token is issued by the drain-side router when the agent asks to
 //! hand off (`POST /agt/handoff/init`). The restore-side router — on
-//! the same or a different AzureClaw deployment — validates the token
+//! the same or a different Kars deployment — validates the token
 //! against the known hash before accepting the encrypted state blob.
 //!
 //! Properties enforced by [`HandoffTokenStore`]:

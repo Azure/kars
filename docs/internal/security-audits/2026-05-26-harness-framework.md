@@ -26,7 +26,7 @@ runtime and prompt copy.
 
 `tools/e2e-harness/` (new dir, not in capability paths): scenario
 files for exec-brief; platform plugins for `aks`, `local-k8s`, and a
-`docker` stub. The harness applies `ClawSandbox` CRs, monitors logs,
+`docker` stub. The harness applies `KarsSandbox` CRs, monitors logs,
 and counts evidence. No mutation surface beyond `kubectl apply -f` of
 the four sandbox CRs.
 
@@ -51,7 +51,7 @@ seccomp-bounded.
 ### 1c. Stability fixes
 
 - Viz/parent prompt fixes — pure prompt copy adjustments.
-- ClawSandbox `memoryRef` plumbing — controller-side change covered
+- KarsSandbox `memoryRef` plumbing — controller-side change covered
   by the existing CRD schema; no capability change.
 - Watchdog timeout bump — sub-agent watchdog gives sibling artefacts
   more time to arrive over the mesh. No capability change.
@@ -71,7 +71,7 @@ Pure documentation. Not in capability paths.
 |---|---|---|
 | Sub-agent filesystem read | `exec_command` + `cat` | Same — new `file_read` is a typed wrapper using identical underlying syscalls |
 | Sub-agent prompt | covered in #331 audit | Pure copy tweaks only |
-| `ClawSandbox.memoryRef` | controller resolver already trusted | Same |
+| `KarsSandbox.memoryRef` | controller resolver already trusted | Same |
 
 No new capabilities.
 
@@ -96,7 +96,7 @@ Secret is mounted as `envFrom`, not as files.
 
 ## 6. Network / NetworkPolicy review
 
-No NetworkPolicy changes. The harness applies `ClawSandbox` CRs that
+No NetworkPolicy changes. The harness applies `KarsSandbox` CRs that
 the controller renders into the existing NetworkPolicy template.
 
 ## 7. Sign-offs

@@ -4,4 +4,4 @@ nodes:
   - role: control-plane
   - role: worker
     labels:
-      azureclaw.azure.com/pool: sandbox
+      kars.azure.com/pool: sandbox

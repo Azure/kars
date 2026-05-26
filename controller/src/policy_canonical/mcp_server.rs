@@ -56,8 +56,7 @@ use std::time::{Instant, SystemTime};
 /// `artifactType` MUST match this exactly; consumers reject any other
 /// value (forward-compat: v2 bumps the suffix; v1 consumers MUST
 /// refuse v2 artifacts).
-pub const MCP_SERVER_BUNDLE_V1_MEDIA_TYPE: &str =
-    "application/vnd.azureclaw.mcp-server-bundle.v1+json";
+pub const MCP_SERVER_BUNDLE_V1_MEDIA_TYPE: &str = "application/vnd.kars.mcp-server-bundle.v1+json";
 
 /// Recognised top-level keys in an mcp-server bundle. `allowedSandboxes`
 /// is intentionally NOT one of them: the selector targets sandboxes
@@ -107,7 +106,7 @@ pub struct McpServerKind;
 
 impl PolicyKind for McpServerKind {
     const MEDIA_TYPE: &'static str = MCP_SERVER_BUNDLE_V1_MEDIA_TYPE;
-    const API_VERSION: &'static str = "azureclaw.azure.com/v1alpha1";
+    const API_VERSION: &'static str = "kars.azure.com/v1alpha1";
     const KIND: &'static str = "McpServer";
     type Output = VerifiedMcpServerBundle;
 

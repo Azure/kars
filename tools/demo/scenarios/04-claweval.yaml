@@ -1,4 +1,4 @@
-# Demo scenario step 4 — Run-now ClawEval against the demo sandbox.
+# Demo scenario step 4 — Run-now KarsEval against the demo sandbox.
 #
 # The reconciler immediately creates a one-shot Job (run-now annotation
 # is consumed), the conformance corpus runs, and status.history is
@@ -6,13 +6,13 @@
 #   jailbreak-baseline | prompt-injection-2026q1 | banned-tools |
 #   egress-known-bad   | memory-isolation
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawEval
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsEval
 metadata:
   name: demo-eval
-  namespace: azureclaw-system
+  namespace: kars-system
   annotations:
-    azureclaw.azure.com/run-now: "true"
+    kars.azure.com/run-now: "true"
 spec:
   targetSandboxRef:
     name: demo-agent

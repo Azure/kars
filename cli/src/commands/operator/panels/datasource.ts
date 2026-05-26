@@ -17,9 +17,9 @@ import {
   type ToolPolicyItem,
   type InferencePolicyItem,
   type A2AAgentItem,
-  type ClawMemoryItem,
-  type ClawEvalItem,
-  type ClawPairingItem,
+  type KarsMemoryItem,
+  type KarsEvalItem,
+  type KarsPairingItem,
   type ProviderState,
   type ProviderStatusSnapshot,
   emptyClusterState,
@@ -99,16 +99,16 @@ export class KubectlDataSource implements ClusterDataSource {
       pairings, mcpServers, toolPolicies, inferencePolicies,
       a2aAgents, clawMemories, clawEvals,
     ] = await Promise.all([
-      listCrd("clawpairings", this.kubeContext),
+      listCrd("karspairings", this.kubeContext),
       listCrd("mcpservers", this.kubeContext),
       listCrd("toolpolicies", this.kubeContext),
       listCrd("inferencepolicies", this.kubeContext),
       listCrd("a2aagents", this.kubeContext),
-      listCrd("clawmemories", this.kubeContext),
-      listCrd("clawevals", this.kubeContext),
+      listCrd("karsmemories", this.kubeContext),
+      listCrd("karsevals", this.kubeContext),
     ]);
 
-    out.pairings = pairings.map<ClawPairingItem>((it) => {
+    out.pairings = pairings.map<KarsPairingItem>((it) => {
       const spec = (it.spec ?? {}) as Record<string, unknown>;
       const status = (it.status ?? {}) as Record<string, unknown>;
       return {
@@ -214,12 +214,12 @@ export class KubectlDataSource implements ClusterDataSource {
       };
     });
 
-    out.clawMemories = clawMemories.map<ClawMemoryItem>((it) => {
+    out.clawMemories = clawMemories.map<KarsMemoryItem>((it) => {
       const spec = (it.spec ?? {}) as Record<string, unknown>;
       const status = (it.status ?? {}) as Record<string, unknown>;
       const sbRef = (spec.sandboxRef ?? {}) as Record<string, unknown>;
       const phase = asString(status.phase);
-      // The ClawMemory reconciler emits phase="Ready" once the binding has
+      // The KarsMemory reconciler emits phase="Ready" once the binding has
       // compiled and published successfully (the post-S7 honesty fix flips
       // it to "Pending" with reason=AwaitingFoundryProvisioning until the
       // upstream Foundry store actually exists). Treat "Ready" as bound,
@@ -235,11 +235,11 @@ export class KubectlDataSource implements ClusterDataSource {
         scope: asString(spec.scope),
         retentionDays: asNumber(spec.retentionDays),
         rbacScopeSummary: asString(status.rbacScopeSummary),
-        foundryBound: bound as ClawMemoryItem["foundryBound"],
+        foundryBound: bound as KarsMemoryItem["foundryBound"],
       };
     });
 
-    out.clawEvals = clawEvals.map<ClawEvalItem>((it) => {
+    out.clawEvals = clawEvals.map<KarsEvalItem>((it) => {
       const spec = (it.spec ?? {}) as Record<string, unknown>;
       const status = (it.status ?? {}) as Record<string, unknown>;
       const sbRef = (spec.sandboxRef ?? {}) as Record<string, unknown>;
@@ -305,7 +305,7 @@ export class KubectlDataSource implements ClusterDataSource {
       // Sandbox deployments are named after the sandbox itself; address the
       // pod via `deploy/<sandbox>` so we don't depend on a label selector
       // (the legacy `app.kubernetes.io/name=openclaw` label doesn't exist
-      // on AzureClaw sandbox pods — they use `azureclaw.azure.com/sandbox`).
+      // on Kars sandbox pods — they use `kars.azure.com/sandbox`).
       const { stdout } = await execa(
         "kubectl",
         kctl(

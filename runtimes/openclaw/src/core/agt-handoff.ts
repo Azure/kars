@@ -46,7 +46,7 @@ export interface AgtInboxEntry {
   message_type?: string;
   /**
    * ISO timestamp of when this entry was first surfaced to the LLM via
-   * azureclaw_mesh_inbox. Undefined while still unread. Used by the inbox
+   * kars_mesh_inbox. Undefined while still unread. Used by the inbox
    * tool to:
    *   1. show "📬 N new / M total" diagnostics so the LLM knows which
    *      messages it has already seen on prior turns;
@@ -410,7 +410,7 @@ export async function runHandoffOrchestration(
         handoffProgress.status = "error";
         handoffProgress.phase = "error";
         handoffProgress.error = "Local target agent not found in mesh registry after 60s. " +
-          "Ensure the local agent is running: azureclaw dev <name>";
+          "Ensure the local agent is running: kars dev <name>";
         handoffProgress.steps.push("❌ Local target not found — is the local agent running?");
       }
       return;
@@ -586,20 +586,20 @@ export async function runHandoffOrchestration(
     handoffProgress.steps.push("Your local keys are preserved. You can reclaim with a reverse handoff anytime.");
     handoffProgress.steps.push("");
     // Connection instructions — explicit --cloud since local container still exists
-    handoffProgress.steps.push(`📡 Connect to cloud agent: azureclaw connect ${agentName} --cloud`);
-    handoffProgress.steps.push(`📊 Monitor: azureclaw operator`);
+    handoffProgress.steps.push(`📡 Connect to cloud agent: kars connect ${agentName} --cloud`);
+    handoffProgress.steps.push(`📊 Monitor: kars operator`);
     // Telegram note
     if (process.env.TELEGRAM_BOT_TOKEN) {
       handoffProgress.steps.push(`📱 Telegram: Your bot is now handled by the cloud agent. Chat continues automatically.`);
     }
     handoffProgress.steps.push(`💤 This local agent is now dormant. It will show as 'Dormant' in the operator TUI.`);
-    handoffProgress.steps.push(`🗑️  Clean up local: azureclaw destroy ${agentName} --local`);
+    handoffProgress.steps.push(`🗑️  Clean up local: kars destroy ${agentName} --local`);
   } else {
     handoffProgress.steps.push("Your local agent has the full state — chat history, trust scores, audit trail.");
     handoffProgress.steps.push("The cloud agent has been decommissioned and scaled to zero.");
     handoffProgress.steps.push("");
-    handoffProgress.steps.push(`📡 Connect to local agent: azureclaw connect ${agentName} --local`);
-    handoffProgress.steps.push(`📊 Monitor: azureclaw operator`);
+    handoffProgress.steps.push(`📡 Connect to local agent: kars connect ${agentName} --local`);
+    handoffProgress.steps.push(`📊 Monitor: kars operator`);
     if (process.env.TELEGRAM_BOT_TOKEN) {
       handoffProgress.steps.push(`📱 Telegram: Your bot is now handled by the local agent.`);
     }

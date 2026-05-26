@@ -34,7 +34,7 @@ pub const HANDOFF_STATE_VERSION: u32 = 1;
 
 /// HKDF context tag — bound into the derived key so blobs from a
 /// different protocol family cannot collide.
-pub(crate) const HKDF_INFO: &[u8] = b"azureclaw-handoff-v1";
+pub(crate) const HKDF_INFO: &[u8] = b"kars-handoff-v1";
 
 /// AES-GCM nonce length (96 bits, per NIST SP 800-38D).
 pub(crate) const AES_NONCE_BYTES: usize = 12;

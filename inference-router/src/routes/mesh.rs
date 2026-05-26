@@ -322,7 +322,7 @@ async fn agt_registry_proxy(
     }
 
     // ── Identity-claim enforcement ──────────────────────────────────────
-    // Trust in AzureClaw's mesh is keyed by sandbox display_name (which is
+    // Trust in Kars's mesh is keyed by sandbox display_name (which is
     // K8s admission-unique within a cluster). The receiver-side KNOCK
     // handler resolves a peer AMID → display_name via the registry and
     // checks it against `parentTrustedNames`. That trust is only sound if
@@ -483,13 +483,13 @@ async fn agt_registry_proxy(
 
 /// Identity-claim enforcement for AGT registry mutations.
 ///
-/// AzureClaw mesh trust is name-based: receivers verify peers by resolving
+/// Kars mesh trust is name-based: receivers verify peers by resolving
 /// `display_name` through the registry and matching against a parent-seeded
 /// trust set. That guarantee only holds if a sandbox cannot register another
 /// sandbox's name. This function vets `POST /v1/agents` bodies, allowing only:
 ///   - `display_name` equal to the router's `SANDBOX_NAME` env (or absent)
-///   - `capabilities` drawn from `{SANDBOX_NAME, "azureclaw-agent",
-///     "task-execution"}` plus any prefixed with `azureclaw:` (reserved for
+///   - `capabilities` drawn from `{SANDBOX_NAME, "kars-agent",
+///     "task-execution"}` plus any prefixed with `kars:` (reserved for
 ///     future controller-issued attestations)
 ///
 /// Returns `Err((status, message))` if the claim must be rejected. An empty
@@ -546,17 +546,17 @@ pub(super) fn enforce_identity_claim(path: &str, body: &Bytes) -> Result<(), (St
                 continue;
             };
             let allowed = s == sandbox_name
-                || s == "azureclaw-agent"
+                || s == "kars-agent"
                 || s == "task-execution"
-                || s.starts_with("azureclaw:");
+                || s.starts_with("kars:");
             if !allowed {
                 return Err((
                     StatusCode::FORBIDDEN,
                     format!(
                         "capability '{}' is not permitted — sandboxes may \
                          only assert capabilities matching SANDBOX_NAME or \
-                         the AzureClaw default set ({{azureclaw-agent, \
-                         task-execution, azureclaw:*}})",
+                         the Kars default set ({{kars-agent, \
+                         task-execution, kars:*}})",
                         s
                     ),
                 ));
@@ -718,12 +718,12 @@ mod tests {
 
     #[test]
     fn enforce_accepts_matching_display_name() {
-        with_env("SANDBOX_NAME", "azureclawtest", || {
+        with_env("SANDBOX_NAME", "karstest", || {
             let body = Bytes::from(
                 serde_json::to_vec(&serde_json::json!({
                     "amid": "ABC",
-                    "display_name": "azureclawtest",
-                    "capabilities": ["azureclaw-agent", "task-execution", "azureclawtest"],
+                    "display_name": "karstest",
+                    "capabilities": ["kars-agent", "task-execution", "karstest"],
                 }))
                 .unwrap(),
             );
@@ -737,7 +737,7 @@ mod tests {
             let body = Bytes::from(
                 serde_json::to_vec(&serde_json::json!({
                     "amid": "ABC",
-                    "display_name": "azureclawtest",
+                    "display_name": "karstest",
                 }))
                 .unwrap(),
             );
@@ -754,7 +754,7 @@ mod tests {
                 serde_json::to_vec(&serde_json::json!({
                     "amid": "ABC",
                     "display_name": "viz",
-                    "capabilities": ["azureclaw-agent", "azureclawtest"],
+                    "capabilities": ["kars-agent", "karstest"],
                 }))
                 .unwrap(),
             );
@@ -767,11 +767,14 @@ mod tests {
     #[test]
     fn enforce_allows_default_capability_set() {
         with_env("SANDBOX_NAME", "viz", || {
-            let body = Bytes::from(serde_json::to_vec(&serde_json::json!({
-                "amid": "ABC",
-                "display_name": "viz",
-                "capabilities": ["azureclaw-agent", "task-execution", "viz", "azureclaw:internal"],
-            })).unwrap());
+            let body = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "amid": "ABC",
+                    "display_name": "viz",
+                    "capabilities": ["kars-agent", "task-execution", "viz", "kars:internal"],
+                }))
+                .unwrap(),
+            );
             assert!(enforce_identity_claim("v1/agents", &body).is_ok());
         });
     }

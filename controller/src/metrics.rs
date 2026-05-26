@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Prometheus metrics for the AzureClaw controller.
+//! Prometheus metrics for the Kars controller.
 //!
 //! S7.E (workqueue metrics): exposes counters / histograms that
 //! operators can scrape from the controller pod's `:9091/metrics`
@@ -10,8 +10,8 @@
 //! via [`observe_reconcile`], a thin wrapper threaded through each
 //! `Controller::run(...)` call site.
 //!
-//! Naming follows `azureclaw_controller_*` to disambiguate from the
-//! inference router's `azureclaw_*` series, mirroring the
+//! Naming follows `kars_controller_*` to disambiguate from the
+//! inference router's `kars_*` series, mirroring the
 //! controller-runtime `controller_runtime_*` convention used by
 //! kubebuilder/operator-sdk-style operators.
 
@@ -23,21 +23,21 @@ use std::sync::LazyLock;
 /// Total reconcile errors by CRD kind and error class.
 ///
 /// Labels:
-/// - `crd_kind`: `ClawSandbox` | `ClawPairing` | `McpServer` |
-///   `ToolPolicy` | `A2AAgent` | `InferencePolicy` | `ClawMemory` |
-///   `ClawEval`.
+/// - `crd_kind`: `KarsSandbox` | `KarsPairing` | `McpServer` |
+///   `ToolPolicy` | `A2AAgent` | `InferencePolicy` | `KarsMemory` |
+///   `KarsEval`.
 /// - `error_class`: per-reconciler error variant tag, e.g.
 ///   `kube` / `serde_json` / `policy_compile` / `unknown`. Stays
 ///   small-cardinality.
 pub static RECONCILE_ERRORS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_controller_reconcile_errors_total",
+            "kars_controller_reconcile_errors_total",
             "Total reconcile errors emitted by the controller, by CRD kind and error class"
         ),
         &["crd_kind", "error_class"]
     )
-    .expect("failed to register azureclaw_controller_reconcile_errors_total")
+    .expect("failed to register kars_controller_reconcile_errors_total")
 });
 
 /// Total reconcile retries scheduled (every error_policy invocation).
@@ -48,12 +48,12 @@ pub static RECONCILE_ERRORS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub static RECONCILE_RETRIES: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_controller_reconcile_retries_total",
+            "kars_controller_reconcile_retries_total",
             "Total reconcile retries scheduled (each error_policy emission)"
         ),
         &["crd_kind"]
     )
-    .expect("failed to register azureclaw_controller_reconcile_retries_total")
+    .expect("failed to register kars_controller_reconcile_retries_total")
 });
 
 /// Convenience: increment both error + retry counters for a kind.
@@ -75,14 +75,14 @@ pub fn record_reconcile_error(crd_kind: &str, error_class: &str) {
 /// - `outcome`: `success` | `error`.
 pub static RECONCILE_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
-        "azureclaw_controller_reconcile_duration_seconds",
+        "kars_controller_reconcile_duration_seconds",
         "Reconcile duration in seconds, by CRD kind and outcome",
         &["crd_kind", "outcome"],
         vec![
             0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0
         ]
     )
-    .expect("failed to register azureclaw_controller_reconcile_duration_seconds")
+    .expect("failed to register kars_controller_reconcile_duration_seconds")
 });
 
 /// Total reconcile invocations by CRD kind and outcome.
@@ -95,12 +95,12 @@ pub static RECONCILE_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
 pub static RECONCILE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_controller_reconcile_total",
+            "kars_controller_reconcile_total",
             "Total reconcile invocations by CRD kind and outcome"
         ),
         &["crd_kind", "outcome"]
     )
-    .expect("failed to register azureclaw_controller_reconcile_total")
+    .expect("failed to register kars_controller_reconcile_total")
 });
 
 /// Total status-patch skips (idempotency cache hits) by CRD kind.
@@ -114,12 +114,12 @@ pub static RECONCILE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub static STATUS_PATCH_SKIPS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_controller_skip_cache_hits_total",
+            "kars_controller_skip_cache_hits_total",
             "Total status-patch skips (idempotency cache hits) by CRD kind"
         ),
         &["crd_kind"]
     )
-    .expect("failed to register azureclaw_controller_skip_cache_hits_total")
+    .expect("failed to register kars_controller_skip_cache_hits_total")
 });
 
 /// Increment the skip-cache counter for a CRD kind.
@@ -142,12 +142,12 @@ pub fn record_status_patch_skip(crd_kind: &str) {
 pub static CONDITION_TRANSITIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_controller_conditions_transitions_total",
+            "kars_controller_conditions_transitions_total",
             "Total condition status-flips by condition type and new status value"
         ),
         &["condition_type", "new_status"]
     )
-    .expect("failed to register azureclaw_controller_conditions_transitions_total")
+    .expect("failed to register kars_controller_conditions_transitions_total")
 });
 
 /// Increment the condition-transition counter.
@@ -166,7 +166,7 @@ pub fn record_condition_transition(condition_type: &str, new_status: &str) {
 /// ```ignore
 /// .run(
 ///     |x, ctx| async move {
-///         crate::metrics::observe_reconcile("ClawSandbox", reconcile(x, ctx)).await
+///         crate::metrics::observe_reconcile("KarsSandbox", reconcile(x, ctx)).await
 ///     },
 ///     error_policy,
 ///     ctx,
@@ -242,8 +242,8 @@ mod tests {
         let families = prometheus::gather();
         prometheus::Encoder::encode(&encoder, &families, &mut buf).unwrap();
         let rendered = String::from_utf8(buf).unwrap();
-        assert!(rendered.contains("azureclaw_controller_reconcile_errors_total"));
-        assert!(rendered.contains("azureclaw_controller_reconcile_retries_total"));
+        assert!(rendered.contains("kars_controller_reconcile_errors_total"));
+        assert!(rendered.contains("kars_controller_reconcile_retries_total"));
         assert!(rendered.contains("RenderKind"));
     }
 
@@ -307,8 +307,8 @@ mod tests {
         let families = prometheus::gather();
         prometheus::Encoder::encode(&encoder, &families, &mut buf).unwrap();
         let rendered = String::from_utf8(buf).unwrap();
-        assert!(rendered.contains("azureclaw_controller_reconcile_duration_seconds"));
-        assert!(rendered.contains("azureclaw_controller_reconcile_total"));
+        assert!(rendered.contains("kars_controller_reconcile_duration_seconds"));
+        assert!(rendered.contains("kars_controller_reconcile_total"));
         assert!(rendered.contains("RenderDurKind"));
     }
 
@@ -357,8 +357,8 @@ mod tests {
         let families = prometheus::gather();
         prometheus::Encoder::encode(&encoder, &families, &mut buf).unwrap();
         let rendered = String::from_utf8(buf).unwrap();
-        assert!(rendered.contains("azureclaw_controller_skip_cache_hits_total"));
-        assert!(rendered.contains("azureclaw_controller_conditions_transitions_total"));
+        assert!(rendered.contains("kars_controller_skip_cache_hits_total"));
+        assert!(rendered.contains("kars_controller_conditions_transitions_total"));
         assert!(rendered.contains("RenderSkipKind"));
         assert!(rendered.contains("RenderTransKind"));
     }

@@ -7,7 +7,7 @@
 //!
 //! Azure caps federated identity credentials at **20 per managed identity**
 //! (a hard service limit that cannot be raised). The sandbox reconciler's
-//! finalizer (see `reconciler::mod`) deletes the fedcred when a `ClawSandbox`
+//! finalizer (see `reconciler::mod`) deletes the fedcred when a `KarsSandbox`
 //! is removed cleanly, but several real-world paths leak entries:
 //!
 //!  - `kubectl delete --force` / namespace force-deletion (skips finalizers)
@@ -24,11 +24,11 @@
 //!
 //! Every `FEDCRED_REAPER_INTERVAL_SECS` (default 600s):
 //!
-//!  1. List every fedcred whose ARM resource name starts with `azureclaw-`.
-//!  2. Compute the keep-set from live `ClawSandbox` CRs
-//!     (`azureclaw-<sandbox.name>`) plus a tiny system allowlist.
+//!  1. List every fedcred whose ARM resource name starts with `kars-`.
+//!  2. Compute the keep-set from live `KarsSandbox` CRs
+//!     (`kars-<sandbox.name>`) plus a tiny system allowlist.
 //!  3. Delete every fedcred whose subject conforms to
-//!     `system:serviceaccount:azureclaw-*:sandbox` AND is not in the keep-set.
+//!     `system:serviceaccount:kars-*:sandbox` AND is not in the keep-set.
 //!
 //! Operations are idempotent — `delete_federated_credential` already treats
 //! 404 as success — so the reaper is safe to run on every replica without
@@ -36,13 +36,13 @@
 //!
 //! ## What it never touches
 //!
-//!  - `azureclaw-controller-sa` (controller's own WI binding)
-//!  - `azureclaw-sandbox`       (system-shared SA used by the sandbox SA template)
-//!  - Any fedcred whose ARM name does not start with `azureclaw-`
+//!  - `kars-controller-sa` (controller's own WI binding)
+//!  - `kars-sandbox`       (system-shared SA used by the sandbox SA template)
+//!  - Any fedcred whose ARM name does not start with `kars-`
 //!  - Any fedcred whose subject does not match the
-//!    `system:serviceaccount:azureclaw-*:sandbox` pattern
+//!    `system:serviceaccount:kars-*:sandbox` pattern
 
-use crate::crd::ClawSandbox;
+use crate::crd::KarsSandbox;
 use crate::fedcred::FedCredManager;
 use kube::api::{Api, ListParams};
 use kube::{Client, ResourceExt};
@@ -51,15 +51,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// System-level fedcred names the reaper must never delete.
-/// These are not associated with any `ClawSandbox` CR.
-const SYSTEM_KEEPLIST: &[&str] = &["azureclaw-controller-sa", "azureclaw-sandbox"];
+/// These are not associated with any `KarsSandbox` CR.
+const SYSTEM_KEEPLIST: &[&str] = &["kars-controller-sa", "kars-sandbox"];
 
-/// Prefix of fedcred ARM resource names managed by AzureClaw.
-const NAME_PREFIX: &str = "azureclaw-";
+/// Prefix of fedcred ARM resource names managed by Kars.
+const NAME_PREFIX: &str = "kars-";
 
 /// Required prefix and suffix for the subject claim, so we never delete
 /// fedcreds belonging to other workloads that happen to share the MI.
-const SUBJECT_PREFIX: &str = "system:serviceaccount:azureclaw-";
+const SUBJECT_PREFIX: &str = "system:serviceaccount:kars-";
 const SUBJECT_SUFFIX: &str = ":sandbox";
 
 /// Default reap interval (10 minutes).
@@ -97,12 +97,12 @@ pub async fn run(client: Client, fedcred: Arc<FedCredManager>) -> anyhow::Result
 
 /// Execute one reap cycle. Idempotent and safe to call concurrently.
 async fn reap_once(client: &Client, fedcred: &FedCredManager) -> Result<(), String> {
-    // 1. Build the keep-set from live ClawSandbox CRs.
-    let sandboxes: Api<ClawSandbox> = Api::all(client.clone());
+    // 1. Build the keep-set from live KarsSandbox CRs.
+    let sandboxes: Api<KarsSandbox> = Api::all(client.clone());
     let live = sandboxes
         .list(&ListParams::default())
         .await
-        .map_err(|e| format!("list ClawSandbox failed: {e}"))?;
+        .map_err(|e| format!("list KarsSandbox failed: {e}"))?;
     let mut keep: HashSet<String> =
         HashSet::with_capacity(live.items.len() + SYSTEM_KEEPLIST.len());
     for s in live.items.iter() {
@@ -189,48 +189,48 @@ mod tests {
 
     #[test]
     fn keep_list_contains_system_entries() {
-        assert!(SYSTEM_KEEPLIST.contains(&"azureclaw-controller-sa"));
-        assert!(SYSTEM_KEEPLIST.contains(&"azureclaw-sandbox"));
+        assert!(SYSTEM_KEEPLIST.contains(&"kars-controller-sa"));
+        assert!(SYSTEM_KEEPLIST.contains(&"kars-sandbox"));
     }
 
     #[test]
     fn rejects_non_prefixed_names() {
         assert!(!is_candidate(
             "other-team-fedcred",
-            "system:serviceaccount:azureclaw-x:sandbox",
+            "system:serviceaccount:kars-x:sandbox",
         ));
     }
 
     #[test]
     fn rejects_non_conforming_subject() {
         assert!(!is_candidate(
-            "azureclaw-foo",
+            "kars-foo",
             "system:serviceaccount:other-ns:sandbox",
         ));
         assert!(!is_candidate(
-            "azureclaw-foo",
-            "system:serviceaccount:azureclaw-foo:other-sa",
+            "kars-foo",
+            "system:serviceaccount:kars-foo:other-sa",
         ));
     }
 
     #[test]
     fn accepts_conforming_pair() {
         assert!(is_candidate(
-            "azureclaw-akstest",
-            "system:serviceaccount:azureclaw-akstest:sandbox",
+            "kars-akstest",
+            "system:serviceaccount:kars-akstest:sandbox",
         ));
     }
 
     #[test]
     fn keep_set_dedups_system_and_live() {
         let mut keep: HashSet<String> = HashSet::new();
-        keep.insert("azureclaw-akstest".into());
+        keep.insert("kars-akstest".into());
         for s in SYSTEM_KEEPLIST {
             keep.insert((*s).to_string());
         }
         assert_eq!(keep.len(), 3);
-        assert!(keep.contains("azureclaw-akstest"));
-        assert!(keep.contains("azureclaw-controller-sa"));
-        assert!(keep.contains("azureclaw-sandbox"));
+        assert!(keep.contains("kars-akstest"));
+        assert!(keep.contains("kars-controller-sa"));
+        assert!(keep.contains("kars-sandbox"));
     }
 }

@@ -9,7 +9,7 @@ export function destroyCommand(): Command {
   const cmd = new Command("destroy");
 
   cmd
-    .description("Teardown sandbox(es) or the entire AzureClaw deployment")
+    .description("Teardown sandbox(es) or the entire Kars deployment")
     .argument("[name]", "Sandbox name (omit to destroy all sandboxes)")
     .option("-y, --yes", "Skip confirmation prompt", false)
     .option("--local", "Destroy local Docker sandbox only (skip AKS)", false)
@@ -18,7 +18,7 @@ export function destroyCommand(): Command {
     .option("-g, --resource-group <name>", "Resource group name")
     .option("--region <region>", "Azure region (used to derive resource group)", "eastus2")
     .action(async (name: string | undefined, options) => {
-      const rg = options.resourceGroup || `azureclaw-${options.region}`;
+      const rg = options.resourceGroup || `kars-${options.region}`;
 
       if (options.all) {
         // Full teardown — delete the entire resource group
@@ -36,7 +36,7 @@ export function destroyCommand(): Command {
         const spinner = ora(`Deleting resource group '${rg}' and all resources...`).start();
         try {
           const { execa } = await import("execa");
-          const baseName = "azureclaw";
+          const baseName = "kars";
 
           // Delete the resource group (async)
           await execa("az", [
@@ -71,7 +71,7 @@ export function destroyCommand(): Command {
       // ── Local Docker sandbox ───────────────────────────────────
       if (name) {
         const { execa } = await import("execa");
-        const containerName = `azureclaw-${name}`;
+        const containerName = `kars-${name}`;
 
         // Detect where the agent exists
         let localExists = false;
@@ -87,7 +87,7 @@ export function destroyCommand(): Command {
         if (!options.local) {
           try {
             await execa("kubectl", [
-              "get", "clawsandbox", name, "-n", "azureclaw-system", "--no-headers",
+              "get", "karssandbox", name, "-n", "kars-system", "--no-headers",
             ], { stdio: "pipe" });
             aksExists = true;
           } catch { /* no AKS sandbox */ }
@@ -97,9 +97,9 @@ export function destroyCommand(): Command {
         if (localExists && aksExists && !options.local && !options.cloud) {
           console.log(chalk.yellow(`\n  ⚠️  '${name}' exists in both Docker and AKS.`));
           console.log();
-          console.log(`  ${chalk.cyan(`azureclaw destroy ${name} --local`)}   → destroy Docker container`);
-          console.log(`  ${chalk.cyan(`azureclaw destroy ${name} --cloud`)}   → destroy AKS sandbox`);
-          console.log(`  ${chalk.cyan(`azureclaw destroy ${name} --local --cloud`)}   → destroy both`);
+          console.log(`  ${chalk.cyan(`kars destroy ${name} --local`)}   → destroy Docker container`);
+          console.log(`  ${chalk.cyan(`kars destroy ${name} --cloud`)}   → destroy AKS sandbox`);
+          console.log(`  ${chalk.cyan(`kars destroy ${name} --local --cloud`)}   → destroy both`);
           console.log();
           return;
         }
@@ -112,26 +112,26 @@ export function destroyCommand(): Command {
             // Clean up volume
             await execa("docker", ["volume", "rm", `${containerName}-data`], { stdio: "pipe" }).catch(() => {});
 
-            // Check if any other azureclaw sandbox containers are still running
+            // Check if any other kars sandbox containers are still running
             const { stdout: ps } = await execa("docker", [
-              "ps", "--filter", "name=azureclaw-", "--format", "{{.Names}}",
+              "ps", "--filter", "name=kars-", "--format", "{{.Names}}",
             ], { stdio: "pipe" });
             const remaining = ps.split("\n").filter(n =>
-              n.startsWith("azureclaw-") &&
-              !n.startsWith("azureclaw-agt-")
+              n.startsWith("kars-") &&
+              !n.startsWith("kars-agt-")
             );
 
             if (remaining.length === 0) {
               // Last sandbox — tear down AGT infrastructure
               spinner.text = "Stopping AGT infrastructure...";
-              for (const c of ["azureclaw-agt-registry", "azureclaw-agt-relay", "azureclaw-agt-postgres"]) {
+              for (const c of ["kars-agt-registry", "kars-agt-relay", "kars-agt-postgres"]) {
                 // -v removes anonymous volumes attached to the container (e.g. postgres data)
                 await execa("docker", ["rm", "-fv", c], { stdio: "pipe" }).catch(() => {});
               }
-              await execa("docker", ["network", "rm", "azureclaw-dev"], { stdio: "pipe" }).catch(() => {});
+              await execa("docker", ["network", "rm", "kars-dev"], { stdio: "pipe" }).catch(() => {});
               // Clean up any remaining sub-agent containers and their volumes
               const { stdout: allCs } = await execa("docker", [
-                "ps", "-a", "--filter", "name=azureclaw-", "--format", "{{.Names}}",
+                "ps", "-a", "--filter", "name=kars-", "--format", "{{.Names}}",
               ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
               for (const c of allCs.split("\n").filter(Boolean)) {
                 await execa("docker", ["rm", "-fv", c], { stdio: "pipe" }).catch(() => {});
@@ -182,12 +182,12 @@ export function destroyCommand(): Command {
           }
 
           spinner.text = `Destroying sandbox '${name}'...`;
-          const sandboxNs = `azureclaw-${name}`;
+          const sandboxNs = `kars-${name}`;
 
           // Delete the CR (controller will clean up the namespace)
           await execa("kubectl", [
-            "delete", "clawsandbox", name,
-            "-n", "azureclaw-system",
+            "delete", "karssandbox", name,
+            "-n", "kars-system",
             "--ignore-not-found",
           ], { stdio: "pipe" });
 
@@ -200,9 +200,9 @@ export function destroyCommand(): Command {
           // Remove the federated identity credential
           await execa("az", [
             "identity", "federated-credential", "delete",
-            "--identity-name", "azureclaw-aks-sandbox-wi",
+            "--identity-name", "kars-aks-sandbox-wi",
             "--resource-group", rg,
-            "--name", `azureclaw-${name}`,
+            "--name", `kars-${name}`,
             "--yes",
             "--output", "none",
           ], { stdio: "pipe" }).catch(() => {});
@@ -220,8 +220,8 @@ export function destroyCommand(): Command {
 
           spinner.text = "Destroying all sandboxes...";
           await execa("kubectl", [
-            "delete", "clawsandbox", "--all",
-            "-n", "azureclaw-system",
+            "delete", "karssandbox", "--all",
+            "-n", "kars-system",
             "--ignore-not-found",
           ], { stdio: "pipe" });
 
@@ -230,14 +230,14 @@ export function destroyCommand(): Command {
             "get", "ns", "-o", "jsonpath={.items[*].metadata.name}",
           ], { stdio: "pipe" });
           for (const ns of nsList.split(" ")) {
-            if (ns.startsWith("azureclaw-") && ns !== "azureclaw-system") {
+            if (ns.startsWith("kars-") && ns !== "kars-system") {
               // Delete federated credential for this sandbox
-              const sandboxName = ns.replace("azureclaw-", "");
+              const sandboxName = ns.replace("kars-", "");
               await execa("az", [
                 "identity", "federated-credential", "delete",
-                "--identity-name", "azureclaw-aks-sandbox-wi",
+                "--identity-name", "kars-aks-sandbox-wi",
                 "--resource-group", rg,
-                "--name", `azureclaw-${sandboxName}`,
+                "--name", `kars-${sandboxName}`,
                 "--yes", "--output", "none",
               ], { stdio: "pipe" }).catch(() => {});
 

@@ -102,7 +102,7 @@ const SYNC_PATH_NOT_SUPPORTED: &str = "PlatformDispatcher does not support synch
 /// relearn the tool surface.
 ///
 /// Tools are namespaced as `foundry.<name>` so future Class B (mesh /
-/// spawn / handoff) and AzureClaw-platform tools sit cleanly alongside.
+/// spawn / handoff) and Kars-platform tools sit cleanly alongside.
 pub fn foundry_tool_catalog() -> ToolCatalog {
     let tools = vec![
         ToolDefinition {
@@ -298,7 +298,7 @@ pub struct PlatformDispatcher {
     base_url: String,
     sandbox_name: String,
     memory_store_id: String,
-    /// Slice 3b.3: optional handle into the ClawMemory binding loaded
+    /// Slice 3b.3: optional handle into the KarsMemory binding loaded
     /// by `memory_binding_loader`. When `Some` and the handle resolves
     /// to a binding with a non-empty `store_name`, that value wins
     /// over the chart-fed `FOUNDRY_MEMORY_STORE_ID` env (i.e. CRD
@@ -312,7 +312,7 @@ pub struct PlatformDispatcher {
     /// `PolicyStatusRegistry`. When set, `foundry.memory` records an
     /// `AuthMisconfigured:` prefixed `last_error` on the `Memory`
     /// policy kind any time the upstream Foundry Memory Store
-    /// returns 401/403. The controller's ClawMemory reconciler
+    /// returns 401/403. The controller's KarsMemory reconciler
     /// scans for that prefix and elevates the status to
     /// `Degraded=True / reason=AuthMisconfigured` rather than the
     /// generic `AwaitingRouterEnforcement` (see Slice 3b.4 changelog).
@@ -359,7 +359,7 @@ impl PlatformDispatcher {
         d
     }
 
-    /// Override the sandbox name used in the `x-azureclaw-sandbox`
+    /// Override the sandbox name used in the `x-kars-sandbox`
     /// header on self-calls. Mainly for tests.
     pub fn with_sandbox_name(mut self, name: impl Into<String>) -> Self {
         self.sandbox_name = name.into();
@@ -372,7 +372,7 @@ impl PlatformDispatcher {
         self
     }
 
-    /// Slice 3b.3: attach a `ClawMemory` binding handle. When the
+    /// Slice 3b.3: attach a `KarsMemory` binding handle. When the
     /// handle resolves to a binding with a non-empty `store_name`,
     /// `foundry.memory` calls use that store id instead of the
     /// env-fed `memory_store_id`. Lets the CRD-driven binding take
@@ -390,7 +390,7 @@ impl PlatformDispatcher {
     /// Slice 3b.4: attach the per-process `PolicyStatusRegistry`.
     /// Enables the `foundry.memory` 401/403 path to surface an
     /// `AuthMisconfigured:` prefixed `last_error` for the `Memory`
-    /// policy kind so the controller can elevate the ClawMemory CRD
+    /// policy kind so the controller can elevate the KarsMemory CRD
     /// to `Degraded=True / reason=AuthMisconfigured`. Without this
     /// handle the dispatcher still works end-to-end — 403s just stay
     /// in-band on the agent envelope and never reach the CRD.
@@ -400,7 +400,7 @@ impl PlatformDispatcher {
     }
 
     /// Resolve the effective Memory Store id for a `foundry.memory`
-    /// call. Returns the ClawMemory binding's `store_name` when one
+    /// call. Returns the KarsMemory binding's `store_name` when one
     /// is loaded with a non-empty value; otherwise the configured
     /// env-fed `memory_store_id`. The CRD-driven binding wins.
     async fn effective_memory_store_id(&self) -> String {
@@ -563,7 +563,7 @@ impl PlatformDispatcher {
                         let source_path = registry
                             .get(PolicyKind::Memory)
                             .map(|e| e.source_path)
-                            .unwrap_or_else(|| "/etc/azureclaw/memory/binding.json".to_string());
+                            .unwrap_or_else(|| "/etc/kars/memory/binding.json".to_string());
                         let msg = format!(
                             "AuthMisconfigured: foundry.memory auto-provision returned HTTP {s} \
                              from /memory_stores (verify the project managed identity has \
@@ -588,8 +588,8 @@ impl PlatformDispatcher {
         // Slice 3b.4 — surface upstream auth failures from the
         // Foundry Memory Store on the CRD. The router records an
         // `AuthMisconfigured:` prefixed `last_error` on
-        // `PolicyKind::Memory` so the ClawMemory reconciler's pre-scan
-        // (see `controller/src/claw_memory_reconciler.rs::
+        // `PolicyKind::Memory` so the KarsMemory reconciler's pre-scan
+        // (see `controller/src/kars_memory_reconciler.rs::
         // first_auth_misconfigured_message`) lifts the condition to
         // `Degraded=True / reason=AuthMisconfigured`. The wire prefix
         // is pinned by the controller side as
@@ -603,7 +603,7 @@ impl PlatformDispatcher {
             let source_path = registry
                 .get(PolicyKind::Memory)
                 .map(|e| e.source_path)
-                .unwrap_or_else(|| "/etc/azureclaw/memory/binding.json".to_string());
+                .unwrap_or_else(|| "/etc/kars/memory/binding.json".to_string());
             let msg = format!(
                 "AuthMisconfigured: foundry.memory:{} returned HTTP {} from {} \
                  (verify the project managed identity has the Azure AI User \
@@ -628,7 +628,7 @@ impl PlatformDispatcher {
             let source_path = registry
                 .get(PolicyKind::Memory)
                 .map(|e| e.source_path)
-                .unwrap_or_else(|| "/etc/azureclaw/memory/binding.json".to_string());
+                .unwrap_or_else(|| "/etc/kars/memory/binding.json".to_string());
             let msg = format!(
                 "MemoryStoreMissing: foundry.memory:{op} returned HTTP 404 from {path} \
                  (auto-provision also failed; check the router logs for the \
@@ -661,7 +661,7 @@ impl PlatformDispatcher {
         let chat_model = std::env::var("OPENCLAW_MODEL").unwrap_or_else(|_| "gpt-4.1".to_string());
         let body = json!({
             "name": store_id,
-            "description": "AzureClaw agent persistent memory",
+            "description": "Kars agent persistent memory",
             "definition": {
                 "kind": "default",
                 "chat_model": chat_model,
@@ -899,8 +899,8 @@ impl PlatformDispatcher {
             .http
             .post(&url)
             .header("content-type", "application/json")
-            .header("x-azureclaw-sandbox", &self.sandbox_name)
-            .header("x-azureclaw-platform-mcp", "1")
+            .header("x-kars-sandbox", &self.sandbox_name)
+            .header("x-kars-platform-mcp", "1")
             .body(bytes)
             .send()
             .await;
@@ -912,8 +912,8 @@ impl PlatformDispatcher {
         let resp = self
             .http
             .get(&url)
-            .header("x-azureclaw-sandbox", &self.sandbox_name)
-            .header("x-azureclaw-platform-mcp", "1")
+            .header("x-kars-sandbox", &self.sandbox_name)
+            .header("x-kars-platform-mcp", "1")
             .send()
             .await;
         Ok(self.envelope(tool, resp).await)
@@ -928,8 +928,8 @@ impl PlatformDispatcher {
         let resp = self
             .http
             .delete(&url)
-            .header("x-azureclaw-sandbox", &self.sandbox_name)
-            .header("x-azureclaw-platform-mcp", "1")
+            .header("x-kars-sandbox", &self.sandbox_name)
+            .header("x-kars-platform-mcp", "1")
             .send()
             .await;
         Ok(self.envelope(tool, resp).await)
@@ -1125,7 +1125,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/responses"))
-            .and(header("x-azureclaw-sandbox", "test-sandbox"))
+            .and(header("x-kars-sandbox", "test-sandbox"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": "websearch"})))
             .mount(&server)
             .await;
@@ -1264,7 +1264,7 @@ mod tests {
         assert!(matches!(err, DispatchError::InvalidArguments { .. }));
     }
 
-    /// Slice 3b.3: when a ClawMemory binding is attached and carries
+    /// Slice 3b.3: when a KarsMemory binding is attached and carries
     /// a non-empty `store_name`, that name wins over the env-fed
     /// `memory_store_id`. The compiled CRD is the source of truth.
     #[tokio::test]
@@ -1281,7 +1281,7 @@ mod tests {
             let mut g = handle.write().await;
             *g = Some(LoadedMemoryBinding {
                 digest: "sha256:deadbeef".into(),
-                source_path: "/etc/azureclaw/memory/binding.json".into(),
+                source_path: "/etc/kars/memory/binding.json".into(),
                 store_name: "from-crd".into(),
                 scope: "agent:test".into(),
                 raw: json!({"storeName": "from-crd"}),
@@ -1325,7 +1325,7 @@ mod tests {
             let mut g = handle.write().await;
             *g = Some(LoadedMemoryBinding {
                 digest: "sha256:deadbeef".into(),
-                source_path: "/etc/azureclaw/memory/binding.json".into(),
+                source_path: "/etc/kars/memory/binding.json".into(),
                 store_name: "   ".into(),
                 scope: "agent:test".into(),
                 raw: json!({}),
@@ -1645,7 +1645,7 @@ mod tests {
     /// `AuthMisconfigured:` prefixed `last_error` on
     /// `PolicyKind::Memory` while preserving the prior digest. This
     /// is the producer half of the controller-side scan added in
-    /// `controller/src/claw_memory_reconciler::first_auth_misconfigured_message`.
+    /// `controller/src/kars_memory_reconciler::first_auth_misconfigured_message`.
     #[tokio::test]
     async fn memory_403_records_auth_misconfigured_on_policy_status() {
         let server = MockServer::start().await;
@@ -1661,7 +1661,7 @@ mod tests {
         // "never loaded".
         registry.record_success(
             PolicyKind::Memory,
-            "/etc/azureclaw/memory/binding.json",
+            "/etc/kars/memory/binding.json",
             b"binding",
         );
         let prior_digest = registry
@@ -1805,7 +1805,7 @@ mod tests {
     /// `MemoryStoreMissing:` prefixed `last_error` on
     /// `PolicyKind::Memory` while preserving the prior digest. The
     /// controller's `first_memory_store_missing_message` pre-scan
-    /// (claw_memory_reconciler) elevates this to
+    /// (kars_memory_reconciler) elevates this to
     /// `Degraded=True / reason=MemoryStoreMissing`. 404 has lower
     /// precedence than 401/403 (RBAC dominates), so callers must
     /// check AuthMisconfigured first — which they do.
@@ -1820,7 +1820,7 @@ mod tests {
         let registry = Arc::new(PolicyStatusRegistry::new());
         registry.record_success(
             PolicyKind::Memory,
-            "/etc/azureclaw/memory/binding.json",
+            "/etc/kars/memory/binding.json",
             b"binding",
         );
         let prior_digest = registry
@@ -1950,7 +1950,7 @@ mod tests {
         let registry = Arc::new(PolicyStatusRegistry::new());
         registry.record_success(
             PolicyKind::Memory,
-            "/etc/azureclaw/memory/binding.json",
+            "/etc/kars/memory/binding.json",
             b"binding",
         );
         let d = PlatformDispatcher::with_base_url(server.uri())
@@ -2071,7 +2071,7 @@ mod tests {
         );
         // MemoryStoreMissing must NOT also be recorded (RBAC
         // dominates the 404 signal — see precedence comment in
-        // claw_memory_reconciler).
+        // kars_memory_reconciler).
         assert!(
             !err.starts_with("MemoryStoreMissing:"),
             "RBAC must dominate 404: {err}"

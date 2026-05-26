@@ -5,7 +5,7 @@
 ## What it does
 
 When `controller.byoStrict=true`, the controller validates the
-`spec.runtime.byo` block of every `ClawSandbox` of `runtime.kind=BYO`
+`spec.runtime.byo` block of every `KarsSandbox` of `runtime.kind=BYO`
 before reconciling. Any violation fails the sandbox closed:
 
 ```yaml
@@ -39,7 +39,7 @@ missing tag, leading whitespace).
 ## What it does *not* check (yet)
 
 Registry-side label introspection — i.e. confirming the image
-actually carries `org.azureclaw.runtime.contract=v1` — is tracked in
+actually carries `org.kars.runtime.contract=v1` — is tracked in
 the [roadmap](../roadmap.md). That requires an authenticated registry
 pull in the controller's hot reconcile loop, which is a substantial
 new dependency surface (rate limits, image-cache, registry auth flow).

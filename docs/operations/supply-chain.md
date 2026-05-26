@@ -1,6 +1,6 @@
-# AzureClaw — Supply-Chain Hardening
+# Kars — Supply-Chain Hardening
 
-This document describes the AzureClaw build, sign, and verify pipeline
+This document describes the Kars build, sign, and verify pipeline
 for container images and Rust dependencies. It is the operator's
 reference for what `cargo deny`, `cosign verify`, and the CI rows
 actually check, and how to extend them.
@@ -44,7 +44,7 @@ actually check, and how to extend them.
 
 ## Image signing
 
-AzureClaw images are signed in two flows:
+Kars images are signed in two flows:
 
 - **Tag releases (`v*`)** — signed with Notation against an Azure
   Key Vault key (`.github/workflows/image-sign-sbom.yml`). SBOMs are
@@ -61,9 +61,9 @@ locally against a tag-release image:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp "^https://github.com/Azure/azureclaw/" \
+  --certificate-identity-regexp "^https://github.com/Azure/kars/" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/azure/azureclaw-controller@sha256:<digest>
+  ghcr.io/azure/kars-controller@sha256:<digest>
 ```
 
 The `cosign-verify` job runs in PR mode as a **dry-run** because
@@ -73,7 +73,7 @@ specific digest.
 
 ## Image-tag convention
 
-The AzureClaw repo convention is `:latest` as the *default*
+The Kars repo convention is `:latest` as the *default*
 operator-image tag (controller, inference-router, sandbox base). This
 is intentional: the controller's image-tag drift across v11–v25
 caused hard-to-debug incidents, and `:latest` plus
@@ -84,7 +84,7 @@ In production, operators are expected to override the tag at install
 time with a digest pin:
 
 ```bash
-helm install azureclaw deploy/helm/azureclaw \
+helm install kars deploy/helm/kars \
   --set controller.image.tag="@sha256:<digest>"
 ```
 

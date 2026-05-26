@@ -1,8 +1,8 @@
-# Azure permissions required for `azureclaw up`
+# Azure permissions required for `kars up`
 
-`azureclaw up` provisions a complete secure-by-default AKS runtime: cluster,
+`kars up` provisions a complete secure-by-default AKS runtime: cluster,
 ACR, Key Vault, Log Analytics, Azure AI Foundry project, Workload Identity,
-role assignments, network rules, Helm charts, and the `ClawSandbox` CRD.
+role assignments, network rules, Helm charts, and the `KarsSandbox` CRD.
 
 End-to-end the flow takes **15–25 minutes**. If the caller lacks the right
 RBAC, the flow fails halfway through with a cryptic `AuthorizationFailed`
@@ -11,7 +11,7 @@ ask your subscription Owner for the right roles up front, or hand them this
 page.
 
 The CLI also ships a preflight check (run automatically at the start of
-`azureclaw up`) that queries your effective permissions and fails fast in
+`kars up`) that queries your effective permissions and fails fast in
 under 30 seconds if anything is missing. You can bypass it with
 `--skip-preflight` if you know better.
 
@@ -20,7 +20,7 @@ under 30 seconds if anything is missing. You can bypass it with
 ## TL;DR — grant these two roles
 
 At **subscription** scope, for the user (or service principal) running
-`azureclaw up`:
+`kars up`:
 
 ```bash
 SUB=$(az account show --query id -o tsv)
@@ -39,7 +39,7 @@ acceptable.
 
 ## Why two roles?
 
-| Role | Actions it grants | What `azureclaw up` needs it for |
+| Role | Actions it grants | What `kars up` needs it for |
 |------|-------------------|----------------------------------|
 | **Contributor** | `*` except `Microsoft.Authorization/*/Write`, `*/Delete` | Create AKS, ACR, KV, Log Analytics, Foundry, VNet, Workload Identity, Bicep deployments |
 | **User Access Administrator** | `Microsoft.Authorization/*` | `az aks update --attach-acr` (kubelet↔ACR role assignment), federated-credential creation, Workload Identity → Foundry role grants |
@@ -78,8 +78,8 @@ here so you can build a **custom role** if you need tighter least-privilege.
 
 ```jsonc
 {
-  "Name": "AzureClaw Deployer",
-  "Description": "Minimal role to run 'azureclaw up' end-to-end",
+  "Name": "Kars Deployer",
+  "Description": "Minimal role to run 'kars up' end-to-end",
   "IsCustom": true,
   "Actions": [
     "Microsoft.Resources/subscriptions/resourceGroups/write",
@@ -111,14 +111,14 @@ here so you can build a **custom role** if you need tighter least-privilege.
 Assign with:
 
 ```bash
-az role definition create --role-definition ./azureclaw-deployer.json
-az role assignment create --assignee "$USER" --role "AzureClaw Deployer" --scope "/subscriptions/$SUB"
+az role definition create --role-definition ./kars-deployer.json
+az role assignment create --assignee "$USER" --role "Kars Deployer" --scope "/subscriptions/$SUB"
 ```
 
 > **Note:** When `a2aGateway.enabled: true` in Helm values, cert-manager (≥ 1.14)
 > must be installed in the cluster before deploying — the chart creates a
 > `Certificate` CR for TLS provisioning. cert-manager is not deployed by
-> `azureclaw up`; install it independently with
+> `kars up`; install it independently with
 > `helm install cert-manager jetstack/cert-manager --set installCRDs=true`.
 
 ---
@@ -159,7 +159,7 @@ done
 | `Microsoft.Compute/EncryptionAtHost` | Always — `clawpool` VMs use encryption-at-host |
 | `Microsoft.ContainerService/KataVMIsolationPreview` | Only with `--isolation confidential` |
 
-`azureclaw up` attempts to register these automatically. **Feature
+`kars up` attempts to register these automatically. **Feature
 propagation takes 5–15 minutes** — if your tenant hasn't registered them
 before, the preflight will print a warning and you'll want to register
 them ahead of time:
@@ -181,10 +181,10 @@ az provider register -n Microsoft.ContainerService
 
 ## Tenant-level (Entra ID) considerations
 
-AzureClaw's inter-agent mesh (AGT) authenticates agents to the AgentMesh
+Kars's inter-agent mesh (AGT) authenticates agents to the AgentMesh
 relay using an Entra-issued token for the scope `api://agentmesh/.default`.
 **Registering that scope requires a tenant administrator** (Global
-Administrator or Application Administrator). AzureClaw does **not** create
+Administrator or Application Administrator). Kars does **not** create
 the app registration automatically.
 
 If nobody has provisioned the `api://agentmesh` Entra application in your
@@ -192,12 +192,12 @@ tenant, sandboxes still come up — they fall back to the **AGT anonymous
 tier**, which works for dev/test but not for production tenant-isolated
 workloads.
 
-The fastest fix is the AzureClaw CLI helper, which is idempotent and
+The fastest fix is the Kars CLI helper, which is idempotent and
 prints the tenant/client IDs when it's done:
 
 ```bash
 # Requires Application Administrator or Global Admin
-azureclaw mesh setup-trust
+kars mesh setup-trust
 ```
 
 If you'd rather run the underlying `az` calls directly:
@@ -227,12 +227,12 @@ az ad sp create --id "$APP_ID"
 ## Running the preflight manually
 
 ```bash
-# The preflight runs automatically at the start of `azureclaw up`. To run
+# The preflight runs automatically at the start of `kars up`. To run
 # just the checks without deploying, pair it with --dry-run:
-azureclaw up --dry-run
+kars up --dry-run
 
 # To bypass (e.g. cross-tenant guests where the permissions API returns
 # misleading results, or CI systems using a federated identity where the
 # effective-permissions API doesn't reflect reality):
-azureclaw up --skip-preflight
+kars up --skip-preflight
 ```

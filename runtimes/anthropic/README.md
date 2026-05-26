@@ -1,8 +1,8 @@
-# AzureClaw runtime adapter — Anthropic Claude Agent SDK
+# Kars runtime adapter — Anthropic Claude Agent SDK
 
-`azureclaw_runtime_anthropic` is the in-pod adapter that wires the
+`kars_runtime_anthropic` is the in-pod adapter that wires the
 [Anthropic Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python)
-into the AzureClaw sandbox. It ships inside the
+into the Kars sandbox. It ships inside the
 `sandbox-images/anthropic` container image and is invoked from
 `entrypoint.sh` before the user's agent code runs.
 
@@ -37,7 +37,7 @@ the platform MCP server in directly:
 
 ```python
 from claude_agent_sdk import Agent
-from azureclaw_runtime_anthropic import bootstrap, PLATFORM_MCP_URL
+from kars_runtime_anthropic import bootstrap, PLATFORM_MCP_URL
 
 bootstrap()  # idempotent
 
@@ -56,9 +56,9 @@ duplication of upstream MCP transport logic).
 
 - Process runs as UID 1000 (egress-guard pin in `reconciler/mod.rs`).
 - LLM traffic goes via `http://127.0.0.1:8443/anthropic/v1` (router sidecar).
-- Reads MCP gateway from `AZURECLAW_PLATFORM_MCP_URL` (defaults to the
+- Reads MCP gateway from `KARS_PLATFORM_MCP_URL` (defaults to the
   in-cluster MCP server).
-- Honors `AZURECLAW_*` env wiring (router URL, AGT relay URL, identity SAN).
+- Honors `KARS_*` env wiring (router URL, AGT relay URL, identity SAN).
 - Does not bind privileged ports; default `securityContext` only.
 
 ## Building the wheel

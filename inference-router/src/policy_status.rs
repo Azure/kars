@@ -49,20 +49,20 @@ use std::time::SystemTime;
 #[serde(rename_all = "PascalCase")]
 pub enum PolicyKind {
     /// AGT (Agent Governance Toolkit) profile — YAML rule files mounted
-    /// at `AGT_POLICY_DIR` (default `/etc/azureclaw/policies`). Produced
+    /// at `AGT_POLICY_DIR` (default `/etc/kars/policies`). Produced
     /// by `ToolPolicy` reconciler (Slice 1) and by the built-in
     /// `agt-profiles/*.yaml` shipped in the sandbox image as a fallback.
     AgtProfile,
     /// `InferencePolicy` compiled profile — single JSON file mounted at
-    /// `INFERENCE_POLICY_DIR` (default `/etc/azureclaw/inference`).
+    /// `INFERENCE_POLICY_DIR` (default `/etc/kars/inference`).
     /// Produced by the `InferencePolicy` reconciler (Slice 2a).
     /// Today only the `tokenBudget.perRequestTokens` axis is enforced
     /// by the router; later sub-slices add daily/monthly budgets,
     /// content-safety floors, and model failover.
     InferencePolicy,
-    /// `ClawMemory` compiled binding — single JSON file mounted at
-    /// `MEMORY_BINDING_DIR` (default `/etc/azureclaw/memory`).
-    /// Produced by the `ClawMemory` reconciler (Slice 3a). Slice 3a
+    /// `KarsMemory` compiled binding — single JSON file mounted at
+    /// `MEMORY_BINDING_DIR` (default `/etc/kars/memory`).
+    /// Produced by the `KarsMemory` reconciler (Slice 3a). Slice 3a
     /// is digest-echo only: the router loads the binding, registers
     /// the digest, and exposes it via `/internal/policy-status` so
     /// the controller can close the §3 Ready ⇔ router-echo loop.
@@ -71,8 +71,8 @@ pub enum PolicyKind {
     /// chart-fed `FOUNDRY_MEMORY_STORE_ID` env.
     Memory,
     /// Compiled egress allowlist — single JSON file mounted at
-    /// `EGRESS_ALLOWLIST_DIR` (default `/etc/azureclaw/egress`).
-    /// Produced by the `ClawSandbox` reconciler (Slice 5c.1) from the
+    /// `EGRESS_ALLOWLIST_DIR` (default `/etc/kars/egress`).
+    /// Produced by the `KarsSandbox` reconciler (Slice 5c.1) from the
     /// resolved `spec.networkPolicy.{allowlistRef,allowedEndpoints}`.
     /// On every load the router atomically replaces
     /// `Blocklist.allowlist` (the L7 hostname filter consulted by
@@ -287,12 +287,12 @@ mod tests {
         let reg = PolicyStatusRegistry::new();
         reg.record_success(
             PolicyKind::AgtProfile,
-            "/etc/azureclaw/policies/a.yaml",
+            "/etc/kars/policies/a.yaml",
             b"hello",
         );
         let e = reg.get(PolicyKind::AgtProfile).expect("entry present");
         assert_eq!(e.kind, PolicyKind::AgtProfile);
-        assert_eq!(e.source_path, "/etc/azureclaw/policies/a.yaml");
+        assert_eq!(e.source_path, "/etc/kars/policies/a.yaml");
         assert_eq!(
             e.digest.as_deref(),
             Some("sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"),
@@ -422,7 +422,7 @@ mod tests {
             .get();
 
         let reg = PolicyStatusRegistry::new();
-        reg.record_success(kind, "/etc/azureclaw/egress/approvals.json", b"{}");
+        reg.record_success(kind, "/etc/kars/egress/approvals.json", b"{}");
 
         assert_eq!(
             crate::metrics::POLICY_BUNDLE_HEALTHY
@@ -455,7 +455,7 @@ mod tests {
         // Seed with a success so we can prove `record_error` flips the
         // gauge back down (not just sets it from default 0 → 0).
         let reg = PolicyStatusRegistry::new();
-        reg.record_success(kind, "/etc/azureclaw/memory/binding.json", b"{}");
+        reg.record_success(kind, "/etc/kars/memory/binding.json", b"{}");
         assert_eq!(
             crate::metrics::POLICY_BUNDLE_HEALTHY
                 .with_label_values(&[label])
@@ -466,11 +466,7 @@ mod tests {
         let error_before = crate::metrics::POLICY_BUNDLE_RELOADS
             .with_label_values(&[label, "error"])
             .get();
-        reg.record_error(
-            kind,
-            "/etc/azureclaw/memory/binding.json",
-            "permission denied",
-        );
+        reg.record_error(kind, "/etc/kars/memory/binding.json", "permission denied");
 
         assert_eq!(
             crate::metrics::POLICY_BUNDLE_HEALTHY

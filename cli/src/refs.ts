@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 // S13 phase2-config-authority-refs:
-// `ClawSandbox.spec.inferenceRef` → sibling `InferencePolicy` CR (required).
-// `ClawSandbox.spec.governance.toolPolicyRef` → sibling `ToolPolicy` CR
+// `KarsSandbox.spec.inferenceRef` → sibling `InferencePolicy` CR (required).
+// `KarsSandbox.spec.governance.toolPolicyRef` → sibling `ToolPolicy` CR
 // (required when governance.enabled). Both are SAME-NAMESPACE refs.
 
 import { readFileSync } from "node:fs";
@@ -64,12 +64,12 @@ export function buildInferencePolicy(opts: InferencePolicyOpts): Record<string, 
     spec.tokenBudget = tb;
   }
   return {
-    apiVersion: "azureclaw.azure.com/v1alpha1",
+    apiVersion: "kars.azure.com/v1alpha1",
     kind: "InferencePolicy",
     metadata: {
       name: inferenceRefName(opts.sandboxName),
       namespace: opts.namespace,
-      labels: { "azureclaw.azure.com/sandbox": opts.sandboxName },
+      labels: { "kars.azure.com/sandbox": opts.sandboxName },
     },
     spec,
   };
@@ -84,13 +84,13 @@ export interface ToolPolicyOpts {
 /**
  * Resolve the AGT profile YAML bytes that get inlined into
  * `ToolPolicy.spec.agtProfile.inline`. Pre-Slice-1e the sandbox image
- * shipped these YAMLs at `/opt/azureclaw-plugin/policies/` and the
+ * shipped these YAMLs at `/opt/kars-plugin/policies/` and the
  * controller selected one by name via `AGT_POLICY_PROFILE`. Post-Slice-1e
  * (phase 2) the bundled sandbox-side path is gone — the CLI is the
  * sole producer of the inline policy bytes, and the controller
  * hard-fails any ToolPolicy without `spec.agtProfile.inline`.
  *
- * Profile assets live in `cli/profiles/agt/azureclaw-<profile>.yaml`
+ * Profile assets live in `cli/profiles/agt/kars-<profile>.yaml`
  * and are copied to `dist/profiles/agt/` by the build script. We
  * resolve relative to `import.meta.url` so the lookup works whether
  * the CLI runs from source (tsx/vitest) or from the installed bundle.
@@ -109,7 +109,7 @@ export function loadAgtProfile(profile: string): string {
       path.resolve(path.dirname(here), "..", "profiles", "agt"),
     ];
     for (const d of dirs) {
-      const p = path.join(d, `azureclaw-${name}.yaml`);
+      const p = path.join(d, `kars-${name}.yaml`);
       try {
         return readFileSync(p, "utf8");
       } catch {
@@ -124,14 +124,14 @@ export function loadAgtProfile(profile: string): string {
 
   if (requested !== "default") {
     console.warn(
-      `[azureclaw] AGT profile '${requested}' not found; falling back to 'default'`,
+      `[kars] AGT profile '${requested}' not found; falling back to 'default'`,
     );
     const fallback = candidate("default");
     if (fallback !== undefined) return fallback;
   }
 
   throw new Error(
-    `AGT profile asset 'azureclaw-${requested}.yaml' not found in cli/profiles/agt/. ` +
+    `AGT profile asset 'kars-${requested}.yaml' not found in cli/profiles/agt/. ` +
       `The CLI build is missing its bundled profiles — re-run \`npm run build\` ` +
       `or reinstall the CLI.`,
   );
@@ -141,18 +141,18 @@ export function buildToolPolicy(opts: ToolPolicyOpts): Record<string, unknown> {
   const profile = (opts.profile || "default").trim() || "default";
   const inline = loadAgtProfile(profile);
   return {
-    apiVersion: "azureclaw.azure.com/v1alpha1",
+    apiVersion: "kars.azure.com/v1alpha1",
     kind: "ToolPolicy",
     metadata: {
       name: toolPolicyRefName(opts.sandboxName),
       namespace: opts.namespace,
-      labels: { "azureclaw.azure.com/sandbox": opts.sandboxName },
-      annotations: { "azureclaw.azure.com/profile": profile },
+      labels: { "kars.azure.com/sandbox": opts.sandboxName },
+      annotations: { "kars.azure.com/profile": profile },
     },
     spec: {
       // ToolPolicy.appliesTo has no sandboxName field — scope via sandbox label.
       appliesTo: {
-        sandboxMatchLabels: { "azureclaw.azure.com/sandbox": opts.sandboxName },
+        sandboxMatchLabels: { "kars.azure.com/sandbox": opts.sandboxName },
       },
       agtProfile: { inline },
     },

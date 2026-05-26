@@ -23,13 +23,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build inference router
-        run: cargo build --release --package azureclaw-inference-router
+        run: cargo build --release --package kars-inference-router
 
       - name: Start router (background)
         run: |
           # Minimal env — the smoke test only hits /healthz which has no
           # auth dependency.
-          ./target/release/azureclaw-inference-router &
+          ./target/release/kars-inference-router &
           echo "ROUTER_PID=$!" >> "$GITHUB_ENV"
           # Give the router a moment to bind.
           for i in $(seq 1 30); do

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! AzureClaw chaos tier — fault-injection harness (Phase 2 S16).
+//! Kars chaos tier — fault-injection harness (Phase 2 S16).
 //!
 //! This crate is empty by design: all logic lives in feature-gated
 //! integration tests under `tests/`. The library exists only so the
@@ -11,7 +11,7 @@
 //! Run the chaos tier with:
 //!
 //! ```bash
-//! cargo test --package azureclaw-chaos-tests --features chaos --tests
+//! cargo test --package kars-chaos-tests --features chaos --tests
 //! ```
 //!
 //! See `tests/chaos/README.md` for tier composition and operational notes.

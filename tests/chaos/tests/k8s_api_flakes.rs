@@ -18,7 +18,7 @@
 
 #![cfg(feature = "chaos")]
 
-use azureclaw_chaos_tests::harness::{
+use kars_chaos_tests::harness::{
     ChaosResponse, ChaosScript, chaos_client, http_with_retry, start_chaos_server,
 };
 

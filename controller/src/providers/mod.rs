@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Provider contracts for the AzureClaw controller.
+//! Provider contracts for the Kars controller.
 //!
 //! Mirrors `inference-router/src/providers/` but scoped to controller-side
 //! concerns: the controller chooses and wires providers based on
-//! `ClawSandbox.spec.agt.providers`, and passes selected references through
+//! `KarsSandbox.spec.agt.providers`, and passes selected references through
 //! to the router via ConfigMap.
 //!
 //! **Phase 0 status:** contracts only. No implementations and no
@@ -15,10 +15,10 @@
 //! **Server-Side Apply** (plan §6 #4): each controller-side write that
 //! touches provider-owned fields uses SSA with a stable field manager:
 //!
-//! - `azureclaw-controller/reconciler`  — base reconciler
-//! - `azureclaw-controller/mesh`        — mesh provider ownership
-//! - `azureclaw-controller/pairing`     — pairing reconciler
-//! - `azureclaw-controller/provider-bridge` — provider-kind selection
+//! - `kars-controller/reconciler`  — base reconciler
+//! - `kars-controller/mesh`        — mesh provider ownership
+//! - `kars-controller/pairing`     — pairing reconciler
+//! - `kars-controller/provider-bridge` — provider-kind selection
 //!
 //! See [`field_managers`].
 
@@ -44,7 +44,7 @@ pub enum ProviderKind {
     Vendored,
     Agt,
     /// Admission-policy-rejected in prod. Only accepted when the manifest
-    /// carries `metadata.labels.azureclaw.azure.com/dev-only: "true"`.
+    /// carries `metadata.labels.kars.azure.com/dev-only: "true"`.
     /// Static mirror: `ci/no-null-provider-prod.sh`.
     Null,
 }
@@ -67,7 +67,7 @@ impl ProviderKind {
     }
 }
 
-/// Outage mode selected per `ClawSandbox` via `spec.agt.outageMode`.
+/// Outage mode selected per `KarsSandbox` via `spec.agt.outageMode`.
 /// See internal Phase 1 plan §1.3.
 ///
 /// The router-side enforcement, pure decision function, and serde wire
@@ -106,8 +106,8 @@ impl OutageMode {
     }
 
     /// Returns `Err` when the chosen mode is illegal for the environment.
-    /// `is_dev_env` must be `true` only when the `ClawSandbox` already
-    /// carries `metadata.labels.azureclaw.azure.com/dev-only=true` — that
+    /// `is_dev_env` must be `true` only when the `KarsSandbox` already
+    /// carries `metadata.labels.kars.azure.com/dev-only=true` — that
     /// admission check lives in the null-provider VAP and must have run
     /// before this helper is consulted.
     pub fn validate_for_env(self, is_dev_env: bool) -> Result<(), OutageModeError> {
@@ -129,7 +129,7 @@ impl std::fmt::Display for OutageModeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DegradedDevInProd => f.write_str(
-                "outageMode=degradedDev requires the sandbox to carry metadata.labels.azureclaw.azure.com/dev-only=true",
+                "outageMode=degradedDev requires the sandbox to carry metadata.labels.kars.azure.com/dev-only=true",
             ),
         }
     }
@@ -137,7 +137,7 @@ impl std::fmt::Display for OutageModeError {
 
 impl std::error::Error for OutageModeError {}
 
-/// The four provider kinds a `ClawSandbox` selects. Each field reads from
+/// The four provider kinds a `KarsSandbox` selects. Each field reads from
 /// `spec.agt.providers.{mesh,policy,audit,signing}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderSelection {
@@ -220,15 +220,12 @@ mod tests {
 
     #[test]
     fn field_managers_are_stable_strings() {
-        assert_eq!(
-            field_managers::RECONCILER,
-            "azureclaw-controller/reconciler"
-        );
-        assert_eq!(field_managers::MESH, "azureclaw-controller/mesh");
-        assert_eq!(field_managers::PAIRING, "azureclaw-controller/pairing");
+        assert_eq!(field_managers::RECONCILER, "kars-controller/reconciler");
+        assert_eq!(field_managers::MESH, "kars-controller/mesh");
+        assert_eq!(field_managers::PAIRING, "kars-controller/pairing");
         assert_eq!(
             field_managers::PROVIDER_BRIDGE,
-            "azureclaw-controller/provider-bridge"
+            "kars-controller/provider-bridge"
         );
     }
 

@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 #
-# AzureClaw runtime image: Microsoft Agent Framework Python.
+# Kars runtime image: Microsoft Agent Framework Python.
 #
-# Ships the in-pod adapter package `azureclaw_runtime_maf_python`,
+# Ships the in-pod adapter package `kars_runtime_maf_python`,
 # which is invoked from `entrypoint.sh::bootstrap` before the user
 # agent code runs. The adapter:
 #   - pins `OPENAI_BASE_URL` and `AZURE_OPENAI_ENDPOINT` to the router
@@ -19,17 +19,17 @@
 # Contract this image must honor:
 #   - Process runs as UID 1000 (egress-guard pin in `reconciler/mod.rs`).
 #   - LLM traffic goes via `http://127.0.0.1:8443` (router sidecar — governance gate).
-#   - Reads MCP gateway from `AZURECLAW_PLATFORM_MCP_URL` (S10.B platform MCP server).
-#   - Honors `AZURECLAW_*` env wiring (router URL, AGT relay URL, identity SAN).
+#   - Reads MCP gateway from `KARS_PLATFORM_MCP_URL` (S10.B platform MCP server).
+#   - Honors `KARS_*` env wiring (router URL, AGT relay URL, identity SAN).
 #   - Does not bind privileged ports; default `securityContext` only.
 
 FROM mcr.microsoft.com/azurelinux/base/python:3.12 AS base
 
-LABEL org.azureclaw.runtime.contract="v1"
-LABEL org.azureclaw.runtime.kind="MicrosoftAgentFramework"
-LABEL org.azureclaw.runtime.language="python"
+LABEL org.kars.runtime.contract="v1"
+LABEL org.kars.runtime.kind="MicrosoftAgentFramework"
+LABEL org.kars.runtime.language="python"
 
-# ---- Install AGT-Python wheels and the AzureClaw adapter ----------------
+# ---- Install AGT-Python wheels and the Kars adapter ----------------
 # AGT-Python wheels (`a2a_agentmesh`, `agent_sandbox`) are built from
 # the upstream `agent-governance-toolkit` repo by
 # `runtimes/build-agt-wheels.sh` and copied into the build context as
@@ -39,21 +39,21 @@ RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
         pip install --no-cache-dir /tmp/agt-wheels/*.whl ; \
     fi
 
-COPY runtimes/maf-python/ /opt/azureclaw-runtime-maf-python/
-RUN pip install --no-cache-dir /opt/azureclaw-runtime-maf-python
+COPY runtimes/maf-python/ /opt/kars-runtime-maf-python/
+RUN pip install --no-cache-dir /opt/kars-runtime-maf-python
 
 # ---- Adapter entrypoint -------------------------------------------------
-COPY sandbox-images/maf-python/entrypoint.sh /usr/local/bin/azureclaw-maf-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/azureclaw-maf-entrypoint.sh
+COPY sandbox-images/maf-python/entrypoint.sh /usr/local/bin/kars-maf-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/kars-maf-entrypoint.sh
 
 # Workspace where the controller mounts user-supplied agent code via
 # `agentCode: { oci | git }`.
 RUN mkdir -p /sandbox/agent && chown -R 1000:1000 /sandbox
 
-COPY --chown=1000:1000 sandbox-images/maf-python/default-agent/ /opt/azureclaw-default-agent/
+COPY --chown=1000:1000 sandbox-images/maf-python/default-agent/ /opt/kars-default-agent/
 
 USER 1000
 WORKDIR /sandbox/agent
 
-ENTRYPOINT ["/usr/local/bin/azureclaw-maf-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/kars-maf-entrypoint.sh"]
 CMD ["python3", "/sandbox/agent/main.py"]

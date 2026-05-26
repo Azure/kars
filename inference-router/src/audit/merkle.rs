@@ -65,7 +65,7 @@ const NODE_PREFIX: u8 = 0x01;
 /// Domain-separation tag for the signed pre-image. Prevents an
 /// attacker who can solicit a signature over different content
 /// (e.g. a chat completion) from re-using it as an audit anchor.
-const ANCHOR_DST: &[u8] = b"azureclaw.audit.anchor.v1\0";
+const ANCHOR_DST: &[u8] = b"kars.audit.anchor.v1\0";
 
 /// Compute a leaf hash with the RFC 6962 leaf prefix.
 pub fn leaf_hash(payload: &[u8]) -> [u8; 32] {

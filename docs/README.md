@@ -1,4 +1,4 @@
-# AzureClaw documentation
+# Kars documentation
 
 A secure runtime for AI agents on Azure Kubernetes Service. This is the documentation index. The top-level [`README`](../README.md) is a faster on-ramp; come here when you need depth.
 
@@ -8,7 +8,7 @@ A secure runtime for AI agents on Azure Kubernetes Service. This is the document
 1. [Getting started](getting-started.md) — laptop in five minutes, then AKS.
 2. [Architecture](architecture.md) — the design and why.
 3. [Architecture diagrams](architecture-diagrams.md) — every component, dev and prod side by side.
-4. [Use cases](use-cases.md) — the four scenarios AzureClaw was built for.
+4. [Use cases](use-cases.md) — the four scenarios Kars was built for.
 
 ### By audience
 
@@ -26,7 +26,7 @@ A secure runtime for AI agents on Azure Kubernetes Service. This is the document
 - [Architecture](architecture.md) — the canonical design doc.
 - [Architecture diagrams](architecture-diagrams.md) — dev, prod, mesh, A2A, MCP.
 - [A2A gateway](architecture/a2a-gateway.md) — public-ingress topology and trust model.
-- [AGT boundary](architecture/agt-boundary.md) — what AGT enforces vs what AzureClaw enforces.
+- [AGT boundary](architecture/agt-boundary.md) — what AGT enforces vs what Kars enforces.
 ### API
 - [CRD reference](api/crd-reference.md) — all nine CRDs with schema and examples.
 - [Conditions reference](api/conditions.md) — every status condition the controller emits.
@@ -48,12 +48,12 @@ A secure runtime for AI agents on Azure Kubernetes Service. This is the document
 - [STRIDE](security/stride.md) — threat model.
 - [Red-team playbook](security/red-team.md) — adversarial scenarios.
 - [Security validation](security-validation.md) — what CI verifies.
-- [MCP top-10](security-mcp-top10.md) — how AzureClaw addresses each item.
+- [MCP top-10](security-mcp-top10.md) — how Kars addresses each item.
 - [Upstream alignment](upstream-alignment.md) — the OpenClaw extension contract.
 
 ### Operations
 - [Operations index](operations/) — fleet operations, GitOps, upgrades.
-- [Operator TUI](operator-tui.md) — `azureclaw operator`.
+- [Operator TUI](operator-tui.md) — `kars operator`.
 - [Egress proxy](egress-proxy.md) — outbound network controls.
 
 ### CLI

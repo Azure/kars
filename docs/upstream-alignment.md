@@ -1,9 +1,9 @@
 # Upstream Alignment
 
-**TL;DR** — AzureClaw does **not** fork OpenClaw. It uses only first-class extension
+**TL;DR** — Kars does **not** fork OpenClaw. It uses only first-class extension
 points (`tools.deny` config, `api.registerTool()` plugin API, `~/.openclaw-data/extensions/`
 discovery) to substitute governance-aware sub-agent tools. Every OpenClaw release
-stays drop-in compatible with AzureClaw.
+stays drop-in compatible with Kars.
 
 ---
 
@@ -14,7 +14,7 @@ stays drop-in compatible with AzureClaw.
 
 ## The answer
 
-Policy ≠ fork. AzureClaw alters **which capabilities are permitted**, not **what
+Policy ≠ fork. Kars alters **which capabilities are permitted**, not **what
 the capabilities do.** Every alteration goes through upstream-documented
 extension points.
 
@@ -42,11 +42,11 @@ capability surface.
 
 ### 2. Register alternative tools via the plugin API
 
-The AzureClaw plugin registers ~20 governance-aware tools through the
+The Kars plugin registers ~20 governance-aware tools through the
 upstream `api.registerTool()` contract:
 
 - `cloud_offload` — ship a task to a fresh AKS sandbox
-- `azureclaw_spawn` / `azureclaw_handoff` — create or migrate to a sub-agent
+- `kars_spawn` / `kars_handoff` — create or migrate to a sub-agent
 - `mesh_send` / `mesh_inbox` / `discover` — peer-to-peer messaging via AgentMesh
 - …plus file, memory, and Foundry skill tools
 
@@ -70,7 +70,7 @@ No monkey-patching. No runtime injection. No modified gateway binary.
 
 ## Why this pattern is correct, not a workaround
 
-| Property | Fork | AzureClaw (this pattern) |
+| Property | Fork | Kars (this pattern) |
 |---|---|---|
 | Tracks upstream releases | Manual merge on every bump | Drop-in |
 | Visible to operators | Hidden in diffs | One config line + one plugin dir |
@@ -115,7 +115,7 @@ re-examined — but today, both are supported, documented extension points.
 
 ## Summary for reviewers
 
-> AzureClaw uses OpenClaw's own `tools.deny` configuration and plugin API
+> Kars uses OpenClaw's own `tools.deny` configuration and plugin API
 > to substitute governance-aware sub-agent tools for the native ones. No
 > OpenClaw source is modified, forked, or patched. The pattern is the
 > intended use of OpenClaw's extension contract and stays compatible with
@@ -126,6 +126,6 @@ re-examined — but today, both are supported, documented extension points.
 - Native tool deny list: [`sandbox-images/openclaw/entrypoint.sh:223`](../sandbox-images/openclaw/entrypoint.sh)
 - Replacement tool registrations: [`cli/src/plugin.ts`](../cli/src/plugin.ts) (all `api.registerTool(...)` call sites)
 - Plugin manifest + entry exports: [`cli/src/plugin.ts`](../cli/src/plugin.ts) (`register` / `activate`)
-- Plugin discovery path: `~/.openclaw-data/extensions/azureclaw-mesh/`
+- Plugin discovery path: `~/.openclaw-data/extensions/kars-mesh/`
 - Architecture overview: [`architecture.md`](architecture.md)
 - Security model: [`security.md`](security.md)

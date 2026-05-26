@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AzureClaw LangGraph (LangChain) runtime entrypoint.
+# Kars LangGraph (LangChain) runtime entrypoint.
 #
 # Pins each known LLM provider base URL to the router sidecar, points
 # MCP-aware tools at the platform MCP server, then invokes the in-pod
@@ -36,12 +36,12 @@ export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-router-managed}"
 
 # Platform MCP server: 9 Foundry-shim tools every runtime gets for
 # free. LangGraph nodes can call this via any MCP client.
-export AZURECLAW_PLATFORM_MCP_URL="${AZURECLAW_PLATFORM_MCP_URL:-http://127.0.0.1:8443/platform/mcp}"
+export KARS_PLATFORM_MCP_URL="${KARS_PLATFORM_MCP_URL:-http://127.0.0.1:8443/platform/mcp}"
 
 # AGT relay/registry — reverse-proxied by the router so AgentMesh
 # traffic shares the same governance gate as LLM traffic.
-export AZURECLAW_AGT_RELAY_URL="${AZURECLAW_AGT_RELAY_URL:-http://127.0.0.1:8443/agt/relay/}"
-export AZURECLAW_AGT_REGISTRY_URL="${AZURECLAW_AGT_REGISTRY_URL:-http://127.0.0.1:8443/agt/registry/}"
+export KARS_AGT_RELAY_URL="${KARS_AGT_RELAY_URL:-http://127.0.0.1:8443/agt/relay/}"
+export KARS_AGT_REGISTRY_URL="${KARS_AGT_REGISTRY_URL:-http://127.0.0.1:8443/agt/registry/}"
 
 # OTel collector — the router exposes `/v1/traces` and `/v1/metrics`.
 export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:8443/v1/traces}"
@@ -50,21 +50,21 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.
 # the controller's `plan_langgraph` rejects `language: typescript`
 # with ShapeInvalid until the TS adapter ships).
 if [ -n "${RUNTIME_LANGGRAPH_LANGUAGE:-}" ]; then
-    echo "[azureclaw-langgraph] language: ${RUNTIME_LANGGRAPH_LANGUAGE}" >&2
+    echo "[kars-langgraph] language: ${RUNTIME_LANGGRAPH_LANGUAGE}" >&2
 fi
 
 # In-pod adapter bootstrap. Idempotent (guarded by
-# `__AZURECLAW_RUNTIME_INITIALIZED__`). Non-fatal if telemetry init
+# `__KARS_RUNTIME_INITIALIZED__`). Non-fatal if telemetry init
 # fails — the adapter logs and continues.
-python3 -c "from azureclaw_runtime_langgraph.runtime import bootstrap; bootstrap()"
+python3 -c "from kars_runtime_langgraph.runtime import bootstrap; bootstrap()"
 
 # If no user agent code is mounted at /sandbox/agent/main.py (operator
 # spawned this runtime without `agentCode`), fall back to the bundled
 # default smoke-test agent so the pod stays Running and proves the
 # Foundry inference path through the router.
 if [ ! -f /sandbox/agent/main.py ]; then
-    echo "[azureclaw-langgraph] no /sandbox/agent/main.py — running bundled default agent" >&2
-    exec python3 /opt/azureclaw-default-agent/main.py
+    echo "[kars-langgraph] no /sandbox/agent/main.py — running bundled default agent" >&2
+    exec python3 /opt/kars-default-agent/main.py
 fi
 
 exec "$@"

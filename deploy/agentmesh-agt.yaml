@@ -8,13 +8,13 @@
 # in the same namespace (agentmesh), so the inference router and the
 # sandbox plugin connect identically. The wire protocol (AgentMesh Wire
 # v1.0) is shared between vendored and upstream — confirmed in upstream
-# MeshClient header which calls out AzureClaw compatibility features.
+# MeshClient header which calls out Kars compatibility features.
 #
 # Image source: build from the AGT clone at
 #   /agent-governance-toolkit/agent-governance-python/agent-mesh/docker/Dockerfile
 # with --build-arg COMPONENT=registry|relay, then tag and push as:
-#   azureclawacr.azurecr.io/agentmesh-registry-agt:latest
-#   azureclawacr.azurecr.io/agentmesh-relay-agt:latest
+#   karsacr.azurecr.io/agentmesh-registry-agt:latest
+#   karsacr.azurecr.io/agentmesh-relay-agt:latest
 #
 # Registry HTTP port: 8082 (upstream default). Relay WebSocket port: 8083.
 # We re-map these to the same Service ports our router/router-helpers expect
@@ -25,8 +25,8 @@ kind: Namespace
 metadata:
   name: agentmesh
   labels:
-    azureclaw.azure.com/managed: "true"
-    azureclaw.azure.com/mesh-provider: "agt"
+    kars.azure.com/managed: "true"
+    kars.azure.com/mesh-provider: "agt"
 ---
 # AGT upstream registry (Python FastAPI)
 apiVersion: apps/v1
@@ -35,7 +35,7 @@ metadata:
   name: registry
   namespace: agentmesh
   labels:
-    azureclaw.azure.com/mesh-provider: agt
+    kars.azure.com/mesh-provider: agt
 spec:
   replicas: 1
   selector:
@@ -45,11 +45,11 @@ spec:
     metadata:
       labels:
         app: agentmesh-registry
-        azureclaw.azure.com/mesh-provider: agt
+        kars.azure.com/mesh-provider: agt
     spec:
       containers:
         - name: registry
-          image: azureclawacr.azurecr.io/agentmesh-registry-agt:latest
+          image: karsacr.azurecr.io/agentmesh-registry-agt:latest
           ports:
             - containerPort: 8082
           env:
@@ -99,7 +99,7 @@ metadata:
   name: relay
   namespace: agentmesh
   labels:
-    azureclaw.azure.com/mesh-provider: agt
+    kars.azure.com/mesh-provider: agt
 spec:
   replicas: 1
   selector:
@@ -109,11 +109,11 @@ spec:
     metadata:
       labels:
         app: agentmesh-relay
-        azureclaw.azure.com/mesh-provider: agt
+        kars.azure.com/mesh-provider: agt
     spec:
       containers:
         - name: relay
-          image: azureclawacr.azurecr.io/agentmesh-relay-agt:latest
+          image: karsacr.azurecr.io/agentmesh-relay-agt:latest
           ports:
             - containerPort: 8083
           env:

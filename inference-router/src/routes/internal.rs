@@ -17,7 +17,7 @@
 //! the digest in the response matches the digest it published.
 //!
 //! The shape is a stable wire contract — clients (controller poller,
-//! `azureclaw inspect`, headlamp plugin) match on field names. Don't
+//! `kars inspect`, headlamp plugin) match on field names. Don't
 //! rename fields without a deprecation window.
 
 use axum::Json;
@@ -53,7 +53,7 @@ struct PolicyStatusResponse {
     /// (always present, may be empty). Populated by the Slice 2d.2
     /// `forward_with_failover` walker as it observes upstream
     /// responses. Clients that don't care can ignore it; the
-    /// controller and `azureclaw inspect` consume it for surfacing
+    /// controller and `kars inspect` consume it for surfacing
     /// `modelPreference.fallback[]` activity.
     #[serde(default)]
     deployment_health: Vec<DeploymentHealthSnapshot>,
@@ -162,8 +162,8 @@ async fn policy_status(State(state): State<AppState>) -> impl IntoResponse {
 //
 // Operator-facing companion to the existing `/egress/learned/blocked`
 // endpoint (which keeps its old shape for the
-// `azureclaw egress … --pending`/`--approve` workflow). The `/internal`
-// variants are the canonical surface the `azureclaw egress blocked` CLI
+// `kars egress … --pending`/`--approve` workflow). The `/internal`
+// variants are the canonical surface the `kars egress blocked` CLI
 // and the headlamp plugin consume:
 //
 //   GET /internal/egress/blocked?since=<rfc3339>
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn entry_dto_serializes_with_camel_pascal_kind() {
         let reg = PolicyStatusRegistry::new();
-        reg.record_success(PolicyKind::AgtProfile, "/etc/azureclaw/policies", b"hello");
+        reg.record_success(PolicyKind::AgtProfile, "/etc/kars/policies", b"hello");
         let entry = reg.get(PolicyKind::AgtProfile).unwrap();
         let dto = EntryDto::from(entry);
         let json = serde_json::to_value(&dto).unwrap();
@@ -457,10 +457,7 @@ mod tests {
             json["digest"].as_str(),
             Some("sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"),
         );
-        assert_eq!(
-            json["source_path"].as_str(),
-            Some("/etc/azureclaw/policies")
-        );
+        assert_eq!(json["source_path"].as_str(), Some("/etc/kars/policies"));
         assert!(json["loaded_at"].as_str().unwrap().ends_with("Z"));
         assert!(json["last_error"].is_null());
     }

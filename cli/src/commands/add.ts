@@ -17,7 +17,7 @@ export function addCommand(): Command {
   const cmd = new Command("add");
 
   cmd
-    .description("Add a new sandboxed agent to an existing AzureClaw cluster")
+    .description("Add a new sandboxed agent to an existing Kars cluster")
     .argument("<name>", "Name for the new sandbox agent")
 
     // ── Core (all runtimes) ────────────────────────────────────────────
@@ -38,7 +38,7 @@ export function addCommand(): Command {
     .option("--no-governance", "Skip generating per-sandbox ToolPolicy / TrustGraph CRs (router guardrails still enforced)")
     .option("--trust-threshold <score>", "AGT trust threshold (0-1000)", "500")
     .option("--policy-profile <profile>", "AGT policy profile name", "default")
-    .option("--learn-egress", "Egress learn mode: observe outbound domains (blocklist still enforced); review with 'azureclaw policy learn'", false)
+    .option("--learn-egress", "Egress learn mode: observe outbound domains (blocklist still enforced); review with 'kars policy learn'", false)
 
     // ── Foundry agent (all runtimes; optional) ─────────────────────────
     .option("--agent-instructions <instructions>", "System prompt for the Foundry agent")
@@ -59,14 +59,14 @@ export function addCommand(): Command {
     .option("--openai-api-key <key>", "[OpenClaw only] OpenAI API key (for dual-provider setups)")
 
     // ── Runtime-specific: BYO ──────────────────────────────────────────
-    .option("--byo-image <image>", "[BYO only] Container image (must declare org.azureclaw.runtime.contract=v1)")
+    .option("--byo-image <image>", "[BYO only] Container image (must declare org.kars.runtime.contract=v1)")
     .option("--byo-contract-version <version>", "[BYO only] BYO contract version", "v1")
 
     // ── Runtime-specific: Microsoft Agent Framework ────────────────────
     .option("--maf-language <lang>", "[MAF only] Microsoft Agent Framework language: python (dotnet not yet wired)", "python")
 
     // ── Output control ─────────────────────────────────────────────────
-    .option("--dry-run", "Print the ClawSandbox YAML without applying", false)
+    .option("--dry-run", "Print the KarsSandbox YAML without applying", false)
     .addHelpText("after", `
 Flag groups (see --help for details):
   Core:                --runtime, --model, --isolation, --image
@@ -138,17 +138,17 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       });
 
       const sandbox: Record<string, unknown> = {
-        apiVersion: "azureclaw.azure.com/v1alpha1",
-        kind: "ClawSandbox",
+        apiVersion: "kars.azure.com/v1alpha1",
+        kind: "KarsSandbox",
         metadata: {
           name,
-          namespace: "azureclaw-system",
+          namespace: "kars-system",
         },
         spec: {
           runtime: runtimeBlock,
           sandbox: {
             isolation: options.isolation,
-            seccompProfile: options.isolation === "standard" ? "RuntimeDefault" : "azureclaw-strict",
+            seccompProfile: options.isolation === "standard" ? "RuntimeDefault" : "kars-strict",
             readOnlyRootFilesystem: true,
             runAsNonRoot: true,
             allowPrivilegeEscalation: false,
@@ -247,7 +247,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           } else if (channel === "whatsapp") {
             envSecrets[channelEnvVars[channel]] = "true";
           } else if (tokenFlag && !resolved) {
-            console.error(chalk.yellow(`  ⚠ Channel '${channel}' enabled but no token found (use --${channel}-token or 'azureclaw credentials set ${channel}-token <token>')`));
+            console.error(chalk.yellow(`  ⚠ Channel '${channel}' enabled but no token found (use --${channel}-token or 'kars credentials set ${channel}-token <token>')`));
           }
         }
 
@@ -285,10 +285,10 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         console.log(chalk.dim(`  Skills: ${options.skills}`));
       }
 
-      // S13: build companion same-namespace policy CRs (sibling to ClawSandbox).
+      // S13: build companion same-namespace policy CRs (sibling to KarsSandbox).
       const inferencePolicy = buildInferencePolicy({
         sandboxName: name,
-        namespace: "azureclaw-system",
+        namespace: "kars-system",
         model: options.model,
         provider: "azure-ai-foundry",
         contentSafety: true,
@@ -299,7 +299,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       const toolPolicy = options.governance
         ? buildToolPolicy({
             sandboxName: name,
-            namespace: "azureclaw-system",
+            namespace: "kars-system",
             profile: options.policyProfile || "default",
           })
         : undefined;
@@ -310,7 +310,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       const yaml = JSON.stringify(bundle, null, 2);
 
       if (options.dryRun) {
-        console.log(chalk.bold("\nClawSandbox manifest (dry-run):\n"));
+        console.log(chalk.bold("\nKarsSandbox manifest (dry-run):\n"));
         console.log(yaml);
         console.log(chalk.dim("\nApply with: kubectl apply -f <file>"));
         return;
@@ -321,7 +321,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         let kataReady = false;
         try {
           const { stdout } = await execa("kubectl", [
-            "get", "nodes", "-l", "azureclaw.azure.com/pool=sandbox-kata",
+            "get", "nodes", "-l", "kars.azure.com/pool=sandbox-kata",
             "--no-headers",
           ], { stdio: "pipe" });
           kataReady = stdout.trim().split("\n").filter(Boolean).length > 0;
@@ -358,8 +358,8 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
                 "--node-vm-size", "Standard_DC4as_v5",
                 "--os-sku", "AzureLinux",
                 "--workload-runtime", "KataVmIsolation",
-                "--labels", "azureclaw.azure.com/pool=sandbox-kata",
-                "--node-taints", "azureclaw.azure.com/sandbox=true:NoSchedule",
+                "--labels", "kars.azure.com/pool=sandbox-kata",
+                "--node-taints", "kars.azure.com/sandbox=true:NoSchedule",
               ], { stdio: "pipe", timeout: 600_000 });
               kataSpinner.succeed("Kata nodepool provisioned");
             } catch (e: any) {
@@ -369,7 +369,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
             }
           } else {
             console.error(chalk.red("\n✗ No Kata nodepool found and no cached cluster context."));
-            console.error(chalk.dim("  Run 'azureclaw up --isolation confidential' first, or provision a katapool manually."));
+            console.error(chalk.dim("  Run 'kars up --isolation confidential' first, or provision a katapool manually."));
             process.exit(1);
           }
         }
@@ -379,10 +379,10 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
 
       try {
         // Verify cluster is reachable
-        await execa("kubectl", ["get", "crd", "clawsandboxes.azureclaw.azure.com"], { stdio: "pipe" });
+        await execa("kubectl", ["get", "crd", "karssandboxes.kars.azure.com"], { stdio: "pipe" });
 
         // Create federated credential FIRST (before CRD) so it propagates while pod starts
-        const namespace = `azureclaw-${name}`;
+        const namespace = `kars-${name}`;
         try {
           spinner.text = "Creating federated credential...";
           const ctx = loadContext();
@@ -393,7 +393,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
 
           if (!identityName || !identityRg || !issuerUrl) {
             const { stdout: wiClientId } = await execa("kubectl", [
-              "get", "sa", "-n", "azureclaw-system", "azureclaw-controller",
+              "get", "sa", "-n", "kars-system", "kars-controller",
               "-o", "jsonpath={.metadata.annotations.azure\\.workload\\.identity/client-id}",
             ], { stdio: "pipe" });
 
@@ -422,7 +422,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           if (identityName && identityRg && issuerUrl) {
             await execa("az", [
               "identity", "federated-credential", "create",
-              "--name", `azureclaw-${name}`,
+              "--name", `kars-${name}`,
               "--identity-name", identityName,
               "--resource-group", identityRg,
               "--issuer", issuerUrl,
@@ -461,7 +461,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           }
         }
         spinner.text = `Creating sandbox '${name}'...`;
-        // Apply InferencePolicy + (optional) ToolPolicy + ClawSandbox as a
+        // Apply InferencePolicy + (optional) ToolPolicy + KarsSandbox as a
         // single multi-doc bundle. The controller resolves refs at reconcile
         // time; if the policy CRs are missing the sandbox goes Degraded.
         const bundleManifest = {
@@ -522,16 +522,16 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         if (options.skills) {
           console.log(chalk.dim(`  Skills:     ${options.skills}`));
         }
-        console.log(chalk.dim(`  Status:     kubectl get clawsandbox ${name} -n azureclaw-system`));
-        console.log(chalk.dim(`  Connect:    azureclaw connect ${name}`));
-        console.log(chalk.dim(`  Remove:     azureclaw destroy ${name}\n`));
+        console.log(chalk.dim(`  Status:     kubectl get karssandbox ${name} -n kars-system`));
+        console.log(chalk.dim(`  Connect:    kars connect ${name}`));
+        console.log(chalk.dim(`  Remove:     kars destroy ${name}\n`));
 
       } catch (error) {
         spinner.fail("Failed to create sandbox");
         const message = error instanceof Error ? error.message : String(error);
-        if (message.includes("clawsandboxes.azureclaw.azure.com")) { // lgtm[js/incomplete-url-substring-sanitization] — error message check, not URL validation
-          console.error(chalk.red("\n  AzureClaw is not installed on this cluster."));
-          console.error(chalk.red("  Run 'azureclaw up' first to deploy the infrastructure.\n"));
+        if (message.includes("karssandboxes.kars.azure.com")) { // lgtm[js/incomplete-url-substring-sanitization] — error message check, not URL validation
+          console.error(chalk.red("\n  Kars is not installed on this cluster."));
+          console.error(chalk.red("  Run 'kars up' first to deploy the infrastructure.\n"));
         } else {
           console.error(chalk.red(`\n  Error: ${message}\n`));
         }

@@ -3,7 +3,7 @@
 #
 # Runs the FakeRouter on 127.0.0.1:8443 backed by the sanitized Foundry
 # fixtures. Use this to exercise any CLI or plugin code that honours
-# AZURECLAW_ROUTER_URL without rebuilding the sandbox image or deploying
+# KARS_ROUTER_URL without rebuilding the sandbox image or deploying
 # to AKS.
 #
 # Prerequisites:
@@ -18,8 +18,8 @@
 #   curl -sX POST http://127.0.0.1:8443/v1/chat/completions \
 #        -H 'content-type: application/json' -d '{"model":"gpt-4o"}' | jq .
 #
-# Point any AzureClaw client at the fake:
-#   AZURECLAW_ROUTER_URL=http://127.0.0.1:8443 <your command>
+# Point any Kars client at the fake:
+#   KARS_ROUTER_URL=http://127.0.0.1:8443 <your command>
 #
 # Stop:
 #   docker compose -f docker-compose.dev.yml down
@@ -42,7 +42,7 @@ services:
     # compatible for the fake router's tiny surface (node:http, fetch,
     # node:fs/promises, node:path, node:util).
     image: mcr.microsoft.com/azurelinux/base/nodejs:24
-    container_name: azureclaw-fake-router
+    container_name: kars-fake-router
     working_dir: /cli
     ports:
       - "127.0.0.1:8443:8443"

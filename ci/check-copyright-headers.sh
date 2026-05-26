@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 # ci/check-copyright-headers.sh — enforces OSPO finding CODE-COPYRIGHT-HDRS.
 #
-# Every AzureClaw-authored source file (.rs, .ts, .tsx, .js, .sh) must carry
+# Every Kars-authored source file (.rs, .ts, .tsx, .js, .sh) must carry
 # the two-line Microsoft + MIT copyright header at the top of the file.
 #
 # Excludes:
@@ -48,7 +48,7 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
     echo "  $f" >&2
   done
   echo "" >&2
-  echo "Every AzureClaw-authored source file must begin with:" >&2
+  echo "Every Kars-authored source file must begin with:" >&2
   echo "  // Copyright (c) Microsoft Corporation."  >&2
   echo "  // Licensed under the MIT License."        >&2
   echo "(or # … for shell/Python files)" >&2

@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 S9.1 — `azureclaw migrate` mode-switch CLI subcommand.
+// Phase 2 S9.1 — `kars migrate` mode-switch CLI subcommand.
 //
-// Operator-facing tool to flip a `ClawSandbox` between the four
+// Operator-facing tool to flip a `KarsSandbox` between the four
 // upstream-compatibility modes shipped by S8 (controller-side
 // OverlayMode / TranslateMode / ObserveMode + the default Native /
 // "off" mode). The command is a thin wrapper around `kubectl patch`:
@@ -15,25 +15,25 @@
 // in S11.1):
 //
 //   # operator already has an upstream sigs.k8s.io/agent-sandbox
-//   # `Sandbox` CR called `legacy-agent`; wants to bolt AzureClaw
+//   # `Sandbox` CR called `legacy-agent`; wants to bolt Kars
 //   # governance on without rewriting it:
-//   $ kubectl apply -f legacy-clawsandbox.yaml      # native by default
-//   $ azureclaw migrate to-overlay legacy --upstream-ref legacy-agent
+//   $ kubectl apply -f legacy-karssandbox.yaml      # native by default
+//   $ kars migrate to-overlay legacy --upstream-ref legacy-agent
 //   ✓ legacy: native → overlay (upstream sandbox 'legacy-agent')
 //
-//   # later: customer wants pure AzureClaw, drop the upstream
-//   $ azureclaw migrate from-overlay legacy
+//   # later: customer wants pure Kars, drop the upstream
+//   $ kars migrate from-overlay legacy
 //   ✓ legacy: overlay → native
 //
 // **No new CRD field, no controller change.** The OverlayMode
 // reconciler logic landed in S8 (PR #57); this slice ships the
 // operator-facing command that drives it. Reuse-first by design.
 //
-// Sub-slice S9.2 (PR #63) shipped a real `azureclaw convert` (YAML
+// Sub-slice S9.2 (PR #63) shipped a real `kars convert` (YAML
 // translator from upstream agent-sandbox shapes).
 //
 // Sub-slice S9.3 (this file's `from-kagent` subcommand) ships the
-// kagent CR → ClawSandbox translator: pure helpers live in
+// kagent CR → KarsSandbox translator: pure helpers live in
 // `cli/src/migrate/from_kagent.ts`.
 
 import { Command } from "commander";
@@ -125,7 +125,7 @@ interface CurrentMode {
   upstreamRef: string | null;
 }
 
-/** Reads the relevant fields off the current ClawSandbox spec.
+/** Reads the relevant fields off the current KarsSandbox spec.
  *  Defaults match the controller: missing config is "off" mode. */
 export function readCurrentMode(spec: unknown): CurrentMode {
   const s = spec as Record<string, unknown> | undefined;
@@ -174,7 +174,7 @@ async function runPatch(
     "kubectl",
     [
       "patch",
-      "clawsandbox",
+      "karssandbox",
       name,
       "-n",
       namespace,
@@ -193,7 +193,7 @@ async function fetchCurrentSpec(
   const { execa } = await import("execa");
   const { stdout } = await execa(
     "kubectl",
-    ["get", "clawsandbox", name, "-n", namespace, "-o", "json"],
+    ["get", "karssandbox", name, "-n", namespace, "-o", "json"],
     { stdio: "pipe" },
   );
   const cr = JSON.parse(stdout) as { spec?: unknown };
@@ -225,7 +225,7 @@ async function runMigrate(
     } else {
       console.log(chalk.bold("DRY RUN — patch that would be applied:"));
       console.log(JSON.stringify(patch, null, 2));
-      console.log(chalk.dim(`\nApply with: azureclaw migrate ... (omit --dry-run)`));
+      console.log(chalk.dim(`\nApply with: kars migrate ... (omit --dry-run)`));
     }
     return;
   }
@@ -286,8 +286,8 @@ function commonOptions(cmd: Command): Command {
   return cmd
     .option(
       "-n, --namespace <ns>",
-      "Namespace where the ClawSandbox CR lives",
-      "azureclaw-system",
+      "Namespace where the KarsSandbox CR lives",
+      "kars-system",
     )
     .option(
       "--dry-run",
@@ -304,7 +304,7 @@ function commonOptions(cmd: Command): Command {
 export function migrateCommand(): Command {
   const cmd = new Command("migrate")
     .description(
-      "Switch a ClawSandbox between upstream-compatibility modes " +
+      "Switch a KarsSandbox between upstream-compatibility modes " +
         "(native / overlay / translate / observe). Wraps a kubectl " +
         "patch with validation, before/after summary, and dry-run.",
     );
@@ -313,7 +313,7 @@ export function migrateCommand(): Command {
     cmd
       .command("to-overlay <name>")
       .description(
-        "Flip to overlay mode: AzureClaw provides governance overlay " +
+        "Flip to overlay mode: Kars provides governance overlay " +
           "(namespace, NetworkPolicy, ConfigMaps); upstream sigs.k8s.io/" +
           "agent-sandbox CR owns the Pod. Requires --upstream-ref.",
       )
@@ -347,7 +347,7 @@ export function migrateCommand(): Command {
     cmd
       .command("from-overlay <name>")
       .description(
-        "Leave overlay mode and revert to native AzureClaw " +
+        "Leave overlay mode and revert to native Kars " +
           "(controller resumes Pod / Service / NetworkPolicy ownership).",
       ),
   ).action(
@@ -377,7 +377,7 @@ export function migrateCommand(): Command {
             ? "Accept upstream SandboxClaim semantics on inbound (P1 schema-only)."
             : m === "observe"
               ? "Mirror status of an upstream Sandbox CR; no overlay."
-              : "Reset to default native mode (AzureClaw owns the workload).",
+              : "Reset to default native mode (Kars owns the workload).",
         ),
     ).action(
       async (
@@ -400,8 +400,8 @@ export function migrateCommand(): Command {
   cmd
     .command("from-kagent <input>")
     .description(
-      "Translate a kagent.dev/v1alpha2 Agent YAML into an AzureClaw " +
-        "resource bundle (ClawSandbox + InferencePolicy + ToolPolicies). " +
+      "Translate a kagent.dev/v1alpha2 Agent YAML into an Kars " +
+        "resource bundle (KarsSandbox + InferencePolicy + ToolPolicies). " +
         "Use '-' to read from stdin. Hard-fails on lossy translation " +
         "by default; pass --allow-lossy to waive.",
     )
@@ -411,7 +411,7 @@ export function migrateCommand(): Command {
     )
     .option(
       "--isolation <mode>",
-      "ClawSandbox isolation mode: standard | enhanced | confidential (default: enhanced).",
+      "KarsSandbox isolation mode: standard | enhanced | confidential (default: enhanced).",
       "enhanced",
     )
     .option(
@@ -530,11 +530,11 @@ async function runFromKagent(
   );
 
   // S12.g — when the migrated bundle includes an egress allowlist on a
-  // ClawSandbox, point the operator at the sign-by-default + GitOps
+  // KarsSandbox, point the operator at the sign-by-default + GitOps
   // emit-manifest flow.
   const sandboxesWithEgress = result.resources.filter(
     (r) =>
-      r.kind === "ClawSandbox" &&
+      r.kind === "KarsSandbox" &&
       Array.isArray(
         ((r.spec as Record<string, unknown>)?.networkPolicy as
           | Record<string, unknown>
@@ -553,7 +553,7 @@ async function runFromKagent(
       const sbNs = r.metadata.namespace;
       process.stderr.write(
         chalk.gray(
-          `  azureclaw egress ${sbName} --namespace ${sbNs} --enforce ` +
+          `  kars egress ${sbName} --namespace ${sbNs} --enforce ` +
             `--emit-manifest ./gitops/${sbName}-allowlist.yaml\n`,
         ),
       );

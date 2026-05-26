@@ -28,11 +28,11 @@ export function pushCommand(): Command {
     )
     .option(
       "--agt-repo <path>",
-      `Path to the agent-governance-toolkit checkout (relay/registry images are built from here). Defaults to $AZURECLAW_AGT_REPO or ${DEFAULT_AGT_REPO}`,
+      `Path to the agent-governance-toolkit checkout (relay/registry images are built from here). Defaults to $KARS_AGT_REPO or ${DEFAULT_AGT_REPO}`,
     )
     .option(
       "--agt-sdk-tarball <path>",
-      "Path to a locally-packed @microsoft/agent-governance-sdk .tgz to install in the sandbox image (auto-discovered from $AZURECLAW_AGT_REPO/agent-governance-typescript otherwise).",
+      "Path to a locally-packed @microsoft/agent-governance-sdk .tgz to install in the sandbox image (auto-discovered from $KARS_AGT_REPO/agent-governance-typescript otherwise).",
     )
     .action(async (options) => {
       const { execa } = await import("execa");
@@ -51,13 +51,13 @@ export function pushCommand(): Command {
 
       // Resolve AGT repo path — required to (re)build relay/registry images
       const agtRepo: string =
-        options.agtRepo || process.env.AZURECLAW_AGT_REPO || DEFAULT_AGT_REPO;
+        options.agtRepo || process.env.KARS_AGT_REPO || DEFAULT_AGT_REPO;
       const agtDockerfileRel = "agent-governance-python/agent-mesh/docker/Dockerfile";
       const agtRepoMissing = !fs.existsSync(path.join(agtRepo, agtDockerfileRel));
       if (agtRepoMissing && (!options.only || options.only === "relay" || options.only === "registry")) {
         console.error(chalk.red(`\n  Building relay/registry requires the AGT repo.`));
         console.error(chalk.red(`  Looked for: ${path.join(agtRepo, agtDockerfileRel)}`));
-        console.error(chalk.red(`  Pass --agt-repo <path> or set $AZURECLAW_AGT_REPO, or pass --only <image> to skip mesh.\n`));
+        console.error(chalk.red(`  Pass --agt-repo <path> or set $KARS_AGT_REPO, or pass --only <image> to skip mesh.\n`));
         process.exit(1);
       }
 
@@ -67,7 +67,7 @@ export function pushCommand(): Command {
       const acrLoginServer = acrName ? `${acrName}.azurecr.io` : null;
 
       if (!acrName || !acrLoginServer) {
-        console.error(chalk.red("\n  No ACR configured. Run 'azureclaw up' first or pass --acr <name>.\n"));
+        console.error(chalk.red("\n  No ACR configured. Run 'kars up' first or pass --acr <name>.\n"));
         process.exit(1);
       }
 
@@ -78,11 +78,11 @@ export function pushCommand(): Command {
         repoRoot = path.dirname(repoRoot);
       }
       if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
-        console.error(chalk.red("\n  Not in an AzureClaw repo. Run from the repo root.\n"));
+        console.error(chalk.red("\n  Not in an Kars repo. Run from the repo root.\n"));
         process.exit(1);
       }
 
-      console.log(blue(`\n  AzureClaw · Push Images → ${acrLoginServer}\n`));
+      console.log(blue(`\n  Kars · Push Images → ${acrLoginServer}\n`));
 
       // Login to ACR
       const spinner = ora("Logging into ACR...").start();
@@ -122,8 +122,8 @@ export function pushCommand(): Command {
       // .agt-sdk/ (the .keep file ensures it never fails); the RUN step
       // installs the tarball only when AGT_SDK_TARBALL is set.
       const sandboxBuildArgs: string[] = [
-        "--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
-        "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
+        "--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/kars-sandbox-base:latest`,
+        "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/kars-inference-router:latest`,
         "--build-arg", `SANDBOX_CACHE_BUST=${Date.now()}`,
         "--build-arg", `MESH_PROVIDER=${meshProvider}`,
       ];
@@ -175,27 +175,27 @@ export function pushCommand(): Command {
         absoluteContext?: string;
         buildArgs?: string[];
       }> = [
-        { name: "controller", tag: "azureclaw-controller:latest", dockerfile: "controller/Dockerfile" },
-        { name: "router", tag: "azureclaw-inference-router:latest", dockerfile: "inference-router/Dockerfile",
+        { name: "controller", tag: "kars-controller:latest", dockerfile: "controller/Dockerfile" },
+        { name: "router", tag: "kars-inference-router:latest", dockerfile: "inference-router/Dockerfile",
           buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`] },
-        { name: "sandbox-base", tag: "azureclaw-sandbox-base:latest", dockerfile: "sandbox-images/openclaw/Dockerfile.base",
+        { name: "sandbox-base", tag: "kars-sandbox-base:latest", dockerfile: "sandbox-images/openclaw/Dockerfile.base",
           buildArgs: ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`] },
         { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
           buildArgs: sandboxBuildArgs },
         ...meshImages,
         // Multi-runtime adapter images — must match controller defaults in
         // `controller/src/reconciler/runtime.rs` (DEFAULT_*_IMAGE constants).
-        { name: "runtime-openai-agents", tag: "azureclaw-runtime-openai-agents:latest",
+        { name: "runtime-openai-agents", tag: "kars-runtime-openai-agents:latest",
           dockerfile: "sandbox-images/openai-agents/Dockerfile" },
-        { name: "runtime-maf-python", tag: "azureclaw-runtime-maf-python:latest",
+        { name: "runtime-maf-python", tag: "kars-runtime-maf-python:latest",
           dockerfile: "sandbox-images/maf-python/Dockerfile" },
-        { name: "runtime-anthropic", tag: "azureclaw-runtime-anthropic:latest",
+        { name: "runtime-anthropic", tag: "kars-runtime-anthropic:latest",
           dockerfile: "sandbox-images/anthropic/Dockerfile" },
-        { name: "runtime-langgraph", tag: "azureclaw-runtime-langgraph:latest",
+        { name: "runtime-langgraph", tag: "kars-runtime-langgraph:latest",
           dockerfile: "sandbox-images/langgraph/Dockerfile" },
-        { name: "runtime-langgraph-ts", tag: "azureclaw-runtime-langgraph-ts:latest",
+        { name: "runtime-langgraph-ts", tag: "kars-runtime-langgraph-ts:latest",
           dockerfile: "sandbox-images/langgraph-ts/Dockerfile" },
-        { name: "runtime-pydantic-ai", tag: "azureclaw-runtime-pydantic-ai:latest",
+        { name: "runtime-pydantic-ai", tag: "kars-runtime-pydantic-ai:latest",
           dockerfile: "sandbox-images/pydantic-ai/Dockerfile" },
       ];
 
@@ -212,7 +212,7 @@ export function pushCommand(): Command {
       if (hasSandbox && !hasBase) {
         // Check if base image exists locally (would have been pushed previously)
         try {
-          await execa("docker", ["image", "inspect", `${acrLoginServer}/azureclaw-sandbox-base:latest`], { stdio: "pipe" });
+          await execa("docker", ["image", "inspect", `${acrLoginServer}/kars-sandbox-base:latest`], { stdio: "pipe" });
         } catch {
           // Base not found locally — include it so the build succeeds
           console.log(chalk.yellow("  ℹ sandbox-base not found locally — building it first\n"));
@@ -279,7 +279,7 @@ export function pushCommand(): Command {
 
       // Rollout restart if --apply
       if (options.apply) {
-        const ns = "azureclaw-system";
+        const ns = "kars-system";
 
         // The AGT manifest is the only mesh stack now; on --apply we ensure
         // it's installed and the helm mesh.provider=agt value is set so
@@ -300,22 +300,22 @@ export function pushCommand(): Command {
           const helmSpin = ora("Setting helm mesh.provider=agt...").start();
           try {
             await execa("helm", [
-              "upgrade", "azureclaw", path.join(repoRoot, "deploy/helm/azureclaw"),
+              "upgrade", "kars", path.join(repoRoot, "deploy/helm/kars"),
               "--namespace", ns,
               "--reuse-values",
               "--set", "mesh.provider=agt",
             ], { stdio: "pipe" });
             helmSpin.succeed("helm mesh.provider=agt");
           } catch (e: any) {
-            helmSpin.fail(`helm upgrade failed: ${e.message?.split("\n")[0]} (apply manually: helm upgrade azureclaw deploy/helm/azureclaw --reuse-values --set mesh.provider=agt)`);
+            helmSpin.fail(`helm upgrade failed: ${e.message?.split("\n")[0]} (apply manually: helm upgrade kars deploy/helm/kars --reuse-values --set mesh.provider=agt)`);
           }
         }
 
         // Restart controller (manages all sandbox pods)
         const spin = ora("Restarting deployments...").start();
         try {
-          await execa("kubectl", ["rollout", "restart", "deployment", "azureclaw-controller", "-n", ns], { stdio: "pipe" });
-          spin.text = "Restarted azureclaw-controller";
+          await execa("kubectl", ["rollout", "restart", "deployment", "kars-controller", "-n", ns], { stdio: "pipe" });
+          spin.text = "Restarted kars-controller";
 
           // If sandbox/router image changed, also restart all sandbox pods
           const sandboxImages = ["sandbox", "router"];
@@ -323,7 +323,7 @@ export function pushCommand(): Command {
             // Delete sandbox pods so controller recreates them with new images
             await execa("kubectl", [
               "delete", "pods", "-n", ns,
-              "-l", "azureclaw.azure.com/component=sandbox",
+              "-l", "kars.azure.com/component=sandbox",
               "--grace-period=10",
             ], { stdio: "pipe" }).catch(() => {});
             // Also restart pods in per-agent namespaces
@@ -332,7 +332,7 @@ export function pushCommand(): Command {
             ], { stdio: "pipe" });
             for (const line of nsLines.split("\n")) {
               const nsName = line.replace("namespace/", "").trim();
-              if (nsName.startsWith("azureclaw-") && nsName !== "azureclaw-system") {
+              if (nsName.startsWith("kars-") && nsName !== "kars-system") {
                 await execa("kubectl", [
                   "delete", "pods", "--all", "-n", nsName, "--grace-period=10",
                 ], { stdio: "pipe" }).catch(() => {});
@@ -350,8 +350,8 @@ export function pushCommand(): Command {
           spin.fail(`Rollout restart failed: ${e.message?.split("\n")[0]}`);
         }
       } else if (ctx?.aksCluster) {
-        console.log(chalk.dim(`  To apply: azureclaw push --apply`));
-        console.log(chalk.dim(`  Or manually: kubectl rollout restart deployment -n azureclaw-system\n`));
+        console.log(chalk.dim(`  To apply: kars push --apply`));
+        console.log(chalk.dim(`  Or manually: kubectl rollout restart deployment -n kars-system\n`));
       }
     });
 

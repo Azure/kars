@@ -1,0 +1,20 @@
+apiVersion: v2
+name: kars
+description: Kars - Enterprise-grade OpenClaw sandbox orchestrator for AKS
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - azure
+  - openclaw
+  - ai
+  - agent
+  - sandbox
+  - security
+  - aks
+home: https://github.com/Azure/kars
+sources:
+  - https://github.com/Azure/kars
+maintainers:
+  - name: Kars Team
+    url: https://github.com/Azure/kars

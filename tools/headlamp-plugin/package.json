@@ -1,8 +1,8 @@
 {
-  "name": "azureclaw",
+  "name": "kars",
   "version": "0.5.1",
   "private": true,
-  "description": "AzureClaw sidebar + CRD views for the Headlamp dashboard.",
+  "description": "Kars sidebar + CRD views for the Headlamp dashboard.",
   "license": "MIT",
   "scripts": {
     "build": "headlamp-plugin build",
@@ -12,7 +12,7 @@
     "format": "headlamp-plugin format"
   },
   "headlampPlugin": {
-    "displayName": "AzureClaw"
+    "displayName": "Kars"
   },
   "devDependencies": {
     "@kinvolk/headlamp-plugin": "^0.13.0"

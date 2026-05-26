@@ -2,11 +2,11 @@
 // Licensed under the MIT License.
 
 /**
- * `azureclaw config` — local CLI configuration management.
+ * `kars config` — local CLI configuration management.
  *
- * Distinct from `azureclaw model set <sandbox> <model>`, which hot-swaps
+ * Distinct from `kars model set <sandbox> <model>`, which hot-swaps
  * the inference model on a *running AKS sandbox* via InferencePolicy CR.
- * This command tree only touches local files under `~/.azureclaw/`.
+ * This command tree only touches local files under `~/.kars/`.
  *
  * Subcommands:
  *   - `config show`            Print effective config + provider info.
@@ -34,7 +34,7 @@ import { buildCopilotChoices } from "../github-copilot.js";
 
 export function configCommand(): Command {
   const cmd = new Command("config")
-    .description("Manage local CLI configuration (~/.azureclaw/)");
+    .description("Manage local CLI configuration (~/.kars/)");
 
   cmd.addCommand(showCmd());
   cmd.addCommand(modelCmd());
@@ -51,7 +51,7 @@ function showCmd(): Command {
       console.log();
       if (!cfg) {
         console.log(chalk.yellow("  No configuration found."));
-        console.log(chalk.dim(`  Run ${chalk.cyan("azureclaw dev")} or ${chalk.cyan("azureclaw credentials")} to set one up.\n`));
+        console.log(chalk.dim(`  Run ${chalk.cyan("kars dev")} or ${chalk.cyan("kars credentials")} to set one up.\n`));
         return;
       }
       console.log(chalk.bold("  Local configuration"));
@@ -77,7 +77,7 @@ function showCmd(): Command {
           if ("suggestion" in result && result.suggestion) {
             console.log(chalk.dim(`    Suggestion: ${result.suggestion}`));
           }
-          console.log(chalk.dim(`    Fix with: ${chalk.cyan("azureclaw config model")}`));
+          console.log(chalk.dim(`    Fix with: ${chalk.cyan("kars config model")}`));
         }
         console.log();
       }
@@ -91,7 +91,7 @@ function modelCmd(): Command {
     .action(async (modelId: string | undefined) => {
       const cfg = loadConfig();
       if (!cfg) {
-        console.log(chalk.yellow("\n  No configuration found. Run `azureclaw credentials` first.\n"));
+        console.log(chalk.yellow("\n  No configuration found. Run `kars credentials` first.\n"));
         process.exit(1);
       }
       if (cfg.provider === "github-copilot") {
@@ -118,7 +118,7 @@ function modelCmd(): Command {
       if (cfg.provider !== "github-models") {
         console.log(chalk.yellow("\n  `config model` currently only manages GitHub Models / GitHub Copilot entries."));
         console.log(chalk.dim("  For Foundry models, edit the deployment in your Foundry project."));
-        console.log(chalk.dim("  For running sandboxes, use `azureclaw model set <sandbox> <model>`.\n"));
+        console.log(chalk.dim("  For running sandboxes, use `kars model set <sandbox> <model>`.\n"));
         process.exit(1);
       }
 
@@ -128,7 +128,7 @@ function modelCmd(): Command {
       if (!result.ok) {
         console.log(chalk.red(`  Catalog fetch failed (${result.status}): ${result.message}`));
         if (result.status === 401 || result.status === 403) {
-          console.log(chalk.yellow("  Your PAT no longer has 'models:read'. Re-run `azureclaw credentials`."));
+          console.log(chalk.yellow("  Your PAT no longer has 'models:read'. Re-run `kars credentials`."));
         }
         console.log();
         process.exit(1);
@@ -218,7 +218,7 @@ function resetCmd(): Command {
           return;
         }
         console.log(chalk.green(`\n  ✔ First-run flag cleared.`));
-        console.log(chalk.dim(`  Next ${chalk.cyan("azureclaw dev")} will re-show the welcome banner.\n`));
+        console.log(chalk.dim(`  Next ${chalk.cyan("kars dev")} will re-show the welcome banner.\n`));
         return;
       }
 
@@ -275,6 +275,6 @@ function resetCmd(): Command {
       }
 
       console.log(chalk.green(`  ✔ Removed ${removed.length} file${removed.length === 1 ? "" : "s"}.`));
-      console.log(chalk.dim(`  Re-run ${chalk.cyan("azureclaw dev")} to start fresh.\n`));
+      console.log(chalk.dim(`  Re-run ${chalk.cyan("kars dev")} to start fresh.\n`));
     });
 }

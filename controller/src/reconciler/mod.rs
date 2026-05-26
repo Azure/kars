@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Controller reconciliation loop — watches ClawSandbox CRDs and reconciles state.
+//! Controller reconciliation loop — watches KarsSandbox CRDs and reconciles state.
 //!
-//! When a ClawSandbox is created or updated, the reconciler:
+//! When a KarsSandbox is created or updated, the reconciler:
 //! 1. Creates an isolated namespace
 //! 2. Deploys a ServiceAccount with Workload Identity
 //! 3. Applies default-deny NetworkPolicy + allowlist
@@ -30,7 +30,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::time::Duration;
 
-use crate::crd::{ClawSandbox, SandboxConfig};
+use crate::crd::{KarsSandbox, SandboxConfig};
 use crate::fedcred::{FedCredConfig, FedCredManager};
 
 pub(crate) mod byo_contract;
@@ -44,7 +44,7 @@ pub(crate) fn build_pod_security_context(cfg: &SandboxConfig) -> serde_json::Val
     // Standard and Confidential use RuntimeDefault seccomp:
     //   standard     — basic container isolation, kernel-default syscall filter
     //   confidential — Kata VM boundary is the isolation layer
-    // Enhanced uses custom Localhost seccomp (azureclaw-strict) for strict syscall allowlist
+    // Enhanced uses custom Localhost seccomp (kars-strict) for strict syscall allowlist
     let seccomp = if cfg.isolation == "confidential"
         || cfg.isolation == "standard"
         || cfg.seccomp_profile == "RuntimeDefault"
@@ -79,7 +79,7 @@ pub(crate) fn build_pod_security_context(cfg: &SandboxConfig) -> serde_json::Val
 
 /// Returns (runtimeClassName, nodeSelector) based on the isolation level.
 ///   standard   → runc on clawpool, no custom seccomp
-///   enhanced   → runc on clawpool + Localhost seccomp (azureclaw-strict)
+///   enhanced   → runc on clawpool + Localhost seccomp (kars-strict)
 ///   confidential → Kata VM isolation on katapool
 pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'static str) {
     match isolation {
@@ -132,15 +132,15 @@ struct Context {
     /// router sidecar when present. AKS production leaves all three
     /// empty and the router falls back to workload identity.
     /// - `dev_openai_api_key`: bearer key for Foundry / Azure OpenAI / GitHub Models.
-    /// - `dev_provider`: `AZURECLAW_PROVIDER` override (`github-models` |
+    /// - `dev_provider`: `KARS_PROVIDER` override (`github-models` |
     ///   `github-copilot`). When unset the router uses standard Azure
     ///   OpenAI dispatch.
     /// - `dev_copilot_github_token`: GitHub PAT for the GitHub Copilot
     ///   path (`inference-router/src/copilot_auth.rs`); only meaningful
     ///   when `dev_provider == "github-copilot"`.
     ///   All three are populated from the controller's own env at startup,
-    ///   which the local-k8s overlay sources from a `azureclaw-dev-creds`
-    ///   Secret in the `azureclaw-system` namespace. See
+    ///   which the local-k8s overlay sources from a `kars-dev-creds`
+    ///   Secret in the `kars-system` namespace. See
     ///   `cli/src/commands/dev/local-k8s.ts`.
     dev_openai_api_key: String,
     dev_provider: String,
@@ -154,8 +154,8 @@ struct Context {
     cluster_name: Option<String>,
 }
 
-/// Main reconciliation function — called whenever a ClawSandbox changes.
-async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+/// Main reconciliation function — called whenever a KarsSandbox changes.
+async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let name = sandbox.name_any();
 
     // Validate sandbox name — must be K8s-safe (alphanumeric + hyphens)
@@ -174,16 +174,16 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
 
-    let sandbox_ns = format!("azureclaw-{name}");
+    let sandbox_ns = format!("kars-{name}");
     let client = &ctx.client;
 
-    tracing::info!("Reconciling ClawSandbox {name}");
+    tracing::info!("Reconciling KarsSandbox {name}");
 
     // ── Finalizer: cascading namespace deletion ──────────────────────────
-    const FINALIZER: &str = "azureclaw.azure.com/namespace-cleanup";
+    const FINALIZER: &str = "kars.azure.com/namespace-cleanup";
 
     if sandbox.metadata.deletion_timestamp.is_some() {
-        tracing::info!("ClawSandbox {name} is being deleted — cleaning up namespace {sandbox_ns}");
+        tracing::info!("KarsSandbox {name} is being deleted — cleaning up namespace {sandbox_ns}");
 
         // Delete the namespace (cascades to all resources within it)
         let ns_api: Api<Namespace> = Api::all(client.clone());
@@ -200,7 +200,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         // Clean up the spawner ClusterRoleBinding
         let crb_api: Api<ClusterRoleBinding> = Api::all(client.clone());
-        let crb_name = format!("azureclaw-spawner-{name}");
+        let crb_name = format!("kars-spawner-{name}");
         match crb_api.delete(&crb_name, &DeleteParams::default()).await {
             Ok(_) => tracing::info!("ClusterRoleBinding {crb_name} deleted"),
             Err(kube::Error::Api(ae)) if ae.code == 404 => {}
@@ -241,18 +241,18 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
-        // Offload sandbox slot cleanup: decrement slotsUsed on the parent ClawPairing
+        // Offload sandbox slot cleanup: decrement slotsUsed on the parent KarsPairing
         if let Some(requester) = sandbox
             .metadata
             .labels
             .as_ref()
-            .and_then(|l| l.get("azureclaw.azure.com/offload-requester"))
+            .and_then(|l| l.get("kars.azure.com/offload-requester"))
         {
             crate::pairing::release_offload_slot(client.clone(), requester, &name).await;
         }
 
         // Remove the finalizer so K8s can complete CRD deletion
-        let sandbox_api: Api<ClawSandbox> =
+        let sandbox_api: Api<KarsSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
         let patch = json!({
             "metadata": {
@@ -265,7 +265,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
             .await;
 
-        tracing::info!("ClawSandbox {name} cleanup complete");
+        tracing::info!("KarsSandbox {name} cleanup complete");
         return Ok(Action::await_change());
     }
 
@@ -276,7 +276,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         .as_ref()
         .is_some_and(|f| f.iter().any(|x| x == FINALIZER));
     if !has_finalizer {
-        let sandbox_api: Api<ClawSandbox> =
+        let sandbox_api: Api<KarsSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
         let mut finalizers = sandbox.metadata.finalizers.clone().unwrap_or_default();
         finalizers.push(FINALIZER.to_string());
@@ -284,7 +284,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         sandbox_api
             .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
             .await?;
-        tracing::info!("Added finalizer to ClawSandbox {name}");
+        tracing::info!("Added finalizer to KarsSandbox {name}");
     }
 
     let spec = sandbox.spec.clone();
@@ -402,7 +402,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     // ── S13: resolve the sandbox's InferencePolicy ref ───────────────────
-    // ClawSandbox.spec.inferenceRef is the single source of truth for
+    // KarsSandbox.spec.inferenceRef is the single source of truth for
     // inference guardrails (model preference, content-safety floor,
     // prompt-shield requirement, token budgets). The reconciler resolves
     // the ref against the sandbox's *own* namespace; cross-namespace
@@ -497,7 +497,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // We still create the overlay (namespace, SA, NetworkPolicy,
     // governance ConfigMaps) but skip Deployment/Service/CronJob.
     //
-    // Field-level invariant (no ClawSandbox CEL today): overlay mode
+    // Field-level invariant (no KarsSandbox CEL today): overlay mode
     // requires `upstreamSandboxRef.name`. Without it we can't surface
     // *which* upstream CR the operator meant, so we Degrade rather than
     // silently no-op.
@@ -560,7 +560,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     //
     // Slice 1e (phase 1): also detect the bundled-profile fallback path
     // ── Resolve the ToolPolicy referenced by `spec.governance` ────────
-    // Slice 1e (phase 2): the bundled `/opt/azureclaw-plugin/policies/`
+    // Slice 1e (phase 2): the bundled `/opt/kars-plugin/policies/`
     // fallback is gone. When governance is enabled and the referenced
     // ToolPolicy lacks `spec.agtProfile.inline`, fail-closed with
     // `SpecInvalid` so the operator cannot start a sandbox whose AGT
@@ -597,7 +597,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                         SPEC_INVALID,
                         format!(
                             "ToolPolicy `{tp_ref_name}` has no `spec.agtProfile.inline`. \
-                             The bundled `/opt/azureclaw-plugin/policies/` fallback was removed in \
+                             The bundled `/opt/kars-plugin/policies/` fallback was removed in \
                              Slice 1e phase 2. Set `spec.agtProfile.inline` on the ToolPolicy CR."
                         )
                     );
@@ -640,11 +640,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         "metadata": {
             "name": sandbox_ns,
             "labels": {
-                "app.kubernetes.io/name": "azureclaw",
+                "app.kubernetes.io/name": "kars",
                 "app.kubernetes.io/component": "sandbox",
-                "azureclaw.azure.com/sandbox": name,
-                "azureclaw.azure.com/role": "sandbox",
-                "azureclaw.azure.com/isolated": "strict",
+                "kars.azure.com/sandbox": name,
+                "kars.azure.com/role": "sandbox",
+                "kars.azure.com/isolated": "strict",
                 "pod-security.kubernetes.io/enforce": "privileged",
                 "pod-security.kubernetes.io/audit": "baseline",
                 "pod-security.kubernetes.io/warn": "baseline"
@@ -668,7 +668,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "name": "sandbox",
             "namespace": sandbox_ns,
             "labels": {
-                "azureclaw.azure.com/sandbox": name
+                "kars.azure.com/sandbox": name
             },
             "annotations": {
                 "azure.workload.identity/client-id": ctx.wi_client_id
@@ -695,24 +695,24 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     // ── Step 2a: Grant sandbox SA permission to spawn sub-agents ─────────
-    // Bind the sandbox SA to the azureclaw-sandbox-spawner ClusterRole so
-    // agents can create/list/delete ClawSandbox CRDs for sub-agent spawning.
+    // Bind the sandbox SA to the kars-sandbox-spawner ClusterRole so
+    // agents can create/list/delete KarsSandbox CRDs for sub-agent spawning.
     let crb_api: Api<ClusterRoleBinding> = Api::all(client.clone());
-    let crb_name = format!("azureclaw-spawner-{}", name);
+    let crb_name = format!("kars-spawner-{}", name);
     let crb: ClusterRoleBinding = serde_json::from_value(json!({
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "ClusterRoleBinding",
         "metadata": {
             "name": crb_name,
             "labels": {
-                "azureclaw.azure.com/sandbox": name,
-                "app.kubernetes.io/managed-by": "azureclaw-controller"
+                "kars.azure.com/sandbox": name,
+                "app.kubernetes.io/managed-by": "kars-controller"
             }
         },
         "roleRef": {
             "apiGroup": "rbac.authorization.k8s.io",
             "kind": "ClusterRole",
-            "name": "azureclaw-sandbox-spawner"
+            "name": "kars-sandbox-spawner"
         },
         "subjects": [{
             "kind": "ServiceAccount",
@@ -767,7 +767,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "name": "gateway-token",
             "namespace": sandbox_ns,
             "labels": {
-                "azureclaw.azure.com/sandbox": name
+                "kars.azure.com/sandbox": name
             }
         },
         "stringData": {
@@ -819,7 +819,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "name": "router-admin-token",
             "namespace": sandbox_ns,
             "labels": {
-                "azureclaw.azure.com/sandbox": name
+                "kars.azure.com/sandbox": name
             }
         },
         "stringData": {
@@ -879,13 +879,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Allow AGT mesh egress: inference-router → other sandbox routers on port 8443.
         // This permits cross-namespace mesh communication between parent and child agents.
         json!({
-            "to": [{"namespaceSelector": {"matchLabels": {"azureclaw.azure.com/role": "sandbox"}}}],
+            "to": [{"namespaceSelector": {"matchLabels": {"kars.azure.com/role": "sandbox"}}}],
             "ports": [{"protocol": "TCP", "port": 8443}]
         }),
         // Allow AGT relay/registry egress: inference-router → self-hosted agentmesh services.
         // Relay (WebSocket, port 8765) and registry (HTTP, port 8080) in the agentmesh namespace.
         json!({
-            "to": [{"namespaceSelector": {"matchLabels": {"app.kubernetes.io/managed-by": "azureclaw"}}}],
+            "to": [{"namespaceSelector": {"matchLabels": {"app.kubernetes.io/managed-by": "kars"}}}],
             "ports": [{"protocol": "TCP", "port": 8765}, {"protocol": "TCP", "port": 8080}]
         }),
     ];
@@ -926,7 +926,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 // Mesh + gateway ingress from peer sandbox namespaces.
                 "from": [{
                     "namespaceSelector": {
-                        "matchLabels": {"azureclaw.azure.com/role": "sandbox"}
+                        "matchLabels": {"kars.azure.com/role": "sandbox"}
                     }
                 }],
                 "ports": [
@@ -946,7 +946,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "from": [{
                     "namespaceSelector": {
                         "matchLabels": {
-                            "app.kubernetes.io/name": "azureclaw",
+                            "app.kubernetes.io/name": "kars",
                             "app.kubernetes.io/component": "system"
                         }
                     }
@@ -966,10 +966,10 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         "metadata": {
             "name": "sandbox-policy",
             "namespace": sandbox_ns,
-            "labels": {"azureclaw.azure.com/sandbox": name}
+            "labels": {"kars.azure.com/sandbox": name}
         },
         "spec": {
-            "podSelector": {"matchLabels": {"azureclaw.azure.com/component": "sandbox"}},
+            "podSelector": {"matchLabels": {"kars.azure.com/component": "sandbox"}},
             "policyTypes": ["Egress", "Ingress"],
             "egress": egress_rules,
             "ingress": ingress_rules
@@ -986,7 +986,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // Slice 5c.1: publish the compiled egress allowlist as a
     // ConfigMap in the sandbox namespace + stamp the digest as an
     // annotation. The inference-router container mounts this CM at
-    // `/etc/azureclaw/egress/allowlist.json`; its
+    // `/etc/kars/egress/allowlist.json`; its
     // `egress_allowlist_loader` reads the file, seeds
     // `Blocklist.allowlist` (L7 hostname filter on `forward_proxy`),
     // and echoes the digest under `PolicyKind::EgressAllowlist` via
@@ -1003,7 +1003,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // `None` (verify failed and no LKG cache), we publish an EMPTY
     // allowlist document. The router then rejects every egress
     // attempt by hostname at L7, matching the L4 deny encoded above.
-    let egress_allowlist_cm_name = format!("clawsandbox-{}-egress-allowlist", name);
+    let egress_allowlist_cm_name = format!("karssandbox-{}-egress-allowlist", name);
     let egress_approvals_cm_name = crate::egress_approval_compile::approvals_configmap_name(&name);
     {
         let endpoints_for_compile: Vec<crate::crd::EndpointConfig> = allowlist_resolution
@@ -1027,7 +1027,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         let mut annotations: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
         annotations.insert(
-            "azureclaw.azure.com/egress-allowlist-digest".into(),
+            "kars.azure.com/egress-allowlist-digest".into(),
             allowlist_digest,
         );
         let allowlist_cm: ConfigMap = serde_json::from_value(json!({
@@ -1037,9 +1037,9 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "name": egress_allowlist_cm_name,
                 "namespace": sandbox_ns,
                 "labels": {
-                    "app.kubernetes.io/managed-by": "azureclaw-controller",
-                    "azureclaw.azure.com/sandbox": name,
-                    "azureclaw.azure.com/artifact": "egress-allowlist",
+                    "app.kubernetes.io/managed-by": "kars-controller",
+                    "kars.azure.com/sandbox": name,
+                    "kars.azure.com/artifact": "egress-allowlist",
                 },
                 "annotations": annotations,
             },
@@ -1094,7 +1094,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             "AllowlistAuthoritative=False/FailedClosed: {}",
             deg_reason,
         );
-        let sandbox_api: Api<ClawSandbox> =
+        let sandbox_api: Api<KarsSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
         let mut status_obj =
             crate::status::build_degraded_status_patch(&sandbox, deg_reason, deg_msg);
@@ -1122,7 +1122,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // upstream `Sandbox` CR (sigs.k8s.io/agent-sandbox) owns the Pod
     // lifecycle. Step 4b (SA annotations for Azure RBAC) and Step 4c
     // (governance ConfigMap + mesh ingress NetworkPolicy) intentionally
-    // still run — they form the *overlay* that AzureClaw layers on top
+    // still run — they form the *overlay* that Kars layers on top
     // of the upstream Pod.
     'deployment_block: {
         if overlay_mode {
@@ -1172,13 +1172,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         //      token without requiring a controller reconcile to re-render the
         //      Deployment env.
         //   2. The pod env is, by construction, equal to the Secret value at pod
-        //      start. `azureclaw connect` reads the Secret to find the gateway
+        //      start. `kars connect` reads the Secret to find the gateway
         //      token; if env and Secret ever drift, the operator gets 401s on a
         //      rolled pod even though the Secret looks correct. valueFrom closes
         //      that drift window.
         //
         // For BYO, OPENCLAW_* envs are skipped: the gateway-token Secret is
-        // OpenClaw-specific (azureclaw up provisions it for OpenClaw only),
+        // OpenClaw-specific (kars up provisions it for OpenClaw only),
         // and a BYO pod referencing it without `optional: true` would
         // ImagePullBackOff-style fail to start.
         let mut openclaw_env: Vec<serde_json::Value> = Vec::new();
@@ -1190,7 +1190,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "CLUSTER_NAME", "value": cluster}));
         }
         openclaw_env.push(json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}));
-        openclaw_env.push(json!({"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"}));
+        openclaw_env.push(json!({"name": "KARS_AUTH_MODE", "value": "workload-identity"}));
         if is_openclaw {
             openclaw_env.push(json!({
                 "name": "OPENCLAW_GATEWAY_TOKEN",
@@ -1239,7 +1239,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         // Operator-level Entra-auth kill switch.
         //
-        // When the cluster operator sets `AZURECLAW_DISABLE_ENTRA_AUTH=1` on
+        // When the cluster operator sets `KARS_DISABLE_ENTRA_AUTH=1` on
         // the controller (e.g. dev clusters, or any subscription where the
         // `api://agentmesh` Entra app registration is not yet provisioned),
         // tell every sandbox to skip the Entra token-exchange step at startup.
@@ -1256,13 +1256,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // controller-side tenant feature detection once Entra Agent ID
         // provisioning is automated.
         let skip_entra =
-            std::env::var("AZURECLAW_DISABLE_ENTRA_AUTH").unwrap_or_else(|_| "1".to_string());
+            std::env::var("KARS_DISABLE_ENTRA_AUTH").unwrap_or_else(|_| "1".to_string());
         if skip_entra == "1" || skip_entra.eq_ignore_ascii_case("true") {
             openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
         }
 
         // Strict-mode tool definitions: when the controller is launched with
-        // AZURECLAW_STRICT_TOOLS=1 (e.g. via the Helm chart's `strictTools`
+        // KARS_STRICT_TOOLS=1 (e.g. via the Helm chart's `strictTools`
         // value), propagate it into every sandbox's openclaw container.
         // The runtime additionally gates strict mode on (a) non-slim provider
         // and (b) GPT-family model — see runtimes/openclaw/src/core/agt-task-tools.ts
@@ -1270,20 +1270,20 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // OpenAI-compat shim are auto-excluded at the runtime layer regardless
         // of this flag, so it's safe to enable cluster-wide. Default OFF to
         // preserve byte-identical behaviour for existing deployments.
-        if let Ok(strict_tools) = std::env::var("AZURECLAW_STRICT_TOOLS")
+        if let Ok(strict_tools) = std::env::var("KARS_STRICT_TOOLS")
             && (strict_tools == "1" || strict_tools.eq_ignore_ascii_case("true"))
             && is_openclaw
         {
-            openclaw_env.push(json!({"name": "AZURECLAW_STRICT_TOOLS", "value": "1"}));
+            openclaw_env.push(json!({"name": "KARS_STRICT_TOOLS", "value": "1"}));
         }
 
         // AGT is the only supported mesh provider in this phase. Keep the
         // env var explicit so OpenClaw and the router agree on the protocol.
-        openclaw_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": "agt"}));
+        openclaw_env.push(json!({"name": "KARS_MESH_PROVIDER", "value": "agt"}));
         // The router container is separate from openclaw on AKS, and the
-        // router's own mesh code paths read AZURECLAW_MESH_PROVIDER. Push
+        // router's own mesh code paths read KARS_MESH_PROVIDER. Push
         // the same value into the router env so both containers agree.
-        router_agt_env.push(json!({"name": "AZURECLAW_MESH_PROVIDER", "value": "agt"}));
+        router_agt_env.push(json!({"name": "KARS_MESH_PROVIDER", "value": "agt"}));
 
         if governance_config.enabled {
             openclaw_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
@@ -1364,7 +1364,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         if !runtime_plan.runtime_extra_env.is_empty() {
             // Reserved prefixes that must come from the reconciler itself, not user input.
             const RESERVED_PREFIXES: &[&str] =
-                &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "AZURECLAW_"];
+                &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "KARS_"];
             // Names already set above — skip silently if caller provided a duplicate.
             let mut existing: std::collections::HashSet<String> = openclaw_env
                 .iter()
@@ -1401,7 +1401,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // the `valueFrom` payload itself is rendered verbatim.
         if !runtime_plan.raw_env.is_empty() {
             const RESERVED_PREFIXES: &[&str] =
-                &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "AZURECLAW_"];
+                &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "KARS_"];
             let mut existing: std::collections::HashSet<String> = openclaw_env
                 .iter()
                 .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
@@ -1438,7 +1438,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
             json!({"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id}),
             json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_model}),
-            json!({"name": "AZURECLAW_AUTH_MODE", "value": if ctx.dev_openai_api_key.is_empty() { "workload-identity" } else { "api-key" }}),
+            json!({"name": "KARS_AUTH_MODE", "value": if ctx.dev_openai_api_key.is_empty() { "workload-identity" } else { "api-key" }}),
             json!({"name": "CONTENT_SAFETY_ENABLED", "value": content_safety_enabled.to_string()}),
             json!({"name": "PROMPT_SHIELDS_ENABLED", "value": prompt_shields_enabled.to_string()}),
             json!({"name": "CONTENT_SAFETY_ENDPOINT", "value": &ctx.content_safety_endpoint}),
@@ -1451,7 +1451,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         router_env.extend(router_agt_env);
 
         // Local-k8s dev mode: when the controller has dev creds (set via
-        // `controller.extraEnv` referencing `azureclaw-dev-creds`
+        // `controller.extraEnv` referencing `kars-dev-creds`
         // Secret), forward them to the router so it short-circuits
         // workload-identity auth. AKS production leaves these empty and
         // the router falls back to IMDS.
@@ -1463,7 +1463,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
         if !ctx.dev_provider.is_empty() {
             router_env.push(json!({
-                "name": "AZURECLAW_PROVIDER",
+                "name": "KARS_PROVIDER",
                 "value": &ctx.dev_provider,
             }));
         }
@@ -1481,7 +1481,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // CronJob (Step 4d) can reach it in overlay mode.)
         router_env.push(json!({"name": "BLOCKLIST_ENABLED", "value": "true"}));
         router_env.push(
-            json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/azureclaw/blocklist/domains.txt"}),
+            json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/kars/blocklist/domains.txt"}),
         );
 
         // Egress mode — Slice 5b: `spec.networkPolicy.egressMode` drives the
@@ -1535,7 +1535,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             // least privilege).
             agent_volume_mounts.push(json!({
                 "name": "admin-token",
-                "mountPath": "/etc/azureclaw/secrets",
+                "mountPath": "/etc/kars/secrets",
                 "readOnly": true,
             }));
         }
@@ -1571,7 +1571,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         });
         if is_openclaw {
-            // OpenClaw gateway port (used by `azureclaw connect` port-forward).
+            // OpenClaw gateway port (used by `kars connect` port-forward).
             agent_container["ports"] = json!([{"containerPort": 18789, "name": "gateway"}]);
         }
         if let Some(cmd) = &runtime_plan.command {
@@ -1674,7 +1674,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                                     "periodSeconds": 5
                                 },
                                 "volumeMounts": [
-                                    {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
+                                    {"name": "admin-token", "mountPath": "/etc/kars/secrets", "readOnly": true}
                                 ]
                             }
                         ],
@@ -1684,13 +1684,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}}
                         ],
                         "tolerations": [{
-                            "key": "azureclaw.azure.com/sandbox",
+                            "key": "kars.azure.com/sandbox",
                             "operator": "Equal",
                             "value": "true",
                             "effect": "NoSchedule"
                         }],
                         "nodeSelector": {
-                            "azureclaw.azure.com/pool": pool_label
+                            "kars.azure.com/pool": pool_label
                         }
         });
 
@@ -1845,31 +1845,31 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
-        // ClawMemory (optional, Slice 3a): if the sandbox references
+        // KarsMemory (optional, Slice 3a): if the sandbox references
         // one via `spec.memoryRef`, mirror its compiled binding
         // ConfigMap and mount it into the inference-router. The
         // router's `memory_binding_loader` reads the file, registers
         // the digest under `PolicyKind::Memory`, and echoes it via
-        // `/internal/policy-status` so the `claw_memory_reconciler`
+        // `/internal/policy-status` so the `kars_memory_reconciler`
         // can close the §3 Ready ⇔ router-echo loop.
         //
         // Failure mode: source missing → mount omitted, router boots
         // without a binding loaded (digest absent in
-        // `/internal/policy-status`, ClawMemory stays `Compiled`).
+        // `/internal/policy-status`, KarsMemory stays `Compiled`).
         // Memory consumption today still runs through the existing
         // env-driven `FOUNDRY_MEMORY_STORE_ID` path (Slice 3b will
         // rewire to the binding).
         if let Some(memory_ref) = spec.memory_ref.as_ref() {
             let memory_name = memory_ref.name.trim();
             if !memory_name.is_empty() {
-                let mem_cm = format!("clawmemory-{memory_name}-binding");
+                let mem_cm = format!("karsmemory-{memory_name}-binding");
                 match governance_mounts::mirror_configmap(
                     client,
                     &mem_cm,
                     &sandbox_self_ns,
                     &sandbox_ns,
                     &name,
-                    "ClawMemory",
+                    "KarsMemory",
                 )
                 .await
                 {
@@ -1891,8 +1891,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             sandbox = %name,
                             cm = %mem_cm,
                             reason = %reason,
-                            "ClawMemory binding ConfigMap not mirrored; \
-                             router will start without ClawMemory binding loaded",
+                            "KarsMemory binding ConfigMap not mirrored; \
+                             router will start without KarsMemory binding loaded",
                         );
                     }
                     Err(e) => {
@@ -1900,7 +1900,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                             error = %e,
                             sandbox = %name,
                             cm = %mem_cm,
-                            "ClawMemory ConfigMap mirror failed",
+                            "KarsMemory ConfigMap mirror failed",
                         );
                         return Ok(Action::requeue(Duration::from_secs(15)));
                     }
@@ -1911,7 +1911,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Slice 5c.1: egress allowlist mount. The ConfigMap was
         // published earlier in this reconcile pass directly in the
         // sandbox namespace (no cross-NS mirror — the data lives
-        // inline on the `ClawSandbox` CR, no separate producer CRD).
+        // inline on the `KarsSandbox` CR, no separate producer CRD).
         // Mount only on the inference-router container; the agent
         // container (UID 1000) has no business reading it.
         //
@@ -1958,8 +1958,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // individually.
         //
         // Mount layout (Slice 4d.2):
-        //   - JWKS:    /etc/azureclaw/mcp/{name}/jwks.json
-        //   - signing: /etc/azureclaw/mcp-signing/{name}/{keys...}
+        //   - JWKS:    /etc/kars/mcp/{name}/jwks.json
+        //   - signing: /etc/kars/mcp-signing/{name}/{keys...}
         //
         // Env vars set on `inference-router`:
         //   - `MCP_JWKS_DIR`: parent dir for all per-server JWKS subdirs.
@@ -2112,7 +2112,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             // `openclaw` container so the entrypoint can render an
             // `mcp.servers.<name>` block in `openclaw.json` pointing each
             // server at the loopback router (`127.0.0.1:8443/mcp`). The
-            // router resolves the `x-azureclaw-mcp-server` header to the
+            // router resolves the `x-kars-mcp-server` header to the
             // registered McpServer, signs with the mounted key, filters
             // by allowedTools, and forwards to the upstream URL.
             //
@@ -2121,7 +2121,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             governance_mounts::inject_container_env(
                 &mut pod_spec,
                 "openclaw",
-                "AZURECLAW_MCP_SERVERS",
+                "KARS_MCP_SERVERS",
                 &names_csv,
             );
         }
@@ -2210,7 +2210,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             Ok(trustgraph_mount::MountOutcome::NoSource) => {
                 tracing::debug!(
                     sandbox = %name,
-                    "No TrustGraph projections present in azureclaw-system"
+                    "No TrustGraph projections present in kars-system"
                 );
             }
             Err(e) => {
@@ -2246,7 +2246,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                     if let Some(mounts_arr) = mounts.as_array_mut() {
                         mounts_arr.push(json!({
                             "name": "blocklist-seed",
-                            "mountPath": "/etc/azureclaw/blocklist",
+                            "mountPath": "/etc/kars/blocklist",
                             "readOnly": true
                         }));
                     }
@@ -2261,22 +2261,22 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "name": name,
                 "namespace": sandbox_ns,
                 "labels": {
-                    "azureclaw.azure.com/sandbox": name,
-                    "azureclaw.azure.com/component": "sandbox",
-                    "azureclaw.azure.com/parent-namespace":
+                    "kars.azure.com/sandbox": name,
+                    "kars.azure.com/component": "sandbox",
+                    "kars.azure.com/parent-namespace":
                         sandbox.namespace().unwrap_or_default(),
                 }
             },
             "spec": {
                 "replicas": desired_replicas,
                 "selector": {
-                    "matchLabels": {"azureclaw.azure.com/sandbox": name}
+                    "matchLabels": {"kars.azure.com/sandbox": name}
                 },
                 "template": {
                     "metadata": {
                         "labels": {
-                            "azureclaw.azure.com/sandbox": name,
-                            "azureclaw.azure.com/component": "sandbox",
+                            "kars.azure.com/sandbox": name,
+                            "kars.azure.com/component": "sandbox",
                             "azure.workload.identity/use": "true"
                         }
                     },
@@ -2295,7 +2295,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     // ── Step 4b: Azure Services RBAC annotations ─────────────────────────
     // If spec.azure_services is configured, annotate the ServiceAccount and
-    // namespace so that `azureclaw up` (or a future RBAC controller) can
+    // namespace so that `kars up` (or a future RBAC controller) can
     // create the necessary Azure role assignments for the sandbox identity.
     if let Some(ref azure_services) = spec.azure_services
         && !azure_services.is_empty()
@@ -2304,19 +2304,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             Api::namespaced(client.clone(), &sandbox_ns);
         let mut annotations = std::collections::BTreeMap::new();
         for (i, svc) in azure_services.iter().enumerate() {
-            annotations.insert(
-                format!("azureclaw.azure.com/service-{i}"),
-                svc.service.clone(),
-            );
+            annotations.insert(format!("kars.azure.com/service-{i}"), svc.service.clone());
             if let Some(ref acct) = svc.account {
-                annotations.insert(
-                    format!("azureclaw.azure.com/service-{i}-account"),
-                    acct.clone(),
-                );
+                annotations.insert(format!("kars.azure.com/service-{i}-account"), acct.clone());
             }
             if let Some(ref perms) = svc.permissions {
                 annotations.insert(
-                    format!("azureclaw.azure.com/service-{i}-permissions"),
+                    format!("kars.azure.com/service-{i}-permissions"),
                     perms.join(","),
                 );
             }
@@ -2361,13 +2355,13 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "name": &name,
                 "namespace": &sandbox_ns,
                 "labels": {
-                    "azureclaw.azure.com/sandbox": &name,
-                    "azureclaw.azure.com/component": "sandbox"
+                    "kars.azure.com/sandbox": &name,
+                    "kars.azure.com/component": "sandbox"
                 }
             },
             "spec": {
                 "selector": {
-                    "azureclaw.azure.com/sandbox": &name
+                    "kars.azure.com/sandbox": &name
                 },
                 "ports": [{
                     "name": "inference",
@@ -2390,8 +2384,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
         // sandbox reconciler mirrors it into the sandbox namespace
         // (above, in the pod-spec assembly block). Two earlier
         // implementations have been removed:
-        //   - pre-S7: baked `cli/policies/azureclaw-default.yaml` /
-        //     `cli/policies/azureclaw-offload.yaml` into the controller
+        //   - pre-S7: baked `cli/policies/kars-default.yaml` /
+        //     `cli/policies/kars-offload.yaml` into the controller
         //     binary and wrote a static `agt-policy-{profile}` ConfigMap,
         //     which bypassed the ToolPolicy CRD entirely.
         //   - pre-Slice-1e-phase-2: kept the bundled YAMLs in the
@@ -2427,8 +2421,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
     // directly, the mounted file stays fresh.
     //
     // **OverlayMode (S8):** skipped. The blocklist is mounted into the
-    // AzureClaw-managed router container; in overlay mode the upstream
-    // Sandbox CR owns the Pod and there is no AzureClaw router to consume
+    // Kars-managed router container; in overlay mode the upstream
+    // Sandbox CR owns the Pod and there is no Kars router to consume
     // the ConfigMap. Recreating it would be dead overhead (CronJob would
     // run every 6h with nothing reading the output).
     if !overlay_mode {
@@ -2457,8 +2451,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "name": &blocklist_cm_name,
                 "namespace": &sandbox_ns,
                 "labels": {
-                    "azureclaw.azure.com/sandbox": &name,
-                    "azureclaw.azure.com/component": "blocklist"
+                    "kars.azure.com/sandbox": &name,
+                    "kars.azure.com/component": "blocklist"
                 }
             },
             "data": {
@@ -2484,8 +2478,8 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "name": &cronjob_name,
                 "namespace": &sandbox_ns,
                 "labels": {
-                    "azureclaw.azure.com/sandbox": &name,
-                    "azureclaw.azure.com/component": "blocklist-refresh"
+                    "kars.azure.com/sandbox": &name,
+                    "kars.azure.com/component": "blocklist-refresh"
                 }
             },
             "spec": {
@@ -2580,7 +2574,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             upstream_ref,
             runtime_kind_str,
         ) {
-            let sandbox_api: Api<ClawSandbox> =
+            let sandbox_api: Api<KarsSandbox> =
                 Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
             let status_obj = crate::status::build_overlay_status_patch(
                 &sandbox,
@@ -2656,7 +2650,7 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
             runtime_kind_str,
             &extras,
         ) {
-            let sandbox_api: Api<ClawSandbox> =
+            let sandbox_api: Api<KarsSandbox> =
                 Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
             let status_obj = crate::status::build_running_status_patch_with_extras(
                 &sandbox,
@@ -2668,11 +2662,11 @@ async fn reconcile(sandbox: Arc<ClawSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
                 .await;
         } else {
-            crate::metrics::record_status_patch_skip("ClawSandbox");
+            crate::metrics::record_status_patch_skip("KarsSandbox");
         }
     }
 
-    tracing::info!("ClawSandbox {name} reconciled successfully");
+    tracing::info!("KarsSandbox {name} reconciled successfully");
     Ok(Action::requeue(Duration::from_secs(300)))
 }
 
@@ -2694,12 +2688,12 @@ fn error_requeue_duration(error: &ReconcileError) -> Duration {
 }
 
 /// Error policy — what to do when reconciliation fails.
-fn error_policy(sandbox: Arc<ClawSandbox>, error: &ReconcileError, _ctx: Arc<Context>) -> Action {
+fn error_policy(sandbox: Arc<KarsSandbox>, error: &ReconcileError, _ctx: Arc<Context>) -> Action {
     let class = match error {
         ReconcileError::Kube(_) => "kube_api",
         ReconcileError::SerdeJson(_) => "serde",
     };
-    crate::metrics::record_reconcile_error("ClawSandbox", class);
+    crate::metrics::record_reconcile_error("KarsSandbox", class);
     tracing::error!(
         "Reconciliation error for {}: {:?}",
         sandbox.name_any(),
@@ -2708,27 +2702,27 @@ fn error_policy(sandbox: Arc<ClawSandbox>, error: &ReconcileError, _ctx: Arc<Con
     Action::requeue(error_requeue_duration(error))
 }
 
-/// Run the controller — blocks forever, watching ClawSandbox CRDs.
+/// Run the controller — blocks forever, watching KarsSandbox CRDs.
 pub async fn run(client: Client) -> Result<()> {
-    let sandboxes: Api<ClawSandbox> = Api::all(client.clone());
+    let sandboxes: Api<KarsSandbox> = Api::all(client.clone());
 
     // Verify CRD is installed
     sandboxes
         .list(&ListParams::default().limit(1))
         .await
         .map_err(|e| {
-            anyhow::anyhow!("ClawSandbox CRD not found — install the Helm chart first: {e}")
+            anyhow::anyhow!("KarsSandbox CRD not found — install the Helm chart first: {e}")
         })?;
-    tracing::info!("ClawSandbox CRD found — starting controller");
+    tracing::info!("KarsSandbox CRD found — starting controller");
 
     let wi_client_id = std::env::var("AZURE_WI_CLIENT_ID").unwrap_or_default();
     let inference_router_image = std::env::var("INFERENCE_ROUTER_IMAGE").unwrap_or_else(|_| {
         tracing::warn!("INFERENCE_ROUTER_IMAGE not set — using default :latest image");
-        "azureclawacr.azurecr.io/azureclaw-inference-router:latest".into()
+        "karsacr.azurecr.io/kars-inference-router:latest".into()
     });
     let sandbox_image = std::env::var("SANDBOX_IMAGE").unwrap_or_else(|_| {
         tracing::warn!("SANDBOX_IMAGE not set — using default :latest image");
-        "azureclawacr.azurecr.io/openclaw-sandbox:latest".into()
+        "karsacr.azurecr.io/openclaw-sandbox:latest".into()
     });
     let openai_endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_ENDPOINT").unwrap_or_default();
@@ -2785,7 +2779,7 @@ pub async fn run(client: Client) -> Result<()> {
     // Production AKS deployments leave this unset and the router falls
     // back to workload identity. See `inference-router/src/auth.rs`.
     let dev_openai_api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
-    let dev_provider = std::env::var("AZURECLAW_PROVIDER").unwrap_or_default();
+    let dev_provider = std::env::var("KARS_PROVIDER").unwrap_or_default();
     let dev_copilot_github_token = std::env::var("COPILOT_GITHUB_TOKEN").unwrap_or_default();
     if !dev_openai_api_key.is_empty() || !dev_provider.is_empty() {
         tracing::info!(
@@ -2825,7 +2819,7 @@ pub async fn run(client: Client) -> Result<()> {
         )
         .run(
             |x, ctx| async move {
-                crate::metrics::observe_reconcile("ClawSandbox", reconcile(x, ctx)).await
+                crate::metrics::observe_reconcile("KarsSandbox", reconcile(x, ctx)).await
             },
             error_policy,
             ctx,
@@ -2846,9 +2840,9 @@ mod tests;
 
 pub mod runtime;
 
-/// Phase G P1 #5 — Deployment-to-ClawSandbox parent mapper.
+/// Phase G P1 #5 — Deployment-to-KarsSandbox parent mapper.
 ///
-/// Triggers a reconcile on the parent ClawSandbox whenever a child
+/// Triggers a reconcile on the parent KarsSandbox whenever a child
 /// Deployment is created, updated, or deleted. Combined with
 /// `Controller::watches`, this closes the gap that previously let
 /// manual `kubectl edit deploy` / `kubectl scale` mutations linger
@@ -2856,36 +2850,32 @@ pub mod runtime;
 /// reconciler restored the desired state.
 ///
 /// Cross-namespace constraint: K8s does not allow ownerReferences
-/// across namespaces, and the Deployment lives in `azureclaw-{name}`
-/// while the parent ClawSandbox can live in any namespace. We
+/// across namespaces, and the Deployment lives in `kars-{name}`
+/// while the parent KarsSandbox can live in any namespace. We
 /// therefore identify the parent by the labels we stamp at
 /// Deployment-creation time:
 ///
-/// * `azureclaw.azure.com/component=sandbox` — required (filters
+/// * `kars.azure.com/component=sandbox` — required (filters
 ///   out unrelated Deployments).
-/// * `azureclaw.azure.com/sandbox=<name>` — parent CR name.
-/// * `azureclaw.azure.com/parent-namespace=<ns>` — parent CR
+/// * `kars.azure.com/sandbox=<name>` — parent CR name.
+/// * `kars.azure.com/parent-namespace=<ns>` — parent CR
 ///   namespace.
 ///
 /// Deployments that pre-date this PR carry the first two labels but
 /// not the third. They are silently skipped by the mapper; the next
 /// periodic 5-minute requeue re-applies the Deployment with the new
 /// label, after which subsequent edits trigger this watch.
-fn deployment_to_sandbox_ref(d: Deployment) -> Option<ObjectRef<ClawSandbox>> {
+fn deployment_to_sandbox_ref(d: Deployment) -> Option<ObjectRef<KarsSandbox>> {
     let labels = d.metadata.labels.as_ref()?;
-    if labels
-        .get("azureclaw.azure.com/component")
-        .map(|s| s.as_str())
-        != Some("sandbox")
-    {
+    if labels.get("kars.azure.com/component").map(|s| s.as_str()) != Some("sandbox") {
         return None;
     }
-    let sandbox_name = labels.get("azureclaw.azure.com/sandbox")?;
-    let parent_ns = labels.get("azureclaw.azure.com/parent-namespace")?;
+    let sandbox_name = labels.get("kars.azure.com/sandbox")?;
+    let parent_ns = labels.get("kars.azure.com/parent-namespace")?;
     if sandbox_name.is_empty() || parent_ns.is_empty() {
         return None;
     }
-    Some(ObjectRef::<ClawSandbox>::new(sandbox_name).within(parent_ns))
+    Some(ObjectRef::<KarsSandbox>::new(sandbox_name).within(parent_ns))
 }
 
 #[cfg(test)]
@@ -2907,20 +2897,17 @@ mod watch_tests {
     fn mapper_returns_ref_for_well_labeled_deployment() {
         let mut labels = BTreeMap::new();
         labels.insert(
-            "azureclaw.azure.com/component".to_string(),
+            "kars.azure.com/component".to_string(),
             "sandbox".to_string(),
         );
+        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
         labels.insert(
-            "azureclaw.azure.com/sandbox".to_string(),
-            "my-agent".to_string(),
-        );
-        labels.insert(
-            "azureclaw.azure.com/parent-namespace".to_string(),
-            "azureclaw-system".to_string(),
+            "kars.azure.com/parent-namespace".to_string(),
+            "kars-system".to_string(),
         );
         let r = deployment_to_sandbox_ref(deploy_with_labels(labels)).expect("ref");
         assert_eq!(r.name, "my-agent");
-        assert_eq!(r.namespace.as_deref(), Some("azureclaw-system"));
+        assert_eq!(r.namespace.as_deref(), Some("kars-system"));
     }
 
     #[test]
@@ -2931,17 +2918,11 @@ mod watch_tests {
     #[test]
     fn mapper_skips_wrong_component() {
         let mut labels = BTreeMap::new();
+        labels.insert("kars.azure.com/component".to_string(), "router".to_string());
+        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
         labels.insert(
-            "azureclaw.azure.com/component".to_string(),
-            "router".to_string(),
-        );
-        labels.insert(
-            "azureclaw.azure.com/sandbox".to_string(),
-            "my-agent".to_string(),
-        );
-        labels.insert(
-            "azureclaw.azure.com/parent-namespace".to_string(),
-            "azureclaw-system".to_string(),
+            "kars.azure.com/parent-namespace".to_string(),
+            "kars-system".to_string(),
         );
         assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
     }
@@ -2954,13 +2935,10 @@ mod watch_tests {
         // subsequent edits start triggering this watch).
         let mut labels = BTreeMap::new();
         labels.insert(
-            "azureclaw.azure.com/component".to_string(),
+            "kars.azure.com/component".to_string(),
             "sandbox".to_string(),
         );
-        labels.insert(
-            "azureclaw.azure.com/sandbox".to_string(),
-            "my-agent".to_string(),
-        );
+        labels.insert("kars.azure.com/sandbox".to_string(), "my-agent".to_string());
         assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
     }
 
@@ -2968,13 +2946,13 @@ mod watch_tests {
     fn mapper_skips_empty_label_values() {
         let mut labels = BTreeMap::new();
         labels.insert(
-            "azureclaw.azure.com/component".to_string(),
+            "kars.azure.com/component".to_string(),
             "sandbox".to_string(),
         );
-        labels.insert("azureclaw.azure.com/sandbox".to_string(), "".to_string());
+        labels.insert("kars.azure.com/sandbox".to_string(), "".to_string());
         labels.insert(
-            "azureclaw.azure.com/parent-namespace".to_string(),
-            "azureclaw-system".to_string(),
+            "kars.azure.com/parent-namespace".to_string(),
+            "kars-system".to_string(),
         );
         assert!(deployment_to_sandbox_ref(deploy_with_labels(labels)).is_none());
     }

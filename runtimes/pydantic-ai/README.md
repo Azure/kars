@@ -1,4 +1,4 @@
-# azureclaw-runtime-pydantic-ai
+# kars-runtime-pydantic-ai
 
 In-pod adapter for the [Pydantic-AI](https://ai.pydantic.dev/) agent
 framework. Phase H#3 of the multi-runtime hosting initiative
@@ -24,7 +24,7 @@ sidecar's matching proxy endpoint so that:
 ## Bootstrap
 
 ```python
-from azureclaw_runtime_pydantic_ai.runtime import bootstrap
+from kars_runtime_pydantic_ai.runtime import bootstrap
 bootstrap()  # idempotent — safe to call from user code or tests
 ```
 
@@ -40,7 +40,7 @@ the user agent module is imported.
 2. Sets each provider API-key env to the sentinel `router-managed`.
 3. Initializes OpenTelemetry (GenAI semantic conventions).
 4. Installs SIGTERM/SIGINT handlers for graceful shutdown.
-5. Marks `__AZURECLAW_RUNTIME_INITIALIZED__=1` so re-imports no-op.
+5. Marks `__KARS_RUNTIME_INITIALIZED__=1` so re-imports no-op.
 
 ## Provenance
 

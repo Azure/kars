@@ -172,10 +172,10 @@ export async function discoverFoundryProject(
     const crypto = await import("node:crypto");
     const memoryDir = "/sandbox/.openclaw/workspace/memory";
     const memoryFile = "/sandbox/.openclaw/workspace/MEMORY.md";
-    const tmpFile = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
+    const tmpFile = `/tmp/kars-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
     try { fs.mkdirSync(memoryDir, { recursive: true }); } catch { /* read-only fs */ }
 
-    const sections: string[] = ["# AzureClaw Environment\n"];
+    const sections: string[] = ["# Kars Environment\n"];
 
     if (endpoint) {
       sections.push(`## Connected Foundry Project\n\nEndpoint: \`${endpoint}\`\n`);
@@ -208,14 +208,14 @@ export async function discoverFoundryProject(
     // Identity section — tells the model who it is
     sections.push(
       "## Identity\n",
-      "You are **AzureClaw** — a secure, governed AI agent running on Azure Kubernetes Service.",
-      "You are NOT a generic assistant. You are AzureClaw, a specialized agent platform with",
+      "You are **Kars** — a secure, governed AI agent running on Azure Kubernetes Service.",
+      "You are NOT a generic assistant. You are Kars, a specialized agent platform with",
       "multi-agent orchestration, end-to-end encryption (Signal Protocol), governance (AGT),",
-      "and Azure AI Foundry integration. Always refer to yourself as **AzureClaw** — never",
+      "and Azure AI Foundry integration. Always refer to yourself as **Kars** — never",
       'as "Assistant", "AI", "OpenClaw", or any other name.',
       "",
       "When greeting users or introducing yourself, be confident and specific:",
-      '- "I\'m AzureClaw, your secure AI agent on Azure."',
+      '- "I\'m Kars, your secure AI agent on Azure."',
       '- Mention your capabilities: multi-agent spawning, E2E encrypted mesh, web search,',
       "  code execution, image generation, governed tool access, and persistent memory.",
       '- Be professional but approachable. You are a production-grade platform, not a chatbot.',
@@ -230,10 +230,10 @@ export async function discoverFoundryProject(
       "- `foundry_file_search` — RAG over vector stores + vector store CRUD + file upload",
       "- `foundry_memory` — Persistent semantic memory (cross-session, cross-agent)",
       "- `http_fetch` — External HTTP via egress proxy (blocklist + allowlist enforced)",
-      "- `azureclaw_spawn` — Spawn governed sub-agents with dedicated sandboxes",
-      "- `azureclaw_mesh_send` — Send E2E encrypted messages to other agents via AGT mesh",
-      "- `azureclaw_mesh_inbox` — Check for incoming messages from other agents",
-      "- `azureclaw_discover` — Discover other agents in the mesh network",
+      "- `kars_spawn` — Spawn governed sub-agents with dedicated sandboxes",
+      "- `kars_mesh_send` — Send E2E encrypted messages to other agents via AGT mesh",
+      "- `kars_mesh_inbox` — Check for incoming messages from other agents",
+      "- `kars_discover` — Discover other agents in the mesh network",
       "",
       "## Agent Behavior\n",
       "When asked to perform a task, execute it immediately using available tools. Do not announce what you will do — just do it. Chain multiple tool calls in sequence if needed to complete the task in a single response. Never say 'Processing...' or 'One moment...' without actually making a tool call in the same turn.",
@@ -264,7 +264,7 @@ export async function discoverFoundryProject(
     // Write (or replace) the environment section at the top of MEMORY.md
     let existingMemory = "";
     try { existingMemory = fs.readFileSync(memoryFile, "utf8"); } catch { /* first run */ }
-    const envMarker = "# AzureClaw Environment";
+    const envMarker = "# Kars Environment";
     const endMarker = "\n---\n";
     const envSection = sections.join("\n") + endMarker;
 
@@ -348,7 +348,7 @@ export async function discoverFoundryProject(
           const sepIdx = current.indexOf("\n---\n");
           if (sepIdx >= 0) {
             const updated = current.slice(0, sepIdx) + recallSection.join("\n") + current.slice(sepIdx);
-            const tmpFile2 = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
+            const tmpFile2 = `/tmp/kars-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
             fs.writeFileSync(tmpFile2, updated, { mode: 0o600 });
             try { fs.renameSync(tmpFile2, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); try { fs.unlinkSync(tmpFile2); } catch { /* */ } }
           }
@@ -400,7 +400,7 @@ export async function discoverFoundryProject(
             const sepIdx = current.indexOf("\n---\n");
             if (sepIdx >= 0) {
               const updated = current.slice(0, sepIdx) + historySection.join("\n") + current.slice(sepIdx);
-              const tmpFile3 = `/tmp/azureclaw-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
+              const tmpFile3 = `/tmp/kars-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
               fs.writeFileSync(tmpFile3, updated, { mode: 0o600 });
               try { fs.renameSync(tmpFile3, memoryFile); } catch { fs.writeFileSync(memoryFile, updated); try { fs.unlinkSync(tmpFile3); } catch { /* */ } }
             }

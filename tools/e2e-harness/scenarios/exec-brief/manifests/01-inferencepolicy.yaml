@@ -4,13 +4,13 @@
 # execution); github-copilot and github-models providers return 501 for
 # those Foundry-only routes (see docs/security.md).
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: execbrief-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: execbrief
+    kars.azure.com/sandbox: execbrief
 spec:
   appliesTo:
     sandboxName: execbrief

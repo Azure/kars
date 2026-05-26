@@ -83,7 +83,7 @@ export function deleteSelectedAgent(ctx: DeleteDialogContext): void {
           if (sb.runtime === "docker") {
             await execa("docker", ["rm", "-f", sb.podName!], { stdio: "pipe" });
           } else {
-            await execa("azureclaw", ["destroy", sb.name, "--cloud", "--yes"], { stdio: "pipe" });
+            await execa("kars", ["destroy", sb.name, "--cloud", "--yes"], { stdio: "pipe" });
           }
           activityLog.log(`{green-fg}✓ Destroyed{/} ${sb.name}`);
         } catch (e: any) {

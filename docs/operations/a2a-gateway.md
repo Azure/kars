@@ -7,7 +7,7 @@
 The gateway is opt-in. To turn it on:
 
 ```bash
-helm upgrade azureclaw deploy/helm/azureclaw \
+helm upgrade kars deploy/helm/kars \
   --set a2aGateway.enabled=true \
   --set inferenceRouter.a2aMtls.enabled=true   # required pair
 ```
@@ -45,7 +45,7 @@ Two independent rotations:
    (`A2A_MTLS_CA_PATH` on the router Deployment) **in lockstep**.
 2. Use a transitional CA bundle (old + new) for at least one Kubelet
    refresh window before retiring the old cert. The Cilium
-   ClusterwideNetworkPolicy `azureclaw-a2a-gateway-to-router`
+   ClusterwideNetworkPolicy `kars-a2a-gateway-to-router`
    already restricts the path to the gateway ServiceAccount, so a
    stolen cert from outside that SA cannot reach the router even if
    chain-of-trust check passed.
@@ -90,12 +90,12 @@ gateway with an explicit message.
 ### Prometheus scrape
 
 ```yaml
-- job_name: azureclaw-a2a-gateway
+- job_name: kars-a2a-gateway
   kubernetes_sd_configs:
     - role: pod
       selectors:
         - role: pod
-          label: "app.kubernetes.io/name=azureclaw-a2a-gateway"
+          label: "app.kubernetes.io/name=kars-a2a-gateway"
   relabel_configs:
     - source_labels: [__meta_kubernetes_pod_container_port_name]
       regex: admin
@@ -106,7 +106,7 @@ gateway with an explicit message.
 
 | Alert | Expression | Severity |
 |---|---|---|
-| Gateway down | `up{job="azureclaw-a2a-gateway"} == 0` for 5m | page |
+| Gateway down | `up{job="kars-a2a-gateway"} == 0` for 5m | page |
 | JWS rejection burst | `rate(a2a_gateway_rejections_total{reason="jws_invalid"}[5m]) > 1` | ticket |
 | Replay attack signal | `rate(a2a_gateway_rejections_total{reason="replay"}[1m]) > 0` | page |
 | Subject map saturating | `a2a_gateway_subject_count / 50000 > 0.8` | ticket |

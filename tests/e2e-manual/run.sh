@@ -6,7 +6,7 @@
 # tests/e2e-manual/scenarios/.
 #
 # This is *not* part of CI. It is run by hand against a real cluster
-# with AzureClaw already installed (Kind, AKS, or any conformant K8s).
+# with Kars already installed (Kind, AKS, or any conformant K8s).
 #
 # Usage:
 #   bash tests/e2e-manual/run.sh                       # run every scenario
@@ -29,7 +29,7 @@ source "${LIB_DIR}/common.sh"
 # id           script                                 description
 declare -a SCENARIOS=(
     "runtime|runtime_matrix.sh|Bring up every supported runtime and assert Ready"
-    "crds|crd_admission.sh|Admission + status for the 7 untested AzureClaw CRDs"
+    "crds|crd_admission.sh|Admission + status for the 7 untested Kars CRDs"
     "inference|inference_smoke.sh|Agent → router → Foundry round-trip (per runtime)"
     "foundry-bing|foundry_bing.sh|Foundry Bing grounding tool through the router"
     "agt-mesh|agt_mesh.sh|AGT mesh: 1sub, 2sub-parallel, sibling, multiturn"
@@ -51,7 +51,7 @@ list_scenarios() {
 
 usage() {
     cat <<EOF
-AzureClaw manual E2E runner.
+Kars manual E2E runner.
 
 Usage: bash tests/e2e-manual/run.sh [options]
 
@@ -68,11 +68,11 @@ Environment overrides:
   MANUAL_E2E_TIMEOUT       Per-resource wait, seconds (default 300).
   MANUAL_E2E_KEEP_NS       1 → keep namespaces (same as --keep-ns).
   MANUAL_E2E_VERBOSE       1 → dump kubectl describe on failure.
-  AZURECLAW_E2E_RUNTIMES   Same as --runtime, env-var form.
+  KARS_E2E_RUNTIMES   Same as --runtime, env-var form.
 
 This runner does NOT create or destroy clusters; it assumes a working
-kubeconfig context with AzureClaw already installed in the
-'azureclaw-system' namespace.
+kubeconfig context with Kars already installed in the
+'kars-system' namespace.
 EOF
 }
 
@@ -81,7 +81,7 @@ WANTED=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --scenario) WANTED="$2"; shift 2 ;;
-        --runtime)  export AZURECLAW_E2E_RUNTIMES="${2//,/ }"; shift 2 ;;
+        --runtime)  export KARS_E2E_RUNTIMES="${2//,/ }"; shift 2 ;;
         --keep-ns)  export MANUAL_E2E_KEEP_NS=1; shift ;;
         --list)     list_scenarios; exit 0 ;;
         -h|--help)  usage; exit 0 ;;
@@ -144,11 +144,11 @@ _cleanup_on_exit() {
         echo "[INFO] sweeping leftover manual-e2e namespaces…"
     fi
     # CR namespaces are labeled by the factory; pod namespaces are
-    # named azureclaw-<sandbox> and labeled by the controller. We match
+    # named kars-<sandbox> and labeled by the controller. We match
     # both via the same label so the sweep is scoped.
     local ns_list
     ns_list=$(kubectl get ns \
-        -l azureclaw.azure.com/test-suite=manual-e2e \
+        -l kars.azure.com/test-suite=manual-e2e \
         -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
     if [[ -z "$ns_list" ]]; then
         echo "[INFO] nothing to sweep"
@@ -157,7 +157,7 @@ _cleanup_on_exit() {
     # Drop CR finalizers first so deletion isn't blocked when the
     # controller is unhealthy. Best-effort.
     for ns in $ns_list; do
-        kubectl -n "$ns" get clawsandbox -o name 2>/dev/null | while read -r cr; do
+        kubectl -n "$ns" get karssandbox -o name 2>/dev/null | while read -r cr; do
             kubectl -n "$ns" patch "$cr" --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
         done
     done
@@ -169,7 +169,7 @@ trap _cleanup_on_exit EXIT
 
 # ── Pre-flight ─────────────────────────────────────────────────────────
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
 # Reset metrics file for this run so percentile aggregation reflects
 # only scenarios from this invocation. Past runs are preserved as

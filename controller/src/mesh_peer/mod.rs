@@ -7,7 +7,7 @@
 //! The controller's mesh identity (Ed25519) is persisted in a K8s Secret.
 //! On startup, it connects to the relay via WebSocket and listens for:
 //! - `pair_request` — validates pairing token, binds AMID, responds
-//! - `offload_request` — validates pairing, creates ClawSandbox CRD
+//! - `offload_request` — validates pairing, creates KarsSandbox CRD
 //! - `offload_cancel` — cancels an active offload
 //!
 //! For the pairing ceremony, messages use a simplified protocol (the pairing
@@ -47,7 +47,7 @@ use agt_wire::{AgtFrame, AgtRegisterAgentRequest};
 
 /// Which AgentMesh implementation the controller should speak to.
 ///
-/// Selected at startup from `AZURECLAW_MESH_PROVIDER` (default `agt`).
+/// Selected at startup from `KARS_MESH_PROVIDER` (default `agt`).
 /// Kept as an enum so the multi-provider framework shape remains intact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -60,11 +60,11 @@ pub enum Provider {
 }
 
 impl Provider {
-    /// Read the provider selection from `AZURECLAW_MESH_PROVIDER`. Defaults
+    /// Read the provider selection from `KARS_MESH_PROVIDER`. Defaults
     /// to `Agt` (upstream `@microsoft/agent-governance-sdk`) — Phase 5 of
     /// the AGT migration. Unknown values fall back to `Agt` with a warning.
     pub fn from_env() -> Self {
-        match std::env::var("AZURECLAW_MESH_PROVIDER")
+        match std::env::var("KARS_MESH_PROVIDER")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
@@ -72,13 +72,13 @@ impl Provider {
             "" | "agt" => Provider::Agt,
             "vendored" => {
                 tracing::warn!(
-                    "AZURECLAW_MESH_PROVIDER=vendored is no longer supported; defaulting to agt"
+                    "KARS_MESH_PROVIDER=vendored is no longer supported; defaulting to agt"
                 );
                 Provider::Agt
             }
             other => {
                 tracing::warn!(
-                    "Unknown AZURECLAW_MESH_PROVIDER={other} — defaulting to agt. \
+                    "Unknown KARS_MESH_PROVIDER={other} — defaulting to agt. \
                      Valid value: agt."
                 );
                 Provider::Agt
@@ -139,7 +139,7 @@ fn derive_amid(verifying_key: &VerifyingKey) -> String {
 // ---------------------------------------------------------------------------
 
 const IDENTITY_SECRET_NAME: &str = "controller-mesh-identity";
-pub(crate) const IDENTITY_NAMESPACE: &str = "azureclaw-system";
+pub(crate) const IDENTITY_NAMESPACE: &str = "kars-system";
 
 /// Load or create the controller's mesh identity from a K8s Secret.
 pub async fn load_or_create_identity(client: &Client) -> Result<MeshIdentity> {
@@ -232,10 +232,7 @@ async fn register_with_registry(provider: Provider, identity: &MeshIdentity) -> 
     let public_key = BASE64_URL.encode(identity.verifying_key.to_bytes());
 
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert(
-        "display_name".to_string(),
-        "azureclaw-controller".to_string(),
-    );
+    metadata.insert("display_name".to_string(), "kars-controller".to_string());
     metadata.insert("amid".to_string(), identity.amid.clone());
 
     let body = AgtRegisterAgentRequest {
@@ -397,7 +394,7 @@ enum FederationMessage {
         phase: String,
     },
     /// Sent by the parent (external agent) when an offload has terminated
-    /// (completed, errored, or user-cancelled) and the ClawSandbox CRD can
+    /// (completed, errored, or user-cancelled) and the KarsSandbox CRD can
     /// be torn down. Without this, the reconciler keeps the offload pod
     /// alive until idle-timeout, which wastes cluster capacity.
     #[serde(rename = "offload_cleanup")]
@@ -444,7 +441,7 @@ struct MeshPeerState {
     client: Client,
     relay_url: String,
     cluster_name: String,
-    /// Mesh provider selector. Set once at startup from `AZURECLAW_MESH_PROVIDER`.
+    /// Mesh provider selector. Set once at startup from `KARS_MESH_PROVIDER`.
     provider: Provider,
     /// Persistent outbox for background tasks (pod watchers, resumed watchers)
     /// to send messages to peers via the active relay connection. Survives
@@ -471,7 +468,7 @@ struct OutboundMsg {
     epoch: u64,
 }
 
-const LEASE_NAME: &str = "azureclaw-mesh-peer-leader";
+const LEASE_NAME: &str = "kars-mesh-peer-leader";
 const LEASE_DURATION_SECS: i32 = 30;
 const LEASE_RENEW_SECS: u64 = 10;
 
@@ -608,9 +605,8 @@ pub async fn run(client: Client) -> Result<()> {
     let provider = Provider::from_env();
     let relay_url = std::env::var("MESH_RELAY_URL")
         .unwrap_or_else(|_| "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765/ws".into());
-    let cluster_name = std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "azureclaw-cluster".into());
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let cluster_name = std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "kars-cluster".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
 
     let identity = load_or_create_identity(&client).await?;
     tracing::info!(

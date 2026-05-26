@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 /**
- * Preflight RBAC & provider checks for `azureclaw up`.
+ * Preflight RBAC & provider checks for `kars up`.
  *
- * `azureclaw up` takes ~15–25 minutes end-to-end. Failing halfway through
+ * `kars up` takes ~15–25 minutes end-to-end. Failing halfway through
  * because the caller lacks `Microsoft.Authorization/roleAssignments/write`
  * is a terrible experience. This module queries the caller's effective
  * permissions at subscription scope, resource provider registration
@@ -49,7 +49,7 @@ export interface PreflightResult {
   user?: string;
 }
 
-// Minimum set of Azure control-plane actions `azureclaw up` requires.
+// Minimum set of Azure control-plane actions `kars up` requires.
 // Each entry lists the action and a short human label for error output.
 interface RequiredAction {
   action: string;
@@ -83,7 +83,7 @@ const REMEDIATION_ROLES = [
   "— OR — Owner (covers both, but violates least-privilege)",
 ];
 
-// Required resource providers. `azureclaw up` will attempt `az provider register`
+// Required resource providers. `kars up` will attempt `az provider register`
 // on Microsoft.Compute / Microsoft.ContainerService explicitly; others are
 // typically auto-registered on first use but checking upfront catches locked-down
 // subs that block auto-registration.

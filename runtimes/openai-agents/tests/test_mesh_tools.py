@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import pytest
 
-from azureclaw_runtime_openai_agents import build_mesh_tools, register_mesh_tools
+from kars_runtime_openai_agents import build_mesh_tools, register_mesh_tools
 
 
 def test_mesh_tools_re_exported_via_package_init():
     # Re-exports must be present so user code can do
-    # `from azureclaw_runtime_openai_agents import build_mesh_tools`.
+    # `from kars_runtime_openai_agents import build_mesh_tools`.
     assert callable(build_mesh_tools)
     assert callable(register_mesh_tools)
 
@@ -34,7 +34,7 @@ def test_register_mesh_tools_requires_tools_attr():
 def test_build_mesh_tools_returns_two_named_tools():
     pytest.importorskip("agents")
     tools = build_mesh_tools()
-    names = [getattr(t, "__azureclaw_tool_name__", None) for t in tools]
+    names = [getattr(t, "__kars_tool_name__", None) for t in tools]
     assert sorted(names) == ["mesh_inbox", "mesh_send"]
 
 

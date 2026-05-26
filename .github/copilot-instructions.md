@@ -1,6 +1,6 @@
-# AzureClaw — Copilot Instructions
+# Kars — Copilot Instructions
 
-## What is AzureClaw?
+## What is Kars?
 
 A secure AI agent runtime on Azure AKS. OpenClaw agents run in isolated K8s sandbox pods with E2E encrypted inter-agent communication (Signal Protocol via AgentMesh). Each agent gets its own namespace, NetworkPolicy, seccomp profile, and inference router.
 
@@ -10,9 +10,9 @@ Four components, two languages:
 
 | Component | Language | Package Name | Role |
 |-----------|----------|-------------|------|
-| **Controller** | Rust (kube-rs) | `azureclaw-controller` | K8s operator — reconciles `ClawSandbox` CRDs into isolated sandboxes (namespace, deployment, service, NetworkPolicy, ConfigMap) |
-| **Inference Router** | Rust (axum) | `azureclaw-inference-router` | Per-sandbox proxy — the **only** network path for agents. Handles IMDS auth, Content Safety, token budgets, the full Foundry data-plane API surface, AGT governance, sub-agent spawn |
-| **CLI** | TypeScript | `@azureclaw/cli` | 18 CLI commands (`azureclaw up/add/dev/connect/handoff/mesh/...`) + OpenClaw plugin + 10 Foundry skills |
+| **Controller** | Rust (kube-rs) | `kars-controller` | K8s operator — reconciles `KarsSandbox` CRDs into isolated sandboxes (namespace, deployment, service, NetworkPolicy, ConfigMap) |
+| **Inference Router** | Rust (axum) | `kars-inference-router` | Per-sandbox proxy — the **only** network path for agents. Handles IMDS auth, Content Safety, token budgets, the full Foundry data-plane API surface, AGT governance, sub-agent spawn |
+| **CLI** | TypeScript | `@kars/cli` | 18 CLI commands (`kars up/add/dev/connect/handoff/mesh/...`) + OpenClaw plugin + 10 Foundry skills |
 | **Policy Engine** | YAML profiles | — | AGT governance policy profiles (allow/deny/approval/rate-limit) |
 
 **External dependencies:** [OpenClaw](https://openclaw.ai) (agent framework), [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) (managed AI services), [AGT](https://github.com/microsoft/agent-governance-toolkit) (governance layer).
@@ -21,14 +21,14 @@ Four components, two languages:
 
 Each sandbox pod has 2 containers + 1 init container:
 - **init: egress-guard** — iptables rules restricting UID 1000 to localhost + DNS only
-- **openclaw** (UID 1000) — runs the OpenClaw agent with the AzureClaw plugin
+- **openclaw** (UID 1000) — runs the OpenClaw agent with the Kars plugin
 - **inference-router** (UID 1001) — Rust router on port 8443, all agent traffic flows through it
 
 Agents never see API keys. The router authenticates via IMDS/Workload Identity.
 
 ### AgentMesh provider
 
-AzureClaw uses Microsoft AGT AgentMesh exclusively. TypeScript transport is provided by `@microsoft/agent-governance-sdk` through the `@azureclaw/mesh` package, and AGT relay/registry are deployed via `deploy/agentmesh-agt.yaml`. The historical AgentMesh npm package and vendored relay/registry forks were removed in Phase 5.2 after AGT upstreamed AzureClaw's gap-closing patches.
+Kars uses Microsoft AGT AgentMesh exclusively. TypeScript transport is provided by `@microsoft/agent-governance-sdk` through the `@kars/mesh` package, and AGT relay/registry are deployed via `deploy/agentmesh-agt.yaml`. The historical AgentMesh npm package and vendored relay/registry forks were removed in Phase 5.2 after AGT upstreamed Kars's gap-closing patches.
 
 ## Build, Test, and Lint
 
@@ -40,12 +40,12 @@ cargo build --release     # Rust only (both crates)
 cargo test --all          # all Rust tests (74 controller + 105 router + 26 integration)
 
 # Single crate:
-cargo build --release --package azureclaw-controller
-cargo build --release --package azureclaw-inference-router
+cargo build --release --package kars-controller
+cargo build --release --package kars-inference-router
 
 # Single test:
-cargo test --package azureclaw-controller -- test_name
-cargo test --package azureclaw-inference-router -- test_name
+cargo test --package kars-controller -- test_name
+cargo test --package kars-inference-router -- test_name
 
 # Lint:
 cargo clippy --all-targets -- -D warnings
@@ -133,7 +133,7 @@ CLI flag → Docker env var → entrypoint.sh auto-config → plugins.allow + pl
 
 ### Credentials Secret Convention
 
-Credentials are stored in a K8s secret named `<name>-credentials` in namespace `azureclaw-<name>`. The controller mounts it via `envFrom` with `optional: true` — pods start even without the secret. Update with `azureclaw credentials update <name> --telegram-token <token>`.
+Credentials are stored in a K8s secret named `<name>-credentials` in namespace `kars-<name>`. The controller mounts it via `envFrom` with `optional: true` — pods start even without the secret. Update with `kars credentials update <name> --telegram-token <token>`.
 
 ### Foundry Bing Web Search
 
@@ -143,7 +143,7 @@ Bing Grounding is auto-discovered via the Foundry `/connections` API. The router
 
 After modifying the sandbox image (entrypoint, plugins, skills):
 ```bash
-azureclaw push --only sandbox --apply   # build, push to ACR, restart pods
+kars push --only sandbox --apply   # build, push to ACR, restart pods
 ```
 
 ### Node.js 22 Proxy Issue

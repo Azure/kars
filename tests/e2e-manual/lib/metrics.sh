@@ -5,7 +5,7 @@
 # Manual-E2E benchmarking layer.
 #
 # Emits one JSONL row per measured event to ${MANUAL_E2E_METRICS_FILE}
-# (default: ${MANUAL_E2E_OUTDIR:-/tmp/azureclaw-e2e-manual}/metrics.jsonl).
+# (default: ${MANUAL_E2E_OUTDIR:-/tmp/kars-e2e-manual}/metrics.jsonl).
 #
 # The aggregator (`metrics_summary`) walks that file at end-of-run and
 # prints a human-readable table plus min/avg/max/p50/p95 percentiles per
@@ -14,7 +14,7 @@
 #
 # Conventions:
 #   metric=name           camelCase, e.g. ttiSandbox, ttrPodRunning,
-#                         ttfrInference, admitClawSandbox, cleanupNs,
+#                         ttfrInference, admitKarsSandbox, cleanupNs,
 #                         restartCount.
 #   unit=ms|count|bytes   string. Default "ms".
 #   tags={k=v,...}        free-form context (runtime, scenario, sandbox).
@@ -24,7 +24,7 @@
 #    "unit":"ms","value":4521,"tags":{"runtime":"openclaw","sandbox":"manual-openclaw"}}
 
 # ── Paths ───────────────────────────────────────────────────────────────
-: "${MANUAL_E2E_OUTDIR:=/tmp/azureclaw-e2e-manual}"
+: "${MANUAL_E2E_OUTDIR:=/tmp/kars-e2e-manual}"
 : "${MANUAL_E2E_METRICS_FILE:=${MANUAL_E2E_OUTDIR}/metrics.jsonl}"
 : "${MANUAL_E2E_RUN_ID:=$(date +%Y%m%dT%H%M%S)-$$}"
 export MANUAL_E2E_OUTDIR MANUAL_E2E_METRICS_FILE MANUAL_E2E_RUN_ID

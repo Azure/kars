@@ -9,7 +9,7 @@
 //! cosmetic, and the file shape is a rich nested mapping rather than a
 //! flat allowlist. Imposing the strict byte-canonical rules egress
 //! enforces (no comments, sorted keys, deduplication) would break
-//! day-1 ergonomics — operators would need a separate `azureclaw
+//! day-1 ergonomics — operators would need a separate `kars
 //! agt-profile canonicalize` step before every sign.
 //!
 //! The supply-chain guarantee is preserved without strict byte-
@@ -46,7 +46,7 @@ use std::time::{Instant, SystemTime};
 /// `artifactType` MUST match this exactly; consumers reject any other
 /// value (forward-compat: v2 bumps the suffix; v1 consumers MUST refuse
 /// v2 artifacts).
-pub const AGT_PROFILE_V1_MEDIA_TYPE: &str = "application/vnd.azureclaw.agt-profile.v1+yaml";
+pub const AGT_PROFILE_V1_MEDIA_TYPE: &str = "application/vnd.kars.agt-profile.v1+yaml";
 
 /// A verified AGT policy profile bundle. The `bytes` field is the
 /// signed payload as pulled from OCI; the router consumes it verbatim
@@ -380,7 +380,7 @@ policies:
     fn media_type_v1() {
         assert_eq!(
             ToolsKind::MEDIA_TYPE,
-            "application/vnd.azureclaw.agt-profile.v1+yaml"
+            "application/vnd.kars.agt-profile.v1+yaml"
         );
     }
 }

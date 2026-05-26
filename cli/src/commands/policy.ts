@@ -12,7 +12,7 @@ export function policyCommand(): Command {
 
   cmd.description("Manage sandbox network and security policies");
 
-  // Slice 1c.6 — unified `azureclaw policy sign --kind X` surface
+  // Slice 1c.6 — unified `kars policy sign --kind X` surface
   // covering all five signed policy artifact kinds.
   registerPolicySignSubcommand(cmd);
 
@@ -29,8 +29,8 @@ export function policyCommand(): Command {
       try {
         // First get the current allowed endpoints
         const { stdout: current } = await execa("kubectl", [
-          "get", "clawsandbox", name,
-          "-n", "azureclaw-system",
+          "get", "karssandbox", name,
+          "-n", "kars-system",
           "-o", "jsonpath={.spec.networkPolicy.allowedEndpoints}",
         ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
 
@@ -39,8 +39,8 @@ export function policyCommand(): Command {
 
         // Use merge patch to set the full array
         await execa("kubectl", [
-          "patch", "clawsandbox", name,
-          "-n", "azureclaw-system",
+          "patch", "karssandbox", name,
+          "-n", "kars-system",
           "--type", "merge",
           "-p", JSON.stringify({ spec: { networkPolicy: { allowedEndpoints: existing } } }),
         ], { stdio: "pipe" });
@@ -60,7 +60,7 @@ export function policyCommand(): Command {
     .argument("<name>", "Sandbox name")
     .action(async (name: string) => {
       const { execa } = await import("execa");
-      const ns = `azureclaw-${name}`;
+      const ns = `kars-${name}`;
       try {
         // Get NetworkPolicy from the sandbox namespace
         const { stdout } = await execa("kubectl", [
@@ -102,8 +102,8 @@ export function policyCommand(): Command {
 
       try {
         const { stdout: current } = await execa("kubectl", [
-          "get", "clawsandbox", name,
-          "-n", "azureclaw-system",
+          "get", "karssandbox", name,
+          "-n", "kars-system",
           "-o", "jsonpath={.spec.networkPolicy.allowedEndpoints}",
         ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
 
@@ -116,8 +116,8 @@ export function policyCommand(): Command {
         }
 
         await execa("kubectl", [
-          "patch", "clawsandbox", name,
-          "-n", "azureclaw-system",
+          "patch", "karssandbox", name,
+          "-n", "kars-system",
           "--type", "merge",
           "-p", JSON.stringify({ spec: { networkPolicy: { allowedEndpoints: filtered } } }),
         ], { stdio: "pipe" });
@@ -133,15 +133,15 @@ export function policyCommand(): Command {
 
   cmd
     .command("learn")
-    .description("Alias for 'azureclaw egress <name> --learned' (kept for backward compatibility)")
+    .description("Alias for 'kars egress <name> --learned' (kept for backward compatibility)")
     .argument("<name>", "Sandbox name")
     .option("--apply", "Apply learned domains as the sandbox allowlist", false)
     .option("--clear", "Clear learned domains after export", false)
     .action(async (name: string, options) => {
       // Quiet hint — full functionality preserved below for backward compat.
-      console.log(chalk.dim(`\n  Tip: 'azureclaw egress ${name} --learned' is the documented path for this workflow.\n`));
+      console.log(chalk.dim(`\n  Tip: 'kars egress ${name} --learned' is the documented path for this workflow.\n`));
       const { execa } = await import("execa");
-      const namespace = `azureclaw-${name}`;
+      const namespace = `kars-${name}`;
       const spinner = ora(`Fetching learned domains from '${name}'...`).start();
 
       try {
@@ -171,7 +171,7 @@ export function policyCommand(): Command {
 
         if (!data.learn_mode) {
           console.log(chalk.yellow("\n  ⚠ Learn mode is not active on this sandbox."));
-          console.log(chalk.yellow("  Enable with: azureclaw add <name> --learn-egress\n"));
+          console.log(chalk.yellow("  Enable with: kars add <name> --learn-egress\n"));
         }
 
         if (domains.length === 0) {
@@ -190,8 +190,8 @@ export function policyCommand(): Command {
           const applySpinner = ora("Applying learned domains as allowlist...").start();
           const endpoints = domains.map((d) => ({ host: d, port: 443 }));
           await execa("kubectl", [
-            "patch", "clawsandbox", name,
-            "-n", "azureclaw-system",
+            "patch", "karssandbox", name,
+            "-n", "kars-system",
             "--type", "merge",
             "-p", JSON.stringify({
               spec: {

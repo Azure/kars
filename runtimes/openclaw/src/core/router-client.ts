@@ -41,7 +41,7 @@ const require: NodeRequire = (() => {
 const DEFAULT_ROUTER_BASE = "http://127.0.0.1:8443";
 
 export function routerBase(): string {
-  return process.env.AZURECLAW_ROUTER_URL || DEFAULT_ROUTER_BASE;
+  return process.env.KARS_ROUTER_URL || DEFAULT_ROUTER_BASE;
 }
 
 export function routerWsBase(): string {
@@ -59,7 +59,7 @@ export function routerWsUrl(path: string): string {
 
 const ADMIN_TOKEN_PATHS = [
   "/tmp/.agt-admin-token",
-  "/etc/azureclaw/secrets/admin-token",
+  "/etc/kars/secrets/admin-token",
   "/run/secrets/admin-token",
 ] as const;
 
@@ -78,7 +78,7 @@ export async function routerCall(
       port: url.port,
       path: url.pathname + url.search,
       method,
-      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
+      headers: { "x-kars-sandbox": "self", ...extraHeaders } as Record<string, string>,
     };
     if (body) {
       opts.headers["content-type"] = "application/json";
@@ -114,7 +114,7 @@ export async function routerCallStrict(
       port: url.port,
       path: url.pathname + url.search,
       method,
-      headers: { "x-azureclaw-sandbox": "self", ...extraHeaders } as Record<string, string>,
+      headers: { "x-kars-sandbox": "self", ...extraHeaders } as Record<string, string>,
     };
     if (body) {
       opts.headers["content-type"] = "application/json";
@@ -154,7 +154,7 @@ export async function routerCallBinary(
       port: url.port,
       path: url.pathname + url.search,
       method: "GET",
-      headers: { "x-azureclaw-sandbox": "self" } as Record<string, string>,
+      headers: { "x-kars-sandbox": "self" } as Record<string, string>,
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const req = http.request(opts, (res: any) => {

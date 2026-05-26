@@ -1,26 +1,26 @@
 # CRD reference
 
-AzureClaw exposes its API through **nine** first-class CustomResourceDefinitions in the `azureclaw.azure.com` group, all at version `v1alpha1`. This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
+Kars exposes its API through **nine** first-class CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
 
-> **Version.** All CRDs are served at `azureclaw.azure.com/v1alpha1`. The project is at `v0.1.0`; see [`CHANGELOG.md`](../../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](../roadmap.md) for what's next.
+> **Version.** All CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.0`; see [`CHANGELOG.md`](../../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](../roadmap.md) for what's next.
 
 ## At a glance
 
 | CRD | Kind | Short names | Scope | Signing surface | What it represents |
 |---|---|---|---|---|---|
-| `clawsandboxes.azureclaw.azure.com` | `ClawSandbox` | `cs`, `claw` | Namespaced | `spec.networkPolicy.allowlistRef` (signed OCI egress bundle, optional) | One agent. The unit of work. |
-| `a2aagents.azureclaw.azure.com` | `A2AAgent` | `a2a` | Namespaced | Inline `spec.signingKeys[]` (Ed25519, peer-callable JWS verification) | A public-ingress endpoint a peer can call. |
-| `mcpservers.azureclaw.azure.com` | `McpServer` | `mcp` | Namespaced | `spec.bundleRef` (signed OCI tool-allow-list bundle, optional) | An external MCP server the sandbox may call. |
-| `toolpolicies.azureclaw.azure.com` | `ToolPolicy` | `tp` | Namespaced | `spec.bundleRef` (signed OCI tool-policy bundle, optional) | Per-tool allow/approval/rate-limit/commerce gate. |
-| `inferencepolicies.azureclaw.azure.com` | `InferencePolicy` | `ip` | Namespaced | `spec.bundleRef` (signed OCI inference-policy bundle, optional) | Model preference, content-safety floor, token budgets. |
-| `clawmemories.azureclaw.azure.com` | `ClawMemory` | `cmem` | Namespaced | `spec.bundleRef` (signed OCI memory-binding bundle, optional) | Memory-store binding (Foundry Memory Store). |
-| `clawevals.azureclaw.azure.com` | `ClawEval` | `ceval` | Namespaced | `spec.corpus.bundleRef` (signed OCI eval-corpus bundle, mutex with `corpus.builtin`) | Reproducible evaluation run. |
-| `trustgraphs.azureclaw.azure.com` | `TrustGraph` | `tg` | Cluster | Inline `spec.edges[].signature` (Ed25519 per edge, domain-separated payload) | Cross-namespace / cross-cluster mesh trust topology. |
-| `egressapprovals.azureclaw.azure.com` | `EgressApproval` | `eappr` | Namespaced | None on the CR itself (it's a sibling overlay); the sandbox's signed `allowlistRef` is the cryptographic baseline | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
+| `karssandboxes.kars.azure.com` | `KarsSandbox` | `cs`, `claw` | Namespaced | `spec.networkPolicy.allowlistRef` (signed OCI egress bundle, optional) | One agent. The unit of work. |
+| `a2aagents.kars.azure.com` | `A2AAgent` | `a2a` | Namespaced | Inline `spec.signingKeys[]` (Ed25519, peer-callable JWS verification) | A public-ingress endpoint a peer can call. |
+| `mcpservers.kars.azure.com` | `McpServer` | `mcp` | Namespaced | `spec.bundleRef` (signed OCI tool-allow-list bundle, optional) | An external MCP server the sandbox may call. |
+| `toolpolicies.kars.azure.com` | `ToolPolicy` | `tp` | Namespaced | `spec.bundleRef` (signed OCI tool-policy bundle, optional) | Per-tool allow/approval/rate-limit/commerce gate. |
+| `inferencepolicies.kars.azure.com` | `InferencePolicy` | `ip` | Namespaced | `spec.bundleRef` (signed OCI inference-policy bundle, optional) | Model preference, content-safety floor, token budgets. |
+| `karsmemories.kars.azure.com` | `KarsMemory` | `cmem` | Namespaced | `spec.bundleRef` (signed OCI memory-binding bundle, optional) | Memory-store binding (Foundry Memory Store). |
+| `karsevals.kars.azure.com` | `KarsEval` | `ceval` | Namespaced | `spec.corpus.bundleRef` (signed OCI eval-corpus bundle, mutex with `corpus.builtin`) | Reproducible evaluation run. |
+| `trustgraphs.kars.azure.com` | `TrustGraph` | `tg` | Cluster | Inline `spec.edges[].signature` (Ed25519 per edge, domain-separated payload) | Cross-namespace / cross-cluster mesh trust topology. |
+| `egressapprovals.kars.azure.com` | `EgressApproval` | `eappr` | Namespaced | None on the CR itself (it's a sibling overlay); the sandbox's signed `allowlistRef` is the cryptographic baseline | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
 
-A tenth CRD, `clawpairings.azureclaw.azure.com` (`ClawPairing`, `cp`), is a controller-internal record used to bind sandboxes to AgentMesh registry IDs. It is created by the controller; you generally do not write it directly.
+A tenth CRD, `karspairings.kars.azure.com` (`KarsPairing`, `cp`), is a controller-internal record used to bind sandboxes to AgentMesh registry IDs. It is created by the controller; you generally do not write it directly.
 
-The full Kubernetes schema lives in `deploy/helm/azureclaw/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
+The full Kubernetes schema lives in `deploy/helm/kars/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
 
 ---
 
@@ -33,7 +33,7 @@ This section explains the shape that applies to all six policy kinds. The per-CR
 ### Authoring path
 
 ```bash
-azureclaw policy sign --kind {egress|tools|inference|memory|mcp-tools|eval-corpus} \
+kars policy sign --kind {egress|tools|inference|memory|mcp-tools|eval-corpus} \
   --file my-policy.yaml \
   --registry <oci-registry> \
   --repository <repo-path>
@@ -92,7 +92,7 @@ You can verify the loop on any deployed CR:
 kubectl get inferencepolicy <name> -n <ns> -o jsonpath='{.status.bundleRefDigest}'
 
 # Router's loaded digest (what's enforcing)
-kubectl exec deploy/<sandbox> -c inference-router -n azureclaw-<sandbox> -- \
+kubectl exec deploy/<sandbox> -c inference-router -n kars-<sandbox> -- \
   curl -sf -H "Authorization: Bearer $TOKEN" http://localhost:8443/internal/policy-status \
   | jq '.policies.inference.loaded_digest'
 ```
@@ -114,25 +114,25 @@ The router watches its mounted ConfigMaps. When the controller updates the proje
 
 ---
 
-## `ClawSandbox` — the agent
+## `KarsSandbox` — the agent
 
-The unit of work. One `ClawSandbox` per agent.
+The unit of work. One `KarsSandbox` per agent.
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: my-agent
-  namespace: azureclaw-my-agent
+  namespace: kars-my-agent
 spec:
   runtime:
     kind: OpenClaw                  # or OpenAIAgents | MicrosoftAgentFramework |
                                     #    LangGraph | Anthropic | PydanticAi | BYO
     openclaw:                       # block name matches `kind` (CEL-validated)
-      image: azureclawacr.azurecr.io/azureclaw-runtime-openclaw:latest
+      image: karsacr.azurecr.io/kars-runtime-openclaw:latest
   inferenceRef:
     name: shared-inference          # required: sibling InferencePolicy
-  memoryRef:                        # optional: sibling ClawMemory
+  memoryRef:                        # optional: sibling KarsMemory
     name: my-agent-memory
   governance:
     enabled: true
@@ -148,8 +148,8 @@ status:
   phase: Running
   observedGeneration: 1
   sandboxPod: my-agent-7d9-abc
-  namespace: azureclaw-my-agent
-  inferenceEndpoint: http://my-agent.azureclaw-my-agent.svc.cluster.local:8443
+  namespace: kars-my-agent
+  inferenceEndpoint: http://my-agent.kars-my-agent.svc.cluster.local:8443
   runtimeKind: OpenClaw
   conditions:
     - type: Ready
@@ -169,13 +169,13 @@ status:
 
 | Field | Type | Purpose |
 |---|---|---|
-| `spec.memoryRef.name` | LocalObjectRef | Bind to a sibling `ClawMemory` (same namespace). |
-| `spec.sandbox` | object | Isolation primitives — `isolation` (`standard` \| `enhanced`, default `enhanced`), `seccompProfile` (default `azureclaw-strict`), `writablePaths` (default `[/sandbox, /tmp]`). |
+| `spec.memoryRef.name` | LocalObjectRef | Bind to a sibling `KarsMemory` (same namespace). |
+| `spec.sandbox` | object | Isolation primitives — `isolation` (`standard` \| `enhanced`, default `enhanced`), `seccompProfile` (default `kars-strict`), `writablePaths` (default `[/sandbox, /tmp]`). |
 | `spec.networkPolicy` | object | Baseline egress allowlist. Defaults `defaultDeny: true`, `egressMode: Learn`. |
 | `spec.governance.enabled` | bool | Turn on AGT governance — router guardrails are always on regardless; this gates AGT trust/audit. |
 | `spec.governance.toolPolicyRef.name` | LocalObjectRef | Required when `governance.enabled`. Resolves to a sibling `ToolPolicy`. |
 | `spec.governance.trustThreshold` | int | Minimum trust score `0..1000` for KNOCK accept. Default `500`. |
-| `spec.governance.mcpServerRefs` | `[]LocalObjectRef` | Up to 8 sibling `McpServer` refs; controller mirrors per-server JWKS + signing keys into `/etc/azureclaw/mcp/<name>/`; router builds a multi-issuer OAuth verifier and exposes tools under `{server}.{tool}`. Deprecated singular `governance.mcpServerRef` is still honoured (emits `McpSingularDeprecated` warning). |
+| `spec.governance.mcpServerRefs` | `[]LocalObjectRef` | Up to 8 sibling `McpServer` refs; controller mirrors per-server JWKS + signing keys into `/etc/kars/mcp/<name>/`; router builds a multi-issuer OAuth verifier and exposes tools under `{server}.{tool}`. Deprecated singular `governance.mcpServerRef` is still honoured (emits `McpSingularDeprecated` warning). |
 | `spec.governance.registryMode` | string | `local` (default) or `global`. Global enables cross-cluster mesh + handoff tools. |
 | `spec.governance.trustedPeers` | string | Pre-seeded `"name:AMID,..."` peers — used by sub-agents to auto-trust the spawning parent. |
 | `spec.a2a` | object | Inbound A2A 1.0.0 ingress configuration. Default off; see [A2A gateway](../architecture/a2a-gateway.md). |
@@ -187,7 +187,7 @@ status:
 |---|---|
 | `status.phase` | `Pending` \| `Creating` \| `Running` \| `Failed` \| `Terminating`. |
 | `status.sandboxPod` | Resolved Pod name. |
-| `status.namespace` | Sandbox namespace (`azureclaw-<name>`). |
+| `status.namespace` | Sandbox namespace (`kars-<name>`). |
 | `status.inferenceEndpoint` | Cluster-internal Service URL of the inference-router. |
 | `status.runtimeKind` | Runtime kind observed for the current `observedGeneration`. |
 | `status.observedGeneration` | `metadata.generation` that produced this status. Compare against `metadata.generation` to detect stale observations. |
@@ -200,11 +200,11 @@ status:
 Binds an HTTPS endpoint as an A2A 1.0.0 peer-callable agent. The controller compiles signed AgentCards from `signingKeys[]`, projects them into a `ConfigMap` consumed by the inference-router, and tracks compile state in `status.versionHash`.
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: A2AAgent
 metadata:
   name: weather-agent
-  namespace: azureclaw-weather-agent
+  namespace: kars-weather-agent
 spec:
   endpointUrl: https://weather-agent.example.com   # required; https:// when productionMode
   productionMode: true                              # required-https + non-empty signingKeys
@@ -241,26 +241,26 @@ status:
 | `spec.federation[]` | Peer A2A agents acknowledged as part of the trust circle. Each is either `kind: in-cluster` + `agentRef: <A2AAgent.name>` (same namespace) or `kind: external` + `endpointUrl` + `pinnedKid`. |
 | `spec.policyRefs.toolPolicy` | Name of a sibling `ToolPolicy` whose `commerce` / `approval` / `rateLimit` apply to inbound `message/send`. |
 
-> **AgentCard verifier wiring is library-only today.** `azureclaw_a2a_core::verify_inbound_card` exists and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream Gateway-API mTLS layer. Wiring the verifier as an axum layer in the gateway is tracked in the [roadmap](../roadmap.md) — see [A2A gateway](../architecture/a2a-gateway.md).
+> **AgentCard verifier wiring is library-only today.** `kars_a2a_core::verify_inbound_card` exists and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream Gateway-API mTLS layer. Wiring the verifier as an axum layer in the gateway is tracked in the [roadmap](../roadmap.md) — see [A2A gateway](../architecture/a2a-gateway.md).
 
 ---
 
 ## `McpServer` — declared MCP backend
 
-Declares an MCP server the sandbox may call. The router enforces — calls to an MCP host that is not declared are denied. A `ClawSandbox` may bind up to 8 `McpServer`s via `governance.mcpServerRefs`; the controller mirrors per-server JWKS into `/etc/azureclaw/mcp/<name>/jwks.json` and signing keys into `/etc/azureclaw/mcp-signing/<name>/`. The router exposes tools under namespaced names `{server}.{tool}` (e.g. `github_mcp.repo_search`) and verifies inbound MCP host bearer tokens against a multi-issuer `OAuthVerifier` keyed by `oauth.issuer`.
+Declares an MCP server the sandbox may call. The router enforces — calls to an MCP host that is not declared are denied. A `KarsSandbox` may bind up to 8 `McpServer`s via `governance.mcpServerRefs`; the controller mirrors per-server JWKS into `/etc/kars/mcp/<name>/jwks.json` and signing keys into `/etc/kars/mcp-signing/<name>/`. The router exposes tools under namespaced names `{server}.{tool}` (e.g. `github_mcp.repo_search`) and verifies inbound MCP host bearer tokens against a multi-issuer `OAuthVerifier` keyed by `oauth.issuer`.
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: McpServer
 metadata:
   name: github-mcp
-  namespace: azureclaw-my-agent
+  namespace: kars-my-agent
 spec:
   url: https://api.githubcopilot.com/mcp                  # required (or supplied by bundleRef)
   productionMode: true
   oauth:
     issuer: https://github.com/login/oauth                # required when productionMode
-    audience: azureclaw-mcp                               # optional
+    audience: kars-mcp                               # optional
     resource: https://api.githubcopilot.com/mcp           # optional resource indicator
     pkce: S256                                            # only S256 today
   scopes: ["read:repo"]
@@ -291,11 +291,11 @@ spec:
 One `ToolPolicy` = one tool gate (combined approval / rate-limit / commerce / AGT-profile). `appliesTo` is a single selector, not an array of rules.
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: web-fetch-policy
-  namespace: azureclaw-my-agent
+  namespace: kars-my-agent
 spec:
   appliesTo:
     tool: web.fetch                                       # `"*"` matches all
@@ -351,14 +351,14 @@ spec:
 
 ## `InferencePolicy` — model routing and budgets
 
-Per-tenant control of *which* model, *how much* of it, and the content-safety floor. Referenced by sibling `ClawSandbox.spec.inferenceRef`.
+Per-tenant control of *which* model, *how much* of it, and the content-safety floor. Referenced by sibling `KarsSandbox.spec.inferenceRef`.
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: shared-inference
-  namespace: azureclaw-my-agent
+  namespace: kars-my-agent
 spec:
   appliesTo:
     sandboxName: my-agent                                 # exact match; empty = any in ns
@@ -398,19 +398,19 @@ spec:
 
 ---
 
-## `ClawMemory` — memory store binding
+## `KarsMemory` — memory store binding
 
-Binds a sandbox to a Foundry Memory Store. The reconciler compiles the binding into `/etc/azureclaw/memory/binding.json`, the router loads it and echoes its digest back, and the controller marks the CR `Ready` only when those digests match — the same `Ready ⇔ router echo` invariant used by every other policy CRD.
+Binds a sandbox to a Foundry Memory Store. The reconciler compiles the binding into `/etc/kars/memory/binding.json`, the router loads it and echoes its digest back, and the controller marks the CR `Ready` only when those digests match — the same `Ready ⇔ router echo` invariant used by every other policy CRD.
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawMemory
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsMemory
 metadata:
   name: my-agent-memory
-  namespace: azureclaw-my-agent
+  namespace: kars-my-agent
 spec:
   sandboxRef:
-    name: my-agent                                        # required: sibling ClawSandbox
+    name: my-agent                                        # required: sibling KarsSandbox
   storeName: episodic                                     # required (unless bundleRef)
   scope: "agent:my-agent"                                 # optional; default `agent:<sandboxName>`
   retentionDays: 30                                       # optional; > 0 when set
@@ -419,7 +419,7 @@ spec:
 
 | Field | Notes |
 |---|---|
-| `spec.sandboxRef.name` | Required. Sibling `ClawSandbox` name; same namespace. |
+| `spec.sandboxRef.name` | Required. Sibling `KarsSandbox` name; same namespace. |
 | `spec.storeName` | Required when `bundleRef` is absent. DNS-label-style. |
 | `spec.scope` | Foundry Memory Store partition key. Defaults to `agent:<sandboxName>` if absent. |
 | `spec.retentionDays` | Optional retention floor; runtime applies a `delete_scope` sweep past this age. |
@@ -427,7 +427,7 @@ spec:
 | `spec.bundleRef` | Signed OCI artifact alternative to inline content (mutex with `storeName` / `scope` / `retentionDays` / `deleteOnSandboxDelete` / `displayName`). `sandboxRef` is always CR-owned. |
 
 > **Provisioning split.** The CRD reconciler compiles the binding into
-> `/etc/azureclaw/memory/binding.json` and confirms the router loaded it
+> `/etc/kars/memory/binding.json` and confirms the router loaded it
 > (`Ready ⇔ router echo`). It does **not** create the upstream **Foundry
 > AI Services account / Project** — that is operator-driven (Portal or
 > `azure-prepare`). The Memory **Store** *inside* a provisioned project,
@@ -450,19 +450,19 @@ spec:
 
 ---
 
-## `ClawEval` — reproducible evaluation run
+## `KarsEval` — reproducible evaluation run
 
-Replays a corpus of jailbreak / prompt-injection / banned-tool / egress / memory-isolation prompts against a sandbox. Builtin corpora ship in the controller binary (`azureclaw_eval_corpus::BUILTIN_NAMES`): `jailbreak-baseline`, `prompt-injection-2026q1`, `banned-tools`, `egress-known-bad`, `memory-isolation`. For an operator-focused walkthrough see [`docs/api/claweval.md`](claweval.md).
+Replays a corpus of jailbreak / prompt-injection / banned-tool / egress / memory-isolation prompts against a sandbox. Builtin corpora ship in the controller binary (`kars_eval_corpus::BUILTIN_NAMES`): `jailbreak-baseline`, `prompt-injection-2026q1`, `banned-tools`, `egress-known-bad`, `memory-isolation`. For an operator-focused walkthrough see [`docs/api/karseval.md`](karseval.md).
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawEval
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsEval
 metadata:
   name: nightly-regression
-  namespace: azureclaw-my-agent
+  namespace: kars-my-agent
 spec:
   targetSandboxRef:
-    name: my-agent                                        # required: sibling ClawSandbox
+    name: my-agent                                        # required: sibling KarsSandbox
   corpus:
     builtin: jailbreak-baseline                           # mutex with bundleRef; default `jailbreak-baseline`
   schedule: "0 3 * * *"                                   # optional cron; absent = run-now annotation only
@@ -471,14 +471,14 @@ status:
   phase: Ready
   observedGeneration: 1
   lastRunAt: "2026-05-14T03:00:00Z"
-  cronJobName: claweval-nightly-regression
-  corpusConfigMapRef: { name: claweval-nightly-regression-corpus }
+  cronJobName: karseval-nightly-regression
+  corpusConfigMapRef: { name: karseval-nightly-regression-corpus }
   corpusDigest: "sha256:1f3a…"
   lastResult:
     schemaVersion: 1
     corpusLabel: jailbreak-baseline
     corpusDigest: "sha256:1f3a…"
-    jobName: claweval-nightly-regression-20260514030000
+    jobName: karseval-nightly-regression-20260514030000
     total: 42
     passed: 41
     failed: 1
@@ -488,33 +488,33 @@ status:
       status: "True"
 ```
 
-To trigger a one-shot run without a schedule, add the `azureclaw.azure.com/run-now=true` annotation (or use `azureclaw eval run <name>`). To run from a signed corpus instead of a builtin, replace `corpus.builtin` with `corpus.bundleRef: { registry, repository, digest }` (mutex enforced by CEL).
+To trigger a one-shot run without a schedule, add the `kars.azure.com/run-now=true` annotation (or use `kars eval run <name>`). To run from a signed corpus instead of a builtin, replace `corpus.builtin` with `corpus.bundleRef: { registry, repository, digest }` (mutex enforced by CEL).
 
 ---
 
 ## `TrustGraph` — mesh trust topology
 
-Cluster-scoped. Declares vertices (agent identities + Ed25519 public keys) and **signed** edges (`from → to` attestations carrying a trust score). The reconciler verifies each edge's signature against the source vertex's public key, drops invalid edges, and projects the verified subset into a per-sandbox ConfigMap at `/etc/azureclaw/trustgraph/graph.json`.
+Cluster-scoped. Declares vertices (agent identities + Ed25519 public keys) and **signed** edges (`from → to` attestations carrying a trust score). The reconciler verifies each edge's signature against the source vertex's public key, drops invalid edges, and projects the verified subset into a per-sandbox ConfigMap at `/etc/kars/trustgraph/graph.json`.
 
 > **Status — reconciler-only.** The controller validates the graph and projects it into every sandbox that references it. The **router does not yet read the projected graph**. The router keeps a post-decision trust-score map at `/tmp/agt/trust_scores.json`, populated from KNOCK outcomes the agent SDK reports out-of-band — this is for audit and rate-limit only; the actual KNOCK accept/deny decision lives inside the Signal session the agent owns (the router cannot decrypt it). Live edge updates require a sandbox roll. Closing this loop is tracked in the [roadmap](../roadmap.md): router-side **mesh-admission gating** against the projected graph (refuse to WS-bridge an edge not in the graph — a separate, coarser layer that complements agent-side KNOCK, never replaces it). Today this CRD is useful as a declarative source-of-record for trust intent and as a static projection at sandbox creation time; **it is not yet a runtime enforcement surface**.
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: TrustGraph
 metadata:
   name: my-org-trust
 spec:
   vertices:
-    - id: a2a-agent/azureclaw-my-agent/weather-agent
+    - id: a2a-agent/kars-my-agent/weather-agent
       alg: EdDSA
       publicKeyB64u: m3oUe9...                            # 32-byte Ed25519 public key
       label: weather-agent
-    - id: a2a-agent/azureclaw-summarizer/summarizer
+    - id: a2a-agent/kars-summarizer/summarizer
       alg: EdDSA
       publicKeyB64u: 7Xb12r...
   edges:
-    - from: a2a-agent/azureclaw-my-agent/weather-agent
-      to:   a2a-agent/azureclaw-summarizer/summarizer
+    - from: a2a-agent/kars-my-agent/weather-agent
+      to:   a2a-agent/kars-summarizer/summarizer
       score: 750                                          # 0..1000
       issuedAt: 1715698800                                # Unix seconds
       notAfter: 1747234800                                # optional Unix seconds
@@ -534,24 +534,24 @@ status:
 | `spec.vertices[]` | Required, ≥1 entry. Each vertex: `id` (unique within CR; conventionally `a2a-agent/<ns>/<name>` or an AGT AMID), `alg` (`EdDSA` only), `publicKeyB64u` (base64url, no padding, 32 bytes). |
 | `spec.edges[]` | Each edge is a signed attestation: `from`, `to`, `score` (`0..1000`), `issuedAt` (Unix seconds), optional `notAfter`, `signature` (base64url Ed25519, no padding, 64 bytes), optional `reason`. The signature payload is domain-separated by the prefix `trustgraph.v1\n` — see source. |
 | `status.validEdges` / `invalidEdges` | Operators inspect controller logs for which edges fail; the count is surfaced but not the failing IDs. |
-| `status.projectionConfigMapRef` | Always `azureclaw-system/trustgraph-<name>-projection`. |
+| `status.projectionConfigMapRef` | Always `kars-system/trustgraph-<name>-projection`. |
 
-Per-sandbox trust threshold remains on `ClawSandbox.spec.governance.trustThreshold` (default 500). The TrustGraph carries the topology and signed scores; the threshold lives on the consumer.
+Per-sandbox trust threshold remains on `KarsSandbox.spec.governance.trustThreshold` (default 500). The TrustGraph carries the topology and signed scores; the threshold lives on the consumer.
 
 ---
 
 ## `EgressApproval` — ephemeral egress grant
 
-Namespaced overlay on a `ClawSandbox`'s baseline `networkPolicy.allowedEndpoints`. The controller unions the approval's hosts into a sibling ConfigMap mounted by the inference-router; the router rebuilds its allowlist on every change, POSTs the loaded digest back, and the controller promotes `phase=Pending → Active` only when the loaded digest matches the compiled merged digest (the same `Ready ⇔ router echo` invariant used by every other policy CRD). On TTL expiry the file is removed, the merged digest is recomputed, and `phase=Expired` is stamped (terminal).
+Namespaced overlay on a `KarsSandbox`'s baseline `networkPolicy.allowedEndpoints`. The controller unions the approval's hosts into a sibling ConfigMap mounted by the inference-router; the router rebuilds its allowlist on every change, POSTs the loaded digest back, and the controller promotes `phase=Pending → Active` only when the loaded digest matches the compiled merged digest (the same `Ready ⇔ router echo` invariant used by every other policy CRD). On TTL expiry the file is removed, the merged digest is recomputed, and `phase=Expired` is stamped (terminal).
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: EgressApproval
 metadata:
   name: debug-stripe-2026-05-14
-  namespace: azureclaw-system        # same namespace as the sandbox
+  namespace: kars-system        # same namespace as the sandbox
 spec:
-  sandbox: my-agent                  # sibling ClawSandbox name
+  sandbox: my-agent                  # sibling KarsSandbox name
   hosts:                             # 1..16 entries; small scoped grants only
     - host: api.stripe.com
       port: 443
@@ -563,7 +563,7 @@ spec:
 
 | `spec` field | Required | Validation |
 |---|---|---|
-| `sandbox` | ✅ | 1..253 chars; must be a sibling `ClawSandbox` in the same namespace. |
+| `sandbox` | ✅ | 1..253 chars; must be a sibling `KarsSandbox` in the same namespace. |
 | `hosts` | ✅ | 1..16 entries; each `host` is 1..253 chars; `port`, when set, is 1..65535. |
 | `reason` | ✅ | 1..512 chars; ASCII control bytes (`\x00-\x08\x0B\x0C\x0E-\x1F\x7F`) rejected. |
 | `ticket` | optional | 1..128 chars (free-form linkage to ITSM / incident system). |
@@ -590,13 +590,13 @@ status:
       reason: Active
 ```
 
-CLI: `azureclaw egress allow-extra <sandbox> --host … --reason … --ttl PT4H` to grant, `azureclaw egress approvals <sandbox>` to list, `azureclaw egress revoke <name>` to revoke. See **[Network egress & proxy](../egress-proxy.md)** for the full lifecycle, status semantics, and FAQ.
+CLI: `kars egress allow-extra <sandbox> --host … --reason … --ttl PT4H` to grant, `kars egress approvals <sandbox>` to list, `kars egress revoke <name>` to revoke. See **[Network egress & proxy](../egress-proxy.md)** for the full lifecycle, status semantics, and FAQ.
 
 ---
 
-## Lifecycle of a `ClawSandbox`
+## Lifecycle of a `KarsSandbox`
 
-1. You `kubectl apply` (or `azureclaw add`).
+1. You `kubectl apply` (or `kars add`).
 2. Controller creates: namespace → RBAC → ServiceAccount → federated credential → ConfigMap (governance profile) → NetworkPolicy → Deployment → Service.
 3. Pod schedules, init `egress-guard` runs iptables rules, agent + router start.
 4. Router registers with AgentMesh (when `governance.registryMode` is `global`).

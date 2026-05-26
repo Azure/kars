@@ -1,0 +1,108 @@
+# Default-deny NetworkPolicy for the operator namespace.
+#
+# Pinned by the CNCF K8s AI conformance suite (criterion C8). The
+# Kars controller reaches the K8s API server via the
+# in-cluster service (egress on TCP/443 to kube-apiserver) and
+# scrapes /metrics over TCP/9091 from a co-located Prometheus or
+# `kubectl port-forward`. Everything else is denied unless an
+# operator opts in via an additional NetworkPolicy.
+#
+# This is the *operator* namespace policy, distinct from the
+# per-sandbox default-deny that the controller renders inline in
+# Rust (see `controller/src/reconciler/mod.rs::reconcile_sandbox`,
+# Step 3 — "Apply default-deny NetworkPolicy + allowlist").
+{{- $netpol := (((.Values.controller).networkPolicy).enabled) }}
+{{- if or (eq $netpol nil) $netpol }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kars-system-default-deny
+  namespace: {{ .Release.Namespace | default "kars-system" }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/part-of: kars
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow Prometheus / port-forward scrapes of /metrics on :9091.
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 9091
+  egress:
+    # DNS resolution.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API server (in-cluster Service: kubernetes.default).
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # AGT mesh peer connection — controller registers itself with the
+    # registry and connects to the relay to act as a fully-fledged
+    # mesh peer for cross-cluster trust propagation and operator-driven
+    # message injection. Without this rule the controller's `mesh_peer`
+    # task logs `Registry registration failed` forever while sandboxes
+    # connect successfully (their NetworkPolicy is rendered separately
+    # by the per-sandbox reconciler).
+    #
+    # Ports listed cover both vendored (relay:8765, registry:8080) and
+    # AGT (relay-pod:8083, registry-pod:8082) backends. On AKS the
+    # Cilium dataplane evaluates NetworkPolicy egress against the
+    # BACKEND pod port (post-DNAT), not the Service port — so for AGT
+    # we must allow the pod ports 8082/8083 even though traffic targets
+    # service ports 8080/8765.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agentmesh
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8765
+        - protocol: TCP
+          port: 8082
+        - protocol: TCP
+          port: 8083
+    # Per-sandbox router policy-status echo (Slice 6.5-followup).
+    #
+    # The controller polls `GET /internal/policy-status` on every
+    # per-sandbox router (port 8443, plain HTTP, in-cluster only) to
+    # confirm the router has actually applied the signed
+    # ToolPolicy / InferencePolicy / EgressAllowlist / EgressApproval /
+    # TrustGraph / KarsMemory bundles before flipping downstream CRDs
+    # to their terminal phases (§3 of `principles.md` — Ready ⇔ router
+    # echo). Without this egress rule the operator can never reach the
+    # routers and downstream phases are pinned to `AwaitingRouterEcho`
+    # indefinitely.
+    #
+    # Scoped to namespaces labelled
+    # `app.kubernetes.io/name=kars` + `app.kubernetes.io/component=sandbox`
+    # (rendered by the controller per-sandbox), so this rule cannot
+    # leak egress to unrelated namespaces. The corresponding ingress
+    # rule on each sandbox NP only opens 8443 from the operator
+    # namespace, and the endpoint still requires
+    # `Authorization: Bearer <per-sandbox ADMIN_TOKEN>`.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/name: kars
+              app.kubernetes.io/component: sandbox
+      ports:
+        - protocol: TCP
+          port: 8443
+{{- end }}

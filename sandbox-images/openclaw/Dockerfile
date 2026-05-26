@@ -1,6 +1,6 @@
-# AzureClaw OpenClaw Sandbox Image
-# Slim overlay on top of azureclaw-sandbox-base — adds only the router binary,
-# AzureClaw plugin, vendored SDK, and entrypoint.
+# Kars OpenClaw Sandbox Image
+# Slim overlay on top of kars-sandbox-base — adds only the router binary,
+# Kars plugin, vendored SDK, and entrypoint.
 #
 # Base image (Dockerfile.base) contains: OS, Node.js, Python, Go tools, OpenClaw.
 # This image adds: router binary, plugin code, SDK patches, entrypoint.
@@ -9,18 +9,18 @@
 # Prod: docker build --platform linux/amd64 -f sandbox-images/openclaw/Dockerfile .
 #
 # Expects base image to be pre-built:
-#   Dev:  azureclaw-sandbox-base:dev
-#   Prod: ${ACR}/azureclaw-sandbox-base:latest
+#   Dev:  kars-sandbox-base:dev
+#   Prod: ${ACR}/kars-sandbox-base:latest
 
-ARG SANDBOX_BASE_IMAGE=azureclaw-sandbox-base:dev
-ARG INFERENCE_ROUTER_IMAGE=azureclawacr.azurecr.io/azureclaw-inference-router:latest
+ARG SANDBOX_BASE_IMAGE=kars-sandbox-base:dev
+ARG INFERENCE_ROUTER_IMAGE=karsacr.azurecr.io/kars-inference-router:latest
 
 # ─── Use pre-built inference router image ────────────────────────────────────
 
 FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 
 # ─── Runtime Adapter Builder (TypeScript → JavaScript) ───────────────────────
-# Builds runtimes/openclaw/ — the AzureClaw runtime adapter for OpenClaw,
+# Builds runtimes/openclaw/ — the Kars runtime adapter for OpenClaw,
 # loaded as a non-bundled OpenClaw plugin inside the sandbox pod.
 # Uses the base image (has Node.js) to avoid a separate Node.js download.
 
@@ -28,7 +28,7 @@ FROM ${SANDBOX_BASE_IMAGE} AS cli-builder
 
 WORKDIR /build
 # mesh-plugin is a file: dep of runtimes/openclaw (npm resolves
-# `@azureclaw/mesh` to `../../mesh-plugin`). It must be present at
+# `@kars/mesh` to `../../mesh-plugin`). It must be present at
 # /build/mesh-plugin BEFORE `npm ci` runs, or tsc fails to resolve
 # the import. We copy the pre-built dist so npm doesn't need to run
 # mesh-plugin's `prepare` script (which needs tsc as a devDep).
@@ -53,16 +53,16 @@ FROM ${SANDBOX_BASE_IMAGE}
 COPY sandbox-images/openclaw/proxy-bootstrap.js /usr/local/lib/proxy-bootstrap.js
 
 # Copy inference router from pre-built image
-COPY --from=router-bin /usr/local/bin/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
+COPY --from=router-bin /usr/local/bin/kars-inference-router /usr/local/bin/kars-inference-router
 
-# Copy AzureClaw OpenClaw runtime adapter (built from source in cli-builder stage)
-COPY --from=cli-builder /build/runtimes/openclaw/dist/ /opt/azureclaw-plugin/
-COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/openclaw.plugin.json /opt/azureclaw-plugin/
-COPY runtimes/openclaw/skills/ /opt/azureclaw-plugin/skills/
+# Copy Kars OpenClaw runtime adapter (built from source in cli-builder stage)
+COPY --from=cli-builder /build/runtimes/openclaw/dist/ /opt/kars-plugin/
+COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/openclaw.plugin.json /opt/kars-plugin/
+COPY runtimes/openclaw/skills/ /opt/kars-plugin/skills/
 
 # mesh-plugin is referenced by the runtime as a `file:../../mesh-plugin` dep.
 # `npm ci` below creates a symlink at
-# /opt/azureclaw-plugin/node_modules/@azureclaw/mesh → ../../../../mesh-plugin
+# /opt/kars-plugin/node_modules/@kars/mesh → ../../../../mesh-plugin
 # which resolves to /mesh-plugin. Stage the prebuilt mesh-plugin there so the
 # symlink is not dangling at runtime. Without this the runtime falls back to
 # the vendored SDK silently (`mesh provider swap failed, staying on vendored`).
@@ -71,22 +71,22 @@ COPY mesh-plugin/dist/ /mesh-plugin/dist/
 RUN node -e "const f='/mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));"
 
 # Install plugin runtime dependencies
-RUN cd /opt/azureclaw-plugin && npm ci --omit=dev --ignore-scripts
+RUN cd /opt/kars-plugin && npm ci --omit=dev --ignore-scripts
 
 # Optional: install upstream Microsoft AGT SDK when MESH_PROVIDER=agt build arg
 # is passed. Not installed by default so vendored builds stay slim and offline.
 # AGT_SDK_TARBALL: when set (dev mode pinning a locally-patched AGT branch) the
 # build context must contain `.agt-sdk/<tarball-name>`. The CLI stages this for
-# `azureclaw dev --mesh-provider agt --build`. The directory always exists with
+# `kars dev --mesh-provider agt --build`. The directory always exists with
 # at least a .keep file so the COPY never fails.
 ARG MESH_PROVIDER=vendored
 ARG AGT_SDK_TARBALL=
-COPY .agt-sdk/ /opt/azureclaw-agt-sdk/
-RUN cd /opt/azureclaw-plugin && \
-    if [ -n "$AGT_SDK_TARBALL" ] && [ -f "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ]; then \
+COPY .agt-sdk/ /opt/kars-agt-sdk/
+RUN cd /opt/kars-plugin && \
+    if [ -n "$AGT_SDK_TARBALL" ] && [ -f "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ]; then \
       echo "Installing AGT SDK from local tarball: $AGT_SDK_TARBALL" && \
       npm install --omit=dev --ignore-scripts --no-save \
-        "/opt/azureclaw-agt-sdk/$AGT_SDK_TARBALL" ; \
+        "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ; \
     else \
       echo "Installing AGT SDK from npm: @microsoft/agent-governance-sdk@^3.5.0" && \
       npm install --omit=dev --ignore-scripts --no-save \
@@ -95,8 +95,8 @@ RUN cd /opt/azureclaw-plugin && \
 
 # Harden image-level code: root-owned, read-only — prevents agent from tampering
 # with the master copy that gets re-installed on every container start.
-RUN chmod -R a-w /opt/azureclaw-plugin && \
-    chmod -R a+rX /opt/azureclaw-plugin
+RUN chmod -R a-w /opt/kars-plugin && \
+    chmod -R a+rX /opt/kars-plugin
 
 # Build a pruned dist-runtime/extensions/ tree mirroring dist/, but containing
 # only the 3 always-required runtime cores. Files are hardlinked (`cp -al`)
@@ -140,7 +140,7 @@ RUN chmod -R a-w /opt/azureclaw-plugin && \
 # mode, xai, mistral, groq, deepseek, ollama, bedrock, openrouter,
 # litellm, codex, copilot-proxy, github-copilot, vercel-ai-gateway, etc.)
 # because each one re-enables a slice of the pi-ai catalog enumeration
-# that wedges models.list for ~50s on first WebUI connect; AzureClaw
+# that wedges models.list for ~50s on first WebUI connect; Kars
 # routes all model traffic through the inference router instead.
 RUN OC=/usr/local/lib/node_modules/openclaw && \
     if [ -d "$OC/dist" ] && [ ! -d "$OC/dist-runtime" ]; then \
@@ -158,23 +158,23 @@ RUN OC=/usr/local/lib/node_modules/openclaw && \
     fi
 
 # Pre-create router-readable config dirs (root-owned, world-traversable).
-# /etc/azureclaw/policies/  — AGT governance policy YAMLs (populated by entrypoint)
-# /etc/azureclaw/blocklist/ — egress blocklist (populated by entrypoint)
+# /etc/kars/policies/  — AGT governance policy YAMLs (populated by entrypoint)
+# /etc/kars/blocklist/ — egress blocklist (populated by entrypoint)
 # These live OUTSIDE OpenClaw's data dir so the inference router (UID 1001)
 # can read them even after OpenClaw 2026.4.x re-locks ~/.openclaw/ to 0700.
-RUN mkdir -p /etc/azureclaw/policies /etc/azureclaw/blocklist && \
-    chmod 755 /etc/azureclaw /etc/azureclaw/policies /etc/azureclaw/blocklist
+RUN mkdir -p /etc/kars/policies /etc/kars/blocklist && \
+    chmod 755 /etc/kars /etc/kars/policies /etc/kars/blocklist
 
 # Copy entrypoint that auto-configures OpenClaw from mounted secrets
 COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Labels
-LABEL org.opencontainers.image.title="AzureClaw OpenClaw Sandbox" \
+LABEL org.opencontainers.image.title="Kars OpenClaw Sandbox" \
       org.opencontainers.image.description="Hardened OpenClaw sandbox on Azure Linux 3" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/Azure/azureclaw" \
+      org.opencontainers.image.source="https://github.com/Azure/kars" \
       org.opencontainers.image.base.name="azurelinux/base/core:3.0"
 
 # HEALTHCHECK: probes the OpenClaw gateway on its in-pod port. The

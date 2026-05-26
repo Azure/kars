@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Slice 1c.6 — `azureclaw policy sign --kind X` unified signing CLI.
+// Slice 1c.6 — `kars policy sign --kind X` unified signing CLI.
 //
 // Single dispatch surface that supersedes the egress-only signing flow
-// inside `azureclaw egress`. Operators authoring any of the five signed
+// inside `kars egress`. Operators authoring any of the five signed
 // policy artifact kinds (egress-allowlist | agt-profile |
 // inference-policy | memory-binding | mcp-server-bundle) point this at
 // a prebuilt canonical-form file on disk; the command pushes the bytes
@@ -21,7 +21,7 @@
 // crisp `Degraded / SpecInvalid` condition.
 //
 // The egress-allowlist kind also supports the canonical-builder flow
-// (see `azureclaw egress` — that command builds the canonical YAML from
+// (see `kars egress` — that command builds the canonical YAML from
 // CR-side `allowedEndpoints` and then calls into this signing pipeline
 // internally). This top-level command is for the other four kinds
 // where the operator already has the bytes.
@@ -84,31 +84,31 @@ export const POLICY_KIND_SPECS: Record<PolicyKindId, PolicyKindSpec> = {
   "agt-profile": {
     id: "agt-profile",
     controllerKind: "AgtProfile",
-    mediaType: "application/vnd.azureclaw.agt-profile.v1+yaml",
+    mediaType: "application/vnd.kars.agt-profile.v1+yaml",
     expectedExt: ".yaml",
   },
   "inference-policy": {
     id: "inference-policy",
     controllerKind: "InferencePolicy",
-    mediaType: "application/vnd.azureclaw.inference-policy.v1+json",
+    mediaType: "application/vnd.kars.inference-policy.v1+json",
     expectedExt: ".json",
   },
   "memory-binding": {
     id: "memory-binding",
-    controllerKind: "ClawMemory",
-    mediaType: "application/vnd.azureclaw.memory-binding.v1+json",
+    controllerKind: "KarsMemory",
+    mediaType: "application/vnd.kars.memory-binding.v1+json",
     expectedExt: ".json",
   },
   "mcp-server-bundle": {
     id: "mcp-server-bundle",
     controllerKind: "McpServer",
-    mediaType: "application/vnd.azureclaw.mcp-server-bundle.v1+json",
+    mediaType: "application/vnd.kars.mcp-server-bundle.v1+json",
     expectedExt: ".json",
   },
   "eval-corpus": {
     id: "eval-corpus",
-    controllerKind: "ClawEval",
-    mediaType: "application/vnd.azureclaw.eval-corpus.v1+json",
+    controllerKind: "KarsEval",
+    mediaType: "application/vnd.kars.eval-corpus.v1+json",
     expectedExt: ".json",
   },
 };
@@ -206,7 +206,7 @@ export async function signPolicyArtifact(
   const bytes = buf.toString("utf8");
 
   // Sign-mode auto-detect: respects user-explicit override, env hints,
-  // TTY presence — identical heuristic to `azureclaw egress --sign`.
+  // TTY presence — identical heuristic to `kars egress --sign`.
   const env = opts.env ?? process.env;
   const isTTY = opts.isTTY ?? Boolean(process.stdin?.isTTY);
   const signMode = autoDetectSignMode({
@@ -272,7 +272,7 @@ export function renderBundleRefSnippet(artifact: SignedPolicyArtifact): string {
   ].join("\n");
 }
 
-/** Register `azureclaw policy sign` on an existing `Command`
+/** Register `kars policy sign` on an existing `Command`
  *  (typically the `policy` parent created by
  *  `cli/src/commands/policy.ts`). */
 export function registerPolicySignSubcommand(parent: Command): Command {
@@ -319,7 +319,7 @@ export function registerPolicySignSubcommand(parent: Command): Command {
           process.stdout.write(`\n${renderBundleRefSnippet(result)}\n`);
         }
       } catch (e) {
-        process.stderr.write(`azureclaw policy sign: ${(e as Error).message}\n`);
+        process.stderr.write(`kars policy sign: ${(e as Error).message}\n`);
         process.exitCode = 1;
       }
     });

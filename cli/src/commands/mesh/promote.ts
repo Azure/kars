@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 / S15.b: `azureclaw mesh promote` subcommand body extracted
+// Phase 2 / S15.b: `kars mesh promote` subcommand body extracted
 // from mesh.ts. Attaches as a subcommand of an existing Commander command.
 
 import chalk from "chalk";
@@ -31,13 +31,13 @@ export function attachPromoteSubcommand(cmd: Command): void {
     .option("--registry-port <port>", "Local port for registry (port-forward mode)", "18080")
     .option("--relay-port <port>", "Local port for relay (port-forward mode)", "18765")
     .action(async (opts: { allowIp?: string; portForward?: boolean; registryPort?: string; relayPort?: string }) => {
-      banner("AzureClaw · Mesh Promote", "Promote Registry to Global");
+      banner("Kars · Mesh Promote", "Promote Registry to Global");
 
       // Load deployment context
       const ctx = loadContext();
       if (!ctx?.aksCluster || !ctx?.resourceGroup) {
         console.error(chalk.red("  ✘ No deployment context found."));
-        console.error(chalk.dim("    Run azureclaw up first to deploy an AKS cluster."));
+        console.error(chalk.dim("    Run kars up first to deploy an AKS cluster."));
         process.exit(1);
       }
 
@@ -46,7 +46,7 @@ export function attachPromoteSubcommand(cmd: Command): void {
         const isPortForward = ctx.promoteMode === "port-forward";
         const regPort = parseInt(opts.registryPort ?? "18080", 10);
         const relayPort = parseInt(opts.relayPort ?? "18765", 10);
-        const pidFile = path.join(os.homedir(), ".azureclaw", "port-forward-pids.json");
+        const pidFile = path.join(os.homedir(), ".kars", "port-forward-pids.json");
 
         console.log(chalk.dim("  Registry was previously promoted — checking health...\n"));
 
@@ -109,7 +109,7 @@ export function attachPromoteSubcommand(cmd: Command): void {
 
           const pids: Record<string, number> = {};
           for (const t of tunnels) {
-            const logDir = path.join(os.homedir(), ".azureclaw", "logs");
+            const logDir = path.join(os.homedir(), ".kars", "logs");
             fs.mkdirSync(logDir, { recursive: true });
             const outFd = fs.openSync(path.join(logDir, `pf-${t.label.toLowerCase()}.log`), "w");
 
@@ -169,7 +169,7 @@ export function attachPromoteSubcommand(cmd: Command): void {
           console.log();
         } else {
           // LoadBalancer mode — just report the broken state
-          console.log(chalk.yellow("\n  ⚠ Endpoints are not healthy. Run azureclaw mesh demote and re-promote."));
+          console.log(chalk.yellow("\n  ⚠ Endpoints are not healthy. Run kars mesh demote and re-promote."));
         }
         return;
       }
@@ -186,7 +186,7 @@ export function attachPromoteSubcommand(cmd: Command): void {
         checkLine(true, "agentmesh namespace exists");
       } catch {
         console.error(chalk.red("  ✘ agentmesh namespace not found."));
-        console.error(chalk.dim("    Deploy an agent first: azureclaw up <name> --model <model>"));
+        console.error(chalk.dim("    Deploy an agent first: kars up <name> --model <model>"));
         process.exit(1);
       }
 
@@ -220,12 +220,12 @@ export function attachPromoteSubcommand(cmd: Command): void {
           { svc: "svc/agentmesh-relay", localPort: relayPort, remotePort: 8765, label: "Relay" },
         ];
 
-        const pidFile = path.join(os.homedir(), ".azureclaw", "port-forward-pids.json");
+        const pidFile = path.join(os.homedir(), ".kars", "port-forward-pids.json");
         const pids: Record<string, number> = {};
 
         for (const t of tunnels) {
           // Open log files so kubectl port-forward has somewhere to write
-          const logDir = path.join(os.homedir(), ".azureclaw", "logs");
+          const logDir = path.join(os.homedir(), ".kars", "logs");
           fs.mkdirSync(logDir, { recursive: true });
           const outFd = fs.openSync(path.join(logDir, `pf-${t.label.toLowerCase()}.log`), "w");
 
@@ -293,8 +293,8 @@ export function attachPromoteSubcommand(cmd: Command): void {
         console.log(chalk.dim("    Tunnels are running in the background."));
         console.log(chalk.dim(`    PIDs saved to ${pidFile}`));
         console.log(chalk.dim(`\n    Test:  curl ${globalRegistryUrl}/health`));
-        console.log(chalk.dim(`    Then:  azureclaw dev --global-registry ${globalRegistryUrl}`));
-        console.log(chalk.dim(`    Stop:  azureclaw mesh demote`));
+        console.log(chalk.dim(`    Then:  kars dev --global-registry ${globalRegistryUrl}`));
+        console.log(chalk.dim(`    Stop:  kars mesh demote`));
         console.log();
         return;
       }
@@ -406,7 +406,7 @@ export function attachPromoteSubcommand(cmd: Command): void {
       console.log(chalk.dim("    Using sslip.io for DNS (auto-resolved, no setup needed)."));
       console.log(chalk.dim("    HTTP only — secured by LoadBalancer IP allowlist."));
       console.log(chalk.dim(`\n    Test:  curl ${globalRegistryUrl}/health`));
-      console.log(chalk.dim(`    Then:  azureclaw dev --global-registry ${globalRegistryUrl}`));
+      console.log(chalk.dim(`    Then:  kars dev --global-registry ${globalRegistryUrl}`));
       console.log();
     });
 }

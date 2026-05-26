@@ -1,17 +1,17 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Minimal BYO image meeting the AzureClaw BYO contract:
-#   - declares org.azureclaw.runtime.contract = v1
+# Minimal BYO image meeting the Kars BYO contract:
+#   - declares org.kars.runtime.contract = v1
 #   - runs as UID 1000
 #   - read-only root filesystem (writes in /sandbox + /tmp only)
 #   - listens on :8080 for the in-cluster Service
 
 FROM python:3.12-slim
 
-LABEL org.azureclaw.runtime.contract="v1"
+LABEL org.kars.runtime.contract="v1"
 LABEL org.opencontainers.image.title="byo-quickstart"
-LABEL org.opencontainers.image.description="AzureClaw BYO runtime quickstart example"
+LABEL org.opencontainers.image.description="Kars BYO runtime quickstart example"
 
 # Create the sandbox user that the controller will run as.
 RUN groupadd -g 1000 sandbox && \

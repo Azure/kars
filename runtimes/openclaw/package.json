@@ -1,11 +1,11 @@
 {
-  "name": "@azureclaw/runtime-openclaw",
+  "name": "@kars/runtime-openclaw",
   "version": "0.1.0-alpha.1",
-  "description": "AzureClaw runtime adapter for OpenClaw — loaded as an OpenClaw plugin inside the sandbox pod",
+  "description": "Kars runtime adapter for OpenClaw — loaded as an OpenClaw plugin inside the sandbox pod",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Azure/azureclaw.git"
+    "url": "https://github.com/Azure/kars.git"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,7 +29,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@azureclaw/mesh": "file:../../mesh-plugin",
+    "@kars/mesh": "file:../../mesh-plugin",
     "commander": "^13.0.0"
   },
   "optionalDependencies": {

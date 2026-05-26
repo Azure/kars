@@ -1,8 +1,8 @@
 # ── Naked claw — vanilla OpenClaw with ONLY a domain-only egress
-# allowlist. No AzureClaw control plane. This is the strawman that
+# allowlist. No Kars control plane. This is the strawman that
 # falls to the lethal trifecta. We deploy it as a plain Pod
-# (NOT a ClawSandbox) precisely to show what running OpenClaw
-# without AzureClaw looks like.
+# (NOT a KarsSandbox) precisely to show what running OpenClaw
+# without Kars looks like.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -61,4 +61,4 @@ spec:
               value: "http://bait-server.naked-claw.svc.cluster.local/poisoned-skill.md"
           # No seccomp profile, no read-only rootfs, no UID egress guard.
           # Runs as root by default. This is what "just deploy OpenClaw"
-          # gets you without the AzureClaw stack.
+          # gets you without the Kars stack.

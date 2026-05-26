@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 //! Per-criterion conformance tests. Each `#[test]` covers one row of
-//! [`azureclaw_cncf_conformance::run_all_checks`] and asserts pass.
+//! [`kars_cncf_conformance::run_all_checks`] and asserts pass.
 //!
 //! These tests run in PR CI (`cargo test --all`) and are the gate
 //! that catches regressions (e.g., a new CRD merged without a
 //! conditions array, or a Deployment edited to drop probes).
 
-use azureclaw_cncf_conformance as conf;
+use kars_cncf_conformance as conf;
 
 fn manifests() -> std::collections::BTreeMap<std::path::PathBuf, Vec<serde_yaml::Value>> {
     conf::load_repo_manifests()
@@ -20,7 +20,7 @@ fn c1_crd_versions_served_storage() {
     let crds = conf::collect_crds(&m);
     assert!(
         !crds.is_empty(),
-        "no CRDs discovered under deploy/helm/azureclaw/templates/"
+        "no CRDs discovered under deploy/helm/kars/templates/"
     );
     assert_eq!(conf::check_crd_versions_served(&crds), conf::Outcome::Pass);
 }

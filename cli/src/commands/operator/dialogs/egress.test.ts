@@ -10,19 +10,19 @@ const { buildFleetRows, formatFleetRow } = __test;
 
 function sb(name: string): SandboxInfo {
   return {
-    name, namespace: `azureclaw-${name}`, status: "Running", health: "healthy",
+    name, namespace: `kars-${name}`, status: "Running", health: "healthy",
     model: "gpt-4.1", isolation: "enhanced", channels: "", age: "1d",
     podName: `${name}-0`, restarts: 0, role: "controller", parent: "", runtime: "aks",
   };
 }
 
 function dom(domain: string, sandbox: string, state: "learned" | "approved"): EgressDomain {
-  return { domain, sandbox, namespace: `azureclaw-${sandbox}`, state };
+  return { domain, sandbox, namespace: `kars-${sandbox}`, state };
 }
 
 function sec(name: string, mode: "learning" | "enforcing" | "unknown", allowlist: number, blocklist = 0): SecurityState {
   return {
-    sandbox: name, isolation: "enhanced", runtime: "runc", seccomp: "azureclaw-strict",
+    sandbox: name, isolation: "enhanced", runtime: "runc", seccomp: "kars-strict",
     networkPolicy: true, adminAuth: true, readyz: true, readyzDetail: "ok",
     egressMode: mode, learnedDomains: 0, allowlistDomains: allowlist,
     blocklistDomains: blocklist, blocklistLearnMode: false,

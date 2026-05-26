@@ -11,7 +11,7 @@
   "parameters": {
     "baseName": {
       "type": "string",
-      "defaultValue": "azureclaw",
+      "defaultValue": "kars",
       "metadata": {
         "description": "Base name for all resources"
       }
@@ -648,7 +648,7 @@
                   "networkPolicy": "cilium",
                   "networkDataplane": "cilium"
                 },
-                "agentPoolProfiles": "[concat(createArray(createObject('name', 'system', 'count', 2, 'vmSize', 'Standard_D2as_v5', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'System', 'enableFIPS', parameters('enableFips')), createObject('name', 'clawpool', 'count', parameters('nodeCount'), 'vmSize', parameters('vmSize'), 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'nodeTaints', createArray('azureclaw.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('azureclaw.azure.com/pool', 'sandbox'))), if(parameters('enableKata'), createArray(createObject('name', 'katapool', 'count', parameters('nodeCount'), 'vmSize', 'Standard_D4as_v6', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'workloadRuntime', 'KataMshvVmIsolation', 'nodeTaints', createArray('azureclaw.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('azureclaw.azure.com/pool', 'sandbox-kata'))), createArray()))]",
+                "agentPoolProfiles": "[concat(createArray(createObject('name', 'system', 'count', 2, 'vmSize', 'Standard_D2as_v5', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'System', 'enableFIPS', parameters('enableFips')), createObject('name', 'clawpool', 'count', parameters('nodeCount'), 'vmSize', parameters('vmSize'), 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'nodeTaints', createArray('kars.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('kars.azure.com/pool', 'sandbox'))), if(parameters('enableKata'), createArray(createObject('name', 'katapool', 'count', parameters('nodeCount'), 'vmSize', 'Standard_D4as_v6', 'osType', 'Linux', 'osSKU', 'AzureLinux', 'mode', 'User', 'enableFIPS', parameters('enableFips'), 'enableEncryptionAtHost', true(), 'workloadRuntime', 'KataMshvVmIsolation', 'nodeTaints', createArray('kars.azure.com/sandbox=true:NoSchedule'), 'nodeLabels', createObject('kars.azure.com/pool', 'sandbox-kata'))), createArray()))]",
                 "addonProfiles": {
                   "omsagent": {
                     "enabled": true,
@@ -690,10 +690,10 @@
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
               "apiVersion": "2023-01-31",
-              "name": "[format('{0}/{1}', format('{0}-sandbox-wi', parameters('name')), 'azureclaw-sandbox')]",
+              "name": "[format('{0}/{1}', format('{0}-sandbox-wi', parameters('name')), 'kars-sandbox')]",
               "properties": {
                 "issuer": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').oidcIssuerProfile.issuerURL]",
-                "subject": "system:serviceaccount:azureclaw-system:azureclaw-sandbox",
+                "subject": "system:serviceaccount:kars-system:kars-sandbox",
                 "audiences": [
                   "api://AzureADTokenExchange"
                 ]
@@ -706,17 +706,17 @@
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
               "apiVersion": "2023-01-31",
-              "name": "[format('{0}/{1}', format('{0}-sandbox-wi', parameters('name')), 'azureclaw-controller-sa')]",
+              "name": "[format('{0}/{1}', format('{0}-sandbox-wi', parameters('name')), 'kars-controller-sa')]",
               "properties": {
                 "issuer": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').oidcIssuerProfile.issuerURL]",
-                "subject": "system:serviceaccount:azureclaw-system:azureclaw-controller",
+                "subject": "system:serviceaccount:kars-system:kars-controller",
                 "audiences": [
                   "api://AzureADTokenExchange"
                 ]
               },
               "dependsOn": [
                 "[resourceId('Microsoft.ContainerService/managedClusters', parameters('name'))]",
-                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials', format('{0}-sandbox-wi', parameters('name')), 'azureclaw-sandbox')]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials', format('{0}-sandbox-wi', parameters('name')), 'kars-sandbox')]",
                 "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
               ]
             },

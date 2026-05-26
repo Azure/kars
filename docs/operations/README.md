@@ -1,10 +1,10 @@
 # Operations
 
-How to operate AzureClaw in production. Each page is one operational concern, with the full runbook for that concern.
+How to operate Kars in production. Each page is one operational concern, with the full runbook for that concern.
 
 | Topic | Read |
 |---|---|
-| **GitOps** — managing AzureClaw with Flux / Argo CD instead of the CLI. | [`gitops.md`](gitops.md) |
+| **GitOps** — managing Kars with Flux / Argo CD instead of the CLI. | [`gitops.md`](gitops.md) |
 | **Secret rotation** — rotating Foundry keys, ACR credentials, federated identities. | [`secret-rotation.md`](secret-rotation.md) |
 | **Image versioning** — `:latest` tag policy, pinning by digest, supply-chain considerations. | [`image-versioning.md`](image-versioning.md) |
 | **Helm packaging** — packaging the chart for offline / sovereign deployments. | [`helm-packaging.md`](helm-packaging.md) |
@@ -18,16 +18,16 @@ How to operate AzureClaw in production. Each page is one operational concern, wi
 
 For day-to-day work the most useful surfaces are:
 
-- **`azureclaw operator`** — the live fleet TUI. See [`docs/operator-tui.md`](../operator-tui.md).
-- **`azureclaw status <name>`** — quick health snapshot of one sandbox.
-- **`azureclaw logs <name> -f`** — tail router + agent logs.
-- **`azureclaw policy show <name>`** — what is allowed / denied / approval-gated for a sandbox.
-- **`kubectl describe clawsandbox <name>`** — full condition chain (every status condition is documented in [`../api/conditions.md`](../api/conditions.md)).
-- **`azureclaw eval`** — reproducible evaluation against a pinned sandbox spec.
+- **`kars operator`** — the live fleet TUI. See [`docs/operator-tui.md`](../operator-tui.md).
+- **`kars status <name>`** — quick health snapshot of one sandbox.
+- **`kars logs <name> -f`** — tail router + agent logs.
+- **`kars policy show <name>`** — what is allowed / denied / approval-gated for a sandbox.
+- **`kubectl describe karssandbox <name>`** — full condition chain (every status condition is documented in [`../api/conditions.md`](../api/conditions.md)).
+- **`kars eval`** — reproducible evaluation against a pinned sandbox spec.
 
 ## What is not here
 
-- **Cluster provisioning** — see [Getting started](../getting-started.md). `azureclaw up` provisions AKS, ACR, Foundry, federated identity, and Helm install in one go.
+- **Cluster provisioning** — see [Getting started](../getting-started.md). `kars up` provisions AKS, ACR, Foundry, federated identity, and Helm install in one go.
 - **Architecture and CRDs** — see [Architecture](../architecture.md) and [CRD reference](../api/crd-reference.md).
 - **Security guarantees** — see [Security model](../security.md).
 

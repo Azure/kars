@@ -67,7 +67,7 @@ function formatEgressRules(
 
 /** Compute sandbox namespace from name (used across policy commands). */
 function sandboxNamespace(name: string): string {
-  return `azureclaw-${name}`;
+  return `kars-${name}`;
 }
 
 // Test withAdminAuth directly from router-admin (pure function, no mocks needed)
@@ -76,12 +76,12 @@ import { withAdminAuth } from "../router-admin.js";
 // --- Tests ---
 
 describe("sandbox namespace resolution", () => {
-  it("prefixes name with azureclaw-", () => {
-    expect(sandboxNamespace("myagent")).toBe("azureclaw-myagent");
+  it("prefixes name with kars-", () => {
+    expect(sandboxNamespace("myagent")).toBe("kars-myagent");
   });
 
   it("works with hyphenated names", () => {
-    expect(sandboxNamespace("my-agent-v2")).toBe("azureclaw-my-agent-v2");
+    expect(sandboxNamespace("my-agent-v2")).toBe("kars-my-agent-v2");
   });
 });
 

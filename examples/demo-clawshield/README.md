@@ -2,7 +2,7 @@
 
 A 30-minute scripted demo showing **three tenants on one cluster**
 (Contoso Bank, Fabrikam Legal, Northwind Traders), one of which gets
-compromised via a poisoned legal document, and AzureClaw's nine
+compromised via a poisoned legal document, and Kars's nine
 security layers containing the attack while the other two tenants
 keep working.
 
@@ -40,24 +40,24 @@ lives in [`docs/internal/DEMO.md`](../../docs/internal/DEMO.md).
 | 3a. Exfiltration | Compromised agent posts to external C2 | NetworkPolicy default-deny + URL+method allowlist |
 | 3b. Container escape | runc breakout (Leaky Vessels CVE-2024-21626 style) | Kata VM boundary (Fabrikam ships `confidential` isolation) |
 | 4. Lateral movement | Probe Contoso's pod | Cross-namespace NetworkPolicy isolation |
-| 5. Privilege escalation | Try to mount host fs / install miner | seccomp `azureclaw-strict` + RO rootfs + non-root |
+| 5. Privilege escalation | Try to mount host fs / install miner | seccomp `kars-strict` + RO rootfs + non-root |
 | 6. IMDS token theft | Reach 169.254.169.254 | egress-guard iptables (UID 1000 cannot reach IMDS) |
 
 ## Quick run
 
 ```bash
-# Prereq: AzureClaw cluster with the Kata Confidential Containers add-on
+# Prereq: Kars cluster with the Kata Confidential Containers add-on
 # (Fabrikam uses `isolation: confidential`)
 kubectl apply -f examples/demo-clawshield/
 
 # Wait for all three sandboxes to go Ready
-kubectl get clawsandbox -A -w
+kubectl get karssandbox -A -w
 
 # Demonstrate the benign multi-tenant workflow
 bash examples/demo-clawshield/normal-workflow.sh
 
 # Run the attack simulation inside the Fabrikam sandbox
-azureclaw connect fabrikam-legal-agent --shell
+kars connect fabrikam-legal-agent --shell
 # inside the sandbox:
 bash /sandbox/attack-simulation.sh
 ```

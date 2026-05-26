@@ -1,16 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `azureclaw-conformance-runner` binary — Slice 6.2.
+//! `kars-conformance-runner` binary — Slice 6.2.
 //!
-//! Replays an [`azureclaw_eval_corpus::Corpus`] of policy-conformance
-//! cases against a live AzureClaw inference router and emits a
+//! Replays an [`kars_eval_corpus::Corpus`] of policy-conformance
+//! cases against a live Kars inference router and emits a
 //! [`crate::report::RunReport`] JSON document describing every
 //! verdict.
 //!
 //! The binary is intentionally pure: it has no Kubernetes API access,
 //! mints no tokens, and does not touch any CR `status`. The Slice 6.3
-//! `ClawEval` reconciler reads the JSON report from a shared volume
+//! `KarsEval` reconciler reads the JSON report from a shared volume
 //! (or from `kubectl logs` as a fallback) and stamps the verdicts onto
 //! the CR. This separation keeps the runner image small, RBAC-free,
 //! and unit-testable without a kube apiserver.
@@ -27,8 +27,8 @@ mod scenarios;
 mod transport;
 
 use anyhow::{Context, Result};
-use azureclaw_eval_corpus::{Corpus, judge, load_builtin, parse};
 use clap::Parser;
+use kars_eval_corpus::{Corpus, judge, load_builtin, parse};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -89,12 +89,10 @@ async fn run(cli: Cli) -> Result<bool> {
     let mut transport =
         Transport::new(cli.router_base.clone(), cli.timeout()).context("build router transport")?;
 
-    let needs_forward_proxy = corpus.cases.iter().any(|c| {
-        matches!(
-            c.scenario,
-            azureclaw_eval_corpus::Scenario::EgressConnect { .. }
-        )
-    });
+    let needs_forward_proxy = corpus
+        .cases
+        .iter()
+        .any(|c| matches!(c.scenario, kars_eval_corpus::Scenario::EgressConnect { .. }));
     let forward_proxy_addr = cli.forward_proxy.clone().or_else(|| {
         if needs_forward_proxy {
             derive_default_forward_proxy(&cli.router_base)
@@ -215,11 +213,11 @@ async fn run(cli: Cli) -> Result<bool> {
 fn load_corpus(source: &CorpusSource) -> Result<(Corpus, Vec<u8>)> {
     match source {
         CorpusSource::Builtin(name) => {
-            let bytes = azureclaw_eval_corpus::builtin_bytes(name)
+            let bytes = kars_eval_corpus::builtin_bytes(name)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "unknown built-in corpus `{name}`; available: {:?}",
-                        azureclaw_eval_corpus::BUILTIN_NAMES
+                        kars_eval_corpus::BUILTIN_NAMES
                     )
                 })?
                 .to_vec();
@@ -260,11 +258,11 @@ fn write_report(path: &PathBuf, json: &str) -> Result<()> {
 /// surface it; the corpus's `judge` function only sees actual decisions,
 /// so we bypass it here and stamp the failure directly.
 fn synthetic_transport_failure_report(
-    case: &azureclaw_eval_corpus::Case,
+    case: &kars_eval_corpus::Case,
     reason: &str,
     duration_ms: u64,
 ) -> CaseReport {
-    use azureclaw_eval_corpus::{ActualDecision, Decision, Verdict, VerdictFailure};
+    use kars_eval_corpus::{ActualDecision, Decision, Verdict, VerdictFailure};
 
     let actual = ActualDecision {
         decision: Decision::Blocked,

@@ -14,13 +14,13 @@ You are running with AGT (Agent Governance Toolkit) governance enabled. This mea
 - **Trust scoring**: When communicating with other agents, trust scores (0-1000) determine what actions are allowed. Higher trust = more capabilities.
 - **Audit logging**: Every action you take is recorded in a tamper-evident hash-chain log for compliance.
 
-## What governance does NOT do (AzureClaw handles these)
+## What governance does NOT do (Kars handles these)
 
-- Network restrictions → AzureClaw iptables + NetworkPolicy (kernel-level)
-- Filesystem scope → AzureClaw read-only rootfs (OS-level)
-- Content safety → AzureClaw Content Safety API (router-level)
-- Token budgets → AzureClaw inference router (router-level)
-- IMDS blocking → AzureClaw iptables UID-based (kernel-level)
+- Network restrictions → Kars iptables + NetworkPolicy (kernel-level)
+- Filesystem scope → Kars read-only rootfs (OS-level)
+- Content safety → Kars Content Safety API (router-level)
+- Token budgets → Kars inference router (router-level)
+- IMDS blocking → Kars iptables UID-based (kernel-level)
 
 ## How it works
 

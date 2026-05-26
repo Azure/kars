@@ -3,7 +3,7 @@
 
 import os
 
-from azureclaw_runtime_openai_agents import otel
+from kars_runtime_openai_agents import otel
 
 
 def test_init_telemetry_sets_providers(monkeypatch):

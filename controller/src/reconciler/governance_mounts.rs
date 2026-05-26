@@ -6,17 +6,17 @@
 //! Phase 3 S7 wiring: closes the gap where governance CRD reconcilers
 //! (`tool_policy_reconciler`, `mcp_server_reconciler`, `a2a_agent_reconciler`)
 //! produce ConfigMaps/Secrets in the **user's** namespace but the sandbox
-//! pod runs in `azureclaw-{name}` and cannot mount cross-namespace.
+//! pod runs in `kars-{name}` and cannot mount cross-namespace.
 //!
 //! ## Strategy
 //!
-//! For each governance CR referenced by a `ClawSandbox`:
+//! For each governance CR referenced by a `KarsSandbox`:
 //!
 //! 1. Look up the source artifact (ConfigMap/Secret) in the user's
 //!    namespace (`sandbox_self_ns`).
 //! 2. Copy its `data` / `stringData` / `binaryData` into a new
 //!    sandbox-local artifact (same name) in the sandbox namespace
-//!    (`azureclaw-{name}`), labelled with provenance.
+//!    (`kars-{name}`), labelled with provenance.
 //! 3. Mount the sandbox-local copy into the inference-router container.
 //!
 //! The mirror is one-way (controller-managed); operators do not edit the
@@ -80,13 +80,13 @@ fn safe_label_value(raw: &str) -> String {
 /// so cleanup/observability can find them. Value format is
 /// `<kind>.<name>` (lowercased) — note `.` not `/`: K8s label *values*
 /// cannot contain `/` (only label *keys* may use the `prefix/name` form).
-pub(crate) const MIRROR_OWNER_LABEL: &str = "azureclaw.azure.com/mirrored-from";
-/// Sandbox name label, links the mirror back to its `ClawSandbox`.
-pub(crate) const MIRROR_SANDBOX_LABEL: &str = "azureclaw.azure.com/sandbox";
+pub(crate) const MIRROR_OWNER_LABEL: &str = "kars.azure.com/mirrored-from";
+/// Sandbox name label, links the mirror back to its `KarsSandbox`.
+pub(crate) const MIRROR_SANDBOX_LABEL: &str = "kars.azure.com/sandbox";
 /// Source-namespace annotation, records where the artifact originated.
-pub(crate) const MIRROR_SOURCE_NS_ANNOTATION: &str = "azureclaw.azure.com/mirrored-from-namespace";
+pub(crate) const MIRROR_SOURCE_NS_ANNOTATION: &str = "kars.azure.com/mirrored-from-namespace";
 /// Source-kind annotation (`ToolPolicy` / `McpServer` / `A2AAgent`).
-pub(crate) const MIRROR_SOURCE_KIND_ANNOTATION: &str = "azureclaw.azure.com/mirrored-from-kind";
+pub(crate) const MIRROR_SOURCE_KIND_ANNOTATION: &str = "kars.azure.com/mirrored-from-kind";
 
 /// Mount paths exposed inside the inference-router container.
 pub mod paths {
@@ -99,14 +99,14 @@ pub mod paths {
     /// controller can close the §3 Ready ⇔ router-echo loop. Must
     /// match the router-side default in
     /// `inference-router/src/inference_policy_loader.rs::INFERENCE_POLICY_DIR_DEFAULT`.
-    pub const INFERENCE_POLICY_DIR: &str = "/etc/azureclaw/inference";
-    /// `ClawMemory` compiled binding (JSON). Loaded by the
+    pub const INFERENCE_POLICY_DIR: &str = "/etc/kars/inference";
+    /// `KarsMemory` compiled binding (JSON). Loaded by the
     /// inference-router's `memory_binding_loader` on startup; the
     /// digest is echoed via `/internal/policy-status` so the
     /// controller can close the §3 Ready ⇔ router-echo loop
     /// (Slice 3a). Must match the router-side default in
     /// `inference-router/src/memory_binding_loader.rs::MEMORY_BINDING_DIR_DEFAULT`.
-    pub const MEMORY_BINDING_DIR: &str = "/etc/azureclaw/memory";
+    pub const MEMORY_BINDING_DIR: &str = "/etc/kars/memory";
     /// Signed egress allowlist (JSON). Compiled by the controller
     /// from the verified `spec.networkPolicy.allowlistRef` (or inline
     /// `allowedEndpoints` when no ref is set); loaded by the
@@ -116,7 +116,7 @@ pub mod paths {
     /// to close the §3 Ready ⇔ router-echo loop (Slice 5c.1). Must
     /// match the router-side default in
     /// `inference-router/src/egress_allowlist_loader.rs::EGRESS_ALLOWLIST_DIR_DEFAULT`.
-    pub const EGRESS_ALLOWLIST_DIR: &str = "/etc/azureclaw/egress";
+    pub const EGRESS_ALLOWLIST_DIR: &str = "/etc/kars/egress";
     /// Per-sandbox `EgressApproval` files (one `approval-{name}.json`
     /// per CR pointing at this sandbox). Owned by the
     /// `egress_approval_reconciler`; consumed by the inference-router's
@@ -128,13 +128,13 @@ pub mod paths {
     /// `inference-router/src/egress_allowlist_loader.rs`
     /// (`EGRESS_APPROVAL_DIR_DEFAULT` in
     /// `inference-router/src/egress_allowlist_loader.rs`).
-    pub const EGRESS_APPROVAL_DIR: &str = "/etc/azureclaw/egress-approvals";
+    pub const EGRESS_APPROVAL_DIR: &str = "/etc/kars/egress-approvals";
     /// McpServer JWKS (used by the customer-MCP OAuth verifier).
-    pub const MCP_JWKS_DIR: &str = "/etc/azureclaw/mcp";
+    pub const MCP_JWKS_DIR: &str = "/etc/kars/mcp";
     /// A2AAgent compiled signed AgentCard.
-    pub const A2A_CARD_DIR: &str = "/etc/azureclaw/a2a-card";
+    pub const A2A_CARD_DIR: &str = "/etc/kars/a2a-card";
     /// McpServer Ed25519 signing keypair Secret mount.
-    pub const MCP_SIGNING_DIR: &str = "/etc/azureclaw/mcp-signing";
+    pub const MCP_SIGNING_DIR: &str = "/etc/kars/mcp-signing";
 }
 
 /// Result of mirroring a single resource. `Skipped` carries a reason
@@ -180,7 +180,7 @@ pub async fn mirror_configmap(
     labels.insert(MIRROR_SANDBOX_LABEL.into(), sandbox_name.into());
     labels.insert(
         "app.kubernetes.io/managed-by".into(),
-        "azureclaw-controller".into(),
+        "kars-controller".into(),
     );
 
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
@@ -251,7 +251,7 @@ pub async fn mirror_secret(
     labels.insert(MIRROR_SANDBOX_LABEL.into(), sandbox_name.into());
     labels.insert(
         "app.kubernetes.io/managed-by".into(),
-        "azureclaw-controller".into(),
+        "kars-controller".into(),
     );
 
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
@@ -581,7 +581,7 @@ mod tests {
             "inference-router",
             "mcp-foo-signing",
             "mcp-signing",
-            "/etc/azureclaw/mcp-signing",
+            "/etc/kars/mcp-signing",
             None,
         );
         let v = spec.get("volumes").unwrap().as_array().unwrap();
@@ -601,7 +601,7 @@ mod tests {
             "inference-router",
             "card",
             "card-vol",
-            "/etc/azureclaw/a2a-card",
+            "/etc/kars/a2a-card",
             None,
         );
         let env_after = spec.pointer("/containers/0/env");
@@ -637,7 +637,7 @@ mod tests {
             &mut spec,
             "inference-router",
             "MCP_JWKS_DIR",
-            "/etc/azureclaw/mcp",
+            "/etc/kars/mcp",
         );
 
         let env = spec
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(env.len(), 2);
         assert!(env.iter().any(
             |e| e.get("name").and_then(|n| n.as_str()) == Some("MCP_JWKS_DIR")
-                && e.get("value").and_then(|v| v.as_str()) == Some("/etc/azureclaw/mcp")
+                && e.get("value").and_then(|v| v.as_str()) == Some("/etc/kars/mcp")
         ));
         // Other container untouched.
         assert!(spec.pointer("/containers/1/env").is_none());

@@ -1,7 +1,7 @@
 [book]
-title = "AzureClaw — Documentation"
-description = "AzureClaw: a secure runtime for AI agents on Azure Kubernetes Service. Per-agent sandbox isolation, declarative governance via CRDs, end-to-end encrypted inter-agent messaging, and a Rust router that enforces every external call."
-authors = ["AzureClaw contributors"]
+title = "Kars — Documentation"
+description = "Kars: a secure runtime for AI agents on Azure Kubernetes Service. Per-agent sandbox isolation, declarative governance via CRDs, end-to-end encrypted inter-agent messaging, and a Rust router that enforces every external call."
+authors = ["Kars contributors"]
 language = "en"
 
 # The book sources live one level up — the existing docs/ tree is the
@@ -21,8 +21,8 @@ create-missing = false
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/Azure/azureclaw"
-edit-url-template = "https://github.com/Azure/azureclaw/edit/dev/docs/{path}"
+git-repository-url = "https://github.com/Azure/kars"
+edit-url-template = "https://github.com/Azure/kars/edit/dev/docs/{path}"
 no-section-label = false
 mathjax-support = false
 additional-js = ["mermaid.min.js", "mermaid-init.js"]

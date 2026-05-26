@@ -108,9 +108,9 @@ export async function runOffloadTask(
 
   // Guarded task content — prevents the inner LLM from re-delegating.
   const guardedTask = [
-    "You are running INSIDE an AzureClaw offload sandbox — you ARE the cloud",
+    "You are running INSIDE an Kars offload sandbox — you ARE the cloud",
     "executor. Do NOT try to delegate this task to another sandbox; calls to",
-    "cloud_offload, azureclaw_spawn, or handoff will be policy-denied and",
+    "cloud_offload, kars_spawn, or handoff will be policy-denied and",
     "will fail. Execute the task directly HERE.",
     "",
     "Write ALL artifacts (markdown, JSON, CSV, HTML, PNG, PDF, TXT) to",

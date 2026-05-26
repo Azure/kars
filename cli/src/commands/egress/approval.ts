@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `azureclaw egress allow-extra | approvals | revoke` — the CLI surface
+//! `kars egress allow-extra | approvals | revoke` — the CLI surface
 //! for the `EgressApproval` CRD (Slice 5e). Closes the "operator wants
 //! to grant a hostname for the next 15 minutes without resigning the
 //! baseline bundle" loop from
@@ -249,7 +249,7 @@ export function deriveApprovalName(sandbox: string, now: Date = new Date()): str
 }
 
 /**
- * Render one row for the `azureclaw egress approvals` table.
+ * Render one row for the `kars egress approvals` table.
  * Columns: NAME / HOSTS / TTL / EXPIRES / PHASE / AGE.
  */
 export function summarizeApprovalRow(
@@ -414,7 +414,7 @@ export function allowExtraCommand(): Command {
     .description(
       "Grant additional egress hosts for one sandbox on top of the signed baseline (TTL-scoped, audit-logged)",
     )
-    .argument("<sandbox>", "Target ClawSandbox name (must exist in --namespace)")
+    .argument("<sandbox>", "Target KarsSandbox name (must exist in --namespace)")
     .option("-n, --namespace <ns>", "Namespace", "default")
     .option(
       "--host <host[:port]>",
@@ -480,7 +480,7 @@ export function allowExtraCommand(): Command {
 export function approvalsCommand(): Command {
   return new Command("approvals")
     .description("List EgressApprovals targeting a sandbox")
-    .argument("<sandbox>", "ClawSandbox name to filter by")
+    .argument("<sandbox>", "KarsSandbox name to filter by")
     .option("-n, --namespace <ns>", "Namespace", "default")
     .action(async (sandbox: string, opts: { namespace: string }) => {
       await listApprovalsForSandbox(sandbox, opts.namespace);

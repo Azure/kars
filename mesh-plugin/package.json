@@ -1,7 +1,7 @@
 {
-  "name": "@azureclaw/mesh",
+  "name": "@kars/mesh",
   "version": "0.1.0",
-  "description": "Connect any OpenClaw agent to AzureClaw for secure cloud offload and inter-agent communication",
+  "description": "Connect any OpenClaw agent to Kars for secure cloud offload and inter-agent communication",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -28,7 +28,7 @@
   },
   "keywords": [
     "openclaw",
-    "azureclaw",
+    "kars",
     "agentmesh",
     "cloud-offload",
     "e2e-encryption",
@@ -37,7 +37,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AzureClaw/azureclaw.git",
+    "url": "https://github.com/Kars/kars.git",
     "directory": "mesh-plugin"
   },
   "engines": {

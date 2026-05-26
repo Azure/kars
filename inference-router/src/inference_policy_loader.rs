@@ -24,7 +24,7 @@
 //! Loading two policies at once is **not supported** in 2a: each
 //! router process serves exactly one sandbox, and the sandbox
 //! references at most one `InferencePolicy` via
-//! `ClawSandbox.spec.inferenceRef`. The loader picks the first
+//! `KarsSandbox.spec.inferenceRef`. The loader picks the first
 //! `*.json` file in the mount directory (sorted) so behaviour is
 //! deterministic if multiple files appear during a transitional
 //! mirror update.
@@ -369,7 +369,7 @@ pub fn load_inference_policy_from_dir(
 /// - [`LoadOutcome::NoBinding`] → handle cleared. Restores the
 ///   chart-fed `BUDGET_PER_REQUEST_TOKENS` / env-driven content
 ///   safety paths the second the operator removes the
-///   `InferencePolicy` reference from a `ClawSandbox`.
+///   `InferencePolicy` reference from a `KarsSandbox`.
 /// - [`LoadOutcome::Error`] → handle left intact. The registry
 ///   already recorded the parse error and the controller's echo
 ///   loop will catch the stale digest; we refuse to knock the

@@ -4,7 +4,7 @@
 /**
  * Signal KNOCK sequence invariants — Phase 0 scaffold.
  *
- * See internal Phase 1 plan §5.4. KNOCK is AzureClaw's
+ * See internal Phase 1 plan §5.4. KNOCK is Kars's
  * policy-gated session-establishment protocol layered over Signal
  * X3DH; it's the first place where vendored-AgentMesh and AGT-AgentMesh
  * must agree on wire format.

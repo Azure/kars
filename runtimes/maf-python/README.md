@@ -1,8 +1,8 @@
-# AzureClaw runtime adapter — Microsoft Agent Framework (Python)
+# Kars runtime adapter — Microsoft Agent Framework (Python)
 
-`azureclaw_runtime_maf_python` is the in-pod adapter that wires the
+`kars_runtime_maf_python` is the in-pod adapter that wires the
 [Microsoft Agent Framework Python SDK](https://github.com/microsoft/agent-framework)
-into the AzureClaw sandbox. It ships inside the
+into the Kars sandbox. It ships inside the
 `sandbox-images/maf-python` container image and is invoked from
 `entrypoint.sh` before the user's agent code runs.
 
@@ -25,10 +25,10 @@ into the AzureClaw sandbox. It ships inside the
    `tools` attribute).
 5. **Router base URLs** — sets `OPENAI_BASE_URL` and
    `AZURE_OPENAI_ENDPOINT` to the local router so `OpenAIChatClient`
-   and `AzureOpenAIChatClient` route through the AzureClaw governance
+   and `AzureOpenAIChatClient` route through the Kars governance
    gate.
 
-`bootstrap()` is idempotent via the `__AZURECLAW_RUNTIME_INITIALIZED__`
+`bootstrap()` is idempotent via the `__KARS_RUNTIME_INITIALIZED__`
 env var.
 
 ## Usage
@@ -37,7 +37,7 @@ env var.
 # main.py — user agent code
 from agent_framework import ChatAgent
 from agent_framework.openai import OpenAIChatClient
-from azureclaw_runtime_maf_python import bootstrap, register_foundry_tools
+from kars_runtime_maf_python import bootstrap, register_foundry_tools
 
 bootstrap()  # invoked from entrypoint.sh in production
 

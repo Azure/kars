@@ -85,8 +85,8 @@ export async function fetchSecurityState(sb: SandboxInfo, kubeContext?: string):
     sandbox: sb.name,
     isolation: sb.isolation,
     runtime: sb.isolation === "confidential" ? "kata-vm" : "runc",
-    seccomp: sb.runtime === "docker" ? "azureclaw-strict"
-             : sb.isolation === "enhanced" ? "azureclaw-strict" : "RuntimeDefault",
+    seccomp: sb.runtime === "docker" ? "kars-strict"
+             : sb.isolation === "enhanced" ? "kars-strict" : "RuntimeDefault",
     networkPolicy: false,
     adminAuth: false,
     readyz: false,
@@ -258,14 +258,14 @@ export async function fetchSecurityState(sb: SandboxInfo, kubeContext?: string):
   // /metrics — parse Prometheus text format
   if (checks[6].status === "fulfilled") {
     const metricsText = (checks[6].value as any).stdout || "";
-    state.totalRequests = sumPrometheusCounter(metricsText, "azureclaw_inference_requests_total");
-    state.errorRequests = sumPrometheusCounter(metricsText, "azureclaw_inference_requests_total", { status: "error" });
-    state.inputTokens = sumPrometheusCounter(metricsText, "azureclaw_tokens_total", { direction: "input" });
-    state.outputTokens = sumPrometheusCounter(metricsText, "azureclaw_tokens_total", { direction: "output" });
+    state.totalRequests = sumPrometheusCounter(metricsText, "kars_inference_requests_total");
+    state.errorRequests = sumPrometheusCounter(metricsText, "kars_inference_requests_total", { status: "error" });
+    state.inputTokens = sumPrometheusCounter(metricsText, "kars_tokens_total", { direction: "input" });
+    state.outputTokens = sumPrometheusCounter(metricsText, "kars_tokens_total", { direction: "output" });
 
     // Average latency from histogram sum/count
-    const latSum = sumPrometheusCounter(metricsText, "azureclaw_inference_latency_seconds_sum");
-    const latCount = sumPrometheusCounter(metricsText, "azureclaw_inference_latency_seconds_count");
+    const latSum = sumPrometheusCounter(metricsText, "kars_inference_latency_seconds_sum");
+    const latCount = sumPrometheusCounter(metricsText, "kars_inference_latency_seconds_count");
     state.avgLatencyMs = latCount > 0 ? Math.round((latSum / latCount) * 1000) : 0;
   }
 

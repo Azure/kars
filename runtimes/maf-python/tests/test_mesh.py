@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from azureclaw_runtime_maf_python import mesh
+from kars_runtime_maf_python import mesh
 
 
 @respx.mock
@@ -25,7 +25,7 @@ def test_send_message_posts_envelope_to_relay():
 
 @respx.mock
 def test_receive_messages_returns_inbox(monkeypatch):
-    monkeypatch.setenv("AZURECLAW_AGENT_DID", "did:mesh:me")
+    monkeypatch.setenv("KARS_AGENT_DID", "did:mesh:me")
     route = respx.get("http://127.0.0.1:8443/agt/relay/inbox").mock(
         return_value=httpx.Response(
             200,
@@ -83,7 +83,7 @@ def test_send_raises_on_5xx():
 
 @respx.mock
 def test_module_send_message_uses_default_client(monkeypatch):
-    monkeypatch.setenv("AZURECLAW_AGENT_DID", "did:mesh:mod")
+    monkeypatch.setenv("KARS_AGENT_DID", "did:mesh:mod")
     respx.post("http://127.0.0.1:8443/agt/relay/send").mock(
         return_value=httpx.Response(200, json={"ok": True})
     )
@@ -107,7 +107,7 @@ def test_build_envelope_uses_a2a_when_available():
 
 
 def test_relay_url_normalizes_trailing_slash(monkeypatch):
-    monkeypatch.setenv("AZURECLAW_AGT_RELAY_URL", "http://relay.local/agt/relay")
+    monkeypatch.setenv("KARS_AGT_RELAY_URL", "http://relay.local/agt/relay")
     client = mesh.MeshClient()
     assert client.relay_url.endswith("/")
     client.close()

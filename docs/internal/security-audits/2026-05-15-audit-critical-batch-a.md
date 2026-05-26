@@ -62,7 +62,7 @@ with existing operators. Inline comment added on `deriveEncryptionKey()`.
 
 ### 2.5 C7 — Version reconciliation
 README.md / `cli/package.json` / `cli/package-lock.json` /
-`deploy/helm/azureclaw/Chart.yaml` were in three-way drift
+`deploy/helm/kars/Chart.yaml` were in three-way drift
 (`v1.0.0-rc.1`, `0.1.0-alpha.1`, `1.0.0-rc.1`). All aligned to
 `0.1.0`; README phrased "v0.1.0 — pre-1.0 development" so the
 pre-release status is plain. CHANGELOG.md historical entries and

@@ -1,16 +1,16 @@
-# AzureClaw Example: Microsoft Agent Framework (MAF) runtime
+# Kars Example: Microsoft Agent Framework (MAF) runtime
 #
-# Hosts a Microsoft Agent Framework (Python) agent inside an AzureClaw
+# Hosts a Microsoft Agent Framework (Python) agent inside an Kars
 # sandbox. The controller swaps the OpenClaw image for
 # `sandbox-images/maf-python/` and points MAF's Azure OpenAI client at the
 # local inference router. Egress guard, AGT governance, AgentMesh E2E,
 # and seccomp/Landlock isolation are identical to the OpenClaw default.
 #
 # Apply with:
-#   kubectl apply -f examples/maf-quickstart/clawsandbox.yaml
+#   kubectl apply -f examples/maf-quickstart/karssandbox.yaml
 #
 # Pre-reqs:
-#   - AzureClaw control plane installed (`azureclaw up`)
+#   - Kars control plane installed (`kars up`)
 #   - InferencePolicy below references an Azure OpenAI deployment named
 #     `gpt-4.1`. Adjust if needed.
 #   - You publish your MAF agent code to an OCI registry and replace the
@@ -19,13 +19,13 @@
 #     of `oci:` for dev iteration without a container build.
 
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: maf-quickstart-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: maf-quickstart
+    kars.azure.com/sandbox: maf-quickstart
 spec:
   appliesTo:
     sandboxName: maf-quickstart
@@ -39,11 +39,11 @@ spec:
     dailyTokens: 500000
     perRequestTokens: 128000
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: maf-quickstart
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: MicrosoftAgentFramework
@@ -64,7 +64,7 @@ spec:
 
   sandbox:
     isolation: "enhanced"
-    seccompProfile: "azureclaw-strict"
+    seccompProfile: "kars-strict"
     readOnlyRootFilesystem: true
     runAsNonRoot: true
     allowPrivilegeEscalation: false

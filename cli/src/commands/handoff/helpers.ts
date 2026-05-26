@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // Phase 2 / S15 hotspot-pass3: extracted helpers + state for
-// `azureclaw handoff`. The command is intentionally a single
+// `kars handoff`. The command is intentionally a single
 // long-lived action handler — its many helpers all share one piece
 // of mutable state (the AKS port-forward child process + its local
 // port). To keep handoff.ts under the §15 hotspot cap, this module
@@ -62,8 +62,8 @@ export interface HandoffHelpers {
 
 export async function createHandoffHelpers(name: string): Promise<HandoffHelpers> {
   const { execa } = await import("execa");
-  const containerName = `azureclaw-${name}`;
-  const targetNs = `azureclaw-${name}`;
+  const containerName = `kars-${name}`;
+  const targetNs = `kars-${name}`;
   const aksPfPort = 18445; // temp local port for source AKS pod
   let aksPfProc: ChildProcess | undefined;
 
@@ -222,12 +222,12 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
   }
 
   async function getAksAdminToken(): Promise<string | undefined> {
-    // On AKS, the controller mounts the admin token at /etc/azureclaw/secrets/admin-token
+    // On AKS, the controller mounts the admin token at /etc/kars/secrets/admin-token
     try {
       const { stdout } = await execa("kubectl", [
         "exec", "-n", targetNs,
         `deploy/${name}`, "-c", "inference-router", "--",
-        "cat", "/etc/azureclaw/secrets/admin-token",
+        "cat", "/etc/kars/secrets/admin-token",
       ], { stdio: "pipe", reject: false });
       if (stdout.trim()) return stdout.trim();
     } catch {
@@ -238,7 +238,7 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
       const { stdout } = await execa("kubectl", [
         "exec", "-n", targetNs,
         `deploy/${name}`, "-c", "openclaw", "--",
-        "cat", "/etc/azureclaw/secrets/admin-token",
+        "cat", "/etc/kars/secrets/admin-token",
       ], { stdio: "pipe", reject: false });
       if (stdout.trim()) return stdout.trim();
     } catch {
@@ -269,7 +269,7 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
     } catch {
       return {
         ready: false,
-        error: `Container '${containerName}' not found. Run 'azureclaw dev --name ${name}' first.`,
+        error: `Container '${containerName}' not found. Run 'kars dev --name ${name}' first.`,
       };
     }
 
@@ -312,7 +312,7 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
     };
     try {
       const { stdout } = await execa("kubectl", [
-        "get", "clawsandbox", name, "-n", "azureclaw-system",
+        "get", "karssandbox", name, "-n", "kars-system",
         "-o", "json",
       ], { stdio: "pipe" });
       const obj = JSON.parse(stdout);
@@ -326,7 +326,7 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
       if (typeof inferenceRefName === "string" && inferenceRefName.length > 0) {
         try {
           const { stdout: ipStdout } = await execa("kubectl", [
-            "get", "inferencepolicy", inferenceRefName, "-n", "azureclaw-system",
+            "get", "inferencepolicy", inferenceRefName, "-n", "kars-system",
             "-o", "jsonpath={.spec.modelPreference.primary.deployment}",
           ], { stdio: "pipe" });
           const dep = ipStdout.trim();
@@ -339,7 +339,7 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
       // CRs created before S10.A1), legacy openclaw.config, defaults.
       model =
         model ||
-        annotations["azureclaw.azure.com/model"] ||
+        annotations["kars.azure.com/model"] ||
         spec.inference?.model ||
         spec.runtime?.openclaw?.config?.agent?.model?.replace("azure/", "") ||
         defaults.model;
@@ -421,7 +421,7 @@ export async function runStatus(name: string, h: HandoffHelpers): Promise<void> 
     const resp = await h.routerExec("GET", "/agt/handoff/status", undefined, headers);
     const s = resp.body;
 
-    banner("AzureClaw · Handoff Status", name);
+    banner("Kars · Handoff Status", name);
 
     kvLine("Phase", s.phase || "idle");
     kvLine("Direction", s.direction || "—");

@@ -2,19 +2,19 @@
 // Licensed under the MIT License.
 
 /**
- * `azureclaw dev --target local-k8s` — runs a sandbox in a local kind
+ * `kars dev --target local-k8s` — runs a sandbox in a local kind
  * cluster instead of plain Docker. Pairs with a Headlamp dashboard
  * (added in a later phase) so developers get a real K8s view of their
  * agents without needing AKS.
  *
  * Phase 1: skeleton only.
- *   - Detects/creates a kind cluster (default name: azureclaw-dev).
- *   - Loads the locally-built azureclaw images into kind.
+ *   - Detects/creates a kind cluster (default name: kars-dev).
+ *   - Loads the locally-built kars images into kind.
  *   - Helm-installs the existing chart in a local-friendly way.
  *   - Prints a `kubectl exec` recipe.
  *
  * Later phases add: values-local-dev overlay, fake-router, Headlamp,
- * AzureClaw Headlamp plugin, hot-reload, and lifecycle commands.
+ * Kars Headlamp plugin, hot-reload, and lifecycle commands.
  */
 
 import { execa } from "execa";
@@ -23,7 +23,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { existsSync, writeFileSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { Stepper } from "../../stepper.js";
-import { loadConfig, getSecret, type AzureClawConfig } from "../../config.js";
+import { loadConfig, getSecret, type KarsConfig } from "../../config.js";
 import { loadAgtProfile } from "../../refs.js";
 
 export interface LocalK8sOptions {
@@ -47,7 +47,7 @@ export interface LocalK8sOptions {
   /**
    * If true, force-rebuild any sandbox/router/controller image whose
    * arch doesn't match the host (e.g. cached linux/amd64 from a prior
-   * `azureclaw push` on an Apple Silicon laptop) — or that the user
+   * `kars push` on an Apple Silicon laptop) — or that the user
    * explicitly asked to rebuild via the `--build` flag in the
    * common first-run prompt.
    */
@@ -62,7 +62,7 @@ export interface LocalK8sOptions {
   /**
    * Path to the agent-governance-toolkit checkout, used to build AGT relay
    * + registry images when meshProvider==="agt". Defaults to
-   * $AZURECLAW_AGT_REPO or the same fallback dev.ts uses.
+   * $KARS_AGT_REPO or the same fallback dev.ts uses.
    */
   agtRepo?: string;
   /**
@@ -74,7 +74,7 @@ export interface LocalK8sOptions {
   noMesh?: boolean;
   /**
    * External AgentMesh registry URL (e.g. `https://registry.example.com`
-   * or a port-forwarded `http://localhost:18080` from `azureclaw mesh
+   * or a port-forwarded `http://localhost:18080` from `kars mesh
    * promote --port-forward`). When set, the local-k8s flow skips the
    * in-kind relay+registry deployment and the controller / sandbox env
    * is wired to talk to this URL instead.
@@ -112,7 +112,7 @@ export type ContainerRuntime = "docker" | "podman" | "nerdctl";
  *     controller then projects under the same env name.
  *
  * `tokenSecretName` is set only for the foundry path (where we provision
- * a brand-new Secret); copilot/models reuse the existing `azureclaw-dev-creds`
+ * a brand-new Secret); copilot/models reuse the existing `kars-dev-creds`
  * Secret's api-key. `tokenInline` is set when the user pastes a token
  * inline (foundry path with no `gh` CLI available).
  */
@@ -132,13 +132,13 @@ interface GithubMcpDecision {
  * user's mental model (copilot: "you already have a token"; foundry:
  * "we need a fresh GitHub token").
  *
- * Non-interactive (no TTY) or `AZURECLAW_MCP_GITHUB=skip` skips the
+ * Non-interactive (no TTY) or `KARS_MCP_GITHUB=skip` skips the
  * whole prompt — useful for CI / regression scripts.
  */
 async function promptForGithubMcp(
-  creds: AzureClawConfig,
+  creds: KarsConfig,
 ): Promise<GithubMcpDecision> {
-  const envOverride = (process.env.AZURECLAW_MCP_GITHUB ?? "").toLowerCase();
+  const envOverride = (process.env.KARS_MCP_GITHUB ?? "").toLowerCase();
   if (envOverride === "skip" || envOverride === "no" || envOverride === "false") {
     return { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" };
   }
@@ -267,7 +267,7 @@ const RUNTIME_PRIORITY: ContainerRuntime[] = ["docker", "podman", "nerdctl"];
 async function detectRuntime(): Promise<{ name: ContainerRuntime; path: string }> {
   // Honour an explicit override so power users can force a specific
   // runtime even when several are installed.
-  const override = process.env.AZURECLAW_DEV_RUNTIME?.toLowerCase();
+  const override = process.env.KARS_DEV_RUNTIME?.toLowerCase();
   if (
     override === "docker" ||
     override === "podman" ||
@@ -276,7 +276,7 @@ async function detectRuntime(): Promise<{ name: ContainerRuntime; path: string }
     const p = await whichOptional(override);
     if (!p) {
       throw new Error(
-        `AZURECLAW_DEV_RUNTIME=${override} but the '${override}' binary is not on PATH.`,
+        `KARS_DEV_RUNTIME=${override} but the '${override}' binary is not on PATH.`,
       );
     }
     return { name: override, path: p };
@@ -293,7 +293,7 @@ async function detectRuntime(): Promise<{ name: ContainerRuntime; path: string }
   throw new Error(
     "No container runtime found on PATH. Install Docker Desktop, colima, " +
       "podman (with `podman machine` on macOS), or nerdctl, then retry. " +
-      "Set AZURECLAW_DEV_RUNTIME=docker|podman|nerdctl to override " +
+      "Set KARS_DEV_RUNTIME=docker|podman|nerdctl to override " +
       "autodetection.",
   );
 }
@@ -309,14 +309,14 @@ async function ensureKindVersion(kindBin: string): Promise<void> {
   } catch (err) {
     throw new Error(
       `Failed to run \`${kindBin} --version\`: ${(err as Error).message}. ` +
-        `AzureClaw needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
+        `Kars needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
     );
   }
   const m = raw.match(/v?(\d+)\.(\d+)\.(\d+)/);
   if (!m) {
     throw new Error(
       `Could not parse kind version from output: "${raw}". ` +
-        `AzureClaw needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
+        `Kars needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
     );
   }
   const major = Number(m[1]);
@@ -326,7 +326,7 @@ async function ensureKindVersion(kindBin: string): Promise<void> {
     (major === MIN_KIND_MAJOR && minor < MIN_KIND_MINOR);
   if (tooOld) {
     throw new Error(
-      `kind v${major}.${minor}.${m[3]} is too old. AzureClaw needs ` +
+      `kind v${major}.${minor}.${m[3]} is too old. Kars needs ` +
         `v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+ (the post-init untaint ` +
         `step for single-node control-plane clusters was introduced in ` +
         `v0.20). Upgrade with \`brew upgrade kind\` or ` +
@@ -365,7 +365,7 @@ async function ensureTooling(): Promise<Tooling> {
 }
 
 /**
- * Public helper used by `azureclaw dev down` so it can issue
+ * Public helper used by `kars dev down` so it can issue
  * `kind delete cluster` against a cluster created under podman or
  * nerdctl. Returns a copy of `process.env` with
  * `KIND_EXPERIMENTAL_PROVIDER` set/cleared based on what's installed.
@@ -568,13 +568,13 @@ async function rebuildDevImages(
   const specs: Spec[] = [
     {
       name: "inference-router",
-      tag: "azureclaw-inference-router:dev",
+      tag: "kars-inference-router:dev",
       build: async () => {
         await execa(runtime, [
           "build",
           "--platform", platform,
           "--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`,
-          "-t", "azureclaw-inference-router:dev",
+          "-t", "kars-inference-router:dev",
           "-f", path.join(repoRoot, "inference-router/Dockerfile"),
           repoRoot,
         ], { stdio: "inherit" });
@@ -582,12 +582,12 @@ async function rebuildDevImages(
     },
     {
       name: "controller",
-      tag: "azureclaw-controller:dev",
+      tag: "kars-controller:dev",
       build: async () => {
         await execa(runtime, [
           "build",
           "--platform", platform,
-          "-t", "azureclaw-controller:dev",
+          "-t", "kars-controller:dev",
           "-f", path.join(repoRoot, "controller/Dockerfile"),
           repoRoot,
         ], { stdio: "inherit" });
@@ -595,10 +595,10 @@ async function rebuildDevImages(
     },
     {
       name: "sandbox",
-      tag: "azureclaw-sandbox:dev",
+      tag: "kars-sandbox:dev",
       build: async () => {
         // Base image first if not present (heavy — only built once).
-        const baseTag = "azureclaw-sandbox-base:dev";
+        const baseTag = "kars-sandbox-base:dev";
         const azureLinux = "mcr.microsoft.com/azurelinux/base/core:3.0";
         if (!(await localImageExists(runtime, baseTag)) ||
             (await imageArch(runtime, baseTag)) !== archToken) {
@@ -617,12 +617,12 @@ async function rebuildDevImages(
           "build",
           "--platform", platform,
           "--build-arg", `SANDBOX_BASE_IMAGE=${baseTag}`,
-          "--build-arg", `INFERENCE_ROUTER_IMAGE=azureclaw-inference-router:dev`,
+          "--build-arg", `INFERENCE_ROUTER_IMAGE=kars-inference-router:dev`,
           "--build-arg", `MESH_PROVIDER=agt`,
           ...(agtSdkTarballBasename
             ? ["--build-arg", `AGT_SDK_TARBALL=${agtSdkTarballBasename}`]
             : []),
-          "-t", "azureclaw-sandbox:dev",
+          "-t", "kars-sandbox:dev",
           "-f", path.join(repoRoot, "sandbox-images/openclaw/Dockerfile"),
           repoRoot,
         ], { stdio: "inherit" });
@@ -691,7 +691,7 @@ function findRepoRoot(start: string): string {
   }
   if (cur === "/") {
     throw new Error(
-      "Could not locate repo root (Cargo.toml). Run from inside the azureclaw checkout.",
+      "Could not locate repo root (Cargo.toml). Run from inside the kars checkout.",
     );
   }
   return cur;
@@ -714,7 +714,7 @@ async function helmInstall(
     release,
     chartDir,
     "--namespace",
-    "azureclaw-system",
+    "kars-system",
     "--include-crds",
   ];
   for (const overlay of valuesOverlays) {
@@ -738,13 +738,13 @@ async function helmInstall(
  * Materialize a per-run Helm overlay carrying real inference creds from
  * `loadConfig()`. The controller picks the values up from its own env
  * (set via `controller.extraEnv`) and propagates `AZURE_OPENAI_API_KEY`
- * / `AZURECLAW_PROVIDER` / `COPILOT_GITHUB_TOKEN` to every spawned
+ * / `KARS_PROVIDER` / `COPILOT_GITHUB_TOKEN` to every spawned
  * router sidecar (see `controller/src/reconciler/mod.rs`). The router
  * auto-detects API-key auth when those env vars are present and
  * short-circuits the workload-identity / IMDS path used in AKS.
  *
- * The API key itself lives in a K8s Secret (`azureclaw-dev-creds` in
- * `azureclaw-system`) so it never lands in a values file or in
+ * The API key itself lives in a K8s Secret (`kars-dev-creds` in
+ * `kars-system`) so it never lands in a values file or in
  * `kubectl describe` output. The overlay only references it via
  * `valueFrom.secretKeyRef`.
  *
@@ -754,14 +754,14 @@ async function helmInstall(
  */
 async function provisionDevCreds(
   kubectl: string,
-  creds: AzureClawConfig,
+  creds: KarsConfig,
   mcpGithub: GithubMcpDecision = { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" },
 ): Promise<string> {
-  const SECRET_NAME = "azureclaw-dev-creds";
-  const NS = "azureclaw-system";
+  const SECRET_NAME = "kars-dev-creds";
+  const NS = "kars-system";
 
   // Materialize the Secret idempotently. Using `apply` instead of `create`
-  // so re-running `azureclaw dev` after rotating creds picks up the new
+  // so re-running `kars dev` after rotating creds picks up the new
   // value without having to delete the secret first.
   const dryRun = await execa(kubectl, [
     "create",
@@ -807,13 +807,13 @@ async function provisionDevCreds(
   // controller forwards it to both the OpenClaw container and the router
   // sidecar — see `controller/src/reconciler/mod.rs:1015,1223`). We
   // reference the API key via secretKeyRef so it never leaks into a
-  // values file. AZURECLAW_PROVIDER + COPILOT_GITHUB_TOKEN are only set
+  // values file. KARS_PROVIDER + COPILOT_GITHUB_TOKEN are only set
   // for non-Foundry providers — same flag set the docker dev path uses.
   const isCopilot = creds.provider === "github-copilot";
   const isGithubModels = creds.provider === "github-models";
   const providerEnv =
     isCopilot || isGithubModels
-      ? `        - name: AZURECLAW_PROVIDER\n          value: "${creds.provider}"\n`
+      ? `        - name: KARS_PROVIDER\n          value: "${creds.provider}"\n`
       : "";
   // Copilot mode treats the API key as the GitHub PAT — pass it through
   // a second env var because `inference-router/src/copilot_auth.rs`
@@ -826,7 +826,7 @@ async function provisionDevCreds(
     : "";
 
   const overlay = [
-    "# Auto-generated per-run dev overlay. Rewritten on every `azureclaw dev` invocation.",
+    "# Auto-generated per-run dev overlay. Rewritten on every `kars dev` invocation.",
     "# Endpoint flows in via `inferenceRouter.azure.openai.endpoint` below — the chart's",
     "# controller-deployment.yaml already wires that into AZURE_OPENAI_ENDPOINT, so",
     "# duplicating it here would collide on apply.",
@@ -840,7 +840,7 @@ async function provisionDevCreds(
     `          name: ${SECRET_NAME}`,
     "          key: api-key",
     ...(isCopilot || isGithubModels
-      ? ["    - name: AZURECLAW_PROVIDER", `      value: "${creds.provider}"`]
+      ? ["    - name: KARS_PROVIDER", `      value: "${creds.provider}"`]
       : []),
     ...(isCopilot
       ? [
@@ -886,7 +886,7 @@ async function provisionDevCreds(
   void copilotTokenEnv;
   void projectEndpointEnv;
 
-  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-dev-"));
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "kars-dev-"));
   const overlayPath = path.join(tmpDir, "values-local-dev-creds.yaml");
   writeFileSync(overlayPath, overlay, { mode: 0o600 });
   return overlayPath;
@@ -917,7 +917,7 @@ async function deployAgentMesh(
   // ── Build relay + registry images locally (AGT Python) ────────────
   if (!agtRepo) {
     throw new Error(
-      "--mesh-provider=agt requires --agt-repo or $AZURECLAW_AGT_REPO pointing at an agent-governance-toolkit checkout.",
+      "--mesh-provider=agt requires --agt-repo or $KARS_AGT_REPO pointing at an agent-governance-toolkit checkout.",
     );
   }
   const agtDockerfile = path.join(
@@ -926,7 +926,7 @@ async function deployAgentMesh(
   );
   if (!existsSync(agtDockerfile)) {
     throw new Error(
-      `AGT Dockerfile not found at ${agtDockerfile}. Pass --agt-repo <path> or set $AZURECLAW_AGT_REPO.`,
+      `AGT Dockerfile not found at ${agtDockerfile}. Pass --agt-repo <path> or set $KARS_AGT_REPO.`,
     );
   }
   for (const component of ["relay", "registry"] as const) {
@@ -967,7 +967,7 @@ async function deployAgentMesh(
   // Plain-string replacements (no regex) — the manifest contains fixed ACR
   // image references that we swap for the local kind-loaded tags. Using
   // String.replaceAll avoids regex-anchor pitfalls flagged by CodeQL.
-  const acrPrefix = "azureclawacr.azurecr.io";
+  const acrPrefix = "karsacr.azurecr.io";
   const repls: { from: string; to: string }[] = [
     { from: `${acrPrefix}/agentmesh-relay-agt:latest`, to: localTag("relay") },
     { from: `${acrPrefix}/agentmesh-registry-agt:latest`, to: localTag("registry") },
@@ -982,7 +982,7 @@ async function deployAgentMesh(
     `$1\n          imagePullPolicy: Never`,
   );
 
-  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-mesh-"));
+  const tmpDir = mkdtempSync(path.join(os.tmpdir(), "kars-mesh-"));
   const rewritten = path.join(tmpDir, path.basename(manifestPath));
   writeFileSync(rewritten, manifest);
   try {
@@ -1023,10 +1023,10 @@ async function deployAgentMesh(
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   const stepper = new Stepper({ totalSteps: 13 });
 
-  // Fail fast if the user is running outside the azureclaw checkout.
+  // Fail fast if the user is running outside the kars checkout.
   // `--target local-k8s` rebuilds the controller, router, and sandbox
   // images from local source via docker build, which needs the repo
-  // root (Cargo.toml + deploy/helm/azureclaw + sandbox-images/...).
+  // root (Cargo.toml + deploy/helm/kars + sandbox-images/...).
   // Without this check the failure surfaces only AFTER kind cluster
   // creation (10+ seconds wasted, orphaned cluster left behind).
   if (!opts.noBuild) {
@@ -1034,14 +1034,14 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       findRepoRoot(process.cwd());
     } catch {
       throw new Error(
-        "`azureclaw dev --target local-k8s` must be run from inside the azureclaw " +
+        "`kars dev --target local-k8s` must be run from inside the kars " +
           "repo checkout — the dev flow rebuilds the controller, inference-router, " +
           "and sandbox images from local source.\n\n" +
           "Either:\n" +
-          "  • `cd` into your azureclaw checkout and re-run, or\n" +
+          "  • `cd` into your kars checkout and re-run, or\n" +
           "  • pass `--no-build` to use already-loaded images, or\n" +
           "  • use `--target docker` (no cluster, no rebuild — fastest dev loop), or\n" +
-          "  • use `azureclaw up` to deploy to an existing AKS cluster (ACR images).",
+          "  • use `kars up` to deploy to an existing AKS cluster (ACR images).",
       );
     }
   }
@@ -1053,14 +1053,14 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   );
 
   // Load creds up-front so we fail fast (and with a friendly pointer to
-  // `azureclaw credentials`) before paying the cost of cluster bringup
+  // `kars credentials`) before paying the cost of cluster bringup
   // and image loading.
   stepper.step("Loading inference credentials…");
   const creds = loadConfig();
   if (!creds || !creds.apiKey || !creds.endpoint) {
     stepper.stop();
     throw new Error(
-      "no inference credentials found. Run `azureclaw credentials` (or `azureclaw dev` once " +
+      "no inference credentials found. Run `kars credentials` (or `kars dev` once " +
         "without --target local-k8s) to configure GitHub Copilot / GitHub Models / Azure Foundry.",
     );
   }
@@ -1076,7 +1076,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // attach the upstream `api.githubcopilot.com/mcp` server to this
   // sandbox. The decision modulates BOTH `provisionDevCreds` (env+secret
   // wiring on the controller deployment) and `autoCreateSandbox`
-  // (McpServer CR + mcpServerRefs on the ClawSandbox).
+  // (McpServer CR + mcpServerRefs on the KarsSandbox).
   const mcpGithub = await promptForGithubMcp(creds);
   if (mcpGithub.enabled) {
     console.log(
@@ -1094,7 +1094,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
 
   // Ensure the three local-dev images exist AND match the host arch.
   // Without this, a cached linux/amd64 image left over from
-  // `azureclaw push` (which builds for AKS) would crash openclaw under
+  // `kars push` (which builds for AKS) would crash openclaw under
   // Rosetta on an Apple Silicon laptop with
   // `rt_tgsigqueueinfo failed in pend_signal`.
   if (!opts.noBuild) {
@@ -1120,7 +1120,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // the chart references — sandbox, controller, inference-router.
   // Missing any of them turns the helm install into an ErrImageNeverPull
   // loop with no useful diagnostics.
-  stepper.step("Loading AzureClaw images into the kind cluster…");
+  stepper.step("Loading Kars images into the kind cluster…");
   if (opts.noBuild) {
     stepper.done("skipped image load (--no-build)");
   } else {
@@ -1128,22 +1128,22 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       {
         target: opts.image,
         aliases: [
-          "azureclawacr.azurecr.io/openclaw-sandbox:latest",
-          "azureclaw.azurecr.io/openclaw-sandbox:latest",
+          "karsacr.azurecr.io/openclaw-sandbox:latest",
+          "kars.azurecr.io/openclaw-sandbox:latest",
         ],
       },
       {
-        target: "azureclaw-controller:dev",
+        target: "kars-controller:dev",
         aliases: [
-          "azureclawacr.azurecr.io/azureclaw-controller:latest",
-          "azureclaw.azurecr.io/azureclaw-controller:latest",
+          "karsacr.azurecr.io/kars-controller:latest",
+          "kars.azurecr.io/kars-controller:latest",
         ],
       },
       {
-        target: "azureclaw-inference-router:dev",
+        target: "kars-inference-router:dev",
         aliases: [
-          "azureclawacr.azurecr.io/azureclaw-inference-router:latest",
-          "azureclaw.azurecr.io/azureclaw-inference-router:latest",
+          "karsacr.azurecr.io/kars-inference-router:latest",
+          "kars.azurecr.io/kars-inference-router:latest",
         ],
       },
     ];
@@ -1171,7 +1171,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     stepper.done(`loaded ${images.length - missing.length}/${images.length} images`);
   }
 
-  // Sandboxes are scheduled with `nodeSelector: azureclaw.azure.com/pool=sandbox`.
+  // Sandboxes are scheduled with `nodeSelector: kars.azure.com/pool=sandbox`.
   // On a single-node kind cluster we just label the control-plane node — no
   // taint, because tainting would also block system workloads (Headlamp,
   // controller, etc.) from scheduling on the only node we have.
@@ -1183,7 +1183,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       "label",
       "node",
       node,
-      "azureclaw.azure.com/pool=sandbox",
+      "kars.azure.com/pool=sandbox",
       "--overwrite",
     ]);
     // Best-effort: if a previous run added the NoSchedule taint, remove it
@@ -1193,7 +1193,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         "taint",
         "node",
         node,
-        "azureclaw.azure.com/sandbox-",
+        "kars.azure.com/sandbox-",
       ]);
     } catch {
       // taint not present — fine
@@ -1202,11 +1202,11 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     // Best-effort: if the node naming differs the user can fix manually.
   }
 
-  stepper.step("Helm-installing the AzureClaw chart (with local-dev overlay)…");
+  stepper.step("Helm-installing the Kars chart (with local-dev overlay)…");
   const repoRoot = findRepoRoot(process.cwd());
-  const chartDir = path.join(repoRoot, "deploy", "helm", "azureclaw");
+  const chartDir = path.join(repoRoot, "deploy", "helm", "kars");
   if (!existsSync(chartDir)) {
-    throw new Error(`AzureClaw helm chart not found at ${chartDir}`);
+    throw new Error(`Kars helm chart not found at ${chartDir}`);
   }
   const valuesOverlay = path.join(chartDir, "values-local-dev.yaml");
   if (!existsSync(valuesOverlay)) {
@@ -1216,7 +1216,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   }
   // Ensure the namespace exists before applying namespaced resources.
   try {
-    await execa(tools.kubectl, ["create", "namespace", "azureclaw-system"]);
+    await execa(tools.kubectl, ["create", "namespace", "kars-system"]);
   } catch {
     // Namespace already exists — proceed.
   }
@@ -1254,7 +1254,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // Three skip-paths:
   //   1. --no-mesh: pure controller smoke test, no relay/registry at all.
   //   2. --global-registry: an external registry (port-forwarded from a
-  //      remote AKS cluster via `azureclaw mesh promote --port-forward`,
+  //      remote AKS cluster via `kars mesh promote --port-forward`,
   //      or a shared dev URL) is already reachable — no need to deploy
   //      a second local copy. Federation/handoff scenarios live here.
   //   3. Default: build + deploy AGT relay+registry into the kind cluster.
@@ -1287,16 +1287,16 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
 
   stepper.step("Verifying controller deployment is rolling out…");
   // Force a rollout restart in case the deployment already existed (e.g.
-  // user re-ran `azureclaw dev` after rotating creds). Helm's apply
+  // user re-ran `kars dev` after rotating creds). Helm's apply
   // doesn't trigger a restart when only a referenced Secret changes;
   // explicitly restarting catches that case.
   try {
     await execa(tools.kubectl, [
       "rollout",
       "restart",
-      "deployment/azureclaw-controller",
+      "deployment/kars-controller",
       "-n",
-      "azureclaw-system",
+      "kars-system",
     ]);
   } catch {
     // Deployment may not exist yet on first run — fine, rollout status
@@ -1311,9 +1311,9 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       [
         "rollout",
         "status",
-        "deployment/azureclaw-controller",
+        "deployment/kars-controller",
         "-n",
-        "azureclaw-system",
+        "kars-system",
         "--timeout=120s",
       ],
       { stdio: "inherit" },
@@ -1321,7 +1321,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   } catch {
     console.warn(
       chalk.yellow(
-        "  ⚠ controller deployment did not become ready within 120s — check 'kubectl describe deployment/azureclaw-controller -n azureclaw-system'.",
+        "  ⚠ controller deployment did not become ready within 120s — check 'kubectl describe deployment/kars-controller -n kars-system'.",
       ),
     );
   }
@@ -1334,12 +1334,12 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   await installHeadlamp(tools, opts.clusterName);
   stepper.done("Headlamp installed");
 
-  // Phase 5: side-load the AzureClaw Headlamp plugin (CRD views).
-  // Built into a ConfigMap and volume-mounted at /headlamp/plugins/azureclaw
+  // Phase 5: side-load the Kars Headlamp plugin (CRD views).
+  // Built into a ConfigMap and volume-mounted at /headlamp/plugins/kars
   // so it survives pod restarts.
-  stepper.step("Installing AzureClaw Headlamp plugin…");
+  stepper.step("Installing Kars Headlamp plugin…");
   await installAzureclawPlugin(tools, opts.clusterName);
-  stepper.done("AzureClaw plugin installed");
+  stepper.done("Kars plugin installed");
 
   // Phase 5b: Prometheus + Grafana stack so the Headlamp plugin's
   // metric panels (mesh topology msg counts, token budgets, AGT decisions,
@@ -1349,7 +1349,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   stepper.done("Prometheus + Grafana installed");
 
   // Open Headlamp in the user's browser. Port-forward runs detached so
-  // it survives the CLI command exiting; user kills it via `azureclaw dev down`
+  // it survives the CLI command exiting; user kills it via `kars dev down`
   // (Phase 6) or `pkill -f 'port-forward.*headlamp'`.
   const headlampPort = 4466;
   const headlampUrl = `http://localhost:${headlampPort}/`;
@@ -1379,8 +1379,8 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   console.log(`    Prometheus: ${chalk.cyan(prometheusUrl)}`);
   console.log(
     chalk.dim(
-      `    Default dashboards: 'AzureClaw — Sandbox Fleet Overview' (uid azureclaw-fleet)\n` +
-        `                        'AzureClaw — Agent Fleet Operations' (uid azureclaw-ops)`,
+      `    Default dashboards: 'Kars — Sandbox Fleet Overview' (uid kars-fleet)\n` +
+        `                        'Kars — Agent Fleet Operations' (uid kars-ops)`,
     ),
   );
   console.log("");
@@ -1389,10 +1389,10 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // Mirrors docker-mode UX: at this point the user has answered
   // creds + name + channels, so go all the way and bring up THEIR
   // sandbox, not just the platform. Saves the manual `kubectl apply
-  // -f examples/...` + `azureclaw connect <name>` dance.
+  // -f examples/...` + `kars connect <name>` dance.
   stepper.step(`Creating sandbox '${opts.name}'…`);
   await autoCreateSandbox(tools, opts, creds, mcpGithub);
-  stepper.done(`sandbox CR applied (azureclaw-${opts.name})`);
+  stepper.done(`sandbox CR applied (kars-${opts.name})`);
 
   stepper.step("Waiting for sandbox pod to be ready…");
   await waitForSandboxReady(tools, opts.name);
@@ -1420,7 +1420,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     console.log(
       chalk.yellow(
         "  ⚠ gateway token not yet written — the openclaw container is still " +
-          "initializing. Once ready, run 'azureclaw connect " +
+          "initializing. Once ready, run 'kars connect " +
           opts.name +
           "' to get a clickable login URL.",
       ),
@@ -1436,7 +1436,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
 
   console.log(chalk.bold("  Next steps:"));
   console.log(
-    `    azureclaw connect ${opts.name}   ${chalk.dim("# re-open the WebUI later")}`,
+    `    kars connect ${opts.name}   ${chalk.dim("# re-open the WebUI later")}`,
   );
   console.log(
     `    kubectl get pods -A --context kind-${opts.clusterName}`,
@@ -1487,15 +1487,15 @@ async function installHeadlamp(tools: Tooling, clusterName: string): Promise<voi
   }
   await execa(tools.helm, ["repo", "update", "headlamp"]);
 
-  // Render-and-apply (consistent with how we apply the azureclaw chart).
+  // Render-and-apply (consistent with how we apply the kars chart).
   //
-  // NOTE: the chart version is pinned. The AzureClaw Headlamp plugin
+  // NOTE: the chart version is pinned. The Kars Headlamp plugin
   // (tools/headlamp-plugin) is built against @kinvolk/headlamp-plugin
   // ^0.13.0 and depends on a specific `pluginLib` API surface
   // (K8s.cluster.KubeObject, CommonComponents.SimpleTable/SectionBox/Link).
   // Newer chart releases (0.42+) ship Headlamp images whose runtime API
   // has drifted enough that our plugin fails to mount its sidebar entries
-  // or crashes in the list view. Pinning keeps `azureclaw dev` reproducible
+  // or crashes in the list view. Pinning keeps `kars dev` reproducible
   // until we re-test against a newer version and bump intentionally.
   const HEADLAMP_CHART_VERSION = "0.41.0";
   const { stdout } = await execa(tools.helm, [
@@ -1570,9 +1570,9 @@ async function installHeadlamp(tools: Tooling, clusterName: string): Promise<voi
  *
  * The chart version is pinned for reproducibility. The matching Headlamp
  * plugin (tools/headlamp-plugin) reads
- *   azureclaw_mesh_messages_{sent,received}_total
- *   azureclaw_tokens_total
- *   azureclaw_agt_policy_evaluations_total
+ *   kars_mesh_messages_{sent,received}_total
+ *   kars_tokens_total
+ *   kars_agt_policy_evaluations_total
  *   agentmesh_relay_*
  * which all light up once the PodMonitor + json-exporter manifests below
  * are applied.
@@ -1581,7 +1581,7 @@ async function installPrometheus(tools: Tooling, clusterName: string): Promise<v
   const ctx = `kind-${clusterName}`;
 
   // Ensure namespace exists + has the labels the sandbox NetworkPolicy
-  // ingress allows scraping from (app.kubernetes.io/name=azureclaw,
+  // ingress allows scraping from (app.kubernetes.io/name=kars,
   // component=system). Without these labels kindnet would block the
   // PodMonitor scrape on :8443.
   try {
@@ -1595,7 +1595,7 @@ async function installPrometheus(tools: Tooling, clusterName: string): Promise<v
     "label",
     "namespace",
     "monitoring",
-    "app.kubernetes.io/name=azureclaw",
+    "app.kubernetes.io/name=kars",
     "app.kubernetes.io/component=system",
     "--overwrite",
   ]);
@@ -1680,7 +1680,7 @@ kubeProxy:
 `.trimStart();
 
   const KPS_CHART_VERSION = "85.3.3";
-  const tmpdir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-kps-"));
+  const tmpdir = mkdtempSync(path.join(os.tmpdir(), "kars-kps-"));
   const valuesPath = path.join(tmpdir, "values.yaml");
   writeFileSync(valuesPath, valuesYaml);
 
@@ -1744,7 +1744,7 @@ kubeProxy:
     );
   }
 
-  // Apply our AzureClaw-specific monitoring manifests: PodMonitor for
+  // Apply our Kars-specific monitoring manifests: PodMonitor for
   // every sandbox router, prometheus-json-exporter for the AGT relay
   // /health endpoint, and the two Grafana dashboards (fleet + ops).
   const repoRoot = findRepoRoot(process.cwd());
@@ -1778,7 +1778,7 @@ kubeProxy:
 /**
  * Start detached `kubectl port-forward` for Grafana (3000) and Prometheus
  * (19091) so the Headlamp plugin's iframe + ad-hoc PromQL just work
- * after `azureclaw dev`. Same kill-existing-then-spawn pattern as the
+ * after `kars dev`. Same kill-existing-then-spawn pattern as the
  * Headlamp port-forward.
  */
 async function startMonitoringPortForwards(
@@ -1830,11 +1830,11 @@ async function startMonitoringPortForwards(
 }
 
 /**
- * Side-load the AzureClaw Headlamp plugin.
+ * Side-load the Kars Headlamp plugin.
  *
  * Strategy: package `tools/headlamp-plugin/dist/main.js` + `package.json`
  * into a ConfigMap, then patch the Headlamp deployment to mount the
- * ConfigMap at `/headlamp/plugins/azureclaw`. This survives pod restarts
+ * ConfigMap at `/headlamp/plugins/kars`. This survives pod restarts
  * (`kubectl cp` would not — it writes to ephemeral container fs).
  *
  * If the plugin hasn't been built yet we fall back to building it on
@@ -1894,7 +1894,7 @@ async function installAzureclawPlugin(
   const cmYaml = `apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: azureclaw-headlamp-plugin
+  name: kars-headlamp-plugin
   namespace: headlamp
 data:
   main.js: |
@@ -1913,7 +1913,7 @@ ${indent(pkgContent, 4)}
       "apply",
       "--server-side",
       "--force-conflicts",
-      "--field-manager=azureclaw-cli",
+      "--field-manager=kars-cli",
       "-f",
       "-",
     ],
@@ -1921,7 +1921,7 @@ ${indent(pkgContent, 4)}
   );
 
   // Patch the Headlamp Deployment to add the ConfigMap as a volume +
-  // mount it at /headlamp/plugins/azureclaw. Use strategic merge patch
+  // mount it at /headlamp/plugins/kars. Use strategic merge patch
   // so we don't clobber existing volumes/mounts.
   //
   // NB: 'plugins' on the chart is at /build/plugins (the in-image
@@ -1930,7 +1930,7 @@ ${indent(pkgContent, 4)}
   // compatible with both layouts we patch the container's args
   // explicitly to point at our mount, then mount our CM on top.
   //
-  // Simpler approach: mount the CM at /headlamp-plugins/azureclaw
+  // Simpler approach: mount the CM at /headlamp-plugins/kars
   // and rewrite the -plugins-dir arg to /headlamp-plugins.
   const patch = JSON.stringify({
     spec: {
@@ -1938,8 +1938,8 @@ ${indent(pkgContent, 4)}
         spec: {
           volumes: [
             {
-              name: "azureclaw-plugin",
-              configMap: { name: "azureclaw-headlamp-plugin" },
+              name: "kars-plugin",
+              configMap: { name: "kars-headlamp-plugin" },
             },
           ],
           containers: [
@@ -1953,8 +1953,8 @@ ${indent(pkgContent, 4)}
               ],
               volumeMounts: [
                 {
-                  name: "azureclaw-plugin",
-                  mountPath: "/headlamp-plugins/azureclaw",
+                  name: "kars-plugin",
+                  mountPath: "/headlamp-plugins/kars",
                 },
               ],
             },
@@ -2015,7 +2015,7 @@ function indent(s: string, n: number): string {
  * Start `kubectl port-forward` for Headlamp in the background. We
  * detach via 'spawn' (not execa.{detached}) so the CLI process can
  * exit while leaving the forward running. The user kills it with
- * `azureclaw dev down --target local-k8s` (Phase 6).
+ * `kars dev down --target local-k8s` (Phase 6).
  */
 async function startHeadlampPortForward(
   tools: Tooling,
@@ -2142,7 +2142,7 @@ function resolveChannelTokens(
 
 /**
  * Look up the saved Telegram allow-from list (comma-separated numeric
- * user IDs) from `azureclaw credentials`. Mirrors how docker mode
+ * user IDs) from `kars credentials`. Mirrors how docker mode
  * resolves it (see `cli/src/commands/dev.ts` ~line 1260). Without
  * this, local-k8s sandboxes start the Telegram channel unrestricted
  * (any chat can DM the bot) while docker mode honours the allow-list,
@@ -2171,8 +2171,8 @@ function resolveTelegramAllowFrom(channels: string | undefined): string | undefi
 /**
  * Auto-create the sandbox in the cluster: a one-shot YAML bundle with
  * the namespace, optional credentials Secret (telegram/slack/discord
- * tokens), the InferencePolicy CR, and the ClawSandbox CR. Server-side
- * apply so re-running `azureclaw dev` is idempotent.
+ * tokens), the InferencePolicy CR, and the KarsSandbox CR. Server-side
+ * apply so re-running `kars dev` is idempotent.
  *
  * The InferencePolicy `provider` field is just a tag — the actual
  * upstream is governed by the controller env (set by the per-run
@@ -2183,10 +2183,10 @@ function resolveTelegramAllowFrom(channels: string | undefined): string | undefi
 async function autoCreateSandbox(
   tools: Tooling,
   opts: LocalK8sOptions,
-  creds: AzureClawConfig,
+  creds: KarsConfig,
   mcpGithub: GithubMcpDecision = { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" },
 ): Promise<void> {
-  const ns = `azureclaw-${opts.name}`;
+  const ns = `kars-${opts.name}`;
   const policyName = `${opts.name}-inference`;
 
   // Channels: convert tokens to a base64-encoded Secret block. The
@@ -2225,12 +2225,12 @@ async function autoCreateSandbox(
 
   const toolPolicyName = `${opts.name}-toolpolicy`;
 
-  // Slice "well-oiled-machine" — auto-emit a default ClawMemory binding
+  // Slice "well-oiled-machine" — auto-emit a default KarsMemory binding
   // for the Foundry provider path. github-copilot / github-models don't
   // have a Foundry Memory Store, so we skip the CR there (and the router
   // simply omits the memory tools, gracefully). The Foundry path lets the
   // router auto-provision the store on first 404 (see
-  // claw_memory_reconciler.rs + Slice 6.5 follow-up docs).
+  // kars_memory_reconciler.rs + Slice 6.5 follow-up docs).
   //
   // storeName must be a DNS-label (≤63 chars). Sandbox name is already
   // DNS-1123 (≤63 chars max in practice), but truncate defensively so
@@ -2256,16 +2256,16 @@ async function autoCreateSandbox(
     "metadata:",
     `  name: ${ns}`,
     "  labels:",
-    `    azureclaw.azure.com/sandbox: ${opts.name}`,
+    `    kars.azure.com/sandbox: ${opts.name}`,
     credsBlock,
     "---",
-    "apiVersion: azureclaw.azure.com/v1alpha1",
+    "apiVersion: kars.azure.com/v1alpha1",
     "kind: InferencePolicy",
     "metadata:",
     `  name: ${policyName}`,
-    "  namespace: azureclaw-system",
+    "  namespace: kars-system",
     "  labels:",
-    `    azureclaw.azure.com/sandbox: ${opts.name}`,
+    `    kars.azure.com/sandbox: ${opts.name}`,
     "spec:",
     "  appliesTo:",
     `    sandboxName: ${opts.name}`,
@@ -2285,23 +2285,23 @@ async function autoCreateSandbox(
     // build_sub_agent_crd). Without this stub, every spawn lands in
     // Degraded with `ToolPolicyNotFound`. Permissive default — selector
     // matches the parent's sandbox label only, no rate-limit, no
-    // approval, no commerce. Operators tighten via `azureclaw toolpolicy`.
+    // approval, no commerce. Operators tighten via `kars toolpolicy`.
     //
     // `agtProfile.inline` is mandatory post-Slice-1e phase 2 (the bundled
-    // sandbox-side fallback at /opt/azureclaw-plugin/policies/ is gone),
-    // so we inline the same default profile that `azureclaw add` uses.
-    "apiVersion: azureclaw.azure.com/v1alpha1",
+    // sandbox-side fallback at /opt/kars-plugin/policies/ is gone),
+    // so we inline the same default profile that `kars add` uses.
+    "apiVersion: kars.azure.com/v1alpha1",
     "kind: ToolPolicy",
     "metadata:",
     `  name: ${toolPolicyName}`,
-    "  namespace: azureclaw-system",
+    "  namespace: kars-system",
     "  labels:",
-    `    azureclaw.azure.com/sandbox: ${opts.name}`,
+    `    kars.azure.com/sandbox: ${opts.name}`,
     "spec:",
     "  appliesTo:",
     '    tool: "*"',
     "    sandboxMatchLabels:",
-    `      azureclaw.azure.com/sandbox: ${opts.name}`,
+    `      kars.azure.com/sandbox: ${opts.name}`,
     "  agtProfile:",
     "    inline: |",
     ...loadAgtProfile("default")
@@ -2320,11 +2320,11 @@ async function autoCreateSandbox(
     // include write access.
     ...(mcpGithub.enabled
       ? [
-          "apiVersion: azureclaw.azure.com/v1alpha1",
+          "apiVersion: kars.azure.com/v1alpha1",
           "kind: McpServer",
           "metadata:",
           "  name: github",
-          "  namespace: azureclaw-system",
+          "  namespace: kars-system",
           "spec:",
           "  url: https://api.githubcopilot.com/mcp",
           `  bearerFromEnv: ${mcpGithub.envVarName}`,
@@ -2340,23 +2340,23 @@ async function autoCreateSandbox(
           "---",
         ]
       : []),
-    // well-oiled-machine — Foundry-only ClawMemory binding.
+    // well-oiled-machine — Foundry-only KarsMemory binding.
     // Auto-emits a default scope so the openclaw plugin's memory
     // tools (search_memories / update_memories / delete_scope in
     // runtimes/openclaw/src/core/agt-tools/foundry.ts) have a
     // resolved Memory Store from first boot. The router auto-
-    // provisions the store on first 404 (claw_memory_reconciler.rs +
+    // provisions the store on first 404 (kars_memory_reconciler.rs +
     // Slice 6.5 follow-up docs). Skipped for github-copilot /
     // github-models — no Foundry Memory Store on those paths.
     ...(wantMemoryCr
       ? [
-          "apiVersion: azureclaw.azure.com/v1alpha1",
-          "kind: ClawMemory",
+          "apiVersion: kars.azure.com/v1alpha1",
+          "kind: KarsMemory",
           "metadata:",
           `  name: ${opts.name}-memory`,
-          "  namespace: azureclaw-system",
+          "  namespace: kars-system",
           "  labels:",
-          `    azureclaw.azure.com/sandbox: ${opts.name}`,
+          `    kars.azure.com/sandbox: ${opts.name}`,
           "spec:",
           "  sandboxRef:",
           `    name: ${opts.name}`,
@@ -2368,11 +2368,11 @@ async function autoCreateSandbox(
           "---",
         ]
       : []),
-    "apiVersion: azureclaw.azure.com/v1alpha1",
-    "kind: ClawSandbox",
+    "apiVersion: kars.azure.com/v1alpha1",
+    "kind: KarsSandbox",
     "metadata:",
     `  name: ${opts.name}`,
-    "  namespace: azureclaw-system",
+    "  namespace: kars-system",
     ...(mcpGithub.enabled
       ? ["  labels:", "    mcp-github: allow"]
       : []),
@@ -2387,7 +2387,7 @@ async function autoCreateSandbox(
     `          model: "azure/${creds.model || "gpt-4.1"}"`,
     "  sandbox:",
     '    isolation: "enhanced"',
-    '    seccompProfile: "azureclaw-strict"',
+    '    seccompProfile: "kars-strict"',
     "    readOnlyRootFilesystem: true",
     "    runAsNonRoot: true",
     "    allowPrivilegeEscalation: false",
@@ -2396,10 +2396,10 @@ async function autoCreateSandbox(
     "      - /tmp",
     "  inferenceRef:",
     `    name: ${policyName}`,
-    // well-oiled-machine — wire ClawMemory back-ref so the controller
-    // mounts /etc/azureclaw/memory/binding.json on the router and the
-    // ClawMemory CR promotes from Compiled → Ready (router echo). Same
-    // namespace as the sandbox (azureclaw-system).
+    // well-oiled-machine — wire KarsMemory back-ref so the controller
+    // mounts /etc/kars/memory/binding.json on the router and the
+    // KarsMemory CR promotes from Compiled → Ready (router echo). Same
+    // namespace as the sandbox (kars-system).
     ...(wantMemoryCr
       ? ["  memoryRef:", `    name: ${opts.name}-memory`]
       : []),
@@ -2420,7 +2420,7 @@ async function autoCreateSandbox(
     // Slice 4d.4.1 — wire the GitHub MCP server when the user opted
     // in. The CR itself is emitted separately below; here we just
     // attach it via mcpServerRefs so the controller materializes
-    // /etc/azureclaw/mcp/github/meta.json into the router pod.
+    // /etc/kars/mcp/github/meta.json into the router pod.
     ...(mcpGithub.enabled
       ? ["    mcpServerRefs:", "      - name: github"]
       : []),
@@ -2431,7 +2431,7 @@ async function autoCreateSandbox(
     //   `Network request for 'deleteMyCommands' failed`
     // because api.telegram.org / slack.com / discord.com aren't on the
     // allowlist. Operators promote learned domains to a strict
-    // allowlist via `azureclaw policy allow` once they're happy.
+    // allowlist via `kars policy allow` once they're happy.
     "  networkPolicy:",
     "    defaultDeny: true",
     "    egressMode: Learn",
@@ -2447,7 +2447,7 @@ async function autoCreateSandbox(
       "apply",
       "--server-side",
       "--force-conflicts",
-      "--field-manager=azureclaw-cli",
+      "--field-manager=kars-cli",
       "-f",
       "-",
     ],
@@ -2470,7 +2470,7 @@ async function waitForSandboxReady(
   tools: Tooling,
   name: string,
 ): Promise<void> {
-  const ns = `azureclaw-${name}`;
+  const ns = `kars-${name}`;
   const ctx = ["--context", `kind-${ /* clusterName isn't on Tooling */ ""}`];
   // Strip the empty context arg if cluster name isn't tracked here —
   // current-context is set during `ensureCluster` to kind-<clusterName>
@@ -2496,7 +2496,7 @@ async function waitForSandboxReady(
   if (Date.now() >= deadline) {
     throw new Error(
       `controller did not create deployment '${name}' in namespace '${ns}' within 120s. ` +
-        `Check 'kubectl logs -n azureclaw-system deploy/azureclaw-controller'.`,
+        `Check 'kubectl logs -n kars-system deploy/kars-controller'.`,
     );
   }
 
@@ -2525,25 +2525,25 @@ async function waitForSandboxReady(
  * loads but rejects every request with 401.
  *
  * The port-forward is spawned **detached** so it survives the CLI
- * exiting; teardown is handled by `azureclaw dev down` (which kills
+ * exiting; teardown is handled by `kars dev down` (which kills
  * any port-forward processes targeting the kind cluster).
  */
 async function startSandboxConnect(
   tools: Tooling,
   name: string,
 ): Promise<{ url: string; token: string }> {
-  const ns = `azureclaw-${name}`;
+  const ns = `kars-${name}`;
   const localPort = 18789;
 
   // The token is provisioned by the controller as a K8s Secret named
   // `gateway-token` in the sandbox namespace. The openclaw container reads
   // it via the OPENCLAW_GATEWAY_TOKEN env var. We must NOT `kubectl exec
   // cat /tmp/gateway-token` here — that path is blocked by the
-  // ValidatingAdmissionPolicy `azureclaw-sandbox-exec-ban` and silently
+  // ValidatingAdmissionPolicy `kars-sandbox-exec-ban` and silently
   // 403s, causing this loop to time out after ~3 minutes even though the
   // gateway is up.
   //
-  // Reading the Secret matches `azureclaw connect`'s behavior (see
+  // Reading the Secret matches `kars connect`'s behavior (see
   // cli/src/commands/connect.ts ~line 143) and is gated by namespaced
   // RBAC on the Secret instead of a cluster-wide exec capability.
   let token = "";
@@ -2573,7 +2573,7 @@ async function startSandboxConnect(
   }
 
   // Detached port-forward. Match the headlamp port-forward pattern so
-  // `azureclaw dev down` can clean it up uniformly.
+  // `kars dev down` can clean it up uniformly.
   const { spawn } = await import("node:child_process");
   const pf = spawn(
     tools.kubectl,

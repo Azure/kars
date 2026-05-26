@@ -15,7 +15,7 @@
 //!
 //! ```json
 //! {
-//!   "namespace": "azureclaw-system",
+//!   "namespace": "kars-system",
 //!   "name": "mandate-issuer-bootstrap",
 //!   "signingKeys": [
 //!     {
@@ -191,7 +191,7 @@ mod tests {
         let path = write(
             tmp.path(),
             &json!({
-                "namespace": "azureclaw-system",
+                "namespace": "kars-system",
                 "name": "mandate-issuer-bootstrap",
                 "signingKeys": [
                     {"kid": "issuer-1", "alg": "EdDSA", "publicKeyB64u": vk_b64u(1)}

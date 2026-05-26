@@ -12,7 +12,7 @@
       },
       "expect": {
         "decision": "Blocked",
-        "byPolicyKind": "ClawMemory",
+        "byPolicyKind": "KarsMemory",
         "reasonContains": "scope"
       }
     },
@@ -26,7 +26,7 @@
       },
       "expect": {
         "decision": "Blocked",
-        "byPolicyKind": "ClawMemory",
+        "byPolicyKind": "KarsMemory",
         "reasonContains": "scope"
       }
     },
@@ -40,7 +40,7 @@
       },
       "expect": {
         "decision": "Blocked",
-        "byPolicyKind": "ClawMemory",
+        "byPolicyKind": "KarsMemory",
         "reasonContains": "scope"
       }
     },
@@ -54,7 +54,7 @@
       },
       "expect": {
         "decision": "Blocked",
-        "byPolicyKind": "ClawMemory",
+        "byPolicyKind": "KarsMemory",
         "reasonContains": "scope"
       }
     },
@@ -68,7 +68,7 @@
       },
       "expect": {
         "decision": "Blocked",
-        "byPolicyKind": "ClawMemory",
+        "byPolicyKind": "KarsMemory",
         "reasonContains": "scope"
       }
     }

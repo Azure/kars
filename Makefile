@@ -1,10 +1,10 @@
-# AzureClaw Makefile
+# Kars Makefile
 # Usage: make build | make test | make lint | make images | make clean
 
 VERSION ?= $(shell cat cli/package.json | grep '"version"' | head -1 | sed 's/.*"\([0-9].*\)".*/\1/')
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 IMAGE_TAG ?= $(VERSION)-$(GIT_SHA)
-REGISTRY ?= azureclawacr.azurecr.io
+REGISTRY ?= karsacr.azurecr.io
 
 .PHONY: build test lint images clean cli controller router
 
@@ -13,10 +13,10 @@ REGISTRY ?= azureclawacr.azurecr.io
 build: controller router cli ## Build all components
 
 controller: ## Build the Rust controller
-	cargo build --release --package azureclaw-controller
+	cargo build --release --package kars-controller
 
 router: ## Build the Rust inference router
-	cargo build --release --package azureclaw-inference-router
+	cargo build --release --package kars-inference-router
 
 cli: ## Build the TypeScript CLI
 	cd cli && npm ci && npm run build
@@ -36,7 +36,7 @@ test-e2e: ## Run E2E tests (requires Docker + Kind)
 test-e2e-manual: ## Run the manual E2E matrix against an existing cluster (see tests/e2e-manual/README.md)
 	bash tests/e2e-manual/run.sh
 
-helm-package: ## Lint + package the AzureClaw Helm chart into ./dist/charts/
+helm-package: ## Lint + package the Kars Helm chart into ./dist/charts/
 	bash deploy/helm/package.sh
 
 docs-site: ## Build the mdbook documentation site into target/book/ (requires mdbook)
@@ -68,64 +68,64 @@ image-runtimes: image-runtime-anthropic image-runtime-langgraph image-runtime-ma
 
 image-runtime-anthropic: ## Build Anthropic Claude Agent SDK runtime image
 	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/azureclaw-runtime-anthropic:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-runtime-anthropic:latest \
+		-t $(REGISTRY)/kars-runtime-anthropic:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-runtime-anthropic:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f sandbox-images/anthropic/Dockerfile .
 
 image-runtime-langgraph: ## Build LangGraph (Python) runtime image
 	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/azureclaw-runtime-langgraph:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-runtime-langgraph:latest \
+		-t $(REGISTRY)/kars-runtime-langgraph:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-runtime-langgraph:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f sandbox-images/langgraph/Dockerfile .
 
 image-runtime-langgraph-ts: ## Build LangGraph (TypeScript) runtime image
 	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/azureclaw-runtime-langgraph-ts:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-runtime-langgraph-ts:latest \
+		-t $(REGISTRY)/kars-runtime-langgraph-ts:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-runtime-langgraph-ts:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f sandbox-images/langgraph-ts/Dockerfile .
 
 image-runtime-maf-python: ## Build Microsoft Agent Framework (Python) runtime image
 	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/azureclaw-runtime-maf-python:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-runtime-maf-python:latest \
+		-t $(REGISTRY)/kars-runtime-maf-python:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-runtime-maf-python:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f sandbox-images/maf-python/Dockerfile .
 
 image-runtime-openai-agents: ## Build OpenAI Agents SDK runtime image
 	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/azureclaw-runtime-openai-agents:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-runtime-openai-agents:latest \
+		-t $(REGISTRY)/kars-runtime-openai-agents:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-runtime-openai-agents:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f sandbox-images/openai-agents/Dockerfile .
 
 image-runtime-pydantic-ai: ## Build Pydantic-AI runtime image
 	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/azureclaw-runtime-pydantic-ai:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-runtime-pydantic-ai:latest \
+		-t $(REGISTRY)/kars-runtime-pydantic-ai:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-runtime-pydantic-ai:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f sandbox-images/pydantic-ai/Dockerfile .
 
 image-controller: ## Build controller Docker image
 	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/azureclaw-controller:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-controller:latest \
+		-t $(REGISTRY)/kars-controller:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-controller:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f controller/Dockerfile .
 
 image-router: ## Build inference router Docker image
 	docker build --platform linux/amd64 \
-		-t $(REGISTRY)/azureclaw-inference-router:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-inference-router:latest \
+		-t $(REGISTRY)/kars-inference-router:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-inference-router:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f inference-router/Dockerfile .
@@ -133,14 +133,14 @@ image-router: ## Build inference router Docker image
 image-sandbox-base: ## Build sandbox base image (heavy deps — rebuild when upgrading OpenClaw/Python/Go tools)
 	docker build --platform linux/amd64 \
 		--build-arg OPENCLAW_CACHE_BUST=$$(date +%s) \
-		-t $(REGISTRY)/azureclaw-sandbox-base:$(IMAGE_TAG) \
-		-t $(REGISTRY)/azureclaw-sandbox-base:latest \
+		-t $(REGISTRY)/kars-sandbox-base:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-sandbox-base:latest \
 		-f sandbox-images/openclaw/Dockerfile.base .
 
 image-sandbox: image-router ## Build sandbox Docker image (slim overlay — fast per-commit rebuild)
 	docker build --platform linux/amd64 \
-		--build-arg SANDBOX_BASE_IMAGE=$(REGISTRY)/azureclaw-sandbox-base:latest \
-		--build-arg INFERENCE_ROUTER_IMAGE=$(REGISTRY)/azureclaw-inference-router:latest \
+		--build-arg SANDBOX_BASE_IMAGE=$(REGISTRY)/kars-sandbox-base:latest \
+		--build-arg INFERENCE_ROUTER_IMAGE=$(REGISTRY)/kars-inference-router:latest \
 		-t $(REGISTRY)/openclaw-sandbox:$(IMAGE_TAG) \
 		-t $(REGISTRY)/openclaw-sandbox:latest \
 		-f sandbox-images/openclaw/Dockerfile .
@@ -152,29 +152,29 @@ image-sandbox: image-router ## Build sandbox Docker image (slim overlay — fast
 # longer owns these targets after the Phase 5.2 vendored fork removal.
 
 push: ## Push all images to ACR (controller + router + sandbox-base + sandbox + runtimes)
-	docker push $(REGISTRY)/azureclaw-controller:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-controller:latest
-	docker push $(REGISTRY)/azureclaw-inference-router:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-inference-router:latest
-	docker push $(REGISTRY)/azureclaw-sandbox-base:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-sandbox-base:latest
+	docker push $(REGISTRY)/kars-controller:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-controller:latest
+	docker push $(REGISTRY)/kars-inference-router:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-inference-router:latest
+	docker push $(REGISTRY)/kars-sandbox-base:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-sandbox-base:latest
 	docker push $(REGISTRY)/openclaw-sandbox:$(IMAGE_TAG)
 	docker push $(REGISTRY)/openclaw-sandbox:latest
 
 push-runtimes: ## Push all runtime adapter images to ACR
-	docker push $(REGISTRY)/azureclaw-runtime-anthropic:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-runtime-anthropic:latest
-	docker push $(REGISTRY)/azureclaw-runtime-langgraph:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-runtime-langgraph:latest
-	docker push $(REGISTRY)/azureclaw-runtime-maf-python:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-runtime-maf-python:latest
-	docker push $(REGISTRY)/azureclaw-runtime-openai-agents:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-runtime-openai-agents:latest
-	docker push $(REGISTRY)/azureclaw-runtime-pydantic-ai:$(IMAGE_TAG)
-	docker push $(REGISTRY)/azureclaw-runtime-pydantic-ai:latest
+	docker push $(REGISTRY)/kars-runtime-anthropic:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-runtime-anthropic:latest
+	docker push $(REGISTRY)/kars-runtime-langgraph:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-runtime-langgraph:latest
+	docker push $(REGISTRY)/kars-runtime-maf-python:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-runtime-maf-python:latest
+	docker push $(REGISTRY)/kars-runtime-openai-agents:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-runtime-openai-agents:latest
+	docker push $(REGISTRY)/kars-runtime-pydantic-ai:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-runtime-pydantic-ai:latest
 
 apply: ## Apply Helm chart to AKS (fast upgrade)
-	azureclaw up --upgrade
+	kars up --upgrade
 
 push-apply: cli images push apply ## Rebuild CLI, build all images, push to ACR, apply to AKS
 
@@ -182,13 +182,13 @@ push-apply: cli images push apply ## Rebuild CLI, build all images, push to ACR,
 
 dev: cli ## Start local development sandbox
 	cd cli && npm link
-	azureclaw dev
+	kars dev
 
 dev-compose-up: cli ## Start the local fake-router dev stack (plan T4)
 	docker compose -f docker-compose.dev.yml up -d
 	@echo
 	@echo "Fake router live at http://127.0.0.1:8443"
-	@echo "  Point AZURECLAW_ROUTER_URL=http://127.0.0.1:8443 at any AzureClaw client."
+	@echo "  Point KARS_ROUTER_URL=http://127.0.0.1:8443 at any Kars client."
 	@echo "  Tear down with: make dev-compose-down"
 
 dev-compose-down: ## Stop the local fake-router dev stack

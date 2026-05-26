@@ -6,14 +6,14 @@ requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
 
 [project]
-name = "azureclaw_runtime_maf_python"
+name = "kars_runtime_maf_python"
 version = "0.1.0"
-description = "AzureClaw in-pod adapter for the Microsoft Agent Framework Python SDK — AAD shim, OTel auto-init, AgentMesh bridge, and Foundry tools out of the box."
+description = "Kars in-pod adapter for the Microsoft Agent Framework Python SDK — AAD shim, OTel auto-init, AgentMesh bridge, and Foundry tools out of the box."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 authors = [
-    {name = "Microsoft Corporation", email = "azureclaw@microsoft.com"},
+    {name = "Microsoft Corporation", email = "kars@microsoft.com"},
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -53,11 +53,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Azure/azureclaw"
-Repository = "https://github.com/Azure/azureclaw"
+Homepage = "https://github.com/Azure/kars"
+Repository = "https://github.com/Azure/kars"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/azureclaw_runtime_maf_python"]
+packages = ["src/kars_runtime_maf_python"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

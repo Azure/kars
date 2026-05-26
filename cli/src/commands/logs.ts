@@ -15,7 +15,7 @@ export function logsCommand(): Command {
     .option("--service <svc>", "Service to show logs for (router, gateway, openclaw, node-host, all)", "all")
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
-      const containerName = `azureclaw-${name}`;
+      const containerName = `kars-${name}`;
 
       // Try local Docker first
       let isDocker = false;
@@ -72,13 +72,13 @@ export function logsCommand(): Command {
       }
 
       // Fall back to Kubernetes
-      const namespace = `azureclaw-${name}`;
+      const namespace = `kars-${name}`;
       const args = [
         "logs",
         "-n",
         namespace,
         "-l",
-        `azureclaw.azure.com/sandbox=${name}`,
+        `kars.azure.com/sandbox=${name}`,
         "--tail",
         options.tail,
       ];

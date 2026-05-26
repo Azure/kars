@@ -44,9 +44,9 @@ export async function connectToAgent(ctx: ConnectAgentContext): Promise<void> {
   if (!sb) return;
 
   // ── AKS sandboxes: port-forward + WebUI URL (do NOT exec into pod) ──
-  // The `azureclaw-sandbox-exec-ban` ValidatingAdmissionPolicy denies
+  // The `kars-sandbox-exec-ban` ValidatingAdmissionPolicy denies
   // exec/attach into the openclaw container. The legitimate flow (per
-  // the policy's own message and `azureclaw connect`) is:
+  // the policy's own message and `kars connect`) is:
   //   1. read the gateway-token Secret (RBAC-gated)
   //   2. kubectl port-forward to 18789
   //   3. open WebUI at http://localhost:18789/#token=...
@@ -57,7 +57,7 @@ export async function connectToAgent(ctx: ConnectAgentContext): Promise<void> {
     const isAks = !devMode;
     if (!isAks) {
       // sb says aks but we're not pointed at AKS — refuse early.
-      activityLog.log(`{red-fg}✗ ${sb.name}: AKS sandbox but operator started with --dev. Run 'azureclaw connect ${sb.name}' from another terminal.{/}`);
+      activityLog.log(`{red-fg}✗ ${sb.name}: AKS sandbox but operator started with --dev. Run 'kars connect ${sb.name}' from another terminal.{/}`);
       render(); screen.render();
       return;
     }

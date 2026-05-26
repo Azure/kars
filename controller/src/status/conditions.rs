@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Standardised K8s Condition helpers for AzureClaw CRD status subresources.
+//! Standardised K8s Condition helpers for Kars CRD status subresources.
 //!
 //! **Why a helper module, not inline `json!({...})` in the reconciler.**
 //! K8s Conditions have strict semantics:
@@ -33,7 +33,7 @@
 
 // The constants and helpers here define shared vocabulary for every
 // reconciler that writes conditions. `Ready` + `Reconciled` are consumed
-// today by the ClawSandbox reconciler; `Progressing`, `Degraded`, and the
+// today by the KarsSandbox reconciler; `Progressing`, `Degraded`, and the
 // remaining `reason::*` values are the pinned vocabulary for upcoming
 // reconcilers (McpServer, ToolPolicy, etc., per plan §7). Locking them in
 // now prevents each future PR from reinventing slightly-different names.
@@ -80,7 +80,7 @@ pub const TYPE_RUNTIME_READY: &str = "RuntimeReady";
 /// canonical-form rules from `docs/internal/policy-canonical-format.md`.
 ///
 /// Emitted whenever `allowlistRef` is set on the CR. The S12.b
-/// `AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate was lifted in S12.e —
+/// `KARS_FEATURE_SIGNED_ALLOWLIST` env gate was lifted in S12.e —
 /// the verification path is always-on once an operator opts in by
 /// populating `allowlistRef`.
 ///
@@ -139,7 +139,7 @@ pub mod reason {
     pub const DEPENDENCY_MISSING: &str = "DependencyMissing";
     pub const TIMED_OUT: &str = "TimedOut";
     /// Phase 2 S8 — `OverlayMode`: operator's upstream `Sandbox` CR
-    /// owns the Pod; AzureClaw provides the governance overlay only.
+    /// owns the Pod; Kars provides the governance overlay only.
     pub const OVERLAY_MODE: &str = "OverlayMode";
     /// Phase 2 S10 — `AdapterMissing`: the runtime declared in
     /// `spec.runtime.kind` is recognised by the CRD but the controller
@@ -162,7 +162,7 @@ pub mod reason {
     /// SignerPolicy, canonical form re-validated.
     pub const VERIFIED: &str = "Verified";
     /// Phase 2 S13 — `InferencePolicyNotFound`: the
-    /// `ClawSandbox.spec.inferenceRef.name` did not resolve to an
+    /// `KarsSandbox.spec.inferenceRef.name` did not resolve to an
     /// `InferencePolicy` CR in the sandbox's namespace. Same-namespace
     /// constraint is enforced; cross-namespace lookups are not allowed.
     pub const INFERENCE_POLICY_NOT_FOUND: &str = "InferencePolicyNotFound";
@@ -211,11 +211,11 @@ pub mod reason {
     /// digest the controller published. This closes the principles.md
     /// §3 invariant ("Ready ⇔ router echo") for ToolPolicy's AGT
     /// profile. Slice 1c is the first user; later slices reuse it for
-    /// InferencePolicy, ClawMemory, and McpServer plural.
+    /// InferencePolicy, KarsMemory, and McpServer plural.
     pub const ROUTER_ENFORCING: &str = "RouterEnforcing";
 
     /// A ToolPolicy with `spec.agtProfile.inline` set has no
-    /// referencing `ClawSandbox` — no router exists to confirm
+    /// referencing `KarsSandbox` — no router exists to confirm
     /// enforcement. The controller stamps `phase=Compiled` with
     /// this reason rather than `Ready` because there is no consumer
     /// to honor the policy yet. As soon as a sandbox references the
@@ -230,7 +230,7 @@ pub mod reason {
     /// `foundry.memory` MCP tool). This is *not* a transient network
     /// error; it indicates a misconfigured project-MI or wrong
     /// `Azure AI User` role assignment (see the
-    /// `azureclaw-deployment` skill notes on the project-MI
+    /// `kars-deployment` skill notes on the project-MI
     /// gotcha). The controller stamps `Ready=False` / `Degraded=True`
     /// with this reason so operators don't waste time chasing
     /// transient digest mismatches when the real problem is RBAC.
@@ -246,7 +246,7 @@ pub mod reason {
     /// least one referencing sandbox's router observed an HTTP 404
     /// from the upstream Foundry Memory Store on a
     /// `foundry.memory.{search,update,...}` call. The store the
-    /// compiled `ClawMemory` binding points at does not exist (yet)
+    /// compiled `KarsMemory` binding points at does not exist (yet)
     /// on the Foundry side. Today the openclaw runtime lazily
     /// auto-creates stores via `ensureMemoryStore` on first sync, so
     /// 404 is operator-visible up to the first runtime sync. Slice
@@ -264,7 +264,7 @@ pub mod reason {
     pub const MEMORY_STORE_MISSING: &str = "MemoryStoreMissing";
 
     /// `crd-well-oiled-machine` Slice 4d.1 — `McpSingularDeprecated`:
-    /// the ClawSandbox uses `spec.governance.mcpServerRef` (singular),
+    /// the KarsSandbox uses `spec.governance.mcpServerRef` (singular),
     /// which is superseded by `spec.governance.mcpServerRefs` (plural).
     /// The singular path keeps working in Slice 4d.1 (one-to-one
     /// alias), but operators should migrate. Emitted as a Warning

@@ -10,7 +10,7 @@
 //! nested JSON, malformed arrays, SSE-looking text, huge strings, etc.
 
 use libfuzzer_sys::fuzz_target;
-use azureclaw_inference_router::handoff;
+use kars_inference_router::handoff;
 
 fuzz_target!(|data: &[u8]| {
     let _ = handoff::sanitize_chat_snapshot(data);

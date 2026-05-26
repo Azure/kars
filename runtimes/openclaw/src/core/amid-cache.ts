@@ -25,11 +25,11 @@ export const nameToAmidTs: Map<string, number> = new Map();
 export const AMID_CACHE_TTL_MS = 60_000;
 
 // Spawned-sibling roster: name → role/persona description provided at spawn
-// time by the parent. Used by azureclaw_mesh_send to prepend a deterministic
+// time by the parent. Used by kars_mesh_send to prepend a deterministic
 // "Peer roster:" block to outbound task content so sub-agents can resolve
 // role references ("the writer", "the graphic designer") to canonical names
-// without LLM guessing. Populated on azureclaw_spawn, cleaned on
-// azureclaw_spawn_destroy.
+// without LLM guessing. Populated on kars_spawn, cleaned on
+// kars_spawn_destroy.
 export const spawnedRoster: Map<string, string> = new Map();
 
 // ── Name-based trust (authoritative) ──────────────────────────────────
@@ -113,7 +113,7 @@ export function setCachedAmid(name: string, amid: string): void {
 // last_seen.
 //
 // **Trust scope (important):** within a single cluster the AgentMesh registry
-// is cluster-local (NetworkPolicy-gated) and ClawSandbox names are unique by
+// is cluster-local (NetworkPolicy-gated) and KarsSandbox names are unique by
 // K8s admission, so display_name uniquely identifies one sandbox and the
 // duplicates we see in the registry are always different AMIDs of the same
 // logical sandbox across pod restarts (sandbox identities are ephemeral by
@@ -179,7 +179,7 @@ export async function resolveAmidByName(
   const timeoutMs = opts.timeoutMs ?? 5000;
   try {
     // Use the provider-aware registry abstraction so we hit the right URL
-    // shape under AZURECLAW_MESH_PROVIDER=agt. When the caller pinned a
+    // shape under KARS_MESH_PROVIDER=agt. When the caller pinned a
     // custom base, we construct an explicit impl rather than the cached
     // singleton (sub-agents override base via AGT_REGISTRY_URL).
     const { getMeshRegistry } = await import("./mesh-registry.js");

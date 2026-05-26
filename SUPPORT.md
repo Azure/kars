@@ -14,21 +14,21 @@ We provide templates for common issue types:
 - **Feature Request** — new capabilities or improvements  
 - **Security Report** — vulnerability disclosures (see [SECURITY.md](SECURITY.md))
 
-Browse existing issues at https://github.com/Azure/azureclaw/issues.
+Browse existing issues at https://github.com/Azure/kars/issues.
 
 ### Getting help
 
 For questions and usage guidance:
 
-- **Preferred:** [GitHub Discussions](https://github.com/Azure/azureclaw/discussions) (best-effort community support)
+- **Preferred:** [GitHub Discussions](https://github.com/Azure/kars/discussions) (best-effort community support)
 - **Alternative:** File a GitHub Issue with the `question` label
 - **Security issues:** Do **not** file public issues. Report through [SECURITY.md](SECURITY.md) instead
 
 ### Scope of support
 
-Bug reports and feature requests **for AzureClaw itself** are in scope:
+Bug reports and feature requests **for Kars itself** are in scope:
 
-- Core AzureClaw controller and inference router
+- Core Kars controller and inference router
 - CLI commands and behavior
 - Integration with Azure AI Foundry and AKS
 - E2E encryption and governance features

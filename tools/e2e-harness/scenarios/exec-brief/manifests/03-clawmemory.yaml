@@ -1,22 +1,22 @@
-# 03-clawmemory.yaml — Foundry Memory Store binding for the exec-brief
+# 03-karsmemory.yaml — Foundry Memory Store binding for the exec-brief
 # sandbox. Lets the analyst persist its JSON artifact so later
 # sub-agent invocations (or a retry) can pick it up without re-running
 # the web search.
 #
 # Provisioning: the controller drives Memory Store creation on the
 # Foundry project (project MI must have "Azure AI User" on the resource
-# group — see docs/api/crd-reference.md ClawMemory section). The
+# group — see docs/api/crd-reference.md KarsMemory section). The
 # project MI is what authenticates the internal model calls Memory Store
 # makes during update_memories / search_memories — the user's RBAC alone
 # is not enough.
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawMemory
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsMemory
 metadata:
   name: execbrief-memory
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: execbrief
+    kars.azure.com/sandbox: execbrief
 spec:
   # storeName: DNS-label, becomes the Foundry Memory Store partition for
   # everything this sandbox writes. Required when bundleRef is absent.

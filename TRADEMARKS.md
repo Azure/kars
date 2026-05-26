@@ -11,17 +11,17 @@ trademarks or logos is subject to those third parties' policies.
 
 ## Project marks
 
-"AzureClaw", the AzureClaw wordmark, and the trident/claw symbol used in this
+"Kars", the Kars wordmark, and the trident/claw symbol used in this
 repository are project marks of Microsoft Corporation. They identify the
-official upstream distribution of AzureClaw and the components published from
+official upstream distribution of Kars and the components published from
 this repository.
 
 You may reference these marks in factual, descriptive ways — for example, to
-state that your software interoperates with AzureClaw, builds on AzureClaw, or
-deploys AzureClaw. You may not use them in a way that suggests endorsement,
-affiliation, or that your fork is the official AzureClaw distribution.
+state that your software interoperates with Kars, builds on Kars, or
+deploys Kars. You may not use them in a way that suggests endorsement,
+affiliation, or that your fork is the official Kars distribution.
 
-If you fork or substantially modify AzureClaw and redistribute it, please use a
+If you fork or substantially modify Kars and redistribute it, please use a
 distinct name and mark for the resulting project so users can tell the two
 apart. Removing or replacing project marks in source files you modify is
 permitted and encouraged for forks.

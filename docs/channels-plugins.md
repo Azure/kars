@@ -1,6 +1,6 @@
 # Channels & Plugins
 
-Messaging channels and third-party plugins extend your AzureClaw agent with external communication and search capabilities. Configuration is handled via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
+Messaging channels and third-party plugins extend your Kars agent with external communication and search capabilities. Configuration is handled via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
 
 ---
 
@@ -8,7 +8,7 @@ Messaging channels and third-party plugins extend your AzureClaw agent with exte
 
 ### Overview
 
-Channels connect your agent to messaging platforms. Pass channel flags to `azureclaw dev` (local) or `azureclaw add` (AKS) and the entrypoint enables them automatically.
+Channels connect your agent to messaging platforms. Pass channel flags to `kars dev` (local) or `kars add` (AKS) and the entrypoint enables them automatically.
 
 | Channel | Flag | Credential Flag | Notes |
 |---------|------|-----------------|-------|
@@ -20,7 +20,7 @@ Channels connect your agent to messaging platforms. Pass channel flags to `azure
 Multiple channels can be enabled at once:
 
 ```bash
-azureclaw dev --channels telegram,slack --telegram-token "TOKEN" --slack-token "xoxb-TOKEN"
+kars dev --channels telegram,slack --telegram-token "TOKEN" --slack-token "xoxb-TOKEN"
 ```
 
 ### Telegram Setup
@@ -30,10 +30,10 @@ azureclaw dev --channels telegram,slack --telegram-token "TOKEN" --slack-token "
 
 ```bash
 # Local
-azureclaw dev --channels telegram --telegram-token "123456:ABC-DEF..."
+kars dev --channels telegram --telegram-token "123456:ABC-DEF..."
 
 # AKS
-azureclaw add my-agent --channels telegram --telegram-token "123456:ABC-DEF..." --learn-egress
+kars add my-agent --channels telegram --telegram-token "123456:ABC-DEF..." --learn-egress
 ```
 
 ### Slack Setup
@@ -43,7 +43,7 @@ azureclaw add my-agent --channels telegram --telegram-token "123456:ABC-DEF..." 
 3. Install to workspace → copy Bot User OAuth Token
 
 ```bash
-azureclaw dev --channels slack --slack-token "xoxb-..."
+kars dev --channels slack --slack-token "xoxb-..."
 ```
 
 ### Discord Setup
@@ -53,7 +53,7 @@ azureclaw dev --channels slack --slack-token "xoxb-..."
 3. Invite the bot to your server with `Send Messages` and `Read Message History` permissions
 
 ```bash
-azureclaw dev --channels discord --discord-token "TOKEN"
+kars dev --channels discord --discord-token "TOKEN"
 ```
 
 ### WhatsApp Setup
@@ -61,7 +61,7 @@ azureclaw dev --channels discord --discord-token "TOKEN"
 WhatsApp uses QR code pairing — no token flag needed. The agent prints a QR code to the console on first launch.
 
 ```bash
-azureclaw dev --channels whatsapp
+kars dev --channels whatsapp
 ```
 
 Scan the QR code with WhatsApp on your phone to link the session.
@@ -85,10 +85,10 @@ Plugins are activated by providing their API keys via CLI flags. The entrypoint 
 
 ```bash
 # Enable Brave and Tavily search
-azureclaw dev --brave-api-key "KEY" --tavily-api-key "KEY"
+kars dev --brave-api-key "KEY" --tavily-api-key "KEY"
 
 # AKS deployment with plugins
-azureclaw add my-agent --brave-api-key "KEY" --tavily-api-key "KEY" --learn-egress
+kars add my-agent --brave-api-key "KEY" --tavily-api-key "KEY" --learn-egress
 ```
 
 ### Environment Variable Fallback
@@ -98,7 +98,7 @@ If you prefer not to pass keys via CLI flags, set the environment variables dire
 ```bash
 export BRAVE_API_KEY="your-key"
 export TAVILY_API_KEY="your-key"
-azureclaw dev
+kars dev
 ```
 
 ---
@@ -122,10 +122,10 @@ Built-in web search powered by Azure AI Foundry's Responses API with Bing Ground
 
 ```bash
 # Local development with Foundry web search
-azureclaw dev --build
+kars dev --build
 
 # AKS (connection discovered automatically via Workload Identity)
-azureclaw add my-agent --learn-egress
+kars add my-agent --learn-egress
 ```
 
 ### Manual Override
@@ -134,7 +134,7 @@ If auto-discovery fails (e.g., multiple Bing connections), set the connection ID
 
 ```bash
 export BING_CONNECTION_ID="/subscriptions/.../connections/bing-grounding"
-azureclaw dev
+kars dev
 ```
 
 ### Troubleshooting
@@ -150,13 +150,13 @@ azureclaw dev
 
 ## Credentials on AKS (K8s Secrets)
 
-When deploying to AKS with `azureclaw add`, channel tokens and plugin API keys are stored as Kubernetes secrets in the agent's namespace:
+When deploying to AKS with `kars add`, channel tokens and plugin API keys are stored as Kubernetes secrets in the agent's namespace:
 
 ```
-CLI (azureclaw add --telegram-token "...")
+CLI (kars add --telegram-token "...")
     │
     ▼
-K8s Secret (azureclaw-<name>/<name>-credentials)
+K8s Secret (kars-<name>/<name>-credentials)
     │
     ▼
 Controller mounts via envFrom in pod spec
@@ -168,7 +168,7 @@ entrypoint.sh reads env vars → configures channels/plugins
 Agent process (pre-configured, never sees raw tokens)
 ```
 
-Secret naming convention: All credentials are stored in a **single secret** named `<name>-credentials` in the `azureclaw-<name>` namespace. The secret contains keys mapped to environment variables:
+Secret naming convention: All credentials are stored in a **single secret** named `<name>-credentials` in the `kars-<name>` namespace. The secret contains keys mapped to environment variables:
 
 | Credential Type | Secret Key | Environment Variable |
 |----------------|------------|---------------------|
@@ -185,24 +185,24 @@ Secret naming convention: All credentials are stored in a **single secret** name
 | OpenAI API key | `OPENAI_API_KEY` | `OPENAI_API_KEY` |
 
 These secrets are:
-- **Created automatically** by the CLI during `azureclaw add` or `azureclaw credentials update`
+- **Created automatically** by the CLI during `kars add` or `kars credentials update`
 - **Mounted as environment variables** into the sandbox pod by the controller (via `envFrom` with `optional: true` — pods start even without credentials)
 - **Read by the entrypoint** — which auto-configures channels/plugins before handing off to the agent
 - **Scoped to the agent namespace** — other agents cannot access them
 
 ### Rotating Credentials
 
-Use `azureclaw credentials update` to rotate tokens on a running sandbox:
+Use `kars credentials update` to rotate tokens on a running sandbox:
 
 ```bash
 # Update a single credential
-azureclaw credentials update my-agent --telegram-token "NEW_TOKEN"
+kars credentials update my-agent --telegram-token "NEW_TOKEN"
 
 # Update multiple credentials at once
-azureclaw credentials update my-agent --telegram-token "NEW" --brave-api-key "NEW"
+kars credentials update my-agent --telegram-token "NEW" --brave-api-key "NEW"
 
 # Update without restarting the pod (apply on next restart)
-azureclaw credentials update my-agent --telegram-token "NEW" --no-restart
+kars credentials update my-agent --telegram-token "NEW" --no-restart
 ```
 
 The command updates the K8s secret and triggers a rolling restart of the sandbox pod (unless `--no-restart` is passed).
@@ -235,15 +235,15 @@ No manual configuration files needed — everything is driven by environment var
 | Slack `invalid_auth` | Token revoked or wrong workspace | Reinstall the Slack app and use the new `xoxb-` token |
 | Discord bot offline | Missing `MESSAGE_CONTENT` intent | Enable it in Discord Developer Portal → Bot → Privileged Gateway Intents |
 | WhatsApp QR not appearing | Console output buffered | Check gateway logs: `kubectl logs <pod> -c openclaw` |
-| Channel traffic blocked | Domain not on egress allowlist | Run `azureclaw egress <name> --learned` and approve channel API domains |
+| Channel traffic blocked | Domain not on egress allowlist | Run `kars egress <name> --learned` and approve channel API domains |
 
 ### Plugin Issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Plugin tool not available | API key env var not set | Verify with `kubectl exec <pod> -c openclaw -- env \| grep API_KEY` |
-| Plugin returns errors | Invalid API key | Use `azureclaw credentials update <name> --brave-api-key "NEW_KEY"` |
-| Plugin works locally but not on AKS | Secret not mounted | Check secret exists: `kubectl get secret -n azureclaw-<name>` |
+| Plugin returns errors | Invalid API key | Use `kars credentials update <name> --brave-api-key "NEW_KEY"` |
+| Plugin works locally but not on AKS | Secret not mounted | Check secret exists: `kubectl get secret -n kars-<name>` |
 | Multiple plugins conflicting | N/A — plugins are independent | Each plugin registers its own tool; no conflicts expected |
 
 ### Foundry Bing Search Issues
@@ -259,14 +259,14 @@ No manual configuration files needed — everything is driven by environment var
 
 ```bash
 # Check which channels and plugins are active
-kubectl logs <pod> -c openclaw -n azureclaw-<name> | head -50
+kubectl logs <pod> -c openclaw -n kars-<name> | head -50
 
 # Check env vars injected into the sandbox
-kubectl exec <pod> -c openclaw -n azureclaw-<name> -- env | sort
+kubectl exec <pod> -c openclaw -n kars-<name> -- env | sort
 
 # View entrypoint auto-configuration output
-kubectl logs <pod> -c openclaw -n azureclaw-<name> | grep -E "(channel|plugin|bing)"
+kubectl logs <pod> -c openclaw -n kars-<name> | grep -E "(channel|plugin|bing)"
 
 # Rotate a credential and restart
-azureclaw credentials update <name> --telegram-token "NEW_TOKEN"
+kars credentials update <name> --telegram-token "NEW_TOKEN"
 ```

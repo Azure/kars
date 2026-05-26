@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 /**
- * `azureclaw memory` — manage `ClawMemory` CRs.
+ * `kars memory` — manage `KarsMemory` CRs.
  *
- * A `ClawMemory` binds a `ClawSandbox` to a Foundry Memory Store
+ * A `KarsMemory` binds a `KarsSandbox` to a Foundry Memory Store
  * (storeName + scope) with optional retention and a delete-on-sandbox-
  * delete finalizer. CRD shape is the source of truth: see
- * `deploy/helm/azureclaw/templates/crd-clawmemory.yaml` (kind=ClawMemory,
- * plural=clawmemories, group=azureclaw.azure.com/v1alpha1).
+ * `deploy/helm/kars/templates/crd-karsmemory.yaml` (kind=KarsMemory,
+ * plural=karsmemories, group=kars.azure.com/v1alpha1).
  *
  * Mirrors the structure of `mcp.ts` and `inferencepolicy.ts` so the CLI
  * surface stays uniform.
@@ -24,8 +24,8 @@ import {
 } from "./crd-helpers.js";
 import { runApply, runDelete, runGet, runList } from "./toolpolicy.js";
 
-const KIND = "ClawMemory";
-const PLURAL = "clawmemories";
+const KIND = "KarsMemory";
+const PLURAL = "karsmemories";
 
 export interface MemoryApplyOptions {
   fromFile?: string;
@@ -108,13 +108,13 @@ export function summarizeMemoryRow(
 
 export function memoryCommand(): Command {
   const cmd = new Command("memory")
-    .description("Manage ClawMemory CRs (Foundry Memory Store bindings for sandboxes)");
+    .description("Manage KarsMemory CRs (Foundry Memory Store bindings for sandboxes)");
 
   cmd
     .command("apply")
-    .description("Create or update a ClawMemory binding")
-    .argument("<name>", "ClawMemory name (DNS-1123)")
-    .option("-n, --namespace <ns>", "Namespace (use 'azureclaw-<sandbox>')", "default")
+    .description("Create or update a KarsMemory binding")
+    .argument("<name>", "KarsMemory name (DNS-1123)")
+    .option("-n, --namespace <ns>", "Namespace (use 'kars-<sandbox>')", "default")
     .option("--from-file <path>", "Read spec from a YAML/JSON file")
     .option("--sandbox <name>", "Sandbox to bind (spec.sandboxRef.name)")
     .option("--store <name>", "Foundry Memory Store name (DNS-label)")
@@ -134,7 +134,7 @@ export function memoryCommand(): Command {
 
   cmd
     .command("get")
-    .description("Show a ClawMemory by name")
+    .description("Show a KarsMemory by name")
     .argument("<name>", "Name")
     .option("-n, --namespace <ns>", "Namespace", "default")
     .option("-o, --output <fmt>", "Output: pretty|yaml|json", "pretty")
@@ -143,7 +143,7 @@ export function memoryCommand(): Command {
         const spec = (item.spec ?? {}) as Record<string, unknown>;
         const status = (item.status ?? {}) as Record<string, unknown>;
         const sandboxRef = spec.sandboxRef as { name?: string } | undefined;
-        console.log(chalk.bold(`\n  ClawMemory/${name}\n`));
+        console.log(chalk.bold(`\n  KarsMemory/${name}\n`));
         console.log(`  Sandbox:        ${sandboxRef?.name ?? "-"}`);
         console.log(`  Store:          ${spec.storeName ?? "-"}`);
         console.log(`  Scope:          ${spec.scope ?? "-"}`);
@@ -157,7 +157,7 @@ export function memoryCommand(): Command {
 
   cmd
     .command("list")
-    .description("List ClawMemory bindings in a namespace")
+    .description("List KarsMemory bindings in a namespace")
     .option("-n, --namespace <ns>", "Namespace", "default")
     .action(async (opts: { namespace: string }) => {
       await runList(
@@ -170,7 +170,7 @@ export function memoryCommand(): Command {
 
   cmd
     .command("delete")
-    .description("Delete a ClawMemory binding")
+    .description("Delete a KarsMemory binding")
     .argument("<name>", "Name")
     .option("-n, --namespace <ns>", "Namespace", "default")
     .option("--no-prompt", "Skip confirmation")

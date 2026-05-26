@@ -1,4 +1,4 @@
-// AzureClaw - ACR Module
+// Kars - ACR Module
 
 @description('ACR name (must be globally unique, alphanumeric)')
 param name string

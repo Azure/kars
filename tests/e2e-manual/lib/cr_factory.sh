@@ -2,14 +2,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# ClawSandbox CR factory — produces small, valid CRs from runtime + name.
+# KarsSandbox CR factory — produces small, valid CRs from runtime + name.
 #
 # Sourced by scenarios/*.sh. Every helper writes its YAML to stdout so
 # callers can pipe to `kubectl apply -f -`.
 #
-# S13 phase2-config-authority-refs: ClawSandbox.spec now requires
+# S13 phase2-config-authority-refs: KarsSandbox.spec now requires
 # `runtime`, `sandbox`, and `inferenceRef`. Each helper therefore emits
-# *two* documents — a sibling InferencePolicy and the ClawSandbox itself
+# *two* documents — a sibling InferencePolicy and the KarsSandbox itself
 # — separated by `---`. The test harness `kubectl apply -f -` consumes
 # both in one round-trip.
 
@@ -19,21 +19,21 @@
 #
 # Emits the sibling InferencePolicy FIRST so that when kubectl applies
 # the multi-doc stream, the policy exists by the time the controller
-# reconciles the ClawSandbox. Otherwise the sandbox latches to
+# reconciles the KarsSandbox. Otherwise the sandbox latches to
 # `Degraded / InferencePolicyNotFound` and never recovers (controller
 # does not re-reconcile when the dependent appears later — see
-# https://github.com/Azure/azureclaw/issues TBD).
+# https://github.com/Azure/kars/issues TBD).
 _meta() {
     _inference_policy "$1" "$2"
     cat <<EOF
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: ${1}
   namespace: ${2}
   labels:
-    azureclaw.azure.com/test-suite: manual-e2e
+    kars.azure.com/test-suite: manual-e2e
 EOF
 }
 
@@ -45,14 +45,14 @@ EOF
 _inference_policy() {
     cat <<EOF
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: ${1}-inference
   namespace: ${2}
   labels:
-    azureclaw.azure.com/sandbox: ${1}
-    azureclaw.azure.com/test-suite: manual-e2e
+    kars.azure.com/sandbox: ${1}
+    kars.azure.com/test-suite: manual-e2e
 spec:
   appliesTo:
     sandboxName: ${1}

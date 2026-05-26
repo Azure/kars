@@ -5,7 +5,7 @@
  * Sandbox isolation invariants — seccomp / Landlock / egress-guard.
  *
  * See internal Phase 1 plan §5.4. These are e2e-class tests:
- * they need a running Kind cluster with the AzureClaw Helm chart
+ * they need a running Kind cluster with the Kars Helm chart
  * installed so the real sandbox image and NetworkPolicy / seccomp
  * / Landlock surface can be exercised.
  *
@@ -13,7 +13,7 @@
  * harness (Phase 1) supplies the `kubectl` proxy used here.
  *
  * Every negative case here maps to a documented hardening path:
- *   - seccomp: cli/profiles/seccomp/azureclaw-strict.json
+ *   - seccomp: cli/profiles/seccomp/kars-strict.json
  *   - Landlock: sandbox-images/openclaw/entrypoint.sh landlock_policy()
  *   - egress-guard: iptables rules in init container (see
  *     sandbox-images/openclaw/Dockerfile + entrypoint.sh)
@@ -25,7 +25,7 @@ const d = E2E ? describe : describe.skip;
 
 d("seccomp — syscall denial", () => {
   it.todo("forbidden syscall (e.g. mount) → EPERM, not silent allow");
-  it.todo("seccomp profile is azureclaw-strict by default on sandbox pods");
+  it.todo("seccomp profile is kars-strict by default on sandbox pods");
   it.todo("MAP auto-inject assigns seccomp to pods missing it (Phase 1)");
   it.todo("denied syscall is counted in audit-log (not just kernel log)");
 });

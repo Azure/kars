@@ -13,7 +13,7 @@ import { banner, section, kvLine, checkLine } from "../stepper.js";
 // ---------------------------------------------------------------------------
 
 const TOKEN_PREFIX = "azcp_1_";
-const PAIRING_NAMESPACE = "azureclaw-system";
+const PAIRING_NAMESPACE = "kars-system";
 
 interface PairingTokenPayload {
   controller_amid: string;
@@ -56,7 +56,7 @@ export function pairCommand(): Command {
   const cmd = new Command("pair");
   cmd.description("Manage federation pairings for external agent cloud offload");
 
-  // ── azureclaw pair generate ──
+  // ── kars pair generate ──
   cmd
     .command("generate")
     .description("Generate a one-time pairing token for an external agent")
@@ -68,7 +68,7 @@ export function pairCommand(): Command {
     .option("--relay-url <url>", "AgentMesh relay URL", "ws://host.docker.internal:18765")
     .option("--registry-url <url>", "AgentMesh registry URL", "http://host.docker.internal:18080")
     .action(async (options) => {
-      banner("AzureClaw · Pair", "Federation Pairing Token");
+      banner("Kars · Pair", "Federation Pairing Token");
 
       // Parse expiry duration
       const expiresAt = parseDuration(options.expires);
@@ -111,10 +111,10 @@ export function pairCommand(): Command {
       // Parse capabilities
       const capabilities = options.capabilities.split(",").map((c: string) => c.trim());
 
-      // Build ClawPairing CRD
+      // Build KarsPairing CRD
       const pairing = {
-        apiVersion: "azureclaw.azure.com/v1alpha1",
-        kind: "ClawPairing",
+        apiVersion: "kars.azure.com/v1alpha1",
+        kind: "KarsPairing",
         metadata: {
           name: sanitizeName(options.name),
           namespace: PAIRING_NAMESPACE,
@@ -136,7 +136,7 @@ export function pairCommand(): Command {
           input: JSON.stringify(pairing),
           stdio: ["pipe", "pipe", "pipe"],
         });
-        checkLine(true, "ClawPairing created");
+        checkLine(true, "KarsPairing created");
       } catch (err: any) {
         console.error(chalk.red(`Failed to create pairing: ${err.stderr || err.message}`));
         process.exit(1);
@@ -186,16 +186,16 @@ export function pairCommand(): Command {
       console.log();
     });
 
-  // ── azureclaw pair list ──
+  // ── kars pair list ──
   cmd
     .command("list")
     .description("List all federation pairings")
     .action(async () => {
-      banner("AzureClaw · Pairings", "Federation Status");
+      banner("Kars · Pairings", "Federation Status");
 
       try {
         const { stdout } = await execa("kubectl", [
-          "get", "clawpairings", "-n", PAIRING_NAMESPACE,
+          "get", "karspairings", "-n", PAIRING_NAMESPACE,
           "-o", "json",
         ], { stdio: "pipe" });
 
@@ -203,7 +203,7 @@ export function pairCommand(): Command {
         const items = result.items || [];
 
         if (items.length === 0) {
-          console.log(chalk.dim("  No pairings found. Create one with: azureclaw pair generate --name <name>"));
+          console.log(chalk.dim("  No pairings found. Create one with: kars pair generate --name <name>"));
           return;
         }
 
@@ -239,20 +239,20 @@ export function pairCommand(): Command {
         console.log();
       } catch (err: any) {
         if (err.stderr?.includes("not found") || err.stderr?.includes("no matches")) {
-          console.log(chalk.dim("  ClawPairing CRD not installed. Deploy with Helm first."));
+          console.log(chalk.dim("  KarsPairing CRD not installed. Deploy with Helm first."));
         } else {
           console.error(chalk.red(`  Failed to list pairings: ${err.stderr || err.message}`));
         }
       }
     });
 
-  // ── azureclaw pair revoke ──
+  // ── kars pair revoke ──
   cmd
     .command("revoke")
     .description("Revoke a pairing (blocks future offloads)")
     .argument("<name>", "Name of the pairing to revoke")
     .action(async (name: string) => {
-      banner("AzureClaw · Revoke Pairing", "");
+      banner("Kars · Revoke Pairing", "");
 
       const safeName = sanitizeName(name);
 
@@ -262,7 +262,7 @@ export function pairCommand(): Command {
           status: { phase: "Revoked" },
         });
         await execa("kubectl", [
-          "patch", "clawpairing", safeName,
+          "patch", "karspairing", safeName,
           "-n", PAIRING_NAMESPACE,
           "--type=merge", "--subresource=status",
           "-p", patch,
@@ -276,19 +276,19 @@ export function pairCommand(): Command {
       }
     });
 
-  // ── azureclaw pair inspect ──
+  // ── kars pair inspect ──
   cmd
     .command("inspect")
     .description("Show detailed info about a pairing")
     .argument("<name>", "Name of the pairing to inspect")
     .action(async (name: string) => {
-      banner("AzureClaw · Pairing Details", "");
+      banner("Kars · Pairing Details", "");
 
       const safeName = sanitizeName(name);
 
       try {
         const { stdout } = await execa("kubectl", [
-          "get", "clawpairing", safeName,
+          "get", "karspairing", safeName,
           "-n", PAIRING_NAMESPACE,
           "-o", "json",
         ], { stdio: "pipe" });

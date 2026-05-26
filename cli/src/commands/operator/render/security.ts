@@ -42,7 +42,7 @@ export function renderSecurity(ctx: SecurityRenderContext): void {
     return;
   }
 
-  const seccompLabel = sec.seccomp === "azureclaw-strict"
+  const seccompLabel = sec.seccomp === "kars-strict"
     ? "{green-fg}strict (~219){/}" : `{yellow-fg}${sec.seccomp}{/}`;
 
   const egressLabel = sec.egressMode === "learning"

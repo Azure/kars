@@ -2,11 +2,11 @@
 // Licensed under the MIT License.
 
 /**
- * In-process fake AzureClaw inference router.
+ * In-process fake Kars inference router.
  *
  * Groundwork for the local compose stack (plan item T4) and the scenario
  * runner (T5). Bind this on any loopback port and point the plugin at it via
- * `AZURECLAW_ROUTER_URL` (currently honoured at plugin.ts:3340 and
+ * `KARS_ROUTER_URL` (currently honoured at plugin.ts:3340 and
  * plugin.ts:4698; remaining ~30 hardcoded call sites are the subject of a
  * separate quality PR — see plan.md Q-items).
  *
@@ -21,7 +21,7 @@
  *     ],
  *   });
  *   try {
- *     process.env.AZURECLAW_ROUTER_URL = router.baseUrl;
+ *     process.env.KARS_ROUTER_URL = router.baseUrl;
  *     // ... exercise code under test ...
  *     expect(router.log).toHaveLength(1);
  *   } finally {

@@ -2,20 +2,20 @@
 // Licensed under the MIT License.
 
 /**
- * AzureClaw — OpenClaw Plugin
+ * Kars — OpenClaw Plugin
  *
- * Registers AzureClaw commands, Azure OpenAI as a model provider,
+ * Registers Kars commands, Azure OpenAI as a model provider,
  * and agent tools (spawn, mesh, inbox, destroy) within the OpenClaw
  * plugin system using the native definePluginEntry SDK.
  *
  * AGT Integration: identity, signing, and verification use Node's
- * native `crypto` (via `@azureclaw/mesh`). Mesh transport delegates
+ * native `crypto` (via `@kars/mesh`). Mesh transport delegates
  * to the Microsoft Agent Governance Toolkit SDK. Tool-level policy
- * evaluation runs inline against a small allow/deny table. AzureClaw's
+ * evaluation runs inline against a small allow/deny table. Kars's
  * Rust router handles infrastructure-level controls (mesh routing,
  * content safety, token budgets).
  *
- * Usage: openclaw azureclaw <command>
+ * Usage: openclaw kars <command>
  */
 
 import type { Command } from "commander";
@@ -66,7 +66,7 @@ process.on("unhandledRejection", (reason: any) => {
   const msg = reason?.message || String(reason);
   // EPERM from file watchers on read-only rootfs — harmless, suppress
   if (msg.includes("EPERM") && msg.includes("watch")) return;
-  console.error("[azureclaw] Unhandled rejection (suppressed crash):", msg);
+  console.error("[kars] Unhandled rejection (suppressed crash):", msg);
 });
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ process.on("unhandledRejection", (reason: any) => {
 // The sandbox's iptables egress-guard blocks UID 1000 from direct network
 // egress except to 127.0.0.1:8443 (inference router) and DNS. All plugin
 // traffic therefore flows through ROUTER_BASE. Override via
-// AZURECLAW_ROUTER_URL for tests (FakeRouter, docker-compose.dev.yml).
+// KARS_ROUTER_URL for tests (FakeRouter, docker-compose.dev.yml).
 //
 // Late-binding: the env var is re-read on every call so tests can set it
 // after module load.
@@ -167,7 +167,7 @@ let agtInitialized = false; // Module-level guard (supplemented by process-level
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
 const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string; message_type?: string; read_at?: string }> = [];
 
-// Inbox + gateway diagnostics. Surface in azureclaw_mesh_inbox responses so
+// Inbox + gateway diagnostics. Surface in kars_mesh_inbox responses so
 // the LLM (and operators triaging "inbox empty" reports) can distinguish:
 //   - never received   → received_total === 0
 //   - already consumed → received_total > 0 && current array is small/empty
@@ -187,7 +187,7 @@ const inboxStats = {
   read_total: 0,
   // ISO timestamp of last successful agtInbox.push (any source)
   last_received_at: null as string | null,
-  // ISO timestamp of last successful azureclaw_mesh_inbox tool invocation
+  // ISO timestamp of last successful kars_mesh_inbox tool invocation
   last_read_at: null as string | null,
 };
 
@@ -314,8 +314,8 @@ let handoffInterruptReason = "";
 
 // Module-level logger — set once during register(), used by background orchestration
 let _log: { info: (m: string) => void; warn: (m: string) => void } = {
-  info: (m: string) => console.log(`[azureclaw] ${redactSecrets(m)}`),
-  warn: (m: string) => console.warn(`[azureclaw] ${redactSecrets(m)}`),
+  info: (m: string) => console.log(`[kars] ${redactSecrets(m)}`),
+  warn: (m: string) => console.warn(`[kars] ${redactSecrets(m)}`),
 };
 
 // AMID cache state + helpers — extracted to core/amid-cache.ts in S15.f.1.
@@ -498,13 +498,13 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
   const initPromise = (async () => {
   try {
     // Mesh transport — Microsoft Agent Governance Toolkit SDK, via the
-    // @azureclaw/mesh adapter (which also exposes node:crypto–based
+    // @kars/mesh adapter (which also exposes node:crypto–based
     // identity helpers so the runtime does not need a separate SDK
     // dependency for keygen / verify).
-    const meshMod: any = await import("@azureclaw/mesh");
+    const meshMod: any = await import("@kars/mesh");
 
     // Generate Ed25519 + X25519 identity. `generateIdentity` writes the
-    // encrypted envelope under ~/.azureclaw/identity.json and returns a
+    // encrypted envelope under ~/.kars/identity.json and returns a
     // facade with raw key buffers + amid/did.
     const meshIdentity = await meshMod.generateIdentity();
     agtIdentity = {
@@ -534,7 +534,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         },
         displayName: agtSandboxName,
       });
-      log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @azureclaw/mesh)`);
+      log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @kars/mesh)`);
     } catch (swapErr: any) {
       log.warn?.(`mesh transport init failed: ${swapErr?.message ?? swapErr}`);
       throw swapErr;
@@ -762,7 +762,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           pushSigningCounter("rejected");
           pushTrustToRouter(fromName, -0.3);
         } else {
-          const mesh: any = await import("@azureclaw/mesh");
+          const mesh: any = await import("@kars/mesh");
           const pubKey = await resolveSigningKey(senderAmid);
           if (pubKey) {
             try {
@@ -1455,7 +1455,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
           // Validate direction matches our environment
           const incomingDirection = message.direction || "local_to_aks";
-          const isDevMode = process.env.AZURECLAW_DEV_MODE === "true";
+          const isDevMode = process.env.KARS_DEV_MODE === "true";
           // If we're in dev mode (Docker), we should be receiving aks_to_local.
           // If we're in AKS, we should be receiving local_to_aks.
           const expectedDirection = isDevMode ? "aks_to_local" : "local_to_aks";
@@ -1513,7 +1513,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // This runs async (best-effort) — handoff is already complete at this point.
           (async () => {
             try {
-              console.log(`[azureclaw-handoff] IIFE started — sub_agent_results=${JSON.stringify(restoreResp.sub_agent_results?.length ?? "missing")}, sub_agent_workspaces=${JSON.stringify(restoreResp.sub_agent_workspaces?.length ?? "missing")}, meshClient=${!!agtMeshClient}`);
+              console.log(`[kars-handoff] IIFE started — sub_agent_results=${JSON.stringify(restoreResp.sub_agent_results?.length ?? "missing")}, sub_agent_workspaces=${JSON.stringify(restoreResp.sub_agent_workspaces?.length ?? "missing")}, meshClient=${!!agtMeshClient}`);
               const fs = await import("node:fs");
               const agentName = process.env.SANDBOX_NAME || "dev-agent";
               const apiVer = "api-version=2025-11-15-preview";
@@ -1737,11 +1737,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 subWorkspaceMap.set(ws.name, ws);
               }
               const subAgentStatuses: Array<{ name: string; status: string; task?: string }> = [];
-              console.log(`[azureclaw-handoff] step 4: spawned=${spawnedSubs.length} (${spawnedSubs.map((s: any) => s.name).join(",")}), workspaces=${subWorkspaceMap.size}, meshClient=${!!agtMeshClient}`);
+              console.log(`[kars-handoff] step 4: spawned=${spawnedSubs.length} (${spawnedSubs.map((s: any) => s.name).join(",")}), workspaces=${subWorkspaceMap.size}, meshClient=${!!agtMeshClient}`);
               log.info(`📦 Handoff step 4: spawned=${spawnedSubs.length} (${spawnedSubs.map((s: any) => s.name).join(",")}), workspaces=${subWorkspaceMap.size}, meshClient=${!!agtMeshClient}`);
 
               if (spawnedSubs.length > 0 && agtMeshClient) {
-                console.log(`[azureclaw-handoff] entering trust+resume loop for ${spawnedSubs.length} sub-agents`);
+                console.log(`[kars-handoff] entering trust+resume loop for ${spawnedSubs.length} sub-agents`);
                 log.info(`🤖 Handoff: registering trust + resuming ${spawnedSubs.length} sub-agent(s)...`);
 
                 // Collect OLD AMIDs from predecessor's snapshot so we can reject stale
@@ -1937,7 +1937,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                   }
                 }
               } else {
-                console.log(`[azureclaw-handoff] trust loop SKIPPED: spawned=${spawnedSubs.length}, meshClient=${!!agtMeshClient}`);
+                console.log(`[kars-handoff] trust loop SKIPPED: spawned=${spawnedSubs.length}, meshClient=${!!agtMeshClient}`);
               }
 
               // 5. Send Telegram greeting (now includes sub-agent status)
@@ -1950,7 +1950,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 const escapeMd2 = (s: string) => s.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
 
                 const lines: string[] = [
-                  "☁️ *AzureClaw — Cloud Handoff Complete*",
+                  "☁️ *Kars — Cloud Handoff Complete*",
                   "",
                   `I've been migrated to the cloud \\(AKS\\) and I'm ready to continue\\.`,
                   `Model: \`${escapeMd2(process.env.DEFAULT_MODEL || "gpt-5.4")}\` · Sandbox: \`${escapeMd2(agentName)}\``,
@@ -2025,7 +2025,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 } catch { /* predecessor may already be decommissioned */ }
               }
             } catch (hydrateErr: any) {
-              console.log(`[azureclaw-handoff] IIFE error: ${hydrateErr.message}`);
+              console.log(`[kars-handoff] IIFE error: ${hydrateErr.message}`);
               log.warn(`Handoff hydration failed (non-fatal): ${hydrateErr.message}`);
             }
           })();
@@ -2060,7 +2060,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       try {
         await agtMeshClient.connect({
           displayName: agtSandboxName,
-          capabilities: ["azureclaw-agent", "task-execution", agtSandboxName],
+          capabilities: ["kars-agent", "task-execution", agtSandboxName],
         });
         log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
         connected = true;
@@ -2214,7 +2214,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Distinguish module-not-found from other errors
     const isModuleError = e.code === 'MODULE_NOT_FOUND' || e.code === 'ERR_MODULE_NOT_FOUND';
     if (isModuleError) {
-      log.warn(`@azureclaw/mesh not installed: ${e.message}. Install the workspace package to enable inter-agent communication.`);
+      log.warn(`@kars/mesh not installed: ${e.message}. Install the workspace package to enable inter-agent communication.`);
     } else {
       log.warn(`AGT mesh init failed: ${e.message}. Stack: ${e.stack?.split('\n').slice(0, 3).join(' → ')}`);
     }
@@ -2360,9 +2360,9 @@ function registerMemorySyncShutdownHook(log: { info: (m: string) => void; warn: 
 }
 
 // Best-effort self-revoke on pod shutdown so the agentmesh registry doesn't
-// accumulate graveyard entries across azureclaw destroy/up cycles. The vendor
+// accumulate graveyard entries across kars destroy/up cycles. The vendor
 // registry's `/registry/search` endpoint returns ALL agents that ever registered
-// — it doesn't filter by status or last_seen, and `azureclaw destroy` had no
+// — it doesn't filter by status or last_seen, and `kars destroy` had no
 // deregistration path. Result: a brand-new top-level agent calling discover
 // would see 100+ stale AMIDs from long-dead sandboxes and the LLM would try to
 // mesh_send to ghosts. The receiver-side discover filter (90s last_seen window
@@ -2378,7 +2378,7 @@ function registerRevokeShutdownHook(log: { info: (m: string) => void; warn: (m: 
   // via the relay's WS-disconnect path + 90s last_seen filter on the
   // receiver side. Skip the hook entirely in AGT mode to avoid a 404
   // (and the 2s shutdown delay it adds) on every pod termination.
-  const provider = (process.env.AZURECLAW_MESH_PROVIDER ?? "agt")
+  const provider = (process.env.KARS_MESH_PROVIDER ?? "agt")
     .trim()
     .toLowerCase();
   if (provider === "agt") {
@@ -2519,19 +2519,19 @@ interface OpenClawPluginApi {
 // Plugin config
 // ---------------------------------------------------------------------------
 
-interface AzureClawConfig {
+interface KarsConfig {
   endpoint: string;
   model: string;
   sandboxName: string;
 }
 
-const DEFAULT_CONFIG: AzureClawConfig = {
+const DEFAULT_CONFIG: KarsConfig = {
   endpoint: "",
   model: "gpt-4.1",
   sandboxName: "dev-agent",
 };
 
-function getPluginConfig(api: OpenClawPluginApi): AzureClawConfig {
+function getPluginConfig(api: OpenClawPluginApi): KarsConfig {
   const raw = api.pluginConfig ?? {};
   return {
     endpoint: (raw.endpoint as string) || DEFAULT_CONFIG.endpoint,
@@ -2545,8 +2545,8 @@ function getPluginConfig(api: OpenClawPluginApi): AzureClawConfig {
 // ---------------------------------------------------------------------------
 
 const azureClawPlugin = definePluginEntry({
-  id: "azureclaw",
-  name: "AzureClaw",
+  id: "kars",
+  name: "Kars",
   description: "Secure AI agent runtime on Azure — Azure OpenAI provider, agent tools, and sandbox CLI",
   configSchema: {
     type: "object" as const,
@@ -2600,7 +2600,7 @@ const azureClawPlugin = definePluginEntry({
     // path is not predictable and a non-privileged attacker can't pre-seed it.
     const _os = require("os");
     const _path = require("path");
-    const bannerMarkerDir = _path.join(_os.homedir(), ".cache", "azureclaw");
+    const bannerMarkerDir = _path.join(_os.homedir(), ".cache", "kars");
     const bannerMarker = _path.join(bannerMarkerDir, "banner-printed");
     let bannerAlreadyPrinted = false;
     // In tests (vitest sets VITEST=true) always print so assertions see it.
@@ -2616,7 +2616,7 @@ const azureClawPlugin = definePluginEntry({
       log.info([
         "",
         "  ╔══════════════════════════════════════════════════════════╗",
-        "  ║  🔒 AzureClaw — Secure AI Agent Runtime                 ║",
+        "  ║  🔒 Kars — Secure AI Agent Runtime                 ║",
         "  ╠══════════════════════════════════════════════════════════╣",
         `  ║  Sandbox:  ${(sandbox).padEnd(43)}║`,
         `  ║  Model:    ${(config.model).padEnd(43)}║`,
@@ -2749,7 +2749,7 @@ const azureClawPlugin = definePluginEntry({
     registerMemorySyncShutdownHook(log);
     registerRevokeShutdownHook(log);
 
-    // ── Register AzureClaw agent tools (spawn, mesh, status, destroy) ────
+    // ── Register Kars agent tools (spawn, mesh, status, destroy) ────
     // These are first-class tools the LLM can call directly.
     // Registered as required tools (always available, no tools.allow needed).
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
@@ -2761,7 +2761,7 @@ const azureClawPlugin = definePluginEntry({
         const opts: any = {
           method,
           timeout: 15000,
-          headers: { "x-azureclaw-sandbox": process.env.SANDBOX_NAME || "self", ...extraHeaders } as Record<string, string>,
+          headers: { "x-kars-sandbox": process.env.SANDBOX_NAME || "self", ...extraHeaders } as Record<string, string>,
         };
         if (body) opts.headers["Content-Type"] = "application/json";
         // Auto-attach admin token for privileged endpoints. Caller can still
@@ -2796,7 +2796,7 @@ const azureClawPlugin = definePluginEntry({
       });
     }
 
-    // ── AzureClaw AGT tool registrations (S15.f.9) ────────────────────
+    // ── Kars AGT tool registrations (S15.f.9) ────────────────────
     // Extracted to core/agt-tools/agt.ts. Tool bodies are byte-identical;
     // the helper threads (log, mesh client, identity, sandbox name, mesh
     // send, inbox, handoff state holder, runHandoffOrchestration, and
@@ -2846,8 +2846,8 @@ const azureClawPlugin = definePluginEntry({
     // weight: in `github-models` mode they blow past the 16k input-token cap;
     // in `github-copilot` mode they bloat sub-agent prompts (~25k bytes of
     // schemas) and tempt the model to call tools that will 404. Keep
-    // agt-governance + azureclaw-spawn (model-agnostic).
-    const provider = process.env.AZURECLAW_PROVIDER;
+    // agt-governance + kars-spawn (model-agnostic).
+    const provider = process.env.KARS_PROVIDER;
     const ghTokenMode = provider === "github-models" || provider === "github-copilot";
     if (!ghTokenMode) {
       registerFoundryTools(api, {

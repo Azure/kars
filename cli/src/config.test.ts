@@ -34,15 +34,15 @@ beforeEach(() => {
 
 describe("config path resolution", () => {
   it("CONFIG_DIR is under home directory", () => {
-    expect(CONFIG_DIR).toBe(join(homedir(), ".azureclaw"));
+    expect(CONFIG_DIR).toBe(join(homedir(), ".kars"));
   });
 
   it("CONFIG_FILE is config.json inside CONFIG_DIR", () => {
-    expect(CONFIG_FILE).toBe(join(homedir(), ".azureclaw", "config.json"));
+    expect(CONFIG_FILE).toBe(join(homedir(), ".kars", "config.json"));
   });
 
   it("CREDENTIALS_FILE is credentials inside CONFIG_DIR", () => {
-    expect(CREDENTIALS_FILE).toBe(join(homedir(), ".azureclaw", "credentials"));
+    expect(CREDENTIALS_FILE).toBe(join(homedir(), ".kars", "credentials"));
   });
 });
 
@@ -244,7 +244,7 @@ describe("saveContext", () => {
 
 describe("secrets store", () => {
   it("SECRETS_FILE is under config directory", () => {
-    expect(SECRETS_FILE).toBe(join(homedir(), ".azureclaw", "secrets.json"));
+    expect(SECRETS_FILE).toBe(join(homedir(), ".kars", "secrets.json"));
   });
 
   it("loadSecrets returns empty object when file does not exist", () => {

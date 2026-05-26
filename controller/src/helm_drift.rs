@@ -3,7 +3,7 @@
 
 //! Helm ↔ Rust CRD drift detection.
 //!
-//! Phase 1 ships `deploy/helm/azureclaw/templates/crd.yaml` (ClawSandbox)
+//! Phase 1 ships `deploy/helm/kars/templates/crd.yaml` (KarsSandbox)
 //! as hand-written YAML. Phase 2 adds `crd-mcpserver.yaml` (and, in S2,
 //! `crd-toolpolicy.yaml`) the same way — operators that install via
 //! `helm install` get the schema before the controller starts, and
@@ -22,8 +22,8 @@
 //! When a new CRD lands (or this slice authors `crd-mcpserver.yaml`
 //! for the first time), the recommended workflow:
 //!
-//! 1. Run `DUMP_MCP_CRD_YAML=1 cargo test --bin azureclaw-controller helm_drift -- --nocapture`.
-//! 2. Pipe stdout into `deploy/helm/azureclaw/templates/crd-mcpserver.yaml`.
+//! 1. Run `DUMP_MCP_CRD_YAML=1 cargo test --bin kars-controller helm_drift -- --nocapture`.
+//! 2. Pipe stdout into `deploy/helm/kars/templates/crd-mcpserver.yaml`.
 //! 3. Re-run `cargo test helm_drift` — passes.
 //!
 //! After that, the test guards against any unilateral edit on either side.
@@ -32,48 +32,48 @@
 
 #[cfg(test)]
 use crate::crd_validations::{
-    a2a_agent_crd, claw_eval_crd, claw_memory_crd, egress_approval_crd, inference_policy_crd,
+    a2a_agent_crd, egress_approval_crd, inference_policy_crd, kars_eval_crd, kars_memory_crd,
     mcp_server_crd, tool_policy_crd, trust_graph_crd,
 };
 
 const MCP_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../deploy/helm/azureclaw/templates/crd-mcpserver.yaml"
+    "/../deploy/helm/kars/templates/crd-mcpserver.yaml"
 );
 
 const TOOLPOLICY_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../deploy/helm/azureclaw/templates/crd-toolpolicy.yaml"
+    "/../deploy/helm/kars/templates/crd-toolpolicy.yaml"
 );
 
 const A2AAGENT_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../deploy/helm/azureclaw/templates/crd-a2aagent.yaml"
+    "/../deploy/helm/kars/templates/crd-a2aagent.yaml"
 );
 
 const INFERENCEPOLICY_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../deploy/helm/azureclaw/templates/crd-inferencepolicy.yaml"
+    "/../deploy/helm/kars/templates/crd-inferencepolicy.yaml"
 );
 
 const CLAWMEMORY_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../deploy/helm/azureclaw/templates/crd-clawmemory.yaml"
+    "/../deploy/helm/kars/templates/crd-karsmemory.yaml"
 );
 
 const CLAWEVAL_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../deploy/helm/azureclaw/templates/crd-claweval.yaml"
+    "/../deploy/helm/kars/templates/crd-karseval.yaml"
 );
 
 const TRUSTGRAPH_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../deploy/helm/azureclaw/templates/crd-trustgraph.yaml"
+    "/../deploy/helm/kars/templates/crd-trustgraph.yaml"
 );
 
 const EGRESSAPPROVAL_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../deploy/helm/azureclaw/templates/crd-egressapproval.yaml"
+    "/../deploy/helm/kars/templates/crd-egressapproval.yaml"
 );
 
 /// Strip non-schema fields that legitimately differ between the Rust
@@ -87,7 +87,7 @@ fn canonical_form(value: &serde_json::Value) -> serde_json::Value {
         if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
             meta.remove("creationTimestamp");
             meta.remove("annotations");
-            // Helm chart adds `app.kubernetes.io/name: azureclaw` to the
+            // Helm chart adds `app.kubernetes.io/name: kars` to the
             // ObjectMeta labels; the Rust derive emits no labels. Drop
             // labels from the comparison — they are operator-side
             // concerns and are not validated by the API server.
@@ -104,7 +104,7 @@ mod tests {
 
     /// One-shot dumper. Run via:
     ///
-    ///   DUMP_MCP_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///   DUMP_MCP_CRD_YAML=1 cargo test --bin kars-controller \
     ///       helm_drift::tests::dump_mcp_crd_yaml -- --nocapture
     #[test]
     fn dump_mcp_crd_yaml() {
@@ -118,7 +118,7 @@ mod tests {
 
     /// One-shot dumper for the toolpolicy CRD. Run via:
     ///
-    ///   DUMP_TOOLPOLICY_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///   DUMP_TOOLPOLICY_CRD_YAML=1 cargo test --bin kars-controller \
     ///       helm_drift::tests::dump_toolpolicy_crd_yaml -- --nocapture
     #[test]
     fn dump_toolpolicy_crd_yaml() {
@@ -132,7 +132,7 @@ mod tests {
 
     /// One-shot dumper for the a2aagent CRD. Run via:
     ///
-    ///   DUMP_A2AAGENT_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///   DUMP_A2AAGENT_CRD_YAML=1 cargo test --bin kars-controller \
     ///       helm_drift::tests::dump_a2aagent_crd_yaml -- --nocapture
     #[test]
     fn dump_a2aagent_crd_yaml() {
@@ -192,7 +192,7 @@ mod tests {
 
     /// One-shot dumper for the inferencepolicy CRD. Run via:
     ///
-    ///   DUMP_INFERENCEPOLICY_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///   DUMP_INFERENCEPOLICY_CRD_YAML=1 cargo test --bin kars-controller \
     ///       helm_drift::tests::dump_inferencepolicy_crd_yaml -- --nocapture
     #[test]
     fn dump_inferencepolicy_crd_yaml() {
@@ -215,51 +215,51 @@ mod tests {
         );
     }
 
-    /// One-shot dumper for the clawmemory CRD. Run via:
+    /// One-shot dumper for the karsmemory CRD. Run via:
     ///
-    ///   DUMP_CLAWMEMORY_CRD_YAML=1 cargo test --bin azureclaw-controller \
-    ///       helm_drift::tests::dump_clawmemory_crd_yaml -- --nocapture
+    ///   DUMP_CLAWMEMORY_CRD_YAML=1 cargo test --bin kars-controller \
+    ///       helm_drift::tests::dump_karsmemory_crd_yaml -- --nocapture
     #[test]
-    fn dump_clawmemory_crd_yaml() {
+    fn dump_karsmemory_crd_yaml() {
         if std::env::var("DUMP_CLAWMEMORY_CRD_YAML").is_err() {
             return;
         }
-        let crd = claw_memory_crd();
+        let crd = kars_memory_crd();
         let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
     #[test]
-    fn helm_clawmemory_crd_matches_rust_schema() {
+    fn helm_karsmemory_crd_matches_rust_schema() {
         let rust_crd_value =
-            serde_json::to_value(claw_memory_crd()).expect("rust crd serializes to JSON");
-        assert_helm_matches_rust(CLAWMEMORY_HELM_CRD_PATH, rust_crd_value, "clawmemory");
+            serde_json::to_value(kars_memory_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(CLAWMEMORY_HELM_CRD_PATH, rust_crd_value, "karsmemory");
     }
 
-    /// One-shot dumper for the claweval CRD. Run via:
+    /// One-shot dumper for the karseval CRD. Run via:
     ///
-    ///   DUMP_CLAWEVAL_CRD_YAML=1 cargo test --bin azureclaw-controller \
-    ///       helm_drift::tests::dump_claweval_crd_yaml -- --nocapture
+    ///   DUMP_CLAWEVAL_CRD_YAML=1 cargo test --bin kars-controller \
+    ///       helm_drift::tests::dump_karseval_crd_yaml -- --nocapture
     #[test]
-    fn dump_claweval_crd_yaml() {
+    fn dump_karseval_crd_yaml() {
         if std::env::var("DUMP_CLAWEVAL_CRD_YAML").is_err() {
             return;
         }
-        let crd = claw_eval_crd();
+        let crd = kars_eval_crd();
         let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
     #[test]
-    fn helm_claweval_crd_matches_rust_schema() {
+    fn helm_karseval_crd_matches_rust_schema() {
         let rust_crd_value =
-            serde_json::to_value(claw_eval_crd()).expect("rust crd serializes to JSON");
-        assert_helm_matches_rust(CLAWEVAL_HELM_CRD_PATH, rust_crd_value, "claweval");
+            serde_json::to_value(kars_eval_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(CLAWEVAL_HELM_CRD_PATH, rust_crd_value, "karseval");
     }
 
     /// One-shot dumper for the trustgraph CRD. Run via:
     ///
-    ///   DUMP_TRUSTGRAPH_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///   DUMP_TRUSTGRAPH_CRD_YAML=1 cargo test --bin kars-controller \
     ///       helm_drift::tests::dump_trustgraph_crd_yaml -- --nocapture
     #[test]
     fn dump_trustgraph_crd_yaml() {
@@ -280,7 +280,7 @@ mod tests {
 
     /// One-shot dumper for the egressapproval CRD. Run via:
     ///
-    ///   DUMP_EGRESSAPPROVAL_CRD_YAML=1 cargo test --bin azureclaw-controller \
+    ///   DUMP_EGRESSAPPROVAL_CRD_YAML=1 cargo test --bin kars-controller \
     ///       helm_drift::tests::dump_egressapproval_crd_yaml -- --nocapture
     #[test]
     fn dump_egressapproval_crd_yaml() {

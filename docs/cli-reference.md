@@ -1,14 +1,14 @@
-# AzureClaw CLI Reference
+# Kars CLI Reference
 
-AzureClaw ships **dozens of top-level commands** organised by purpose: **Lifecycle**,
+Kars ships **dozens of top-level commands** organised by purpose: **Lifecycle**,
 **Operations**, **Configuration**, **Observability**, and the
 **Multi-Agent / Federation** family (Agent mobility, Interop, Governance).
 Everything you need to go from zero to a production-hardened, E2E-encrypted
 agent sandbox is expressed through these commands.
 
 See [README.md](../README.md) for the five-minute quick-start with
-`azureclaw dev`, and [getting-started.md](getting-started.md) for the
-full walkthrough including `azureclaw up` against AKS. Architecture details
+`kars dev`, and [getting-started.md](getting-started.md) for the
+full walkthrough including `kars up` against AKS. Architecture details
 live in [docs/architecture.md](architecture.md). CRD field reference is in
 [docs/api/crd-reference.md](api/crd-reference.md).
 
@@ -32,71 +32,71 @@ All commands also inherit Commander.js built-in `--help`.
 
 ### Lifecycle
 
-- [up](#azureclaw-up)
-- [dev](#azureclaw-dev)
-- [add](#azureclaw-add)
-- [destroy](#azureclaw-destroy)
-- [push](#azureclaw-push)
-- [convert](#azureclaw-convert)
-- [migrate](#azureclaw-migrate)
+- [up](#kars-up)
+- [dev](#kars-dev)
+- [add](#kars-add)
+- [destroy](#kars-destroy)
+- [push](#kars-push)
+- [convert](#kars-convert)
+- [migrate](#kars-migrate)
 
 ### Operations
 
-- [operator](#azureclaw-operator)
-- [connect](#azureclaw-connect)
-- [handoff](#azureclaw-handoff)
-- [status](#azureclaw-status)
-- [list](#azureclaw-list)
-- [logs](#azureclaw-logs)
-- [inspect](#azureclaw-inspect)
-- [audit](#azureclaw-audit)
-- [attest](#azureclaw-attest)
+- [operator](#kars-operator)
+- [connect](#kars-connect)
+- [handoff](#kars-handoff)
+- [status](#kars-status)
+- [list](#kars-list)
+- [logs](#kars-logs)
+- [inspect](#kars-inspect)
+- [audit](#kars-audit)
+- [attest](#kars-attest)
 
 ### Configuration
 
-- [credentials](#azureclaw-credentials)
-- [config](#azureclaw-config)
-- [model](#azureclaw-model)
-- [policy](#azureclaw-policy)
-- [egress](#azureclaw-egress)
+- [credentials](#kars-credentials)
+- [config](#kars-config)
+- [model](#kars-model)
+- [policy](#kars-policy)
+- [egress](#kars-egress)
 
 ### Observability
 
-- [trace](#azureclaw-trace)
-- [eval](#azureclaw-eval)
+- [trace](#kars-trace)
+- [eval](#kars-eval)
 
 ### Agent mobility
 
-- [mesh](#azureclaw-mesh)
-- [pair](#azureclaw-pair)
+- [mesh](#kars-mesh)
+- [pair](#kars-pair)
 
 ### Interop
 
-- [a2a](#azureclaw-a2a)
-- [a2a-agent](#azureclaw-a2a-agent)
+- [a2a](#kars-a2a)
+- [a2a-agent](#kars-a2a-agent)
 
 ### Governance
 
-- [toolpolicy](#azureclaw-toolpolicy)
-- [inferencepolicy](#azureclaw-inferencepolicy)
-- [mcp](#azureclaw-mcp)
-- [memory](#azureclaw-memory)
+- [toolpolicy](#kars-toolpolicy)
+- [inferencepolicy](#kars-inferencepolicy)
+- [mcp](#kars-mcp)
+- [memory](#kars-memory)
 
 ---
 
 ## Lifecycle
 
-### `azureclaw up`
+### `kars up`
 
 One-command bootstrap: provisions Azure resources (AKS cluster, ACR, Key
-Vault, Workload Identity), deploys the AzureClaw Helm chart, and creates a
+Vault, Workload Identity), deploys the Kars Helm chart, and creates a
 first sandbox — all from a single invocation. Ideal for new deployments and
 for CI pipelines. Use `--upgrade` to skip infra-provisioning and just re-run
 Helm + RBAC against an existing cluster.
 
 **Usage:**
 ```
-azureclaw up [options]
+kars up [options]
 ```
 
 **Options:**
@@ -106,12 +106,12 @@ azureclaw up [options]
 | `--model <model>` | `gpt-4.1` | AI model deployment name |
 | `--policy <preset>` | `developer` | Policy preset: `minimal`, `developer`, `web`, `azure` |
 | `--region <region>` | `eastus2` | Azure region |
-| `--cluster-name <name>` | `azureclaw` | AKS cluster name |
+| `--cluster-name <name>` | `kars` | AKS cluster name |
 | `--isolation <level>` | `enhanced` | Pod isolation: `standard` (runc), `enhanced` (runc + strict seccomp), `confidential` (Kata VM) |
 | `-g, --resource-group <name>` | — | Resource group name |
 | `--skip-infra` | `false` | Skip infrastructure provisioning (reuse existing cluster) |
 | `--force-infra` | `false` | Force Bicep deployment even if AKS cluster already exists |
-| `--source-acr <server>` | `azureclawacr.azurecr.io` | Source ACR for pre-built images (customer deployments) |
+| `--source-acr <server>` | `karsacr.azurecr.io` | Source ACR for pre-built images (customer deployments) |
 | `--build` | `false` | Build images locally and push to ACR (developer mode) |
 | `--skip-runtime-images` | `false` | Skip building/importing the 6 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
 | `--foundry-endpoint <url>` | — | Existing Azure AI Foundry project endpoint (`services.ai.azure.com`) |
@@ -127,27 +127,27 @@ azureclaw up [options]
 **Examples:**
 ```bash
 # Full bootstrap with defaults — provisions Azure, deploys controller, creates sandbox
-azureclaw up
+kars up
 
 # Production deployment with Confidential VM isolation in a named resource group
-azureclaw up --name prod-agent --isolation confidential -g my-rg --region westus3
+kars up --name prod-agent --isolation confidential -g my-rg --region westus3
 
 # Fast upgrade (skip infra, re-run Helm only)
-azureclaw up --upgrade
+kars up --upgrade
 
 # Dry run to preview what would be created
-azureclaw up --dry-run
+kars up --dry-run
 
 # Developer — build images locally, connect to Foundry
-azureclaw up --build --foundry-endpoint https://my-project.services.ai.azure.com
+kars up --build --foundry-endpoint https://my-project.services.ai.azure.com
 
 # Force a clean run (discard any auto-resume state)
-azureclaw up --from-scratch
+kars up --from-scratch
 ```
 
-**Auto-resume:** If `azureclaw up` fails mid-flight (e.g. a transient quota
+**Auto-resume:** If `kars up` fails mid-flight (e.g. a transient quota
 error during image push), the next run automatically picks up where the
-previous one left off. State lives in `~/.azureclaw/context.json` and tracks
+previous one left off. State lives in `~/.kars/context.json` and tracks
 which phases (`rg`, `infra`, `network`, `kubectl`, `images`, `helm`, `mesh`,
 `sandbox`) succeeded. On resume, the slow `network` and `images` phases are
 skipped if they already completed; everything else is re-run idempotently.
@@ -161,14 +161,14 @@ The state is invalidated automatically when:
 
 ---
 
-### `azureclaw dev`
+### `kars dev`
 
 Runs a fully-policy-enforced sandbox locally via Docker for inner-loop
 development. Same model routing, same egress policies, and the same
 AGT governance layer as AKS — but on your laptop.
 
 **Three inference providers** are supported. On first run you'll be asked
-to pick one; your choice is saved to `~/.azureclaw/config.json` and
+to pick one; your choice is saved to `~/.kars/config.json` and
 reused on subsequent runs:
 
 | Provider | Requires | Saved as | Trade-offs |
@@ -179,7 +179,7 @@ reused on subsequent runs:
 
 **Usage:**
 ```
-azureclaw dev [options]
+kars dev [options]
 ```
 
 **Options:**
@@ -189,15 +189,15 @@ azureclaw dev [options]
 | `--model <model>` | `claude-opus-4.7` (Copilot) / `gpt-4.1` (Foundry) / `gpt-4o-mini` (GitHub Models) | Model deployment / catalogue name |
 | `--policy <preset>` | `developer` | Policy preset: `minimal`, `developer`, `web`, `azure` |
 | `--target <target>` | `docker` | Where to run the sandbox: `docker` (fast inner loop) or `local-k8s` (kind + Helm, mirrors AKS layout). |
-| `--cluster-name <name>` | `azureclaw-dev` | Kind cluster name (only used with `--target local-k8s`). |
+| `--cluster-name <name>` | `kars-dev` | Kind cluster name (only used with `--target local-k8s`). |
 | `--ephemeral` | `false` | (local-k8s only) destroy the kind cluster on exit. |
-| `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use for ephemeral runs that shouldn't overwrite your saved provider. To save Copilot/GitHub-Models as your default, run `azureclaw dev` (or `azureclaw credentials`) without this flag and pick at the prompt. |
-| `--image <image>` | `azureclaw-sandbox:dev` | Sandbox container image |
+| `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use for ephemeral runs that shouldn't overwrite your saved provider. To save Copilot/GitHub-Models as your default, run `kars dev` (or `kars credentials`) without this flag and pick at the prompt. |
+| `--image <image>` | `kars-sandbox:dev` | Sandbox container image |
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
 | `--build-base` | `false` | Rebuild the sandbox base image (heavy deps; only needed when upgrading OpenClaw/Python/Go) |
 | `--base-image <image>` | `mcr.microsoft.com/azurelinux/base/core:3.0` | Azure Linux base image for building sandbox |
 | `--mesh-provider <provider>` | `agt` | Mesh stack. Only `agt` is supported (the vendored Rust relay/registry were removed once their upstream AGT equivalents reached parity). Flag retained for existing scripts. |
-| `--agt-repo <path>` | `$AZURECLAW_AGT_REPO` | Path to the agent-governance-toolkit checkout (used to build relay/registry images). |
+| `--agt-repo <path>` | `$KARS_AGT_REPO` | Path to the agent-governance-toolkit checkout (used to build relay/registry images). |
 | `--agt-sdk-tarball <path>` | — | Path to a locally-packed `@microsoft/agent-governance-sdk` `.tgz` to install in the sandbox image. Requires `--build`. |
 | `--no-mesh` | — | (local-k8s only) skip mesh relay/registry deployment. Sandboxes lose KNOCK/E2E. Use only for pure controller smoke tests. |
 | `--global-registry <url>` | — | Use a shared external registry (enables handoff); skips local relay/registry/postgres |
@@ -214,57 +214,57 @@ azureclaw dev [options]
 | `--perplexity-api-key <key>` | — | Perplexity API key |
 | `--openai-api-key <key>` | — | OpenAI API key (for dual-provider setups) |
 
-**Subcommand: `azureclaw dev down`**
+**Subcommand: `kars dev down`**
 
 Tears down a `--target local-k8s` dev environment (Kind cluster +
-Headlamp port-forward). For Docker targets, `azureclaw destroy <name>`
+Headlamp port-forward). For Docker targets, `kars destroy <name>`
 is the right command — `dev down` is local-k8s-specific.
 
 | Flag | Default | Description |
 |---|---|---|
 | `--target <target>` | `local-k8s` | Only `local-k8s` is currently supported. |
-| `--cluster-name <name>` | `azureclaw-dev` | Kind cluster name to delete. |
+| `--cluster-name <name>` | `kars-dev` | Kind cluster name to delete. |
 | `--keep-cluster` | `false` | Stop the port-forward and uninstall Headlamp, but keep the kind cluster running. |
 
 **Examples:**
 ```bash
 # Start a local sandbox with default settings (prompts for credentials on first run)
-azureclaw dev
+kars dev
 
 # Ephemeral GitHub Models run — does not change your saved Foundry creds
-azureclaw dev --github-token $GITHUB_PAT
+kars dev --github-token $GITHUB_PAT
 
 # Named sandbox with Telegram channel
-azureclaw dev --name my-bot --channels telegram --telegram-token 123456:ABC-DEF
+kars dev --name my-bot --channels telegram --telegram-token 123456:ABC-DEF
 
 # Enable web-browsing skill with Brave Search
-azureclaw dev --skills browser --brave-api-key $BRAVE_KEY
+kars dev --skills browser --brave-api-key $BRAVE_KEY
 
 # Build the image from scratch before starting
-azureclaw dev --build
+kars dev --build
 
 # Spin up the full Kind-based mirror of AKS (controller, relay, registry, Headlamp)
-azureclaw dev --target local-k8s --build
+kars dev --target local-k8s --build
 
 # Tear it back down (deletes the Kind cluster)
-azureclaw dev down
+kars dev down
 ```
 
 **See also:** [docs/channels-plugins.md](channels-plugins.md)
 
 ---
 
-### `azureclaw add`
+### `kars add`
 
-Adds a new sandboxed agent to an **existing** AzureClaw cluster. Creates a
-`ClawSandbox` CR which the controller reconciles into an isolated namespace,
+Adds a new sandboxed agent to an **existing** Kars cluster. Creates a
+`KarsSandbox` CR which the controller reconciles into an isolated namespace,
 NetworkPolicy, and inference-router deployment. Supports all 7 wired runtime
 kinds (openclaw, openai-agents, microsoft-agent-framework, langgraph,
 anthropic, pydantic-ai, byo).
 
 **Usage:**
 ```
-azureclaw add <name> [options]
+kars add <name> [options]
 ```
 
 **Arguments:**
@@ -298,42 +298,42 @@ azureclaw add <name> [options]
 | `--firecrawl-api-key <key>` | — | Firecrawl web scraping API key |
 | `--perplexity-api-key <key>` | — | Perplexity API key |
 | `--openai-api-key <key>` | — | OpenAI API key (for dual-provider setups) |
-| `--learn-egress` | `false` | Enable egress learn mode: observe all domains, then review with `azureclaw egress` |
+| `--learn-egress` | `false` | Enable egress learn mode: observe all domains, then review with `kars egress` |
 | `--runtime <kind>` | `openclaw` | Runtime: `openclaw`, `openai-agents`, `microsoft-agent-framework`, `langgraph`, `anthropic`, `pydantic-ai`, `byo` |
-| `--byo-image <image>` | — | Container image for `--runtime byo` (must declare `org.azureclaw.runtime.contract=v1`) |
+| `--byo-image <image>` | — | Container image for `--runtime byo` (must declare `org.kars.runtime.contract=v1`) |
 | `--byo-contract-version <version>` | `v1` | BYO contract version |
 | `--maf-language <lang>` | `python` | Microsoft Agent Framework language (`python`; `dotnet` is tracked in the [roadmap](roadmap.md)) |
-| `--dry-run` | `false` | Print the ClawSandbox YAML without applying |
+| `--dry-run` | `false` | Print the KarsSandbox YAML without applying |
 
 **Examples:**
 ```bash
 # Add a second agent with a 100k token/day budget
-azureclaw add researcher --model gpt-4.1 --token-budget-daily 100000
+kars add researcher --model gpt-4.1 --token-budget-daily 100000
 
 # Add a Telegram-connected agent with enhanced isolation
-azureclaw add support-bot --channels telegram --telegram-token $TOKEN --isolation enhanced
+kars add support-bot --channels telegram --telegram-token $TOKEN --isolation enhanced
 
 # Add a BYO-runtime agent
-azureclaw add my-agent --runtime byo --byo-image myacr.azurecr.io/my-agent:latest
+kars add my-agent --runtime byo --byo-image myacr.azurecr.io/my-agent:latest
 
-# Dry-run: inspect the ClawSandbox YAML before applying
-azureclaw add reviewer --dry-run
+# Dry-run: inspect the KarsSandbox YAML before applying
+kars add reviewer --dry-run
 ```
 
 **See also:** [docs/api/crd-reference.md](api/crd-reference.md), [docs/runtimes.md](runtimes.md), [docs/channels-plugins.md](channels-plugins.md)
 
 ---
 
-### `azureclaw destroy`
+### `kars destroy`
 
-Tears down sandbox(es) or the entire AzureClaw deployment. Without `--all`
+Tears down sandbox(es) or the entire Kars deployment. Without `--all`
 it removes just the named sandbox (or all sandboxes if `<name>` is omitted).
 With `--all` it deletes the entire resource group including AKS, ACR, and Key
 Vault — use with care.
 
 **Usage:**
 ```
-azureclaw destroy [name] [options]
+kars destroy [name] [options]
 ```
 
 **Arguments:**
@@ -354,31 +354,31 @@ azureclaw destroy [name] [options]
 **Examples:**
 ```bash
 # Destroy a single sandbox (prompts for confirmation)
-azureclaw destroy my-agent
+kars destroy my-agent
 
 # Destroy without prompting
-azureclaw destroy my-agent -y
+kars destroy my-agent -y
 
 # Destroy all sandboxes without touching infrastructure
-azureclaw destroy -y
+kars destroy -y
 
 # Destroy everything, including the resource group
-azureclaw destroy --all -y -g my-rg
+kars destroy --all -y -g my-rg
 ```
 
 ---
 
-### `azureclaw push`
+### `kars push`
 
-Builds and pushes AzureClaw images (controller, inference router, sandbox,
-relay, registry) to ACR using the cached context from the last `azureclaw up`
+Builds and pushes Kars images (controller, inference router, sandbox,
+relay, registry) to ACR using the cached context from the last `kars up`
 run. Use `--apply` to restart deployments so pods immediately pick up new
 images. Use `--only sandbox` + `--apply` after modifying `entrypoint.sh`,
 plugins, or skills.
 
 **Usage:**
 ```
-azureclaw push [options]
+kars push [options]
 ```
 
 **Options:**
@@ -392,22 +392,22 @@ azureclaw push [options]
 **Examples:**
 ```bash
 # Push all images and restart pods
-azureclaw push --apply
+kars push --apply
 
 # Push only the sandbox image and restart pods (common after plugin changes)
-azureclaw push --only sandbox --apply
+kars push --only sandbox --apply
 
 # Push only the controller image without restarting
-azureclaw push --only controller
+kars push --only controller
 ```
 
 **See also:** [docs/architecture.md](architecture.md)
 
 ---
 
-### `azureclaw convert`
+### `kars convert`
 
-Translates manifests between `ClawSandbox` and the upstream
+Translates manifests between `KarsSandbox` and the upstream
 `agents.x-k8s.io/v1alpha1 Sandbox` format (and the `overlay` variant). Hard-fails
 on lossy translations by default; pass `--allow-lossy` to proceed with
 warnings. The full field-mapping table is maintained alongside the translator source in `cli/src/commands/migrate/`
@@ -415,61 +415,61 @@ for the normative field mapping.
 
 **Usage:**
 ```
-azureclaw convert [options]
+kars convert [options]
 ```
 
 **Options:**
 | Flag | Default | Description |
 |---|---|---|
 | `-f, --file <path>` | *(required)* | Source manifest YAML |
-| `--to <target>` | `clawsandbox` | Target kind: `clawsandbox`, `upstream-sandbox`, `overlay` |
+| `--to <target>` | `karssandbox` | Target kind: `karssandbox`, `upstream-sandbox`, `overlay` |
 | `--sandbox-ref <ns/name>` | — | For `--to overlay`: reference to an existing Sandbox CR |
 | `--dry-run` | `false` | Validate + translate without emitting the converted manifest |
 | `--allow-lossy` | `false` | Proceed even when translation drops fields with no analog |
 
 **Examples:**
 ```bash
-# Convert an upstream Sandbox YAML to a ClawSandbox
-azureclaw convert -f sandbox.yaml --to clawsandbox > clawsandbox.yaml
+# Convert an upstream Sandbox YAML to a KarsSandbox
+kars convert -f sandbox.yaml --to karssandbox > karssandbox.yaml
 
-# Convert a ClawSandbox to upstream format, allowing lossy translation
-azureclaw convert -f clawsandbox.yaml --to upstream-sandbox --allow-lossy
+# Convert a KarsSandbox to upstream format, allowing lossy translation
+kars convert -f karssandbox.yaml --to upstream-sandbox --allow-lossy
 
 # Convert to overlay mode referencing an existing Sandbox CR
-azureclaw convert -f sandbox.yaml --to overlay --sandbox-ref=prod/web
+kars convert -f sandbox.yaml --to overlay --sandbox-ref=prod/web
 ```
 
 
 
 ---
 
-### `azureclaw migrate`
+### `kars migrate`
 
-Switches a `ClawSandbox` between upstream-compatibility modes (`native`,
+Switches a `KarsSandbox` between upstream-compatibility modes (`native`,
 `overlay`, `translate`, `observe`) by wrapping a `kubectl patch` with
 validation, before/after summary, and dry-run support. Also provides
 `from-kagent` to translate a `kagent.dev/v1alpha2` Agent YAML into an
-AzureClaw resource bundle.
+Kars resource bundle.
 
 **Usage:**
 ```
-azureclaw migrate <subcommand> [arguments] [options]
+kars migrate <subcommand> [arguments] [options]
 ```
 
 **Subcommands:**
 | Subcommand | Description |
 |---|---|
-| `to-overlay <name>` | Flip to overlay mode; AzureClaw provides governance overlay; upstream CR owns the Pod. Requires `--upstream-ref`. |
-| `from-overlay <name>` | Leave overlay mode; revert to native AzureClaw (controller resumes ownership). |
+| `to-overlay <name>` | Flip to overlay mode; Kars provides governance overlay; upstream CR owns the Pod. Requires `--upstream-ref`. |
+| `from-overlay <name>` | Leave overlay mode; revert to native Kars (controller resumes ownership). |
 | `to-translate <name>` | Accept upstream SandboxClaim semantics on inbound (schema-only translation). |
 | `to-observe <name>` | Mirror status of an upstream Sandbox CR without overlay. |
-| `to-native <name>` | Reset to default native mode (AzureClaw owns the workload). |
-| `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into an AzureClaw resource bundle. Use `-` to read from stdin. |
+| `to-native <name>` | Reset to default native mode (Kars owns the workload). |
+| `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into an Kars resource bundle. Use `-` to read from stdin. |
 
 **Common options (all subcommands except `from-kagent`):**
 | Flag | Default | Description |
 |---|---|---|
-| `-n, --namespace <ns>` | `azureclaw-system` | Namespace where the ClawSandbox CR lives |
+| `-n, --namespace <ns>` | `kars-system` | Namespace where the KarsSandbox CR lives |
 | `--dry-run` | `false` | Print the JSON merge patch without applying |
 | `--format <fmt>` | `human` | Output format: `human` or `json` |
 
@@ -482,7 +482,7 @@ azureclaw migrate <subcommand> [arguments] [options]
 | Flag | Default | Description |
 |---|---|---|
 | `-n, --namespace <ns>` | — | Override `metadata.namespace` on emitted resources |
-| `--isolation <mode>` | `enhanced` | ClawSandbox isolation mode: `standard`, `enhanced`, `confidential` |
+| `--isolation <mode>` | `enhanced` | KarsSandbox isolation mode: `standard`, `enhanced`, `confidential` |
 | `--image <image>` | — | Override `spec.runtime.openclaw.image` |
 | `--allow-lossy` | `false` | Waive the hard-fail on lossy translation |
 | `--out-dir <dir>` | — | Write each emitted resource to `<dir>/<kind>-<name>.yaml` |
@@ -493,17 +493,17 @@ azureclaw migrate <subcommand> [arguments] [options]
 **Examples:**
 ```bash
 # Switch to overlay mode
-azureclaw migrate to-overlay my-agent --upstream-ref upstream-sandbox
+kars migrate to-overlay my-agent --upstream-ref upstream-sandbox
 
 # Revert to native mode (dry-run first)
-azureclaw migrate to-native my-agent --dry-run
-azureclaw migrate to-native my-agent
+kars migrate to-native my-agent --dry-run
+kars migrate to-native my-agent
 
 # Import from kagent YAML
-azureclaw migrate from-kagent agent.yaml --isolation enhanced --out-dir ./manifests
+kars migrate from-kagent agent.yaml --isolation enhanced --out-dir ./manifests
 
 # Import from stdin
-cat kagent-agent.yaml | azureclaw migrate from-kagent -
+cat kagent-agent.yaml | kars migrate from-kagent -
 ```
 
 
@@ -512,7 +512,7 @@ cat kagent-agent.yaml | azureclaw migrate from-kagent -
 
 ## Operations
 
-### `azureclaw operator`
+### `kars operator`
 
 Live operator dashboard — a full-screen TUI that shows all sandboxes,
 their policy state, inference stats, and logs from a single screen.
@@ -522,7 +522,7 @@ for scripting and CI.
 
 **Usage:**
 ```
-azureclaw operator [options]
+kars operator [options]
 ```
 
 **Options:**
@@ -538,23 +538,23 @@ azureclaw operator [options]
 **Examples:**
 ```bash
 # Open full operator TUI
-azureclaw operator
+kars operator
 
 # Local dev mode, faster refresh
-azureclaw operator --dev --refresh 3
+kars operator --dev --refresh 3
 
 # Capture a one-shot snapshot for a status page
-azureclaw operator --snapshot
+kars operator --snapshot
 
 # Show specific panels grouped per sandbox
-azureclaw operator --panels status,logs --per-sandbox
+kars operator --panels status,logs --per-sandbox
 ```
 
 **See also:** [docs/operator-tui.md](operator-tui.md)
 
 ---
 
-### `azureclaw connect`
+### `kars connect`
 
 Connects to a running sandbox — either as a shell (bash), as the OpenClaw
 TUI, or via WebUI (port-forwarded to a local port). Defaults to the
@@ -562,7 +562,7 @@ OpenClaw TUI on Docker and to WebUI on AKS.
 
 **Usage:**
 ```
-azureclaw connect <name> [options]
+kars connect <name> [options]
 ```
 
 **Arguments:**
@@ -582,21 +582,21 @@ azureclaw connect <name> [options]
 **Examples:**
 ```bash
 # Connect to the OpenClaw TUI
-azureclaw connect my-agent
+kars connect my-agent
 
 # Open WebUI in browser (port-forwarded)
-azureclaw connect my-agent --web
+kars connect my-agent --web
 
 # Drop into a bash shell for debugging
-azureclaw connect my-agent --shell
+kars connect my-agent --shell
 
 # Connect to the local Docker sandbox explicitly
-azureclaw connect my-agent --local
+kars connect my-agent --local
 ```
 
 ---
 
-### `azureclaw handoff`
+### `kars handoff`
 
 Live-migrates an agent between local Docker and AKS (bidirectional handoff).
 Uses the AgentMesh relay to transfer session state with no dropped requests.
@@ -605,7 +605,7 @@ registry reachable from both sides).
 
 **Usage:**
 ```
-azureclaw handoff <name> [options]
+kars handoff <name> [options]
 ```
 
 **Arguments:**
@@ -623,23 +623,23 @@ azureclaw handoff <name> [options]
 **Examples:**
 ```bash
 # Handoff from local Docker to AKS
-azureclaw handoff my-agent --to cloud
+kars handoff my-agent --to cloud
 
 # Handoff from AKS back to local
-azureclaw handoff my-agent --to local
+kars handoff my-agent --to local
 
 # Check handoff status
-azureclaw handoff my-agent --status
+kars handoff my-agent --status
 
 # Abort an in-progress handoff
-azureclaw handoff my-agent --abort
+kars handoff my-agent --abort
 ```
 
 **See also:** [docs/architecture.md](architecture.md)
 
 ---
 
-### `azureclaw status`
+### `kars status`
 
 Shows sandbox health, policy state, and inference configuration in a
 human-readable summary. Includes the pod phase, readiness, active policy
@@ -647,7 +647,7 @@ profile, model configuration, and recent condition transitions.
 
 **Usage:**
 ```
-azureclaw status <name>
+kars status <name>
 ```
 
 **Arguments:**
@@ -657,19 +657,19 @@ azureclaw status <name>
 
 **Examples:**
 ```bash
-azureclaw status my-agent
+kars status my-agent
 ```
 
 ---
 
-### `azureclaw list`
+### `kars list`
 
-Lists all AzureClaw sandboxes across both Docker (local) and AKS (cloud)
+Lists all Kars sandboxes across both Docker (local) and AKS (cloud)
 environments. Shows name, runtime, status, and model for each sandbox.
 
 **Usage:**
 ```
-azureclaw list [options]
+kars list [options]
 ```
 
 **Options:**
@@ -681,15 +681,15 @@ azureclaw list [options]
 **Examples:**
 ```bash
 # List all sandboxes
-azureclaw list
+kars list
 
 # List AKS sandboxes only
-azureclaw list --aks-only
+kars list --aks-only
 ```
 
 ---
 
-### `azureclaw logs`
+### `kars logs`
 
 Streams agent and platform logs from a sandbox. Can tail logs from all
 services or filter to a specific component: the inference router, OpenClaw
@@ -697,7 +697,7 @@ gateway, or the node host process.
 
 **Usage:**
 ```
-azureclaw logs <name> [options]
+kars logs <name> [options]
 ```
 
 **Arguments:**
@@ -715,51 +715,51 @@ azureclaw logs <name> [options]
 **Examples:**
 ```bash
 # Show the last 100 lines from all services
-azureclaw logs my-agent
+kars logs my-agent
 
 # Stream router logs in real time
-azureclaw logs my-agent --service router -f
+kars logs my-agent --service router -f
 
 # Show last 200 lines from the OpenClaw gateway
-azureclaw logs my-agent --service openclaw --tail 200
+kars logs my-agent --service openclaw --tail 200
 ```
 
 ---
 
-### `azureclaw inspect`
+### `kars inspect`
 
 Prints the controller's view of a single sandbox: the compiled
 InferencePolicy digest, the attached ToolPolicies, EgressApproval
 state, the Memory binding (if any), and recent `Reconciled` /
-`AwaitingRouterEnforcement` conditions. Use this when `azureclaw
+`AwaitingRouterEnforcement` conditions. Use this when `kars
 status` says "Ready" but you want to confirm the router echoed the
 exact policy revision you expect.
 
 **Usage:**
 ```
-azureclaw inspect <sandbox> [options]
+kars inspect <sandbox> [options]
 ```
 
 **Arguments:**
 | Name | Required | Description |
 |---|---|---|
-| `<sandbox>` | Yes | Sandbox name (the `metadata.name` of the `ClawSandbox`). |
+| `<sandbox>` | Yes | Sandbox name (the `metadata.name` of the `KarsSandbox`). |
 
 **Options:**
 | Flag | Description |
 |---|---|
-| `-n, --namespace <ns>` | Override the default controller namespace (`azureclaw-system`). |
+| `-n, --namespace <ns>` | Override the default controller namespace (`kars-system`). |
 | `--json` | Emit raw JSON instead of the formatted tree. |
 
 **Examples:**
 ```bash
-azureclaw inspect my-agent
-azureclaw inspect my-agent --json | jq .policy.inferenceDigest
+kars inspect my-agent
+kars inspect my-agent --json | jq .policy.inferenceDigest
 ```
 
 ---
 
-### `azureclaw audit`
+### `kars audit`
 
 Tails the inference router's structured audit log for a sandbox.
 Every governance decision (allow, deny, approval-required) is one
@@ -768,13 +768,13 @@ and surfaces those rows with pretty formatting + filters.
 
 **Usage:**
 ```
-azureclaw audit tail <sandbox> [options]
+kars audit tail <sandbox> [options]
 ```
 
 **Options:**
 | Flag | Description |
 |---|---|
-| `-n, --namespace <ns>` | Namespace (default: `azureclaw-<sandbox>`). |
+| `-n, --namespace <ns>` | Namespace (default: `kars-<sandbox>`). |
 | `--tail <N>` | Start from the last N rows (default: 200). |
 | `-f, --follow` | Keep streaming new rows as they arrive. |
 | `--decision <kind>` | Filter by decision: `allow`, `deny`, `approval`. |
@@ -786,15 +786,15 @@ azureclaw audit tail <sandbox> [options]
 **Examples:**
 ```bash
 # Pretty-print the last 200 governance decisions
-azureclaw audit tail my-agent
+kars audit tail my-agent
 
 # Follow only denials for the search tool
-azureclaw audit tail my-agent --decision deny --tool web.search -f
+kars audit tail my-agent --decision deny --tool web.search -f
 ```
 
 ---
 
-### `azureclaw attest`
+### `kars attest`
 
 Prints a deterministic attestation receipt for a sandbox: spec hash, SSA
 field owners, referenced policy versions, and reconcile trace. Pass
@@ -805,7 +805,7 @@ Full signature and AGT receipt are tracked in the [roadmap](roadmap.md).
 
 **Usage:**
 ```
-azureclaw attest <name> [options]
+kars attest <name> [options]
 ```
 
 **Arguments:**
@@ -816,20 +816,20 @@ azureclaw attest <name> [options]
 **Options:**
 | Flag | Default | Description |
 |---|---|---|
-| `-n, --namespace <ns>` | `azureclaw-system` | Namespace where the ClawSandbox CR lives |
+| `-n, --namespace <ns>` | `kars-system` | Namespace where the KarsSandbox CR lives |
 | `--format <fmt>` | `human` | Output format: `human` or `json` |
 | `--baseline <path>` | — | Path to a previously-emitted attestation JSON to diff against |
 
 **Examples:**
 ```bash
 # Print attestation receipt in human-readable form
-azureclaw attest my-agent
+kars attest my-agent
 
 # Save attestation as a JSON baseline
-azureclaw attest my-agent --format json > attestation-2026-04-30.json
+kars attest my-agent --format json > attestation-2026-04-30.json
 
 # Diff against saved baseline (exits 2 on drift)
-azureclaw attest my-agent --format json --baseline attestation-2026-04-30.json
+kars attest my-agent --format json --baseline attestation-2026-04-30.json
 echo $?  # 0=match 2=drift 3=missing baseline
 ```
 
@@ -839,9 +839,9 @@ echo $?  # 0=match 2=drift 3=missing baseline
 
 ## Configuration
 
-### `azureclaw credentials`
+### `kars credentials`
 
-Manages AzureClaw credentials (inference provider, channel tokens,
+Manages Kars credentials (inference provider, channel tokens,
 third-party API keys). Invoking without a subcommand opens an interactive
 guided prompt that lets you pick between **GitHub Copilot** *(default,
 recommended)*, **Azure AI Foundry / Azure OpenAI**, and **GitHub Models**
@@ -851,9 +851,9 @@ Use `credentials set` / `list` / `remove` for scripting. Use
 `credentials update` to patch a running AKS sandbox's K8s Secret without
 restarting the pod (unless you want a restart).
 
-The inference provider you pick is saved to `~/.azureclaw/config.json`
+The inference provider you pick is saved to `~/.kars/config.json`
 (field `provider: "github-copilot" | "foundry" | "github-models"`); the
-credential is saved alongside in `~/.azureclaw/secrets.json` under the key
+credential is saved alongside in `~/.kars/secrets.json` under the key
 `azure-openai-key`. For Copilot the value is a GitHub OAuth token obtained
 through an interactive **device-code flow** (the CLI prints a code and
 opens `https://github.com/login/device` in your browser); the router
@@ -863,7 +863,7 @@ command and picking another option.
 
 **Usage:**
 ```
-azureclaw credentials [subcommand] [arguments] [options]
+kars credentials [subcommand] [arguments] [options]
 ```
 
 **Subcommands:**
@@ -909,32 +909,32 @@ azureclaw credentials [subcommand] [arguments] [options]
 **Examples:**
 ```bash
 # Interactive guided setup
-azureclaw credentials
+kars credentials
 
 # Store a Telegram token
-azureclaw credentials set telegram-token 123456:ABC-DEF
+kars credentials set telegram-token 123456:ABC-DEF
 
 # List stored secrets
-azureclaw credentials list
+kars credentials list
 
 # Update a running sandbox's Telegram token and restart
-azureclaw credentials update my-agent --telegram-token 999999:NEW-TOKEN
+kars credentials update my-agent --telegram-token 999999:NEW-TOKEN
 
 # Update without restarting the pod
-azureclaw credentials update my-agent --brave-api-key $KEY --no-restart
+kars credentials update my-agent --brave-api-key $KEY --no-restart
 ```
 
 **See also:** [docs/channels-plugins.md](channels-plugins.md)
 
 ---
 
-### `azureclaw config`
+### `kars config`
 
-Inspects and edits the local CLI configuration at `~/.azureclaw/config.json`. This is the file `azureclaw dev` and `azureclaw credentials` write to, holding your provider choice, endpoint, and default model. The command is a thin viewer + per-provider model picker — it doesn't touch secrets (use `azureclaw credentials` for those) and it doesn't talk to your cluster (it's purely local).
+Inspects and edits the local CLI configuration at `~/.kars/config.json`. This is the file `kars dev` and `kars credentials` write to, holding your provider choice, endpoint, and default model. The command is a thin viewer + per-provider model picker — it doesn't touch secrets (use `kars credentials` for those) and it doesn't talk to your cluster (it's purely local).
 
 **Usage:**
 ```
-azureclaw config <subcommand> [arguments]
+kars config <subcommand> [arguments]
 ```
 
 **Subcommands:**
@@ -947,23 +947,23 @@ azureclaw config <subcommand> [arguments]
 **Examples:**
 ```bash
 # Show what's currently saved
-azureclaw config show
+kars config show
 
 # Switch the local default model interactively
-azureclaw config model
+kars config model
 
 # Set it directly (Copilot / Models style id)
-azureclaw config model claude-opus-4.7
+kars config model claude-opus-4.7
 
 # Set it directly (Foundry deployment name)
-azureclaw config model gpt-4.1
+kars config model gpt-4.1
 ```
 
-**See also:** [`azureclaw credentials`](#azureclaw-credentials), [`azureclaw model`](#azureclaw-model) (per-sandbox).
+**See also:** [`kars credentials`](#kars-credentials), [`kars model`](#kars-model) (per-sandbox).
 
 ---
 
-### `azureclaw model`
+### `kars model`
 
 Manages the AI model for a sandbox. The `set` subcommand switches models
 instantly without a pod restart (the change is applied via a hot ConfigMap
@@ -971,7 +971,7 @@ patch). Use `list` to discover available models from your Foundry project.
 
 **Usage:**
 ```
-azureclaw model <subcommand> [arguments]
+kars model <subcommand> [arguments]
 ```
 
 **Subcommands:**
@@ -995,26 +995,26 @@ azureclaw model <subcommand> [arguments]
 **Examples:**
 ```bash
 # Switch a sandbox to Phi-4
-azureclaw model set my-agent Phi-4
+kars model set my-agent Phi-4
 
 # Show the current model
-azureclaw model get my-agent
+kars model get my-agent
 
 # List available Foundry models
-azureclaw model list my-agent
+kars model list my-agent
 ```
 
 ---
 
-### `azureclaw policy`
+### `kars policy`
 
 Manages sandbox network and security policies. Hot-reload capable: `allow`
 and `deny` take effect without a pod restart. `learn` is an alias for
-`azureclaw egress <name> --learned`.
+`kars egress <name> --learned`.
 
 **Usage:**
 ```
-azureclaw policy <subcommand> [arguments] [options]
+kars policy <subcommand> [arguments] [options]
 ```
 
 **Subcommands:**
@@ -1023,7 +1023,7 @@ azureclaw policy <subcommand> [arguments] [options]
 | `allow <name> <host>` | Add an allowed egress endpoint (hot-reload) |
 | `get <name>` | Show the active policy for a sandbox |
 | `deny <name> <host>` | Remove an allowed endpoint from a running sandbox |
-| `learn <name>` | Alias for `azureclaw egress <name> --learned` |
+| `learn <name>` | Alias for `kars egress <name> --learned` |
 | `sign --kind <kind> --file <path> --registry <r> --repository <repo>` | Sign a canonical-form policy artifact (any of the 6 signed kinds), push it to OCI, cosign-sign the manifest, and optionally print the `bundleRef` snippet for the consuming CRD. This is the operator-authoring half of the trust loop documented in [security/crd-trust-model.md](security/crd-trust-model.md). |
 
 **Arguments for `allow` / `deny`:**
@@ -1059,19 +1059,19 @@ azureclaw policy <subcommand> [arguments] [options]
 **Examples:**
 ```bash
 # Allow GitHub API for a sandbox
-azureclaw policy allow my-agent api.github.com
+kars policy allow my-agent api.github.com
 
 # Allow on a non-standard port
-azureclaw policy allow my-agent internal.corp.com --port 8443
+kars policy allow my-agent internal.corp.com --port 8443
 
 # Show current policy
-azureclaw policy get my-agent
+kars policy get my-agent
 
 # Remove a domain
-azureclaw policy deny my-agent api.github.com
+kars policy deny my-agent api.github.com
 
 # Sign a pre-built canonical InferencePolicy bundle and emit the bundleRef
-azureclaw policy sign \
+kars policy sign \
   --kind inference-policy \
   --file ./inference.canonical.json \
   --registry myacr.azurecr.io \
@@ -1083,7 +1083,7 @@ azureclaw policy sign \
 
 ---
 
-### `azureclaw egress`
+### `kars egress`
 
 Full egress lifecycle management: learn mode (observe domains without
 blocking), pending approvals, allowlist management, and signed OCI artifact
@@ -1095,7 +1095,7 @@ will refuse to use unsigned artifacts in authoritative mode
 
 **Usage:**
 ```
-azureclaw egress [name] [options]
+kars egress [name] [options]
 ```
 
 **Arguments:**
@@ -1122,28 +1122,28 @@ azureclaw egress [name] [options]
 | `--sign-key <ref>` | — | Cosign key reference (path or KMS URI like `azurekms://...`) — required for `--sign-mode keyed` |
 | `--registry <fqdn>` | *(auto-discover)* | Override target ACR for the artifact push |
 | `--repository <repo>` | `policy/egress-allowlist/<sandbox>` | Repository path within the registry |
-| `--emit-manifest <path>` | — | GitOps mode: write the ClawSandbox patch to `<path>` instead of running `kubectl patch` |
+| `--emit-manifest <path>` | — | GitOps mode: write the KarsSandbox patch to `<path>` instead of running `kubectl patch` |
 | `--force` | `false` | With `--emit-manifest`, overwrite an existing file |
 
 **Examples:**
 ```bash
 # Enable learn mode
-azureclaw egress my-agent --learn
+kars egress my-agent --learn
 
 # Review discovered domains
-azureclaw egress my-agent --learned
+kars egress my-agent --learned
 
 # Approve a domain (signs the updated allowlist automatically)
-azureclaw egress my-agent --approve api.github.com
+kars egress my-agent --approve api.github.com
 
 # Graduate to enforcement mode (signs + patches)
-azureclaw egress my-agent --enforce
+kars egress my-agent --enforce
 
 # GitOps mode: emit patch file instead of applying
-azureclaw egress my-agent --enforce --emit-manifest ./patches/egress-my-agent.yaml
+kars egress my-agent --enforce --emit-manifest ./patches/egress-my-agent.yaml
 
 # Sign with a KMS key
-azureclaw egress my-agent --approve api.github.com --sign-mode keyed --sign-key azurekms://myvault.vault.azure.net/keys/cosign
+kars egress my-agent --approve api.github.com --sign-mode keyed --sign-key azurekms://myvault.vault.azure.net/keys/cosign
 ```
 
 **See also:** [docs/egress-proxy.md](egress-proxy.md)
@@ -1152,7 +1152,7 @@ azureclaw egress my-agent --approve api.github.com --sign-mode keyed --sign-key 
 
 ## Observability
 
-### `azureclaw trace`
+### `kars trace`
 
 Live eBPF trace using `kubectl-gadget` — surfaces network connections, file
 access, and process executions in the sandbox container in real time. Requires
@@ -1160,7 +1160,7 @@ access, and process executions in the sandbox container in real time. Requires
 
 **Usage:**
 ```
-azureclaw trace <name> [options]
+kars trace <name> [options]
 ```
 
 **Arguments:**
@@ -1179,29 +1179,29 @@ azureclaw trace <name> [options]
 **Examples:**
 ```bash
 # Trace all events
-azureclaw trace my-agent
+kars trace my-agent
 
 # Show only outbound network connections
-azureclaw trace my-agent --network
+kars trace my-agent --network
 
 # Show DNS lookups in real time
-azureclaw trace my-agent --dns
+kars trace my-agent --dns
 ```
 
 ---
 
-### `azureclaw eval`
+### `kars eval`
 
-Operator surface for the **`ClawEval`** CRD — a policy-conformance
+Operator surface for the **`KarsEval`** CRD — a policy-conformance
 runner driven by signed corpora and the in-tree
 `conformance-runner` image. Replaces the legacy Foundry-Evals
 wrapper.
 
 | Subcommand | What it does |
 |---|---|
-| `list` | List all `ClawEval` resources across the controller namespace. |
+| `list` | List all `KarsEval` resources across the controller namespace. |
 | `show <name>` | Print spec, last-run summary, drift status, and conditions. |
-| `run <name>` | Trigger an immediate run (sets the `azureclaw.azure.com/run-now=true` annotation). |
+| `run <name>` | Trigger an immediate run (sets the `kars.azure.com/run-now=true` annotation). |
 | `diff <name>` | Diff the two most recent runs from `status.history[]`. |
 
 All commands hit the apiserver via `kubectl`; no router admin token
@@ -1211,21 +1211,21 @@ unhealthy).
 **Examples:**
 ```bash
 # Tabular list across the controller namespace
-azureclaw eval list
+kars eval list
 
 # Schema + last run summary
-azureclaw eval show nightly-regression
+kars eval show nightly-regression
 
 # Trigger a one-shot run
-azureclaw eval run nightly-regression
+kars eval run nightly-regression
 
 # Diff the last two runs
-azureclaw eval diff nightly-regression
+kars eval diff nightly-regression
 ```
 
 Authoring new corpora and signing them is covered separately:
-- **[`docs/api/claweval.md`](api/claweval.md)** — operator workflows (run-now, schedule, drift, GC).
-- **[`docs/api/crd-reference.md#claweval`](api/crd-reference.md#claweval--reproducible-evaluation-run)** — the CRD schema.
+- **[`docs/api/karseval.md`](api/karseval.md)** — operator workflows (run-now, schedule, drift, GC).
+- **[`docs/api/crd-reference.md#karseval`](api/crd-reference.md#karseval--reproducible-evaluation-run)** — the CRD schema.
 
 ---
 
@@ -1236,16 +1236,16 @@ Authoring new corpora and signing them is covered separately:
 > - **Interop** — `a2a`, `a2a-agent`: A2A ingress surfacing and per-agent trust anchors
 > - **Governance** — `toolpolicy`, `inferencepolicy`, `mcp`: cluster-wide CRD policy management
 
-### `azureclaw mesh`
+### `kars mesh`
 
 Manages AgentMesh identity and authentication for cross-environment agent
 handoff and federation. Controls the Ed25519 mesh identity (stored
-AES-256-GCM encrypted at `~/.azureclaw/mesh-identity.json`), relay
+AES-256-GCM encrypted at `~/.kars/mesh-identity.json`), relay
 registration enforcement, and cluster federation peer state.
 
 **Usage:**
 ```
-azureclaw mesh <subcommand> [arguments] [options]
+kars mesh <subcommand> [arguments] [options]
 ```
 
 **Subcommands:**
@@ -1271,7 +1271,7 @@ azureclaw mesh <subcommand> [arguments] [options]
 **Options for `setup-trust`:**
 | Flag | Default | Description |
 |---|---|---|
-| `--display-name <name>` | `AzureClaw AgentMesh` | Display name for the Entra app registration |
+| `--display-name <name>` | `Kars AgentMesh` | Display name for the Entra app registration |
 | `--dry-run` | `false` | Print what would be created without making changes |
 
 > Tenant-wide one-time operation. Requires Application Administrator (or higher) at tenant scope. Idempotent — re-running on a tenant where the app reg already exists is safe (just prints the existing IDs and exits).
@@ -1285,8 +1285,8 @@ azureclaw mesh <subcommand> [arguments] [options]
 **Options for `peer`:**
 | Flag | Default | Description |
 |---|---|---|
-| `-n, --namespace <ns>` | `azureclaw-system` | Controller namespace |
-| `--deployment <name>` | `azureclaw-controller` | Controller deployment name |
+| `-n, --namespace <ns>` | `kars-system` | Controller namespace |
+| `--deployment <name>` | `kars-controller` | Controller deployment name |
 
 **Options for `promote`:**
 | Flag | Default | Description |
@@ -1305,47 +1305,47 @@ azureclaw mesh <subcommand> [arguments] [options]
 **Examples:**
 ```bash
 # Authenticate with GitHub OAuth
-azureclaw mesh auth
+kars mesh auth
 
 # Provision the tenant-wide api://agentmesh app reg (one-time, per-tenant)
-azureclaw mesh setup-trust
+kars mesh setup-trust
 
 # Check current mesh identity
-azureclaw mesh status
+kars mesh status
 
 # List pairings on the cluster
-azureclaw mesh list
+kars mesh list
 
 # Enable strict registration on the relay
-azureclaw mesh security strict
+kars mesh security strict
 
 # Enable controller federation
-azureclaw mesh peer enable
+kars mesh peer enable
 
 # Promote cluster registry to public endpoint
-azureclaw mesh promote --port-forward
+kars mesh promote --port-forward
 
 # Demote back to cluster-local
-azureclaw mesh demote
+kars mesh demote
 
 # Delete a specific pairing
-azureclaw mesh unpair --name my-peer
+kars mesh unpair --name my-peer
 ```
 
 
 
 ---
 
-### `azureclaw pair`
+### `kars pair`
 
 Manages federation pairings for external agent cloud offload. Generate a
-one-time token that an external agent (e.g., running `azureclaw dev` on
+one-time token that an external agent (e.g., running `kars dev` on
 another machine) can use to register as a federation peer and offload
 sandboxes into this cluster.
 
 **Usage:**
 ```
-azureclaw pair <subcommand> [arguments] [options]
+kars pair <subcommand> [arguments] [options]
 ```
 
 **Subcommands:**
@@ -1374,26 +1374,26 @@ azureclaw pair <subcommand> [arguments] [options]
 **Examples:**
 ```bash
 # Generate a 30-day pairing token
-azureclaw pair generate --expires 30d
+kars pair generate --expires 30d
 
 # Generate a token with a tighter token budget
-azureclaw pair generate --token-budget 100000 --slots 2
+kars pair generate --token-budget 100000 --slots 2
 
 # List pairings
-azureclaw pair list
+kars pair list
 
 # Inspect a pairing
-azureclaw pair inspect my-peer
+kars pair inspect my-peer
 
 # Revoke a pairing
-azureclaw pair revoke my-peer
+kars pair revoke my-peer
 ```
 
 
 
 ---
 
-### `azureclaw a2a`
+### `kars a2a`
 
 A2A (Agent-to-Agent) ingress surfacing commands. `list-exposed` shows every
 sandbox currently exposed for inbound A2A traffic so operators can verify the
@@ -1403,7 +1403,7 @@ sandboxes are configured to accept inbound A2A traffic.
 
 **Usage:**
 ```
-azureclaw a2a <subcommand> [options]
+kars a2a <subcommand> [options]
 ```
 
 **Subcommands:**
@@ -1421,20 +1421,20 @@ azureclaw a2a <subcommand> [options]
 **Examples:**
 ```bash
 # List exposed sandboxes
-azureclaw a2a list-exposed
+kars a2a list-exposed
 
 # Machine-readable output
-azureclaw a2a list-exposed --output json
+kars a2a list-exposed --output json
 
 # Show the AgentCard schema this cluster publishes
-azureclaw a2a schema
+kars a2a schema
 ```
 
-**See also:** [`azureclaw a2a-agent`](#azureclaw-a2a-agent) — manage A2AAgent CRs (signing-key trust anchors).
+**See also:** [`kars a2a-agent`](#kars-a2a-agent) — manage A2AAgent CRs (signing-key trust anchors).
 
 ---
 
-### `azureclaw a2a-agent`
+### `kars a2a-agent`
 
 Manages **A2AAgent** custom resources — the trust anchors that authorise
 inbound A2A traffic. Each A2AAgent CR pins one or more signing keys and
@@ -1442,7 +1442,7 @@ optionally points at a `ToolPolicy` for per-call authorisation.
 
 **Usage:**
 ```
-azureclaw a2a-agent <subcommand> [options]
+kars a2a-agent <subcommand> [options]
 ```
 
 **Subcommands:**
@@ -1472,31 +1472,31 @@ azureclaw a2a-agent <subcommand> [options]
 **Examples:**
 ```bash
 # Register an external partner agent with one signing key
-azureclaw a2a-agent apply partner-bot \
+kars a2a-agent apply partner-bot \
   --endpoint-url https://partner.example.com/a2a \
   --signing-key key1:Ed25519:MCowBQYDK2VwAyEAxxx... \
   --require-signed --production-mode
 
 # Apply from a YAML spec
-azureclaw a2a-agent apply partner-bot --from-file partner.yaml
+kars a2a-agent apply partner-bot --from-file partner.yaml
 
 # List A2AAgents in a namespace
-azureclaw a2a-agent list -n acme
+kars a2a-agent list -n acme
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md#a2aagent), [`azureclaw toolpolicy`](#azureclaw-toolpolicy)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#a2aagent), [`kars toolpolicy`](#kars-toolpolicy)
 
 ---
 
-### `azureclaw toolpolicy`
+### `kars toolpolicy`
 
 Manages **ToolPolicy** custom resources — per-tool gating, rate limits, and
 AP2 commerce caps applied to every dispatched tool call. Aliased as `tp`.
 
 **Usage:**
 ```
-azureclaw toolpolicy <subcommand> [options]
-azureclaw tp <subcommand> [options]
+kars toolpolicy <subcommand> [options]
+kars tp <subcommand> [options]
 ```
 
 **Subcommands:**
@@ -1530,22 +1530,22 @@ azureclaw tp <subcommand> [options]
 **Examples:**
 ```bash
 # Rate-limit all tools to 10 rps with 20-burst
-azureclaw tp apply rate-limit-default --tool '*' --rps 10 --burst 20
+kars tp apply rate-limit-default --tool '*' --rps 10 --burst 20
 
 # AP2 cap on a payment tool
-azureclaw tp apply payments-cap --tool send-payment \
+kars tp apply payments-cap --tool send-payment \
   --daily-cap 'USD 500.00' --per-transfer-cap 'USD 100.00' \
   --approval-mode aboveThreshold --approval-threshold 'USD 50.00'
 
 # Apply from YAML
-azureclaw tp apply complex-policy --from-file policy.yaml
+kars tp apply complex-policy --from-file policy.yaml
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md#toolpolicy), [`azureclaw inferencepolicy`](#azureclaw-inferencepolicy)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#toolpolicy), [`kars inferencepolicy`](#kars-inferencepolicy)
 
 ---
 
-### `azureclaw inferencepolicy`
+### `kars inferencepolicy`
 
 Manages **InferencePolicy** custom resources — token budgets, model
 preference, and Content Safety severity floor applied to every inference
@@ -1553,8 +1553,8 @@ call. Aliased as `ip`.
 
 **Usage:**
 ```
-azureclaw inferencepolicy <subcommand> [options]
-azureclaw ip <subcommand> [options]
+kars inferencepolicy <subcommand> [options]
+kars ip <subcommand> [options]
 ```
 
 **Subcommands:**
@@ -1586,24 +1586,24 @@ azureclaw ip <subcommand> [options]
 **Examples:**
 ```bash
 # Daily cap for one sandbox with a fallback model
-azureclaw ip apply daily-budget \
+kars ip apply daily-budget \
   --sandbox my-bot \
   --token-budget 100000 \
   --model gpt-4.1 \
   --fallback azure-openai:gpt-4o-mini
 
 # Cluster-wide Content Safety floor
-azureclaw ip apply cs-floor --action '*' --content-safety-severity Medium
+kars ip apply cs-floor --action '*' --content-safety-severity Medium
 
 # Apply from YAML
-azureclaw ip apply complex --from-file policy.yaml
+kars ip apply complex --from-file policy.yaml
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md#inferencepolicy), [`azureclaw toolpolicy`](#azureclaw-toolpolicy)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#inferencepolicy), [`kars toolpolicy`](#kars-toolpolicy)
 
 ---
 
-### `azureclaw mcp`
+### `kars mcp`
 
 Manages **McpServer** custom resources — registers external MCP (Model Context
 Protocol) servers that sandboxes are allowed to reach. The router proxies
@@ -1612,7 +1612,7 @@ Protocol) servers that sandboxes are allowed to reach. The router proxies
 
 **Usage:**
 ```
-azureclaw mcp <subcommand> [options]
+kars mcp <subcommand> [options]
 ```
 
 **Subcommands:**
@@ -1641,10 +1641,10 @@ azureclaw mcp <subcommand> [options]
 **Examples:**
 ```bash
 # Register a public MCP server (dev mode)
-azureclaw mcp apply github-mcp --url https://mcp.github.com --allowed-tool '*'
+kars mcp apply github-mcp --url https://mcp.github.com --allowed-tool '*'
 
 # Production mode with OAuth + tool allowlist
-azureclaw mcp apply prod-mcp \
+kars mcp apply prod-mcp \
   --url https://mcp.example.com \
   --production-mode \
   --oauth-issuer https://login.example.com \
@@ -1653,30 +1653,30 @@ azureclaw mcp apply prod-mcp \
   --allowed-tool search --allowed-tool fetch
 
 # Apply from YAML
-azureclaw mcp apply complex --from-file mcp.yaml
+kars mcp apply complex --from-file mcp.yaml
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md#mcpserver), [`azureclaw toolpolicy`](#azureclaw-toolpolicy)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#mcpserver), [`kars toolpolicy`](#kars-toolpolicy)
 
 ---
 
-### `azureclaw memory`
+### `kars memory`
 
-Operator surface for the **`ClawMemory`** CRD — the binding between a
+Operator surface for the **`KarsMemory`** CRD — the binding between a
 sandbox and a Foundry Memory Store (scope, retention floor, delete-on-
 sandbox-delete sweep). Mirrors `kubectl get/apply/delete` patterns.
 
 | Subcommand | What it does |
 |---|---|
-| `apply <name>` | Create or update a ClawMemory binding (from flags or `--from-file`). |
-| `get <name>` | Show a ClawMemory by name (`-o pretty|yaml|json`). |
-| `list` | List ClawMemory bindings in a namespace. |
+| `apply <name>` | Create or update a KarsMemory binding (from flags or `--from-file`). |
+| `get <name>` | Show a KarsMemory by name (`-o pretty|yaml|json`). |
+| `list` | List KarsMemory bindings in a namespace. |
 | `delete <name>` | Delete a binding (`--no-prompt` to skip confirmation). |
 
 **Common flags on `apply`:**
 | Flag | Description |
 |---|---|
-| `-n, --namespace <ns>` | Namespace (use `azureclaw-<sandbox>`). |
+| `-n, --namespace <ns>` | Namespace (use `kars-<sandbox>`). |
 | `--from-file <path>` | Read full spec from a YAML/JSON file (mutually exclusive with the flags below). |
 | `--sandbox <name>` | Sandbox to bind (`spec.sandboxRef.name`). |
 | `--store <name>` | Foundry Memory Store name (DNS-label). |
@@ -1688,18 +1688,18 @@ sandbox-delete sweep). Mirrors `kubectl get/apply/delete` patterns.
 **Examples:**
 ```bash
 # Bind a sandbox to a Memory Store, scoped per-agent, 30-day floor
-azureclaw memory apply my-agent-mem \
-  -n azureclaw-my-agent \
+kars memory apply my-agent-mem \
+  -n kars-my-agent \
   --sandbox my-agent \
   --store prod-shared-memory \
   --scope agent:my-agent \
   --retention-days 30
 
 # List bindings in a namespace
-azureclaw memory list -n azureclaw-my-agent
+kars memory list -n kars-my-agent
 
 # Delete (defaults to cleaning up scope contents)
-azureclaw memory delete my-agent-mem -n azureclaw-my-agent
+kars memory delete my-agent-mem -n kars-my-agent
 ```
 
-**See also:** [docs/api/crd-reference.md#clawmemory](api/crd-reference.md#clawmemory--foundry-memory-binding)
+**See also:** [docs/api/crd-reference.md#karsmemory](api/crd-reference.md#karsmemory--foundry-memory-binding)

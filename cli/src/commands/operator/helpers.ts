@@ -48,7 +48,7 @@ export function timeSince(date: Date): string {
  * Parse Prometheus text format and sum values for a given metric name.
  * Optionally filter by label key=value pairs.
  *
- * Example line: `azureclaw_tokens_total{direction="input",model="gpt-4",sandbox="s1"} 8500`
+ * Example line: `kars_tokens_total{direction="input",model="gpt-4",sandbox="s1"} 8500`
  */
 export function sumPrometheusCounter(
   text: string,

@@ -3,17 +3,17 @@
 # Licensed under the MIT License.
 
 # ═══════════════════════════════════════════════════════════════════
-# AzureClaw Demo: Operation Claw Shield — Attack Simulation
+# Kars Demo: Operation Claw Shield — Attack Simulation
 # ═══════════════════════════════════════════════════════════════════
 #
 # Run this INSIDE the fabrikam-legal-agent sandbox to simulate
 # a compromised agent attempting a full attack chain.
 #
-# Every attack is expected to FAIL — this demonstrates AzureClaw's
+# Every attack is expected to FAIL — this demonstrates Kars's
 # defense-in-depth security model.
 #
 # Usage:
-#   azureclaw connect fabrikam-legal-agent --shell
+#   kars connect fabrikam-legal-agent --shell
 #   bash /sandbox/attack-simulation.sh
 #
 # ═══════════════════════════════════════════════════════════════════
@@ -176,7 +176,7 @@ header "PHASE 4: Lateral Movement Attempts"
 # ═══════════════════════════════════════════════════════════════════
 
 attack "4.1 — Discover Contoso's pod via DNS"
-contoso_host="contoso-bank-agent.azureclaw-contoso-bank-agent.svc.cluster.local"
+contoso_host="contoso-bank-agent.kars-contoso-bank-agent.svc.cluster.local"
 if nslookup "$contoso_host" 2>/dev/null | grep -q "Address:"; then
     failed "Discovered Contoso's pod via DNS!"
 else
@@ -285,7 +285,7 @@ echo ""
 
 if [ "$FAIL" -eq 0 ]; then
     echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║  ALL ATTACKS BLOCKED — AzureClaw defense-in-depth holds!  ║${NC}"
+    echo -e "${GREEN}${BOLD}║  ALL ATTACKS BLOCKED — Kars defense-in-depth holds!  ║${NC}"
     echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo "Security layers that activated:"
@@ -305,5 +305,5 @@ else
 fi
 
 echo ""
-echo "Run 'azureclaw trace fabrikam-legal-agent --exec --network' to see"
+echo "Run 'kars trace fabrikam-legal-agent --exec --network' to see"
 echo "these attacks from the operator's perspective via eBPF tracing."

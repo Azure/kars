@@ -1,7 +1,7 @@
 # Security Audit: `promote-dev-main/slices-1c-6.5`
 
 **Capability:** umbrella promotion of `dev` → `main` containing 59
-commits across Slices 1c–6.5 (signed OCI policy bundles, ClawEval
+commits across Slices 1c–6.5 (signed OCI policy bundles, KarsEval
 conformance runner, EgressApproval CRD/reconciler/CLI/Headlamp, and
 the MCP router forwarder). Promotion PR: #320.
 
@@ -18,7 +18,7 @@ Slices in scope (chronological, PR numbers in parens):
 
 - **Slice 1c.1–1c.6** (#302–#307): `PolicyKind` trait + `bundleRef`
   signed-OCI artifact pattern for ToolPolicy, InferencePolicy,
-  ClawMemory, McpServer, SignerPolicy. Crypto surface = `sha2::Sha256`
+  KarsMemory, McpServer, SignerPolicy. Crypto surface = `sha2::Sha256`
   for canonical-content hashing only; signing is delegated to cosign +
   sigstore-rs (`controller/src/policy_fetcher.rs`, already allowlisted).
 - **Slice 5b–5d** (#297, #299–#301): egress allowlist mount, signed
@@ -26,8 +26,8 @@ Slices in scope (chronological, PR numbers in parens):
 - **Slice 5e.1–5e.4** (#308–#311): EgressApproval CRD + CEL profile
   compile + reconciler + CLI + Headlamp panel + E2E. CEL evaluation
   uses upstream `cel-interpreter`; no hand-rolled expression engine.
-- **Slice 6.1–6.5** (#312–#317): ClawEval EvalCorpus crate +
-  conformance-runner binary + ClawEval CLI + policy-conformance
+- **Slice 6.1–6.5** (#312–#317): KarsEval EvalCorpus crate +
+  conformance-runner binary + KarsEval CLI + policy-conformance
   reconciler + Headlamp surfaces.
 - **Headlamp #318**: reason-aware status chip + MCP fleet card +
   memory-store docs refresh (UI-only; no new capability surface).
@@ -55,8 +55,8 @@ Capability files touched and their per-slice audits:
 | `cli/src/commands/egress/blocked.test.ts`             | 5e.3     | PR #310 review                            |
 | `sandbox-images/openclaw/Dockerfile.base`             | 5b / 5d  | PRs #297, #301 review                     |
 | `sandbox-images/openclaw/entrypoint.sh`               | 5b–5e    | per-slice review                          |
-| `deploy/helm/azureclaw/templates/crd-mcpserver.yaml`  | 1c.5     | PR #306 review                            |
-| `deploy/helm/azureclaw/templates/operator-default-deny-networkpolicy.yaml` | 5e.3 | PR #310 review |
+| `deploy/helm/kars/templates/crd-mcpserver.yaml`  | 1c.5     | PR #306 review                            |
+| `deploy/helm/kars/templates/operator-default-deny-networkpolicy.yaml` | 5e.3 | PR #310 review |
 
 ## 2. Threat-model delta
 

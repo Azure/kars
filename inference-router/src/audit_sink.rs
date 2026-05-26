@@ -116,7 +116,7 @@ pub struct AzureMonitorConfig {
     pub dce_endpoint: String,
     /// Immutable ID of the Data Collection Rule, e.g. `dcr-1234...`.
     pub dcr_immutable_id: String,
-    /// Custom log stream name declared in the DCR, e.g. `Custom-AzureClawAudit_CL`.
+    /// Custom log stream name declared in the DCR, e.g. `Custom-KarsAudit_CL`.
     pub stream_name: String,
     /// Sandbox name — included as a column on every row.
     pub sandbox: String,
@@ -250,16 +250,16 @@ impl AuditSink for AzureMonitorSink {
 
 /// Build the sandbox-wide audit sink chain from environment variables.
 ///
-/// - `AZURECLAW_AUDIT_DIR` controls the always-on local JSONL writer
+/// - `KARS_AUDIT_DIR` controls the always-on local JSONL writer
 ///   (matches Slice 4a; value `"disabled"` or empty short-circuits).
-/// - `AZURECLAW_AUDIT_AZMON_DCE`, `AZURECLAW_AUDIT_AZMON_DCR_ID`,
-///   `AZURECLAW_AUDIT_AZMON_STREAM` together enable the Azure Monitor
+/// - `KARS_AUDIT_AZMON_DCE`, `KARS_AUDIT_AZMON_DCR_ID`,
+///   `KARS_AUDIT_AZMON_STREAM` together enable the Azure Monitor
 ///   sink. If any one is missing, the sink is disabled silently — this
 ///   is the configuration-by-env path that Slice 4d's plural McpServer
 ///   CRD will replace with a typed `AuditSink` enum.
 ///
 /// Returns `None` when no sinks are configured (e.g. tests with
-/// `AZURECLAW_AUDIT_DIR=disabled` and no AzMon env vars).
+/// `KARS_AUDIT_DIR=disabled` and no AzMon env vars).
 pub fn build_sink_from_env(
     sandbox_name: &str,
     auth: Arc<crate::auth::WorkloadIdentityAuth>,
@@ -289,8 +289,7 @@ pub fn build_sink_from_env(
 }
 
 fn open_local_jsonl_writer(sandbox_name: &str) -> Option<crate::audit_jsonl::JsonlAuditWriter> {
-    let dir =
-        std::env::var("AZURECLAW_AUDIT_DIR").unwrap_or_else(|_| "/var/log/azureclaw/audit".into());
+    let dir = std::env::var("KARS_AUDIT_DIR").unwrap_or_else(|_| "/var/log/kars/audit".into());
     if dir == "disabled" || dir.is_empty() {
         return None;
     }
@@ -320,9 +319,9 @@ fn open_local_jsonl_writer(sandbox_name: &str) -> Option<crate::audit_jsonl::Jso
 /// env-driven configuration path Slice 4c uses ahead of Slice 4d's
 /// `McpServer.spec.auditSink` typed CRD field.
 pub(crate) fn read_azmon_config_from_env(sandbox: &str) -> Option<AzureMonitorConfig> {
-    let dce = non_empty_env("AZURECLAW_AUDIT_AZMON_DCE")?;
-    let dcr = non_empty_env("AZURECLAW_AUDIT_AZMON_DCR_ID")?;
-    let stream = non_empty_env("AZURECLAW_AUDIT_AZMON_STREAM")?;
+    let dce = non_empty_env("KARS_AUDIT_AZMON_DCE")?;
+    let dcr = non_empty_env("KARS_AUDIT_AZMON_DCR_ID")?;
+    let stream = non_empty_env("KARS_AUDIT_AZMON_STREAM")?;
     Some(AzureMonitorConfig {
         dce_endpoint: dce,
         dcr_immutable_id: dcr,
@@ -414,12 +413,12 @@ mod tests {
         let cfg = AzureMonitorConfig {
             dce_endpoint: "https://my-dce.eastus-1.ingest.monitor.azure.com".to_string(),
             dcr_immutable_id: "dcr-abcd1234".to_string(),
-            stream_name: "Custom-AzureClawAudit_CL".to_string(),
+            stream_name: "Custom-KarsAudit_CL".to_string(),
             sandbox: "sb".to_string(),
         };
         assert_eq!(
             cfg.ingestion_url(),
-            "https://my-dce.eastus-1.ingest.monitor.azure.com/dataCollectionRules/dcr-abcd1234/streams/Custom-AzureClawAudit_CL?api-version=2023-01-01"
+            "https://my-dce.eastus-1.ingest.monitor.azure.com/dataCollectionRules/dcr-abcd1234/streams/Custom-KarsAudit_CL?api-version=2023-01-01"
         );
     }
 
@@ -460,24 +459,24 @@ mod tests {
         // SAFETY: unsafe block required by Rust 2024 edition for std::env::set_var.
         // Tests in this module are not run in parallel because they mutate process env.
         unsafe {
-            std::env::remove_var("AZURECLAW_AUDIT_AZMON_DCE");
-            std::env::remove_var("AZURECLAW_AUDIT_AZMON_DCR_ID");
-            std::env::remove_var("AZURECLAW_AUDIT_AZMON_STREAM");
+            std::env::remove_var("KARS_AUDIT_AZMON_DCE");
+            std::env::remove_var("KARS_AUDIT_AZMON_DCR_ID");
+            std::env::remove_var("KARS_AUDIT_AZMON_STREAM");
         }
         assert!(read_azmon_config_from_env("sb").is_none());
 
         unsafe {
-            std::env::set_var("AZURECLAW_AUDIT_AZMON_DCE", "https://x");
+            std::env::set_var("KARS_AUDIT_AZMON_DCE", "https://x");
         }
         assert!(read_azmon_config_from_env("sb").is_none());
 
         unsafe {
-            std::env::set_var("AZURECLAW_AUDIT_AZMON_DCR_ID", "dcr-1");
+            std::env::set_var("KARS_AUDIT_AZMON_DCR_ID", "dcr-1");
         }
         assert!(read_azmon_config_from_env("sb").is_none());
 
         unsafe {
-            std::env::set_var("AZURECLAW_AUDIT_AZMON_STREAM", "Custom-Foo_CL");
+            std::env::set_var("KARS_AUDIT_AZMON_STREAM", "Custom-Foo_CL");
         }
         let cfg = read_azmon_config_from_env("sb").unwrap();
         assert_eq!(cfg.dce_endpoint, "https://x");
@@ -487,14 +486,14 @@ mod tests {
 
         // Empty value → treated as missing.
         unsafe {
-            std::env::set_var("AZURECLAW_AUDIT_AZMON_STREAM", "");
+            std::env::set_var("KARS_AUDIT_AZMON_STREAM", "");
         }
         assert!(read_azmon_config_from_env("sb").is_none());
 
         unsafe {
-            std::env::remove_var("AZURECLAW_AUDIT_AZMON_DCE");
-            std::env::remove_var("AZURECLAW_AUDIT_AZMON_DCR_ID");
-            std::env::remove_var("AZURECLAW_AUDIT_AZMON_STREAM");
+            std::env::remove_var("KARS_AUDIT_AZMON_DCE");
+            std::env::remove_var("KARS_AUDIT_AZMON_DCR_ID");
+            std::env::remove_var("KARS_AUDIT_AZMON_STREAM");
         }
     }
 }

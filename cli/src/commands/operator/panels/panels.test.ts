@@ -3,14 +3,14 @@
 
 import { describe, it, expect } from "vitest";
 import { emptyClusterState, type ClusterState } from "./types.js";
-import { clawSandboxPanel } from "./clawsandbox.js";
-import { clawPairingPanel } from "./clawpairing.js";
+import { clawSandboxPanel } from "./karssandbox.js";
+import { clawPairingPanel } from "./karspairing.js";
 import { mcpServerPanel } from "./mcpserver.js";
 import { toolPolicyPanel } from "./toolpolicy.js";
 import { inferencePolicyPanel } from "./inferencepolicy.js";
 import { a2aAgentPanel } from "./a2aagent.js";
-import { clawMemoryPanel } from "./clawmemory.js";
-import { clawEvalPanel } from "./claweval.js";
+import { clawMemoryPanel } from "./karsmemory.js";
+import { clawEvalPanel } from "./karseval.js";
 import { providerStatusPanel } from "./provider_status.js";
 import {
   DEFAULT_PANELS,
@@ -28,8 +28,8 @@ import {
 } from "./fixtures.js";
 
 const ALL_IDS = [
-  "clawsandbox", "clawpairing", "mcpserver", "toolpolicy",
-  "inferencepolicy", "a2aagent", "clawmemory", "claweval",
+  "karssandbox", "karspairing", "mcpserver", "toolpolicy",
+  "inferencepolicy", "a2aagent", "karsmemory", "karseval",
   "provider_status",
 ];
 
@@ -82,10 +82,10 @@ describe("S14 panels — empty cluster (no panic, no false data)", () => {
 
   it("renderDashboard --panels=triage on empty cluster shows header + 'no alerts' only", () => {
     const out = renderDashboard(empty, { panels: "triage" });
-    expect(out).toContain("AzureClaw Operator");
+    expect(out).toContain("Kars Operator");
     expect(out).toContain("0 agents, ");
     expect(out).toContain("✓ No alerts");
-    expect(out).not.toContain("ClawSandbox");
+    expect(out).not.toContain("KarsSandbox");
   });
 
   it("renderDashboard --per-sandbox on empty cluster falls back to flat list", () => {
@@ -96,7 +96,7 @@ describe("S14 panels — empty cluster (no panic, no false data)", () => {
   });
 });
 
-describe("S14 panels — clawsandbox", () => {
+describe("S14 panels — karssandbox", () => {
   it("renders sandbox columns with health color tag", () => {
     const out = clawSandboxPanel.render(fullFixture());
     expect(out).toContain("sb-1");
@@ -113,7 +113,7 @@ describe("S14 panels — clawsandbox", () => {
   });
 });
 
-describe("S14 panels — clawpairing", () => {
+describe("S14 panels — karspairing", () => {
   it("renders agentA ↔ agentB and Conditions reasons verbatim", () => {
     const out = clawPairingPanel.render(fullFixture());
     expect(out).toContain("alice");
@@ -191,7 +191,7 @@ describe("S14 panels — a2aagent", () => {
   });
 });
 
-describe("S14 panels — clawmemory", () => {
+describe("S14 panels — karsmemory", () => {
   it("renders Foundry binding + RBAC scope summary", () => {
     const out = clawMemoryPanel.render(fullFixture());
     expect(out).toContain("foundry-binding");
@@ -201,7 +201,7 @@ describe("S14 panels — clawmemory", () => {
   });
 });
 
-describe("S14 panels — claweval", () => {
+describe("S14 panels — karseval", () => {
   it("renders lastRunAt + lastScore + nextScheduledAt", () => {
     const out = clawEvalPanel.render(fullFixture());
     expect(out).toContain("eval-nightly");
@@ -254,8 +254,8 @@ describe("S14 panels — provider_status", () => {
 
 describe("S14 panels — layout flag wiring", () => {
   it("--panels filters and orders correctly", () => {
-    const sel = resolvePanels("mcpserver,clawsandbox");
-    expect(sel.map((p) => p.id)).toEqual(["mcpserver", "clawsandbox"]);
+    const sel = resolvePanels("mcpserver,karssandbox");
+    expect(sel.map((p) => p.id)).toEqual(["mcpserver", "karssandbox"]);
   });
 
   it("--panels=all and undefined and empty fall through to defaults", () => {
@@ -265,8 +265,8 @@ describe("S14 panels — layout flag wiring", () => {
   });
 
   it("--panels with unknown ids drops them silently", () => {
-    const sel = resolvePanels("clawsandbox,nope,mcpserver");
-    expect(sel.map((p) => p.id)).toEqual(["clawsandbox", "mcpserver"]);
+    const sel = resolvePanels("karssandbox,nope,mcpserver");
+    expect(sel.map((p) => p.id)).toEqual(["karssandbox", "mcpserver"]);
   });
 
   it("renderDashboard --per-sandbox groups by sandbox-name", () => {
@@ -331,7 +331,7 @@ describe("S20 panels — triage + at-a-glance layout", () => {
     const state = emptyClusterState();
     state.inferencePolicies = [{
       name: "ip-1",
-      namespace: "azureclaw-sb-1",
+      namespace: "kars-sb-1",
       conditions: [
         { type: "Ready", status: "False", reason: "ModelMissing", message: "gpt-foo not found" },
       ],
@@ -348,13 +348,13 @@ describe("S20 panels — triage + at-a-glance layout", () => {
     const { collectTriage } = await import("./layout.js");
     const state = emptyClusterState();
     state.sandboxes = [{
-      name: "sb-down", namespace: "azureclaw-sb-down", status: "CrashLoopBackOff",
+      name: "sb-down", namespace: "kars-sb-down", status: "CrashLoopBackOff",
       health: "down", model: "gpt-4.1", isolation: "enhanced", channels: "",
       age: "1m", podName: "p", restarts: 5, role: "controller", parent: "", runtime: "aks",
     }];
     const triage = collectTriage(state);
     expect(triage).toHaveLength(1);
-    expect(triage[0].panel).toBe("ClawSandbox");
+    expect(triage[0].panel).toBe("KarsSandbox");
     expect(triage[0].status).toBe("False");
   });
 
@@ -362,18 +362,18 @@ describe("S20 panels — triage + at-a-glance layout", () => {
     const out = renderDashboard(emptyClusterState());
     // Optional CRDs shouldn't surface as section headers when empty.
     expect(out).not.toContain("═══ McpServer");
-    expect(out).not.toContain("═══ ClawMemory");
-    expect(out).not.toContain("═══ ClawEval");
+    expect(out).not.toContain("═══ KarsMemory");
+    expect(out).not.toContain("═══ KarsEval");
     expect(out).not.toContain("═══ A2AAgent");
-    expect(out).not.toContain("═══ ClawPairing");
-    // ClawSandbox section is only rendered when there are sandboxes.
-    expect(out).not.toContain("═══ ClawSandbox");
+    expect(out).not.toContain("═══ KarsPairing");
+    // KarsSandbox section is only rendered when there are sandboxes.
+    expect(out).not.toContain("═══ KarsSandbox");
   });
 
   it("dashboard with issues prepends a 🚨 Health alerts section", () => {
     const state = emptyClusterState();
     state.inferencePolicies = [{
-      name: "ip-bad", namespace: "azureclaw",
+      name: "ip-bad", namespace: "kars",
       conditions: [{ type: "Ready", status: "False", reason: "Bad", message: "x" }],
     }];
     const out = renderDashboard(state);
@@ -387,7 +387,7 @@ describe("S20 panels — triage + at-a-glance layout", () => {
   it("default dashboard renders one section per non-empty CRD type with [N] indices", () => {
     const out = renderDashboard(fullFixture());
     // Each non-empty CRD type gets its own section header.
-    expect(out).toContain("═══ ClawSandbox (");
+    expect(out).toContain("═══ KarsSandbox (");
     expect(out).toContain("═══ InferencePolicy (");
     expect(out).toContain("═══ ToolPolicy (");
     // Drill-in indices.
@@ -431,7 +431,7 @@ describe("CRD panel — per-type sections + drill-in", () => {
     // Indices are 1-based and contiguous.
     expect(rows.map((r) => r.index)).toEqual(rows.map((_, i) => i + 1));
     // Body contains a section per non-empty kind.
-    expect(body).toContain("═══ ClawSandbox");
+    expect(body).toContain("═══ KarsSandbox");
   });
 
   it("renderCrdSections on empty cluster returns the (no CRD instances) placeholder", async () => {
@@ -445,14 +445,14 @@ describe("CRD panel — per-type sections + drill-in", () => {
     const { renderCrdItemDetail } = await import("./layout.js");
     const state = fullFixture();
     const sb = state.sandboxes[0];
-    const out = renderCrdItemDetail(state, "ClawSandbox", sb.name, sb.namespace);
-    expect(out).toContain("ClawSandbox detail");
+    const out = renderCrdItemDetail(state, "KarsSandbox", sb.name, sb.namespace);
+    expect(out).toContain("KarsSandbox detail");
     expect(out).toContain(sb.name);
   });
 
   it("renderCrdItemDetail returns a friendly 'not found' for unknown items", async () => {
     const { renderCrdItemDetail } = await import("./layout.js");
-    const out = renderCrdItemDetail(emptyClusterState(), "ClawSandbox", "ghost", "azureclaw-ghost");
+    const out = renderCrdItemDetail(emptyClusterState(), "KarsSandbox", "ghost", "kars-ghost");
     expect(out).toContain("not found");
   });
 
@@ -485,15 +485,15 @@ describe("CRD panel — per-type sections + drill-in", () => {
     ])).toBe("unknown");
   });
 
-  it("ClawPairing rows: empty conditions + state=Active → phase=healthy (regression: pairing reconciler emits no conditions)", async () => {
+  it("KarsPairing rows: empty conditions + state=Active → phase=healthy (regression: pairing reconciler emits no conditions)", async () => {
     const { renderCrdSections } = await import("./layout.js");
     const state = emptyClusterState();
     state.pairings = [{
-      name: "p1", namespace: "azureclaw-system", age: undefined, conditions: [],
+      name: "p1", namespace: "kars-system", age: undefined, conditions: [],
       agentA: "a", agentB: "b", state: "Active", trust: "verified",
     }];
     const { rows } = renderCrdSections(state);
-    const pairing = rows.find((r) => r.kind === "ClawPairing");
+    const pairing = rows.find((r) => r.kind === "KarsPairing");
     expect(pairing?.phase).toBe("healthy");
   });
 });

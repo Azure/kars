@@ -132,10 +132,10 @@ pub struct AppState {
     /// enforced; later sub-slices add daily/monthly budgets,
     /// content-safety floors, and model failover.
     pub inference_policy: crate::inference_policy_loader::LoadedInferencePolicyHandle,
-    /// Currently loaded `ClawMemory` binding, if any. Populated at
+    /// Currently loaded `KarsMemory` binding, if any. Populated at
     /// startup by `memory_binding_loader::load_and_install` reading
     /// the `MEMORY_BINDING_DIR` mount written by the controller's
-    /// `claw_memory_reconciler` + `governance_mounts`. Slice 3a is
+    /// `kars_memory_reconciler` + `governance_mounts`. Slice 3a is
     /// digest-echo only — the binding loads and the digest shows up
     /// under `GET /internal/policy-status` with `kind: Memory`, but
     /// no behaviour changes in the data plane (Slice 3b rewires the
@@ -175,7 +175,7 @@ impl AppState {
         // somewhere writable in your dev box. Empty string disables
         // persistence (in-memory only) — used by integration tests.
         let persist_path = std::env::var("TOKEN_BUDGET_PERSIST_PATH")
-            .unwrap_or_else(|_| "/var/lib/azureclaw/token-budgets.json".into());
+            .unwrap_or_else(|_| "/var/lib/kars/token-budgets.json".into());
         let budget = if persist_path.is_empty() {
             TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
         } else {
@@ -230,7 +230,7 @@ impl AppState {
 
         let blocklist = if blocklist_enabled {
             let seed_path = std::env::var("BLOCKLIST_SEED_PATH")
-                .unwrap_or_else(|_| "/etc/azureclaw/blocklist/domains.txt".into());
+                .unwrap_or_else(|_| "/etc/kars/blocklist/domains.txt".into());
             let bl = Blocklist::new(Some(&seed_path)).await;
 
             let refresh_secs = std::env::var("BLOCKLIST_REFRESH_SECS")
@@ -264,8 +264,8 @@ impl AppState {
         // so the controller can echo-confirm via
         // `GET /internal/policy-status`.
         let inference_policy = crate::inference_policy_loader::empty_handle();
-        let inference_policy_dir = std::env::var("INFERENCE_POLICY_DIR")
-            .unwrap_or_else(|_| "/etc/azureclaw/inference".into());
+        let inference_policy_dir =
+            std::env::var("INFERENCE_POLICY_DIR").unwrap_or_else(|_| "/etc/kars/inference".into());
         let _ = crate::inference_policy_loader::load_and_install(
             &inference_policy_dir,
             &policy_status,
@@ -273,11 +273,11 @@ impl AppState {
         )
         .await;
 
-        // Slice 3a: ClawMemory compiled binding. Single file mounted
-        // by `governance_mounts` when `ClawSandbox.spec.memoryRef` is
+        // Slice 3a: KarsMemory compiled binding. Single file mounted
+        // by `governance_mounts` when `KarsSandbox.spec.memoryRef` is
         // set. The loader registers the canonical digest under
         // `PolicyKind::Memory` so the controller's
-        // `claw_memory_reconciler` can close the §3 echo loop;
+        // `kars_memory_reconciler` can close the §3 echo loop;
         // nothing in the data plane consumes the binding yet
         // (Slice 3b rewires `foundry.memory.*`).
         let memory_binding = crate::memory_binding_loader::empty_handle();
@@ -326,7 +326,7 @@ impl AppState {
             responses_only_models: Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
             )),
-            admin_token: std::fs::read_to_string("/etc/azureclaw/secrets/admin-token")
+            admin_token: std::fs::read_to_string("/etc/kars/secrets/admin-token")
                 .or_else(|_| std::fs::read_to_string("/run/secrets/admin-token"))
                 .or_else(|_| std::env::var("ADMIN_TOKEN"))
                 .ok()
@@ -414,9 +414,9 @@ pub(crate) fn apply_model_preference_override(
 }
 
 /// Extract the admin bearer token from either `Authorization: Bearer <token>`
-/// (canonical) or the legacy `x-azureclaw-admin: <token>` header.
+/// (canonical) or the legacy `x-kars-admin: <token>` header.
 ///
-/// Q3: `Authorization: Bearer` is canonical; `x-azureclaw-admin` is accepted
+/// Q3: `Authorization: Bearer` is canonical; `x-kars-admin` is accepted
 /// for backward compatibility but logs a deprecation warning (once per
 /// process — see `DEPRECATED_ADMIN_HEADER_WARNED`) so operators notice and
 /// migrate callers. The legacy header will be removed in a future release.
@@ -428,13 +428,10 @@ fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
     {
         return Some(value.to_string());
     }
-    if let Some(value) = headers
-        .get("x-azureclaw-admin")
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(value) = headers.get("x-kars-admin").and_then(|v| v.to_str().ok()) {
         if !DEPRECATED_ADMIN_HEADER_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             tracing::warn!(
-                "Deprecated header 'x-azureclaw-admin' used for admin auth. \
+                "Deprecated header 'x-kars-admin' used for admin auth. \
                  Migrate to 'Authorization: Bearer <token>'. This header will \
                  be removed in a future release."
             );

@@ -21,7 +21,7 @@
 //!
 //! The GitHub token itself comes from one of (in priority order):
 //!  - `COPILOT_GITHUB_TOKEN` env (set by entrypoint.sh in sandbox mode)
-//!  - `/run/secrets/copilot-github-token` (mounted by `azureclaw dev`)
+//!  - `/run/secrets/copilot-github-token` (mounted by `kars dev`)
 //!
 //! No fallback to the Workload Identity path — Copilot has no Azure side.
 

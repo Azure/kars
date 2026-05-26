@@ -37,7 +37,7 @@ export function createCli(): Command {
   const program = new Command();
 
   program
-    .name("azureclaw")
+    .name("kars")
     .description(
       "Run AI agents safely on Azure. One command to go from zero to production."
     )
@@ -102,12 +102,12 @@ Command groups:
   Attestation     attest
 
 Quick start:
-  azureclaw up                    # Provision Azure + deploy controller + first sandbox
-  azureclaw add my-bot            # Add a sandbox to an existing cluster
-  azureclaw operator              # Live TUI dashboard for all sandboxes
-  azureclaw <cmd> --help          # Detailed help for any subcommand
+  kars up                    # Provision Azure + deploy controller + first sandbox
+  kars add my-bot            # Add a sandbox to an existing cluster
+  kars operator              # Live TUI dashboard for all sandboxes
+  kars <cmd> --help          # Detailed help for any subcommand
 
-Docs: https://github.com/Azure/azureclaw#readme
+Docs: https://github.com/Azure/kars#readme
 `);
 
   return program;

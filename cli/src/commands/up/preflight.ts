@@ -76,7 +76,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   }
 
   // ── Pre-fill from cached deployment context ────────────────────
-  // If a previous `azureclaw up` saved context, use those values as
+  // If a previous `kars up` saved context, use those values as
   // defaults so the user isn't re-prompted for everything.
   const cachedCtx = loadContext();
   if (cachedCtx && cachedCtx.region) {
@@ -97,7 +97,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   // ══════════════════════════════════════════════════════════════
 
   if (!options.dryRun) {
-    banner("AzureClaw · Preflight Check", "Validating environment before deployment");
+    banner("Kars · Preflight Check", "Validating environment before deployment");
   } else {
     console.log(chalk.dim("  Preflight validation...\n"));
   }
@@ -311,7 +311,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
     }
   }
 
-  const rg = options.resourceGroup || `azureclaw-${options.region}`;
+  const rg = options.resourceGroup || `kars-${options.region}`;
 
   // ── 3b. RBAC + provider preflight ──────────────────────────────
   // Fails fast (≤30s) if the caller lacks roles / providers / features
@@ -375,7 +375,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
     }
     if (!skuOk) {
       console.log(chalk.yellow(`\n  Some VM SKUs are not available in ${options.region}.`));
-      console.log(chalk.yellow(`  Try a different region: ${chalk.cyan("azureclaw up --region westus3")}\n`));
+      console.log(chalk.yellow(`  Try a different region: ${chalk.cyan("kars up --region westus3")}\n`));
       process.exit(1);
     }
 
@@ -407,10 +407,10 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   if (options.dryRun) {
     const isolationDesc: Record<string, string> = {
       standard: "standard (runc + RuntimeDefault seccomp)",
-      enhanced: "enhanced (runc + azureclaw-strict seccomp)",
+      enhanced: "enhanced (runc + kars-strict seccomp)",
       confidential: "confidential (Kata VM isolation)",
     };
-    console.log(blue(`\n  AzureClaw · Dry Run\n`));
+    console.log(blue(`\n  Kars · Dry Run\n`));
     console.log(`  Steps that would execute:\n`);
     console.log(`   1. Check Azure credentials (az account show)`);
     console.log(`   2. Create resource group '${rg}' in ${options.region}`);
@@ -422,8 +422,8 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
     console.log(`   8. Get AKS credentials`);
     console.log(`   9. ${options.build ? "Build images locally + push to ACR (docker build + docker push)" : `Import images from ${options.sourceAcr}: controller, inference-router, openclaw-sandbox`}`);
     console.log(`  10. Helm install: CRD + controller + seccomp DaemonSet + RBAC`);
-    console.log(`  11. Create federated credential for azureclaw-${options.name}:sandbox`);
-    console.log(`  12. Create ClawSandbox CR '${options.name}' (isolation: ${options.isolation})`);
+    console.log(`  11. Create federated credential for kars-${options.name}:sandbox`);
+    console.log(`  12. Create KarsSandbox CR '${options.name}' (isolation: ${options.isolation})`);
     console.log(`  13. Wait for sandbox Running`);
     console.log(`\n  Configuration:`);
     console.log(`    Name:       ${options.name}`);

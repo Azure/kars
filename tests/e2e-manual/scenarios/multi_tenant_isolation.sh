@@ -4,7 +4,7 @@
 #
 # Manual E2E scenario: multi-tenant isolation (T2 / T4 boundaries).
 #
-# Two ClawSandboxes in two namespaces:
+# Two KarsSandboxes in two namespaces:
 #
 #   1. NetworkPolicy blocks pod-to-pod traffic across tenants.
 #      → exec into A's main container, attempt TCP to B's pod IP, expect
@@ -27,7 +27,7 @@ source "$LIB_DIR/cr_factory.sh"
 scenario_header "Multi-tenant isolation"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
 name_a="iso-a"
 name_b="iso-b"
@@ -39,16 +39,16 @@ export MANUAL_E2E_SCENARIO=isolation
 
 metric_start "admit_${name_a}"
 cr_openclaw "$name_a" "$ns_a" | kubectl apply -f - >/dev/null
-metric_finish "admit_${name_a}" isolation admitClawSandbox "sandbox=${name_a}"
+metric_finish "admit_${name_a}" isolation admitKarsSandbox "sandbox=${name_a}"
 metric_start "admit_${name_b}"
 cr_openclaw "$name_b" "$ns_b" | kubectl apply -f - >/dev/null
-metric_finish "admit_${name_b}" isolation admitClawSandbox "sandbox=${name_b}"
+metric_finish "admit_${name_b}" isolation admitKarsSandbox "sandbox=${name_b}"
 
-wait_for_clawsandbox_ready "$ns_a" "$name_a" || { log_fail "A not ready"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
-wait_for_clawsandbox_ready "$ns_b" "$name_b" || { log_fail "B not ready"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
+wait_for_karssandbox_ready "$ns_a" "$name_a" || { log_fail "A not ready"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
+wait_for_karssandbox_ready "$ns_b" "$name_b" || { log_fail "B not ready"; cleanup_sandbox "$ns_a" "$name_a"; cleanup_sandbox "$ns_b" "$name_b"; exit 1; }
 
-pod_a=$(kubectl -n "$pod_ns_a" get pod -l "azureclaw.azure.com/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
-pod_b=$(kubectl -n "$pod_ns_b" get pod -l "azureclaw.azure.com/sandbox=${name_b}" -o jsonpath='{.items[0].metadata.name}')
+pod_a=$(kubectl -n "$pod_ns_a" get pod -l "kars.azure.com/sandbox=${name_a}" -o jsonpath='{.items[0].metadata.name}')
+pod_b=$(kubectl -n "$pod_ns_b" get pod -l "kars.azure.com/sandbox=${name_b}" -o jsonpath='{.items[0].metadata.name}')
 ip_b=$(kubectl -n "$pod_ns_b" get pod "$pod_b" -o jsonpath='{.status.podIP}')
 log_info "tenant A pod=${pod_a} (ns=${pod_ns_a})  →  tenant B IP=${ip_b} (ns=${pod_ns_b})"
 

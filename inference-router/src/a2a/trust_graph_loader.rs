@@ -9,7 +9,7 @@
 //! The router runs *inside* the sandbox pod (UID 1001) under a
 //! restrictive seccomp profile + iptables egress-guard (only loopback +
 //! DNS for UID 1000, plus apiserver for IMDS). Watching a ConfigMap in
-//! the cluster-wide `azureclaw-system` namespace would require either
+//! the cluster-wide `kars-system` namespace would require either
 //! cross-namespace RBAC or a per-sandbox mirror — both controller
 //! changes that belong to **Phase F2b** (per the security-audit doc).
 //!

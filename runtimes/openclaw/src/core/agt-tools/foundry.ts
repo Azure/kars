@@ -354,7 +354,7 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
       "Supports any deployed image model (gpt-image-1, FLUX.2-pro, etc.). " +
       "Images are decoded from base64 and saved under " +
       "`/sandbox/.openclaw/workspace/<output_filename>` (default `image-<ts>.png`) " +
-      "so the returned `path` is directly usable with `azureclaw_mesh_transfer_file`. " +
+      "so the returned `path` is directly usable with `kars_mesh_transfer_file`. " +
       "Use when the user asks to create, draw, or generate an image, diagram, or visual.",
     parameters: {
       type: "object",
@@ -408,7 +408,7 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
         const fs = await import("node:fs");
         const nodePath = await import("node:path");
         // Persist into the sandbox workspace so the file is directly visible
-        // to the agent FS and can be handed to azureclaw_mesh_transfer_file
+        // to the agent FS and can be handed to kars_mesh_transfer_file
         // without a copy step. Matches the foundry_code_execute download path.
         const workspaceDir = "/sandbox/.openclaw/workspace";
         try { fs.mkdirSync(workspaceDir, { recursive: true }); } catch { /* exists */ }
@@ -580,7 +580,7 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
           return { content: [{ type: "text", text: safeJson(result) }] };
         } else if (op === "create_vector_store") {
           const result = await routerCall("POST", `/openai/vector_stores?${apiVer}`, {
-            name: params.store_name || "azureclaw-store",
+            name: params.store_name || "kars-store",
           });
           return { content: [{ type: "text", text: safeJson(result) }] };
         } else if (op === "delete_vector_store") {
@@ -713,7 +713,7 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
           log.info(`Creating memory store '${store}' (chat=${chatModel}, embedding=${embeddingModel})`);
           await routerCall("POST", `/memory_stores?${apiVer}`, {
             name: store,
-            description: "AzureClaw agent persistent memory",
+            description: "Kars agent persistent memory",
             definition: {
               kind: "default",
               chat_model: chatModel,
@@ -1033,7 +1033,7 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
     description:
       "List and query Azure AI Foundry hosted agents. Discover available agents, " +
       "their capabilities, and configurations. These are server-side Foundry agents " +
-      "(different from AzureClaw sub-agent sandboxes).",
+      "(different from Kars sub-agent sandboxes).",
     parameters: {
       type: "object",
       properties: {

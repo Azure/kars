@@ -75,7 +75,7 @@ pub struct Config {
     /// global points to the shared external registry).
     pub registry_url: Option<String>,
 
-    /// Explicit provider override (from `AZURECLAW_PROVIDER` env var).
+    /// Explicit provider override (from `KARS_PROVIDER` env var).
     /// When set to `"github-copilot"`, the router treats inference as
     /// Copilot-API-bound regardless of the configured endpoint URLs.
     /// Captured at config-load time so provider detection is a pure
@@ -141,7 +141,7 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
 
-            provider_override: std::env::var("AZURECLAW_PROVIDER")
+            provider_override: std::env::var("KARS_PROVIDER")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_ascii_lowercase()),
@@ -167,7 +167,7 @@ impl Config {
 
     /// Returns true when the configured endpoint points at the GitHub
     /// Copilot API (`api.githubcopilot.com`) OR when the explicit
-    /// `AZURECLAW_PROVIDER=github-copilot` env var is set.
+    /// `KARS_PROVIDER=github-copilot` env var is set.
     ///
     /// In Copilot mode the proxy:
     /// - skips the Azure `/openai/v1/` path prefix,

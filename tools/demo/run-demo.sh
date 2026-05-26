@@ -3,17 +3,17 @@
 # Licensed under the MIT License.
 # tools/demo/run-demo.sh
 #
-# One scripted demo flow that exercises the full ClawSandbox lifecycle
+# One scripted demo flow that exercises the full KarsSandbox lifecycle
 # in three modes:
 #
-#   --mode dev     azureclaw dev (local Docker, single sandbox container).
+#   --mode dev     kars dev (local Docker, single sandbox container).
 #                  No K8s; the demo terminates after the dev container
 #                  has come up Ready (router echo).
 #   --mode kind    Local Kind cluster bootstrapped by tests/e2e helpers.
 #                  Applies the four scenario YAMLs and verifies each
 #                  phase transition with kubectl.
 #   --mode aks     A real AKS cluster the caller is already kubectl-logged
-#                  into (azureclaw up has already created it). Applies the
+#                  into (kars up has already created it). Applies the
 #                  same scenarios, expects production-grade observability
 #                  (router echo, Job creation, EgressApproval Active phase).
 #
@@ -42,7 +42,7 @@ usage() {
 Usage: $(basename "$0") --mode <dev|kind|aks> [--skip-cleanup] [--timeout SECS]
 
 Modes:
-  dev    Local Docker via 'azureclaw dev' (no K8s; smoke check only).
+  dev    Local Docker via 'kars dev' (no K8s; smoke check only).
   kind   Local Kind cluster (uses tests/e2e infra helpers).
   aks    A real AKS cluster you've already targeted with kubectl.
 
@@ -52,7 +52,7 @@ Options:
   -h, --help       Show this help.
 
 The script never touches your Azure subscription or creates clusters.
-For AKS, run 'azureclaw up' first; for Kind, ensure docker is running.
+For AKS, run 'kars up' first; for Kind, ensure docker is running.
 EOF
 }
 
@@ -101,18 +101,18 @@ wait_for() {
 
 run_dev() {
     need docker
-    need azureclaw
+    need kars
 
-    log "starting azureclaw dev (--name demo-agent, --build)"
+    log "starting kars dev (--name demo-agent, --build)"
     log "ctrl-c after the TUI shows Ready; the demo verifies router echo only"
-    azureclaw dev --name demo-agent --build &
+    kars dev --name demo-agent --build &
     local dev_pid=$!
 
     trap '[[ $SKIP_CLEANUP -eq 0 ]] && kill '"$dev_pid"' 2>/dev/null || true' EXIT
 
     wait_for "dev container Router=Ready" bash -c '
-        docker ps --format "{{.Names}}" | grep -q "^azureclaw-demo-agent$" &&
-        docker exec azureclaw-demo-agent curl -sf http://127.0.0.1:8443/internal/policy-status >/dev/null 2>&1
+        docker ps --format "{{.Names}}" | grep -q "^kars-demo-agent$" &&
+        docker exec kars-demo-agent curl -sf http://127.0.0.1:8443/internal/policy-status >/dev/null 2>&1
     '
 
     ok "dev demo green — agent running locally, router enforcing policy"
@@ -124,55 +124,55 @@ run_dev() {
 # ----------------------------------------------------------- k8s mode core --
 
 apply_scenarios() {
-    log "applying ClawSandbox + InferencePolicy"
+    log "applying KarsSandbox + InferencePolicy"
     kubectl apply -f "$SCENARIOS_DIR/01-sandbox.yaml"
 
-    wait_for "ClawSandbox demo-agent phase=Ready" bash -c '
-        kubectl get clawsandbox -n azureclaw-system demo-agent \
+    wait_for "KarsSandbox demo-agent phase=Ready" bash -c '
+        kubectl get karssandbox -n kars-system demo-agent \
             -o jsonpath="{.status.phase}" 2>/dev/null | grep -q "^Ready$"
     '
 
     log "applying ToolPolicy gate (web.fetch → approval-required)"
     kubectl apply -f "$SCENARIOS_DIR/02-toolpolicy.yaml"
     wait_for "ToolPolicy demo-web-fetch phase=Compiled" bash -c '
-        kubectl get toolpolicy -n azureclaw-system demo-web-fetch \
+        kubectl get toolpolicy -n kars-system demo-web-fetch \
             -o jsonpath="{.status.phase}" 2>/dev/null | grep -qE "^(Compiled|Ready)$"
     '
 
     log "applying EgressApproval grant (api.stripe.com, PT10M)"
     kubectl apply -f "$SCENARIOS_DIR/03-egress-approval.yaml"
     wait_for "EgressApproval demo-stripe-grant phase=Active" bash -c '
-        kubectl get egressapproval -n azureclaw-system demo-stripe-grant \
+        kubectl get egressapproval -n kars-system demo-stripe-grant \
             -o jsonpath="{.status.phase}" 2>/dev/null | grep -q "^Active$"
     '
 
-    log "applying ClawEval (run-now, jailbreak-baseline)"
-    kubectl apply -f "$SCENARIOS_DIR/04-claweval.yaml"
-    wait_for "ClawEval demo-eval annotation consumed" bash -c '
-        ! kubectl get claweval -n azureclaw-system demo-eval \
-            -o jsonpath="{.metadata.annotations.azureclaw\\.azure\\.com/run-now}" \
+    log "applying KarsEval (run-now, jailbreak-baseline)"
+    kubectl apply -f "$SCENARIOS_DIR/04-karseval.yaml"
+    wait_for "KarsEval demo-eval annotation consumed" bash -c '
+        ! kubectl get karseval -n kars-system demo-eval \
+            -o jsonpath="{.metadata.annotations.kars\\.azure\\.com/run-now}" \
             2>/dev/null | grep -q "true"
     '
-    wait_for "ClawEval demo-eval Job created" bash -c '
-        kubectl get jobs -n azureclaw-system \
-            -l azureclaw.azure.com/claweval=demo-eval \
-            --no-headers 2>/dev/null | grep -q claweval
+    wait_for "KarsEval demo-eval Job created" bash -c '
+        kubectl get jobs -n kars-system \
+            -l kars.azure.com/karseval=demo-eval \
+            --no-headers 2>/dev/null | grep -q karseval
     '
 
     ok "all four scenarios reached steady state"
-    kubectl get clawsandbox,toolpolicy,egressapproval,claweval \
-        -n azureclaw-system --no-headers || true
+    kubectl get karssandbox,toolpolicy,egressapproval,karseval \
+        -n kars-system --no-headers || true
 }
 
 cleanup_scenarios() {
     [[ $SKIP_CLEANUP -eq 1 ]] && { warn "skipping cleanup (--skip-cleanup)"; return 0; }
     log "tearing down demo resources"
-    kubectl delete --ignore-not-found -f "$SCENARIOS_DIR/04-claweval.yaml" || true
+    kubectl delete --ignore-not-found -f "$SCENARIOS_DIR/04-karseval.yaml" || true
     kubectl delete --ignore-not-found -f "$SCENARIOS_DIR/03-egress-approval.yaml" || true
     kubectl delete --ignore-not-found -f "$SCENARIOS_DIR/02-toolpolicy.yaml" || true
     kubectl delete --ignore-not-found -f "$SCENARIOS_DIR/01-sandbox.yaml" || true
-    kubectl delete jobs -n azureclaw-system \
-        -l azureclaw.azure.com/claweval=demo-eval --ignore-not-found || true
+    kubectl delete jobs -n kars-system \
+        -l kars.azure.com/karseval=demo-eval --ignore-not-found || true
 }
 
 # --------------------------------------------------------------- kind mode --
@@ -182,13 +182,13 @@ run_kind() {
     need kubectl
     need kind
 
-    if ! kind get clusters | grep -q '^azureclaw-e2e$'; then
-        log "no azureclaw-e2e Kind cluster found"
+    if ! kind get clusters | grep -q '^kars-e2e$'; then
+        log "no kars-e2e Kind cluster found"
         log "bring one up with: bash tests/e2e/infra-e2e.sh up   (then re-run)"
         exit 1
     fi
 
-    kubectl config use-context kind-azureclaw-e2e
+    kubectl config use-context kind-kars-e2e
     trap cleanup_scenarios EXIT
     apply_scenarios
     ok "kind demo green"
@@ -202,13 +202,13 @@ run_aks() {
     local ctx
     ctx="$(kubectl config current-context 2>/dev/null || true)"
     if [[ -z "$ctx" ]]; then
-        warn "no kubectl context; run 'az aks get-credentials' or 'azureclaw up' first"
+        warn "no kubectl context; run 'az aks get-credentials' or 'kars up' first"
         exit 1
     fi
     log "using kubectl context: $ctx"
 
-    if ! kubectl get crd clawsandboxes.azureclaw.azure.com >/dev/null 2>&1; then
-        warn "ClawSandbox CRD not installed on this cluster — run 'azureclaw up' first"
+    if ! kubectl get crd karssandboxes.kars.azure.com >/dev/null 2>&1; then
+        warn "KarsSandbox CRD not installed on this cluster — run 'kars up' first"
         exit 1
     fi
 

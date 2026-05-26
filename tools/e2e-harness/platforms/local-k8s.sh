@@ -4,11 +4,11 @@
 # platforms/local-k8s.sh — local kind-based platform helper for the e2e-harness.
 #
 # Inherits the AKS helper for everything past cluster bring-up — once a
-# kind cluster has the AzureClaw chart installed, the K8s API surface
+# kind cluster has the Kars chart installed, the K8s API surface
 # is identical to AKS (same CRDs, same controller, same router image).
 # The only differences this helper adds:
 #
-#   1. Bring-up: invoke `azureclaw dev --target local-k8s` to create
+#   1. Bring-up: invoke `kars dev --target local-k8s` to create
 #      the kind cluster + install the chart + load the local controller/
 #      router/sandbox images. We detect-and-skip if the cluster is
 #      already up.
@@ -22,15 +22,15 @@
 #      check is interpreted with the right caveats.
 #
 # Inputs (env, all optional):
-#   KIND_CLUSTER_NAME — kind cluster to create/use (default: azureclaw-dev)
+#   KIND_CLUSTER_NAME — kind cluster to create/use (default: kars-dev)
 #                       — matches the CLI's `--cluster-name` default.
 #   SKIP_DEV_BRINGUP  — set to 1 to assume the cluster + chart already
-#                       exist and skip the `azureclaw dev` step. Useful
+#                       exist and skip the `kars dev` step. Useful
 #                       when iterating on the harness itself.
 
 set -euo pipefail
 
-KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-azureclaw-dev}"
+KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kars-dev}"
 
 # Source the AKS helper first so we can reuse its apply/credentials/
 # wait/post/collect functions. We override platform_preflight (and
@@ -46,19 +46,19 @@ platform_preflight() {
     command -v docker >/dev/null || { log "ERR docker not on PATH"; exit 1; }
     command -v kind >/dev/null || { log "ERR kind not on PATH (install via 'brew install kind')"; exit 1; }
     command -v kubectl >/dev/null || { log "ERR kubectl not on PATH"; exit 1; }
-    command -v azureclaw >/dev/null || { log "ERR azureclaw CLI not on PATH (run 'npm run build' under cli/)"; exit 1; }
+    command -v kars >/dev/null || { log "ERR kars CLI not on PATH (run 'npm run build' under cli/)"; exit 1; }
 
     if [ "${SKIP_DEV_BRINGUP:-0}" = "1" ]; then
         log "SKIP_DEV_BRINGUP=1 — assuming kind cluster '${KIND_CLUSTER_NAME}' and chart already present"
     elif kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
         log "kind cluster '${KIND_CLUSTER_NAME}' already exists — skipping bring-up"
     else
-        log "bringing up local-k8s via 'azureclaw dev --target local-k8s --cluster-name ${KIND_CLUSTER_NAME} --once'"
-        azureclaw dev --target local-k8s \
+        log "bringing up local-k8s via 'kars dev --target local-k8s --cluster-name ${KIND_CLUSTER_NAME} --once'"
+        kars dev --target local-k8s \
             --cluster-name "${KIND_CLUSTER_NAME}" \
             --once \
             >>"${OUT_DIR}/dev-bringup.log" 2>&1 || {
-                log "ERR azureclaw dev bring-up failed; tail of dev-bringup.log:"
+                log "ERR kars dev bring-up failed; tail of dev-bringup.log:"
                 tail -n 80 "${OUT_DIR}/dev-bringup.log" >&2 || true
                 exit 1
             }
@@ -79,11 +79,11 @@ platform_preflight() {
     # Defer to AKS preflight for CRD presence (same chart, same CRDs).
     # We can't call the prior definition directly because we redefined
     # the function — inline the relevant check instead.
-    for crd in clawsandboxes.azureclaw.azure.com \
-               inferencepolicies.azureclaw.azure.com \
-               toolpolicies.azureclaw.azure.com \
-               clawmemories.azureclaw.azure.com \
-               mcpservers.azureclaw.azure.com; do
+    for crd in karssandboxes.kars.azure.com \
+               inferencepolicies.kars.azure.com \
+               toolpolicies.kars.azure.com \
+               karsmemories.kars.azure.com \
+               mcpservers.kars.azure.com; do
         kubectl get crd "$crd" >/dev/null 2>&1 || {
             log "ERR CRD ${crd} missing in kind cluster — bring-up did not install the chart"; exit 1
         }

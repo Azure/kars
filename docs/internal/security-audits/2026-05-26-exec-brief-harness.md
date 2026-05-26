@@ -63,7 +63,7 @@ KNOCK; ToolPolicy still gates tool calls.
   the **plugin side** of the data path; the router-side message
   envelope is unchanged.
 - `discover('*')` peer-roster cache (Map keyed by spawn parent) —
-  populates on `azureclaw_spawn`, read on outbound `mesh_send`. No
+  populates on `kars_spawn`, read on outbound `mesh_send`. No
   new capability — `discover` was already a tool; this is a perf-time
   in-process cache, no IPC, no new auth.
 
@@ -91,11 +91,11 @@ KNOCK; ToolPolicy still gates tool calls.
 ### 1e. Harness itself (`tools/e2e-harness/`)
 
 NEW directory, not in the capability path list. The harness is a
-read-only / monitor-only observer: it polls `kubectl get clawsandbox`
+read-only / monitor-only observer: it polls `kubectl get karssandbox`
 state, parses router logs for evidence (tool calls, mesh envelopes,
 foundry calls), and asserts on counts. It has zero ability to
 mutate cluster state beyond `kubectl apply -f` of the four
-`ClawSandbox` CRs that comprise the exec-brief scenario — which is
+`KarsSandbox` CRs that comprise the exec-brief scenario — which is
 the same thing a human operator does.
 
 ## 2. Capability Surface

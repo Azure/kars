@@ -10,7 +10,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
 
-export const IDENTITY_DIR = path.join(os.homedir(), ".azureclaw");
+export const IDENTITY_DIR = path.join(os.homedir(), ".kars");
 export const IDENTITY_FILE = path.join(IDENTITY_DIR, "mesh-identity.json");
 
 export interface MeshIdentity {
@@ -38,7 +38,7 @@ export interface MeshIdentity {
 function deriveEncryptionKey(): Buffer {
   // Use a combination of hostname + homedir as a machine-bound seed.
   // This isn't HSM-grade but protects against casual file theft.
-  const seed = `azureclaw:mesh-identity:${os.hostname()}:${os.homedir()}`;
+  const seed = `kars:mesh-identity:${os.hostname()}:${os.homedir()}`;
   return crypto.createHash("sha256").update(seed).digest();
 }
 

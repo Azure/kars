@@ -1,9 +1,9 @@
 {
-  "id": "azureclaw-mesh",
-  "name": "AzureClaw Mesh",
+  "id": "kars-mesh",
+  "name": "Kars Mesh",
   "version": "0.1.0",
-  "description": "Connect to AzureClaw for secure cloud offload, handoff, and inter-agent communication via E2E encrypted AgentMesh.",
-  "author": "AzureClaw",
+  "description": "Connect to Kars for secure cloud offload, handoff, and inter-agent communication via E2E encrypted AgentMesh.",
+  "author": "Kars",
   "skills": [],
   "configSchema": {
     "relay_url": {
@@ -16,7 +16,7 @@
     },
     "identity_path": {
       "type": "string",
-      "default": "~/.azureclaw/identity.json",
+      "default": "~/.kars/identity.json",
       "description": "Path to mesh identity file"
     }
   }

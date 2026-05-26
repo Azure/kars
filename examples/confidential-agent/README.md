@@ -6,12 +6,12 @@ inside a lightweight VM, not on the host kernel.
 
 Use this when the agent processes sensitive data (regulated industries,
 multi-tenant clusters, code-execution agents) and you want kernel-level
-blast-radius containment on top of AzureClaw's seccomp/RO-rootfs/UID
+blast-radius containment on top of Kars's seccomp/RO-rootfs/UID
 controls.
 
 ## How it differs from `basic-agent`
 
-A single field in the `ClawSandbox`:
+A single field in the `KarsSandbox`:
 
 ```yaml
 spec:
@@ -28,7 +28,7 @@ class), giving the sandbox:
   Leaky Vessels (CVE-2024-21626 runc breakout), Probllama
   (CVE-2024-37032), and similar container-escape classes terminate
   inside the VM
-- The full AzureClaw layer stack on top: seccomp, RO rootfs, non-root,
+- The full Kars layer stack on top: seccomp, RO rootfs, non-root,
   egress-guard, NetworkPolicy, InferencePolicy enforcement
 
 Token budget is bumped to 1M/day vs basic-agent's 500k — confidential
@@ -37,7 +37,7 @@ workloads tend to be larger.
 ## Prereqs (cluster-side)
 
 Your AKS cluster needs the **Kata Confidential Containers** add-on. If
-you provisioned with `azureclaw up`, this isn't enabled by default —
+you provisioned with `kars up`, this isn't enabled by default —
 follow the AKS docs for
 [Confidential Containers on AKS](https://learn.microsoft.com/azure/aks/confidential-containers-overview)
 to add the runtime class.
@@ -45,8 +45,8 @@ to add the runtime class.
 ## Deploy
 
 ```bash
-kubectl apply -f examples/confidential-agent/clawsandbox.yaml
-kubectl get clawsandbox confidential-assistant -n azureclaw-system -w
+kubectl apply -f examples/confidential-agent/karssandbox.yaml
+kubectl get karssandbox confidential-assistant -n kars-system -w
 ```
 
 ## Verify isolation
@@ -54,7 +54,7 @@ kubectl get clawsandbox confidential-assistant -n azureclaw-system -w
 The Pod will land on a Kata-capable node:
 
 ```bash
-kubectl get pod -n azureclaw-confidential-assistant \
+kubectl get pod -n kars-confidential-assistant \
   -o jsonpath='{.items[0].spec.runtimeClassName}{"\n"}'
 # → kata-cc
 ```
@@ -62,7 +62,7 @@ kubectl get pod -n azureclaw-confidential-assistant \
 A simple kernel-info probe inside the sandbox shows you're in a guest:
 
 ```bash
-azureclaw connect confidential-assistant --shell -- \
+kars connect confidential-assistant --shell -- \
   cat /proc/version
 # → typically a Kata-shipped kernel, not the AKS host kernel
 ```
@@ -70,7 +70,7 @@ azureclaw connect confidential-assistant --shell -- \
 ## Cleanup
 
 ```bash
-kubectl delete -f examples/confidential-agent/clawsandbox.yaml
+kubectl delete -f examples/confidential-agent/karssandbox.yaml
 ```
 
 ## See also

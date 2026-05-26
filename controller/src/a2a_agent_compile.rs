@@ -123,7 +123,7 @@ pub fn compile_agent_card(spec: &A2AAgentSpec, namespace: &str, name: &str) -> V
 /// Stable SHA-256 over the canonicalised compiled AgentCard, hex-encoded
 /// (first 32 chars). Same shape as
 /// [`crate::tool_policy_compile::version_hash`] — used as the ConfigMap
-/// annotation `azureclaw.azure.com/a2aagent-version-hash`.
+/// annotation `kars.azure.com/a2aagent-version-hash`.
 #[must_use]
 pub fn version_hash(card: &Value) -> String {
     let bytes = serde_json::to_vec(card).expect("serde_json::Value always serialises");

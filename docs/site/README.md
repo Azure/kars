@@ -1,4 +1,4 @@
-# AzureClaw documentation site
+# Kars documentation site
 
 The `docs/site/` directory contains the **mdbook** configuration that turns the canonical markdown tree under `docs/` into a browsable HTML site.
 

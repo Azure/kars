@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from azureclaw_runtime_maf_python import aad
+from kars_runtime_maf_python import aad
 
 
 @dataclass

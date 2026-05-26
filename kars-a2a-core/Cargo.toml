@@ -1,0 +1,23 @@
+[package]
+name = "kars-a2a-core"
+description = "Shared A2A 1.0.0 primitives — JWS verification, AgentCard parsing, signing-key helpers. Lifted from kars-inference-router so the public-edge a2a-gateway can reuse the same verifier."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+# Library-only crate. No binary target. Phase 2 S3.5 invariant —
+# the same JWS verifier is consumed by both the in-cluster router
+# and the public-edge gateway, so neither side embeds the other.
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

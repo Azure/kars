@@ -1,6 +1,6 @@
 [package]
-name = "azureclaw-eval-corpus"
-description = "ClawEval corpus types, strict parser, verdict function, and built-in conformance corpora — shared library consumed by the controller (for the EvalCorpusKind PolicyKind impl) and by the conformance-runner binary."
+name = "kars-eval-corpus"
+description = "KarsEval corpus types, strict parser, verdict function, and built-in conformance corpora — shared library consumed by the controller (for the EvalCorpusKind PolicyKind impl) and by the conformance-runner binary."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

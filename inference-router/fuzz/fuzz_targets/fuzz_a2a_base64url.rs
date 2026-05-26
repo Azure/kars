@@ -8,7 +8,7 @@
 //! verification time. Attacker-controlled bytes; total function
 //! required.
 use libfuzzer_sys::fuzz_target;
-use azureclaw_inference_router::a2a;
+use kars_inference_router::a2a;
 
 fuzz_target!(|data: &[u8]| {
     let s = match std::str::from_utf8(data) {

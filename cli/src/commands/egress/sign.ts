@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 S12.c — `azureclaw egress … --sign` helpers.
+// Phase 2 S12.c — `kars egress … --sign` helpers.
 //
 // Producer side of the signed-egress-allowlist supply chain. Builds a
 // canonical YAML artifact that is byte-identical to the spec in
 // `docs/internal/policy-canonical-format.md`, pushes it as an OCI artifact via
 // `oras`, signs the resulting digest with `cosign`, and patches the
-// `ClawSandbox.spec.networkPolicy.allowlistRef` field.
+// `KarsSandbox.spec.networkPolicy.allowlistRef` field.
 //
 // The canonical YAML serializer is deliberately written by hand (rather
 // than reusing `js-yaml`/`yaml` defaults) because the S12.a spec is
@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export const EGRESS_ALLOWLIST_MEDIA_TYPE =
-  "application/vnd.azureclaw.egress-allowlist.v1+yaml";
+  "application/vnd.kars.egress-allowlist.v1+yaml";
 
 export interface CanonicalEndpoint {
   host: string;
@@ -132,7 +132,7 @@ export function buildCanonicalAllowlist(
   }
   if (!Array.isArray(input.endpoints) || input.endpoints.length === 0) {
     // S12.a rule #13 reserves `[]` as a valid empty allowlist, but this
-    // CLI flow always derives endpoints from the live ClawSandbox spec.
+    // CLI flow always derives endpoints from the live KarsSandbox spec.
     // An empty list at this stage almost certainly indicates a bug
     // (e.g., kubectl returned nothing) — fail loud.
     throw new Error(
@@ -167,7 +167,7 @@ export function buildCanonicalAllowlist(
 
   // Hand-rolled YAML emitter — block style only, fixed key order.
   const lines: string[] = [];
-  lines.push(`apiVersion: azureclaw.dev/v1alpha1`);
+  lines.push(`apiVersion: kars.dev/v1alpha1`);
   lines.push(`kind: EgressAllowlist`);
   lines.push(`metadata:`);
   lines.push(`  generation: ${input.generation}`);
@@ -272,7 +272,7 @@ export async function pushArtifact(opts: PushArtifactOpts): Promise<string> {
   const exec: ExecaLike = opts.execaImpl ?? execa;
   const expected = digestOfCanonical(opts.yaml);
 
-  const dir = opts.workdir ?? mkdtempSync(join(tmpdir(), "azureclaw-egress-"));
+  const dir = opts.workdir ?? mkdtempSync(join(tmpdir(), "kars-egress-"));
   const filename = "allowlist.yaml";
   const fullPath = join(dir, filename);
   writeFileSync(fullPath, opts.yaml, { encoding: "utf8" });
@@ -474,7 +474,7 @@ export function autoDetectSignMode(opts: {
   );
 }
 
-export interface PatchClawSandboxOpts {
+export interface PatchKarsSandboxOpts {
   kubectlPath: string;
   namespace: string;
   name: string;
@@ -488,7 +488,7 @@ export interface PatchClawSandboxOpts {
 /**
  * Build the kubectl argv for the merge patch. Exposed for tests.
  */
-export function buildPatchArgv(opts: Omit<PatchClawSandboxOpts, "kubectlPath" | "execaImpl">): string[] {
+export function buildPatchArgv(opts: Omit<PatchKarsSandboxOpts, "kubectlPath" | "execaImpl">): string[] {
   const patch = {
     spec: {
       networkPolicy: {
@@ -503,7 +503,7 @@ export function buildPatchArgv(opts: Omit<PatchClawSandboxOpts, "kubectlPath" | 
   };
   return [
     "patch",
-    `clawsandbox/${opts.name}`,
+    `karssandbox/${opts.name}`,
     "-n",
     opts.namespace,
     "--type=merge",
@@ -512,7 +512,7 @@ export function buildPatchArgv(opts: Omit<PatchClawSandboxOpts, "kubectlPath" | 
   ];
 }
 
-export async function patchClawSandbox(opts: PatchClawSandboxOpts): Promise<void> {
+export async function patchKarsSandbox(opts: PatchKarsSandboxOpts): Promise<void> {
   const { execa } = await import("execa");
   const exec: ExecaLike = opts.execaImpl ?? execa;
   const argv = buildPatchArgv(opts);
@@ -521,9 +521,9 @@ export async function patchClawSandbox(opts: PatchClawSandboxOpts): Promise<void
 
 /**
  * Read live `allowedEndpoints` and `metadata.generation` from a
- * ClawSandbox via kubectl. Used to feed the canonical builder.
+ * KarsSandbox via kubectl. Used to feed the canonical builder.
  */
-export async function readClawSandboxState(opts: {
+export async function readKarsSandboxState(opts: {
   kubectlPath: string;
   namespace: string;
   name: string;
@@ -533,14 +533,14 @@ export async function readClawSandboxState(opts: {
   const exec: ExecaLike = opts.execaImpl ?? execa;
   const result = await exec(
     opts.kubectlPath,
-    ["get", `clawsandbox/${opts.name}`, "-n", opts.namespace, "-o", "json"],
+    ["get", `karssandbox/${opts.name}`, "-n", opts.namespace, "-o", "json"],
     { stdio: "pipe" },
   );
   const obj = JSON.parse(String(result.stdout ?? "{}"));
   const generation = Number(obj?.metadata?.generation);
   if (!Number.isInteger(generation) || generation < 1) {
     throw new Error(
-      `kubectl: ClawSandbox ${opts.namespace}/${opts.name} has no positive metadata.generation`,
+      `kubectl: KarsSandbox ${opts.namespace}/${opts.name} has no positive metadata.generation`,
     );
   }
   const raw: unknown = obj?.spec?.networkPolicy?.allowedEndpoints;
@@ -571,9 +571,9 @@ export interface EmitManifestInput {
 }
 
 /**
- * Build the byte-stable strategic-merge patch YAML for a `ClawSandbox`
+ * Build the byte-stable strategic-merge patch YAML for a `KarsSandbox`
  * with `spec.networkPolicy.allowlistRef` set, plus the marker
- * annotation `azureclaw.io/applied-via-gitops=true`. The output is a
+ * annotation `kars.io/applied-via-gitops=true`. The output is a
  * complete, valid resource (apiVersion + kind + metadata + spec only)
  * suitable for `kubectl apply -f` from a GitOps controller.
  *
@@ -598,17 +598,17 @@ export function buildEmitManifestYaml(input: EmitManifestInput): string {
   }
   const lines: string[] = [];
   lines.push(
-    `# azureclaw egress allowlist — digest=${input.digest} signer=${input.signerIdentity}`,
+    `# kars egress allowlist — digest=${input.digest} signer=${input.signerIdentity}`,
   );
-  lines.push(`# Generated by 'azureclaw egress … --emit-manifest'.`);
+  lines.push(`# Generated by 'kars egress … --emit-manifest'.`);
   lines.push(`# Commit this file unchanged; your GitOps controller applies it.`);
-  lines.push(`apiVersion: azureclaw.azure.com/v1alpha1`);
-  lines.push(`kind: ClawSandbox`);
+  lines.push(`apiVersion: kars.azure.com/v1alpha1`);
+  lines.push(`kind: KarsSandbox`);
   lines.push(`metadata:`);
   lines.push(`  name: ${input.name}`);
   lines.push(`  namespace: ${input.namespace}`);
   lines.push(`  annotations:`);
-  lines.push(`    azureclaw.io/applied-via-gitops: "true"`);
+  lines.push(`    kars.io/applied-via-gitops: "true"`);
   lines.push(`spec:`);
   lines.push(`  networkPolicy:`);
   lines.push(`    allowlistRef:`);

@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# setup.sh — resolve host.docker.internal and render the azureclaw-mesh preset
+# setup.sh — resolve host.docker.internal and render the kars-mesh preset
 #
 # Resolves host.docker.internal via DNS and substitutes the __HOST_IP__
 # placeholder in the preset template. This handles platform differences:
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEMPLATE="${SCRIPT_DIR}/policies/presets/azureclaw-mesh.yaml"
+TEMPLATE="${SCRIPT_DIR}/policies/presets/kars-mesh.yaml"
 NEMOCLAW_PRESETS="${NEMOCLAW_PRESETS:-${HOME}/.nemoclaw/source/nemoclaw-blueprint/policies/presets}"
 
 # --- Resolve host.docker.internal -----------------------------------------
@@ -82,18 +82,18 @@ RENDERED=$(sed "s/__HOST_IP__/${HOST_IP}/g" "$TEMPLATE")
 
 if [[ "${1:-}" == "--install" ]]; then
   mkdir -p "$NEMOCLAW_PRESETS"
-  echo "$RENDERED" > "${NEMOCLAW_PRESETS}/azureclaw-mesh.yaml"
-  echo "Installed preset → ${NEMOCLAW_PRESETS}/azureclaw-mesh.yaml" >&2
+  echo "$RENDERED" > "${NEMOCLAW_PRESETS}/kars-mesh.yaml"
+  echo "Installed preset → ${NEMOCLAW_PRESETS}/kars-mesh.yaml" >&2
 
   if [[ "${2:-}" == "--apply" ]]; then
     # Find the first running sandbox and apply
     SANDBOX=$(docker ps --filter "name=openshell" --format '{{.Names}}' | head -1)
     if [[ -n "$SANDBOX" ]]; then
       echo "Applying preset to sandbox: ${SANDBOX}" >&2
-      nemoclaw "${SANDBOX}" policy-add azureclaw-mesh 2>&1 || true
+      nemoclaw "${SANDBOX}" policy-add kars-mesh 2>&1 || true
     else
       echo "No running sandbox found. Apply manually:" >&2
-      echo "  nemoclaw <sandbox-name> policy-add azureclaw-mesh" >&2
+      echo "  nemoclaw <sandbox-name> policy-add kars-mesh" >&2
     fi
   fi
 else

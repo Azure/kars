@@ -12,7 +12,7 @@ export function statusCommand(): Command {
     .argument("<name>", "Sandbox name")
     .action(async (name: string) => {
       const blue = chalk.hex("#0078D4");
-      const containerName = `azureclaw-${name}`;
+      const containerName = `kars-${name}`;
 
       // Try local Docker first, then AKS
       try {
@@ -57,7 +57,7 @@ export function statusCommand(): Command {
 
         console.log(blue(`
   ╔══════════════════════════════════════════════════╗
-  ║           AzureClaw · Sandbox Status             ║
+  ║           Kars · Sandbox Status             ║
   ╚══════════════════════════════════════════════════╝
 `));
         console.log(`  Sandbox:       ${chalk.bold(name)}`);
@@ -70,7 +70,7 @@ export function statusCommand(): Command {
         console.log(`  ${readOnly ? chalk.green("✓") : chalk.red("✗")} Read-only root filesystem`);
         console.log(`  ${chalk.green("✓")} Non-root user (sandbox:1000)`);
         console.log(`  ${chalk.green("✓")} All root privileges removed`);
-        console.log(`  ${seccomp ? chalk.green("✓") : chalk.yellow("○")} seccomp profile${seccomp ? " (azureclaw-strict)" : ""}`);
+        console.log(`  ${seccomp ? chalk.green("✓") : chalk.yellow("○")} seccomp profile${seccomp ? " (kars-strict)" : ""}`);
 
         console.log(blue(`\n  ── Inference Router ───────────────────────────────`));
         // Query Prometheus metrics from the Rust inference router
@@ -79,11 +79,11 @@ export function statusCommand(): Command {
             "exec", containerName, "curl", "-sf", "http://127.0.0.1:8443/metrics",
           ], { stdio: "pipe" });
 
-          const requests = metricsRaw.match(/azureclaw_inference_requests_total\{[^}]*status="ok"[^}]*\}\s+(\d+)/);
-          const inputTokens = metricsRaw.match(/azureclaw_tokens_total\{[^}]*direction="input"[^}]*\}\s+(\d+)/);
-          const outputTokens = metricsRaw.match(/azureclaw_tokens_total\{[^}]*direction="output"[^}]*\}\s+(\d+)/);
-          const latencySum = metricsRaw.match(/azureclaw_inference_latency_seconds_sum\{[^}]*\}\s+([\d.]+)/);
-          const latencyCount = metricsRaw.match(/azureclaw_inference_latency_seconds_count\{[^}]*\}\s+(\d+)/);
+          const requests = metricsRaw.match(/kars_inference_requests_total\{[^}]*status="ok"[^}]*\}\s+(\d+)/);
+          const inputTokens = metricsRaw.match(/kars_tokens_total\{[^}]*direction="input"[^}]*\}\s+(\d+)/);
+          const outputTokens = metricsRaw.match(/kars_tokens_total\{[^}]*direction="output"[^}]*\}\s+(\d+)/);
+          const latencySum = metricsRaw.match(/kars_inference_latency_seconds_sum\{[^}]*\}\s+([\d.]+)/);
+          const latencyCount = metricsRaw.match(/kars_inference_latency_seconds_count\{[^}]*\}\s+(\d+)/);
 
           const reqCount = requests ? parseInt(requests[1]) : 0;
           const inTokens = inputTokens ? parseInt(inputTokens[1]) : 0;
@@ -110,12 +110,12 @@ export function statusCommand(): Command {
         // No local container — try AKS
       }
 
-      // AKS: query ClawSandbox CRD
+      // AKS: query KarsSandbox CRD
       try {
         const { execa } = await import("execa");
         const { stdout } = await execa("kubectl", [
-          "get", "clawsandbox", name,
-          "-n", "azureclaw-system",
+          "get", "karssandbox", name,
+          "-n", "kars-system",
           "-o", "json",
         ], { stdio: "pipe" });
 
@@ -126,12 +126,12 @@ export function statusCommand(): Command {
 
         console.log(blue(`
   ╔══════════════════════════════════════════════════╗
-  ║           AzureClaw · Sandbox Status             ║
+  ║           Kars · Sandbox Status             ║
   ╚══════════════════════════════════════════════════╝
 `));
         console.log(`  Sandbox:       ${chalk.bold(name)}`);
         console.log(`  Status:        ${phase === "Running" ? chalk.green("● Running") : chalk.yellow("● " + phase)}`);
-        console.log(`  Namespace:     azureclaw-${name}`);
+        console.log(`  Namespace:     kars-${name}`);
         console.log(`  Model:         ${chalk.bold(model)} (Azure OpenAI)`);
         console.log(`  Isolation:     ${isolation}`);
         console.log();

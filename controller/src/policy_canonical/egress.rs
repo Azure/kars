@@ -30,11 +30,10 @@ use std::time::{Instant, SystemTime};
 /// `artifactType` MUST match this exactly; consumers reject any other
 /// value (forward-compat: v2 bumps the suffix; v1 consumers MUST refuse
 /// v2 artifacts — see canonical-format doc §"Forward compatibility").
-pub const EGRESS_ALLOWLIST_V1_MEDIA_TYPE: &str =
-    "application/vnd.azureclaw.egress-allowlist.v1+yaml";
+pub const EGRESS_ALLOWLIST_V1_MEDIA_TYPE: &str = "application/vnd.kars.egress-allowlist.v1+yaml";
 
 /// Pinned canonical apiVersion / kind values for v1.
-const CANONICAL_API_VERSION: &str = "azureclaw.dev/v1alpha1";
+const CANONICAL_API_VERSION: &str = "kars.dev/v1alpha1";
 const CANONICAL_KIND: &str = "EgressAllowlist";
 
 /// A verified, canonical-form egress allowlist. The `digest` field is the
@@ -381,7 +380,7 @@ mod tests {
     use super::*;
 
     fn good_doc() -> &'static str {
-        "apiVersion: azureclaw.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - host: example.com\n      port: 443\n"
+        "apiVersion: kars.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - host: example.com\n      port: 443\n"
     }
 
     #[test]
@@ -454,14 +453,14 @@ mod tests {
 
     #[test]
     fn rejects_unsorted_endpoints() {
-        let bytes = "apiVersion: azureclaw.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - host: z.example.com\n      port: 443\n    - host: a.example.com\n      port: 443\n";
+        let bytes = "apiVersion: kars.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - host: z.example.com\n      port: 443\n    - host: a.example.com\n      port: 443\n";
         let err = parse(bytes.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(_)));
     }
 
     #[test]
     fn rejects_duplicate_endpoints() {
-        let bytes = "apiVersion: azureclaw.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - host: a.example.com\n      port: 443\n    - host: a.example.com\n      port: 443\n";
+        let bytes = "apiVersion: kars.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - host: a.example.com\n      port: 443\n    - host: a.example.com\n      port: 443\n";
         let err = parse(bytes.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(_)));
     }
@@ -489,14 +488,14 @@ mod tests {
 
     #[test]
     fn rejects_extra_endpoint_key() {
-        let bytes = "apiVersion: azureclaw.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - host: a.example.com\n      port: 443\n      protocol: tcp\n";
+        let bytes = "apiVersion: kars.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - host: a.example.com\n      port: 443\n      protocol: tcp\n";
         let err = parse(bytes.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(_)));
     }
 
     #[test]
     fn rejects_endpoint_key_wrong_order() {
-        let bytes = "apiVersion: azureclaw.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - port: 443\n      host: a.example.com\n";
+        let bytes = "apiVersion: kars.dev/v1alpha1\nkind: EgressAllowlist\nmetadata:\n  generation: 1\nspec:\n  endpoints:\n    - port: 443\n      host: a.example.com\n";
         let err = parse(bytes.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(_)));
     }

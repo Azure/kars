@@ -31,7 +31,7 @@ pub(super) async fn chat_completions(
 ) -> impl IntoResponse {
     // Extract sandbox identity from header (set by controller)
     let sandbox_name = headers
-        .get("x-azureclaw-sandbox")
+        .get("x-kars-sandbox")
         .and_then(|v| v.to_str().ok())
         .filter(|v| {
             // Validate against K8s name rules: lowercase alphanumeric + hyphens, max 63 chars

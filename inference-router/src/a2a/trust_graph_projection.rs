@@ -8,7 +8,7 @@
 //!
 //! A pure parser + lookup table for the JSON document the controller
 //! writes to `ConfigMap[name=trustgraph-<n>-projection,
-//! ns=azureclaw-system].data["graph.json"]`. The wire shape is the
+//! ns=kars-system].data["graph.json"]`. The wire shape is the
 //! camelCase serialisation of `controller::trust_graph_compile::ProjectedGraph`:
 //!
 //! ```jsonc

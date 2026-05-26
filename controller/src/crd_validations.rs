@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! CEL admission validations for AzureClaw CRDs.
+//! CEL admission validations for Kars CRDs.
 //!
 //! Phase 1 deliverable §7 entry 12: every new CRD must ship with
 //! `x-kubernetes-validations` (CEL) rules that catch malformed specs at
@@ -49,10 +49,10 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
 use kube::CustomResourceExt;
 
 use crate::a2a_agent::A2AAgent;
-use crate::claw_eval::ClawEval;
-use crate::claw_memory::ClawMemory;
 use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
+use crate::kars_eval::KarsEval;
+use crate::kars_memory::KarsMemory;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
 
@@ -336,9 +336,9 @@ pub fn inference_policy_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on InferencePolicy")
 }
 
-/// `ClawMemory.spec` CEL rules. Phase 2 §8 entry 5 (S5).
+/// `KarsMemory.spec` CEL rules. Phase 2 §8 entry 5 (S5).
 ///
-/// `ClawMemory` is a binding/provisioning resource over Azure AI
+/// `KarsMemory` is a binding/provisioning resource over Azure AI
 /// Foundry Memory Store (per `docs/implementation-plan.md` §3
 /// non-compete). The CRD is shape-only — runtime auth and Foundry
 /// availability are out of admission scope. Rules:
@@ -355,7 +355,7 @@ pub fn inference_policy_crd() -> CustomResourceDefinition {
 /// - `retentionDays > 0` when present. Zero would request immediate
 ///   deletion, which is what `delete_scope` is for.
 #[must_use]
-pub fn claw_memory_validations() -> Vec<ValidationRule> {
+pub fn kars_memory_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
             rule: "has(self.bundleRef) || (has(self.storeName) && size(self.storeName) > 0 && size(self.storeName) <= 63 && self.storeName.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))".into(),
@@ -400,20 +400,20 @@ pub fn claw_memory_validations() -> Vec<ValidationRule> {
     ]
 }
 
-/// `ClawMemory` CRD with [`claw_memory_validations`] injected.
+/// `KarsMemory` CRD with [`kars_memory_validations`] injected.
 ///
 /// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
 #[must_use]
-pub fn claw_memory_crd() -> CustomResourceDefinition {
-    inject_spec_validations(ClawMemory::crd(), claw_memory_validations())
-        .expect("kube-rs derive must produce a spec property on ClawMemory")
+pub fn kars_memory_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsMemory::crd(), kars_memory_validations())
+        .expect("kube-rs derive must produce a spec property on KarsMemory")
 }
 
-/// `ClawEval.spec` CEL rules. Slice 6.3 of `crd-well-oiled-machine`.
+/// `KarsEval.spec` CEL rules. Slice 6.3 of `crd-well-oiled-machine`.
 ///
-/// `ClawEval` declares a policy-conformance run against a target
-/// `ClawSandbox`. The reconciler spawns a Kubernetes `Job`/`CronJob`
-/// running the `azureclaw-conformance-runner` image.
+/// `KarsEval` declares a policy-conformance run against a target
+/// `KarsSandbox`. The reconciler spawns a Kubernetes `Job`/`CronJob`
+/// running the `kars-conformance-runner` image.
 ///
 /// Rules:
 ///
@@ -432,7 +432,7 @@ pub fn claw_memory_crd() -> CustomResourceDefinition {
 /// - `runnerImage`, when set, 1-512 chars (room for digest-pinned
 ///   `registry.example.com/foo/bar@sha256:...` URIs).
 #[must_use]
-pub fn claw_eval_validations() -> Vec<ValidationRule> {
+pub fn kars_eval_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
             rule: "size(self.targetSandboxRef.name) > 0 && size(self.targetSandboxRef.name) <= 253"
@@ -484,13 +484,13 @@ pub fn claw_eval_validations() -> Vec<ValidationRule> {
     ]
 }
 
-/// `ClawEval` CRD with [`claw_eval_validations`] injected.
+/// `KarsEval` CRD with [`kars_eval_validations`] injected.
 ///
 /// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
 #[must_use]
-pub fn claw_eval_crd() -> CustomResourceDefinition {
-    inject_spec_validations(ClawEval::crd(), claw_eval_validations())
-        .expect("kube-rs derive must produce a spec property on ClawEval")
+pub fn kars_eval_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsEval::crd(), kars_eval_validations())
+        .expect("kube-rs derive must produce a spec property on KarsEval")
 }
 
 /// `TrustGraph.spec` CEL rules. Phase F1.
@@ -500,7 +500,7 @@ pub fn claw_eval_crd() -> CustomResourceDefinition {
 /// 2. Every `vertices[*].alg` must be `"EdDSA"` — only supported.
 /// 3. Every `edges[*].score` must be in `[0, 1000]` (the AGT
 ///    trust-score domain — same range as
-///    `ClawSandbox.spec.governance.trustThreshold`).
+///    `KarsSandbox.spec.governance.trustThreshold`).
 /// 4. Every `edges[*].notAfter`, when set, must be `>= issuedAt`
 ///    (an inverted-expiry edge cannot represent a meaningful
 ///    attestation lifetime).
@@ -676,18 +676,18 @@ pub fn egress_approval_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on EgressApproval")
 }
 
-/// `ClawSandbox` CRD as produced by the kube-rs derive.
+/// `KarsSandbox` CRD as produced by the kube-rs derive.
 ///
-/// Currently no `claw_sandbox_validations()` helper exists — `ClawSandbox`
+/// Currently no `kars_sandbox_validations()` helper exists — `KarsSandbox`
 /// has historically relied on its hand-written
-/// `deploy/helm/azureclaw/templates/crd.yaml` (with rich CEL rules baked
+/// `deploy/helm/kars/templates/crd.yaml` (with rich CEL rules baked
 /// in there) rather than rule-injection in code. This helper is exposed
 /// so future drift tests / dumpers can compare the kube-rs-derived
 /// schema to the hand-written one without each call site reimplementing
-/// the `ClawSandbox::crd()` invocation.
+/// the `KarsSandbox::crd()` invocation.
 #[must_use]
-pub fn claw_sandbox_crd() -> CustomResourceDefinition {
-    crate::crd::ClawSandbox::crd()
+pub fn kars_sandbox_crd() -> CustomResourceDefinition {
+    crate::crd::KarsSandbox::crd()
 }
 
 #[cfg(test)]
@@ -902,16 +902,16 @@ mod tests {
         assert!(y.contains("monthlyTokens"));
     }
 
-    // ---- ClawMemory (S5) ------------------------------------------------
+    // ---- KarsMemory (S5) ------------------------------------------------
 
     #[test]
-    fn claw_memory_validations_are_non_empty() {
-        assert!(!claw_memory_validations().is_empty());
+    fn kars_memory_validations_are_non_empty() {
+        assert!(!kars_memory_validations().is_empty());
     }
 
     #[test]
-    fn every_claw_memory_rule_has_message_and_rule() {
-        for rule in claw_memory_validations() {
+    fn every_kars_memory_rule_has_message_and_rule() {
+        for rule in kars_memory_validations() {
             assert!(!rule.rule.is_empty(), "rule body must not be empty");
             let msg = rule.message.as_deref().unwrap_or("");
             assert!(!msg.is_empty(), "rule '{}' missing message", rule.rule);
@@ -919,15 +919,15 @@ mod tests {
     }
 
     #[test]
-    fn claw_memory_crd_has_spec_validations_after_injection() {
-        let crd = claw_memory_crd();
+    fn kars_memory_crd_has_spec_validations_after_injection() {
+        let crd = kars_memory_crd();
         let v = spec_validations(&crd);
-        assert_eq!(v.len(), claw_memory_validations().len());
+        assert_eq!(v.len(), kars_memory_validations().len());
     }
 
     #[test]
-    fn claw_memory_rules_mention_store_name_scope_and_retention_invariants() {
-        let rules: Vec<String> = claw_memory_validations()
+    fn kars_memory_rules_mention_store_name_scope_and_retention_invariants() {
+        let rules: Vec<String> = kars_memory_validations()
             .into_iter()
             .map(|r| r.rule)
             .collect();
@@ -954,24 +954,24 @@ mod tests {
     }
 
     #[test]
-    fn claw_memory_crd_is_serde_round_trippable() {
-        let crd = claw_memory_crd();
+    fn kars_memory_crd_is_serde_round_trippable() {
+        let crd = kars_memory_crd();
         let y = serde_yaml::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("storeName"));
         assert!(y.contains("scope"));
     }
 
-    // ---- ClawEval (S6) --------------------------------------------------
+    // ---- KarsEval (S6) --------------------------------------------------
 
     #[test]
-    fn claw_eval_validations_are_non_empty() {
-        assert!(!claw_eval_validations().is_empty());
+    fn kars_eval_validations_are_non_empty() {
+        assert!(!kars_eval_validations().is_empty());
     }
 
     #[test]
-    fn every_claw_eval_rule_has_message_and_rule() {
-        for rule in claw_eval_validations() {
+    fn every_kars_eval_rule_has_message_and_rule() {
+        for rule in kars_eval_validations() {
             assert!(!rule.rule.is_empty(), "rule body must not be empty");
             let msg = rule.message.as_deref().unwrap_or("");
             assert!(!msg.is_empty(), "rule '{}' missing message", rule.rule);
@@ -979,15 +979,15 @@ mod tests {
     }
 
     #[test]
-    fn claw_eval_crd_has_spec_validations_after_injection() {
-        let crd = claw_eval_crd();
+    fn kars_eval_crd_has_spec_validations_after_injection() {
+        let crd = kars_eval_crd();
         let v = spec_validations(&crd);
-        assert_eq!(v.len(), claw_eval_validations().len());
+        assert_eq!(v.len(), kars_eval_validations().len());
     }
 
     #[test]
-    fn claw_eval_rules_cover_core_invariants() {
-        let rules: Vec<String> = claw_eval_validations()
+    fn kars_eval_rules_cover_core_invariants() {
+        let rules: Vec<String> = kars_eval_validations()
             .into_iter()
             .map(|r| r.rule)
             .collect();
@@ -1014,8 +1014,8 @@ mod tests {
     }
 
     #[test]
-    fn claw_eval_crd_is_serde_round_trippable() {
-        let crd = claw_eval_crd();
+    fn kars_eval_crd_is_serde_round_trippable() {
+        let crd = kars_eval_crd();
         let y = serde_yaml::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("targetSandboxRef"));

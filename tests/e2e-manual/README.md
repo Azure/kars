@@ -1,7 +1,7 @@
 # Manual E2E suite
 
 This directory holds the **manually-runnable** end-to-end test matrix
-for AzureClaw. It is **separate from CI**:
+for Kars. It is **separate from CI**:
 
 | Suite | Runs in | Path | Touches a real cluster? |
 |---|---|---|---|
@@ -22,16 +22,16 @@ isolation. Run it before each release tag.
 
 1. A reachable Kubernetes cluster (Kind, AKS, or any conformant K8s)
    with your kubeconfig context pointing at it.
-2. AzureClaw installed in `azureclaw-system`:
+2. Kars installed in `kars-system`:
    ```bash
-   helm upgrade --install azureclaw deploy/helm/azureclaw \
-     -n azureclaw-system --create-namespace
+   helm upgrade --install kars deploy/helm/kars \
+     -n kars-system --create-namespace
    ```
-3. CRDs registered (`kubectl get crd clawsandboxes.azureclaw.azure.com`).
+3. CRDs registered (`kubectl get crd karssandboxes.kars.azure.com`).
 4. `kubectl`, `bash`, and (for the cross-runtime mesh scenario) `yq`.
 5. AgentMesh relay + registry deployed in the `agentmesh` namespace if
    you want the mesh + governance scenarios. They are auto-installed by
-   the AzureClaw helm chart with `agentmesh.enabled=true`.
+   the Kars helm chart with `agentmesh.enabled=true`.
 
 The runner refuses to start if any of these are missing.
 
@@ -79,15 +79,15 @@ aggregate at the end and exits non-zero if any scenario failed.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MANUAL_E2E_NAMESPACE_PREFIX` | `azureclaw-e2e-manual` | Prefix for the per-scenario namespaces. |
+| `MANUAL_E2E_NAMESPACE_PREFIX` | `kars-e2e-manual` | Prefix for the per-scenario namespaces. |
 | `MANUAL_E2E_TIMEOUT` | `300` | Per-resource readiness timeout (seconds). |
 | `MANUAL_E2E_KEEP_NS` | `0` | `1` → keep namespaces after each scenario for triage. |
 | `MANUAL_E2E_VERBOSE` | `0` | `1` → dump `kubectl describe` on each failed assertion. |
-| `AZURECLAW_E2E_RUNTIMES` | all aliases | Subset of runtimes for the `runtime` scenario. |
-| `AZURECLAW_E2E_PEER_A` / `_B` | `openclaw` / `oai-agents` | Peer choice for the `mesh` scenario. |
-| `AZURECLAW_E2E_GOV_RUNTIME` | `openclaw` | Sandbox runtime for the `governance` scenario. |
-| `AZURECLAW_E2E_BURST` | `60` | Request count for the rate-limit probe. |
-| `MANUAL_E2E_OUTDIR` | `/tmp/azureclaw-e2e-manual` | Where the metrics JSONL + archived runs live. |
+| `KARS_E2E_RUNTIMES` | all aliases | Subset of runtimes for the `runtime` scenario. |
+| `KARS_E2E_PEER_A` / `_B` | `openclaw` / `oai-agents` | Peer choice for the `mesh` scenario. |
+| `KARS_E2E_GOV_RUNTIME` | `openclaw` | Sandbox runtime for the `governance` scenario. |
+| `KARS_E2E_BURST` | `60` | Request count for the rate-limit probe. |
+| `MANUAL_E2E_OUTDIR` | `/tmp/kars-e2e-manual` | Where the metrics JSONL + archived runs live. |
 | `MANUAL_E2E_METRICS_FILE` | `${OUTDIR}/metrics.jsonl` | Override the metrics output path. |
 
 ---
@@ -95,16 +95,16 @@ aggregate at the end and exits non-zero if any scenario failed.
 ## Benchmark metrics
 
 Every run emits one JSON-line per measured event to
-`${MANUAL_E2E_METRICS_FILE}` (default `/tmp/azureclaw-e2e-manual/metrics.jsonl`)
+`${MANUAL_E2E_METRICS_FILE}` (default `/tmp/kars-e2e-manual/metrics.jsonl`)
 and prints a `min/p50/avg/p95/max` summary table at the end.
 
 Captured out-of-the-box:
 
 | Metric | Unit | Where |
 |---|---|---|
-| `admitClawSandbox` | ms | wall-clock of `kubectl apply` for the CR (CRD validation + admission) |
+| `admitKarsSandbox` | ms | wall-clock of `kubectl apply` for the CR (CRD validation + admission) |
 | `crdAccepted` / `crdRejected` | count | per-runtime accept/reject tally |
-| `ttiSandbox` | ms | from `wait_for_clawsandbox_ready` start to `phase=Running`/`Ready=True` |
+| `ttiSandbox` | ms | from `wait_for_karssandbox_ready` start to `phase=Running`/`Ready=True` |
 | `ttrPodRunning` | ms | from Ready to first pod observed `phase=Running` |
 | `ttfrInference` | ms | first router HTTP round-trip in the governance scenario |
 | `recoveryRouterCrash` | ms | time to return to Ready after killing the inference-router container |
@@ -132,7 +132,7 @@ metric_emit <scenario> <metricName> count 1 tag1=value
 ## Adding a scenario
 
 1. Drop a script into `scenarios/`. Source `lib/common.sh` and (if you
-   need ClawSandbox CRs) `lib/cr_factory.sh`. Use `scenario_header`
+   need KarsSandbox CRs) `lib/cr_factory.sh`. Use `scenario_header`
    first and `scenario_summary` last; emit individual results via
    `log_pass` / `log_fail` / `log_skip`.
 2. Register it in the `SCENARIOS` array near the top of `run.sh` with
@@ -146,12 +146,12 @@ The runner expects every scenario to clean up its own namespaces unless
 
 ## Troubleshooting
 
-**`require_azureclaw_installed: not found`** — the manual runner sees no
-`azureclaw-system` namespace or no `clawsandboxes.azureclaw.azure.com` CRD.
+**`require_kars_installed: not found`** — the manual runner sees no
+`kars-system` namespace or no `karssandboxes.kars.azure.com` CRD.
 Install the chart (see prerequisites).
 
 **`mesh` scenario says “agentmesh-relay/registry not installed”** — install
-AzureClaw with mesh enabled (`agentmesh.enabled=true` in helm values).
+Kars with mesh enabled (`agentmesh.enabled=true` in helm values).
 
 **`failures` scenario hangs at relay scale-up** — the kubeconfig user
 needs permission to scale deployments in the `agentmesh` namespace.
@@ -175,5 +175,5 @@ time) so resource needs match a single sandbox plus the platform.
   cluster.
 - It does **not** require Azure credentials for the smoke probes; the
   governance scenario only exercises the inference-router policy chain
-  via loopback HTTP. Live model calls require the AzureClaw helm chart
+  via loopback HTTP. Live model calls require the Kars helm chart
   to be configured with Foundry credentials separately.

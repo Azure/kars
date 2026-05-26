@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Optional mTLS listener on port 8445, dedicated to traffic from
-//! the public-edge `azureclaw-a2a-gateway` (Phase 2 S3.5, ADR-0001 #4).
+//! the public-edge `kars-a2a-gateway` (Phase 2 S3.5, ADR-0001 #4).
 //!
 //! ## Why a separate port
 //!
@@ -17,14 +17,14 @@
 //! Splitting onto a new port (8445) lets the gateway-only path be
 //! mTLS-mandatory while leaving 8443 byte-for-byte unchanged. The
 //! existing CiliumClusterwideNetworkPolicy
-//! `azureclaw-a2a-gateway-to-router` (Helm) already pins 8445 → the
+//! `kars-a2a-gateway-to-router` (Helm) already pins 8445 → the
 //! gateway's ServiceAccount, so this listener is the matching pair.
 //!
 //! ## Threat model
 //!
 //! - **Goal**: the only callers reaching :8445 must hold a client
 //!   certificate signed by the CA at
-//!   `/etc/azureclaw/a2a-gateway-ca.pem`.
+//!   `/etc/kars/a2a-gateway-ca.pem`.
 //! - **Mitigations**:
 //!   - rustls in `with_client_cert_verifier` mode (no
 //!     `with_no_client_auth` fallback).
@@ -71,15 +71,15 @@ impl A2aMtlsConfig {
             .unwrap_or(8445);
         let cert_path = PathBuf::from(
             std::env::var("A2A_MTLS_CERT_PATH")
-                .unwrap_or_else(|_| "/etc/azureclaw/a2a-mtls/tls.crt".to_string()),
+                .unwrap_or_else(|_| "/etc/kars/a2a-mtls/tls.crt".to_string()),
         );
         let key_path = PathBuf::from(
             std::env::var("A2A_MTLS_KEY_PATH")
-                .unwrap_or_else(|_| "/etc/azureclaw/a2a-mtls/tls.key".to_string()),
+                .unwrap_or_else(|_| "/etc/kars/a2a-mtls/tls.key".to_string()),
         );
         let ca_path = PathBuf::from(
             std::env::var("A2A_MTLS_CA_PATH")
-                .unwrap_or_else(|_| "/etc/azureclaw/a2a-gateway-ca.pem".to_string()),
+                .unwrap_or_else(|_| "/etc/kars/a2a-gateway-ca.pem".to_string()),
         );
         Self {
             enabled,

@@ -2,7 +2,7 @@
 #
 # When the controller is rolled out with `controller.byoStrict=true`,
 # applying this manifest must NOT produce a half-rendered Deployment.
-# Instead the ClawSandbox is stamped:
+# Instead the KarsSandbox is stamped:
 #
 #   status.conditions:
 #     - type: Degraded
@@ -15,13 +15,13 @@
 # accepted with a `WARN` advisory in controller logs — strict mode is
 # what gives the rejection teeth.
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: byo-strict-demo
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: byo-strict-demo
+    kars.azure.com/sandbox: byo-strict-demo
 spec:
   appliesTo:
     sandboxName: byo-strict-demo
@@ -33,11 +33,11 @@ spec:
     perRequestTokens: 4000
     dailyTokens: 200000
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: byo-strict-demo
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: BYO

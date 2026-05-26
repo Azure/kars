@@ -27,7 +27,7 @@ jobs:
           OUT="cli/blocklists/seed-domains.txt"
           TMP=$(mktemp -d)
 
-          echo "# AzureClaw Domain Blocklist — Auto-refreshed Seed File"  > "$TMP/merged.txt"
+          echo "# Kars Domain Blocklist — Auto-refreshed Seed File"  > "$TMP/merged.txt"
           echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"            >> "$TMP/merged.txt"
           echo "# Sources: OISD small, URLhaus hostfile, manual entries"  >> "$TMP/merged.txt"
           echo "#"                                                        >> "$TMP/merged.txt"

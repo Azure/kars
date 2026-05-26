@@ -3,14 +3,14 @@
 
 //! S12.d — `SignerPolicy` ConfigMap watcher.
 //!
-//! Replaces the env-var path that S12.b used (`AZURECLAW_SIGNER_FULCIO_ISSUERS`,
-//! `AZURECLAW_SIGNER_SAN_PATTERNS`) with a cluster-scoped, watched
+//! Replaces the env-var path that S12.b used (`KARS_SIGNER_FULCIO_ISSUERS`,
+//! `KARS_SIGNER_SAN_PATTERNS`) with a cluster-scoped, watched
 //! `ConfigMap` named [`SIGNER_POLICY_CM_NAME`] in the controller
 //! namespace. The env-var path is preserved as an emergency-override
 //! fallback when the ConfigMap is **absent**; a *malformed* ConfigMap
 //! does **not** silently fall back — it surfaces as
 //! [`crate::policy_fetcher::FetchError::SignerPolicyMalformed`] on the
-//! affected `ClawSandbox` resources.
+//! affected `KarsSandbox` resources.
 //!
 //! ## Wire shape
 //!
@@ -18,14 +18,14 @@
 //! apiVersion: v1
 //! kind: ConfigMap
 //! metadata:
-//!   name: azureclaw-signer-policy
-//!   namespace: azureclaw-system
+//!   name: kars-signer-policy
+//!   namespace: kars-system
 //! data:
 //!   fulcioIssuers: |
 //!     https://token.actions.githubusercontent.com
 //!     https://login.microsoftonline.com/<tenant>/v2.0
 //!   sanPatterns: |
-//!     https://github.com/Azure/azureclaw/.github/workflows/*.yml@*
+//!     https://github.com/Azure/kars/.github/workflows/*.yml@*
 //!     signer@example.com
 //!   ed25519Keys: |
 //!     [
@@ -66,7 +66,7 @@ use k8s_openapi::api::core::v1::ConfigMap;
 /// authoritative SignerPolicy per cluster — multi-tenant slicing of
 /// trust roots is out of scope until a future slice introduces tenant
 /// CRDs.
-pub const SIGNER_POLICY_CM_NAME: &str = "azureclaw-signer-policy";
+pub const SIGNER_POLICY_CM_NAME: &str = "kars-signer-policy";
 
 /// `data.fulcioIssuers` key — newline-separated list of Fulcio issuer
 /// URLs (`https://...`). Comment lines starting with `#` are stripped.
@@ -570,7 +570,7 @@ mod tests {
         ConfigMap {
             metadata: ObjectMeta {
                 name: Some(SIGNER_POLICY_CM_NAME.into()),
-                namespace: Some("azureclaw-system".into()),
+                namespace: Some("kars-system".into()),
                 ..Default::default()
             },
             data,
@@ -588,7 +588,7 @@ mod tests {
         );
         d.insert(
             KEY_SAN_PATTERNS.into(),
-            "https://github.com/Azure/azureclaw/.github/workflows/*.yml@*\n\
+            "https://github.com/Azure/kars/.github/workflows/*.yml@*\n\
              signer@example.com\n"
                 .into(),
         );

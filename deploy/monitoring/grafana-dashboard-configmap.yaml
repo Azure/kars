@@ -1,6 +1,6 @@
 apiVersion: v1
 data:
-  azureclaw-fleet.json: |
+  kars-fleet.json: |
     {
       "annotations": {"list": []},
       "editable": true,
@@ -15,7 +15,7 @@ data:
           "title": "Active sandboxes scraped",
           "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "targets": [{"expr": "count(count by (sandbox) (azureclaw_tokens_total))", "refId": "A"}],
+          "targets": [{"expr": "count(count by (sandbox) (kars_tokens_total))", "refId": "A"}],
           "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "blue"}]}}}
         },
         {
@@ -23,7 +23,7 @@ data:
           "title": "Total tokens (all sandboxes, lifetime)",
           "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "targets": [{"expr": "sum(azureclaw_tokens_total)", "refId": "A"}],
+          "targets": [{"expr": "sum(kars_tokens_total)", "refId": "A"}],
           "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green"}]}}}
         },
         {
@@ -31,7 +31,7 @@ data:
           "title": "AGT policy evaluations (allow)",
           "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "targets": [{"expr": "sum(azureclaw_agt_policy_evaluations_total{decision=\"allow\"})", "refId": "A"}],
+          "targets": [{"expr": "sum(kars_agt_policy_evaluations_total{decision=\"allow\"})", "refId": "A"}],
           "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green"}]}}}
         },
         {
@@ -39,7 +39,7 @@ data:
           "title": "AGT denies / approvals / rate-limited",
           "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "targets": [{"expr": "sum(azureclaw_agt_policy_evaluations_total{decision!=\"allow\"})", "refId": "A"}],
+          "targets": [{"expr": "sum(kars_agt_policy_evaluations_total{decision!=\"allow\"})", "refId": "A"}],
           "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "yellow"}, {"color": "red", "value": 1}]}}}
         },
         {
@@ -48,7 +48,7 @@ data:
           "gridPos": {"h": 9, "w": 12, "x": 0, "y": 4},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "targets": [
-            {"expr": "sum by (sandbox, direction) (azureclaw_tokens_total)", "refId": "A", "legendFormat": "{{sandbox}} / {{direction}}"}
+            {"expr": "sum by (sandbox, direction) (kars_tokens_total)", "refId": "A", "legendFormat": "{{sandbox}} / {{direction}}"}
           ],
           "fieldConfig": {"defaults": {"unit": "short"}}
         },
@@ -58,7 +58,7 @@ data:
           "gridPos": {"h": 9, "w": 12, "x": 12, "y": 4},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "targets": [
-            {"expr": "sum by (sandbox) (rate(azureclaw_tokens_total[5m]))", "refId": "A", "legendFormat": "{{sandbox}}"}
+            {"expr": "sum by (sandbox) (rate(kars_tokens_total[5m]))", "refId": "A", "legendFormat": "{{sandbox}}"}
           ],
           "fieldConfig": {"defaults": {"unit": "tps"}}
         },
@@ -68,7 +68,7 @@ data:
           "gridPos": {"h": 9, "w": 12, "x": 0, "y": 13},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "targets": [
-            {"expr": "sum by (model, direction) (azureclaw_tokens_total)", "refId": "A", "legendFormat": "{{model}} / {{direction}}"}
+            {"expr": "sum by (model, direction) (kars_tokens_total)", "refId": "A", "legendFormat": "{{model}} / {{direction}}"}
           ],
           "fieldConfig": {"defaults": {"unit": "short"}}
         },
@@ -78,7 +78,7 @@ data:
           "gridPos": {"h": 9, "w": 12, "x": 12, "y": 13},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "targets": [
-            {"expr": "sum by (sandbox, decision) (azureclaw_agt_policy_evaluations_total)", "refId": "A", "legendFormat": "{{sandbox}} / {{decision}}"}
+            {"expr": "sum by (sandbox, decision) (kars_agt_policy_evaluations_total)", "refId": "A", "legendFormat": "{{sandbox}} / {{decision}}"}
           ],
           "fieldConfig": {"defaults": {"unit": "short"}}
         },
@@ -88,7 +88,7 @@ data:
           "gridPos": {"h": 5, "w": 12, "x": 0, "y": 22},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "targets": [
-            {"expr": "azureclaw_policy_bundle_healthy", "refId": "A", "legendFormat": "{{sandbox}} / {{kind}}"}
+            {"expr": "kars_policy_bundle_healthy", "refId": "A", "legendFormat": "{{sandbox}} / {{kind}}"}
           ],
           "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "red"}, {"color": "green", "value": 1}]}}}
         },
@@ -98,27 +98,27 @@ data:
           "gridPos": {"h": 5, "w": 12, "x": 12, "y": 22},
           "datasource": {"type": "prometheus", "uid": "prometheus"},
           "targets": [
-            {"expr": "histogram_quantile(0.99, sum by (sandbox, le) (rate(azureclaw_agt_eval_latency_seconds_bucket[5m])))", "refId": "A", "legendFormat": "{{sandbox}}"}
+            {"expr": "histogram_quantile(0.99, sum by (sandbox, le) (rate(kars_agt_eval_latency_seconds_bucket[5m])))", "refId": "A", "legendFormat": "{{sandbox}}"}
           ],
           "fieldConfig": {"defaults": {"unit": "s"}}
         }
       ],
       "refresh": "10s",
       "schemaVersion": 39,
-      "tags": ["azureclaw"],
+      "tags": ["kars"],
       "templating": {"list": []},
       "time": {"from": "now-1h", "to": "now"},
       "timepicker": {},
       "timezone": "",
-      "title": "AzureClaw — Sandbox Fleet Overview",
-      "uid": "azureclaw-fleet",
+      "title": "Kars — Sandbox Fleet Overview",
+      "uid": "kars-fleet",
       "version": 1
     }
 kind: ConfigMap
 metadata:
   annotations:
     kubectl.kubernetes.io/last-applied-configuration: |
-      {"apiVersion":"v1","data":{"azureclaw-fleet.json":"{\n  \"annotations\": {\"list\": []},\n  \"editable\": true,\n  \"fiscalYearStartMonth\": 0,\n  \"graphTooltip\": 0,\n  \"id\": null,\n  \"links\": [],\n  \"liveNow\": false,\n  \"panels\": [\n    {\n      \"type\": \"stat\",\n      \"title\": \"Active sandboxes scraped\",\n      \"gridPos\": {\"h\": 4, \"w\": 6, \"x\": 0, \"y\": 0},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [{\"expr\": \"count(count by (sandbox) (azureclaw_tokens_total))\", \"refId\": \"A\"}],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\", \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"blue\"}]}}}\n    },\n    {\n      \"type\": \"stat\",\n      \"title\": \"Total tokens (all sandboxes, lifetime)\",\n      \"gridPos\": {\"h\": 4, \"w\": 6, \"x\": 6, \"y\": 0},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [{\"expr\": \"sum(azureclaw_tokens_total)\", \"refId\": \"A\"}],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\", \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"green\"}]}}}\n    },\n    {\n      \"type\": \"stat\",\n      \"title\": \"AGT policy evaluations (allow)\",\n      \"gridPos\": {\"h\": 4, \"w\": 6, \"x\": 12, \"y\": 0},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [{\"expr\": \"sum(azureclaw_agt_policy_evaluations_total{decision=\\\"allow\\\"})\", \"refId\": \"A\"}],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\", \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"green\"}]}}}\n    },\n    {\n      \"type\": \"stat\",\n      \"title\": \"AGT denies / approvals / rate-limited\",\n      \"gridPos\": {\"h\": 4, \"w\": 6, \"x\": 18, \"y\": 0},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [{\"expr\": \"sum(azureclaw_agt_policy_evaluations_total{decision!=\\\"allow\\\"})\", \"refId\": \"A\"}],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\", \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"yellow\"}, {\"color\": \"red\", \"value\": 1}]}}}\n    },\n    {\n      \"type\": \"barchart\",\n      \"title\": \"Tokens per sandbox (input vs output)\",\n      \"gridPos\": {\"h\": 9, \"w\": 12, \"x\": 0, \"y\": 4},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"sum by (sandbox, direction) (azureclaw_tokens_total)\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}} / {{direction}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\"}}\n    },\n    {\n      \"type\": \"timeseries\",\n      \"title\": \"Token rate per sandbox (tokens/sec, 5m avg)\",\n      \"gridPos\": {\"h\": 9, \"w\": 12, \"x\": 12, \"y\": 4},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"sum by (sandbox) (rate(azureclaw_tokens_total[5m]))\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"tps\"}}\n    },\n    {\n      \"type\": \"barchart\",\n      \"title\": \"Tokens per model (cross-sandbox)\",\n      \"gridPos\": {\"h\": 9, \"w\": 12, \"x\": 0, \"y\": 13},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"sum by (model, direction) (azureclaw_tokens_total)\", \"refId\": \"A\", \"legendFormat\": \"{{model}} / {{direction}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\"}}\n    },\n    {\n      \"type\": \"barchart\",\n      \"title\": \"AGT policy decisions per sandbox\",\n      \"gridPos\": {\"h\": 9, \"w\": 12, \"x\": 12, \"y\": 13},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"sum by (sandbox, decision) (azureclaw_agt_policy_evaluations_total)\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}} / {{decision}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\"}}\n    },\n    {\n      \"type\": \"stat\",\n      \"title\": \"Policy bundle health (1=healthy)\",\n      \"gridPos\": {\"h\": 5, \"w\": 12, \"x\": 0, \"y\": 22},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"azureclaw_policy_bundle_healthy\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}} / {{kind}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"red\"}, {\"color\": \"green\", \"value\": 1}]}}}\n    },\n    {\n      \"type\": \"timeseries\",\n      \"title\": \"AGT eval latency p99 (per sandbox)\",\n      \"gridPos\": {\"h\": 5, \"w\": 12, \"x\": 12, \"y\": 22},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"histogram_quantile(0.99, sum by (sandbox, le) (rate(azureclaw_agt_eval_latency_seconds_bucket[5m])))\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"s\"}}\n    }\n  ],\n  \"refresh\": \"10s\",\n  \"schemaVersion\": 39,\n  \"tags\": [\"azureclaw\"],\n  \"templating\": {\"list\": []},\n  \"time\": {\"from\": \"now-1h\", \"to\": \"now\"},\n  \"timepicker\": {},\n  \"timezone\": \"\",\n  \"title\": \"AzureClaw — Sandbox Fleet Overview\",\n  \"uid\": \"azureclaw-fleet\",\n  \"version\": 1\n}\n"},"kind":"ConfigMap","metadata":{"annotations":{},"labels":{"grafana_dashboard":"1"},"name":"azureclaw-fleet-dashboard","namespace":"monitoring"}}
+      {"apiVersion":"v1","data":{"kars-fleet.json":"{\n  \"annotations\": {\"list\": []},\n  \"editable\": true,\n  \"fiscalYearStartMonth\": 0,\n  \"graphTooltip\": 0,\n  \"id\": null,\n  \"links\": [],\n  \"liveNow\": false,\n  \"panels\": [\n    {\n      \"type\": \"stat\",\n      \"title\": \"Active sandboxes scraped\",\n      \"gridPos\": {\"h\": 4, \"w\": 6, \"x\": 0, \"y\": 0},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [{\"expr\": \"count(count by (sandbox) (kars_tokens_total))\", \"refId\": \"A\"}],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\", \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"blue\"}]}}}\n    },\n    {\n      \"type\": \"stat\",\n      \"title\": \"Total tokens (all sandboxes, lifetime)\",\n      \"gridPos\": {\"h\": 4, \"w\": 6, \"x\": 6, \"y\": 0},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [{\"expr\": \"sum(kars_tokens_total)\", \"refId\": \"A\"}],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\", \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"green\"}]}}}\n    },\n    {\n      \"type\": \"stat\",\n      \"title\": \"AGT policy evaluations (allow)\",\n      \"gridPos\": {\"h\": 4, \"w\": 6, \"x\": 12, \"y\": 0},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [{\"expr\": \"sum(kars_agt_policy_evaluations_total{decision=\\\"allow\\\"})\", \"refId\": \"A\"}],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\", \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"green\"}]}}}\n    },\n    {\n      \"type\": \"stat\",\n      \"title\": \"AGT denies / approvals / rate-limited\",\n      \"gridPos\": {\"h\": 4, \"w\": 6, \"x\": 18, \"y\": 0},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [{\"expr\": \"sum(kars_agt_policy_evaluations_total{decision!=\\\"allow\\\"})\", \"refId\": \"A\"}],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\", \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"yellow\"}, {\"color\": \"red\", \"value\": 1}]}}}\n    },\n    {\n      \"type\": \"barchart\",\n      \"title\": \"Tokens per sandbox (input vs output)\",\n      \"gridPos\": {\"h\": 9, \"w\": 12, \"x\": 0, \"y\": 4},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"sum by (sandbox, direction) (kars_tokens_total)\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}} / {{direction}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\"}}\n    },\n    {\n      \"type\": \"timeseries\",\n      \"title\": \"Token rate per sandbox (tokens/sec, 5m avg)\",\n      \"gridPos\": {\"h\": 9, \"w\": 12, \"x\": 12, \"y\": 4},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"sum by (sandbox) (rate(kars_tokens_total[5m]))\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"tps\"}}\n    },\n    {\n      \"type\": \"barchart\",\n      \"title\": \"Tokens per model (cross-sandbox)\",\n      \"gridPos\": {\"h\": 9, \"w\": 12, \"x\": 0, \"y\": 13},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"sum by (model, direction) (kars_tokens_total)\", \"refId\": \"A\", \"legendFormat\": \"{{model}} / {{direction}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\"}}\n    },\n    {\n      \"type\": \"barchart\",\n      \"title\": \"AGT policy decisions per sandbox\",\n      \"gridPos\": {\"h\": 9, \"w\": 12, \"x\": 12, \"y\": 13},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"sum by (sandbox, decision) (kars_agt_policy_evaluations_total)\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}} / {{decision}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"short\"}}\n    },\n    {\n      \"type\": \"stat\",\n      \"title\": \"Policy bundle health (1=healthy)\",\n      \"gridPos\": {\"h\": 5, \"w\": 12, \"x\": 0, \"y\": 22},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"kars_policy_bundle_healthy\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}} / {{kind}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"color\": {\"mode\": \"thresholds\"}, \"thresholds\": {\"steps\": [{\"color\": \"red\"}, {\"color\": \"green\", \"value\": 1}]}}}\n    },\n    {\n      \"type\": \"timeseries\",\n      \"title\": \"AGT eval latency p99 (per sandbox)\",\n      \"gridPos\": {\"h\": 5, \"w\": 12, \"x\": 12, \"y\": 22},\n      \"datasource\": {\"type\": \"prometheus\", \"uid\": \"prometheus\"},\n      \"targets\": [\n        {\"expr\": \"histogram_quantile(0.99, sum by (sandbox, le) (rate(kars_agt_eval_latency_seconds_bucket[5m])))\", \"refId\": \"A\", \"legendFormat\": \"{{sandbox}}\"}\n      ],\n      \"fieldConfig\": {\"defaults\": {\"unit\": \"s\"}}\n    }\n  ],\n  \"refresh\": \"10s\",\n  \"schemaVersion\": 39,\n  \"tags\": [\"kars\"],\n  \"templating\": {\"list\": []},\n  \"time\": {\"from\": \"now-1h\", \"to\": \"now\"},\n  \"timepicker\": {},\n  \"timezone\": \"\",\n  \"title\": \"Kars — Sandbox Fleet Overview\",\n  \"uid\": \"kars-fleet\",\n  \"version\": 1\n}\n"},"kind":"ConfigMap","metadata":{"annotations":{},"labels":{"grafana_dashboard":"1"},"name":"kars-fleet-dashboard","namespace":"monitoring"}}
   labels:
     grafana_dashboard: "1"
-  name: azureclaw-fleet-dashboard
+  name: kars-fleet-dashboard

@@ -12,9 +12,9 @@
  *                            verbatim. Always shown — when the cluster is
  *                            healthy it renders "✓ No alerts".
  *   3. CRD sections        — one section per non-empty CRD type
- *                            (ClawSandbox, InferencePolicy, ToolPolicy,
- *                            ClawMemory, ClawEval, MCPServer, A2AAgent,
- *                            ClawPairing). Each section is a compact
+ *                            (KarsSandbox, InferencePolicy, ToolPolicy,
+ *                            KarsMemory, KarsEval, MCPServer, A2AAgent,
+ *                            KarsPairing). Each section is a compact
  *                            table with [#], NAME, NAMESPACE, PHASE, AGE,
  *                            STATUS columns. Drill-in via numeric keys
  *                            opens a per-instance detail popup.
@@ -24,14 +24,14 @@
  */
 import type { Panel, ClusterState, PanelCategory } from "./types.js";
 import { bucketFromConditions } from "./util.js";
-import { clawSandboxPanel } from "./clawsandbox.js";
-import { clawPairingPanel } from "./clawpairing.js";
+import { clawSandboxPanel } from "./karssandbox.js";
+import { clawPairingPanel } from "./karspairing.js";
 import { mcpServerPanel } from "./mcpserver.js";
 import { toolPolicyPanel } from "./toolpolicy.js";
 import { inferencePolicyPanel } from "./inferencepolicy.js";
 import { a2aAgentPanel } from "./a2aagent.js";
-import { clawMemoryPanel } from "./clawmemory.js";
-import { clawEvalPanel } from "./claweval.js";
+import { clawMemoryPanel } from "./karsmemory.js";
+import { clawEvalPanel } from "./karseval.js";
 import { providerStatusPanel } from "./provider_status.js";
 
 /** Default panel order (also doubles as `--panels=all` resolver). */
@@ -101,13 +101,13 @@ interface TriageItem {
 export function collectTriage(state: ClusterState): TriageItem[] {
   const out: TriageItem[] = [];
   const lists: Array<{ panel: string; items: { name: string; namespace: string; conditions: { type: string; status: string; reason?: string; message?: string }[] }[] }> = [
-    { panel: "ClawPairing",     items: state.pairings },
+    { panel: "KarsPairing",     items: state.pairings },
     { panel: "McpServer",       items: state.mcpServers },
     { panel: "ToolPolicy",      items: state.toolPolicies },
     { panel: "InferencePolicy", items: state.inferencePolicies },
     { panel: "A2AAgent",        items: state.a2aAgents },
-    { panel: "ClawMemory",      items: state.clawMemories },
-    { panel: "ClawEval",        items: state.clawEvals },
+    { panel: "KarsMemory",      items: state.clawMemories },
+    { panel: "KarsEval",        items: state.clawEvals },
   ];
   for (const { panel, items } of lists) {
     for (const it of items) {
@@ -130,9 +130,9 @@ export function collectTriage(state: ClusterState): TriageItem[] {
   for (const sb of state.sandboxes) {
     if (sb.health === "down" || sb.health === "degraded") {
       out.push({
-        panel: "ClawSandbox",
+        panel: "KarsSandbox",
         name: sb.name,
-        namespace: `azureclaw-${sb.name}`,
+        namespace: `kars-${sb.name}`,
         conditionType: "Health",
         status: sb.health === "down" ? "False" : "Unknown",
         reason: sb.health,
@@ -182,7 +182,7 @@ function renderHealthAlerts(items: TriageItem[]): string {
 /** A single row in a CRD section's compact table. */
 export interface CrdRow {
   index: number;          // 1-based, used for drill-in keybinding
-  kind: string;           // CRD kind (e.g. "ClawSandbox") — same as section title
+  kind: string;           // CRD kind (e.g. "KarsSandbox") — same as section title
   name: string;
   namespace: string;
   phase: string;          // bucketed: healthy / degraded / down / pending / warning / error / unknown
@@ -220,22 +220,22 @@ function buildRows(state: ClusterState): CrdRow[] {
   let i = 0;
   const next = () => ++i;
 
-  // ClawSandbox — uses SandboxInfo (no conditions; health field is authoritative).
+  // KarsSandbox — uses SandboxInfo (no conditions; health field is authoritative).
   for (const s of state.sandboxes) {
     const rk = s.runtimeKind || "OpenClaw";
     const status = `${s.model || "-"}  ·  ${rk}  ·  ${s.isolation || "-"}  ·  ${s.role}`;
     rows.push({
       index: next(),
-      kind: "ClawSandbox",
+      kind: "KarsSandbox",
       name: s.name,
-      namespace: s.namespace || `azureclaw-${s.name}`,
+      namespace: s.namespace || `kars-${s.name}`,
       phase: s.health,
       age: s.age || "-",
       status,
     });
   }
 
-  // ClawMemory
+  // KarsMemory
   for (const m of state.clawMemories) {
     const parts: string[] = [];
     if (m.sandboxRef) parts.push(`sandbox=${m.sandboxRef}`);
@@ -243,7 +243,7 @@ function buildRows(state: ClusterState): CrdRow[] {
     if (m.scope) parts.push(`scope=${m.scope}`);
     if (m.foundryBound) parts.push(`binding=${m.foundryBound}`);
     rows.push({
-      index: next(), kind: "ClawMemory",
+      index: next(), kind: "KarsMemory",
       name: m.name, namespace: m.namespace,
       phase: phaseFromConditions(m.conditions),
       age: m.age || "-",
@@ -251,7 +251,7 @@ function buildRows(state: ClusterState): CrdRow[] {
     });
   }
 
-  // ClawEval
+  // KarsEval
   for (const e of state.clawEvals) {
     const parts: string[] = [];
     if (e.sandboxRef) parts.push(`sandbox=${e.sandboxRef}`);
@@ -259,7 +259,7 @@ function buildRows(state: ClusterState): CrdRow[] {
     if (e.lastScore) parts.push(`score=${e.lastScore}`);
     if (e.schedule) parts.push(`sched=${e.schedule}`);
     rows.push({
-      index: next(), kind: "ClawEval",
+      index: next(), kind: "KarsEval",
       name: e.name, namespace: e.namespace,
       phase: phaseFromConditions(e.conditions),
       age: e.age || "-",
@@ -267,7 +267,7 @@ function buildRows(state: ClusterState): CrdRow[] {
     });
   }
 
-  // ClawPairing — the pairing reconciler emits `status.phase` (PendingPairing,
+  // KarsPairing — the pairing reconciler emits `status.phase` (PendingPairing,
   // Active, Expired, Revoked) but does NOT publish conditions, so a pure
   // condition-based bucketing always returns "unknown". Map the phase
   // string directly to a health bucket.
@@ -287,7 +287,7 @@ function buildRows(state: ClusterState): CrdRow[] {
             : "unknown";
     }
     rows.push({
-      index: next(), kind: "ClawPairing",
+      index: next(), kind: "KarsPairing",
       name: p.name, namespace: p.namespace,
       phase,
       age: p.age || "-",
@@ -362,25 +362,25 @@ function buildRows(state: ClusterState): CrdRow[] {
 
 /** Section order — only sections with rows are rendered. */
 const SECTION_ORDER = [
-  "ClawSandbox",
+  "KarsSandbox",
   "InferencePolicy",
   "ToolPolicy",
-  "ClawMemory",
-  "ClawEval",
+  "KarsMemory",
+  "KarsEval",
   "MCPServer",
   "A2AAgent",
-  "ClawPairing",
+  "KarsPairing",
 ] as const;
 
 const SECTION_PURPOSE: Record<string, string> = {
-  ClawSandbox:     "the agents themselves — pod, runtime, model, isolation",
+  KarsSandbox:     "the agents themselves — pod, runtime, model, isolation",
   InferencePolicy: "model preference, daily token caps, guardrail floor",
   ToolPolicy:      "allow/deny tools, approval gates, rate limits",
-  ClawMemory:      "Foundry Memory Store binding — scope, retention",
-  ClawEval:        "reproducible eval runs — pinned image+config",
+  KarsMemory:      "Foundry Memory Store binding — scope, retention",
+  KarsEval:        "reproducible eval runs — pinned image+config",
   MCPServer:       "MCP servers reachable from sandboxes",
   A2AAgent:        "A2A ingress + signing-key trust anchors",
-  ClawPairing:     "controller-managed handshake state",
+  KarsPairing:     "controller-managed handshake state",
 };
 
 function padTag(s: string, width: number, color?: string): string {
@@ -463,7 +463,7 @@ function renderHeader(state: ClusterState, triageCount: number): string {
   const agentWord = agents === 1 ? "agent" : "agents";
   const issueWord = triageCount === 1 ? "issue" : "issues";
   const issueColor = triageCount === 0 ? "green" : (triageCount > 3 ? "red" : "yellow");
-  return `{bold}AzureClaw Operator{/}  —  ${agents} ${agentWord}, ` +
+  return `{bold}Kars Operator{/}  —  ${agents} ${agentWord}, ` +
          `{${issueColor}-fg}${triageCount} ${issueWord}{/}\n${PANEL_RULE}`;
 }
 
@@ -526,29 +526,29 @@ export function renderCrdItemDetail(state: ClusterState, kind: string, name: str
     `{bold}{blue-fg}${title}{/}{/}\n{gray-fg}${name} (${namespace}){/}\n\n${body}`;
 
   switch (kind) {
-    case "ClawSandbox": {
+    case "KarsSandbox": {
       const sb = state.sandboxes.find((s) => s.name === name);
       if (!sb) return `{red-fg}sandbox '${name}' not found{/}`;
       const sub = empty(); sub.sandboxes = [sb];
-      return heading("ClawSandbox detail", clawSandboxPanel.render(sub));
+      return heading("KarsSandbox detail", clawSandboxPanel.render(sub));
     }
-    case "ClawMemory": {
+    case "KarsMemory": {
       const m = match(state.clawMemories);
-      if (!m) return `{red-fg}ClawMemory '${name}' not found{/}`;
+      if (!m) return `{red-fg}KarsMemory '${name}' not found{/}`;
       const sub = empty(); sub.clawMemories = [m];
-      return heading("ClawMemory detail", clawMemoryPanel.render(sub));
+      return heading("KarsMemory detail", clawMemoryPanel.render(sub));
     }
-    case "ClawEval": {
+    case "KarsEval": {
       const e = match(state.clawEvals);
-      if (!e) return `{red-fg}ClawEval '${name}' not found{/}`;
+      if (!e) return `{red-fg}KarsEval '${name}' not found{/}`;
       const sub = empty(); sub.clawEvals = [e];
-      return heading("ClawEval detail", clawEvalPanel.render(sub));
+      return heading("KarsEval detail", clawEvalPanel.render(sub));
     }
-    case "ClawPairing": {
+    case "KarsPairing": {
       const p = match(state.pairings);
-      if (!p) return `{red-fg}ClawPairing '${name}' not found{/}`;
+      if (!p) return `{red-fg}KarsPairing '${name}' not found{/}`;
       const sub = empty(); sub.pairings = [p];
-      return heading("ClawPairing detail", clawPairingPanel.render(sub));
+      return heading("KarsPairing detail", clawPairingPanel.render(sub));
     }
     case "InferencePolicy": {
       const ip = match(state.inferencePolicies);

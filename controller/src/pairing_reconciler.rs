@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Pairing reconciler — watches ClawPairing CRDs and manages lifecycle.
+//! Pairing reconciler — watches KarsPairing CRDs and manages lifecycle.
 //!
 //! Responsibilities:
 //! - Set initial phase to PendingPairing on creation
@@ -20,7 +20,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::time::Duration;
 
-use crate::pairing::{ClawPairing, phase};
+use crate::pairing::{KarsPairing, phase};
 
 /// Shared context for the pairing reconciler.
 struct PairingContext {
@@ -36,19 +36,17 @@ enum PairingReconcileError {
     SerdeJson(#[from] serde_json::Error),
 }
 
-/// Main reconciliation function for ClawPairing resources.
+/// Main reconciliation function for KarsPairing resources.
 async fn reconcile_pairing(
-    pairing: Arc<ClawPairing>,
+    pairing: Arc<KarsPairing>,
     ctx: Arc<PairingContext>,
 ) -> Result<Action, PairingReconcileError> {
     let name = pairing.name_any();
-    let ns = pairing
-        .namespace()
-        .unwrap_or_else(|| "azureclaw-system".into());
+    let ns = pairing.namespace().unwrap_or_else(|| "kars-system".into());
 
-    tracing::info!(pairing = %name, "Reconciling ClawPairing");
+    tracing::info!(pairing = %name, "Reconciling KarsPairing");
 
-    let api: Api<ClawPairing> = Api::namespaced(ctx.client.clone(), &ns);
+    let api: Api<KarsPairing> = Api::namespaced(ctx.client.clone(), &ns);
     let current_phase = pairing
         .status
         .as_ref()
@@ -120,7 +118,7 @@ async fn reconcile_pairing(
 }
 
 fn pairing_error_policy(
-    pairing: Arc<ClawPairing>,
+    pairing: Arc<KarsPairing>,
     error: &PairingReconcileError,
     _ctx: Arc<PairingContext>,
 ) -> Action {
@@ -128,26 +126,26 @@ fn pairing_error_policy(
         PairingReconcileError::Kube(_) => "kube_api",
         PairingReconcileError::SerdeJson(_) => "serde",
     };
-    crate::metrics::record_reconcile_error("ClawPairing", class);
+    crate::metrics::record_reconcile_error("KarsPairing", class);
     tracing::warn!(
         pairing = %pairing.name_any(),
         error = %error,
-        "ClawPairing reconcile error — requeuing in ~30s (±20% jitter)"
+        "KarsPairing reconcile error — requeuing in ~30s (±20% jitter)"
     );
     Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
 /// Start the pairing reconciler controller loop.
 pub async fn run(client: Client) -> Result<()> {
-    let pairings: Api<ClawPairing> = Api::all(client.clone());
+    let pairings: Api<KarsPairing> = Api::all(client.clone());
 
     // Verify CRD is installed (non-fatal — pairing is opt-in)
     match pairings.list(&ListParams::default().limit(1)).await {
         Ok(_) => {
-            tracing::info!("ClawPairing CRD found — starting pairing controller");
+            tracing::info!("KarsPairing CRD found — starting pairing controller");
         }
         Err(e) => {
-            tracing::warn!("ClawPairing CRD not installed — pairing/federation disabled: {e}");
+            tracing::warn!("KarsPairing CRD not installed — pairing/federation disabled: {e}");
             // Park forever so the tokio::select! in main() does not see
             // this reconciler exit cleanly and tear the whole controller
             // down. The CRD is only optional from the controller's
@@ -164,7 +162,7 @@ pub async fn run(client: Client) -> Result<()> {
     Controller::new(pairings, kube::runtime::watcher::Config::default())
         .run(
             |x, ctx| async move {
-                crate::metrics::observe_reconcile("ClawPairing", reconcile_pairing(x, ctx)).await
+                crate::metrics::observe_reconcile("KarsPairing", reconcile_pairing(x, ctx)).await
             },
             pairing_error_policy,
             ctx,

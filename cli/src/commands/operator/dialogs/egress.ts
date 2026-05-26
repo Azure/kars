@@ -16,7 +16,7 @@
  *   - lists every sandbox with (mode, learned-count, allowlist-count)
  *     so the operator can see the whole fleet at a glance,
  *   - lets the operator [s]ign+pin the highlighted sandbox's allowlist
- *     (calls `azureclaw egress <name> --enforce` which auto-signs as of
+ *     (calls `kars egress <name> --enforce` which auto-signs as of
  *     S12.g),
  *   - lets the operator [A]pprove-all-learned across **every** sandbox
  *     in one keystroke (the on-dashboard [Shift-A] only acts on the
@@ -35,7 +35,7 @@ import type { SecurityState } from "../types.js";
 interface ActivityLog { log(msg: string): void; }
 
 /** Format an execa failure into a single-line, ANSI-stripped reason string.
- *  Many `azureclaw` subcommands write user-facing abort/error messages to
+ *  Many `kars` subcommands write user-facing abort/error messages to
  *  STDOUT via console.log (chalk-colored), not stderr, so a stderr-only
  *  read produces empty output. Surface stderr first, then the last few
  *  meaningful stdout lines, and finally the exit code so the operator
@@ -104,7 +104,7 @@ export function buildFleetRows(
       mode: sec?.egressMode ?? "unknown",
       learned,
       allowlist,
-      // Read from the live ClawSandbox spec/status — NOT a heuristic on
+      // Read from the live KarsSandbox spec/status — NOT a heuristic on
       // domain count. The earlier proxy ("enforcing + allowlistDomains>0")
       // labelled inline-only sandboxes as "signed", which is wrong: signing
       // requires `spec.networkPolicy.allowlistRef` + a verified cosign
@@ -143,7 +143,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
   // Always read live via `ctx.<field>` so post-refresh state is visible.
 
   // Honest signed-state map, refreshed on every reload(). Sourced from
-  // `kubectl get clawsandbox` rather than the operator's SecurityState
+  // `kubectl get karssandbox` rather than the operator's SecurityState
   // (which is router-internal and doesn't see allowlistRef).
   let signedByAgent = new Map<string, SignedDetail>();
 
@@ -230,12 +230,12 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
    *  Reads `spec.networkPolicy.allowlistRef` and the controller's
    *  `AllowlistAuthoritative` condition in a single batched JSON pull.
    *  Failures are silent (sandbox left as "unknown") because docker
-   *  agents have no ClawSandbox CR. */
+   *  agents have no KarsSandbox CR. */
   const fetchSignedStates = async (): Promise<Map<string, SignedDetail>> => {
     const out = new Map<string, SignedDetail>();
     try {
       const { stdout } = await execa("kubectl", [
-        "get", "clawsandbox", "-A", "-o", "json",
+        "get", "karssandbox", "-A", "-o", "json",
       ], { stdio: "pipe", timeout: 5_000 });
       const data = JSON.parse(stdout) as { items?: Array<Record<string, unknown>> };
       for (const item of data.items ?? []) {
@@ -288,7 +288,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     renderRows();
     const d = fresh.get(sb.name);
     if (!d) {
-      activityLog.log(`{gray-fg}? ${sb.name}: no ClawSandbox CR found{/}`);
+      activityLog.log(`{gray-fg}? ${sb.name}: no KarsSandbox CR found{/}`);
       return;
     }
     if (d.state === "unsigned") {
@@ -301,7 +301,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
   };
 
   const sign = async (sb: FleetRow) => {
-    // Pre-flight: oras + cosign are required by `azureclaw egress --enforce`
+    // Pre-flight: oras + cosign are required by `kars egress --enforce`
     // (auto-signs as of S12.g). Surface a clear, actionable error here rather
     // than letting the subprocess fail later with an opaque "Command failed
     // with exit code 1" — the operator otherwise sees only the ⏳ line and
@@ -330,16 +330,16 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     // multi-line error that's easy to miss. Detect this BEFORE spawning
     // and explain the operator's options.
     const hasIdentityToken = !!(process.env.SIGSTORE_ID_TOKEN || process.env.OIDC_TOKEN);
-    const hasKeyRef = !!(process.env.AZURECLAW_SIGN_KEY || process.env.COSIGN_KEY);
+    const hasKeyRef = !!(process.env.KARS_SIGN_KEY || process.env.COSIGN_KEY);
     if (!hasIdentityToken && !hasKeyRef) {
       activityLog.log(
         `{yellow-fg}⚠ ${sb.name}: cannot sign from inside the operator TUI{/} — keyless OIDC needs a TTY for browser auth, and no identity token / key ref is set.`,
       );
       activityLog.log(
-        `{gray-fg}  → Run from a terminal: {bold}azureclaw egress ${sb.name} --enforce{/bold}{/}`,
+        `{gray-fg}  → Run from a terminal: {bold}kars egress ${sb.name} --enforce{/bold}{/}`,
       );
       activityLog.log(
-        `{gray-fg}  → Or set {bold}SIGSTORE_ID_TOKEN{/bold} (keyless) or {bold}AZURECLAW_SIGN_KEY=<path|azurekms://…>{/bold} (keyed) before launching the operator.{/}`,
+        `{gray-fg}  → Or set {bold}SIGSTORE_ID_TOKEN{/bold} (keyless) or {bold}KARS_SIGN_KEY=<path|azurekms://…>{/bold} (keyed) before launching the operator.{/}`,
       );
       screen.render();
       return;
@@ -349,17 +349,17 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
       `Sign + enforce ${sb.name}? This pushes a cosign-signed allowlist artifact and switches the sandbox to enforcing mode.`);
     if (!ok) return;
 
-    activityLog.log(`{cyan-fg}⏳ azureclaw egress ${sb.name} --enforce  {gray-fg}(auto-signs){/}{/}`);
+    activityLog.log(`{cyan-fg}⏳ kars egress ${sb.name} --enforce  {gray-fg}(auto-signs){/}{/}`);
     screen.render();
     const signArgs = ["egress", sb.name, "--enforce"];
     if (hasKeyRef && !hasIdentityToken) {
       // Pass the key ref explicitly so autoDetectSignMode picks 'keyed'
       // — env var is auxiliary; the flag is canonical.
       signArgs.push("--sign-mode", "keyed", "--sign-key",
-        process.env.AZURECLAW_SIGN_KEY ?? process.env.COSIGN_KEY ?? "");
+        process.env.KARS_SIGN_KEY ?? process.env.COSIGN_KEY ?? "");
     }
     try {
-      const { stdout } = await execa("azureclaw", signArgs, {
+      const { stdout } = await execa("kars", signArgs, {
         stdio: "pipe", timeout: 180_000,
       });
       const lastLine = stdout.split("\n").map((l) => l.trim()).filter(Boolean).slice(-1)[0] || "(no stdout)";
@@ -387,7 +387,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
       for (const d of learned) {
         try {
           // eslint-disable-next-line no-await-in-loop
-          await execa("azureclaw", ["egress", r.name, "--approve", d.domain], { stdio: "pipe", timeout: 60_000 });
+          await execa("kars", ["egress", r.name, "--approve", d.domain], { stdio: "pipe", timeout: 60_000 });
         } catch (e: unknown) {
           activityLog.log(`{red-fg}✗ ${r.name}/${d.domain}:{/} ${formatExecError(e, 80)}`);
         }
@@ -402,9 +402,9 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     const ok = await confirmYesNo(ctx, `Switch ${sb.name} to ${target} mode?`);
     if (!ok) return;
     const flag = target === "enforce" ? "--enforce" : "--learn";
-    activityLog.log(`{cyan-fg}⏳ azureclaw egress ${sb.name} ${flag}{/}`);
+    activityLog.log(`{cyan-fg}⏳ kars egress ${sb.name} ${flag}{/}`);
     try {
-      await execa("azureclaw", ["egress", sb.name, flag], { stdio: "pipe", timeout: 60_000 });
+      await execa("kars", ["egress", sb.name, flag], { stdio: "pipe", timeout: 60_000 });
       activityLog.log(`{green-fg}✓ ${sb.name} → ${target}{/}`);
     } catch (e: unknown) {
       activityLog.log(`{red-fg}✗ toggle failed:{/} ${formatExecError(e, 160)}`);

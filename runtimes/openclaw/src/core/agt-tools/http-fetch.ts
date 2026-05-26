@@ -14,7 +14,7 @@ export function registerHttpFetchTool(api: AnyApi): void {
     name: "http_fetch",
     label: "HTTP Fetch (Egress Proxy)",
     description:
-      "Make an HTTP request to an external URL. The request is routed through the AzureClaw security proxy which enforces blocklist (51K+ malicious domains blocked), allowlist, and learn mode. Use this for ANY external API call (Telegram, HackerNews, web APIs, etc.). Direct internet access via curl/fetch is blocked by the egress guard.",
+      "Make an HTTP request to an external URL. The request is routed through the Kars security proxy which enforces blocklist (51K+ malicious domains blocked), allowlist, and learn mode. Use this for ANY external API call (Telegram, HackerNews, web APIs, etc.). Direct internet access via curl/fetch is blocked by the egress guard.",
     parameters: {
       type: "object",
       properties: {

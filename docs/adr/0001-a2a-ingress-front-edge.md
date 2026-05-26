@@ -12,7 +12,7 @@ The A2A 1.0 (Agent2Agent) protocol is a public-facing, peer-to-peer
 agent interop protocol with no central registry: each agent serves
 its own signed AgentCard at `/.well-known/agent.json` (RFC 7515 JWS,
 EdDSA per RFC 8037). To interoperate with foreign runtimes (LangChain,
-Google ADK, OpenAI Agents, AWS Bedrock Agents), AzureClaw must offer
+Google ADK, OpenAI Agents, AWS Bedrock Agents), Kars must offer
 a publicly-reachable A2A endpoint.
 
 The sandbox inference router is the most privileged process in the
@@ -37,9 +37,9 @@ router itself is never on the public internet?**
 
 ### D1. Single shared gateway component owns A2A public ingress
 
-A new component `azureclaw-a2a-gateway` is the **only** public TLS
-endpoint for A2A. All foreign agents that talk to AzureClaw resolve a
-single hostname (e.g. `a2a.azureclaw.example`); routing to the
+A new component `kars-a2a-gateway` is the **only** public TLS
+endpoint for A2A. All foreign agents that talk to Kars resolve a
+single hostname (e.g. `a2a.kars.example`); routing to the
 target sandbox happens after JWS verification, by sandbox-id in the
 URL path or JWS `sub` claim.
 
@@ -155,7 +155,7 @@ The gateway component is deployable but ships with an empty
 `spec.a2a.allowedSandboxes` allow-list. No sandbox is reachable
 through the gateway by default, even if it has A2A code.
 
-**2. Per-sandbox CRD opt-in.** The `ClawSandbox` CRD gains an
+**2. Per-sandbox CRD opt-in.** The `KarsSandbox` CRD gains an
 optional `spec.a2a` block:
 
 ```yaml
@@ -186,7 +186,7 @@ There are no implicit defaults that broaden exposure. Validation:
 - `expiresAt` absent or > 30d in the future → admission rejects.
 - `advertisedSkills` empty when `enabled: true` → admission rejects.
 - `minimumTrustScore < 500` → admission rejects unless namespace has
-  label `azureclaw.io/a2a-low-trust=acknowledged` and a
+  label `kars.io/a2a-low-trust=acknowledged` and a
   matching `Acknowledgement` CR exists (sign-off path; not a flag).
 
 **3. Time-bounded exposure.** `expiresAt` is mandatory and capped at
@@ -222,7 +222,7 @@ add new sandbox routes or extend an exposure window — it can only
 serve traffic the controller has explicitly authorised.
 
 **8. Revoke-now is a single field flip.** Setting
-`spec.a2a.enabled: false` (or deleting the `ClawSandbox`) triggers
+`spec.a2a.enabled: false` (or deleting the `KarsSandbox`) triggers
 the controller to (a) remove the gateway ConfigMap entry, (b)
 delete the NetworkPolicy, (c) delete the ClusterIP Service for
 8445, (d) emit an audit event — all within one reconcile loop.
@@ -237,7 +237,7 @@ latency, decision (allow / deny / reason). Audit is append-only via
 `AuditSink` and rotated to AGT.
 
 **10. Operator-facing "what is currently exposed?" command.**
-`azureclaw a2a list-exposed` queries all `ClawSandbox` resources
+`kars a2a list-exposed` queries all `KarsSandbox` resources
 across the cluster and prints a single table: namespace, sandbox-id,
 allowed callers, advertised skills, expiry, current trust threshold.
 Operators get a single source of truth for live A2A exposure
@@ -286,7 +286,7 @@ well-known URI. The gateway never holds a per-sandbox signing key.
 
 **Pod layout reminder:** the router and the agent run as **two
 separate sidecar containers** in the sandbox pod, sharing only the
-pod's network namespace. Different images (`azureclaw-inference-router`
+pod's network namespace. Different images (`kars-inference-router`
 vs `openclaw`), different UIDs (1001 vs 1000), different filesystems,
 different seccomp profiles, different Landlock policies. They
 communicate over `127.0.0.1` inside the pod — i.e. kernel-routed
@@ -298,13 +298,13 @@ Internet
     │
     ▼  TLS (cert-manager, public hostname)
 ┌──────────────────────────────────────────────────────────────┐
-│  Cilium L7 ingress (azureclaw-system ns)                     │
+│  Cilium L7 ingress (kars-system ns)                     │
 │   - Method allow-list, path regex, body cap, rate limit      │
 └──────────────────────────────────────────────────────────────┘
     │
     ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  azureclaw-a2a-gateway (Rust binary, shared)                 │
+│  kars-a2a-gateway (Rust binary, shared)                 │
 │   - Public TLS terminator                                    │
 │   - Verify caller AgentCard JWS via SigningProvider          │
 │   - AGT trust score gate                                     │
@@ -316,7 +316,7 @@ Internet
     ▼  cluster-internal mTLS (Workload Identity, peer-pinned)
 ┌──────────────────────────────────────────────────────────────┐
 │  CiliumNetworkPolicy (sandbox ns) — only emitted by the      │
-│  controller when ClawSandbox.spec.a2a.enabled is true        │
+│  controller when KarsSandbox.spec.a2a.enabled is true        │
 │   - Permit TCP 8445 from gateway SA only                     │
 │   - L7 re-validate method/path/body-cap                      │
 └──────────────────────────────────────────────────────────────┘
@@ -349,7 +349,7 @@ Internet
 ### Positive
 
 - Sandbox's "zero public ingress" posture is preserved.
-- Single public TLS surface (`azureclaw-a2a-gateway`) — same
+- Single public TLS surface (`kars-a2a-gateway`) — same
   one-shared-component model as `agentmesh-relay`.
 - Three independent gates (Cilium L7 → gateway → router L7 + mTLS)
   before any user-controlled bytes reach Rust parsers in the router.
@@ -362,7 +362,7 @@ Internet
 ### Negative
 
 - One new component to build, deploy, operate
-  (`azureclaw-a2a-gateway`).
+  (`kars-a2a-gateway`).
 - New cluster-internal ingress path to each sandbox (gateway →
   router on TCP 8445). NetworkPolicy + mTLS make this safe but it is
   a delta from "zero ingress" today.
@@ -387,7 +387,7 @@ Internet
    handlers on TCP 8445 behind a new ClusterIP Service. mTLS-pinned
    to gateway SA. No public exposure. Includes module-isolation CI
    gate (`ci/a2a-module-isolation.sh`).
-2. `phase1/a2a-clawsandbox-spec` — extend `ClawSandbox` CRD with
+2. `phase1/a2a-karssandbox-spec` — extend `KarsSandbox` CRD with
    the full `spec.a2a` block (D6); admission validators reject
    unsafe combinations (empty `allowedCallers` with `enabled: true`,
    missing `expiresAt`, expiry > 30d, `minimumTrustScore < 500`
@@ -396,7 +396,7 @@ Internet
    and delete `Service` + `CiliumNetworkPolicy` + gateway ConfigMap
    entry on opt-in / opt-out / expiry. Reconcile target:
    < 30s end-to-end revocation.
-4. `phase1/a2a-gateway-component` — new `azureclaw-a2a-gateway`
+4. `phase1/a2a-gateway-component` — new `kars-a2a-gateway`
    Rust binary, Helm chart, deployment. Verifies inbound JWS,
    forwards to per-sandbox router. Routing table sourced from
    controller-owned ConfigMap (gateway SA: get/watch only).
@@ -405,7 +405,7 @@ Internet
 6. `phase1/a2a-vap-no-public-router-exposure` — VAP rejecting any
    sandbox-namespace `Ingress`, `LoadBalancer` Service, or
    `NetworkPolicy.ingress.from.ipBlock`.
-7. `phase1/a2a-cli-list-exposed` — `azureclaw a2a list-exposed`
+7. `phase1/a2a-cli-list-exposed` — `kars a2a list-exposed`
    subcommand (D6 #10) plus `--json` for compliance scripting.
 8. `phase1/a2a-egress-from-sandbox` — outbound A2A path through the
    existing forward proxy.
@@ -439,7 +439,7 @@ does not yet demand.
 - RFC 7515 (JWS): <https://www.rfc-editor.org/rfc/rfc7515>
 - RFC 8037 (JOSE EdDSA): <https://www.rfc-editor.org/rfc/rfc8037>
 - RFC 8725 (JWT BCP — alg confusion): <https://www.rfc-editor.org/rfc/rfc8725>
-- AzureClaw implementation plan §1.2.1 (SigningProvider trait), §7
+- Kars implementation plan §1.2.1 (SigningProvider trait), §7
   (Phase 1 protocol scope), §0.2 #11 (dev-only branching).
 
 ## Sign-off

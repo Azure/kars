@@ -1,10 +1,10 @@
 name: Feature Request
-description: Suggest a new feature for AzureClaw
+description: Suggest a new feature for Kars
 body:
   - type: markdown
     attributes:
       value: |
-        Have an idea for AzureClaw? We'd love to hear it.
+        Have an idea for Kars? We'd love to hear it.
 
   - type: textarea
     id: problem

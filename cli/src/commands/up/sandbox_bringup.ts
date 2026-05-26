@@ -7,7 +7,7 @@
 //   - federated credential creation (sandbox + controller SA)
 //   - MI Contributor self-scoped role assignment
 //   - Foundry RBAC via Bicep (sandbox WI, project MI, kubelet MI)
-//   - ClawSandbox CR creation
+//   - KarsSandbox CR creation
 //   - wait for sandbox Running + WebUI port-forward
 //   - deployment summary + saveContext()
 import path from "node:path";
@@ -47,7 +47,7 @@ export interface SandboxBringUpContext {
 }
 
 /**
- * Execute Step 7 (federated credentials + RBAC + ClawSandbox CR), Step 8
+ * Execute Step 7 (federated credentials + RBAC + KarsSandbox CR), Step 8
  * (wait for Running + WebUI port-forward), and the deployment summary +
  * saveContext() at end-of-deploy.
  *
@@ -62,9 +62,9 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     registryMode, globalRegistryUrl, globalRelayUrl,
   } = ctx;
 
-  // ── Step 7: Create ClawSandbox CR ────────────────────────────
+  // ── Step 7: Create KarsSandbox CR ────────────────────────────
   stepper.step(`Creating sandbox '${options.name}'...`);
-  const sandboxNs = `azureclaw-${options.name}`;
+  const sandboxNs = `kars-${options.name}`;
 
   // Create federated identity credential for this sandbox's namespace
   stepper.update(`Setting up Workload Identity for ${sandboxNs}...`);
@@ -80,7 +80,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     "identity", "federated-credential", "create",
     "--identity-name", `${baseName}-aks-sandbox-wi`,
     "--resource-group", rg,
-    "--name", `azureclaw-${options.name}`,
+    "--name", `kars-${options.name}`,
     "--issuer", oidcIssuer.trim(),
     "--subject", `system:serviceaccount:${sandboxNs}:sandbox`,
     "--audiences", "api://AzureADTokenExchange",
@@ -96,9 +96,9 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     "identity", "federated-credential", "create",
     "--identity-name", `${baseName}-aks-sandbox-wi`,
     "--resource-group", rg,
-    "--name", `azureclaw-controller-sa`,
+    "--name", `kars-controller-sa`,
     "--issuer", oidcIssuer.trim(),
-    "--subject", `system:serviceaccount:azureclaw-system:azureclaw-controller`,
+    "--subject", `system:serviceaccount:kars-system:kars-controller`,
     "--audiences", "api://AzureADTokenExchange",
     "--output", "none",
   ], { stdio: "pipe" }).then(() => {
@@ -289,7 +289,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       if (!projectMiPrincipalId) {
         console.log(chalk.yellow("\n  ⚠ Foundry project has no system-assigned MI. Memory Store will not work."));
         console.log(chalk.yellow("    Enable it: Portal → Project → Resource Management → Identity → System assigned → On"));
-        console.log(chalk.yellow("    Then re-run: azureclaw up ...\n"));
+        console.log(chalk.yellow("    Then re-run: kars up ...\n"));
       }
     } else if (foundryResourceId) {
       // Fallback for non-project endpoints (plain AOAI): assign sandbox WI on the resource
@@ -334,7 +334,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   }
 
   stepper.update(`Creating sandbox '${options.name}'...`);
-  const sandboxNamespace = "azureclaw-system";
+  const sandboxNamespace = "kars-system";
   const inferencePolicy = buildInferencePolicy({
     sandboxName: options.name,
     namespace: sandboxNamespace,
@@ -349,8 +349,8 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     profile: "default",
   });
   const sandboxManifest = {
-    apiVersion: "azureclaw.azure.com/v1alpha1",
-    kind: "ClawSandbox",
+    apiVersion: "kars.azure.com/v1alpha1",
+    kind: "KarsSandbox",
     metadata: {
       name: options.name,
       namespace: sandboxNamespace,
@@ -394,8 +394,8 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   await execa("kubectl", [
     "wait",
     "--for=jsonpath={.status.phase}=Running",
-    `clawsandbox/${options.name}`,
-    "-n", "azureclaw-system",
+    `karssandbox/${options.name}`,
+    "-n", "kars-system",
     "--timeout=120s",
   ], { stdio: "pipe" }).catch(() => {
     // Timeout OK — image pull may be slow on first deploy
@@ -444,7 +444,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   // ── Summary ──────────────────────────────────────────────────
   const isolationDesc: Record<string, string> = {
     standard: "standard (runc + RuntimeDefault)",
-    enhanced: "enhanced (runc + azureclaw-strict seccomp)",
+    enhanced: "enhanced (runc + kars-strict seccomp)",
     confidential: "confidential (Kata VM isolation)",
   };
 
@@ -469,10 +469,10 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   }
 
   section("Commands");
-  console.log(`  Connect:     ${chalk.cyan(`azureclaw connect ${options.name}`)}`);
-  console.log(`  Status:      ${chalk.cyan(`azureclaw status ${options.name}`)}`);
-  console.log(`  Logs:        ${chalk.cyan(`azureclaw logs ${options.name} -f`)}`);
-  console.log(`  Egress:      ${chalk.cyan(`azureclaw egress ${options.name}`)}`);
+  console.log(`  Connect:     ${chalk.cyan(`kars connect ${options.name}`)}`);
+  console.log(`  Status:      ${chalk.cyan(`kars status ${options.name}`)}`);
+  console.log(`  Logs:        ${chalk.cyan(`kars logs ${options.name} -f`)}`);
+  console.log(`  Egress:      ${chalk.cyan(`kars egress ${options.name}`)}`);
 
   if (webUiUrl) {
     section("WebUI");
@@ -481,7 +481,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
 
   // Cache deployment context for subsequent commands (add, status, list, push,
   // etc.). Setting phase: "complete" also marks the auto-resume state as fully
-  // consumed so the next `azureclaw up` starts fresh.
+  // consumed so the next `kars up` starts fresh.
   try {
     saveContext({
       region: options.region,

@@ -1,6 +1,6 @@
 # CRD trust model
 
-This page is the threat model and proof for AzureClaw's signed-CRD surface. The schema and per-CRD details are in **[CRD reference → Signing and verification](../api/crd-reference.md#signing-and-verification)**. This page answers three questions an SRE or security reviewer will ask:
+This page is the threat model and proof for Kars's signed-CRD surface. The schema and per-CRD details are in **[CRD reference → Signing and verification](../api/crd-reference.md#signing-and-verification)**. This page answers three questions an SRE or security reviewer will ask:
 
 1. **What does the signing actually defend against?**
 2. **How do I prove, on a live cluster, that the runtime is enforcing what the YAML says?**
@@ -36,7 +36,7 @@ For those, see the platform-level controls in `docs/security/stride.md` and the 
 ```mermaid
 flowchart LR
   subgraph Authoring
-    A[YAML policy file] -->|azureclaw policy sign --kind X| B[Canonicalise]
+    A[YAML policy file] -->|kars policy sign --kind X| B[Canonicalise]
     B --> C[oras push to OCI]
     C --> D[cosign sign]
     D --> E[sha256:digest]
@@ -66,8 +66,8 @@ The trust loop is symmetric: every digest the controller verifies has to be **pr
 
 | You have… | Use | What it does |
 |---|---|---|
-| A live `ClawSandbox` whose `allowedEndpoints` you want to seal (or have just edited with `--approve` / `--enforce`) | `azureclaw egress <sandbox> --enforce --sign` (or `--approve <host> --sign`) | Reads the inline allowlist, builds the canonical YAML for you, pushes via `oras`, signs with `cosign`, and patches `spec.networkPolicy.allowlistRef` in-place. Auto-detects sign mode (TTY → `keyless`, CI → `identity-token`, KMS key → `keyed`). |
-| A pre-built canonical bundle on disk (any of the 6 kinds) | `azureclaw policy sign --kind <k> --file <path> --registry <r> --repository <repo>` | Pushes the bytes as the kind's pinned `artifactType`, signs the manifest digest with `cosign`, and (`--print-bundle-ref`) emits the YAML snippet for you to paste into the consuming CRD's `bundleRef`. |
+| A live `KarsSandbox` whose `allowedEndpoints` you want to seal (or have just edited with `--approve` / `--enforce`) | `kars egress <sandbox> --enforce --sign` (or `--approve <host> --sign`) | Reads the inline allowlist, builds the canonical YAML for you, pushes via `oras`, signs with `cosign`, and patches `spec.networkPolicy.allowlistRef` in-place. Auto-detects sign mode (TTY → `keyless`, CI → `identity-token`, KMS key → `keyed`). |
+| A pre-built canonical bundle on disk (any of the 6 kinds) | `kars policy sign --kind <k> --file <path> --registry <r> --repository <repo>` | Pushes the bytes as the kind's pinned `artifactType`, signs the manifest digest with `cosign`, and (`--print-bundle-ref`) emits the YAML snippet for you to paste into the consuming CRD's `bundleRef`. |
 
 Both paths end in the same place — a cosign-signed OCI artifact whose digest you (or your CI) record on the CR. Everything downstream of that digest is what the verification loop above walks.
 
@@ -76,22 +76,22 @@ Both paths end in the same place — a cosign-signed OCI artifact whose digest y
 ```bash
 # After reviewing pending domains, grant one and seal the resulting allowlist
 # in a single operator gesture. The CLI does canonicalise → oras push →
-# cosign sign → patch ClawSandbox.spec.networkPolicy.allowlistRef.
-azureclaw egress my-agent --approve api.github.com
+# cosign sign → patch KarsSandbox.spec.networkPolicy.allowlistRef.
+kars egress my-agent --approve api.github.com
 # (--sign is implicit with --approve; pass --no-sign only for explicit
 #  dry-runs — the controller refuses unsigned artifacts in authoritative mode.)
 ```
 
 The same `--sign-mode` / `--sign-key` flags accepted by `policy sign` are accepted here. CI runs should pass `--sign-mode identity-token` (the workflow's OIDC token is picked up automatically when `SIGSTORE_ID_TOKEN` / `OIDC_TOKEN` is set); production usually pins a KMS key (`--sign-mode keyed --sign-key azurekms://…`).
 
-See [docs/cli-reference.md → `azureclaw policy sign`](../cli-reference.md#azureclaw-policy) and [docs/egress-proxy.md → Signed OCI egress allowlist](../egress-proxy.md#signed-oci-egress-allowlist) for the full flag and behaviour reference.
+See [docs/cli-reference.md → `kars policy sign`](../cli-reference.md#kars-policy) and [docs/egress-proxy.md → Signed OCI egress allowlist](../egress-proxy.md#signed-oci-egress-allowlist) for the full flag and behaviour reference.
 
 ## Proof on a live cluster
 
 The two values that must agree are the controller's `status.bundleRefDigest` and the router's `/internal/policy-status` echo. Pick any signed-CR-backed sandbox and run:
 
 ```bash
-NS=azureclaw-<sandbox>
+NS=kars-<sandbox>
 SANDBOX=<sandbox>
 
 # 1. The CR says it's Ready
@@ -177,7 +177,7 @@ Two operational points it's worth being explicit about:
 
 1. **Inline CR fields are not OCI-signed.** Most CRDs accept either a `bundleRef` or inline content (e.g. `InferencePolicy.spec.tokenBudget`, `ToolPolicy.spec.tools`). Inline content is governed by Kubernetes RBAC alone — whoever can write the CR can write the policy. The signed path is for tenants who want stronger separation of authorship (the policy bytes live in CI, signed by an OIDC identity, and the tenant only pastes the digest). Both are first-class. Pick the one whose threat model matches your team.
 
-2. **`EgressApproval` overlays are not separately signed.** They're sibling overlays on a `ClawSandbox`'s baseline allowlist; the baseline is the signed thing. The overlay is short-lived (TTL-bounded), namespace-scoped, RBAC-gated, and its merged digest is also subject to the `Ready ⇔ router echo` rule — but the overlay itself doesn't go through OCI. This is intentional: the overlay's value is its low-friction, time-bounded shape, and putting cosign in that path would make it useless. The baseline is what carries the long-lived trust.
+2. **`EgressApproval` overlays are not separately signed.** They're sibling overlays on a `KarsSandbox`'s baseline allowlist; the baseline is the signed thing. The overlay is short-lived (TTL-bounded), namespace-scoped, RBAC-gated, and its merged digest is also subject to the `Ready ⇔ router echo` rule — but the overlay itself doesn't go through OCI. This is intentional: the overlay's value is its low-friction, time-bounded shape, and putting cosign in that path would make it useless. The baseline is what carries the long-lived trust.
 
 ## See also
 

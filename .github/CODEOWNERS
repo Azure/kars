@@ -1,29 +1,29 @@
-# AzureClaw Code Owners
+# Kars Code Owners
 # Each line is a file pattern followed by one or more owners.
 
 # Core infrastructure
-/controller/                 @AzureClawTeam
-/inference-router/           @AzureClawTeam
+/controller/                 @KarsTeam
+/inference-router/           @KarsTeam
 
 # CLI and plugins
-/cli/                        @AzureClawTeam
+/cli/                        @KarsTeam
 
 # AGT Governance
-/cli/profiles/              @AzureClawTeam
+/cli/profiles/              @KarsTeam
 
 # Deployment
-/deploy/                     @AzureClawTeam
-/Makefile                    @AzureClawTeam
+/deploy/                     @KarsTeam
+/Makefile                    @KarsTeam
 
 # Container images
-/sandbox-images/             @AzureClawTeam
+/sandbox-images/             @KarsTeam
 
 # Documentation
-/docs/                       @AzureClawTeam
-*.md                         @AzureClawTeam
+/docs/                       @KarsTeam
+*.md                         @KarsTeam
 
 # CI/CD
-/.github/                    @AzureClawTeam
+/.github/                    @KarsTeam
 
 # Security-sensitive
-/SECURITY.md                 @AzureClawTeam
+/SECURITY.md                 @KarsTeam

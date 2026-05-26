@@ -1,5 +1,5 @@
 """
-AzureClaw default agent for the Pydantic-AI runtime.
+Kars default agent for the Pydantic-AI runtime.
 
 Replace this file by mounting agent code via `agentCode`.
 """
@@ -13,10 +13,10 @@ import time
 # Bootstrap MUST run in this process so OPENAI_BASE_URL /
 # OPENAI_API_KEY (router-managed sentinel) and OTel are set
 # before any framework SDK is imported.
-from azureclaw_runtime_pydantic_ai.runtime import bootstrap
+from kars_runtime_pydantic_ai.runtime import bootstrap
 bootstrap()
 
-BANNER = "🔒 AzureClaw — Pydantic-AI (default agent)"
+BANNER = "🔒 Kars — Pydantic-AI (default agent)"
 
 
 def _env(name: str, default: str = "(unset)") -> str:
@@ -51,11 +51,11 @@ def _smoke_test() -> None:
         agent = Agent(
             OpenAIModel(model_name),
             system_prompt=(
-                "You are a default smoke-test agent embedded in an AzureClaw sandbox. "
+                "You are a default smoke-test agent embedded in an Kars sandbox. "
                 "Reply with exactly one short sentence confirming you are alive."
             ),
         )
-        result = agent.run_sync("Say hello and confirm you are running inside AzureClaw.")
+        result = agent.run_sync("Say hello and confirm you are running inside Kars.")
         print(f"[default-agent] ✓ inference reply: {result.output}", flush=True)
         print("[default-agent] ✓ Foundry inference proven via inference-router", flush=True)
     except Exception as exc:  # noqa: BLE001

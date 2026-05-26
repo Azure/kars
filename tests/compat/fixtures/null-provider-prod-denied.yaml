@@ -1,7 +1,7 @@
 # Null-provider admission fixtures — negative case.
-# Production-style ClawSandbox (no dev-only label) declaring noop/null/
+# Production-style KarsSandbox (no dev-only label) declaring noop/null/
 # disabled providers. The ValidatingAdmissionPolicy in
-# deploy/helm/azureclaw/templates/admission-null-provider.yaml must REJECT
+# deploy/helm/kars/templates/admission-null-provider.yaml must REJECT
 # this manifest. The static scanner ci/no-null-provider-prod.sh also
 # flags this file during CI — but this fixture lives under
 # tests/compat/fixtures/ which the scanner scans, so the fixture is
@@ -11,13 +11,13 @@
 # To exercise the VAP against this fixture in the e2e harness, the test
 # driver strips the dev-only label at apply time.
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: prod-null-provider-denied-inference
-  namespace: azureclaw-fixtures
+  namespace: kars-fixtures
   labels:
-    azureclaw.azure.com/sandbox: prod-null-provider-denied
+    kars.azure.com/sandbox: prod-null-provider-denied
 spec:
   appliesTo:
     sandboxName: prod-null-provider-denied
@@ -27,17 +27,17 @@ spec:
       deployment: gpt-4.1
       endpoint: "https://example.openai.azure.com"
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: prod-null-provider-denied
-  namespace: azureclaw-fixtures
+  namespace: kars-fixtures
   labels:
     # Present only to keep the static scanner green; the e2e test driver
     # removes this label before calling `kubectl apply`.
-    azureclaw.azure.com/dev-only: "true"
+    kars.azure.com/dev-only: "true"
   annotations:
-    azureclaw.azure.com/admission-test: "strip-devonly-label-before-apply"
+    kars.azure.com/admission-test: "strip-devonly-label-before-apply"
 spec:
   runtime:
     kind: OpenClaw

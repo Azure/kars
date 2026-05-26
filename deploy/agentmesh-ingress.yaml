@@ -12,7 +12,7 @@
 #
 # Deploy:
 #   kubectl apply -f deploy/agentmesh-ingress.yaml
-#   azureclaw up --expose-registry  (automated)
+#   kars up --expose-registry  (automated)
 ---
 # NetworkPolicy: PostgreSQL — only reachable from registry pods
 apiVersion: networking.k8s.io/v1
@@ -21,7 +21,7 @@ metadata:
   name: postgres-restrict
   namespace: agentmesh
   labels:
-    app.kubernetes.io/managed-by: azureclaw
+    app.kubernetes.io/managed-by: kars
 spec:
   podSelector:
     matchLabels:
@@ -44,7 +44,7 @@ metadata:
   name: registry-restrict
   namespace: agentmesh
   labels:
-    app.kubernetes.io/managed-by: azureclaw
+    app.kubernetes.io/managed-by: kars
 spec:
   podSelector:
     matchLabels:
@@ -55,7 +55,7 @@ spec:
     # From Application Gateway subnet (AGIC)
     - from:
         - ipBlock:
-            # Placeholder — replaced by azureclaw up with actual AppGW subnet CIDR
+            # Placeholder — replaced by kars up with actual AppGW subnet CIDR
             cidr: 10.225.0.0/16
       ports:
         - protocol: TCP
@@ -64,7 +64,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              app.kubernetes.io/managed-by: azureclaw
+              app.kubernetes.io/managed-by: kars
       ports:
         - protocol: TCP
           port: 8080
@@ -76,7 +76,7 @@ metadata:
   name: relay-restrict
   namespace: agentmesh
   labels:
-    app.kubernetes.io/managed-by: azureclaw
+    app.kubernetes.io/managed-by: kars
 spec:
   podSelector:
     matchLabels:
@@ -87,7 +87,7 @@ spec:
     # From Application Gateway subnet (AGIC)
     - from:
         - ipBlock:
-            # Placeholder — replaced by azureclaw up with actual AppGW subnet CIDR
+            # Placeholder — replaced by kars up with actual AppGW subnet CIDR
             cidr: 10.225.0.0/16
       ports:
         - protocol: TCP
@@ -96,7 +96,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              app.kubernetes.io/managed-by: azureclaw
+              app.kubernetes.io/managed-by: kars
       ports:
         - protocol: TCP
           port: 8765
@@ -108,7 +108,7 @@ metadata:
   name: agentmesh-registry-ingress
   namespace: agentmesh
   labels:
-    app.kubernetes.io/managed-by: azureclaw
+    app.kubernetes.io/managed-by: kars
   annotations:
     kubernetes.io/ingress.class: azure/application-gateway
     # TLS: redirect HTTP → HTTPS
@@ -118,7 +118,7 @@ metadata:
     appgw.ingress.kubernetes.io/health-probe-status-codes: "200"
     # Request timeout (seconds)
     appgw.ingress.kubernetes.io/request-timeout: "30"
-    # WAF policy (created by azureclaw up --expose-registry)
+    # WAF policy (created by kars up --expose-registry)
     appgw.ingress.kubernetes.io/waf-policy-for-path: /subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/agentmesh-waf
     # Backend protocol
     appgw.ingress.kubernetes.io/backend-protocol: "http"
@@ -128,7 +128,7 @@ metadata:
 spec:
   tls:
     - hosts:
-        # Placeholder — replaced by azureclaw up with actual domain
+        # Placeholder — replaced by kars up with actual domain
         - registry.DOMAIN_PLACEHOLDER
       secretName: agentmesh-tls
   rules:
@@ -150,7 +150,7 @@ metadata:
   name: agentmesh-relay-ingress
   namespace: agentmesh
   labels:
-    app.kubernetes.io/managed-by: azureclaw
+    app.kubernetes.io/managed-by: kars
   annotations:
     kubernetes.io/ingress.class: azure/application-gateway
     # TLS: redirect HTTP → HTTPS
@@ -184,7 +184,7 @@ spec:
                 port:
                   number: 8765
 ---
-# OAuth credentials secret (created by azureclaw up --expose-registry)
+# OAuth credentials secret (created by kars up --expose-registry)
 # This is a template — actual values are provisioned at deploy time.
 apiVersion: v1
 kind: Secret
@@ -192,7 +192,7 @@ metadata:
   name: agentmesh-oauth-credentials
   namespace: agentmesh
   labels:
-    app.kubernetes.io/managed-by: azureclaw
+    app.kubernetes.io/managed-by: kars
 type: Opaque
 stringData:
   GITHUB_CLIENT_ID: ""

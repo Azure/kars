@@ -1,4 +1,4 @@
-// AzureClaw - Azure OpenAI Module
+// Kars - Azure OpenAI Module
 
 @description('Azure OpenAI account name')
 param name string

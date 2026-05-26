@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * Shared credential management for AzureClaw CLI.
+ * Shared credential management for Kars CLI.
  * Used by `dev` (auto-prompts if missing) and `credentials` (explicit reconfigure).
  */
 
@@ -33,7 +33,7 @@ import {
   copilotDeviceLogin,
 } from "./github-copilot.js";
 
-const CONFIG_DIR = join(homedir(), ".azureclaw");
+const CONFIG_DIR = join(homedir(), ".kars");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const CREDENTIALS_FILE = join(CONFIG_DIR, "credentials");
 const SECRETS_FILE = join(CONFIG_DIR, "secrets.json");
@@ -67,7 +67,7 @@ export const FLAG_TO_SECRET: Record<string, string> = {
   openaiApiKey:     "openai-api-key",
 };
 
-export interface AzureClawConfig {
+export interface KarsConfig {
   endpoint: string;
   model: string;
   apiKey: string;
@@ -87,8 +87,8 @@ export interface AzureClawConfig {
   provider?: "foundry" | "github-models" | "github-copilot";
   /**
    * Set to true once the first-time setup banner has been completed.
-   * Used by `azureclaw dev` to decide whether to show the welcome flow.
-   * Toggle via `azureclaw config reset --first-run` to retest the UX.
+   * Used by `kars dev` to decide whether to show the welcome flow.
+   * Toggle via `kars config reset --first-run` to retest the UX.
    */
   firstRunCompleted?: boolean;
 }
@@ -108,7 +108,7 @@ export type UpPhase =
   | "sandbox"
   | "complete";
 
-/** Cached deployment context — saved incrementally during `azureclaw up` */
+/** Cached deployment context — saved incrementally during `kars up` */
 export interface DeploymentContext {
   subscription?: string;
   region?: string;
@@ -134,7 +134,7 @@ export interface DeploymentContext {
   /** How the registry was promoted: "port-forward" | "loadbalancer" */
   promoteMode?: string;
   /**
-   * Last completed phase of `azureclaw up`. Used by auto-resume to skip
+   * Last completed phase of `kars up`. Used by auto-resume to skip
    * already-done phases on a re-run after a failure. Set to "complete"
    * after a fully successful run.
    */
@@ -155,7 +155,7 @@ export interface DeploymentContext {
 
 const CONTEXT_FILE = join(CONFIG_DIR, "context.json");
 
-/** Load cached deployment context from ~/.azureclaw/context.json */
+/** Load cached deployment context from ~/.kars/context.json */
 export function loadContext(): DeploymentContext | null {
   try {
     if (!existsSync(CONTEXT_FILE)) return null;
@@ -165,7 +165,7 @@ export function loadContext(): DeploymentContext | null {
   }
 }
 
-/** Save deployment context to ~/.azureclaw/context.json */
+/** Save deployment context to ~/.kars/context.json */
 export function saveContext(ctx: DeploymentContext): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
   ctx.savedAt = new Date().toISOString();
@@ -174,10 +174,10 @@ export function saveContext(ctx: DeploymentContext): void {
 }
 
 /**
- * Load saved config + credentials from ~/.azureclaw/.
+ * Load saved config + credentials from ~/.kars/.
  * Returns null if either is missing or corrupt.
  */
-export function loadConfig(): AzureClawConfig | null {
+export function loadConfig(): KarsConfig | null {
   try {
     if (!existsSync(CONFIG_FILE)) return null;
     const config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
@@ -186,7 +186,7 @@ export function loadConfig(): AzureClawConfig | null {
     const apiKey = secrets["azure-openai-key"]
       || (existsSync(CREDENTIALS_FILE) ? readFileSync(CREDENTIALS_FILE, "utf-8").trim() : "");
     if (!config.endpoint || !apiKey) return null;
-    const provider: AzureClawConfig["provider"] =
+    const provider: KarsConfig["provider"] =
       config.provider === "github-models"
         ? "github-models"
         : config.provider === "github-copilot"
@@ -224,7 +224,7 @@ export async function promptAndSaveCredentials(options?: {
   heading?: string;
   /** Force a specific provider (skip the choice prompt) */
   provider?: "foundry" | "github-models" | "github-copilot";
-}): Promise<AzureClawConfig> {
+}): Promise<KarsConfig> {
   const existing = loadConfig();
 
   if (options?.heading) {
@@ -295,9 +295,9 @@ export async function promptAndSaveCredentials(options?: {
  *   4. Persist config + secret + legacy credentials file (back-compat).
  */
 async function promptGithubModels(
-  existing: AzureClawConfig | null,
+  existing: KarsConfig | null,
   skipVerify?: boolean,
-): Promise<AzureClawConfig> {
+): Promise<KarsConfig> {
   const endpoint = GITHUB_MODELS_ENDPOINT;
 
   // ── Step 1: PAT acquisition ────────────────────────────────────────────
@@ -354,9 +354,9 @@ async function promptGithubModels(
  * inference time (see `inference-router/src/copilot_auth.rs`).
  */
 async function promptGithubCopilot(
-  existing: AzureClawConfig | null,
+  existing: KarsConfig | null,
   skipVerify?: boolean,
-): Promise<AzureClawConfig> {
+): Promise<KarsConfig> {
   const endpoint = COPILOT_API_ENDPOINT;
 
   // ── Step 1: token acquisition ──────────────────────────────────────────
@@ -387,12 +387,12 @@ async function promptGithubCopilot(
       {
         type: "confirm",
         name: "confirm",
-        message: "Open a browser to authorize AzureClaw with your Copilot account?",
+        message: "Open a browser to authorize Kars with your Copilot account?",
         default: true,
       },
     ]);
     if (!confirm) {
-      console.log(chalk.yellow("\n  Cancelled. Re-run `azureclaw credentials` when you're ready.\n"));
+      console.log(chalk.yellow("\n  Cancelled. Re-run `kars credentials` when you're ready.\n"));
       process.exit(1);
     }
 
@@ -473,7 +473,7 @@ async function promptGithubCopilot(
  *
  * Returns the chosen PAT — does NOT validate scope (that's the catalog GET).
  */
-async function acquireGithubPat(existing: AzureClawConfig | null): Promise<string> {
+async function acquireGithubPat(existing: KarsConfig | null): Promise<string> {
   // The same gh OAuth token (or compatible PAT) works for both Models and
   // Copilot providers — both endpoints accept `Authorization: Bearer <gh>`.
   // Allow reuse across either provider transition.
@@ -602,7 +602,7 @@ async function pickModelInteractive(
         if (result.reason === "not-found") {
           return result.suggestion
             ? `Not in catalog. Did you mean: ${result.suggestion}?`
-            : `Not in the catalog. Run \`azureclaw config model\` to pick from the list.`;
+            : `Not in the catalog. Run \`kars config model\` to pick from the list.`;
         }
         return `${trimmed} doesn't support tool calling — agents will fail. Pick a tool-capable model.`;
       },
@@ -615,14 +615,14 @@ async function pickModelInteractive(
 
 /**
  * Validate a stored config's model id against the live catalog. Used by
- * `azureclaw dev` and `config model` to surface invalid entries from a
+ * `kars dev` and `config model` to surface invalid entries from a
  * stale config (e.g. user hand-edited config.json or upstream renamed a
  * model).
  *
  * Kept separate from `loadConfig()` so the latter stays sync + offline.
  */
 export async function validateGithubModelsConfig(
-  config: AzureClawConfig,
+  config: KarsConfig,
 ): Promise<{ ok: true } | { ok: false; reason: string; suggestion?: string }> {
   if (config.provider !== "github-models") return { ok: true };
   const result = await fetchCatalog(config.apiKey);
@@ -639,9 +639,9 @@ export async function validateGithubModelsConfig(
 
 /** Prompt + verify + save the Azure AI Foundry / Azure OpenAI provider. */
 async function promptFoundry(
-  existing: AzureClawConfig | null,
+  existing: KarsConfig | null,
   skipVerify?: boolean,
-): Promise<AzureClawConfig> {
+): Promise<KarsConfig> {
   const answers = await inquirer.prompt([
     {
       type: "input",
@@ -682,7 +682,7 @@ async function promptFoundry(
   // model deployment name doesn't match `creds.model` even when their creds
   // are valid for the runtime. We must not `process.exit(1)` here: the
   // unique first-run UX bug is that aborting on verify failure leaves
-  // nothing saved, so `azureclaw dev` re-prompts forever for users with
+  // nothing saved, so `kars dev` re-prompts forever for users with
   // non-classic endpoint shapes. Save what we have, warn loudly, and let
   // the runtime surface the real error against the real model at use time.
   if (!skipVerify) {
@@ -716,7 +716,7 @@ async function promptFoundry(
       console.log(
         chalk.yellow(
           "  Note: network/TLS error during verify. Creds were saved; re-run " +
-            "`azureclaw credentials` if you need to correct them.",
+            "`kars credentials` if you need to correct them.",
         ),
       );
     }
@@ -774,7 +774,7 @@ async function promptFoundry(
  * Ensure credentials are available — load from disk or prompt interactively.
  * This is the main entry point for commands that need creds.
  */
-export async function ensureCredentials(): Promise<AzureClawConfig> {
+export async function ensureCredentials(): Promise<KarsConfig> {
   const existing = loadConfig();
   if (existing) return existing;
 
@@ -785,7 +785,7 @@ export async function ensureCredentials(): Promise<AzureClawConfig> {
 export { CONFIG_DIR, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE };
 
 /**
- * Reset the `firstRunCompleted` flag so `azureclaw dev` re-shows the
+ * Reset the `firstRunCompleted` flag so `kars dev` re-shows the
  * welcome banner on the next run. Leaves credentials and other config
  * in place. Returns true if the flag was cleared, false if no config
  * file exists.
@@ -810,8 +810,8 @@ export function resetFirstRunFlag(): boolean {
 
 /**
  * Set the `firstRunCompleted` flag without re-prompting. Used when the
- * user pre-configured credentials via `azureclaw credentials` and then
- * runs `azureclaw dev` for the first time — we want to skip the
+ * user pre-configured credentials via `kars credentials` and then
+ * runs `kars dev` for the first time — we want to skip the
  * credentials sub-prompt of the welcome flow but mark first-run done
  * so subsequent runs don't re-display the welcome.
  */
@@ -833,7 +833,7 @@ export function markFirstRunCompleted(): boolean {
   }
 }
 
-// ─── Secrets store (~/.azureclaw/secrets.json) ────────────────────────────────
+// ─── Secrets store (~/.kars/secrets.json) ────────────────────────────────
 
 /** Load all secrets from secrets.json, migrating from legacy credentials file if needed. */
 export function loadSecrets(): Record<string, string> {
@@ -863,7 +863,7 @@ export function loadSecrets(): Record<string, string> {
   return secrets;
 }
 
-/** Save secrets to ~/.azureclaw/secrets.json with mode 600. */
+/** Save secrets to ~/.kars/secrets.json with mode 600. */
 export function saveSecrets(secrets: Record<string, string>): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
   writeFileSync(SECRETS_FILE, JSON.stringify(secrets, null, 2), "utf-8");

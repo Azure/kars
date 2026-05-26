@@ -19,8 +19,8 @@ export function connectCommand(): Command {
     .option("--reset", "Restart the openclaw deployment to clear gateway brute-force lockout (token is preserved)", false)
     .action(async (name: string, options: { shell: boolean; web: boolean; local: boolean; cloud: boolean; port: string; reset: boolean }) => {
       const { execa } = await import("execa");
-      const containerName = `azureclaw-${name}`;
-      const namespace = `azureclaw-${name}`;
+      const containerName = `kars-${name}`;
+      const namespace = `kars-${name}`;
       const localPort = options.port;
 
       // Detect where the agent exists
@@ -47,7 +47,7 @@ export function connectCommand(): Command {
         } catch { /* no AKS deployment */ }
       }
 
-      // S10.A5: resolve container name from the live ClawSandbox CR
+      // S10.A5: resolve container name from the live KarsSandbox CR
       // so non-OpenClaw runtimes (OpenAIAgents, MAF, BYO) hit the
       // generic `agent` container rather than the legacy `openclaw`
       // container name. Falls back to OpenClaw if the CR can't be
@@ -57,7 +57,7 @@ export function connectCommand(): Command {
       if (aksExists) {
         try {
           const { stdout: crJson } = await execa("kubectl", [
-            "get", "clawsandbox", name, "-n", "azureclaw-system", "-o", "json",
+            "get", "karssandbox", name, "-n", "kars-system", "-o", "json",
           ], { stdio: "pipe" });
           runtimeKind = runtimeKindFromCr(JSON.parse(crJson));
         } catch { /* fall back to OpenClaw default */ }
@@ -70,8 +70,8 @@ export function connectCommand(): Command {
         console.log(chalk.dim(`     Docker: ${localRunning ? "running" : "dormant (stopped)"}`));
         console.log(chalk.dim(`     AKS:    running`));
         console.log();
-        console.log(`  ${chalk.cyan(`azureclaw connect ${name} --local`)}   → Docker`);
-        console.log(`  ${chalk.cyan(`azureclaw connect ${name} --cloud`)}   → AKS`);
+        console.log(`  ${chalk.cyan(`kars connect ${name} --local`)}   → Docker`);
+        console.log(`  ${chalk.cyan(`kars connect ${name} --cloud`)}   → AKS`);
         console.log();
         // Auto-resolve: prefer cloud if local is dormant (handoff scenario)
         if (!localRunning) {
@@ -86,7 +86,7 @@ export function connectCommand(): Command {
       // Neither exists
       if (!localExists && !aksExists) {
         console.log(chalk.red(`\n  Sandbox '${name}' not found.`));
-        console.log(chalk.dim(`  Run: azureclaw dev --name ${name}  (local) or  azureclaw up --name ${name}  (AKS)\n`));
+        console.log(chalk.dim(`  Run: kars dev --name ${name}  (local) or  kars up --name ${name}  (AKS)\n`));
         return;
       }
 
@@ -113,7 +113,7 @@ export function connectCommand(): Command {
       // ── AKS mode ──
       if (!aksExists) {
         console.log(chalk.red(`\n  Sandbox '${name}' not found on AKS.`));
-        console.log(chalk.dim(`  Run: azureclaw up --name ${name}\n`));
+        console.log(chalk.dim(`  Run: kars up --name ${name}\n`));
         return;
       }
 
@@ -126,7 +126,7 @@ export function connectCommand(): Command {
         let isKata = false;
         try {
           const { stdout: rc } = await execa("kubectl", [
-            "get", "pod", "-n", namespace, "-l", `azureclaw.azure.com/sandbox=${name}`,
+            "get", "pod", "-n", namespace, "-l", `kars.azure.com/sandbox=${name}`,
             "-o", "jsonpath={.items[0].spec.runtimeClassName}",
           ], { stdio: "pipe" });
           isKata = rc.trim().includes("kata");
@@ -188,7 +188,7 @@ export function connectCommand(): Command {
           console.log(chalk.yellow("  The WebUI is accessible from inside the cluster only.\n"));
           console.log(chalk.dim(`  Gateway token: ${gatewayToken}`));
           console.log(chalk.dim(`  To access the WebUI, use an enhanced (non-Kata) sandbox:\n`));
-          console.log(`  ${chalk.cyan(`azureclaw up --skip-infra --isolation enhanced --name ${name}-web`)}`);
+          console.log(`  ${chalk.cyan(`kars up --skip-infra --isolation enhanced --name ${name}-web`)}`);
           console.log();
           console.log(chalk.dim("  Falling back to shell mode...\n"));
           await execa("kubectl", [
@@ -200,9 +200,9 @@ export function connectCommand(): Command {
         }
 
         // Detect an already-running port-forward (the most common cause
-        // of EADDRINUSE here is the user re-running `azureclaw connect`
+        // of EADDRINUSE here is the user re-running `kars connect`
         // while a previous invocation is still alive in another terminal,
-        // or after `azureclaw dev` already opened the WebUI). If port
+        // or after `kars dev` already opened the WebUI). If port
         // 18789 is open AND speaks HTTP, just print the URL + open the
         // browser instead of erroring out with a Node stack trace.
         const isPortServingHttp = await (async (): Promise<boolean> => {
@@ -236,7 +236,7 @@ export function connectCommand(): Command {
           console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(url)}`);
           console.log();
           console.log(chalk.dim(`  Gateway token: ${gatewayToken}`));
-          console.log(chalk.dim(`  If WebUI says "too many failed authentication attempts": run 'azureclaw connect ${name} --reset' to clear the gateway lockout (token is preserved).`));
+          console.log(chalk.dim(`  If WebUI says "too many failed authentication attempts": run 'kars connect ${name} --reset' to clear the gateway lockout (token is preserved).`));
           console.log();
           // Best-effort browser open; don't fail if it errors.
           try {

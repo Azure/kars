@@ -1,6 +1,6 @@
-# STRIDE Threat Model — AzureClaw
+# STRIDE Threat Model — Kars
 
-> Companion to [`docs/security.md`](../security.md) (defense-in-depth layers). This document classifies the threats AzureClaw mitigates using STRIDE (Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege) across the four primary trust boundaries.
+> Companion to [`docs/security.md`](../security.md) (defense-in-depth layers). This document classifies the threats Kars mitigates using STRIDE (Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege) across the four primary trust boundaries.
 
 ## Trust boundaries
 
@@ -38,7 +38,7 @@
 | **R** | Tool calls not attributable | AGT policy receipt + per-tool span emitted to App Insights |
 | **I** | Agent reads cluster metadata (IMDS) | UID-1000 iptables block on `169.254.169.254` except via router |
 | **D** | Agent spam-saturates router | Per-agent rate limit + circuit-breaker on tool failures |
-| **E** | Agent escapes UID-1000 jail | seccomp `azureclaw-strict` (28 blocked syscalls), Landlock RO mount, drop-ALL caps, read-only rootfs |
+| **E** | Agent escapes UID-1000 jail | seccomp `kars-strict` (28 blocked syscalls), Landlock RO mount, drop-ALL caps, read-only rootfs |
 
 ### T3 — Router ↔ Azure
 
@@ -68,7 +68,7 @@
 
 Items accepted today with explicit user-visible markers in source/docs:
 
-- **Cosign-on-admission** — image signatures are produced and verifiable; admission does not yet *require* a signature on `ClawSandbox` reconciliation. Mitigation: cluster admins gate image pulls at the registry (ACR signed-content policy).
+- **Cosign-on-admission** — image signatures are produced and verifiable; admission does not yet *require* a signature on `KarsSandbox` reconciliation. Mitigation: cluster admins gate image pulls at the registry (ACR signed-content policy).
 - **Static TrustGraph projection** — captured at sandbox creation; live edge changes require a sandbox roll. Mitigation: operators can roll affected sandboxes.
 - **Per-cluster token budget** — only per-tenant budgets exist. A noisy tenant cannot starve the cluster but could starve its own peers. Mitigation: namespace ResourceQuota.
 

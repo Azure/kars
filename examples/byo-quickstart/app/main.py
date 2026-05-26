@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""Minimal BYO agent that proxies prompts to the AzureClaw router.
+"""Minimal BYO agent that proxies prompts to the Kars router.
 
 The agent never sees an API key. The router is reachable at
 ``http://127.0.0.1:8443/openai/v1`` from inside the sandbox; it
@@ -15,12 +15,12 @@ from fastapi import FastAPI
 from openai import OpenAI
 from pydantic import BaseModel
 
-ROUTER_BASE = os.environ.get("AZURECLAW_ROUTER_URL", "http://127.0.0.1:8443") + "/openai/v1"
-MODEL = os.environ.get("AZURECLAW_MODEL", "gpt-4.1")
+ROUTER_BASE = os.environ.get("KARS_ROUTER_URL", "http://127.0.0.1:8443") + "/openai/v1"
+MODEL = os.environ.get("KARS_MODEL", "gpt-4.1")
 
 # OpenAI SDK requires *something* in api_key; the router rewrites the
 # auth header with an IMDS-issued token before forwarding upstream.
-client = OpenAI(base_url=ROUTER_BASE, api_key="azureclaw-router")
+client = OpenAI(base_url=ROUTER_BASE, api_key="kars-router")
 app = FastAPI(title="byo-quickstart")
 
 

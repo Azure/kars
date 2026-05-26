@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# `azureclaw-a2a-gateway` — distroless static image for the public
+# `kars-a2a-gateway` — distroless static image for the public
 # A2A ingress edge (Phase 2 S3.5, ADR-0001 #4).
 #
 # Two-stage build:
@@ -30,7 +30,7 @@ WORKDIR /work
 # our own code edits.
 COPY Cargo.toml Cargo.lock ./
 COPY a2a-gateway/Cargo.toml a2a-gateway/Cargo.toml
-COPY azureclaw-a2a-core/Cargo.toml azureclaw-a2a-core/Cargo.toml
+COPY kars-a2a-core/Cargo.toml kars-a2a-core/Cargo.toml
 COPY inference-router/Cargo.toml inference-router/Cargo.toml
 COPY controller/Cargo.toml controller/Cargo.toml
 COPY eval-corpus/Cargo.toml eval-corpus/Cargo.toml
@@ -43,7 +43,7 @@ COPY tests/cncf-conformance/Cargo.toml tests/cncf-conformance/Cargo.toml
 # member without seeing the others' manifests).
 COPY a2a-gateway/src a2a-gateway/src
 COPY a2a-gateway/testdata a2a-gateway/testdata
-COPY azureclaw-a2a-core/src azureclaw-a2a-core/src
+COPY kars-a2a-core/src kars-a2a-core/src
 COPY inference-router/src inference-router/src
 COPY inference-router/benches inference-router/benches
 COPY controller/src controller/src
@@ -55,17 +55,17 @@ COPY tests/cncf-conformance/src tests/cncf-conformance/src
 
 RUN cargo build \
         --release \
-        --bin azureclaw-a2a-gateway \
+        --bin kars-a2a-gateway \
         --target x86_64-unknown-linux-musl
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder \
-    /work/target/x86_64-unknown-linux-musl/release/azureclaw-a2a-gateway \
-    /usr/local/bin/azureclaw-a2a-gateway
+    /work/target/x86_64-unknown-linux-musl/release/kars-a2a-gateway \
+    /usr/local/bin/kars-a2a-gateway
 
 USER 65532:65532
 
 EXPOSE 8443 9090
 
-ENTRYPOINT ["/usr/local/bin/azureclaw-a2a-gateway"]
+ENTRYPOINT ["/usr/local/bin/kars-a2a-gateway"]

@@ -4,7 +4,7 @@
 /**
  * GitHub Models integration helpers.
  *
- * Used by the first-run onboarding flow and the `azureclaw config` command
+ * Used by the first-run onboarding flow and the `kars config` command
  * tree to:
  *   - detect logged-in `gh` accounts (multi-account aware)
  *   - fetch the live catalog and validate a PAT scope
@@ -69,7 +69,7 @@ export function tierLabel(tier?: string): "free" | "paid" | "embed" | "unknown" 
 }
 
 /**
- * Returns true when the catalog model can be used by an AzureClaw agent
+ * Returns true when the catalog model can be used by an Kars agent
  * (must support tool/function calling).
  */
 export function isToolCapable(m: CatalogModel): boolean {
@@ -101,7 +101,7 @@ export async function fetchCatalog(pat: string): Promise<FetchCatalogResult | Fe
       headers: { // lgtm[js/file-access-to-http] — PAT read from user config is sent to GitHub's models API by design
         "Authorization": `Bearer ${pat}`,
         "Accept": "application/vnd.github+json",
-        "User-Agent": "azureclaw-cli",
+        "User-Agent": "kars-cli",
       },
     });
     if (!resp.ok) {
@@ -335,12 +335,12 @@ export function normalizeSecretValue(key: string, value: string): string {
  * keep the classic link as the simpler default.
  */
 export const PAT_CREATE_URL =
-  "https://github.com/settings/tokens/new?description=AzureClaw%20CLI&scopes=read:user";
+  "https://github.com/settings/tokens/new?description=Kars%20CLI&scopes=read:user";
 
 /**
  * Format a "rate-limit hit" hint for the user when chat fails on a tier
  * boundary (paid `custom`-tier model called by a free-tier PAT).
  */
 export function quotaHelpText(modelId: string): string {
-  return `${modelId} requires a paid GitHub Models plan. Run ${chalk.cyan("azureclaw config model")} to switch to a free-tier model.`;
+  return `${modelId} requires a paid GitHub Models plan. Run ${chalk.cyan("kars config model")} to switch to a free-tier model.`;
 }

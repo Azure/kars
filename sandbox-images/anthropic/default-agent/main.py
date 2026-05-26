@@ -1,5 +1,5 @@
 """
-AzureClaw default agent for the Anthropic Claude runtime.
+Kars default agent for the Anthropic Claude runtime.
 
 The router exposes `/anthropic/v1/messages` — a translation route that
 accepts native Anthropic Messages-API requests and forwards them to
@@ -8,7 +8,7 @@ native Anthropic surface this becomes a passthrough, no client
 changes needed.
 
 Replace this file by mounting agent code via the `agentCode` fields
-on ClawSandbox.
+on KarsSandbox.
 """
 
 from __future__ import annotations
@@ -20,10 +20,10 @@ import time
 # Bootstrap MUST run in this process so ANTHROPIC_BASE_URL /
 # ANTHROPIC_API_KEY (router-managed sentinel) and OTel are set
 # before the Anthropic SDK is imported.
-from azureclaw_runtime_anthropic.runtime import bootstrap
+from kars_runtime_anthropic.runtime import bootstrap
 bootstrap()
 
-BANNER = "🔒 AzureClaw — Anthropic Claude (default agent)"
+BANNER = "🔒 Kars — Anthropic Claude (default agent)"
 
 
 def _env(name: str, default: str = "(unset)") -> str:
@@ -65,7 +65,7 @@ def _smoke_test() -> None:
         msg = client.messages.create(
             model=model,
             max_tokens=128,
-            system="You are a default smoke-test agent embedded in an AzureClaw sandbox.",
+            system="You are a default smoke-test agent embedded in an Kars sandbox.",
             messages=[
                 {"role": "user", "content": "Reply with exactly one short sentence confirming you are alive."}
             ],

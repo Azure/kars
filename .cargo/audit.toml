@@ -25,7 +25,7 @@ ignore = [
     # Severity: medium (CVSS 5.9). NO upstream fix is available.
     # Source: transitive dependency — `jsonwebtoken 10.3.0` → `rsa 0.9.10`.
     # The Marvin attack requires *RSA private key operations* whose timing leaks
-    # to a co-located attacker. AzureClaw's only RSA usage is **JWT signature
+    # to a co-located attacker. Kars's only RSA usage is **JWT signature
     # verification on JWKS-published public keys** (OAuth 2.1 access-token
     # validation in `inference-router/src/mcp/oauth.rs`). Public-key verification
     # does not exercise the vulnerable scalar-multiplication path; we never hold

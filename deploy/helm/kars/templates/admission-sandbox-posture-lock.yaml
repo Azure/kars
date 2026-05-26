@@ -1,0 +1,118 @@
+{{- /*
+  Phase 1 deliverable (implementation-plan.md §7 item 13 / "core VAP set").
+
+  ValidatingAdmissionPolicy that blocks posture *downgrades* on pods
+  inside sandbox namespaces (namespaces labelled
+  kars.azure.com/isolated=strict). Applied on UPDATE only; CREATE
+  is handled by the controller's own pod template, which already
+  stamps the correct posture.
+
+  Downgrades blocked:
+   * flipping readOnlyRootFilesystem from true → false on any container
+   * dropping runAsNonRoot from true → false
+   * removing seccompProfile from pod or container
+   * setting privileged=true
+   * setting allowPrivilegeEscalation=true
+   * dropping any NET_RAW / SYS_ADMIN capability drop (adding them
+     back via capabilities.add)
+
+  A compromised workload identity or controller bug that tries to
+  relax the sandbox posture is caught here instead of landing in the
+  cluster.
+
+  CEL notes
+  ---------
+  * `oldObject` is populated on UPDATE. We compare old vs new.
+  * `containers` means both pod.spec.containers and
+     pod.spec.initContainers. ephemeralContainers are blocked outright
+     elsewhere (they are the canonical "escape hatch" — an
+     ephemeralContainer can join an existing pod's PID/net namespace
+     with different securityContext). The apiserver routes ephemeral
+     container creation to the `pods/ephemeralcontainers` subresource;
+     the pod-exec-ban VAP already denies CONNECT subresources in
+     sandbox namespaces, and a separate rule here denies UPDATEs that
+     add ephemeralContainers.
+*/}}
+{{- if .Values.admission.sandboxPostureLock.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sandbox-posture-lock
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   [""]
+        apiVersions: ["v1"]
+        operations:  ["UPDATE"]
+        resources:   ["pods"]
+    namespaceSelector:
+      matchLabels:
+        kars.azure.com/isolated: strict
+  variables:
+    - name: allContainersNew
+      expression: |
+        (object.spec.?containers.orValue([])) +
+        (object.spec.?initContainers.orValue([]))
+    - name: privilegedSet
+      expression: |
+        variables.allContainersNew.exists(c,
+          c.?securityContext.?privileged.orValue(false) == true)
+    - name: privEscSet
+      expression: |
+        variables.allContainersNew.exists(c,
+          c.?securityContext.?allowPrivilegeEscalation.orValue(false) == true)
+    - name: rofsDowngraded
+      expression: |
+        variables.allContainersNew.exists(nc,
+          nc.?securityContext.?readOnlyRootFilesystem.orValue(true) == false)
+    - name: runAsNonRootDowngraded
+      expression: |
+        object.spec.?securityContext.?runAsNonRoot.orValue(true) == false ||
+        variables.allContainersNew.exists(nc,
+          nc.?securityContext.?runAsNonRoot.orValue(true) == false)
+    - name: seccompRemoved
+      expression: |
+        !has(object.spec.securityContext) ||
+        !has(object.spec.securityContext.seccompProfile) ||
+        variables.allContainersNew.exists(nc,
+          has(nc.securityContext) && has(nc.securityContext.seccompProfile) &&
+          nc.securityContext.seccompProfile.type == 'Unconfined')
+    - name: ephemeralAdded
+      expression: |
+        size(object.spec.?ephemeralContainers.orValue([])) >
+        size(oldObject.spec.?ephemeralContainers.orValue([]))
+  validations:
+    - expression: "!variables.privilegedSet"
+      message: "privileged=true is not permitted on kars sandbox pods"
+      reason: Forbidden
+    - expression: "!variables.privEscSet"
+      message: "allowPrivilegeEscalation=true is not permitted on kars sandbox pods"
+      reason: Forbidden
+    - expression: "!variables.rofsDowngraded"
+      message: "readOnlyRootFilesystem=false is not permitted on kars sandbox pods"
+      reason: Forbidden
+    - expression: "!variables.runAsNonRootDowngraded"
+      message: "runAsNonRoot=false is not permitted on kars sandbox pods"
+      reason: Forbidden
+    - expression: "!variables.seccompRemoved"
+      message: "seccompProfile is required on kars sandbox pods (no Unconfined, no removal)"
+      reason: Forbidden
+    - expression: "!variables.ephemeralAdded"
+      message: "ephemeralContainers are not permitted in kars sandbox namespaces"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sandbox-posture-lock-binding
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: admission
+spec:
+  policyName: kars-sandbox-posture-lock
+  validationActions: [Deny, Audit]
+{{- end }}

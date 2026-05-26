@@ -5,9 +5,9 @@
 # generic driver picks up via `source $SCENARIO_DIR/config.sh`.
 #
 # Required variables:
-#   SCENARIO_SANDBOX     — name of the parent ClawSandbox the harness
+#   SCENARIO_SANDBOX     — name of the parent KarsSandbox the harness
 #                          posts the prompt to (also the sandbox-NS
-#                          stem: pod runs in azureclaw-${SCENARIO_SANDBOX}).
+#                          stem: pod runs in kars-${SCENARIO_SANDBOX}).
 #   SCENARIO_SUB_SANDBOXES
 #                        — bash array of sub-agent sandbox names whose
 #                          namespaces the driver should harvest

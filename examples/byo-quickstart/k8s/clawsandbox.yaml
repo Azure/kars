@@ -2,23 +2,23 @@
 #
 # The image must meet the contract documented in
 # docs/byo-runtime-contract.md. With controller.byoStrict=true the
-# AzureClaw controller verifies that:
+# Kars controller verifies that:
 #   * spec.runtime.byo.contractVersion is in {"v1", "1", "1.0"}
 #   * spec.runtime.byo.image looks like a valid image reference
 #     (host/path:tag or host/path@sha256:...)
 #
 # Registry-side label introspection (verifying the image actually
-# carries `org.azureclaw.runtime.contract=v1`) is a Phase 4 add-on;
+# carries `org.kars.runtime.contract=v1`) is a Phase 4 add-on;
 # CR-level enforcement alone catches the most common operator
 # mistakes (typoed version, missing tag) at admission time.
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: byo-quickstart
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: byo-quickstart
+    kars.azure.com/sandbox: byo-quickstart
 spec:
   appliesTo:
     sandboxName: byo-quickstart
@@ -30,11 +30,11 @@ spec:
     perRequestTokens: 4000
     dailyTokens: 200000
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: byo-quickstart
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: BYO

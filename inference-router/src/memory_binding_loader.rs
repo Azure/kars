@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `ClawMemory` compiled-binding loader (Slice 3a).
+//! `KarsMemory` compiled-binding loader (Slice 3a).
 //!
 //! Reads a single JSON file from a mount directory, registers the
 //! sha256 digest with the shared `PolicyStatusRegistry` under
@@ -12,10 +12,10 @@
 //! ## Slice 3a scope (digest-echo only)
 //!
 //! Slice 3a wires the §3 "Ready ⇔ router echo" loop and nothing else:
-//! the controller publishes `clawmemory-<name>-binding.binding.json`,
+//! the controller publishes `karsmemory-<name>-binding.binding.json`,
 //! the router loads + sha256's the canonical bytes, the digest shows
 //! up under `GET /internal/policy-status` with `kind: Memory`, and
-//! the `claw_memory_reconciler` poller promotes `Compiled → Ready`
+//! the `kars_memory_reconciler` poller promotes `Compiled → Ready`
 //! once every referencing sandbox echoes a match.
 //!
 //! What we deliberately do **not** wire in 3a:
@@ -23,7 +23,7 @@
 //! - Foundry Memory Store auto-provisioning on first use (router-side
 //!   HEAD/POST against the upstream).
 //! - `AuthMisconfigured` condition emission on 403 from Memory Store
-//!   (project-MI vs. account-MI gotcha — see `azureclaw-deployment`
+//!   (project-MI vs. account-MI gotcha — see `kars-deployment`
 //!   skill notes).
 //! - Rewiring the MCP `foundry.memory.*` tools from the chart-fed
 //!   `FOUNDRY_MEMORY_STORE_ID` env to the binding lookup. Today the
@@ -33,8 +33,8 @@
 //!
 //! ## Single-binding rule
 //!
-//! A sandbox references at most one `ClawMemory` via
-//! `ClawSandbox.spec.memoryRef`. If the mount directory accidentally
+//! A sandbox references at most one `KarsMemory` via
+//! `KarsSandbox.spec.memoryRef`. If the mount directory accidentally
 //! contains multiple `*.json` files (e.g. during a transitional
 //! mirror update), the loader picks the first one in lexicographic
 //! order so behaviour stays deterministic.
@@ -42,7 +42,7 @@
 //! ## Digest contract (DO NOT BREAK)
 //!
 //! The digest layout is **byte-identical** to the controller-side
-//! `claw_memory_compile::canonical_bytes_for_digest`:
+//! `kars_memory_compile::canonical_bytes_for_digest`:
 //! `u64-BE(name.len()) || name || u64-BE(body.len()) || body`, then
 //! sha256. `name = "binding.json"`, `body = serde_json::to_vec(&binding)`
 //! (non-pretty, no trailing newline). Any divergence here silently
@@ -54,8 +54,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Canonical filename the controller writes to the
-/// `clawmemory-<name>-binding` ConfigMap. Kept in lockstep with
-/// `controller::claw_memory_compile::MEMORY_BINDING_FILENAME` — the
+/// `karsmemory-<name>-binding` ConfigMap. Kept in lockstep with
+/// `controller::kars_memory_compile::MEMORY_BINDING_FILENAME` — the
 /// byte layout is part of the wire contract.
 pub const MEMORY_BINDING_FILENAME: &str = "binding.json";
 
@@ -63,15 +63,15 @@ pub const MEMORY_BINDING_FILENAME: &str = "binding.json";
 /// `MEMORY_BINDING_DIR` env var (which the sandbox reconciler also
 /// pushes onto the inference-router container when
 /// `spec.memoryRef` is set).
-pub const MEMORY_BINDING_DIR_DEFAULT: &str = "/etc/azureclaw/memory";
+pub const MEMORY_BINDING_DIR_DEFAULT: &str = "/etc/kars/memory";
 
-/// Shared handle to the currently loaded `ClawMemory` binding, or
+/// Shared handle to the currently loaded `KarsMemory` binding, or
 /// `None` when no binding has been loaded (mount missing, file
 /// absent, or parse failure). Wired into `routes::AppState` so
 /// Slice 3b's MCP rewire can do a single read-lock snapshot.
 pub type LoadedMemoryBindingHandle = Arc<RwLock<Option<LoadedMemoryBinding>>>;
 
-/// Parsed `ClawMemory` binding cached in memory. Fields populated in
+/// Parsed `KarsMemory` binding cached in memory. Fields populated in
 /// 3a are the bare minimum the operator needs to debug a digest
 /// mismatch (`source_path`, `store_name`, `scope`); the full JSON
 /// stays in `raw` so 3b's MCP rewire doesn't need a new loader.
@@ -105,7 +105,7 @@ pub fn empty_handle() -> LoadedMemoryBindingHandle {
 /// Compute the canonical byte layout the controller hashes for a
 /// single `binding.json` file. Exposed as a free function so the
 /// equality with the controller-side
-/// `claw_memory_compile::canonical_bytes_for_digest` can be asserted
+/// `kars_memory_compile::canonical_bytes_for_digest` can be asserted
 /// in a test without pulling in the loader's I/O paths.
 #[must_use]
 pub fn canonical_bytes_for_digest(filename: &str, body: &[u8]) -> Vec<u8> {
@@ -160,7 +160,7 @@ pub fn load_memory_binding_from_dir(
     if !path.is_dir() {
         tracing::debug!(
             dir,
-            "ClawMemory mount not present — router runs without a memory binding loaded"
+            "KarsMemory mount not present — router runs without a memory binding loaded"
         );
         return LoadOutcome::NoBinding;
     }
@@ -173,14 +173,14 @@ pub fn load_memory_binding_from_dir(
             .collect(),
         Err(e) => {
             let msg = format!("read_dir failed: {e}");
-            tracing::warn!(dir, error = %e, "ClawMemory mount read_dir failed");
+            tracing::warn!(dir, error = %e, "KarsMemory mount read_dir failed");
             policy_status.record_error(PolicyKind::Memory, dir, &msg);
             return LoadOutcome::Error(msg);
         }
     };
     json_files.sort();
     let Some(file) = json_files.first() else {
-        tracing::debug!(dir, "ClawMemory mount is empty");
+        tracing::debug!(dir, "KarsMemory mount is empty");
         return LoadOutcome::NoBinding;
     };
 
@@ -189,7 +189,7 @@ pub fn load_memory_binding_from_dir(
         Ok(b) => b,
         Err(e) => {
             let msg = format!("read failed: {e}");
-            tracing::warn!(file = %file.display(), error = %e, "ClawMemory read failed");
+            tracing::warn!(file = %file.display(), error = %e, "KarsMemory read failed");
             policy_status.record_error(PolicyKind::Memory, &file_str, &msg);
             return LoadOutcome::Error(msg);
         }
@@ -199,7 +199,7 @@ pub fn load_memory_binding_from_dir(
         Ok(v) => v,
         Err(e) => {
             let msg = format!("JSON parse failed: {e}");
-            tracing::warn!(file = %file.display(), error = %e, "ClawMemory parse failed");
+            tracing::warn!(file = %file.display(), error = %e, "KarsMemory parse failed");
             policy_status.record_error(PolicyKind::Memory, &file_str, &msg);
             return LoadOutcome::Error(msg);
         }
@@ -221,7 +221,7 @@ pub fn load_memory_binding_from_dir(
         .unwrap_or("")
         .to_string();
 
-    // Digest layout matches controller `claw_memory_digest`:
+    // Digest layout matches controller `kars_memory_digest`:
     // length-prefixed (name, body) hashed with sha256.
     let canonical = canonical_bytes_for_digest(MEMORY_BINDING_FILENAME, &body);
     policy_status.record_success(PolicyKind::Memory, &file_str, &canonical);
@@ -235,7 +235,7 @@ pub fn load_memory_binding_from_dir(
         store_name = %store_name,
         scope = %scope,
         digest = %digest,
-        "ClawMemory binding loaded"
+        "KarsMemory binding loaded"
     );
 
     LoadOutcome::Loaded(LoadedMemoryBinding {
@@ -258,7 +258,7 @@ pub fn load_memory_binding_from_dir(
 ///   `scope` on the very next read-lock.
 /// - [`LoadOutcome::NoBinding`] → handle is **cleared**
 ///   (`*handle = None`). This is what makes hot-reload work when an
-///   operator removes `spec.memoryRef` from a `ClawSandbox`: the
+///   operator removes `spec.memoryRef` from a `KarsSandbox`: the
 ///   sandbox reconciler unmounts the ConfigMap, the watcher sees an
 ///   empty dir, and the router stops claiming a binding exists.
 /// - [`LoadOutcome::Error`] → handle is **left intact**. A transient
@@ -300,7 +300,7 @@ pub const WATCH_INTERVAL_ENV: &str = "MEMORY_BINDING_WATCH_INTERVAL";
 /// `MEMORY_BINDING_WATCH_INTERVAL` seconds (default 5s) and calls
 /// [`load_and_install`] whenever a change is detected. Mirrors the
 /// pattern in `governance::Governance::spawn_policy_watcher` and
-/// closes Slice 3 DoD item 4 (ClawMemory hot-reload).
+/// closes Slice 3 DoD item 4 (KarsMemory hot-reload).
 ///
 /// The watcher is **best-effort**: it never panics, never propagates
 /// errors out of the task, and tolerates the directory not existing
@@ -328,7 +328,7 @@ pub fn spawn_memory_binding_watcher(
                 tracing::info!(
                     target: "memory_binding_watcher",
                     dir = %dir,
-                    "ClawMemory binding directory changed, reloading"
+                    "KarsMemory binding directory changed, reloading"
                 );
                 let _ = load_and_install(&dir, &policy_status, &handle).await;
                 last_mtime = current;
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn missing_dir_returns_no_binding_and_leaves_registry_empty() {
         let reg = PolicyStatusRegistry::new();
-        let outcome = load_memory_binding_from_dir("/nonexistent/azureclaw/memory", &reg);
+        let outcome = load_memory_binding_from_dir("/nonexistent/kars/memory", &reg);
         assert!(matches!(outcome, LoadOutcome::NoBinding));
         assert!(reg.get(PolicyKind::Memory).is_none());
     }
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn digest_is_byte_identical_to_controller_layout() {
         // Golden vector cross-validating router ↔ controller. The
-        // controller's `claw_memory_digest` computes
+        // controller's `kars_memory_digest` computes
         // `sha256(canonical_bytes_for_digest("binding.json", body))`
         // and so does the router. Any divergence here breaks the §3
         // echo loop silently.
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn dir_max_mtime_returns_none_for_missing_dir() {
-        assert!(dir_max_mtime("/nonexistent/azureclaw/memory").is_none());
+        assert!(dir_max_mtime("/nonexistent/kars/memory").is_none());
     }
 
     #[test]

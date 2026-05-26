@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// `azureclaw mesh setup-trust` — provisions the Entra ID app registration
-// and service principal that AzureClaw sandboxes use to acquire access
+// `kars mesh setup-trust` — provisions the Entra ID app registration
+// and service principal that Kars sandboxes use to acquire access
 // tokens with audience `api://agentmesh/.default`. Without this, sandbox
 // pods fall back to the AGT anonymous tier (trust score 0) and every
 // peer KNOCK is gated against that floor.
@@ -110,10 +110,10 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
     .description(
       `Provision the tenant-wide Entra app registration (${AGENTMESH_IDENTIFIER_URI}) so sandboxes register as the AGT verified tier`,
     )
-    .option("--display-name <name>", "Display name for the Entra app registration", "AzureClaw AgentMesh")
+    .option("--display-name <name>", "Display name for the Entra app registration", "Kars AgentMesh")
     .option("--dry-run", "Print what would be created without making changes", false)
     .action(async (opts: { displayName: string; dryRun: boolean }) => {
-      banner("AzureClaw · Mesh Setup Trust", "Entra App Registration for api://agentmesh");
+      banner("Kars · Mesh Setup Trust", "Entra App Registration for api://agentmesh");
 
       // Step 1: confirm az is signed in and which tenant we're targeting
       section("Tenant");

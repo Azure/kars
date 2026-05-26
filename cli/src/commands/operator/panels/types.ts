@@ -34,7 +34,7 @@ export interface CrdItem {
   conditions: CrdCondition[];
 }
 
-export interface ClawPairingItem extends CrdItem {
+export interface KarsPairingItem extends CrdItem {
   agentA?: string;
   agentB?: string;
   trust?: string;
@@ -72,7 +72,7 @@ export interface A2AAgentItem extends CrdItem {
   capabilities?: string[];
 }
 
-export interface ClawMemoryItem extends CrdItem {
+export interface KarsMemoryItem extends CrdItem {
   sandboxRef?: string;
   storeName?: string;
   scope?: string;
@@ -81,7 +81,7 @@ export interface ClawMemoryItem extends CrdItem {
   foundryBound?: "bound" | "pending" | "failed" | "unknown";
 }
 
-export interface ClawEvalItem extends CrdItem {
+export interface KarsEvalItem extends CrdItem {
   sandboxRef?: string;
   suite?: string;
   schedule?: string;
@@ -111,13 +111,13 @@ export interface ProviderStatusSnapshot {
 /** Full snapshot consumed by panels. Every field has a safe empty form. */
 export interface ClusterState {
   sandboxes: SandboxInfo[];
-  pairings: ClawPairingItem[];
+  pairings: KarsPairingItem[];
   mcpServers: McpServerItem[];
   toolPolicies: ToolPolicyItem[];
   inferencePolicies: InferencePolicyItem[];
   a2aAgents: A2AAgentItem[];
-  clawMemories: ClawMemoryItem[];
-  clawEvals: ClawEvalItem[];
+  clawMemories: KarsMemoryItem[];
+  clawEvals: KarsEvalItem[];
   providers: ProviderStatusSnapshot;
 }
 
@@ -130,10 +130,10 @@ export interface PanelRenderOpts {
 
 /** Category used by the layout to group panels. Optional for back-compat. */
 export type PanelCategory =
-  | "agent"           // ClawSandbox — the page's reason to exist
+  | "agent"           // KarsSandbox — the page's reason to exist
   | "infrastructure"  // InferencePolicy, ToolPolicy — usually present, expected
-  | "optional"        // McpServer, A2AAgent, ClawMemory, ClawEval — hidden when 0
-  | "internal"        // ClawPairing — controller-managed, foldable
+  | "optional"        // McpServer, A2AAgent, KarsMemory, KarsEval — hidden when 0
+  | "internal"        // KarsPairing — controller-managed, foldable
   | "providers";      // Provider/health bar — always shown compact
 
 /** Per-panel summary used by the at-a-glance section. */

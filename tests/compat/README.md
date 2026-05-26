@@ -1,4 +1,4 @@
-# AzureClaw Compatibility Suite (`tests/compat/`)
+# Kars Compatibility Suite (`tests/compat/`)
 
 **Status:** Phase 0 skeleton. Grows with every Phase-0→Phase-4 decomposition.
 **Charter:** `internal Phase 1 plan` §5.4.
@@ -15,13 +15,13 @@ same spec must still pass against the refactored code.
 
 ## Protected flows (per plan §5.1 — eight)
 
-1. **`azureclaw dev`** — local Docker sandbox lifecycle.
-2. **`azureclaw up`** — AKS provisioning preflight → provision → helm.
-3. **`azureclaw connect`** — attach to running sandbox.
-4. **`azureclaw handoff`** — warm handoff between sibling agents.
-5. **`azureclaw offload`** — cloud offload from local to AKS.
-6. **`azureclaw operator`** — headless operator TUI (blessed dashboard).
-7. **OpenClaw → AzureClaw inter-agent** — E2E Signal protocol via router.
+1. **`kars dev`** — local Docker sandbox lifecycle.
+2. **`kars up`** — AKS provisioning preflight → provision → helm.
+3. **`kars connect`** — attach to running sandbox.
+4. **`kars handoff`** — warm handoff between sibling agents.
+5. **`kars offload`** — cloud offload from local to AKS.
+6. **`kars operator`** — headless operator TUI (blessed dashboard).
+7. **OpenClaw → Kars inter-agent** — E2E Signal protocol via router.
 8. **Plugin lifecycle** — OpenClaw plugin load + tool registration.
 
 Each flow gets a spec file under `specs/<flow>.spec.ts`.
@@ -68,4 +68,4 @@ external calls are mocked through the harness in `harness/`.
 - [x] `operator-tui.spec.ts` — smoke spec: command registers, blessed screen
   creates without crashing, quit key exits cleanly.
 - [ ] Phase 1 adds: full operator-TUI render snapshot, kubectl-mock scenarios,
-  `azureclaw dev` lifecycle spec.
+  `kars dev` lifecycle spec.

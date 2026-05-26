@@ -19,10 +19,10 @@
 mod common;
 
 use axum::http::{HeaderMap, Method};
-use azureclaw_inference_router::auth::WorkloadIdentityAuth;
-use azureclaw_inference_router::proxy::{UpstreamConfig, forward};
 use bytes::Bytes;
 use common::{FakeAd, FakeAzure, FakeImds, FixtureRoute};
+use kars_inference_router::auth::WorkloadIdentityAuth;
+use kars_inference_router::proxy::{UpstreamConfig, forward};
 use std::sync::Mutex;
 
 // Env vars are process-wide. Serialize tests that mutate them.
@@ -130,10 +130,7 @@ async fn wi_mode_falls_back_to_imds_and_proxies_embeddings() {
         set_env("AZURE_TENANT_ID", "fake-tenant");
         set_env("AZURE_CLIENT_ID", "fake-client");
         // point WI at a path that will not exist
-        set_env(
-            "AZURE_FEDERATED_TOKEN_FILE",
-            "/nonexistent/azureclaw-test-token",
-        );
+        set_env("AZURE_FEDERATED_TOKEN_FILE", "/nonexistent/kars-test-token");
         set_env("AZURE_AD_ENDPOINT", &ad.base_url());
         set_env("AZURE_IMDS_ENDPOINT", &imds.base_url());
     }

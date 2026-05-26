@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 
 # ═══════════════════════════════════════════════════════════════════
-# AzureClaw Demo: Operation Claw Shield — Normal Workflow
+# Kars Demo: Operation Claw Shield — Normal Workflow
 # ═══════════════════════════════════════════════════════════════════
 #
 # Demonstrates normal multi-agent collaboration:
@@ -35,7 +35,7 @@ step() {
 # ═══════════════════════════════════════════════════════════════════
 echo -e "${BOLD}${CYAN}"
 echo "  ╔═══════════════════════════════════════════════════════════╗"
-echo "  ║  AzureClaw Demo: Operation Claw Shield                   ║"
+echo "  ║  Kars Demo: Operation Claw Shield                   ║"
 echo "  ║  Multi-Agent Compliance Workflow                         ║"
 echo "  ╚═══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -43,7 +43,7 @@ echo -e "${NC}"
 
 step 0 "Verify all sandboxes are running"
 echo ""
-kubectl get clawsandboxes -A -o wide 2>/dev/null || echo "(ClawSandbox CRDs — showing expected output)"
+kubectl get karssandboxes -A -o wide 2>/dev/null || echo "(KarsSandbox CRDs — showing expected output)"
 echo ""
 echo -e "${GREEN}✅ Three company agents running in isolated namespaces${NC}"
 echo "   • contoso-bank-agent     (enhanced — runc + seccomp)"
@@ -103,6 +103,6 @@ printf "  %-25s %-12s %-15s %-12s %s\n" "northwind-trade-agent" "Running" "enhan
 echo ""
 echo -e "${GREEN}${BOLD}All agents operating normally. No security events.${NC}"
 echo ""
-echo "Next: Run the attack simulation to demo AzureClaw's security:"
-echo "  azureclaw connect fabrikam-legal-agent --shell"
+echo "Next: Run the attack simulation to demo Kars's security:"
+echo "  kars connect fabrikam-legal-agent --shell"
 echo "  bash /sandbox/attack-simulation.sh"

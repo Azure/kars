@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Docker dev-mode sandbox spawn — `azureclaw dev` path.
+//! Docker dev-mode sandbox spawn — `kars dev` path.
 //!
 //! Extracted from `spawn.rs` per §4.2 hotspot decomposition. The
 //! controller-managed (K8s) path stays in `spawn::mod`; this module
@@ -20,7 +20,7 @@ pub(super) async fn collect_sub_agent_snapshots_docker(
     // List containers with the parent label — URL-encode the filter
     // (raw JSON braces/brackets cause curl globbing and Docker parse errors)
     let filter = format!(
-        r#"{{"label":["azureclaw.parent={}"],"status":["running"]}}"#,
+        r#"{{"label":["kars.parent={}"],"status":["running"]}}"#,
         parent_name
     );
     let encoded = filter
@@ -54,17 +54,17 @@ pub(super) async fn collect_sub_agent_snapshots_docker(
             continue;
         }
 
-        // Strip the "azureclaw-" prefix that create_sandbox_docker adds,
-        // so respawn doesn't double-prefix to "azureclaw-azureclaw-{name}".
+        // Strip the "kars-" prefix that create_sandbox_docker adds,
+        // so respawn doesn't double-prefix to "kars-kars-{name}".
         let name = container_name
-            .strip_prefix("azureclaw-")
+            .strip_prefix("kars-")
             .unwrap_or(&container_name)
             .to_string();
 
         // Extract model from container labels
         let labels = container.get("Labels").and_then(|l| l.as_object());
         let model = labels
-            .and_then(|l| l.get("azureclaw.model"))
+            .and_then(|l| l.get("kars.model"))
             .and_then(|m| m.as_str())
             .map(String::from);
 
@@ -112,13 +112,12 @@ pub(super) fn docker_create_body(
         .or_else(|_| std::env::var("AZURE_OPENAI_DEPLOYMENT"))
         .unwrap_or_else(|_| "gpt-4.1".into());
     let model = req.model.as_deref().unwrap_or(&parent_model);
-    let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "azureclaw-dev".into());
+    let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "kars-dev".into());
     let relay_url = std::env::var("AGT_RELAY_URL").unwrap_or_default();
     let registry_url = std::env::var("AGT_REGISTRY_URL").unwrap_or_default();
     let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
-    let image =
-        std::env::var("AZURECLAW_DEV_IMAGE").unwrap_or_else(|_| "azureclaw-sandbox:dev".into());
+    let image = std::env::var("KARS_DEV_IMAGE").unwrap_or_else(|_| "kars-sandbox:dev".into());
 
     let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
 
@@ -127,7 +126,7 @@ pub(super) fn docker_create_body(
         format!("AZURE_OPENAI_ENDPOINT={}", endpoint),
         format!("AZURE_OPENAI_API_KEY={}", api_key),
         format!("SANDBOX_NAME={}", req.agent_id),
-        "AZURECLAW_DEV_MODE=true".to_string(),
+        "KARS_DEV_MODE=true".to_string(),
         format!("DOCKER_NETWORK={}", network),
         "EGRESS_LEARN_MODE=true".to_string(),
     ];
@@ -138,10 +137,10 @@ pub(super) fn docker_create_body(
     // tool catalog (~25k tokens) and 413 on every chat against the 16k
     // GH-Models input cap. The parent router process inherits this env
     // from its own container, which the CLI sets in dev.ts.
-    if let Ok(provider) = std::env::var("AZURECLAW_PROVIDER")
+    if let Ok(provider) = std::env::var("KARS_PROVIDER")
         && !provider.is_empty()
     {
-        env.push(format!("AZURECLAW_PROVIDER={}", provider));
+        env.push(format!("KARS_PROVIDER={}", provider));
     }
 
     if !foundry_endpoint.is_empty() {
@@ -170,15 +169,15 @@ pub(super) fn docker_create_body(
     // spawns vendored-mode children that connect to the AGT relay's wrong
     // path (root vs `/ws`) and get 403, and call vendored registry URLs
     // (`/registry/search`) on the AGT registry which 404s.
-    if let Ok(mesh_provider) = std::env::var("AZURECLAW_MESH_PROVIDER")
+    if let Ok(mesh_provider) = std::env::var("KARS_MESH_PROVIDER")
         && !mesh_provider.is_empty()
     {
-        env.push(format!("AZURECLAW_MESH_PROVIDER={}", mesh_provider));
+        env.push(format!("KARS_MESH_PROVIDER={}", mesh_provider));
     }
 
     let mut labels = serde_json::Map::new();
-    labels.insert("azureclaw.parent".into(), serde_json::json!(parent_name));
-    labels.insert("azureclaw.spawned-by".into(), serde_json::json!("agent"));
+    labels.insert("kars.parent".into(), serde_json::json!(parent_name));
+    labels.insert("kars.spawned-by".into(), serde_json::json!("agent"));
 
     serde_json::json!({
         "Image": image,
@@ -264,7 +263,7 @@ pub(super) async fn create_sandbox_docker(
     parent_name: &str,
     req: &SpawnRequest,
 ) -> Result<SpawnResponse, String> {
-    let container_name = format!("azureclaw-{}", req.agent_id);
+    let container_name = format!("kars-{}", req.agent_id);
     let parent_model = std::env::var("OPENCLAW_MODEL")
         .or_else(|_| std::env::var("AZURE_OPENAI_DEPLOYMENT"))
         .unwrap_or_else(|_| "gpt-4.1".into());
@@ -304,7 +303,7 @@ pub(super) async fn create_sandbox_docker(
     }
 
     // Ensure the Docker network exists (it may not if --agt was not used)
-    let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "azureclaw-dev".into());
+    let network = std::env::var("DOCKER_NETWORK").unwrap_or_else(|_| "kars-dev".into());
     let net_check = docker_api("GET", &format!("/networks/{}", network), None).await;
     if net_check.is_err()
         || net_check
@@ -361,10 +360,10 @@ pub(super) async fn create_sandbox_docker(
 
 /// Get sub-agent status in dev mode (Docker container inspect).
 pub(super) async fn get_sandbox_status_docker(name: &str) -> Result<SpawnResponse, String> {
-    let container_name = if name.starts_with("azureclaw-") {
+    let container_name = if name.starts_with("kars-") {
         name.to_string()
     } else {
-        format!("azureclaw-{}", name)
+        format!("kars-{}", name)
     };
 
     let resp = docker_api("GET", &format!("/containers/{}/json", container_name), None)
@@ -398,7 +397,7 @@ pub(super) async fn get_sandbox_status_docker(name: &str) -> Result<SpawnRespons
 
 /// List sub-agents in dev mode (Docker containers with parent label).
 pub async fn list_sandboxes_docker(parent_name: &str) -> Result<Vec<SubAgentEntry>, String> {
-    let filter = format!(r#"{{"label":["azureclaw.parent={}"]}}"#, parent_name);
+    let filter = format!(r#"{{"label":["kars.parent={}"]}}"#, parent_name);
     // URL-encode the filter JSON (only special chars that appear in our filter)
     let encoded = filter
         .replace('{', "%7B")
@@ -423,7 +422,7 @@ pub async fn list_sandboxes_docker(parent_name: &str) -> Result<Vec<SubAgentEntr
             let names = c.get("Names")?.as_array()?;
             let raw_name = names.first()?.as_str()?.trim_start_matches('/');
             let name = raw_name
-                .strip_prefix("azureclaw-")
+                .strip_prefix("kars-")
                 .unwrap_or(raw_name)
                 .to_string();
             let state = c.get("State")?.as_str().unwrap_or("unknown");
@@ -448,7 +447,7 @@ pub async fn list_sandboxes_docker(parent_name: &str) -> Result<Vec<SubAgentEntr
 
 /// Delete a sub-agent Docker container (dev mode).
 pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<SpawnResponse, String> {
-    let container_name = format!("azureclaw-{}", name);
+    let container_name = format!("kars-{}", name);
 
     // Verify parent label via inspect
     let inspect = docker_api("GET", &format!("/containers/{}/json", container_name), None)
@@ -460,7 +459,7 @@ pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<Spaw
 
     let labels = info.pointer("/Config/Labels");
     let actual_parent = labels
-        .and_then(|l| l.get("azureclaw.parent"))
+        .and_then(|l| l.get("kars.parent"))
         .and_then(|v| v.as_str());
 
     if actual_parent != Some(parent_name) {
