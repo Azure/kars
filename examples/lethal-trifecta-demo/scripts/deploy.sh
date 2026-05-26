@@ -30,8 +30,13 @@ done
 kubectl apply -f scenarios/03-bait-server.yaml
 
 echo "▸ waiting for pods..."
-kubectl -n naked-claw      wait --for=condition=available --timeout=120s deploy/realestate-agent deploy/bait-server
-kubectl -n azureclaw-claw  wait --for=condition=available --timeout=180s deploy/realestate-agent deploy/bait-server
+kubectl -n naked-claw                wait --for=condition=available --timeout=120s deploy/realestate-agent deploy/bait-server
+# The ClawSandbox CR is created in `azureclaw-claw`, but the AzureClaw
+# controller materialises the sandbox deployment in its own per-sandbox
+# namespace `azureclaw-<sandbox-name>` (here: `azureclaw-realestate-agent`).
+# The bait server is a plain Deployment that stays in `azureclaw-claw`.
+kubectl -n azureclaw-realestate-agent wait --for=condition=available --timeout=180s deploy/realestate-agent
+kubectl -n azureclaw-claw             wait --for=condition=available --timeout=180s deploy/bait-server
 
 echo
 echo "✅ deployed. Run ./scripts/run-attack.sh next."

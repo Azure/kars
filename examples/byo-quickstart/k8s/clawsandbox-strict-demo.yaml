@@ -30,8 +30,8 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
   tokenBudget:
-    perRequestMax: 4000
-    perDayMax: 200000
+    perRequestTokens: 4000
+    dailyTokens: 200000
 ---
 apiVersion: azureclaw.azure.com/v1alpha1
 kind: ClawSandbox

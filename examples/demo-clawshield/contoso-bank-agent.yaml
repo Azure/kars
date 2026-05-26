@@ -37,8 +37,7 @@ spec:
   runtime:
     kind: OpenClaw
     openclaw:
-      version: "2026.3.13"
-      image: azureclaw.azurecr.io/openclaw-sandbox:latest
+      # Image intentionally unset: controller resolves from SANDBOX_IMAGE env (set by azureclaw up).
       config:
         agent:
           model: "azure/gpt-4.1"
@@ -66,17 +65,13 @@ spec:
     allowedEndpoints:
       - host: "github.com"
         port: 443
-        methods: ["GET"]
       - host: "api.github.com"
         port: 443
-        methods: ["GET"]
       # Contoso internal APIs only
       - host: "compliance.contoso.com"
         port: 443
-        methods: ["GET", "POST"]
       - host: "transactions.contoso.com"
         port: 443
-        methods: ["GET"]
 
   azureServices:
     - service: ai-foundry

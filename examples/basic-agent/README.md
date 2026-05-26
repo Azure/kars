@@ -31,7 +31,7 @@ The `ClawSandbox` references the `InferencePolicy` by name via
 
 | Layer | Setting |
 |---|---|
-| Runtime | `OpenClaw 2026.3.13` |
+| Runtime | `OpenClaw` (image resolved by the controller from its `SANDBOX_IMAGE` env, set by `azureclaw up`) |
 | Isolation | `enhanced` (runc + strict seccomp + RO rootfs) |
 | Model | `azure-openai/gpt-4.1` (via Foundry; switch to GitHub Models with `azureclaw dev`) |
 | Content Safety | `requirePromptShields: true` |
