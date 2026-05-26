@@ -64,6 +64,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentmesh-mcp"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3c96f7b1e4734e84b59fc545a708ec9d06927432235c22c71051a3767459a68"
+dependencies = [
+ "base64 0.22.1",
+ "hmac",
+ "rand 0.8.6",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2524,6 +2540,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "agentmesh",
+ "agentmesh-mcp",
  "anyhow",
  "async-trait",
  "axum",

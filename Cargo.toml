@@ -80,6 +80,7 @@ futures-util = "0.3"
 
 # AGT governance (native — replaces former Python sidecar)
 agentmesh = "3.7.0"
+agentmesh-mcp = "3.7.0"
 
 # Benchmarking (S16 — chaos tier perf baselines). Used by `controller/benches/`
 # and `inference-router/benches/`. Kept out of the binary builds via dev-deps.

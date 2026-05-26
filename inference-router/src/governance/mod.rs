@@ -10,10 +10,10 @@
 
 use agentmesh::AuditLogger;
 use agentmesh::identity::AgentIdentity;
-use agentmesh::mcp::rate_limit::{InMemoryRateLimitStore, McpSlidingRateLimiter};
-use agentmesh::mcp::redactor::{CredentialKind, CredentialRedactor};
-use agentmesh::mcp::response::{McpResponseScanner, McpResponseThreatType};
-use agentmesh::mcp::{InMemoryAuditSink, McpMetricsCollector, SystemClock};
+use agentmesh_mcp::rate_limit::{InMemoryRateLimitStore, McpSlidingRateLimiter};
+use agentmesh_mcp::redactor::{CredentialKind, CredentialRedactor};
+use agentmesh_mcp::response::{McpResponseScanner, McpResponseThreatType};
+use agentmesh_mcp::{InMemoryAuditSink, McpMetricsCollector, SystemClock};
 use agentmesh::policy::PolicyEngine;
 use agentmesh::trust::{TrustConfig, TrustManager};
 use agentmesh::types::PolicyDecision;
@@ -180,8 +180,8 @@ impl Governance {
         // `.expect()` inside the constructor. See agentmesh-3.7.0
         // src/mcp/redactor.rs.
         let redactor = CredentialRedactor::new();
-        let mcp_clock: std::sync::Arc<dyn agentmesh::mcp::Clock> = std::sync::Arc::new(SystemClock);
-        let mcp_audit: std::sync::Arc<dyn agentmesh::mcp::McpAuditSink> =
+        let mcp_clock: std::sync::Arc<dyn agentmesh_mcp::Clock> = std::sync::Arc::new(SystemClock);
+        let mcp_audit: std::sync::Arc<dyn agentmesh_mcp::McpAuditSink> =
             std::sync::Arc::new(InMemoryAuditSink::new(CredentialRedactor::new()));
         let mcp_metrics = McpMetricsCollector::default();
         let response_scanner = McpResponseScanner::new(

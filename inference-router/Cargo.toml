@@ -43,6 +43,7 @@ async-trait.workspace = true
 # AGT governance (policy YAML parsing + native policy/trust/audit)
 serde_yaml = "0.9"
 agentmesh.workspace = true
+agentmesh-mcp.workspace = true
 
 # TCP keepalive for tunnel dead-connection detection
 socket2 = "0.6"
