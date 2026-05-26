@@ -7,6 +7,7 @@
 // `securityStates`, and `topologyBox` become an explicit context object.
 
 import type { SandboxInfo, SecurityState } from "../types.js";
+import { platformTag } from "../helpers.js";
 
 interface BlessedBox {
   setContent(content: string): void;
@@ -116,7 +117,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
       return a !== p.name && sandboxes.some((s) => s.name === a) && (t.interactions > 0 || t.lastSeen);
     }).length || 0;
 
-    const rtLabel = p.runtime === "docker" ? "D" : "C";
+    const rtLabel = platformTag(p);
     const pBox = makeBox(p.name, icon, `${rtLabel} ${p.model}  ${mode}`, `${peerCount} peer${peerCount !== 1 ? "s" : ""}  ${meshInfo}  ${p.age}`);
     for (const l of pBox) lines.push(`  ${l}`);
 
@@ -132,7 +133,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
         const childSec = securityStates.get(subs[0].name);
         const ci = statusIcon(subs[0].health);
         const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
-        const cBox = makeBox(subs[0].name, ci, subs[0].model, cMesh);
+        const cBox = makeBox(subs[0].name, ci, `${platformTag(subs[0])} ${subs[0].model}`, cMesh);
         // Center single child under parent
         const childIndent = Math.max(2, parentCenter - Math.floor(BOX_W / 2));
         for (const l of cBox) lines.push(" ".repeat(childIndent) + l);
@@ -177,7 +178,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
           const childSec = securityStates.get(s.name);
           const ci = statusIcon(s.health);
           const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
-          childBoxes.push(makeBox(s.name, ci, s.model, cMesh));
+          childBoxes.push(makeBox(s.name, ci, `${platformTag(s)} ${s.model}`, cMesh));
         }
         for (let row = 0; row < 5; row++) {
           let line = " ".repeat(groupStart);

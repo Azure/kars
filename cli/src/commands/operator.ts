@@ -27,7 +27,7 @@ import type {
   ClusterHealth,
   MeshHealth,
 } from "./operator/types.js";
-import { timeSince, kctl } from "./operator/helpers.js";
+import { timeSince, kctl, platformTag } from "./operator/helpers.js";
 import { fetchSandboxes } from "./operator/fetchers/sandboxes.js";
 import {
   fetchEgressDomains,
@@ -436,16 +436,16 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         rk === "PydanticAi" ? "PydAI" :
         rk === "BYO" ? "BYO" :
         rk;
-      // Compact cluster origin tag so the user can tell which cluster
-      // each row came from in a multi-cluster operator view. Docker
-      // sandboxes show "docker"; AKS-tagged sandboxes show the last
-      // segment of their kube context name (e.g. "azureclaw-aks" or
-      // "azureclaw-dev"). Empty when no context was tagged (single-
-      // cluster operator runs preserved the historical no-column view).
-      const clusterTag =
-        s.runtime === "docker" ? "docker" :
+      // Compact cluster origin: one-letter platform tag (D/K/C) +
+      // short cluster name. Lets the user tell at a glance whether a
+      // row came from Docker, kind, or a real cloud cluster, and
+      // which cluster specifically when more than one is present.
+      const tag = platformTag(s);
+      const clusterName =
+        s.runtime === "docker" ? "" :
         s.kubeContext ? s.kubeContext.replace(/^kind-/, "") :
         "";
+      const clusterTag = clusterName ? `${tag} ${clusterName}` : tag;
       return [hIcon, displayName, statusStr, rkTag, s.model, s.isolation, s.channels, s.age, clusterTag];
     });
     (agentTable as any).setData({
