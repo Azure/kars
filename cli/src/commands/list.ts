@@ -22,7 +22,7 @@ export function listCommand(): Command {
   const cmd = new Command("list");
 
   cmd
-    .description("List all AzureClaw sandboxes (Docker + every reachable kube context)")
+    .description("List all Kars sandboxes (Docker + every reachable kube context)")
     .option("--aks-only", "Only show AKS sandboxes")
     .option("--docker-only", "Only show local Docker sandboxes")
     .option("--context <name>", "Limit kube query to a single context")
@@ -38,7 +38,7 @@ export function listCommand(): Command {
         try {
           const { stdout } = await execa("docker", [
             "ps", "-a",
-            "--filter", "name=azureclaw-",
+            "--filter", "name=kars-",
             "--format",
             "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Label \"io.x-k8s.kind.cluster\"}}\t{{.Label \"io.x-k8s.kind.role\"}}",
           ], { stdio: "pipe" });
@@ -46,10 +46,10 @@ export function listCommand(): Command {
           const rows: { name: string; status: string; image: string }[] = [];
           for (const line of stdout.trim().split("\n").filter(Boolean)) {
             const [name, status, image, kindCluster, kindRole] = line.split("\t");
-            if (!name?.startsWith("azureclaw-")) continue;
-            // Skip kind cluster nodes — they match name=azureclaw- when the
-            // local-k8s cluster is named "azureclaw-*" (default for
-            // `azureclaw dev --target local-k8s`). Detect via the kind
+            if (!name?.startsWith("kars-")) continue;
+            // Skip kind cluster nodes — they match name=kars- when the
+            // local-k8s cluster is named "kars-*" (default for
+            // `kars dev --target local-k8s`). Detect via the kind
             // labels rather than relying on the image name.
             if (kindCluster || kindRole) continue;
             // Skip AGT infrastructure containers
@@ -61,7 +61,7 @@ export function listCommand(): Command {
             console.log(chalk.bold("  Local (Docker)"));
             console.log(chalk.dim("  ─────────────────────────────────────────────────────────────────"));
             for (const r of rows) {
-              const agentName = r.name.replace(/^azureclaw-/, "");
+              const agentName = r.name.replace(/^kars-/, "");
               const isUp = r.status.toLowerCase().startsWith("up");
               const icon = isUp ? chalk.green("●") : chalk.red("●");
               const shortStatus = r.status.replace(/ \(.*\)/, "");
@@ -76,7 +76,7 @@ export function listCommand(): Command {
       // ── Kubernetes sandboxes (all reachable contexts) ──
       // Discover every kubectl context once and query each separately
       // so users see both their local-k8s kind cluster AND their AKS
-      // cluster in a single `azureclaw list`. Previously this section
+      // cluster in a single `kars list`. Previously this section
       // only queried the *current* context, which silently hid one or
       // the other depending on which `kubectl config use-context` was
       // last run.
@@ -103,7 +103,7 @@ export function listCommand(): Command {
         }
 
         if (!found && options.aksOnly) {
-          console.log(chalk.dim("  No AKS / kube sandboxes found (kubectl unreachable or no ClawSandbox CRs)\n"));
+          console.log(chalk.dim("  No AKS / kube sandboxes found (kubectl unreachable or no KarsSandbox CRs)\n"));
         }
       }
 
@@ -123,13 +123,13 @@ export function listCommand(): Command {
  * - Otherwise: every context in kubeconfig that we can reach. A
  *   context is "reachable" if `kubectl --context <name> get ns` returns
  *   within a short timeout. Unreachable contexts are silently skipped
- *   so a stale kubeconfig entry doesn't make `azureclaw list` hang.
+ *   so a stale kubeconfig entry doesn't make `kars list` hang.
  *
  * Returns a friendly label per context: `Local (kind)` for any
  * `kind-*` context, `AKS Cluster` for everything else. This is a
- * heuristic — it covers the documented `azureclaw dev --target
- * local-k8s` (creates `kind-azureclaw-dev`) and `azureclaw up`
- * (configures `azureclaw-aks`).
+ * heuristic — it covers the documented `kars dev --target
+ * local-k8s` (creates `kind-kars-dev`) and `kars up`
+ * (configures `kars-aks`).
  */
 async function discoverKubeContexts(
   execa: typeof import("execa").execa,
@@ -167,13 +167,13 @@ async function discoverKubeContexts(
 }
 
 /**
- * Query ClawSandbox CRs from one kube context, resolving the model
+ * Query KarsSandbox CRs from one kube context, resolving the model
  * via the modern `spec.inferenceRef → InferencePolicy.modelPreference`
  * path (with legacy `spec.inference.model` fallback for pre-S10 CRs).
  *
  * This mirrors the same resolution order used by
  * `cli/src/commands/operator/fetchers/sandboxes.ts:75-82`. Keeping the
- * two in sync means `azureclaw list` and `azureclaw operator` agree
+ * two in sync means `kars list` and `kars operator` agree
  * on which model each sandbox is using.
  */
 async function fetchClusterSandboxes(
@@ -184,7 +184,7 @@ async function fetchClusterSandboxes(
     const [sbRes, ipRes] = await Promise.allSettled([
       execa(
         "kubectl",
-        ["--context", context, "get", "clawsandbox", "-A", "-o", "json", "--request-timeout=5s"],
+        ["--context", context, "get", "karssandbox", "-A", "-o", "json", "--request-timeout=5s"],
         { stdio: "pipe", timeout: 8000 },
       ),
       execa(
@@ -214,7 +214,7 @@ async function fetchClusterSandboxes(
     const out: SandboxRow[] = [];
     for (const sb of (data.items || []) as any[]) {
       const name = sb.metadata?.name || "unknown";
-      const ns = sb.metadata?.namespace || "azureclaw-system";
+      const ns = sb.metadata?.namespace || "kars-system";
       const phase = sb.status?.phase || "Unknown";
       const runtime = sb.spec?.runtime?.kind || "OpenClaw";
       const isolation = sb.spec?.sandbox?.isolation || "enhanced";

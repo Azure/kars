@@ -29,8 +29,8 @@ import { kctl, timeSince } from "../helpers.js";
  *
  * When `kubeContext` is undefined, every kube context in the user's
  * kubeconfig that's reachable within ~5s is queried in parallel. This
- * matches what `azureclaw list` already does and means a developer
- * with both `kind-azureclaw-dev` and `azureclaw-aks` configured sees
+ * matches what `kars list` already does and means a developer
+ * with both `kind-kars-dev` and `kars-aks` configured sees
  * both clusters' sandboxes in a single dashboard, without having to
  * `kubectl config use-context` between them.
  *
@@ -278,19 +278,19 @@ export async function fetchSandboxesDocker(): Promise<SandboxInfo[]> {
   try {
     const { stdout } = await execa("docker", [
       "ps", "-a", "--format",
-      "{{.Names}}|{{.Status}}|{{.Label \"azureclaw.parent\"}}|{{.Label \"azureclaw.spawned-by\"}}|{{.CreatedAt}}|{{.Label \"io.x-k8s.kind.cluster\"}}|{{.Label \"io.x-k8s.kind.role\"}}",
-      "--filter", "name=azureclaw-",
+      "{{.Names}}|{{.Status}}|{{.Label \"kars.parent\"}}|{{.Label \"kars.spawned-by\"}}|{{.CreatedAt}}|{{.Label \"io.x-k8s.kind.cluster\"}}|{{.Label \"io.x-k8s.kind.role\"}}",
+      "--filter", "name=kars-",
     ], { stdio: "pipe" });
 
     const results: SandboxInfo[] = [];
     for (const line of stdout.split("\n").filter(Boolean)) {
       const [containerName, status, parent, , createdAt, kindCluster, kindRole] = line.split("|");
-      if (!containerName?.startsWith("azureclaw-")) continue;
+      if (!containerName?.startsWith("kars-")) continue;
       // Skip kind cluster nodes: `kind` names control-plane / worker
       // containers `<cluster-name>-control-plane`, `<cluster-name>-worker`.
-      // When the kind cluster is named `azureclaw-dev` (default for
-      // `azureclaw dev --target local-k8s`) these containers match our
-      // `name=azureclaw-` filter and get misidentified as sandboxes.
+      // When the kind cluster is named `kars-dev` (default for
+      // `kars dev --target local-k8s`) these containers match our
+      // `name=kars-` filter and get misidentified as sandboxes.
       // Distinguishing label: `io.x-k8s.kind.cluster` is set by kind on
       // every node container; we drop any container that carries it.
       if (kindCluster || kindRole) continue;

@@ -5,15 +5,15 @@ import { Command } from "commander";
 import chalk from "chalk";
 
 /**
- * `azureclaw headlamp` — open the Headlamp Kubernetes dashboard for the
+ * `kars headlamp` — open the Headlamp Kubernetes dashboard for the
  * current kubectl context (AKS, kind, anything kubectl can reach).
  *
- * Mirrors the UX of `azureclaw connect <name>`: best-effort port-forward
+ * Mirrors the UX of `kars connect <name>`: best-effort port-forward
  * + browser open + token print, with a single `--install` escape hatch
  * for clusters that don't have Headlamp installed yet.
  *
- * Headlamp is installed by `azureclaw dev --target local-k8s` out of
- * the box. For AKS / shared clusters, run `azureclaw headlamp --install`
+ * Headlamp is installed by `kars dev --target local-k8s` out of
+ * the box. For AKS / shared clusters, run `kars headlamp --install`
  * once per cluster.
  */
 export function headlampCommand(): Command {
@@ -24,7 +24,7 @@ export function headlampCommand(): Command {
     .option("--context <name>", "Kubernetes context to use (defaults to current-context)")
     .option("--port <port>", "Local port to bind", "4466")
     .option("--namespace <ns>", "Namespace where Headlamp is deployed", "headlamp")
-    .option("--install", "Install Headlamp + AzureClaw plugin into the cluster first", false)
+    .option("--install", "Install Headlamp + Kars plugin into the cluster first", false)
     .option("--no-browser", "Skip opening the browser; just port-forward + print URL")
     .option("--token-duration <dur>", "Token TTL passed to `kubectl create token`", "24h")
     .action(
@@ -78,7 +78,7 @@ export function headlampCommand(): Command {
           );
           console.error("");
           console.error(chalk.bold("  Install it first:"));
-          console.error(`    ${chalk.cyan(`azureclaw headlamp --install --context ${ctx}`)}`);
+          console.error(`    ${chalk.cyan(`kars headlamp --install --context ${ctx}`)}`);
           process.exitCode = 1;
           return;
         }
@@ -129,11 +129,11 @@ export function headlampCommand(): Command {
         await new Promise((r) => setTimeout(r, 1500));
 
         // Best-effort: if the cluster also has kube-prometheus-stack
-        // installed (which `azureclaw dev` ships out of the box), forward
+        // installed (which `kars dev` ships out of the box), forward
         // Prometheus on :19091 and Grafana on :3000 so the Headlamp
-        // AzureClaw plugin's metric panels (Mesh Topology, Token
+        // Kars plugin's metric panels (Mesh Topology, Token
         // Budget, AGT decisions) light up without manual setup. The
-        // plugin reads `window.AZURECLAW_PROMETHEUS_URL` which defaults
+        // plugin reads `window.KARS_PROMETHEUS_URL` which defaults
         // to http://127.0.0.1:19091.
         const promPort = 19091;
         const grafanaPort = 3000;
@@ -226,7 +226,7 @@ export function headlampCommand(): Command {
 
 /**
  * Best-effort: kill any process holding `port` so a fresh port-forward
- * can bind. Reuses the same lsof/kill dance used by `azureclaw dev`.
+ * can bind. Reuses the same lsof/kill dance used by `kars dev`.
  */
 async function freePort(execa: typeof import("execa").execa, port: number): Promise<void> {
   try {
@@ -263,8 +263,8 @@ async function openBrowser(execa: typeof import("execa").execa, url: string): Pr
 }
 
 /**
- * Install Headlamp + the AzureClaw plugin into the active cluster.
- * Pinned to the same Headlamp chart version that `azureclaw dev`
+ * Install Headlamp + the Kars plugin into the active cluster.
+ * Pinned to the same Headlamp chart version that `kars dev`
  * installs locally so the bundled plugin remains compatible.
  *
  * Idempotent — re-running re-applies the manifest. Works on AKS,

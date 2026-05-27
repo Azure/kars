@@ -25,8 +25,8 @@
 import type { Panel, ClusterState, PanelCategory } from "./types.js";
 import { bucketFromConditions } from "./util.js";
 import { platformTag } from "../helpers.js";
-import { clawSandboxPanel } from "./clawsandbox.js";
-import { clawPairingPanel } from "./clawpairing.js";
+import { clawSandboxPanel } from "./karssandbox.js";
+import { clawPairingPanel } from "./karspairing.js";
 import { mcpServerPanel } from "./mcpserver.js";
 import { toolPolicyPanel } from "./toolpolicy.js";
 import { inferencePolicyPanel } from "./inferencepolicy.js";
@@ -225,8 +225,8 @@ function buildRows(state: ClusterState): CrdRow[] {
   for (const s of state.sandboxes) {
     const rk = s.runtimeKind || "OpenClaw";
     // Include cluster origin so multi-cluster aggregated views can
-    // distinguish e.g. an `execbrief` on kind-azureclaw-dev from an
-    // `execbrief` on azureclaw-aks — otherwise the two rows look
+    // distinguish e.g. an `execbrief` on kind-kars-dev from an
+    // `execbrief` on kars-aks — otherwise the two rows look
     // identical except for AGE, which is misleading. Tag format is
     // "<D|K|C> <cluster-name>" — D=Docker, K=Kind, C=Cloud.
     const tag = platformTag(s);
