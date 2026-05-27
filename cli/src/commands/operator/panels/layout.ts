@@ -24,6 +24,7 @@
  */
 import type { Panel, ClusterState, PanelCategory } from "./types.js";
 import { bucketFromConditions } from "./util.js";
+import { platformTag } from "../helpers.js";
 import { clawSandboxPanel } from "./karssandbox.js";
 import { clawPairingPanel } from "./karspairing.js";
 import { mcpServerPanel } from "./mcpserver.js";
@@ -223,7 +224,18 @@ function buildRows(state: ClusterState): CrdRow[] {
   // KarsSandbox — uses SandboxInfo (no conditions; health field is authoritative).
   for (const s of state.sandboxes) {
     const rk = s.runtimeKind || "OpenClaw";
-    const status = `${s.model || "-"}  ·  ${rk}  ·  ${s.isolation || "-"}  ·  ${s.role}`;
+    // Include cluster origin so multi-cluster aggregated views can
+    // distinguish e.g. an `execbrief` on kind-kars-dev from an
+    // `execbrief` on kars-aks — otherwise the two rows look
+    // identical except for AGE, which is misleading. Tag format is
+    // "<D|K|C> <cluster-name>" — D=Docker, K=Kind, C=Cloud.
+    const tag = platformTag(s);
+    const clusterName =
+      s.runtime === "docker" ? "" :
+      s.kubeContext ? s.kubeContext.replace(/^kind-/, "") :
+      "";
+    const clusterTag = clusterName ? `${tag} ${clusterName}` : tag;
+    const status = [s.model || "-", rk, s.isolation || "-", s.role, clusterTag].join("  ·  ");
     rows.push({
       index: next(),
       kind: "KarsSandbox",

@@ -883,10 +883,23 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             "ports": [{"protocol": "TCP", "port": 8443}]
         }),
         // Allow AGT relay/registry egress: inference-router → self-hosted agentmesh services.
-        // Relay (WebSocket, port 8765) and registry (HTTP, port 8080) in the agentmesh namespace.
+        // Relay (WebSocket) and registry (HTTP) in the agentmesh namespace.
+        //
+        // Selector: agentmesh namespace by canonical name. kindnet
+        // (the local-k8s CNI) evaluates NetworkPolicy post-DNAT, so
+        // the destination port the policy sees is the *targetPort*
+        // of the Service (relay→8083, registry→8082), not the
+        // service-side ports (8765 / 8080). We allow both pairs so
+        // the policy is correct on both kindnet (post-DNAT) and CNIs
+        // that evaluate pre-DNAT.
         json!({
-            "to": [{"namespaceSelector": {"matchLabels": {"app.kubernetes.io/managed-by": "kars"}}}],
-            "ports": [{"protocol": "TCP", "port": 8765}, {"protocol": "TCP", "port": 8080}]
+            "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "agentmesh"}}}],
+            "ports": [
+                {"protocol": "TCP", "port": 8765},
+                {"protocol": "TCP", "port": 8080},
+                {"protocol": "TCP", "port": 8083},
+                {"protocol": "TCP", "port": 8082}
+            ]
         }),
     ];
 

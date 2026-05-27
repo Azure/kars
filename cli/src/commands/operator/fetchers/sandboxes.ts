@@ -22,18 +22,80 @@ import type { HealthState, SandboxInfo } from "../types.js";
 import { kctl, timeSince } from "../helpers.js";
 
 /**
- * Unified Docker + AKS sandbox view (concatenated; deduplication is
- * intentionally avoided — same-named sandboxes in both runtimes are a
- * legitimate handoff state, e.g. dormant local + active-successor cloud).
+ * Unified Docker + multi-cluster sandbox view.
+ *
+ * When `kubeContext` is given (legacy `--context <name>` path), only
+ * that one context is queried — preserves the historical behaviour.
+ *
+ * When `kubeContext` is undefined, every kube context in the user's
+ * kubeconfig that's reachable within ~5s is queried in parallel. This
+ * matches what `kars list` already does and means a developer
+ * with both `kind-kars-dev` and `kars-aks` configured sees
+ * both clusters' sandboxes in a single dashboard, without having to
+ * `kubectl config use-context` between them.
+ *
+ * Deduplication is intentionally avoided — same-named sandboxes in
+ * both runtimes are a legitimate handoff state (e.g. dormant local +
+ * active-successor cloud).
  */
 export async function fetchSandboxes(kubeContext?: string): Promise<SandboxInfo[]> {
-  const [dockerResult, aksResult] = await Promise.allSettled([
+  // Decide which kube contexts to query.
+  let contexts: (string | undefined)[];
+  if (kubeContext) {
+    contexts = [kubeContext];
+  } else {
+    contexts = await discoverReachableContexts();
+    // If discovery returned nothing (no kubeconfig / kubectl missing),
+    // fall back to a single undefined → current-context attempt so an
+    // existing kube user without explicit context names still sees
+    // their sandboxes.
+    if (contexts.length === 0) contexts = [undefined];
+  }
+
+  const [dockerResult, ...aksResults] = await Promise.allSettled([
     fetchSandboxesDocker(),
-    fetchSandboxesAKS(kubeContext),
+    ...contexts.map((c) => fetchSandboxesAKS(c)),
   ]);
   const docker = dockerResult.status === "fulfilled" ? dockerResult.value : [];
-  const aks = aksResult.status === "fulfilled" ? aksResult.value : [];
+  const aks = aksResults.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
   return [...docker, ...aks];
+}
+
+/**
+ * List every kube context in the user's kubeconfig that responds to
+ * `kubectl get ns` within ~3 seconds. Probes run in parallel so a
+ * single unreachable AKS doesn't block the local kind cluster.
+ *
+ * Mirrors `cli/src/commands/list.ts:discoverKubeContexts`, but here we
+ * return raw context names (no labels) because the operator UI does
+ * not group by cluster.
+ */
+async function discoverReachableContexts(): Promise<string[]> {
+  let allContexts: string[] = [];
+  try {
+    const { stdout } = await execa("kubectl", ["config", "get-contexts", "-o", "name"], {
+      stdio: "pipe",
+      timeout: 5000,
+    });
+    allContexts = stdout.trim().split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+  const probed = await Promise.all(
+    allContexts.map(async (ctx) => {
+      try {
+        await execa(
+          "kubectl",
+          ["--context", ctx, "get", "ns", "--request-timeout=3s", "--no-headers"],
+          { stdio: "pipe", timeout: 5000 },
+        );
+        return ctx;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return probed.filter((c): c is string => c !== null);
 }
 
 export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxInfo[]> {
@@ -177,6 +239,12 @@ export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxIn
         role, parent: parentLabel, handoffState,
         runtime: "aks",
         runtimeKind: (item.spec?.runtime?.kind as string | undefined) || "OpenClaw",
+        // Tag every kube-sourced sandbox with its origin context so
+        // per-sandbox follow-up fetches (security/egress/agt-quick)
+        // target the same cluster instead of the current kubectl
+        // context. Critical when the operator aggregates multiple
+        // clusters in one view.
+        kubeContext,
       } as SandboxInfo;
     }));
 
@@ -210,14 +278,22 @@ export async function fetchSandboxesDocker(): Promise<SandboxInfo[]> {
   try {
     const { stdout } = await execa("docker", [
       "ps", "-a", "--format",
-      "{{.Names}}|{{.Status}}|{{.Label \"kars.parent\"}}|{{.Label \"kars.spawned-by\"}}|{{.CreatedAt}}",
+      "{{.Names}}|{{.Status}}|{{.Label \"kars.parent\"}}|{{.Label \"kars.spawned-by\"}}|{{.CreatedAt}}|{{.Label \"io.x-k8s.kind.cluster\"}}|{{.Label \"io.x-k8s.kind.role\"}}",
       "--filter", "name=kars-",
     ], { stdio: "pipe" });
 
     const results: SandboxInfo[] = [];
     for (const line of stdout.split("\n").filter(Boolean)) {
-      const [containerName, status, parent, , createdAt] = line.split("|");
+      const [containerName, status, parent, , createdAt, kindCluster, kindRole] = line.split("|");
       if (!containerName?.startsWith("kars-")) continue;
+      // Skip kind cluster nodes: `kind` names control-plane / worker
+      // containers `<cluster-name>-control-plane`, `<cluster-name>-worker`.
+      // When the kind cluster is named `kars-dev` (default for
+      // `kars dev --target local-k8s`) these containers match our
+      // `name=kars-` filter and get misidentified as sandboxes.
+      // Distinguishing label: `io.x-k8s.kind.cluster` is set by kind on
+      // every node container; we drop any container that carries it.
+      if (kindCluster || kindRole) continue;
       // Skip AGT infrastructure containers
       if (containerName.includes("agt-postgres") || containerName.includes("agt-relay") || containerName.includes("agt-registry")) continue;
 

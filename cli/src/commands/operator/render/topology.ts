@@ -7,6 +7,7 @@
 // `securityStates`, and `topologyBox` become an explicit context object.
 
 import type { SandboxInfo, SecurityState } from "../types.js";
+import { platformTag } from "../helpers.js";
 
 interface BlessedBox {
   setContent(content: string): void;
@@ -89,15 +90,34 @@ export function renderTopology(ctx: TopologyRenderContext): void {
     ];
   }
 
+  // Normalize agent_id to short name for peer matching. The router
+  // emits trust_states[].agent_id in DID format ("did:agentmesh:<name>")
+  // while sandbox names in the operator are the short form
+  // ("execbrief", "analyst", ...). Without normalization the
+  // sandboxes.some()/subs.some() lookups never match and the peer
+  // count is always 0. Also filter out the legacy "did:agentmes"
+  // truncation ghost (pre-PR-354 openclaw plugins collapsed every
+  // unresolved peer into that single key; persists until pod restart).
+  function shortAgentName(id: string): string {
+    return id.replace(/^did:agentmesh:/, "");
+  }
+  function isBogusLegacyKey(id: string): boolean {
+    return id === "did:agentmes";
+  }
+
   for (const p of parents) {
     const sec = securityStates.get(p.name);
     const icon = statusIcon(p.health);
     const mode = sec?.egressMode === "enforcing" ? "{green-fg}enforce{/}" :
                  sec?.egressMode === "learning" ? "{yellow-fg}learn{/}" : "";
     const meshInfo = sec ? `↑${sec.agtMeshSent} ↓${sec.agtMeshReceived}` : "";
-    const peerCount = sec?.agtTrustScores.filter((t) => t.agent !== p.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)).length || 0;
+    const peerCount = sec?.agtTrustScores.filter((t) => {
+      if (isBogusLegacyKey(t.agent)) return false;
+      const a = shortAgentName(t.agent);
+      return a !== p.name && sandboxes.some((s) => s.name === a) && (t.interactions > 0 || t.lastSeen);
+    }).length || 0;
 
-    const rtLabel = p.runtime === "docker" ? "D" : "C";
+    const rtLabel = platformTag(p);
     const pBox = makeBox(p.name, icon, `${rtLabel} ${p.model}  ${mode}`, `${peerCount} peer${peerCount !== 1 ? "s" : ""}  ${meshInfo}  ${p.age}`);
     for (const l of pBox) lines.push(`  ${l}`);
 
@@ -113,7 +133,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
         const childSec = securityStates.get(subs[0].name);
         const ci = statusIcon(subs[0].health);
         const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
-        const cBox = makeBox(subs[0].name, ci, subs[0].model, cMesh);
+        const cBox = makeBox(subs[0].name, ci, `${platformTag(subs[0])} ${subs[0].model}`, cMesh);
         // Center single child under parent
         const childIndent = Math.max(2, parentCenter - Math.floor(BOX_W / 2));
         for (const l of cBox) lines.push(" ".repeat(childIndent) + l);
@@ -158,7 +178,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
           const childSec = securityStates.get(s.name);
           const ci = statusIcon(s.health);
           const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
-          childBoxes.push(makeBox(s.name, ci, s.model, cMesh));
+          childBoxes.push(makeBox(s.name, ci, `${platformTag(s)} ${s.model}`, cMesh));
         }
         for (let row = 0; row < 5; row++) {
           let line = " ".repeat(groupStart);
@@ -174,15 +194,18 @@ export function renderTopology(ctx: TopologyRenderContext): void {
       const peerLinks: string[] = [];
       for (const s of subs) {
         const childSec = securityStates.get(s.name);
-        const peers = childSec?.agtTrustScores.filter((t) =>
-          t.agent !== s.name && subs.some((sub) => sub.name === t.agent) && t.interactions > 0
-        ) || [];
+        const peers = childSec?.agtTrustScores.filter((t) => {
+          if (isBogusLegacyKey(t.agent)) return false;
+          const a = shortAgentName(t.agent);
+          return a !== s.name && subs.some((sub) => sub.name === a) && t.interactions > 0;
+        }) || [];
         for (const peer of peers) {
-          const key = [s.name, peer.agent].sort().join(":");
+          const peerShort = shortAgentName(peer.agent);
+          const key = [s.name, peerShort].sort().join(":");
           if (!peerLinks.includes(key)) {
             peerLinks.push(key);
             const c = peer.score >= 600 ? "green" : peer.score >= 400 ? "yellow" : "red";
-            lines.push(`         {${c}-fg}⟷{/} ${s.name} ↔ ${peer.agent} {gray-fg}(${peer.interactions} msg${peer.interactions !== 1 ? "s" : ""}, trust: ${peer.score}){/}`);
+            lines.push(`         {${c}-fg}⟷{/} ${s.name} ↔ ${peerShort} {gray-fg}(${peer.interactions} msg${peer.interactions !== 1 ? "s" : ""}, trust: ${peer.score}){/}`);
           }
         }
       }

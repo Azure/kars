@@ -133,9 +133,20 @@ export function renderAGTFull(
   if (!sec) return `{bold}${sb.name}{/}\n{gray-fg}Polling...{/}`;
   if (!sec.agtEnabled) return "{gray-fg}AGT not enabled{/}\n{gray-fg}Use --governance flag{/}";
 
-  const activePeerCount = sec.agtTrustScores.filter((t: any) =>
-    t.agent !== sb.name && sandboxes.some((s) => s.name === t.agent) && (t.interactions > 0 || t.lastSeen)
-  ).length;
+  // Strip DID prefix when comparing agent_ids to sandbox short names
+  // (router emits did:agentmesh:<name>; sandbox list uses short names).
+  // Also collapse the legacy truncated "did:agentmes" key — pre-PR-354
+  // openclaw plugin builds collapsed every unresolved peer into that
+  // single key, so it pollutes the trust store on already-running pods.
+  // Hide it from the operator view until the router restarts.
+  const shortAgentName = (id: string): string => id.replace(/^did:agentmesh:/, "");
+  const isBogusLegacyKey = (id: string): boolean => id === "did:agentmes";
+
+  const activePeerCount = sec.agtTrustScores.filter((t: any) => {
+    const a = shortAgentName(t.agent);
+    if (isBogusLegacyKey(t.agent) || a === sb.name) return false;
+    return sandboxes.some((s) => s.name === a) && (t.interactions > 0 || t.lastSeen);
+  }).length;
 
   const lines: string[] = [
     `{bold}${sb.name}{/}` + (sec.agtAmid ? ` {gray-fg}${sec.agtAmid}{/}` : ""),
@@ -194,17 +205,22 @@ export function renderAGTFull(
   }
 
   if (sec.agtTrustScores.length > 0) {
-    const self = sec.agtTrustScores.find((t) => t.agent === sb.name);
+    const self = sec.agtTrustScores.find((t) => shortAgentName(t.agent) === sb.name);
     // Show peers that are either known sandboxes OR recently active.
     // Sub-agents are spawned dynamically and may not appear in the
     // sandbox list; cloud-offload parents are identified only by AMID
     // prefix (no CR name) so they also don't match. For AMID-only peers
     // we require BOTH recent lastSeen AND interactions > 0 so stale
     // ghosts (failed KNOCKs, aged-out sessions) stay hidden.
+    // Bogus "did:agentmes" entries (legacy 12-char truncation from
+    // pre-PR-354 openclaw plugin builds) are filtered out — they will
+    // persist in the router's trust store until the pod restarts.
     const recentThreshold = Date.now() - 30 * 60_000;
     const peers = sec.agtTrustScores.filter((t) => {
-      if (t.agent === sb.name) return false;
-      if (sandboxes.some((s) => s.name === t.agent)) return true;
+      if (isBogusLegacyKey(t.agent)) return false;
+      const a = shortAgentName(t.agent);
+      if (a === sb.name) return false;
+      if (sandboxes.some((s) => s.name === a)) return true;
       if (!t.lastSeen || t.interactions <= 0) return false;
       const seen = new Date(/^\d+Z$/.test(t.lastSeen) ? Number(t.lastSeen.slice(0, -1)) * 1000 : t.lastSeen);
       return !isNaN(seen.getTime()) && seen.getTime() > recentThreshold;
@@ -226,7 +242,7 @@ export function renderAGTFull(
             else ago = `${Math.round(ms / 3_600_000)}h ago`;
           }
         }
-        const name = t.agent;
+        const name = shortAgentName(t.agent);
         lines.push(` {${c}-fg}${bar}{/} ${t.score} ${name}`);
         lines.push(`   ${t.tier} · ${t.interactions} msg${t.interactions !== 1 ? "s" : ""}${ago ? ` · ${ago}` : ""}`);
       }
@@ -276,14 +292,21 @@ export function renderAGT(ctx: SecurityRenderContext): void {
   }
 
   const mode = sec.egressMode === "enforcing" ? "{green-fg}enforcing{/}" : "{yellow-fg}learning{/}";
+  // Strip DID prefix and filter out the legacy "did:agentmes" truncation
+  // ghost. Same rationale as in renderSecurity above.
+  const shortAgentName = (id: string): string => id.replace(/^did:agentmesh:/, "");
+  const isBogusLegacyKey = (id: string): boolean => id === "did:agentmes";
+
   // Same filter as the full panel: include known-sandbox peers
   // unconditionally; include AMID-only peers (e.g. cloud-offload parents)
   // only if they have real traffic + recent activity, to avoid showing
   // stale ghosts from failed KNOCKs or aged-out sessions.
   const recentThreshold = Date.now() - 30 * 60_000;
   const peers = sec.agtTrustScores.filter((t) => {
-    if (t.agent === sb.name) return false;
-    if (sandboxes.some((s) => s.name === t.agent)) return t.interactions > 0 || !!t.lastSeen;
+    if (isBogusLegacyKey(t.agent)) return false;
+    const a = shortAgentName(t.agent);
+    if (a === sb.name) return false;
+    if (sandboxes.some((s) => s.name === a)) return t.interactions > 0 || !!t.lastSeen;
     if (!t.lastSeen || t.interactions <= 0) return false;
     const seen = new Date(/^\d+Z$/.test(t.lastSeen) ? Number(t.lastSeen.slice(0, -1)) * 1000 : t.lastSeen);
     return !isNaN(seen.getTime()) && seen.getTime() > recentThreshold;
@@ -299,7 +322,7 @@ export function renderAGT(ctx: SecurityRenderContext): void {
     const c = t.score >= 600 ? "green" : t.score >= 400 ? "yellow" : "red";
     const filled = Math.round(t.score / 100);
     const bar = "█".repeat(filled) + "░".repeat(4 - Math.min(filled, 4));
-    lines.push(` {${c}-fg}${bar}{/} ${t.score} ${t.agent}`);
+    lines.push(` {${c}-fg}${bar}{/} ${t.score} ${shortAgentName(t.agent)}`);
   }
 
   if (peers.length === 0) {

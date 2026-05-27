@@ -75,8 +75,16 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Events
+  # Events — Kubernetes ships two Event APIs: the legacy core v1
+  # Events ("" apiGroup) and the modern events.k8s.io/v1 Events.
+  # The controller writes to events.k8s.io (the kube-rs Recorder
+  # defaults to it on newer Kubernetes versions), so both groups
+  # need the create/patch verb or the recorder log-spams
+  # `events.events.k8s.io is forbidden` warnings on every reconcile.
   - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
   # Manage spawner role bindings for sandbox sub-agent creation

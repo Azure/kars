@@ -76,3 +76,60 @@ export function sumPrometheusCounter(
   }
   return total;
 }
+
+/**
+ * Compact one-letter platform tag for a sandbox row.
+ *
+ * The TUI needs to fit the host type into a tiny column or a topology
+ * subtitle. The three values cover all the deployment surfaces the
+ * controller supports today:
+ *
+ *   D — Docker (local docker-engine sandbox; `runtime === "docker"`)
+ *   K — Kind  (local Kubernetes via kind; `runtime === "aks"` but
+ *              `kubeContext` starts with `kind-`)
+ *   C — Cloud (real AKS / any other kubernetes context;
+ *              `runtime === "aks"` and not kind)
+ *
+ * `runtime: "aks"` is a legacy field name from before kind support
+ * landed — it now means "any kubernetes context", not specifically
+ * Azure Kubernetes Service. The `kubeContext` tag added in the
+ * multi-cluster refactor is what distinguishes kind from real AKS.
+ */
+export function platformTag(s: {
+  runtime: "docker" | "aks";
+  kubeContext?: string;
+}): "D" | "K" | "C" {
+  if (s.runtime === "docker") return "D";
+  if (s.kubeContext && s.kubeContext.startsWith("kind-")) return "K";
+  return "C";
+}
+
+/**
+ * Full word for the platform — used where space allows (e.g. tooltips,
+ * status lines). Same mapping as `platformTag` above.
+ */
+export function platformLabel(s: {
+  runtime: "docker" | "aks";
+  kubeContext?: string;
+}): "docker" | "kind" | "cloud" {
+  if (s.runtime === "docker") return "docker";
+  if (s.kubeContext && s.kubeContext.startsWith("kind-")) return "kind";
+  return "cloud";
+}
+
+/**
+ * Compact "<tag> <cluster-name>" used in the agent-table Cluster column
+ * and the CRD snapshot status line. Docker sandboxes show just "D"
+ * (no cluster name). Kube sandboxes show "K kars-dev" or
+ * "C kars-aks" — the kubeContext with the `kind-` prefix stripped.
+ */
+export function clusterOriginTag(s: {
+  runtime: "docker" | "aks";
+  kubeContext?: string;
+}): string {
+  const tag = platformTag(s);
+  const clusterName = s.runtime === "docker"
+    ? ""
+    : s.kubeContext?.replace(/^kind-/, "") ?? "";
+  return clusterName ? `${tag} ${clusterName}` : tag;
+}
