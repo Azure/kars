@@ -5,7 +5,7 @@
 **A secure runtime for AI agents on Azure. Short name: `kars`.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](LICENSE)
-[![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg)](https://github.com/Azure/kars/actions/workflows/ci.yml)
+[![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Azure/kars/actions/workflows/ci.yml)
 [![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry-0078D4)](https://azure.microsoft.com)
 
 Hardened sandbox per agent. Zero credentials in the agent. Every external call goes through a Rust router that enforces identity, content safety, governance, and audit. End-to-end encrypted inter-agent messaging. One CLI for the whole loop — laptop to AKS.
