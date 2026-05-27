@@ -280,20 +280,40 @@ workaround is:
    `de8bc8b5-...` which is typically not subject to the same CA
    token-binding policy as the Azure CLI).
 3. Convert the existing untyped App to a typed `AgentIdentityBlueprint`
-   in place:
+   in place. **Include `sponsors` and `owners`** — empirically the
+   Entra Agents portal filter requires both before the blueprint
+   becomes visible under the Agents page (a minimal `@odata.type`-only
+   PATCH does the type upgrade but the entry stays hidden):
 
    ```http
    PATCH https://graph.microsoft.com/beta/applications/<blueprintObjectId>
    Content-Type: application/json
-   OData-Version: 4.0
 
    {
-     "@odata.type": "Microsoft.Graph.AgentIdentityBlueprint"
+     "@odata.type": "Microsoft.Graph.AgentIdentityBlueprint",
+     "sponsors@odata.bind": [
+       "https://graph.microsoft.com/v1.0/users/<YOUR_USER_OID>"
+     ],
+     "owners@odata.bind": [
+       "https://graph.microsoft.com/v1.0/users/<YOUR_USER_OID>"
+     ]
    }
    ```
 
-   (`blueprintObjectId` is the value from `kubectl get karsauthconfig
-   default -o jsonpath='{.spec.agentId.blueprintObjectId}'`.)
+   - `blueprintObjectId` is the value from
+     `kubectl get karsauthconfig default -o jsonpath='{.spec.agentId.blueprintObjectId}'`
+   - `<YOUR_USER_OID>` is your Entra user objectId — find it at
+     Entra admin center → Users → (your account) → Object ID
+   - Note the `@odata.type` value has **no `#` prefix** in the request
+     body; Graph returns it with the `#` and lowercase `microsoft.graph.`
+     prefix on subsequent GETs (both forms are accepted on input)
+   - The `@odata.bind` URLs must use **`/v1.0/users/`** specifically
+     even though the parent PATCH is to `/beta/applications/` — Graph
+     rejects `/beta/users/` as a bind target
+
+   The `kars mesh setup-trust --mode bicep` driver prints this exact
+   body (with your OID auto-filled when discoverable) at the end of
+   the Bicep flow — copy-paste it directly from the CLI output.
 
    If Graph rejects the in-place PATCH, delete + recreate with the
    typed body — the kars controller will pick up the new `appId`

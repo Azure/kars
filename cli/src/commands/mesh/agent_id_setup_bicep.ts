@@ -273,6 +273,7 @@ export async function ensureAgentIdTrustViaBicep(
     });
     console.log();
     console.log(chalk.green("  ✓ KarsAuthConfig/default written"));
+    await printPortalVisibilityHint(result.blueprintObjectId);
   } catch (e) {
     // The kubectl apply is the LAST step and a soft failure here
     // should NOT mask the successful Bicep deployment that already
@@ -300,6 +301,7 @@ export async function ensureAgentIdTrustViaBicep(
       console.log(chalk.dim("    Bicep outputs (apply manually if you prefer):"));
       console.log(chalk.dim(`      blueprint:    ${result.blueprintClientId}`));
       console.log(chalk.dim(`      controller MI: ${result.controllerMiClientId}`));
+      await printPortalVisibilityHint(result.blueprintObjectId);
       // Return the result so callers know the Bicep half succeeded.
       return result;
     }
@@ -310,4 +312,116 @@ export async function ensureAgentIdTrustViaBicep(
   }
 
   return result;
+}
+
+/// Print a ready-to-paste Graph Explorer PATCH body that upgrades the
+/// untyped blueprint App to the typed `agentIdentityBlueprint` form.
+///
+/// Why this exists: the Bicep `Microsoft.Graph` extension does not
+/// (as of writing) support the `@odata.type` discriminator needed to
+/// create a typed `agentIdentityBlueprint`. Bicep produces a regular
+/// `Application` tagged `EntraAgentId` — fully functional for the
+/// runtime, but **not visible** under
+/// Entra portal → Identity → Agents → Agent identity blueprints.
+///
+/// Empirically the portal filter requires three things on top of the
+/// `@odata.type` upgrade: `sponsors`, `owners`, and (when present)
+/// the `serviceManagementReference`. Including `sponsors`+`owners`
+/// in the PATCH is what makes the blueprint show up in the Agents
+/// page — a minimal `@odata.type`-only PATCH does the type upgrade
+/// but the entry stays hidden.
+///
+/// We can't run the PATCH on the user's behalf because the CA policy
+/// (AADSTS530084) that pushed us to Bicep in the first place also
+/// blocks `az rest` to Graph. The next-best thing is to print a
+/// fully-populated body the user can paste into Graph Explorer, which
+/// uses a different first-party app (`de8bc8b5-...`) and bypasses
+/// the CA token-binding policy.
+///
+/// User OID discovery: try `az ad signed-in-user show` first (works
+/// in tenants where ARM-scope Graph is allowed but data-plane Graph
+/// is blocked — rare but exists). On failure leave a clear
+/// `<YOUR_USER_OID>` placeholder with a one-line hint on how to find it.
+async function printPortalVisibilityHint(blueprintObjectId: string): Promise<void> {
+  const userOid = await tryGetSignedInUserOid();
+  const oid = userOid ?? "<YOUR_USER_OID>";
+  const body = JSON.stringify(
+    {
+      "@odata.type": "Microsoft.Graph.AgentIdentityBlueprint",
+      "sponsors@odata.bind": [`https://graph.microsoft.com/v1.0/users/${oid}`],
+      "owners@odata.bind": [`https://graph.microsoft.com/v1.0/users/${oid}`],
+    },
+    null,
+    2,
+  );
+  console.log();
+  console.log(
+    chalk.dim(
+      "  ── Make blueprint visible under Entra → Agents (optional) ──",
+    ),
+  );
+  console.log(
+    chalk.dim(
+      "  Bicep's Microsoft.Graph extension cannot set @odata.type, so the",
+    ),
+  );
+  console.log(
+    chalk.dim(
+      "  blueprint works but is not listed in the Agents portal page.",
+    ),
+  );
+  console.log(
+    chalk.dim(
+      "  To make it visible, paste this PATCH into Graph Explorer:",
+    ),
+  );
+  console.log(chalk.cyan("    https://developer.microsoft.com/en-us/graph/graph-explorer"));
+  console.log();
+  console.log(
+    chalk.cyan(
+      `    PATCH https://graph.microsoft.com/beta/applications/${blueprintObjectId}`,
+    ),
+  );
+  console.log(chalk.cyan("    Content-Type: application/json"));
+  console.log();
+  for (const line of body.split("\n")) {
+    console.log(chalk.cyan(`    ${line}`));
+  }
+  if (!userOid) {
+    console.log();
+    console.log(
+      chalk.dim(
+        "  Replace <YOUR_USER_OID> with your Entra user objectId — find it at",
+      ),
+    );
+    console.log(
+      chalk.dim(
+        "  Entra admin center → Users → (your account) → Object ID.",
+      ),
+    );
+  }
+  console.log();
+}
+
+/// Best-effort: try to read the signed-in user's Entra objectId via
+/// `az ad signed-in-user show`. This usually hits the same CA block
+/// as direct Graph calls (returns AADSTS530084) — we return null
+/// silently in that case so the caller falls back to a placeholder.
+async function tryGetSignedInUserOid(): Promise<string | null> {
+  try {
+    const res = await execa(
+      "az",
+      ["ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"],
+      { stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
+    );
+    const oid = res.stdout.trim();
+    // Quick GUID sanity check — az returns the error string on stdout
+    // in some configurations rather than failing the process.
+    if (/^[0-9a-f-]{36}$/i.test(oid)) {
+      return oid;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
