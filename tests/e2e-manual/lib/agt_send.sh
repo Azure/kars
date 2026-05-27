@@ -12,7 +12,7 @@
 #
 # These helpers are exec-based, so the caller MUST `enable_break_glass`
 # on the pod's namespace first (the openclaw container is normally
-# blocked by ValidatingAdmissionPolicy `azureclaw-sandbox-exec-ban`).
+# blocked by ValidatingAdmissionPolicy `kars-sandbox-exec-ban`).
 #
 # Path B (raw relay WebSocket framing) would require a JS test harness
 # to perform a real Signal-Protocol handshake — deferred to Tier C.

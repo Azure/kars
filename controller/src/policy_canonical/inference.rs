@@ -48,8 +48,7 @@ use std::time::{Instant, SystemTime};
 /// `artifactType` MUST match this exactly; consumers reject any other
 /// value (forward-compat: v2 bumps the suffix; v1 consumers MUST refuse
 /// v2 artifacts).
-pub const INFERENCE_POLICY_V1_MEDIA_TYPE: &str =
-    "application/vnd.azureclaw.inference-policy.v1+json";
+pub const INFERENCE_POLICY_V1_MEDIA_TYPE: &str = "application/vnd.kars.inference-policy.v1+json";
 
 /// Recognised top-level keys in an inference-policy bundle. The
 /// selector (`appliesTo`) is intentionally NOT one of them: selector
@@ -92,7 +91,7 @@ pub struct InferenceKind;
 
 impl PolicyKind for InferenceKind {
     const MEDIA_TYPE: &'static str = INFERENCE_POLICY_V1_MEDIA_TYPE;
-    const API_VERSION: &'static str = "azureclaw.azure.com/v1alpha1";
+    const API_VERSION: &'static str = "kars.azure.com/v1alpha1";
     const KIND: &'static str = "InferencePolicy";
     type Output = VerifiedInferencePolicy;
 

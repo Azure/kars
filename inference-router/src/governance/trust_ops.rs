@@ -7,7 +7,7 @@
 //! decomposition. These methods all delegate to AGT's
 //! `TrustManager` (shipped in the `agentmesh` crate) for the
 //! authoritative trust-score store; the logic here is the
-//! AzureClaw-side wrapping (clamping rules, audit-event emission,
+//! Kars-side wrapping (clamping rules, audit-event emission,
 //! metrics counters, response-shape JSON).
 //!
 //! Pure refactor — function bodies are byte-identical to the

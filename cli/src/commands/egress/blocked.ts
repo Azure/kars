@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `azureclaw egress blocked <sandbox> [--since 10m] [--top] [--watch]`
+//! `kars egress blocked <sandbox> [--since 10m] [--top] [--watch]`
 //! — surface the router's `/internal/egress/blocked` view of every
 //! egress attempt that was denied by the enforcement layer.
 //!
 //! Slice 5a in
 //! `docs/internal/crd-well-oiled-machine/slice-5-egress-polish-and-observability.md`.
-//! Mirrors the in-pod curl approach used by `azureclaw inspect` so we
+//! Mirrors the in-pod curl approach used by `kars inspect` so we
 //! avoid `kubectl port-forward` port-collision footguns.
 
 import { Command } from "commander";
@@ -63,10 +63,10 @@ export function blockedCommand(): Command {
     .description(
       "Show egress attempts the router's enforcement layer denied (Slice 5a)"
     )
-    .argument("<sandbox>", "Sandbox name (the `metadata.name` of the ClawSandbox)")
+    .argument("<sandbox>", "Sandbox name (the `metadata.name` of the KarsSandbox)")
     .option(
       "-n, --namespace <ns>",
-      "Sandbox pod namespace (default: 'azureclaw-<sandbox>')"
+      "Sandbox pod namespace (default: 'kars-<sandbox>')"
     )
     .option(
       "--since <duration>",
@@ -101,12 +101,12 @@ export function blockedCommand(): Command {
 }
 
 async function runBlocked(sandbox: string, opts: BlockedOptions): Promise<void> {
-  const ns = opts.namespace ?? `azureclaw-${sandbox}`;
+  const ns = opts.namespace ?? `kars-${sandbox}`;
   const token = await readAdminToken(sandbox, ns);
   if (!token) {
     throw new Error(
       `Could not read admin token from secret 'router-admin-token' in '${ns}'.\n` +
-        `  The sandbox may not be fully provisioned yet. Try 'azureclaw status ${sandbox}'.`
+        `  The sandbox may not be fully provisioned yet. Try 'kars status ${sandbox}'.`
     );
   }
 
@@ -208,7 +208,7 @@ async function readAdminToken(
           container,
           "--",
           "cat",
-          "/etc/azureclaw/secrets/admin-token",
+          "/etc/kars/secrets/admin-token",
         ],
         { stdio: "pipe", reject: false }
       );
@@ -228,9 +228,9 @@ async function fetchInternal(
   path: string
 ): Promise<string> {
   const script =
-    "read -r AZURECLAW_ADMIN_TOKEN <&0 && " +
+    "read -r KARS_ADMIN_TOKEN <&0 && " +
     "curl --silent --show-error --fail --max-time 10 " +
-    '-H "Authorization: Bearer $AZURECLAW_ADMIN_TOKEN" ' +
+    '-H "Authorization: Bearer $KARS_ADMIN_TOKEN" ' +
     `http://127.0.0.1:8443${path}`;
 
   const result = await execa(

@@ -13,7 +13,7 @@
 #
 # Tails:
 #   K8S-EVT  kubectl get events -A --watch        (CRD lifecycle)
-#   CTRL     azureclaw-controller logs            (reconcile decisions)
+#   CTRL     kars-controller logs            (reconcile decisions)
 #   ROUTER   inference-router logs                (provider + AGT calls)
 #   RELAY    agentmesh-relay logs                 (E2E message flow)
 #   REGISTRY agentmesh-registry logs              (peer discovery)
@@ -69,10 +69,10 @@ trap cleanup EXIT INT TERM
 
 emit "MONITOR" "${C_OFF}" "starting — sandbox=${SANDBOX_NAME} out=${OUT_DIR}"
 
-# 1. CRD events across all azureclaw namespaces.
+# 1. CRD events across all kars namespaces.
 {
     kubectl get events -A --watch \
-        --field-selector 'involvedObject.kind in (ClawSandbox,InferencePolicy,ToolPolicy,ClawMemory,McpServer)' \
+        --field-selector 'involvedObject.kind in (KarsSandbox,InferencePolicy,ToolPolicy,KarsMemory,McpServer)' \
         2>/dev/null \
         | while IFS= read -r line; do emit "K8S-EVT" "${C_EVT}" "${line}"; done
 } &
@@ -80,7 +80,7 @@ PIDS+=($!)
 
 # 2. Controller logs.
 {
-    kubectl logs -n azureclaw-system deploy/azureclaw-controller -f --tail=5 2>/dev/null \
+    kubectl logs -n kars-system deploy/kars-controller -f --tail=5 2>/dev/null \
         | while IFS= read -r line; do emit "CTRL" "${C_CTRL}" "${line}"; done
 } &
 PIDS+=($!)
@@ -88,10 +88,10 @@ PIDS+=($!)
 # 3. Router logs (per-sandbox container).
 {
     # the deployment doesn't exist until reconcile finishes; retry-wait
-    until kubectl get deploy -n "azureclaw-${SANDBOX_NAME}" "${SANDBOX_NAME}" >/dev/null 2>&1; do
+    until kubectl get deploy -n "kars-${SANDBOX_NAME}" "${SANDBOX_NAME}" >/dev/null 2>&1; do
         sleep 3
     done
-    kubectl logs -n "azureclaw-${SANDBOX_NAME}" "deploy/${SANDBOX_NAME}" \
+    kubectl logs -n "kars-${SANDBOX_NAME}" "deploy/${SANDBOX_NAME}" \
         -c inference-router -f --tail=5 2>/dev/null \
         | while IFS= read -r line; do emit "ROUTER" "${C_ROUTER}" "${line}"; done
 } &
@@ -113,17 +113,17 @@ PIDS+=($!)
 
 # 6. Sandbox pod openclaw container.
 {
-    until kubectl get deploy -n "azureclaw-${SANDBOX_NAME}" "${SANDBOX_NAME}" >/dev/null 2>&1; do
+    until kubectl get deploy -n "kars-${SANDBOX_NAME}" "${SANDBOX_NAME}" >/dev/null 2>&1; do
         sleep 3
     done
-    kubectl logs -n "azureclaw-${SANDBOX_NAME}" "deploy/${SANDBOX_NAME}" \
+    kubectl logs -n "kars-${SANDBOX_NAME}" "deploy/${SANDBOX_NAME}" \
         -c openclaw -f --tail=5 2>/dev/null \
         | while IFS= read -r line; do emit "POD" "${C_POD}" "${line}"; done
 } &
 PIDS+=($!)
 
 # 7. Sub-agent openclaw containers — dynamic discovery. Each sub-agent sandbox
-# lands in its own azureclaw-<name> namespace. Tail each one's openclaw
+# lands in its own kars-<name> namespace. Tail each one's openclaw
 # container with a source tag of POD-<name> so verify.py can attribute
 # 'AGT relay: sent to X' lines to a specific sender.
 SUBAGENT_NAMES=("analyst" "viz" "writer")
@@ -131,11 +131,11 @@ for sub in "${SUBAGENT_NAMES[@]}"; do
     (
         # Wait up to 10 minutes for the sub-agent deployment to appear.
         deadline=$(( $(date +%s) + 600 ))
-        until kubectl get deploy -n "azureclaw-${sub}" "${sub}" >/dev/null 2>&1; do
+        until kubectl get deploy -n "kars-${sub}" "${sub}" >/dev/null 2>&1; do
             [ "$(date +%s)" -gt "${deadline}" ] && exit 0
             sleep 5
         done
-        kubectl logs -n "azureclaw-${sub}" "deploy/${sub}" \
+        kubectl logs -n "kars-${sub}" "deploy/${sub}" \
             -c openclaw -f --tail=5 2>/dev/null \
             | while IFS= read -r line; do emit "POD-${sub}" "${C_POD}" "${line}"; done
     ) &
@@ -146,11 +146,11 @@ for sub in "${SUBAGENT_NAMES[@]}"; do
         # shows up in trace.jsonl for verify.py. Without this, sub-agent
         # foundry calls are invisible and check_hero / check_chart misfire.
         deadline=$(( $(date +%s) + 600 ))
-        until kubectl get deploy -n "azureclaw-${sub}" "${sub}" >/dev/null 2>&1; do
+        until kubectl get deploy -n "kars-${sub}" "${sub}" >/dev/null 2>&1; do
             [ "$(date +%s)" -gt "${deadline}" ] && exit 0
             sleep 5
         done
-        kubectl logs -n "azureclaw-${sub}" "deploy/${sub}" \
+        kubectl logs -n "kars-${sub}" "deploy/${sub}" \
             -c inference-router -f --tail=5 2>/dev/null \
             | while IFS= read -r line; do emit "ROUTER" "${C_ROUTER}" "${line}"; done
     ) &

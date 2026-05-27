@@ -27,16 +27,16 @@ interface ImageDef {
 function buildImageList(acrLoginServer: string): ImageDef[] {
   const now = 1700000000000; // fixed timestamp for tests
   return [
-    { name: "controller", tag: "azureclaw-controller:latest", dockerfile: "controller/Dockerfile" },
+    { name: "controller", tag: "kars-controller:latest", dockerfile: "controller/Dockerfile" },
     {
       name: "router",
-      tag: "azureclaw-inference-router:latest",
+      tag: "kars-inference-router:latest",
       dockerfile: "inference-router/Dockerfile",
       buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${now}`],
     },
     {
       name: "sandbox-base",
-      tag: "azureclaw-sandbox-base:latest",
+      tag: "kars-sandbox-base:latest",
       dockerfile: "sandbox-images/openclaw/Dockerfile.base",
       buildArgs: [
         "--build-arg",
@@ -49,9 +49,9 @@ function buildImageList(acrLoginServer: string): ImageDef[] {
       dockerfile: "sandbox-images/openclaw/Dockerfile",
       buildArgs: [
         "--build-arg",
-        `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
+        `SANDBOX_BASE_IMAGE=${acrLoginServer}/kars-sandbox-base:latest`,
         "--build-arg",
-        `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`,
+        `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/kars-inference-router:latest`,
       ],
     },
   ];
@@ -84,9 +84,9 @@ function buildDockerArgs(img: ImageDef, acrLoginServer: string, repoRoot: string
 
 /** Deployment map for --apply restart logic */
 const deploymentMap: Record<string, string> = {
-  controller: "azureclaw-controller",
-  router: "azureclaw-controller",
-  sandbox: "azureclaw-controller",
+  controller: "kars-controller",
+  router: "kars-controller",
+  sandbox: "kars-controller",
 };
 
 // --- Tests ---
@@ -134,13 +134,13 @@ describe("image list", () => {
       a.includes("INFERENCE_ROUTER_IMAGE="),
     );
     expect(routerArg).toBe(
-      "INFERENCE_ROUTER_IMAGE=myacr.azurecr.io/azureclaw-inference-router:latest",
+      "INFERENCE_ROUTER_IMAGE=myacr.azurecr.io/kars-inference-router:latest",
     );
     const baseArg = sandbox.buildArgs!.find((a) =>
       a.includes("SANDBOX_BASE_IMAGE="),
     );
     expect(baseArg).toBe(
-      "SANDBOX_BASE_IMAGE=myacr.azurecr.io/azureclaw-sandbox-base:latest",
+      "SANDBOX_BASE_IMAGE=myacr.azurecr.io/kars-sandbox-base:latest",
     );
   });
 
@@ -176,19 +176,19 @@ describe("--only flag filtering", () => {
   it("filters router correctly", () => {
     const result = filterImages(images, "router");
     expect(result).toHaveLength(1);
-    expect(result[0].tag).toBe("azureclaw-inference-router:latest");
+    expect(result[0].tag).toBe("kars-inference-router:latest");
   });
 
 });
 
 describe("docker build command construction", () => {
   const acrLoginServer = "myacr.azurecr.io";
-  const repoRoot = "/home/user/azureclaw";
+  const repoRoot = "/home/user/kars";
 
   it("builds correct args for controller (no buildArgs, no context)", () => {
     const img: ImageDef = {
       name: "controller",
-      tag: "azureclaw-controller:latest",
+      tag: "kars-controller:latest",
       dockerfile: "controller/Dockerfile",
     };
     const args = buildDockerArgs(img, acrLoginServer, repoRoot);
@@ -198,7 +198,7 @@ describe("docker build command construction", () => {
     expect(args).toContain("-f");
     expect(args).toContain(path.join(repoRoot, "controller/Dockerfile"));
     expect(args).toContain("-t");
-    expect(args).toContain("myacr.azurecr.io/azureclaw-controller:latest");
+    expect(args).toContain("myacr.azurecr.io/kars-controller:latest");
     // Last arg is the build context (repoRoot since no custom context)
     expect(args[args.length - 1]).toBe(repoRoot);
   });
@@ -206,7 +206,7 @@ describe("docker build command construction", () => {
   it("includes buildArgs for router", () => {
     const img: ImageDef = {
       name: "router",
-      tag: "azureclaw-inference-router:latest",
+      tag: "kars-inference-router:latest",
       dockerfile: "inference-router/Dockerfile",
       buildArgs: ["--build-arg", "ROUTER_CACHE_BUST=123"],
     };
@@ -230,7 +230,7 @@ describe("docker build command construction", () => {
   it("always includes --provenance=false and --sbom=false", () => {
     const img: ImageDef = {
       name: "controller",
-      tag: "azureclaw-controller:latest",
+      tag: "kars-controller:latest",
       dockerfile: "controller/Dockerfile",
     };
     const args = buildDockerArgs(img, acrLoginServer, repoRoot);
@@ -241,24 +241,24 @@ describe("docker build command construction", () => {
   it("generates full ACR tag with login server prefix", () => {
     const img: ImageDef = {
       name: "controller",
-      tag: "azureclaw-controller:latest",
+      tag: "kars-controller:latest",
       dockerfile: "controller/Dockerfile",
     };
     const args = buildDockerArgs(img, acrLoginServer, repoRoot);
-    expect(args).toContain("myacr.azurecr.io/azureclaw-controller:latest");
+    expect(args).toContain("myacr.azurecr.io/kars-controller:latest");
   });
 });
 
 describe("--apply restart logic", () => {
-  it("maps controller to azureclaw-controller deployment", () => {
-    expect(deploymentMap.controller).toBe("azureclaw-controller");
+  it("maps controller to kars-controller deployment", () => {
+    expect(deploymentMap.controller).toBe("kars-controller");
   });
 
-  it("maps router to azureclaw-controller (router in sandbox pods)", () => {
-    expect(deploymentMap.router).toBe("azureclaw-controller");
+  it("maps router to kars-controller (router in sandbox pods)", () => {
+    expect(deploymentMap.router).toBe("kars-controller");
   });
 
-  it("maps sandbox to azureclaw-controller (controller manages sandbox pods)", () => {
-    expect(deploymentMap.sandbox).toBe("azureclaw-controller");
+  it("maps sandbox to kars-controller (controller manages sandbox pods)", () => {
+    expect(deploymentMap.sandbox).toBe("kars-controller");
   });
 });

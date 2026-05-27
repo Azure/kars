@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `azureclaw-a2a-gateway` — public-ingress A2A edge.
+//! `kars-a2a-gateway` — public-ingress A2A edge.
 //!
 //! ## Position in the call graph (ADR-0001 #4)
 //!
@@ -10,7 +10,7 @@
 //!                                       │
 //!                                       ▼
 //!                          ┌────────────────────────┐
-//!                          │   azureclaw-a2a-gateway │
+//!                          │   kars-a2a-gateway │
 //!                          │   • TLS termination     │
 //!                          │   • subject extraction  │
 //!                          │   • replay cache        │
@@ -31,7 +31,7 @@
 //!
 //! ## `[GAP-V1]` JWS verifier wiring
 //!
-//! The standalone JWS path (`azureclaw_a2a_core::verify_inbound_card`)
+//! The standalone JWS path (`kars_a2a_core::verify_inbound_card`)
 //! is **complete and tested** as a library function — every router
 //! that needs it can call it directly. The gateway *binary*, however,
 //! does **not** yet run that verifier in its proxy hot path; it
@@ -41,7 +41,7 @@
 //!
 //! Wiring `verify_inbound_card` directly into the gateway as an
 //! opt-in axum layer is tracked as a v1.1 follow-up; the placeholder
-//! is the unused `azureclaw-a2a-core` workspace dependency declared
+//! is the unused `kars-a2a-core` workspace dependency declared
 //! in `Cargo.toml`. The `[GAP-V1]` marker is mirrored in
 //! `docs/architecture/a2a-gateway.md`.
 //!
@@ -51,7 +51,7 @@
 //! - drop privs to UID 1002 after binding 8443.
 //! - read-only root filesystem (Helm `securityContext`).
 //! - distroless static base image (musl).
-//! - seccomp `azureclaw-strict.json` (existing profile in
+//! - seccomp `kars-strict.json` (existing profile in
 //!   `policy-engine/profiles/seccomp/`).
 //!
 //! Each item is enforced in a different layer (binary, container,

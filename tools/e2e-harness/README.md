@@ -1,6 +1,6 @@
-# AzureClaw e2e-harness
+# Kars e2e-harness
 
-A scenario- and platform-pluggable end-to-end test harness for AzureClaw.
+A scenario- and platform-pluggable end-to-end test harness for Kars.
 
 This was previously the `tools/exec-brief-e2e/` directory; it has been
 refactored so the orchestration logic is independent of any one
@@ -21,9 +21,9 @@ tools/e2e-harness/
 │   ├── aks.sh               # AKS / any K8s cluster you're already
 │   │                        #   kubectl-logged into. Reference impl.
 │   ├── local-k8s.sh         # Sources aks.sh; brings up a kind cluster
-│   │                        #   via `azureclaw dev --target local-k8s`.
+│   │                        #   via `kars dev --target local-k8s`.
 │   └── docker.sh            # Single-host docker target via
-│                            #   `azureclaw dev --target docker`. No
+│                            #   `kars dev --target docker`. No
 │                            #   CRDs / no K8s API.
 └── scenarios/
     └── exec-brief/
@@ -59,9 +59,9 @@ out/2025-…/
 
 | Platform   | Bring-up                                  | Status |
 |------------|-------------------------------------------|--------|
-| `aks`      | Assumes `kubectl` context is set to a cluster where `azureclaw up` has succeeded. | Validated against AKS (the original 9/9 PASS run). |
-| `local-k8s`| Invokes `azureclaw dev --target local-k8s --once`; creates a kind cluster + installs the chart if missing. | Scaffolded; not end-to-end-validated yet. **kindnetd does not enforce NetworkPolicy** — enable Cilium toggle for NP parity. |
-| `docker`   | Invokes `azureclaw dev --target docker --once`. No CRDs, no K8s API, no NetworkPolicy. | Scaffolded; not end-to-end-validated yet. Scenarios needing CRDs must ship a `manifests-docker/` overlay. |
+| `aks`      | Assumes `kubectl` context is set to a cluster where `kars up` has succeeded. | Validated against AKS (the original 9/9 PASS run). |
+| `local-k8s`| Invokes `kars dev --target local-k8s --once`; creates a kind cluster + installs the chart if missing. | Scaffolded; not end-to-end-validated yet. **kindnetd does not enforce NetworkPolicy** — enable Cilium toggle for NP parity. |
+| `docker`   | Invokes `kars dev --target docker --once`. No CRDs, no K8s API, no NetworkPolicy. | Scaffolded; not end-to-end-validated yet. Scenarios needing CRDs must ship a `manifests-docker/` overlay. |
 
 The harness is honest about what each platform enforces. See
 `platform-notes.txt` in any run's output dir for the layer-by-layer
@@ -122,7 +122,7 @@ The harness drives a real prompt through real components and verifies
 real artifacts. It does NOT:
 
 - Provision the cluster's Azure-side dependencies (Foundry project,
-  Workload Identity, role assignments). `azureclaw up` does that.
+  Workload Identity, role assignments). `kars up` does that.
 - Substitute for unit tests — checks are end-to-end and intentionally
   coarse-grained.
 - Substitute for the `cargo test` suite or the CLI vitest suite.

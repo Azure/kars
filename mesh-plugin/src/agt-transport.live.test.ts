@@ -7,7 +7,7 @@
  * Exercises the real upstream Microsoft AGT SDK (@microsoft/agent-governance-sdk)
  * against an upstream Python relay+registry running in Docker.
  *
- * This test is gated on the AZURECLAW_LIVE_AGT env var so it only runs when
+ * This test is gated on the KARS_LIVE_AGT env var so it only runs when
  * the operator explicitly stands up the relay+registry. CI does NOT run it.
  *
  * Recipe to run locally:
@@ -20,7 +20,7 @@
  *     agentmesh-registry-agt:dev
  *   docker run -d --name agt-smoke-relay --network agt-smoke -p 18083:8083 \
  *     -e REGISTRY_URL=http://agt-smoke-registry:8082 agentmesh-relay-agt:dev
- *   AZURECLAW_LIVE_AGT=1 npx vitest run agt-transport.live
+ *   KARS_LIVE_AGT=1 npx vitest run agt-transport.live
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -28,7 +28,7 @@ import * as crypto from "node:crypto";
 import { createMeshTransport } from "./transport-factory.js";
 import type { IMeshTransport } from "./transport-interface.js";
 
-const LIVE = !!process.env.AZURECLAW_LIVE_AGT;
+const LIVE = !!process.env.KARS_LIVE_AGT;
 const RELAY = process.env.AGENTMESH_LIVE_RELAY_URL || "http://localhost:18083";
 const REGISTRY = process.env.AGENTMESH_LIVE_REGISTRY_URL || "http://localhost:18082";
 
@@ -58,7 +58,7 @@ describe.skipIf(!LIVE)("AGT live mesh round-trip", () => {
   const bobKp = newKeypair();
 
   beforeAll(async () => {
-    process.env.AZURECLAW_MESH_PROVIDER = "agt";
+    process.env.KARS_MESH_PROVIDER = "agt";
     alice = await createMeshTransport({
       relayUrl: RELAY,
       registryUrl: REGISTRY,

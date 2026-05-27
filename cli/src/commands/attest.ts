@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 S11 — `azureclaw attest <name>` CLI subcommand.
+// Phase 2 S11 — `kars attest <name>` CLI subcommand.
 //
 // **Read surface only.** Phase 2 ships the *consumer* that prints whatever
 // attestation evidence the controller already records on the cluster;
@@ -11,26 +11,26 @@
 // What this command surfaces today:
 //
 //   1. Spec hash — deterministic SHA-256 over a canonicalised JSON of the
-//      `ClawSandbox.spec` (recursive key-sort, no whitespace). The same
+//      `KarsSandbox.spec` (recursive key-sort, no whitespace). The same
 //      hash recipe is used by the `versionHash` fields shipped on the
 //      five Phase 2 policy CRDs (McpServer / ToolPolicy / A2AAgent /
-//      InferencePolicy / ClawEval — all use SHA-256 over canonical
+//      InferencePolicy / KarsEval — all use SHA-256 over canonical
 //      serde-json), so a future signed audit chain can compose them
 //      without rewriting the hashing layer.
 //   2. Observed-generation lineage — `metadata.generation` vs
 //      `status.observedGeneration` plus `status.phase`. Lets operators
 //      tell "spec applied" from "spec accepted but not yet reconciled".
 //   3. SSA field-owner map — the unique `manager` names from the
-//      ClawSandbox CR's `metadata.managedFields` plus a per-manager
+//      KarsSandbox CR's `metadata.managedFields` plus a per-manager
 //      `fields-owned` count. Surfaces "who edited this object last"
 //      without dumping the full SSA tree.
 //   4. Referenced policy versions — for every policy CRD referenced by
-//      `ClawSandbox.spec` (ToolPolicy, InferencePolicy, A2AAgent — and
+//      `KarsSandbox.spec` (ToolPolicy, InferencePolicy, A2AAgent — and
 //      indirectly the McpServers that ToolPolicy references), the
 //      command resolves the referenced object and prints its
 //      `status.versionHash` if present, plus the binding ConfigMap name.
 //   5. Reconcile trace ID — best-effort lookup from the sandbox-namespace
-//      Deployment's `azureclaw.azure.com/last-trace-id` annotation.
+//      Deployment's `kars.azure.com/last-trace-id` annotation.
 //      Phase 2 controller does not yet stamp this annotation; the field
 //      prints `(Phase 3)` when absent. The lookup is in place so flipping
 //      the controller to emit it does not require a CLI change.
@@ -68,7 +68,7 @@ const POLICY_CR_KINDS: ReadonlyArray<{
 ];
 
 interface AttestationReport {
-  apiVersion: "azureclaw.azure.com/v1alpha1-attest";
+  apiVersion: "kars.azure.com/v1alpha1-attest";
   kind: "Attestation";
   generatedAt: string;
   sandbox: {
@@ -196,7 +196,7 @@ function countLeaves(tree: unknown): number {
   return n || 1;
 }
 
-/** Extracts the policy-CR refs declared on the `ClawSandbox.spec`. The
+/** Extracts the policy-CR refs declared on the `KarsSandbox.spec`. The
  *  refs are looked up at four shapes the Phase 2 CRDs use:
  *  - `spec.toolPolicyRef.name`            → ToolPolicy
  *  - `spec.inferencePolicyRef.name`       → InferencePolicy
@@ -246,12 +246,12 @@ export function extractPolicyRefs(spec: unknown): Array<{
 
 async function buildReport(name: string, opts: { namespace: string }): Promise<AttestationReport> {
   const { execa } = await import("execa");
-  // `ClawSandbox` is cluster-scoped via the controller registration but
-  // historically lives in `azureclaw-system`; the operator passes
+  // `KarsSandbox` is cluster-scoped via the controller registration but
+  // historically lives in `kars-system`; the operator passes
   // `--namespace` to override.
   const { stdout } = await execa("kubectl", [
     "get",
-    "clawsandbox",
+    "karssandbox",
     name,
     "-n",
     opts.namespace,
@@ -268,7 +268,7 @@ async function buildReport(name: string, opts: { namespace: string }): Promise<A
     status?: { phase?: string; observedGeneration?: number };
   };
 
-  const sbNs = `azureclaw-${name}`;
+  const sbNs = `kars-${name}`;
   const policyRefs = extractPolicyRefs(cr.spec);
   const policyVersions = await Promise.all(
     policyRefs.map(async (ref) => {
@@ -314,7 +314,7 @@ async function buildReport(name: string, opts: { namespace: string }): Promise<A
       "-n",
       sbNs,
       "-o",
-      "jsonpath={.metadata.annotations.azureclaw\\.azure\\.com/last-trace-id}",
+      "jsonpath={.metadata.annotations.kars\\.azure\\.com/last-trace-id}",
     ], { stdio: "pipe" });
     traceId = out.trim() || null;
   } catch {
@@ -322,7 +322,7 @@ async function buildReport(name: string, opts: { namespace: string }): Promise<A
   }
 
   return {
-    apiVersion: "azureclaw.azure.com/v1alpha1-attest",
+    apiVersion: "kars.azure.com/v1alpha1-attest",
     kind: "Attestation",
     generatedAt: new Date().toISOString(),
     sandbox: {
@@ -437,14 +437,14 @@ export async function loadBaseline(path: string): Promise<AttestationReport | nu
   }
   const parsed = JSON.parse(raw) as Partial<AttestationReport>;
   if (
-    parsed.apiVersion !== "azureclaw.azure.com/v1alpha1-attest" ||
+    parsed.apiVersion !== "kars.azure.com/v1alpha1-attest" ||
     parsed.kind !== "Attestation" ||
     !parsed.sandbox ||
     typeof parsed.sandbox.specHash !== "string"
   ) {
     throw new Error(
-      `baseline ${path} is not a valid AzureClaw attestation ` +
-        `(expected apiVersion=azureclaw.azure.com/v1alpha1-attest, kind=Attestation)`,
+      `baseline ${path} is not a valid Kars attestation ` +
+        `(expected apiVersion=kars.azure.com/v1alpha1-attest, kind=Attestation)`,
     );
   }
   return parsed as AttestationReport;
@@ -486,7 +486,7 @@ export function formatHuman(report: AttestationReport): string {
       ? chalk.red
       : chalk.yellow;
   const lines: string[] = [];
-  lines.push(blue(`\n  AzureClaw · Attestation\n`));
+  lines.push(blue(`\n  Kars · Attestation\n`));
   lines.push(`  ${chalk.bold("Sandbox:")}             ${report.sandbox.name}`);
   lines.push(`  ${chalk.bold("Namespace:")}           ${report.sandbox.namespace}`);
   lines.push(
@@ -563,8 +563,8 @@ export function attestCommand(): Command {
     .argument("<name>", "Sandbox name")
     .option(
       "-n, --namespace <ns>",
-      "Namespace where the ClawSandbox CR lives",
-      "azureclaw-system",
+      "Namespace where the KarsSandbox CR lives",
+      "kars-system",
     )
     .option("--format <fmt>", "Output format: 'human' (default) or 'json'", "human")
     .option(

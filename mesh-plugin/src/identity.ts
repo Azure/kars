@@ -5,7 +5,7 @@
  * Mesh identity management — Ed25519 signing + X25519 exchange keypairs.
  *
  * Generates keys with Node.js native crypto (no SDK dep). Persists the
- * key material at ~/.azureclaw/identity.json under a schema-2 envelope.
+ * key material at ~/.kars/identity.json under a schema-2 envelope.
  *
  * Exposes a stable `MeshIdentity` facade (amid + raw signing keys) for
  * the rest of the plugin. AMID derivation matches the AgentMesh
@@ -35,7 +35,7 @@ import * as path from "node:path";
 
 import { deriveCanonicalDid } from "./did.js";
 
-const IDENTITY_DIR = path.join(os.homedir(), ".azureclaw");
+const IDENTITY_DIR = path.join(os.homedir(), ".kars");
 const IDENTITY_FILE = path.join(IDENTITY_DIR, "identity.json");
 
 /**
@@ -111,7 +111,7 @@ function deriveEncryptionKey(): Buffer {
   // KEK is derived from host-readable inputs; the wrapping is obfuscation,
   // not encryption against a same-UID attacker. See file-level docstring
   // for the actual security boundary (chmod 0600 + encrypted disk).
-  const seed = `azureclaw:mesh-identity:${os.hostname()}:${os.homedir()}`;
+  const seed = `kars:mesh-identity:${os.hostname()}:${os.homedir()}`;
   return crypto.createHash("sha256").update(seed).digest();
 }
 

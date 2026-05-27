@@ -36,7 +36,7 @@ source "$LIB_DIR/agt_send.sh"
 scenario_header "AGT mesh — 1sub, 2sub-parallel, sibling, multiturn"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
 if ! kubectl get deploy -n agentmesh >/dev/null 2>&1; then
     log_fail "agentmesh namespace missing — relay+registry not deployed"
@@ -62,13 +62,13 @@ _bring_up_mesh_peer() {
     local tp_name="${name}-toolpolicy"
 
     kubectl apply -f - >/dev/null <<YAML
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: ${tp_name}
   namespace: ${cr_ns}
   labels:
-    azureclaw.azure.com/test-suite: manual-e2e
+    kars.azure.com/test-suite: manual-e2e
 spec:
   appliesTo: {}
   agtProfile:
@@ -84,22 +84,22 @@ YAML
 
     cr_dispatch openclaw "$name" "$cr_ns" \
       | yq eval '
-            select(.kind == "ClawSandbox")
+            select(.kind == "KarsSandbox")
                 | .spec.governance.enabled = true
                 | .spec.governance.registryMode = "global"
                 | .spec.governance.toolPolicyRef.name = "'"${tp_name}"'"
             ,
-            select(.kind != "ClawSandbox")
+            select(.kind != "KarsSandbox")
         ' - \
       | kubectl apply -f - >/dev/null
 
-    if ! wait_for_clawsandbox_ready "$cr_ns" "$name"; then
+    if ! wait_for_karssandbox_ready "$cr_ns" "$name"; then
         log_fail "${name}: never reached Ready"
         return 1
     fi
     local pod
     pod=$(kubectl -n "$pod_ns" get pod \
-        -l "azureclaw.azure.com/sandbox=${name}" \
+        -l "kars.azure.com/sandbox=${name}" \
         -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
     if [[ -z "$pod" ]]; then
         log_fail "${name}: Ready but no pod"

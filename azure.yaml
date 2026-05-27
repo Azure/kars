@@ -1,9 +1,9 @@
-# AzureClaw - Azure Developer CLI (azd) template
-# Deploy with: azd init --template Azure/azureclaw && azd up
+# Kars - Azure Developer CLI (azd) template
+# Deploy with: azd init --template Azure/kars && azd up
 
-name: azureclaw
+name: kars
 metadata:
-  template: Azure/azureclaw@main
+  template: Azure/kars@main
 
 services:
   controller:
@@ -35,11 +35,11 @@ hooks:
       echo "Configuring AKS access..."
       az aks get-credentials --name ${AZURE_AKS_NAME} --resource-group ${AZURE_RESOURCE_GROUP} --overwrite-existing --output none
       echo "Installing Helm chart..."
-      helm upgrade --install azureclaw ./deploy/helm/azureclaw \
-        --namespace azureclaw-system --create-namespace \
-        --set controller.image.repository=${AZURE_ACR_LOGIN_SERVER}/azureclaw-controller \
+      helm upgrade --install kars ./deploy/helm/kars \
+        --namespace kars-system --create-namespace \
+        --set controller.image.repository=${AZURE_ACR_LOGIN_SERVER}/kars-controller \
         --set controller.image.tag=latest \
-        --set inferenceRouter.image.repository=${AZURE_ACR_LOGIN_SERVER}/azureclaw-inference-router \
+        --set inferenceRouter.image.repository=${AZURE_ACR_LOGIN_SERVER}/kars-inference-router \
         --set inferenceRouter.image.tag=latest \
         --set sandbox.image.repository=${AZURE_ACR_LOGIN_SERVER}/openclaw-sandbox \
         --set sandbox.image.tag=latest \

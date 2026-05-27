@@ -3,7 +3,7 @@
 
 //! Integration test for `GET /internal/policy-status` — exercises the
 //! full axum stack (router, state extraction, JSON serialization) so
-//! the wire contract consumed by the controller poller, `azureclaw
+//! the wire contract consumed by the controller poller, `kars
 //! inspect`, and the headlamp panel is locked down.
 //!
 //! Unit tests for the registry and the response DTO live in
@@ -26,19 +26,19 @@ use axum::{
 use serde_json::Value;
 use tower::ServiceExt;
 
-use azureclaw_inference_router::auth::WorkloadIdentityAuth;
-use azureclaw_inference_router::blocklist::Blocklist;
-use azureclaw_inference_router::budget::TokenBudgetTracker;
-use azureclaw_inference_router::config::{Config, RegistryMode};
-use azureclaw_inference_router::egress_blocked::BlockedBuffer;
-use azureclaw_inference_router::governance::Governance;
-use azureclaw_inference_router::handoff::{
+use kars_inference_router::auth::WorkloadIdentityAuth;
+use kars_inference_router::blocklist::Blocklist;
+use kars_inference_router::budget::TokenBudgetTracker;
+use kars_inference_router::config::{Config, RegistryMode};
+use kars_inference_router::egress_blocked::BlockedBuffer;
+use kars_inference_router::governance::Governance;
+use kars_inference_router::handoff::{
     DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore,
 };
-use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
-use azureclaw_inference_router::policy_status::PolicyStatusRegistry;
-use azureclaw_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
-use azureclaw_inference_router::routes::{AppState, internal_routes};
+use kars_inference_router::mesh::{MeshInbox, MeshMetrics};
+use kars_inference_router::policy_status::PolicyStatusRegistry;
+use kars_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
+use kars_inference_router::routes::{AppState, internal_routes};
 
 fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
     let policy_status = Arc::new(PolicyStatusRegistry::new());
@@ -48,7 +48,7 @@ fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
     ));
     let state = AppState {
         auth: Arc::new(WorkloadIdentityAuth::new()),
-        copilot: Arc::new(azureclaw_inference_router::copilot_auth::CopilotTokenCache::from_env()),
+        copilot: Arc::new(kars_inference_router::copilot_auth::CopilotTokenCache::from_env()),
         client: reqwest::Client::new(),
         config: Arc::new(Config {
             port: 0,
@@ -83,11 +83,11 @@ fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
         drain_state: DrainState::new(),
         pending_handoff: PendingHandoffStore::new(),
         policy_status: policy_status.clone(),
-        inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
-        memory_binding: azureclaw_inference_router::memory_binding_loader::empty_handle(),
-        egress_allowlist: azureclaw_inference_router::egress_allowlist_loader::empty_handle(),
+        inference_policy: kars_inference_router::inference_policy_loader::empty_handle(),
+        memory_binding: kars_inference_router::memory_binding_loader::empty_handle(),
+        egress_allowlist: kars_inference_router::egress_allowlist_loader::empty_handle(),
         deployment_health: std::sync::Arc::new(
-            azureclaw_inference_router::deployment_health::DeploymentHealthRegistry::new(),
+            kars_inference_router::deployment_health::DeploymentHealthRegistry::new(),
         ),
     };
     (state, policy_status)
@@ -124,8 +124,8 @@ async fn empty_registry_returns_200_with_empty_entries() {
 async fn registry_with_agt_profile_entry_round_trips_through_route() {
     let (state, reg) = test_state();
     reg.record_success(
-        azureclaw_inference_router::policy_status::PolicyKind::AgtProfile,
-        "/etc/azureclaw/policies",
+        kars_inference_router::policy_status::PolicyKind::AgtProfile,
+        "/etc/kars/policies",
         b"hello",
     );
     let app = app(state);
@@ -138,10 +138,7 @@ async fn registry_with_agt_profile_entry_round_trips_through_route() {
         entry["digest"].as_str(),
         Some("sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"),
     );
-    assert_eq!(
-        entry["source_path"].as_str(),
-        Some("/etc/azureclaw/policies")
-    );
+    assert_eq!(entry["source_path"].as_str(), Some("/etc/kars/policies"));
     let loaded_at = entry["loaded_at"].as_str().expect("loaded_at present");
     assert!(
         loaded_at.ends_with("Z"),
@@ -261,21 +258,21 @@ async fn empty_deployment_health_serializes_as_empty_array() {
 
 #[tokio::test]
 async fn memory_kind_digest_surfaces_via_route() {
-    // Slice 3a: the ClawMemory binding loader registers its digest
+    // Slice 3a: the KarsMemory binding loader registers its digest
     // under PolicyKind::Memory so the controller's
-    // `claw_memory_reconciler` poller can confirm the §3 echo loop.
+    // `kars_memory_reconciler` poller can confirm the §3 echo loop.
     // This test simulates the loader having run successfully on
     // startup and asserts the /internal/policy-status envelope
     // surfaces the new kind verbatim — same shape as AgtProfile /
     // InferencePolicy.
     let (state, reg) = test_state();
-    let canonical = azureclaw_inference_router::memory_binding_loader::canonical_bytes_for_digest(
-        azureclaw_inference_router::memory_binding_loader::MEMORY_BINDING_FILENAME,
+    let canonical = kars_inference_router::memory_binding_loader::canonical_bytes_for_digest(
+        kars_inference_router::memory_binding_loader::MEMORY_BINDING_FILENAME,
         br#"{"storeName":"abc","scope":"agent:demo"}"#,
     );
     reg.record_success(
-        azureclaw_inference_router::policy_status::PolicyKind::Memory,
-        "/etc/azureclaw/memory/binding.json",
+        kars_inference_router::policy_status::PolicyKind::Memory,
+        "/etc/kars/memory/binding.json",
         &canonical,
     );
 
@@ -299,7 +296,7 @@ async fn memory_kind_digest_surfaces_via_route() {
     assert!(memory["last_error"].is_null());
     assert_eq!(
         memory["source_path"].as_str(),
-        Some("/etc/azureclaw/memory/binding.json")
+        Some("/etc/kars/memory/binding.json")
     );
 }
 
@@ -307,13 +304,13 @@ async fn memory_kind_digest_surfaces_via_route() {
 async fn memory_binding_loader_digest_matches_canonical_layout() {
     // Cross-validation: the bytes the router hashes for a Memory
     // binding must be byte-identical to the controller-side
-    // `claw_memory_compile::canonical_bytes_for_digest`. Asserts the
+    // `kars_memory_compile::canonical_bytes_for_digest`. Asserts the
     // wire contract end-to-end (controller writes ConfigMap bytes →
     // router loads + hashes → controller's poller compares digest).
     use sha2::{Digest, Sha256};
     let body = br#"{"storeName":"abc","scope":"agent:demo"}"#;
-    let canonical = azureclaw_inference_router::memory_binding_loader::canonical_bytes_for_digest(
-        azureclaw_inference_router::memory_binding_loader::MEMORY_BINDING_FILENAME,
+    let canonical = kars_inference_router::memory_binding_loader::canonical_bytes_for_digest(
+        kars_inference_router::memory_binding_loader::MEMORY_BINDING_FILENAME,
         body,
     );
     let raw = Sha256::digest(&canonical);
@@ -326,7 +323,7 @@ async fn memory_binding_loader_digest_matches_canonical_layout() {
 
     let (state, reg) = test_state();
     reg.record_success(
-        azureclaw_inference_router::policy_status::PolicyKind::Memory,
+        kars_inference_router::policy_status::PolicyKind::Memory,
         "/tmp/binding.json",
         &canonical,
     );

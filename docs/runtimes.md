@@ -1,10 +1,10 @@
 # Runtime catalog
 
-AzureClaw is a host for *agent runtimes*. The runtime is the framework your agent code is written against (OpenClaw, OpenAI Agents SDK, LangGraph, …) plus the small adapter that wires it to the AzureClaw sandbox shape.
+Kars is a host for *agent runtimes*. The runtime is the framework your agent code is written against (OpenClaw, OpenAI Agents SDK, LangGraph, …) plus the small adapter that wires it to the Kars sandbox shape.
 
 This page documents the first-class adapters that ship today and the **BYO** contract for bringing your own. The table below is the authoritative count — when a runtime is added or deferred, this table changes.
 
-The same router, the same governance profile, the same audit chain, the same NetworkPolicy apply to all of them. Switching runtime is a one-field change in `ClawSandbox.spec.runtime.kind`.
+The same router, the same governance profile, the same audit chain, the same NetworkPolicy apply to all of them. Switching runtime is a one-field change in `KarsSandbox.spec.runtime.kind`.
 
 ## At a glance
 
@@ -25,11 +25,11 @@ The CRD enum is the source of truth for which kinds exist; `controller/src/recon
 
 ### How dispatch works
 
-When you `kubectl apply` a `ClawSandbox`, the reconciler reads `spec.runtime.kind` and calls a single `dispatch()` function that fans out to one producer per kind. Each producer returns a fully-formed pod plan; everything *outside* the runtime container — the inference router sidecar, the egress-guard init container, the `NetworkPolicy`, the WI federated credential — is identical across all kinds.
+When you `kubectl apply` a `KarsSandbox`, the reconciler reads `spec.runtime.kind` and calls a single `dispatch()` function that fans out to one producer per kind. Each producer returns a fully-formed pod plan; everything *outside* the runtime container — the inference router sidecar, the egress-guard init container, the `NetworkPolicy`, the WI federated credential — is identical across all kinds.
 
 ```mermaid
 flowchart LR
-  CR["ClawSandbox<br/>spec.runtime.kind"] --> D{dispatch}
+  CR["KarsSandbox<br/>spec.runtime.kind"] --> D{dispatch}
   D -->|OpenClaw| P1["openclaw producer<br/>image: sandbox-images/openclaw"]
   D -->|OpenAIAgents| P2["openai-agents producer"]
   D -->|MicrosoftAgentFramework<br/>language: python| P3["maf-python producer"]
@@ -56,7 +56,7 @@ Verified against `controller/src/reconciler/runtime.rs:249-400` (`kind_str`, the
 A purpose-built adapter does three things you would otherwise have to do in BYO every time:
 
 1. **Pin the model base URL to the router** — sets `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, etc., to `http://127.0.0.1:8443` so the SDK cannot talk to the public model endpoint directly.
-2. **Replace the API key with a sentinel** — sets `OPENAI_API_KEY=ROUTED-VIA-AZURECLAW` (or equivalent). The router brokers the real credential on egress.
+2. **Replace the API key with a sentinel** — sets `OPENAI_API_KEY=ROUTED-VIA-KARS` (or equivalent). The router brokers the real credential on egress.
 3. **Wire AAD broker + OTel + AgentMesh** — federated identity exchange, OpenTelemetry to your observability stack, mesh registration on bootstrap.
 
 If your runtime SDK reads its model endpoint from one of the well-known env vars, a stock adapter is a small Python or Node entrypoint. The seven first-class adapters are short for exactly this reason.
@@ -67,8 +67,8 @@ Default. Uses the [OpenClaw](https://openclaw.ai) public plugin API + `tools.den
 
 The OpenClaw adapter ships two multi-agent helpers on top of the platform mesh:
 
-- **Sub-agent inheritance.** `azureclaw_spawn` propagates the parent's provider, model, upstream endpoint, and credential into the child container — siblings run on the same backend with no per-spawn wiring (see [architecture.md → data path](architecture.md#the-data-path-of-one-external-call)).
-- **Peer roster.** Every spawn takes a `role` (e.g. `"data analyst"`, `"technical writer"`). Once two or more siblings exist the runtime auto-prepends a `Peer roster: name — role` block to every outbound `mesh_send` / `mesh_transfer_file`. Sub-agents resolve role references ("send the chart to the viz agent") against the roster instead of inventing names. Critical for `analyst → viz → writer`-style pipelines; agent-facing contract documented in `runtimes/openclaw/skills/azureclaw-spawn/SKILL.md`.
+- **Sub-agent inheritance.** `kars_spawn` propagates the parent's provider, model, upstream endpoint, and credential into the child container — siblings run on the same backend with no per-spawn wiring (see [architecture.md → data path](architecture.md#the-data-path-of-one-external-call)).
+- **Peer roster.** Every spawn takes a `role` (e.g. `"data analyst"`, `"technical writer"`). Once two or more siblings exist the runtime auto-prepends a `Peer roster: name — role` block to every outbound `mesh_send` / `mesh_transfer_file`. Sub-agents resolve role references ("send the chart to the viz agent") against the roster instead of inventing names. Critical for `analyst → viz → writer`-style pipelines; agent-facing contract documented in `runtimes/openclaw/skills/kars-spawn/SKILL.md`.
 
 ### `OpenAIAgents`
 
@@ -94,11 +94,11 @@ Pydantic-AI is provider-agnostic; the adapter pins multiple LLM provider base UR
 
 ## Bring your own (BYO) runtime
 
-If your runtime is not in the list above, or you want to ship a custom container, use `kind: BYO`. You provide a container image; AzureClaw provides the same sandbox shape, the same router, and the same policy enforcement as for the first-class runtimes.
+If your runtime is not in the list above, or you want to ship a custom container, use `kind: BYO`. You provide a container image; Kars provides the same sandbox shape, the same router, and the same policy enforcement as for the first-class runtimes.
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: my-byo-agent
 spec:
@@ -119,7 +119,7 @@ spec:
 | **Run as UID 1000.** | The egress-guard initContainer assumes the agent runs as UID 1000; UID 1001 is reserved for the router. |
 | **Make all external calls through `http://127.0.0.1:8443`.** | The egress-guard drops anything else. Direct calls to model endpoints, peers, or web hosts will fail. |
 | **For LLM calls, use OpenAI-compatible API shape.** | The router's primary inbound surface is OpenAI-compatible (`/v1/chat/completions`, `/v1/embeddings`, …). Anthropic-shape requests are routed via `/v1/messages` if you set the right path. |
-| **Honour the standard sandbox env vars.** | `AZURECLAW_ROUTER_URL`, `AZURECLAW_AGENT_NAME`, `AZURECLAW_TRUST_THRESHOLD`, `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+| **Honour the standard sandbox env vars.** | `KARS_ROUTER_URL`, `KARS_AGENT_NAME`, `KARS_TRUST_THRESHOLD`, `OTEL_EXPORTER_OTLP_ENDPOINT`. |
 | **Do not bundle Azure credentials in the image.** | The router exchanges the projected SA token for an AAD token at request time. The agent never sees credentials. |
 | **Listen on a non-privileged port if you expose anything.** | UID 1000 cannot bind <1024. |
 | **No tini / supervisord magic that survives SIGTERM > 30s.** | Kubernetes will hard-kill the pod; the router will not be able to flush the audit buffer. |
@@ -133,7 +133,7 @@ spec:
 
 ### Reference example
 
-A reference BYO image (a tiny FastAPI agent) is in [`examples/byo-quickstart/`](../examples/byo-quickstart/). The README walks through building it locally, pushing it to a registry, and applying a `ClawSandbox` against it.
+A reference BYO image (a tiny FastAPI agent) is in [`examples/byo-quickstart/`](../examples/byo-quickstart/). The README walks through building it locally, pushing it to a registry, and applying a `KarsSandbox` against it.
 
 ### Worked examples — full catalogue
 
@@ -148,7 +148,7 @@ Eight end-to-end examples ship under [`examples/`](../examples/README.md) — on
 | [`maf-quickstart`](../examples/maf-quickstart/) | MicrosoftAgentFramework | Unmodified MAF Python app |
 | [`byo-quickstart`](../examples/byo-quickstart/) | BYO | Any container image under the BYO contract |
 | [`demo-clawshield`](../examples/demo-clawshield/) | OpenClaw ×3 | Multi-tenant isolation proof (poisoned doc, two victim tenants) |
-| [`lethal-trifecta-demo`](../examples/lethal-trifecta-demo/) | OpenClaw ×2 | Reproduces the Jan-2026 Claude Cowork file-exfiltration attack against vanilla OpenClaw vs. an AzureClaw-managed agent — six independent layers each catch the attack. **Recommended launch demo.** |
+| [`lethal-trifecta-demo`](../examples/lethal-trifecta-demo/) | OpenClaw ×2 | Reproduces the Jan-2026 Claude Cowork file-exfiltration attack against vanilla OpenClaw vs. an Kars-managed agent — six independent layers each catch the attack. **Recommended launch demo.** |
 
 ---
 
@@ -169,7 +169,7 @@ Both options give you the same isolation and the same governance — the differe
 If a runtime is popular enough that you find yourself maintaining a BYO image for it across multiple deployments, propose it as a first-class adapter. The pattern is small:
 
 1. Add the kind to `RuntimeKind` and the per-kind config struct in `controller/src/crd.rs`.
-2. Add CEL validation rules to the CRD template in `deploy/helm/azureclaw/templates/crd.yaml`.
+2. Add CEL validation rules to the CRD template in `deploy/helm/kars/templates/crd.yaml`.
 3. Add a default-image function and a `plan_<kind>` producer in `controller/src/reconciler/runtime.rs`.
 4. Add a `runtimes/<kind>/` adapter and a `sandbox-images/<kind>/Dockerfile`.
 5. Add tests; cover the kind in the manual E2E suite under `tests/e2e/`.
@@ -178,14 +178,14 @@ The existing adapters are the reference. CrewAI is tracked in the [roadmap](road
 
 ---
 
-## Running OpenClaw locally and offloading to AzureClaw (no in-cluster runtime)
+## Running OpenClaw locally and offloading to Kars (no in-cluster runtime)
 
-The runtimes above describe agents that run **inside** an AzureClaw sandbox pod. There is a second, complementary shape: a local OpenClaw (or OpenClaw variant, e.g. NVIDIA's `nemoclaw`) running on your laptop or a non-AzureClaw host that uses the AzureClaw **mesh-plugin** to delegate heavy work to a governed AKS sandbox over the encrypted mesh.
+The runtimes above describe agents that run **inside** an Kars sandbox pod. There is a second, complementary shape: a local OpenClaw (or OpenClaw variant, e.g. NVIDIA's `nemoclaw`) running on your laptop or a non-Kars host that uses the Kars **mesh-plugin** to delegate heavy work to a governed AKS sandbox over the encrypted mesh.
 
-- **The local OpenClaw is not operated by AzureClaw.** You install it yourself, configure it yourself, run it under your shell. AzureClaw governs only the cloud-side environment that receives the offloaded task.
-- **The mesh-plugin (`@azureclaw/mesh`) installs into your local OpenClaw.** It registers the local agent on AGT, pairs to your AzureClaw cluster with a one-time token, and exposes tools (`mesh_send`, `mesh_offload`, `mesh_transfer_file`, etc.) that your agent can call.
+- **The local OpenClaw is not operated by Kars.** You install it yourself, configure it yourself, run it under your shell. Kars governs only the cloud-side environment that receives the offloaded task.
+- **The mesh-plugin (`@kars/mesh`) installs into your local OpenClaw.** It registers the local agent on AGT, pairs to your Kars cluster with a one-time token, and exposes tools (`mesh_send`, `mesh_offload`, `mesh_transfer_file`, etc.) that your agent can call.
 - **All traffic is E2E encrypted.** The relay sees only ciphertext (same Signal Protocol stack as in-cluster mesh, see [`architecture.md` → The mesh](architecture.md#the-mesh)).
-- **Variants ship as flavored builds of the same plugin.** `mesh-plugin/` is the canonical `@azureclaw/mesh` for stock OpenClaw; `mesh-plugin/nemoclaw/` is the NVIDIA NeMo / `nemoclaw` flavored build (policy presets + `setup.sh` that fits the nemoclaw container shape). The `sandbox-images/nemoclaw/Dockerfile` is the convenience image that bundles nemoclaw + the plugin together for users who want a pre-wired local container.
+- **Variants ship as flavored builds of the same plugin.** `mesh-plugin/` is the canonical `@kars/mesh` for stock OpenClaw; `mesh-plugin/nemoclaw/` is the NVIDIA NeMo / `nemoclaw` flavored build (policy presets + `setup.sh` that fits the nemoclaw container shape). The `sandbox-images/nemoclaw/Dockerfile` is the convenience image that bundles nemoclaw + the plugin together for users who want a pre-wired local container.
 
 Setup, pairing, and troubleshooting for the local-OpenClaw-with-offload pattern live in **[`mesh-plugin/README.md`](../mesh-plugin/README.md)** — that is the operator-facing reference for this shape.
 
@@ -193,6 +193,6 @@ Setup, pairing, and troubleshooting for the local-OpenClaw-with-offload pattern 
 
 ## See also
 
-- **[CRD reference — `ClawSandbox`](api/crd-reference.md#clawsandbox--the-agent)** — the spec field structure for each runtime.
+- **[CRD reference — `KarsSandbox`](api/crd-reference.md#karssandbox--the-agent)** — the spec field structure for each runtime.
 - **[Architecture](architecture.md)** — what the router does that the runtime does not have to.
 - **[Upstream alignment](upstream-alignment.md)** — how the OpenClaw integration stays drop-in compatible with upstream releases.

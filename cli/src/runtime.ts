@@ -99,7 +99,7 @@ export function agentContainerName(kind: RuntimeKind): string {
 }
 
 /**
- * Resolve the runtime kind from a `ClawSandbox` CR (live or YAML).
+ * Resolve the runtime kind from a `KarsSandbox` CR (live or YAML).
  * `spec.runtime.kind` is the canonical field after the S10.A1
  * discriminated-union migration; pre-A1 CRs that have no
  * `spec.runtime` block fall back to `OpenClaw` (the only legal value
@@ -115,7 +115,7 @@ export function runtimeKindFromCr(cr: unknown): RuntimeKind {
 }
 
 /**
- * Build the `spec.runtime` block for a new ClawSandbox CR based on
+ * Build the `spec.runtime` block for a new KarsSandbox CR based on
  * CLI options. Returns the runtime block to splice into the CR
  * scaffold; callers are responsible for the surrounding spec scaffolding.
  *
@@ -198,7 +198,7 @@ export function buildRuntimeBlock(
       if (!opts.byoImage) {
         throw new Error(
           `--byo-image is required when --runtime byo. ` +
-          `The image must declare the org.azureclaw.runtime.contract=v1 label.`,
+          `The image must declare the org.kars.runtime.contract=v1 label.`,
         );
       }
       return {

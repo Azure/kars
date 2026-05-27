@@ -1,0 +1,294 @@
+# Kars TrustGraph CRD (Phase F1).
+#
+# DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
+# schema in `controller/src/trust_graph.rs` plus the CEL rules in
+# `controller/src/crd_validations.rs::trust_graph_validations`.
+#
+# Drift between this file and the Rust schema is caught at `cargo test`
+# time by `controller/src/helm_drift.rs::helm_trustgraph_crd_matches_rust_schema`.
+# To regenerate after schema changes, run:
+#
+#   DUMP_TRUSTGRAPH_CRD_YAML=1 cargo test --bin kars-controller \
+#       helm_drift::tests::dump_trustgraph_crd_yaml -- --nocapture
+#
+# and replace the body below with the captured YAML.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+  name: trustgraphs.kars.azure.com
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: TrustGraph
+    plural: trustgraphs
+    shortNames:
+    - tg
+    singular: trustgraph
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.validVertices
+      name: Vertices
+      type: integer
+    - jsonPath: .status.validEdges
+      name: ValidEdges
+      type: integer
+    - jsonPath: .status.invalidEdges
+      name: InvalidEdges
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for TrustGraphSpec via `CustomResource`
+        properties:
+          spec:
+            description: '`TrustGraph.spec` — the cluster-wide trust topology.'
+            properties:
+              edges:
+                default: []
+                description: |-
+                  Edge set. Each edge is a signed attestation from `from` to
+                  `to` carrying a trust score in [0, 1000] (the AGT trust-score
+                  domain — see `crd.rs::GovernanceConfig`).
+
+                  Edges where signature verification fails are reported in
+                  `status.invalidEdges` and omitted from the projection
+                  ConfigMap. The reconciler does not delete invalid edges from
+                  the spec — the operator owns the spec; the reconciler only
+                  publishes the verified subset.
+                items:
+                  description: One edge — a signed trust attestation between two vertices.
+                  properties:
+                    from:
+                      description: |-
+                        Source vertex `id`. Must resolve to a vertex in
+                        `spec.vertices` whose public key signed this edge.
+                      type: string
+                    issuedAt:
+                      description: |-
+                        Issuance timestamp, Unix seconds. Part of the canonical signed
+                        payload — peers verify both the signature and that
+                        `issuedAt <= now`.
+                      format: int64
+                      type: integer
+                    notAfter:
+                      description: |-
+                        Optional expiry timestamp, Unix seconds. `None` means "never
+                        expires" (operator-asserted; the reconciler still flags
+                        suspiciously old `issuedAt`s in conditions but does not
+                        invalidate).
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: |-
+                        Optional free-text reason ("auditor-attested",
+                        "transitive-1-hop", …) carried into the projection so
+                        downstream policy can pivot on the origin of the trust.
+                      nullable: true
+                      type: string
+                    score:
+                      description: |-
+                        Trust score in `[0, 1000]` — the AGT domain. CEL guards the
+                        range at admission; the reconciler additionally clamps for
+                        defensive depth.
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    signature:
+                      description: |-
+                        Ed25519 signature, base64url-encoded with NO padding, over the
+                        canonical bytes
+                        `b"trustgraph.v1\n" || from || b"\n" || to || b"\n" || score-as-decimal-ascii || b"\n" || issued_at-as-decimal-ascii || b"\n" || not_after-as-decimal-ascii-or-empty || b"\n"`.
+                        64 bytes after decode.
+
+                        The version prefix `trustgraph.v1\n` is a domain-separator so
+                        a signature over a `TrustGraph` edge can never be replayed as
+                        an `A2AAgent` AgentCard signature.
+                      type: string
+                    to:
+                      description: |-
+                        Target vertex `id`. Must resolve to a vertex in
+                        `spec.vertices`.
+                      type: string
+                  required:
+                  - from
+                  - issuedAt
+                  - score
+                  - signature
+                  - to
+                  type: object
+                type: array
+              vertices:
+                description: |-
+                  Vertex set. Each vertex declares an identity and the Ed25519
+                  public key peers must use to verify outbound edge signatures
+                  from this vertex.
+
+                  `id` must be unique across the spec — admission CEL enforces.
+                  At least one vertex is required (an empty graph would yield a
+                  useless projection); enforced by CEL `size(self.vertices) > 0`.
+                items:
+                  description: |-
+                    One vertex — an agent identity with its Ed25519 public key.
+
+                    Field naming mirrors `A2AAgent.signingKeys` for cross-CRD
+                    consistency: the same key material can be authored once in
+                    `A2AAgent` and re-declared as a `TrustGraph` vertex without any
+                    re-encoding step.
+                  properties:
+                    alg:
+                      description: |-
+                        Algorithm pin. Currently only `"EdDSA"` is honoured; other
+                        values cause the reconciler to mark the vertex invalid and
+                        drop edges originating from it.
+                      type: string
+                    id:
+                      description: |-
+                        Stable identity (DNS-label-shaped string). Conventionally an
+                        AGT AMID or a fully-qualified `a2a-agent/<ns>/<name>` form.
+                        Must be unique within the CR (CEL).
+                      type: string
+                    label:
+                      description: |-
+                        Optional human-readable label rendered in audit logs and the
+                        projection ConfigMap.
+                      nullable: true
+                      type: string
+                    publicKeyB64u:
+                      description: |-
+                        Ed25519 public key, base64url-encoded with NO padding (RFC
+                        7515 §2). 32 bytes after decode.
+                      type: string
+                  required:
+                  - alg
+                  - id
+                  - publicKeyB64u
+                  type: object
+                type: array
+            required:
+            - vertices
+            type: object
+            x-kubernetes-validations:
+            - message: spec.vertices must contain at least one entry
+              reason: FieldValueInvalid
+              rule: size(self.vertices) > 0
+            - message: spec.vertices[*].alg must be 'EdDSA' (only supported algorithm)
+              reason: FieldValueInvalid
+              rule: self.vertices.all(v, v.alg == 'EdDSA')
+            - message: spec.edges[*].score must be in [0, 1000]
+              reason: FieldValueInvalid
+              rule: '!has(self.edges) || self.edges.all(e, e.score >= 0 && e.score <= 1000)'
+            - message: spec.edges[*].notAfter, when set, must be >= issuedAt
+              reason: FieldValueInvalid
+              rule: '!has(self.edges) || self.edges.all(e, !has(e.notAfter) || e.notAfter >= e.issuedAt)'
+          status:
+            description: '`TrustGraph.status` — populated by the reconciler.'
+            nullable: true
+            properties:
+              conditions:
+                description: Standard K8s conditions (`Ready`, `Validated`).
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              invalidEdges:
+                description: |-
+                  Number of edges that failed verification (bad signature,
+                  missing vertex, decode error, expired). Counted but not named
+                  to avoid leaking authoring detail into status; operators
+                  inspect controller logs (`error_class`) for which.
+                format: int64
+                nullable: true
+                type: integer
+              lastReconciledAt:
+                description: RFC3339 timestamp of the last reconcile.
+                nullable: true
+                type: string
+              observedGeneration:
+                description: |-
+                  Generation observed at the last successful reconcile. Used by
+                  kube watcher consumers to detect stale projections.
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: '`Pending` | `Ready` | `Degraded`.'
+                nullable: true
+                type: string
+              projectionConfigMapRef:
+                description: |-
+                  `metadata.namespace/metadata.name` of the projection ConfigMap.
+                  Always `kars-system/trustgraph-<name>-projection` once
+                  the reconciler has written successfully.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              validEdges:
+                description: |-
+                  Number of edges whose signature verified against the declared
+                  `from` vertex's public key. Only valid edges are emitted into
+                  the projection ConfigMap.
+                format: int64
+                nullable: true
+                type: integer
+              validVertices:
+                description: |-
+                  Number of vertices that decoded successfully (correct alg +
+                  32-byte public key).
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: TrustGraph
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+

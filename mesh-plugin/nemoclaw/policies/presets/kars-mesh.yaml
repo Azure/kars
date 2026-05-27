@@ -1,0 +1,44 @@
+# Kars mesh federation — relay (WebSocket) and registry (REST)
+#
+# This preset enables NemoClaw/OpenShell sandbox agents to connect to an
+# Kars cluster via AgentMesh federation.
+#
+# The relay endpoint uses a CONNECT tunnel (access: full) for WebSocket.
+# The registry endpoint uses L7 REST inspection.
+#
+# allowed_ips uses the placeholder __HOST_IP__ which is resolved
+# automatically by setup.sh at sandbox startup. This handles platform
+# differences (Mac: 192.168.65.254, Linux: 172.17.0.1, WSL2: varies).
+#
+# For production deployments, replace host.docker.internal with your
+# public relay/registry hostnames and remove the allowed_ips field
+# entirely (no SSRF override needed for public IPs).
+
+preset:
+  name: kars-mesh
+  description: "Kars mesh federation relay and registry access"
+
+network_policies:
+  kars_mesh:
+    name: kars_mesh
+    endpoints:
+      # Relay — WebSocket over CONNECT tunnel (L4).
+      - host: host.docker.internal
+        port: 18765
+        access: full
+        allowed_ips:
+          - __HOST_IP__
+      # Registry — REST API (L7).
+      - host: host.docker.internal
+        port: 18080
+        protocol: rest
+        enforcement: enforce
+        allowed_ips:
+          - __HOST_IP__
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+          - allow: { method: PUT, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/node }
+      - { path: /usr/local/bin/openclaw }

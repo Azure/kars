@@ -1,6 +1,6 @@
 [package]
-name = "azureclaw-controller"
-description = "Kubernetes operator for AzureClaw — manages ClawSandbox CRDs, sandbox lifecycle, policy enforcement, and Azure service connectors"
+name = "kars-controller"
+description = "Kubernetes operator for Kars — manages KarsSandbox CRDs, sandbox lifecycle, policy enforcement, and Azure service connectors"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -23,8 +23,8 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 
-# Shared corpus library (ClawEval slice 6)
-azureclaw-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
+# Shared corpus library (KarsEval slice 6)
+kars-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
 
 # Observability
 tracing.workspace = true

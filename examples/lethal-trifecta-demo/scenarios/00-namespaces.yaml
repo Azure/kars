@@ -4,13 +4,13 @@ kind: Namespace
 metadata:
   name: naked-claw
   labels:
-    azureclaw.azure.com/demo: lethal-trifecta
-    azureclaw.azure.com/posture: vanilla
+    kars.azure.com/demo: lethal-trifecta
+    kars.azure.com/posture: vanilla
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: azureclaw-claw
+  name: kars-claw
   labels:
-    azureclaw.azure.com/demo: lethal-trifecta
-    azureclaw.azure.com/posture: full-stack
+    kars.azure.com/demo: lethal-trifecta
+    kars.azure.com/posture: full-stack

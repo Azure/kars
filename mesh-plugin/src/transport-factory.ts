@@ -38,7 +38,7 @@ export type MeshTransportConfig = MeshTransportFactoryConfig;
 /**
  * Resolve the provider from the environment. Currently always returns
  * "agt" — kept as a function so future providers can be wired in.
- * `AZURECLAW_MESH_PROVIDER` is still honored as an env knob but only
+ * `KARS_MESH_PROVIDER` is still honored as an env knob but only
  * "agt" is supported; unknown values fall back to the same default.
  */
 export function resolveMeshProvider(

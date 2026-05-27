@@ -5,13 +5,13 @@
 //!
 //! Mirrors [`crate::a2a_agent_reconciler`] in shape:
 //!
-//! 1. Adds the `azureclaw.azure.com/trustgraph-cleanup` finalizer.
+//! 1. Adds the `kars.azure.com/trustgraph-cleanup` finalizer.
 //! 2. Calls the pure compile step
 //!    [`crate::trust_graph_compile::compile_trust_graph`] to verify
 //!    every vertex public key and every edge signature.
 //! 3. Persists the verified subset as a `ConfigMap`
 //!    `trustgraph-{name}-projection` in the
-//!    [`PROJECTION_NAMESPACE`] (`azureclaw-system`). Cluster-scoped
+//!    [`PROJECTION_NAMESPACE`] (`kars-system`). Cluster-scoped
 //!    CR → namespaced projection, so ownerRef cascade is **not**
 //!    available — the finalizer is the only correct cleanup
 //!    mechanism.
@@ -49,12 +49,12 @@ use crate::trust_graph::{TrustGraph, TrustGraphStatus};
 use crate::trust_graph_compile::{CompileResult, compile_trust_graph};
 
 const FIELD_MANAGER: &str = crate::field_managers::TRUST_GRAPH;
-const FINALIZER: &str = "azureclaw.azure.com/trustgraph-cleanup";
-/// Where the verified-graph ConfigMap lives. `azureclaw-system` is
+const FINALIZER: &str = "kars.azure.com/trustgraph-cleanup";
+/// Where the verified-graph ConfigMap lives. `kars-system` is
 /// the cluster-control-plane namespace already used by other
 /// controller-owned artefacts (see Helm chart). Pinned because the
 /// router (Phase F2) mounts the same path.
-pub const PROJECTION_NAMESPACE: &str = "azureclaw-system";
+pub const PROJECTION_NAMESPACE: &str = "kars-system";
 
 const REQUEUE_OK: Duration = Duration::from_secs(300);
 const REQUEUE_FAIL: Duration = Duration::from_secs(60);
@@ -99,7 +99,7 @@ async fn reconcile(tg: Arc<TrustGraph>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .unwrap_or(false)
     {
         let patch = json!({
-            "apiVersion": "azureclaw.azure.com/v1alpha1",
+            "apiVersion": "kars.azure.com/v1alpha1",
             "kind": "TrustGraph",
             "metadata": { "finalizers": [FINALIZER] }
         });
@@ -180,7 +180,7 @@ async fn reconcile(tg: Arc<TrustGraph>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     };
 
     let status_patch = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "TrustGraph",
         "status": TrustGraphStatus {
             phase: Some(phase.into()),
@@ -290,7 +290,7 @@ async fn ensure_projection_configmap(
 
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
-        "azureclaw.azure.com/trustgraph-version-hash".into(),
+        "kars.azure.com/trustgraph-version-hash".into(),
         projection.version_hash.clone(),
     );
 
@@ -301,11 +301,11 @@ async fn ensure_projection_configmap(
             labels: Some(BTreeMap::from([
                 (
                     "app.kubernetes.io/managed-by".into(),
-                    "azureclaw-controller".into(),
+                    "kars-controller".into(),
                 ),
-                ("azureclaw.azure.com/trustgraph".into(), owner.into()),
+                ("kars.azure.com/trustgraph".into(), owner.into()),
                 (
-                    "azureclaw.azure.com/artifact".into(),
+                    "kars.azure.com/artifact".into(),
                     "trustgraph-projection".into(),
                 ),
             ])),
@@ -349,7 +349,7 @@ async fn finalize(
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
     let patch = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "TrustGraph",
         "metadata": { "finalizers": finalizers }
     });
@@ -448,7 +448,7 @@ mod tests {
         // The router (Phase F2) mounts a ConfigMap from this namespace.
         // Changing it requires a coordinated rollout — guard with a test
         // so casual edits surface in review.
-        assert_eq!(PROJECTION_NAMESPACE, "azureclaw-system");
+        assert_eq!(PROJECTION_NAMESPACE, "kars-system");
     }
 
     #[test]
@@ -456,6 +456,6 @@ mod tests {
         // Finalizer string is part of the on-cluster contract — once
         // set on a CR, only a controller using the same string will
         // remove it. Guard against drift.
-        assert_eq!(FINALIZER, "azureclaw.azure.com/trustgraph-cleanup");
+        assert_eq!(FINALIZER, "kars.azure.com/trustgraph-cleanup");
     }
 }

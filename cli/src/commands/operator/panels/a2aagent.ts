@@ -19,7 +19,7 @@ export const a2aAgentPanel: Panel = {
   render(state: ClusterState, opts?: PanelRenderOpts): string {
     // A2AAgent is namespace-scoped; per-sandbox view filters by namespace.
     const items = opts?.sandbox
-      ? state.a2aAgents.filter((a) => a.namespace === `azureclaw-${opts.sandbox}`)
+      ? state.a2aAgents.filter((a) => a.namespace === `kars-${opts.sandbox}`)
       : state.a2aAgents;
     if (items.length === 0) return EMPTY;
 

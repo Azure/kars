@@ -15,9 +15,7 @@
 
 #![cfg(feature = "chaos")]
 
-use azureclaw_chaos_tests::harness::{
-    ChaosResponse, ChaosScript, chaos_client, start_chaos_server,
-};
+use kars_chaos_tests::harness::{ChaosResponse, ChaosScript, chaos_client, start_chaos_server};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

@@ -86,9 +86,9 @@ export async function initTelemetry(
     const resource = new Resource({
       [ATTR_SERVICE_NAME]: opts.serviceName,
       [ATTR_SERVICE_VERSION]: opts.serviceVersion ?? '0.1.0',
-      'service.namespace': 'azureclaw',
-      'azureclaw.runtime.kind': 'LangGraph',
-      'azureclaw.runtime.language': 'typescript',
+      'service.namespace': 'kars',
+      'kars.runtime.kind': 'LangGraph',
+      'kars.runtime.language': 'typescript',
     });
 
     const tracerProvider = new NodeTracerProvider({ resource });
@@ -112,13 +112,13 @@ export async function initTelemetry(
     initialized = true;
     // eslint-disable-next-line no-console
     console.error(
-      `[azureclaw-runtime-langgraph-ts] OTel initialized: traces=${tracesUrl} metrics=${metricsUrl}`,
+      `[kars-runtime-langgraph-ts] OTel initialized: traces=${tracesUrl} metrics=${metricsUrl}`,
     );
   } catch (err) {
     // Telemetry must never crash the agent.
     // eslint-disable-next-line no-console
     console.warn(
-      '[azureclaw-runtime-langgraph-ts] initTelemetry failed:',
+      '[kars-runtime-langgraph-ts] initTelemetry failed:',
       err,
     );
   }
@@ -156,7 +156,7 @@ async function instrumentHttp(): Promise<void> {
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
-      '[azureclaw-runtime-langgraph-ts] HTTP instrumentation failed:',
+      '[kars-runtime-langgraph-ts] HTTP instrumentation failed:',
       err,
     );
   }

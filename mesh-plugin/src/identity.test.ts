@@ -13,7 +13,7 @@ import {
   loadOrCreateIdentity,
 } from "./identity.js";
 
-const TEST_DIR = path.join(os.tmpdir(), `azureclaw-test-${Date.now()}`);
+const TEST_DIR = path.join(os.tmpdir(), `kars-test-${Date.now()}`);
 
 describe("identity", () => {
   beforeEach(() => {

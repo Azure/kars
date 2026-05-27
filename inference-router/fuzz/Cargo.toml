@@ -1,5 +1,5 @@
 [package]
-name = "azureclaw-inference-router-fuzz"
+name = "kars-inference-router-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -25,7 +25,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-azureclaw-inference-router = { path = ".." }
+kars-inference-router = { path = ".." }
 
 [[bin]]
 name = "fuzz_deserialize_state"

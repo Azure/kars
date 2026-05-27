@@ -1,4 +1,4 @@
-// AzureClaw - Key Vault Module
+// Kars - Key Vault Module
 
 @description('Key Vault name')
 param name string

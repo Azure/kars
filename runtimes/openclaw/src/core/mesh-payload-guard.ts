@@ -14,7 +14,7 @@
 // Recipient agents run in their own containers — they cannot read
 // `/sandbox/<peer>/...` no matter what the path string says. The right
 // path is the `mesh_transfer_file` tool (sub-agent) or
-// `azureclaw_mesh_transfer_file` (parent), which read-and-base64-encode
+// `kars_mesh_transfer_file` (parent), which read-and-base64-encode
 // the file and send a proper `file_transfer` envelope.
 //
 // `validateMeshPayload(content, hint)` returns `null` when the payload

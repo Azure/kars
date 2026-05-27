@@ -7,19 +7,19 @@ import { existsSync } from "fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
-import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants, type AzureClawConfig } from "../config.js";
+import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants, type KarsConfig } from "../config.js";
 
 const DEFAULT_SANDBOX_IMAGE =
-  "azureclaw-sandbox:dev";
+  "kars-sandbox:dev";
 const SANDBOX_BASE_IMAGE =
-  "azureclaw-sandbox-base:dev";
+  "kars-sandbox-base:dev";
 const AZURELINUX_BASE =
   "mcr.microsoft.com/azurelinux/base/core:3.0";
 
-const AGT_NETWORK = "azureclaw-dev";
-const AGT_POSTGRES = "azureclaw-agt-postgres";
-const AGT_RELAY = "azureclaw-agt-relay";
-const AGT_REGISTRY = "azureclaw-agt-registry";
+const AGT_NETWORK = "kars-dev";
+const AGT_POSTGRES = "kars-agt-postgres";
+const AGT_RELAY = "kars-agt-relay";
+const AGT_REGISTRY = "kars-agt-registry";
 
 // Mesh provider port matrix.
 //   agt: Microsoft AGT Python relay/registry (in-memory, no Postgres)
@@ -49,7 +49,7 @@ Requires either:
     GitHub Models — no Azure subscription needed.
 
 On first run, you'll be prompted to choose between the two providers and
-your choice (and credentials) will be saved to ~/.azureclaw/. Subsequent
+your choice (and credentials) will be saved to ~/.kars/. Subsequent
 runs reuse the saved provider — no flags required.
 
 Use --github-token for a one-off, ephemeral GitHub Models run that does
@@ -72,7 +72,7 @@ NOT overwrite your saved credentials.
     .option(
       "--cluster-name <name>",
       "Kind cluster name (only used with --target local-k8s)",
-      "azureclaw-dev"
+      "kars-dev"
     )
     .option(
       "--ephemeral",
@@ -113,7 +113,7 @@ NOT overwrite your saved credentials.
     )
     .option(
       "--agt-repo <path>",
-      `Path to the agent-governance-toolkit checkout (used to build relay/registry images). Defaults to $AZURECLAW_AGT_REPO or ${DEFAULT_AGT_REPO}`
+      `Path to the agent-governance-toolkit checkout (used to build relay/registry images). Defaults to $KARS_AGT_REPO or ${DEFAULT_AGT_REPO}`
     )
     .option(
       "--agt-sdk-tarball <path>",
@@ -194,7 +194,7 @@ Notes:
       const credsForFirstRun = loadConfig();
       if (!targetWasExplicit && (!credsForFirstRun || !credsForFirstRun.firstRunCompleted)) {
         const { default: inquirer } = await import("inquirer");
-        console.log(chalk.yellow("\n  👋 First time running `azureclaw dev`. Where should the sandbox run?"));
+        console.log(chalk.yellow("\n  👋 First time running `kars dev`. Where should the sandbox run?"));
         const { chosenTarget } = await inquirer.prompt([
           {
             type: "list",
@@ -243,9 +243,9 @@ Notes:
         // are existing creds for a different provider. After the pick:
         //   • if we have existing creds for that exact provider, offer
         //     a reuse confirm,
-        //   • otherwise launch the same flow `azureclaw credentials`
+        //   • otherwise launch the same flow `kars credentials`
         //     uses (forced to the chosen provider), which prompts and
-        //     persists to ~/.azureclaw/.
+        //     persists to ~/.kars/.
         const { provider: chosenProvider } = await inquirer.prompt([
           {
             type: "list",
@@ -269,14 +269,14 @@ Notes:
           },
         ]);
 
-        const providerLabelFor = (p: AzureClawConfig["provider"]): string =>
+        const providerLabelFor = (p: KarsConfig["provider"]): string =>
           p === "github-models"
             ? "GitHub Models"
             : p === "github-copilot"
               ? "GitHub Copilot"
               : "Azure AI Foundry";
 
-        let newCreds: AzureClawConfig;
+        let newCreds: KarsConfig;
         const haveMatchingCreds =
           credsForFirstRun && credsForFirstRun.provider === chosenProvider;
 
@@ -296,7 +296,7 @@ Notes:
           if (reuse) {
             console.log(
               chalk.dim(
-                "    Change with `azureclaw credentials` at any time.\n",
+                "    Change with `kars credentials` at any time.\n",
               ),
             );
             const { markFirstRunCompleted } = await import("../config.js");
@@ -325,7 +325,7 @@ Notes:
             );
             console.log(
               chalk.dim(
-                "  These will be saved to ~/.azureclaw/, same as `azureclaw credentials`.\n",
+                "  These will be saved to ~/.kars/, same as `kars credentials`.\n",
               ),
             );
           }
@@ -360,11 +360,11 @@ Notes:
 
         // ── Channels: prompt moved below the first-run block so it
         // fires on every run (a user who adds a Telegram token via
-        // `azureclaw credentials` after first-run should still get the
-        // channel attached on the next `azureclaw dev`).
+        // `kars credentials` after first-run should still get the
+        // channel attached on the next `kars dev`).
 
         // Rebuild prompt — applies to BOTH targets. Cached images can
-        // be stale (wrong arch after an `azureclaw push` that always
+        // be stale (wrong arch after an `kars push` that always
         // builds linux/amd64; or out-of-date plugin/entrypoint code).
         // Defaults to no — first-time users want fast bringup. Power
         // users testing local changes can opt in here without
@@ -403,7 +403,7 @@ Notes:
             ? `Remote  (reuse port-forward to AKS: ${cachedRegistryUrl})`
             : aksAvailable
               ? `Remote  (auto port-forward to AKS cluster: ${cachedCtx!.aksCluster})`
-              : "Remote  (port-forward to existing AKS mesh — requires `azureclaw up` first)";
+              : "Remote  (port-forward to existing AKS mesh — requires `kars up` first)";
 
           const localLabel =
             options.target === "local-k8s"
@@ -431,10 +431,10 @@ Notes:
                 "\n  ⚠ No cached AKS deployment context found. Falling back to local mesh.",
               ));
               console.log(chalk.dim(
-                "    Run `azureclaw up` first to provision an AKS cluster, then re-run `azureclaw dev`.\n",
+                "    Run `kars up` first to provision an AKS cluster, then re-run `kars dev`.\n",
               ));
             } else {
-              // Default port aligns with `azureclaw mesh promote --port-forward`
+              // Default port aligns with `kars mesh promote --port-forward`
               // (registry on 18080, relay on 18765). The downstream
               // global-registry block (around line 922) does the actual
               // health check + auto-spawn if the tunnels aren't already
@@ -458,7 +458,7 @@ Notes:
       // local-k8s ships a `<name>-credentials` Secret with the channel
       // tokens; docker mode passes them via `-e`. Either way we always
       // want to ask: a user who set their Telegram token via
-      // `azureclaw credentials` AFTER first-run completed would otherwise
+      // `kars credentials` AFTER first-run completed would otherwise
       // never see the channel attached — `isFirstRun` is now false and
       // the channels prompt used to be gated on it. Skip only when the
       // user already passed `--channels` explicitly (CI / scripted use).
@@ -522,7 +522,7 @@ Notes:
             forceRebuild: options.build === true,
             channels: typeof options.channels === "string" ? options.channels : undefined,
             meshProvider: "agt",
-            agtRepo: options.agtRepo ?? process.env.AZURECLAW_AGT_REPO ?? DEFAULT_AGT_REPO,
+            agtRepo: options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO,
             noMesh: options.noMesh === true,
             globalRegistry: typeof options.globalRegistry === "string" ? options.globalRegistry : undefined,
           });
@@ -534,7 +534,7 @@ Notes:
         }
       }
 
-      banner("AzureClaw · Local Sandbox", "Secure AI Agent Runtime on Azure");
+      banner("Kars · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
       const stepper = new Stepper({ totalSteps: 4 });
 
@@ -542,13 +542,13 @@ Notes:
       const meshProvider: MeshProvider = (options.meshProvider ?? "agt") as MeshProvider;
       const meshPorts = MESH_PORTS[meshProvider];
       const agtRepo: string = options.agtRepo
-        ?? process.env.AZURECLAW_AGT_REPO
+        ?? process.env.KARS_AGT_REPO
         ?? DEFAULT_AGT_REPO;
       if (meshProvider === "agt" && options.build) {
         if (!existsSync(path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile"))) {
           console.error(chalk.red(`\n  Error: --mesh-provider=agt --build requires the agent-governance-toolkit checkout.`));
           console.error(chalk.red(`  Looked for: ${path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile")}`));
-          console.error(chalk.red(`  Pass --agt-repo <path> or set $AZURECLAW_AGT_REPO.\n`));
+          console.error(chalk.red(`  Pass --agt-repo <path> or set $KARS_AGT_REPO.\n`));
           process.exit(1);
         }
       }
@@ -579,7 +579,7 @@ Notes:
         const githubToken = typeof options.githubToken === "string" ? options.githubToken.trim() : undefined;
         let creds = loadConfig();
         // Always materialize a per-run secret tempfile from creds.apiKey.
-        // Avoids depending on the legacy ~/.azureclaw/credentials file
+        // Avoids depending on the legacy ~/.kars/credentials file
         // (which can drift from secrets.json) and decouples reset semantics
         // from the container mount path.
         let mountedSecretPath: string;
@@ -637,7 +637,7 @@ Notes:
         // Materialize secret tempfile from the resolved creds.apiKey.
         {
           const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs");
-          const tmpDir = mkdtempSync(path.join(os.tmpdir(), "azureclaw-secret-"));
+          const tmpDir = mkdtempSync(path.join(os.tmpdir(), "kars-secret-"));
           mountedSecretPath = path.join(tmpDir, "azure-openai-key");
           writeFileSync(mountedSecretPath, creds.apiKey, "utf-8"); // lgtm[js/http-to-file-access] — secret tempfile mounted into the dev container; 0o600 below
           chmodSync(mountedSecretPath, 0o600);
@@ -670,7 +670,7 @@ Notes:
             if (cachedArch.trim() === dockerArch) {
               imageExists = true;
             } else {
-              // Stale image from a prior `azureclaw push` (which always
+              // Stale image from a prior `kars push` (which always
               // builds linux/amd64 for AKS) or a different host. Force
               // rebuild — running an amd64 sandbox under Rosetta on
               // Apple Silicon crashes with "rt_tgsigqueueinfo failed".
@@ -699,9 +699,9 @@ Notes:
   Failed to pull ${chalk.bold(baseImage)}.
 
   ${chalk.bold("1.")} Pull manually: ${chalk.cyan(`docker pull ${baseImage}`)}
-  ${chalk.bold("2.")} Re-run:        ${chalk.cyan("azureclaw dev")}
+  ${chalk.bold("2.")} Re-run:        ${chalk.cyan("kars dev")}
 
-  Custom registry? ${chalk.cyan(`azureclaw dev --base-image <your-registry>/azurelinux/base/core:3.0`)}
+  Custom registry? ${chalk.cyan(`kars dev --base-image <your-registry>/azurelinux/base/core:3.0`)}
 `));
               process.exit(1);
             }
@@ -713,9 +713,9 @@ Notes:
           if (!existsSync(dockerfilePath)) {
             stepper.fail("Dockerfile not found");
             console.log(chalk.yellow(`
-  Run from the AzureClaw repo root:
-    ${chalk.cyan("git clone https://github.com/Azure/azureclaw.git && cd azureclaw")}
-    ${chalk.cyan("azureclaw dev")}
+  Run from the Kars repo root:
+    ${chalk.cyan("git clone https://github.com/Azure/kars.git && cd kars")}
+    ${chalk.cyan("kars dev")}
 `));
             process.exit(1);
           }
@@ -748,7 +748,7 @@ Notes:
           }
 
           // Build inference router locally (sandbox Dockerfile needs it)
-          const routerImage = "azureclaw-inference-router:dev";
+          const routerImage = "kars-inference-router:dev";
           let routerExists = false;
           try {
             await execa("docker", ["image", "inspect", routerImage], { stdio: "pipe" });
@@ -822,12 +822,12 @@ Notes:
             "build",
             "--platform", dockerPlatform,
             ...sandboxBuildArgs,
-            "-t", "azureclaw-sandbox:dev",
+            "-t", "kars-sandbox:dev",
             "-f", dockerfilePath,
             repoRoot,
           ], { stdio: "inherit" });
           console.log();
-          image = "azureclaw-sandbox:dev";
+          image = "kars-sandbox:dev";
           stepper.done("Sandbox image built");
 
           // Build mesh relay + registry images from the AGT toolkit.
@@ -1051,7 +1051,7 @@ Notes:
                 { svc: "svc/agentmesh-registry", localPort: regPort, remotePort: 8080, label: "Registry" },
                 { svc: "svc/agentmesh-relay", localPort: relayPort, remotePort: 8765, label: "Relay" },
               ];
-              const logDir = path.join(os.homedir(), ".azureclaw", "logs");
+              const logDir = path.join(os.homedir(), ".kars", "logs");
               mkdirSync(logDir, { recursive: true });
               const pids: Record<string, number> = {};
 
@@ -1076,7 +1076,7 @@ Notes:
                 if (ready && child.pid) pids[t.label] = child.pid;
               }
 
-              const pidFile = path.join(os.homedir(), ".azureclaw", "port-forward-pids.json");
+              const pidFile = path.join(os.homedir(), ".kars", "port-forward-pids.json");
               writeFileSync(pidFile, JSON.stringify(pids, null, 2));
 
               // Kill any stale listeners that aren't our spawned PIDs
@@ -1104,7 +1104,7 @@ Notes:
 
         // ── Container startup ────────────────────────────────────────
         stepper.step("Starting sandbox container...");
-        const containerName = `azureclaw-${options.name}`;
+        const containerName = `kars-${options.name}`;
 
         // Clean up any previous instance
         try {
@@ -1117,7 +1117,7 @@ Notes:
         const { fileURLToPath } = await import("url");
         const thisFile = fileURLToPath(import.meta.url);
         const distDir = path.dirname(path.dirname(thisFile));
-        const seccompPath = path.join(distDir, "profiles", "seccomp", "azureclaw-strict.json");
+        const seccompPath = path.join(distDir, "profiles", "seccomp", "kars-strict.json");
         const hasSeccomp = existsSync(seccompPath);
         const seccompArgs = hasSeccomp
           ? ["--security-opt", `seccomp=${seccompPath}`]
@@ -1178,7 +1178,7 @@ Notes:
             "-e", `AGT_RELAY_URL=${containerRelayUrl}`,
             "-e", "AGT_REGISTRY_MODE=global",
             "-e", "AGT_GOVERNANCE_ENABLED=true",
-            "-e", `AZURECLAW_MESH_PROVIDER=${meshProvider}`,
+            "-e", `KARS_MESH_PROVIDER=${meshProvider}`,
           );
         } else {
           // Local registry mode — router connects to colocated containers.
@@ -1188,7 +1188,7 @@ Notes:
             "-e", `AGT_REGISTRY_URL=http://${AGT_REGISTRY}:${meshPorts.registry}`,
             "-e", "AGT_REGISTRY_MODE=local",
             "-e", "AGT_GOVERNANCE_ENABLED=true",
-            "-e", `AZURECLAW_MESH_PROVIDER=${meshProvider}`,
+            "-e", `KARS_MESH_PROVIDER=${meshProvider}`,
           );
         }
 
@@ -1239,19 +1239,19 @@ Notes:
           "-e", `DEFAULT_MODEL=${model}`,
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
           "-e", `SANDBOX_NAME=${options.name}`,
-          "-e", "AZURECLAW_DEV_MODE=true",
-          ...(isGithubModelsMode ? ["-e", "AZURECLAW_PROVIDER=github-models"] : []),
-          ...(isCopilotMode ? ["-e", "AZURECLAW_PROVIDER=github-copilot"] : []),
+          "-e", "KARS_DEV_MODE=true",
+          ...(isGithubModelsMode ? ["-e", "KARS_PROVIDER=github-models"] : []),
+          ...(isCopilotMode ? ["-e", "KARS_PROVIDER=github-copilot"] : []),
           "-e", `DOCKER_NETWORK=${AGT_NETWORK}`,
           // Phase 2/F8 mitigations — env-gated suppression of false-positive
           // governance findings. Default-on in dev so research/citation
           // workloads aren't impeded; override with =0 to restore strict mode.
-          "-e", "AZURECLAW_SUPPRESS_EXFIL_URL=1",
-          "-e", "AZURECLAW_SUPPRESS_CONTENT_FLAGS=violence",
-          "-e", "AZURECLAW_CONTENT_FLAG_MIN_SEVERITY=medium",
+          "-e", "KARS_SUPPRESS_EXFIL_URL=1",
+          "-e", "KARS_SUPPRESS_CONTENT_FLAGS=violence",
+          "-e", "KARS_CONTENT_FLAG_MIN_SEVERITY=medium",
           ...(creds.foundryProjectEndpoint ? ["-e", `FOUNDRY_PROJECT_ENDPOINT=${creds.foundryProjectEndpoint}`] : []),
           ...(discoveredDeployments ? ["-e", `FOUNDRY_DEPLOYMENTS=${discoveredDeployments}`] : []),
-          "-e", `PS1=azureclaw@${options.name}:\\w\\$ `,
+          "-e", `PS1=kars@${options.name}:\\w\\$ `,
           // Learn mode on by default in dev — records all egress domains for review
           "-e", "EGRESS_LEARN_MODE=true",
           ...agtEnvArgs,
@@ -1284,7 +1284,7 @@ Notes:
             if (!hasIptables) {
               await execa("docker", [
                 "exec", containerName, "sh", "-c",
-                "iptables -L AZURECLAW_EGRESS -n 2>/dev/null | grep -q REJECT",
+                "iptables -L KARS_EGRESS -n 2>/dev/null | grep -q REJECT",
               ], { stdio: "pipe" });
               hasIptables = true;
             }
@@ -1344,7 +1344,7 @@ Notes:
         checkLine(true, "Read-only root filesystem");
         checkLine(true, "Non-root user (sandbox:1000)");
         checkLine(true, "All root privileges removed");
-        checkLine(hasSeccomp, `seccomp profile ${hasSeccomp ? "(azureclaw-strict)" : "(not loaded)"}`);
+        checkLine(hasSeccomp, `seccomp profile ${hasSeccomp ? "(kars-strict)" : "(not loaded)"}`);
         checkLine(hasIptables, `iptables egress guard ${hasIptables ? "(UID 1000 → transparent proxy)" : "(not available)"}`);
         checkLine(true, "API key mounted as read-only secret");
         {
@@ -1392,17 +1392,17 @@ Notes:
         }
 
         section("Commands");
-        console.log(`  Connect:  ${chalk.cyan(`azureclaw connect ${options.name}`)}`);
-        console.log(`  Shell:    ${chalk.cyan(`azureclaw connect ${options.name} --shell`)}`);
-        console.log(`  Status:   ${chalk.cyan(`azureclaw status ${options.name}`)}`);
-        console.log(`  Stop:     ${chalk.cyan(`azureclaw destroy ${options.name}`)}`);
+        console.log(`  Connect:  ${chalk.cyan(`kars connect ${options.name}`)}`);
+        console.log(`  Shell:    ${chalk.cyan(`kars connect ${options.name} --shell`)}`);
+        console.log(`  Status:   ${chalk.cyan(`kars status ${options.name}`)}`);
+        console.log(`  Stop:     ${chalk.cyan(`kars destroy ${options.name}`)}`);
         if (gatewayToken) {
           const url = `http://localhost:18789/#token=${gatewayToken}`;
           // Print URL without chalk formatting — terminals auto-detect http:// links.
           // Chalk ANSI codes break terminal URL detection in most emulators.
           console.log(`  Web UI:   ${url}`);
         }
-        console.log(chalk.dim(`\n  Production: azureclaw up (deploys to AKS)`));
+        console.log(chalk.dim(`\n  Production: kars up (deploys to AKS)`));
         console.log();
       } catch (error) {
         stepper.stop();
@@ -1414,9 +1414,9 @@ Notes:
       }
     });
 
-  // `azureclaw dev down [--target local-k8s] [--keep-cluster]`
-  // Tears down the local-k8s dev environment created by `azureclaw dev
-  // --target local-k8s`. For Docker target, `azureclaw destroy` already
+  // `kars dev down [--target local-k8s] [--keep-cluster]`
+  // Tears down the local-k8s dev environment created by `kars dev
+  // --target local-k8s`. For Docker target, `kars destroy` already
   // does the right thing — `dev down` is local-k8s-specific.
   cmd
     .command("down")
@@ -1429,7 +1429,7 @@ Notes:
     .option(
       "--cluster-name <name>",
       "Kind cluster name to delete",
-      "azureclaw-dev",
+      "kars-dev",
     )
     .option(
       "--keep-cluster",
@@ -1442,7 +1442,7 @@ Notes:
           chalk.red(`  --target ${options.target} is not supported by 'dev down'.`),
         );
         console.error(
-          chalk.dim("  For Docker dev sandboxes, use 'azureclaw destroy <name>' instead."),
+          chalk.dim("  For Docker dev sandboxes, use 'kars destroy <name>' instead."),
         );
         process.exit(1);
       }

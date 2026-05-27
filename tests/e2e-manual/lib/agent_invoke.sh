@@ -26,7 +26,7 @@
 
 # OpenClaw gateway local port for the forward (chosen to not collide
 # with router_pf_open's 18743 default).
-_OPENCLAW_LOCAL_PORT="${AZURECLAW_E2E_OPENCLAW_PORT:-18790}"
+_OPENCLAW_LOCAL_PORT="${KARS_E2E_OPENCLAW_PORT:-18790}"
 
 _invoke_openclaw() {
     local pod_ns="$1"

@@ -1,0 +1,381 @@
+# Kars Helm Chart Values
+# NOTE: For production, replace "latest" tags with specific image digests
+#       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
+
+# Controller configuration
+controller:
+  image:
+    repository: kars.azurecr.io/kars-controller
+    tag: "latest"  # Pin to digest in production
+    pullPolicy: Always
+  replicas: 2
+  # When true, BYO sandboxes whose
+  # spec.runtime.byo.contractVersion is missing or unknown, OR whose
+  # byo.image is shape-invalid, are rejected with Degraded=True
+  # (Reason=BYOContractInvalid) instead of reconciling. Default
+  # `false` keeps the warn-only behaviour. Recommended `true`
+  # in production to fail-closed against operator typos.
+  byoStrict: false
+  # Optional list of additional env vars merged into the controller
+  # container — `[ { name: FOO, value: bar }, ... ]`. Used by E2E
+  # harness to disable leader-election in single-node Kind clusters.
+  extraEnv: []
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# Inference router configuration
+inferenceRouter:
+  image:
+    repository: kars.azurecr.io/kars-inference-router
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 2
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  azure:
+    openai:
+      endpoint: ""       # Azure OpenAI endpoint for dev mode (set via kars onboard)
+      deploymentName: "gpt-4.1"   # Default model for dev mode
+    contentSafety:
+      enabled: true
+    promptShields:
+      enabled: true
+
+# Default sandbox configuration
+sandbox:
+  image:
+    repository: kars.azurecr.io/openclaw-sandbox
+    tag: "latest"
+    pullPolicy: Always
+  isolation: "enhanced"  # standard | enhanced | confidential
+  seccompProfile: "kars-strict"
+  # SELinux: empty = compatible with restricted PodSecurity (Approach C).
+  # Set to "kars_sandbox_t" only if you install a custom SELinux policy module
+  # on nodes and switch namespace enforcement to baseline (Approach A).
+  selinuxContext: ""
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  writablePaths:
+    - /sandbox
+    - /tmp
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+
+# Multi-runtime adapter images. Each value is a fully-qualified
+# `<repo>:<tag>` string consumed by controller/src/reconciler/runtime.rs
+# via the `*_RUNTIME_IMAGE` env vars on the controller Deployment.
+# Empty string falls back to the controller's compiled-in default.
+# `kars up` populates these with `<your-acr>/kars-runtime-*:latest`.
+runtimes:
+  openaiAgents:
+    image: ""
+  mafPython:
+    image: ""
+  anthropic:
+    image: ""
+  langgraph:
+    image: ""
+  langgraphTs:
+    image: ""
+  pydanticAi:
+    image: ""
+
+# Network policy defaults
+networkPolicy:
+  defaultDenyEgress: true
+  allowedEndpoints:
+    - name: azure-openai
+      host: "*.openai.azure.com"
+      port: 443
+    - name: github
+      host: "github.com"
+      port: 443
+      methods: ["GET"]
+    - name: github-api
+      host: "api.github.com"
+      port: 443
+      methods: ["GET"]
+    # clawhub.com intentionally excluded — 12% malware rate (Atomic Stealer).
+    # Skills must be curated at build time, not downloaded at runtime.
+    # See: https://cybersecuritynews.com/openclaws-top-skill-malware/
+    # openclaw.ai also excluded — prevents `curl | bash` install vectors.
+    - name: npm-registry
+      host: "registry.npmjs.org"
+      port: 443
+      methods: ["GET"]
+
+# Mesh federation — enables external agents to pair and offload tasks.
+# Enabled by default so `kars pair add` works out-of-the-box. The
+# controller joins the in-cluster relay on startup (leader-elected so only
+# one replica connects per AMID). Set to false to opt out.
+meshPeer:
+  enabled: true             # Set to false to disable federation
+  relayUrl: ""              # Override relay URL (default: ws://agentmesh-relay.agentmesh.svc.cluster.local:8765)
+  clusterName: ""           # Display name shown to external agents during pairing
+
+# AgentMesh transport.
+# The chart only injects KARS_MESH_PROVIDER into sandbox pods via the
+# controller; operators must apply the matching mesh manifest separately.
+# Only `agt` (upstream Microsoft AGT relay+registry, deploy/agentmesh-agt.yaml,
+# @microsoft/agent-governance-sdk) is supported. The vendored fork was removed
+# in Phase 5.2.
+mesh:
+  provider: "agt"
+
+# Strict-mode tool definitions for sandbox agents.
+# When enabled, sandbox agents send OpenAI strict-mode tool schemas
+# (strict: true + additionalProperties: false + all params required) to
+# the LLM. This grammar-constrains the model's tool-call argument JSON at
+# decode time, eliminating multi-KB string-escape corruption failures on
+# mesh_send, file_write, foundry_code_execute, and 12 other tools.
+# Runtime additionally gates on GPT-family model (gpt-4o/4.1/5/o1/o3/o4)
+# and non-slim provider, so Anthropic / Claude / Gemini deployments via
+# Foundry's OpenAI-compat shim are auto-excluded. Default OFF for
+# backward compatibility — opt in once you've verified your deployment
+# uses a supported model.
+strictTools:
+  enabled: false
+
+# Foundry configuration (set by kars up --foundry-endpoint)
+foundry:
+  endpoint: ""            # e.g. https://my-resource.services.ai.azure.com — AI Services base
+  projectEndpoint: ""     # e.g. https://my-resource.services.ai.azure.com/api/projects/my-project — for Memory, Agents, Indexes
+  deployments: ""         # JSON array of deployment names, e.g. '["gpt-4.1","text-embedding-3-small"]'
+
+# Azure AI Content Safety configuration
+# Used for both Content Safety text analysis and Prompt Shields.
+# Defaults to Foundry endpoint (Azure AI Services host Content Safety at the same URL).
+contentSafety:
+  endpoint: ""    # e.g. https://my-resource.cognitiveservices.azure.com — auto-detected from Foundry endpoint
+
+# Monitoring
+monitoring:
+  enabled: true
+  containerInsights: true
+  prometheus:
+    enabled: true
+  grafana:
+    enabled: false   # Set to true if you want Grafana dashboards
+  inspektorGadget:
+    enabled: false   # Install separately: kubectl gadget deploy
+    image:
+      repository: ghcr.io/inspektor-gadget/inspektor-gadget
+      tag: "v0.37.0"
+    gadgets:
+      traceExec: true       # Monitor process execution in sandboxes
+      traceOpen: true       # Track file opens for policy validation
+      traceTcp: true        # Network flow monitoring per pod
+      traceDns: true        # DNS snooping for policy bypass detection
+      traceMount: true      # Detect mount attempts (should be blocked)
+
+# Admission policies shipped with the chart.
+admission:
+  nullProviderBlock:
+    # Deploy the ValidatingAdmissionPolicy that rejects
+    # spec.*.provider=(null|noop|disabled|none) on non-dev tenants.
+    # Mirror of ci/no-null-provider-prod.sh (static scan); this is the
+    # runtime enforcement. Requires Kubernetes >= 1.30 (VAP GA).
+    # Opt-out per object via label: kars.azure.com/dev-only: "true"
+    enabled: true
+  podExecBan:
+    # Deploy ValidatingAdmissionPolicy that rejects kubectl exec /
+    # attach / portforward / console against pods in sandbox namespaces
+    # (labelled kars.azure.com/isolated=strict). Prevents operator
+    # shell-in-sandbox vector (MCP02 "tool poisoning" blast radius).
+    # Break-glass: set kars.azure.com/break-glass=true on the
+    # namespace; admission bypasses (logged via audit policy).
+    # Requires Kubernetes >= 1.30 (VAP GA).
+    enabled: true
+  sandboxPostureLock:
+    # Deploy ValidatingAdmissionPolicy that blocks posture downgrades
+    # on sandbox pods: flipping readOnlyRootFilesystem false, dropping
+    # runAsNonRoot, removing seccompProfile, escalating privileged.
+    # Applies to pods in namespaces labelled
+    # kars.azure.com/isolated=strict on UPDATE only (CREATE is
+    # handled by the controller's own pod template).
+    # Requires Kubernetes >= 1.30 (VAP GA).
+    enabled: true
+  seccompAutoStamp:
+    # Deploy MutatingAdmissionPolicy that auto-stamps the
+    # kars-strict seccomp profile onto sandbox-namespace pods that
+    # are missing it. Defense-in-depth on top of the controller's own
+    # pod-template stamping and the sandboxPostureLock VAP.
+    #
+    # Requires Kubernetes >= 1.34 AND the `MutatingAdmissionPolicy`
+    # feature gate enabled. The gate is still beta and OFF by default in
+    # upstream K8s 1.34, and AKS does not expose it yet — so we default
+    # to false. Flip to true once the API surface is available.
+    enabled: false
+  contentSafetyFloor:
+    # Deploy ValidatingAdmissionPolicy that rejects InferencePolicy
+    # objects whose `spec.contentSafety.{hate,selfHarm,sexual,violence}`
+    # is more permissive than the cluster minimum. Severity ordering
+    # follows Azure Content Safety: Safe (0) < Low (1) < Medium (2) <
+    # High (3); lower ordinal == stricter floor.
+    #
+    # Per-CR opt-out via the `kars.azure.com/dev-only: "true"`
+    # label, mirroring the null-provider-block VAP convention.
+    #
+    # Requires Kubernetes >= 1.30 (VAP GA).
+    enabled: true
+    # Cluster-wide minimum severity. InferencePolicy authors cannot
+    # set a value above this (which would loosen the floor).
+    minimum: "Medium"
+
+# Azure-specific configuration
+azure:
+  workloadIdentity:
+    enabled: true
+    clientId: ""    # Set by kars up from Bicep outputs
+  keyVaultCsi:
+    enabled: true
+    keyVaultName: ""    # Set via kars init
+  policy:
+    enabled: true
+  # Compliance: azure-osconfig integration (TODO)
+  osconfig:
+    enabled: false      # TODO: enable when azure-osconfig integration is ready
+    benchmark: "CIS_AKS_Optimized_Azure_Linux_3"
+  # Entra Agent ID auth for AGT mesh (api://agentmesh).
+  # When `enabled: false` (default), sandboxes skip the Workload Identity
+  # → Entra token exchange entirely and register with the AGT registry as
+  # anonymous tier. This avoids a ~123-second startup timeout on clusters
+  # where the `api://agentmesh` Entra app registration is not provisioned.
+  # Flip to `enabled: true` once Entra Agent ID provisioning has been
+  # completed end-to-end (see docs/internal/security-audits/2026-04-26-entra-auth-toggle.md).
+  entraAuth:
+    enabled: false
+
+# Cilium-related toggles. AKS clusters with Azure CNI Powered by Cilium
+# get this for free; vanilla Azure CNI does not. Default off so the
+# helm chart still installs on a vanilla cluster — the equivalent
+# CiliumNetworkPolicy is then emitted per-sandbox by the controller.
+cilium:
+  enabled: false
+
+# Cluster-scoped SignerPolicy ConfigMap.
+#
+# Watched by the controller (filtered to the `kars-signer-policy`
+# ConfigMap in this namespace). Defines who is permitted to sign egress
+# allowlist OCI artifacts (see `docs/egress-proxy.md`).
+#
+# Both lists are required when `enabled: true`. Either list empty → the
+# controller surfaces `SignerPolicyMalformed` on affected KarsSandbox
+# resources (no silent fallback). Set `enabled: false` only if you
+# intend to use the env-var emergency-override path
+# (`KARS_SIGNER_FULCIO_ISSUERS` / `KARS_SIGNER_SAN_PATTERNS`
+# on the controller Deployment).
+#
+# Glob syntax in `sanPatterns`: `*` matches any run of non-`/`
+# characters, `?` matches one character — same as the env-var path.
+# Entries that look like `https://...` are matched against
+# `Subject.uri`; everything else is matched against `Subject.email`.
+signerPolicy:
+  enabled: true
+  fulcioIssuers:
+    # GitHub Actions OIDC — for CI signing via `kars egress --sign`.
+    - https://token.actions.githubusercontent.com
+    # Entra workload identity (replace <tenant> with your tenant ID).
+    - https://login.microsoftonline.com/<tenant>/v2.0
+  sanPatterns:
+    # Workflow-identity SAN for repo-scoped CI runners. Tighten the
+    # path / branch component for your fork before going to production.
+    - https://github.com/Azure/kars/.github/workflows/*.yml@*
+
+
+# A2A public-ingress gateway (ADR-0001 #4).
+#
+# Opt-in. When `enabled: false` (default), the inference router is
+# reachable only on the cluster-internal mesh (port 8443) — current
+# behaviour, byte-for-byte unchanged.
+#
+# When `enabled: true`, a separate `kars-a2a-gateway` Deployment
+# is rendered. It terminates public TLS, verifies inbound JWS-signed
+# AgentCards, applies a per-subject token-bucket rate limit, then
+# forwards over mTLS to the router's port 8445. The router-side
+# listener is enabled by setting `inferenceRouter.a2aMtls.enabled=true`
+# in lockstep — both halves must agree.
+a2aGateway:
+  enabled: false
+  # When true, run the gateway in plain-HTTP test mode (no TLS, no
+  # mTLS upstream). Use only for dev / e2e / CI without PKI infra.
+  # The full proxy chain (replay-cache, rate-limit, subject
+  # propagation) still runs. Production must keep this `false`.
+  testMode: false
+  # When true, requests without `X-A2A-Agent-Subject` are accepted
+  # and bucketed under the synthetic subject "anonymous". Off by
+  # default — fail-closed against unauthenticated traffic.
+  anonymousOk: false
+  image:
+    repository: kars.azurecr.io/kars-a2a-gateway
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 2
+  # Server cert presented to external A2A callers. Provisioned by
+  # cert-manager / AGC controller; the chart only references the
+  # Secret name.
+  tls:
+    secretName: kars-a2a-gateway-tls
+  # Client cert presented to the router on port 8445. Must be signed
+  # by the CA whose bundle the router mounts at A2A_MTLS_CA_PATH.
+  mtls:
+    secretName: kars-a2a-gateway-mtls
+  rateLimits:
+    # Per-subject token-bucket parameters.
+    perSubjectBurst: 60
+    perSubjectRefillPerSec: 5
+    # Subject map cap. Beyond this, the most-stale subject is evicted
+    # (RAM-only — replicas do NOT share state in v1).
+    maxSubjects: 50000
+    # Cross-replica synchronisation entry-point. **Not yet
+    # implemented** — the field is locked here so future opt-in is
+    # backward-compatible. Setting this value today has no effect.
+    sharedRedisUrl: ""
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+# Egress allowlist policy (Slice 5c.2).
+egress:
+  # When `true`, KarsSandboxes that set
+  # `spec.networkPolicy.allowedEndpoints` without a signed
+  # `spec.networkPolicy.allowlistRef` fail-closed: the controller
+  # publishes an empty L7 allowlist mount, refuses to broaden L4
+  # egress beyond the always-allowed baseline (DNS / inference router
+  # / mesh), and stamps `Degraded=True / reason=Unsigned`. Default
+  # `false` — inline allowlists are allowed but surfaced as
+  # `AllowlistVerified=False / reason=Unsigned` warnings so operators
+  # can migrate to signed bundles at their own pace.
+  requireSigned: false
+
+# Slice 5e: EgressApproval ephemeral allowlist deltas. An `EgressApproval`
+# CR points at a target KarsSandbox + lists extra hosts to allow + carries
+# a TTL. The controller clamps the requested TTL to
+# `min(maxTtlSeconds, 604800s)` (one-week hard ceiling baked into the
+# binary). Operators can lower this further to match their policy posture.
+# After `expiresAt`, the reconciler transitions the CR to `phase=Expired`,
+# drops its file from the per-sandbox approvals ConfigMap, and removes the
+# finalizer.
+egressApproval:
+  maxTtlSeconds: 86400

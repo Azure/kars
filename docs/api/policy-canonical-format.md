@@ -1,7 +1,7 @@
 # Policy canonical format — per-kind byte rules
 
-> Byte-exact canonicalization rules for AzureClaw signed Policy artifacts.
-> The [`azureclaw policy sign`](../cli-reference.md#azureclaw-policy) CLI applies
+> Byte-exact canonicalization rules for Kars signed Policy artifacts.
+> The [`kars policy sign`](../cli-reference.md#kars-policy) CLI applies
 > these rules before computing the OCI layer digest; the controller's
 > `policy_fetcher` re-validates them after pulling. Both producer and consumer
 > are byte-identical or the artifact is rejected.
@@ -12,7 +12,7 @@
 
 ## §0. Universal rules (apply to every kind)
 
-These rules hold for **every** `application/vnd.azureclaw.*.v1+yaml` artifact.
+These rules hold for **every** `application/vnd.kars.*.v1+yaml` artifact.
 Producer (CLI) and consumer (controller) both enforce them; mismatch =
 `CanonicalFormError`, fail-closed.
 
@@ -32,7 +32,7 @@ Producer (CLI) and consumer (controller) both enforce them; mismatch =
 7. **Pinned `apiVersion` + `kind`** at the top of every artifact:
 
    ```yaml
-   apiVersion: azureclaw.dev/v1alpha1
+   apiVersion: kars.dev/v1alpha1
    kind: {EgressAllowlist|ToolPolicy|InferencePolicy|MemoryPolicy|McpToolsPolicy|EvalCorpus}
    ```
 
@@ -50,12 +50,12 @@ Producer (CLI) and consumer (controller) both enforce them; mismatch =
 (consumer). Slice 1c-real **extracts** the shared scaffolding but does NOT
 change the on-wire byte format — every existing signed bundle remains valid.
 
-**Layer mediaType:** `application/vnd.azureclaw.egress-allowlist.v1+yaml`
+**Layer mediaType:** `application/vnd.kars.egress-allowlist.v1+yaml`
 
 **Key order:**
 
 ```yaml
-apiVersion: azureclaw.dev/v1alpha1
+apiVersion: kars.dev/v1alpha1
 kind: EgressAllowlist
 metadata:
   name: <slug>
@@ -84,12 +84,12 @@ a controller-side compatibility shim.
 
 ## §2. `tools` — ToolPolicy v1 *(Slice 1c-real)*
 
-**Layer mediaType:** `application/vnd.azureclaw.tool-policy.v1+yaml`
+**Layer mediaType:** `application/vnd.kars.tool-policy.v1+yaml`
 
 **Key order:**
 
 ```yaml
-apiVersion: azureclaw.dev/v1alpha1
+apiVersion: kars.dev/v1alpha1
 kind: ToolPolicy
 metadata:
   name: <slug>
@@ -140,12 +140,12 @@ AGT mount.
 
 ## §3. `inference` — InferencePolicy v1 *(Slice 1c-real)*
 
-**Layer mediaType:** `application/vnd.azureclaw.inference-policy.v1+yaml`
+**Layer mediaType:** `application/vnd.kars.inference-policy.v1+yaml`
 
 **Key order:**
 
 ```yaml
-apiVersion: azureclaw.dev/v1alpha1
+apiVersion: kars.dev/v1alpha1
 kind: InferencePolicy
 metadata:
   name: <slug>
@@ -176,12 +176,12 @@ this order; absent categories are simply not included.
 
 ## §4. `memory` — MemoryPolicy v1 *(Slice 1c-real)*
 
-**Layer mediaType:** `application/vnd.azureclaw.memory-policy.v1+yaml`
+**Layer mediaType:** `application/vnd.kars.memory-policy.v1+yaml`
 
 **Key order:**
 
 ```yaml
-apiVersion: azureclaw.dev/v1alpha1
+apiVersion: kars.dev/v1alpha1
 kind: MemoryPolicy
 metadata:
   name: <slug>
@@ -208,12 +208,12 @@ spec:
 
 ## §5. `mcp-tools` — McpToolsPolicy v1 *(Slice 1c-real)*
 
-**Layer mediaType:** `application/vnd.azureclaw.mcp-tools.v1+yaml`
+**Layer mediaType:** `application/vnd.kars.mcp-tools.v1+yaml`
 
 **Key order:**
 
 ```yaml
-apiVersion: azureclaw.dev/v1alpha1
+apiVersion: kars.dev/v1alpha1
 kind: McpToolsPolicy
 metadata:
   name: <slug>
@@ -242,7 +242,7 @@ spec:
 
 ## §6. `eval-corpus` — EvalCorpus v1 *(Slice 6)*
 
-Reserved. Schema lands in Slice 6 when ClawEval is repurposed.
+Reserved. Schema lands in Slice 6 when KarsEval is repurposed.
 
 ## §7. Forward compatibility
 

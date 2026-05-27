@@ -183,8 +183,8 @@ os.chmod(path, 0o600)"
 RUN openclaw doctor --fix > /dev/null 2>&1 || true \
     && openclaw plugins install /opt/nemoclaw > /dev/null 2>&1 || true
 
-# Install AzureClaw Mesh plugin (federation + cloud offload)
-COPY --chown=sandbox:sandbox scripts/azureclaw-mesh/ /sandbox/.openclaw-data/extensions/azureclaw-mesh/
+# Install Kars Mesh plugin (federation + cloud offload)
+COPY --chown=sandbox:sandbox scripts/kars-mesh/ /sandbox/.openclaw-data/extensions/kars-mesh/
 
 # Lock openclaw.json via DAC: chown to root so the sandbox user cannot modify
 # it at runtime.  This works regardless of Landlock enforcement status.

@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `azureclaw inspect <sandbox>` — pretty-print the data-plane view of
+//! `kars inspect <sandbox>` — pretty-print the data-plane view of
 //! every policy CRD bound to a sandbox.
 //!
 //! Hits the router's `GET /internal/policy-status` endpoint and prints
 //! a per-`PolicyKind` summary: the digest the router has actually
 //! loaded, when it was loaded, and the source path. This is the
-//! operator-facing complement to `kubectl get clawsandbox`: that
+//! operator-facing complement to `kubectl get karssandbox`: that
 //! command shows the controller's view of the world (compiled digests,
 //! phases). `inspect` shows the data plane's view — which is what
 //! actually matters for "is my policy enforcing right now?".
@@ -28,9 +28,9 @@ const POLICY_KIND_LABEL: Record<string, string> = {
   InferencePolicy: "InferencePolicy",
   Egress: "Egress",
   // Slice 3a: router emits `PolicyKind::Memory` (as_str="Memory") for
-  // the compiled ClawMemory binding at /etc/azureclaw/memory/binding.json.
+  // the compiled KarsMemory binding at /etc/kars/memory/binding.json.
   // Display as the user-facing CRD name.
-  Memory: "ClawMemory",
+  Memory: "KarsMemory",
 };
 
 interface PolicyStatusEntry {
@@ -57,10 +57,10 @@ export function inspectCommand(): Command {
     .description(
       "Show the data-plane view of every policy CRD loaded by a sandbox's router"
     )
-    .argument("<sandbox>", "Sandbox name (the `metadata.name` of the ClawSandbox)")
+    .argument("<sandbox>", "Sandbox name (the `metadata.name` of the KarsSandbox)")
     .option(
       "-n, --namespace <ns>",
-      "Sandbox pod namespace (default: 'azureclaw-<sandbox>')"
+      "Sandbox pod namespace (default: 'kars-<sandbox>')"
     )
     .option("--json", "Emit raw JSON instead of the formatted tree")
     .action(async (sandbox: string, opts: InspectOptions) => {
@@ -78,13 +78,13 @@ async function runInspect(
   sandbox: string,
   opts: InspectOptions
 ): Promise<void> {
-  const ns = opts.namespace ?? `azureclaw-${sandbox}`;
+  const ns = opts.namespace ?? `kars-${sandbox}`;
 
   const token = await readAdminToken(sandbox, ns);
   if (!token) {
     throw new Error(
       `Could not read admin token from secret 'router-admin-token' in '${ns}'.\n` +
-        `  The sandbox may not be fully provisioned yet. Try 'azureclaw status ${sandbox}'.`
+        `  The sandbox may not be fully provisioned yet. Try 'kars status ${sandbox}'.`
     );
   }
 
@@ -142,7 +142,7 @@ async function readAdminToken(
           container,
           "--",
           "cat",
-          "/etc/azureclaw/secrets/admin-token",
+          "/etc/kars/secrets/admin-token",
         ],
         { stdio: "pipe", reject: false }
       );
@@ -170,9 +170,9 @@ async function fetchPolicyStatus(
   // the token through stdin and let bash read it; --quiet keeps curl
   // off stderr so parsing stdout stays trivial.
   const script =
-    'read -r AZURECLAW_ADMIN_TOKEN <&0 && ' +
+    'read -r KARS_ADMIN_TOKEN <&0 && ' +
     'curl --silent --show-error --fail --max-time 10 ' +
-    '-H "Authorization: Bearer $AZURECLAW_ADMIN_TOKEN" ' +
+    '-H "Authorization: Bearer $KARS_ADMIN_TOKEN" ' +
     "http://127.0.0.1:8443/internal/policy-status";
 
   const result = await execa(
@@ -220,7 +220,7 @@ function renderTree(
 ): void {
   console.log("");
   console.log(
-    chalk.bold(`  ClawSandbox: ${sandbox}`) + chalk.dim(` (${ns})`)
+    chalk.bold(`  KarsSandbox: ${sandbox}`) + chalk.dim(` (${ns})`)
   );
 
   if (response.entries.length === 0) {

@@ -10,22 +10,22 @@
 # Usage: scripts/dev/fast-rebuild.sh <controller|router> [--load <kind-cluster>] [--set-image <ns>/<deploy>]
 #
 # Examples:
-#   scripts/dev/fast-rebuild.sh controller --load azureclaw-dev --set-image azureclaw-system/azureclaw-controller
-#   scripts/dev/fast-rebuild.sh router     --load azureclaw-dev
+#   scripts/dev/fast-rebuild.sh controller --load kars-dev --set-image kars-system/kars-controller
+#   scripts/dev/fast-rebuild.sh router     --load kars-dev
 set -euo pipefail
 
 case "${1:-}" in
     controller)
-        CRATE=azureclaw-controller
-        BASE_IMAGE=azureclaw-controller:dev
-        OUT_IMAGE=azureclaw-controller
-        BIN_PATH=/usr/local/bin/azureclaw-controller
+        CRATE=kars-controller
+        BASE_IMAGE=kars-controller:dev
+        OUT_IMAGE=kars-controller
+        BIN_PATH=/usr/local/bin/kars-controller
         ;;
     router)
-        CRATE=azureclaw-inference-router
-        BASE_IMAGE=azureclaw-inference-router:dev
-        OUT_IMAGE=azureclaw-inference-router
-        BIN_PATH=/usr/local/bin/azureclaw-inference-router
+        CRATE=kars-inference-router
+        BASE_IMAGE=kars-inference-router:dev
+        OUT_IMAGE=kars-inference-router
+        BIN_PATH=/usr/local/bin/kars-inference-router
         ;;
     *)
         echo "usage: $0 <controller|router> [--load <kind-cluster>] [--set-image <ns>/<deploy>]" >&2

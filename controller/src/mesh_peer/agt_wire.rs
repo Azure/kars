@@ -155,14 +155,14 @@ mod tests {
             capabilities: vec!["offload".into(), "pairing".into()],
             metadata: std::collections::HashMap::from([(
                 "display_name".into(),
-                "azureclaw-controller".into(),
+                "kars-controller".into(),
             )]),
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["did"], "did:agentmesh:ctrl-123");
         assert_eq!(json["public_key"], "abcd1234");
         assert!(json["capabilities"].is_array());
-        assert_eq!(json["metadata"]["display_name"], "azureclaw-controller");
+        assert_eq!(json["metadata"]["display_name"], "kars-controller");
         // Must NOT have legacy registry fields
         assert!(json.get("amid").is_none());
         assert!(json.get("signing_public_key").is_none());

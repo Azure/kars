@@ -68,7 +68,7 @@ describe("summarizeEvalRow", () => {
 describe("renderEvalShow", () => {
   it("renders spec + status + conditions", () => {
     const out = renderEvalShow({
-      metadata: { name: "ev1", namespace: "azureclaw-system" },
+      metadata: { name: "ev1", namespace: "kars-system" },
       spec: {
         targetSandboxRef: { name: "bot" },
         corpus: { builtin: "prompt-injection-2026q1" },
@@ -84,7 +84,7 @@ describe("renderEvalShow", () => {
         ],
       },
     });
-    expect(out).toContain("ClawEval/ev1");
+    expect(out).toContain("KarsEval/ev1");
     expect(out).toContain("target sandbox:      bot");
     expect(out).toContain("builtin:prompt-injection-2026q1");
     expect(out).toContain("schedule:            0 */6 * * *");

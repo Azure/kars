@@ -1,6 +1,6 @@
-# Conditions Taxonomy — AzureClaw CRDs
+# Conditions Taxonomy — Kars CRDs
 
-Every AzureClaw CRD exposes a `status.conditions[]` array following the
+Every Kars CRD exposes a `status.conditions[]` array following the
 [Kubernetes condition convention](https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions).
 Each condition carries `type`, `status` (`True`/`False`/`Unknown`),
 `lastTransitionTime`, `reason`, `message`, and `observedGeneration`.
@@ -35,10 +35,10 @@ means the object **is** degraded; for `Ready`, that it **is** ready.
 | `SpecInvalid` | most kinds | Spec failed semantic validation past the CRD schema. |
 | `DependencyMissing` | most kinds | A referenced sibling CR is absent. |
 | `TimedOut` | most kinds | A wait loop hit its budget. |
-| `SuspendedBySpec` | `ClawSandbox` | `spec.suspended: true`; Deployment scaled to 0. |
-| `Active` | `ClawSandbox` | Pairs with `Suspended=False` to clear a prior `SuspendedBySpec`. |
+| `SuspendedBySpec` | `KarsSandbox` | `spec.suspended: true`; Deployment scaled to 0. |
+| `Active` | `KarsSandbox` | Pairs with `Suspended=False` to clear a prior `SuspendedBySpec`. |
 
-## ClawSandbox
+## KarsSandbox
 
 The sandbox carries a richer condition set because it owns the
 end-to-end runtime.
@@ -108,24 +108,24 @@ enforced today; aggregate (`dailyTokens` / `monthlyTokens`) is
 accepted and surfaced but not yet aggregated — see
 [`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades).
 
-## ClawMemory
+## KarsMemory
 
 | Type | Reasons |
 |---|---|
 | `Ready` | `RouterEnforcing` (binding loaded by router), `AwaitingFoundryProvisioning` (Memory Store not yet present upstream — common until first runtime sync), `Reconciled`, `SpecInvalid` |
 | `Progressing` | `AwaitingRouterEnforcement`, `Reconciling` |
-| `Degraded` | `AuthMisconfigured` — router observed an upstream 403 from Foundry; check the project-MI role assignment (see `azureclaw-deployment` skill). `MemoryStoreMissing` — router observed an upstream 404; the store has not been provisioned yet. Precedence: `AuthMisconfigured` outranks `MemoryStoreMissing`. |
+| `Degraded` | `AuthMisconfigured` — router observed an upstream 403 from Foundry; check the project-MI role assignment (see `kars-deployment` skill). `MemoryStoreMissing` — router observed an upstream 404; the store has not been provisioned yet. Precedence: `AuthMisconfigured` outranks `MemoryStoreMissing`. |
 
-## ClawEval
+## KarsEval
 
-`ClawEval` has its own taxonomy in `controller/src/claw_eval.rs`.
+`KarsEval` has its own taxonomy in `controller/src/kars_eval.rs`.
 
 | Type | Reasons |
 |---|---|
 | `Ready` | `Reconciled`, `CorpusResolved`, `Scheduled`, `RunTriggered`, `RunReportRead`, `AllPassed` |
 | `Progressing` | `Reconciling`, `Scheduled` |
 | `Degraded` | `SpecInvalid`, `TargetSandboxMissing`, `TargetSandboxNotReady`, `CorpusFetchFailed`, `CorpusParseFailed`, `CorpusBuiltinMissing`, `RunReportParseFailed` |
-| `ConformanceDrift` | `DriftDetected` — at least one corpus case failed on the last run. When `spec.failSandboxOnDrift: true`, the target `ClawSandbox` is also patched `Degraded=True / EvalDrift`. |
+| `ConformanceDrift` | `DriftDetected` — at least one corpus case failed on the last run. When `spec.failSandboxOnDrift: true`, the target `KarsSandbox` is also patched `Degraded=True / EvalDrift`. |
 
 ## TrustGraph
 
@@ -153,7 +153,7 @@ replacement for it. See the
 |---|---|
 | `Ready` | `RouterConfirmed` — overlay merged into the sandbox's allowlist and the router echoed back the merged digest. |
 | `Progressing` | `AwaitingRouterEcho` — controller compiled the overlay but router has not yet POSTed back the loaded digest. |
-| `Degraded` | `BlockedOnSandbox` — the referenced `ClawSandbox` is not Ready; `TtlExceedsCeiling`, `TtlInvalid`, `ReasonInvalid` — admission-time validation failures retained for visibility; `Expired` — TTL exceeded, file removed (terminal). |
+| `Degraded` | `BlockedOnSandbox` — the referenced `KarsSandbox` is not Ready; `TtlExceedsCeiling`, `TtlInvalid`, `ReasonInvalid` — admission-time validation failures retained for visibility; `Expired` — TTL exceeded, file removed (terminal). |
 
 Phase transitions: `Pending → Active → Expired`. See
 [Network egress & proxy](../egress-proxy.md) for the full lifecycle.

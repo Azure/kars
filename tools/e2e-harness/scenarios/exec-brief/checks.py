@@ -132,7 +132,7 @@ def check_relay_pairs(ctx: "Context") -> tuple[bool, str]:
     for sub in siblings:
         try:
             r = subprocess.run(
-                ["kubectl", "get", "pods", "-n", f"azureclaw-{sub}",
+                ["kubectl", "get", "pods", "-n", f"kars-{sub}",
                  "-l", f"app={sub}", "-o",
                  "jsonpath={.items[0].status.podIP}"],
                 capture_output=True, text=True, timeout=15,
@@ -146,7 +146,7 @@ def check_relay_pairs(ctx: "Context") -> tuple[bool, str]:
     for sub in siblings + ["execbrief"]:
         try:
             r = subprocess.run(
-                ["kubectl", "logs", "-n", f"azureclaw-{sub}",
+                ["kubectl", "logs", "-n", f"kars-{sub}",
                  f"deploy/{sub}", "-c", "openclaw", "--tail=200"],
                 capture_output=True, text=True, timeout=15,
             )
@@ -184,7 +184,7 @@ def check_relay_pairs(ctx: "Context") -> tuple[bool, str]:
         for sub in siblings:
             try:
                 r = subprocess.run(
-                    ["kubectl", "logs", "-n", f"azureclaw-{sub}",
+                    ["kubectl", "logs", "-n", f"kars-{sub}",
                      f"deploy/{sub}", "-c", "inference-router",
                      "--tail=600"],
                     capture_output=True, text=True, timeout=15,

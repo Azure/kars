@@ -5,10 +5,10 @@ Each sandbox runs in its own Kubernetes namespace with independent security boun
 ## Namespace Layout
 
 ```
-azureclaw-system          # Controller (2 replicas), CRD, RBAC, seccomp DaemonSet
-azureclaw-tenant-a        # Tenant A sandbox pod + NetworkPolicy + ServiceAccount
-azureclaw-tenant-b        # Tenant B sandbox pod + NetworkPolicy + ServiceAccount
-azureclaw-tenant-c        # Tenant C sandbox pod + NetworkPolicy + ServiceAccount
+kars-system          # Controller (2 replicas), CRD, RBAC, seccomp DaemonSet
+kars-tenant-a        # Tenant A sandbox pod + NetworkPolicy + ServiceAccount
+kars-tenant-b        # Tenant B sandbox pod + NetworkPolicy + ServiceAccount
+kars-tenant-c        # Tenant C sandbox pod + NetworkPolicy + ServiceAccount
 ```
 
 ## Security Boundaries Per Namespace
@@ -19,7 +19,7 @@ azureclaw-tenant-c        # Tenant C sandbox pod + NetworkPolicy + ServiceAccoun
 | **Network** | Default-deny egress NetworkPolicy. Per-sandbox allowlist via CRD. |
 | **Per-container egress** | iptables: agent (UID 1000) → localhost + DNS only |
 | **RBAC** | Dedicated ServiceAccount per namespace with WI annotation |
-| **Seccomp** | Localhost `azureclaw-strict` (enhanced) or RuntimeDefault (standard) |
+| **Seccomp** | Localhost `kars-strict` (enhanced) or RuntimeDefault (standard) |
 | **Kata VM** | Per-pod dedicated kernel (confidential level) |
 | **Resource limits** | CPU/memory limits per sandbox pod |
 | **Token budgets** | Per-sandbox daily + per-request limits in inference router |
@@ -35,17 +35,17 @@ azureclaw-tenant-c        # Tenant C sandbox pod + NetworkPolicy + ServiceAccoun
 
 ### Credentials Isolation
 
-Each sandbox stores channel tokens and plugin API keys in its own namespace as K8s secrets. Secrets are created by `azureclaw add` and mounted via `envFrom` — they are never shared across namespaces.
+Each sandbox stores channel tokens and plugin API keys in its own namespace as K8s secrets. Secrets are created by `kars add` and mounted via `envFrom` — they are never shared across namespaces.
 
 ```
-azureclaw-tenant-a/
+kars-tenant-a/
   └─ tenant-a-credentials      # All of Tenant A's channel/plugin keys
 
-azureclaw-tenant-b/
+kars-tenant-b/
   └─ tenant-b-credentials      # All of Tenant B's channel/plugin keys
 ```
 
-Use `azureclaw credentials update <name>` to rotate credentials for a specific sandbox without affecting others. See [channels-plugins.md](channels-plugins.md#rotating-credentials) for details.
+Use `kars credentials update <name>` to rotate credentials for a specific sandbox without affecting others. See [channels-plugins.md](channels-plugins.md#rotating-credentials) for details.
 
 ### Channel Isolation
 
@@ -74,7 +74,7 @@ Cross-namespace traffic is blocked by default. The only exception is AGT mesh tr
 
 ## Content Safety floor
 
-A Kubernetes `ValidatingAdmissionPolicy` (`azureclaw-content-safety-floor`)
+A Kubernetes `ValidatingAdmissionPolicy` (`kars-content-safety-floor`)
 enforces a minimum severity threshold on every `InferencePolicy` CR before it
 is accepted by the API server.
 
@@ -97,20 +97,20 @@ admission:
 **Per-CR developer opt-out (non-production only):**
 
 A sandbox can bypass the floor by labelling the `InferencePolicy` with
-`azureclaw.azure.com/dev-only: "true"`. This label is rejected in namespaces
-that carry the `azureclaw.azure.com/production: "true"` label — the VAP
+`kars.azure.com/dev-only: "true"`. This label is rejected in namespaces
+that carry the `kars.azure.com/production: "true"` label — the VAP
 enforces this invariant.
 
 **Requirements:** Kubernetes ≥ 1.30 (ValidatingAdmissionPolicy GA).
 
 ## A2A public ingress
 
-AzureClaw can expose a sandboxed agent to external A2A (Agent-to-Agent) traffic
+Kars can expose a sandboxed agent to external A2A (Agent-to-Agent) traffic
 via a Kubernetes `LoadBalancer` service fronted by an ingress-layer TLS
 termination. This is opt-in at the Helm level.
 
 ```yaml
-# deploy/helm/azureclaw/values.yaml
+# deploy/helm/kars/values.yaml
 a2aGateway:
   enabled: true           # default: false; set to true to provision the gateway
   tlsSecretName: ""       # cert-manager populates this automatically when empty
@@ -127,20 +127,20 @@ When `a2aGateway.enabled: true` the Helm chart provisions:
 tenant) discovers the sandbox via its Agent Card (`/.well-known/agent.json`),
 then initiates an authenticated A2A session over the public ingress. The
 inference router's A2A handler validates the inbound Agent Card signature and
-enforces `ClawPairing` policy before forwarding the request to the sandbox.
+enforces `KarsPairing` policy before forwarding the request to the sandbox.
 
 **Security note:** enabling public ingress adds a `Microsoft.Network/loadBalancers/write`
 action requirement to the deployer role — see [permissions.md](permissions.md)
 for details.
 
 
-azureclaw up --name tenant-a --isolation enhanced --model gpt-4.1
+kars up --name tenant-a --isolation enhanced --model gpt-4.1
 
 # Subsequent tenants add sandboxes without redeploying infrastructure
-azureclaw add tenant-b --isolation confidential --model Phi-4
-azureclaw add tenant-c --isolation standard --model gpt-4o
+kars add tenant-b --isolation confidential --model Phi-4
+kars add tenant-c --isolation standard --model gpt-4o
 
-kubectl get clawsandbox -n azureclaw-system
+kubectl get karssandbox -n kars-system
 NAME       PHASE     MODEL     ISOLATION
 tenant-a   Running   gpt-4.1   enhanced
 tenant-b   Running   Phi-4     confidential

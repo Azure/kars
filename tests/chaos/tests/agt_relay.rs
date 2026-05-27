@@ -17,9 +17,7 @@
 
 #![cfg(feature = "chaos")]
 
-use azureclaw_chaos_tests::harness::{
-    ChaosResponse, ChaosScript, chaos_client, start_chaos_server,
-};
+use kars_chaos_tests::harness::{ChaosResponse, ChaosScript, chaos_client, start_chaos_server};
 use std::time::Duration;
 
 /// 1. Upstream disconnects mid-message. We model this with an HTTP body

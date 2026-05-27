@@ -12,10 +12,7 @@ use std::sync::LazyLock;
 /// Total inference requests by sandbox, model, and status.
 pub static INFERENCE_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
-        opts!(
-            "azureclaw_inference_requests_total",
-            "Total inference requests"
-        ),
+        opts!("kars_inference_requests_total", "Total inference requests"),
         &["sandbox", "model", "status"]
     )
     .unwrap()
@@ -24,7 +21,7 @@ pub static INFERENCE_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 /// Inference request latency in seconds.
 pub static INFERENCE_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
-        "azureclaw_inference_latency_seconds",
+        "kars_inference_latency_seconds",
         "Inference request latency",
         &["sandbox", "model"],
         vec![0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
@@ -35,7 +32,7 @@ pub static INFERENCE_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
 /// Token usage by sandbox and model.
 pub static TOKENS_USED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
-        opts!("azureclaw_tokens_total", "Total tokens consumed"),
+        opts!("kars_tokens_total", "Total tokens consumed"),
         &["sandbox", "model", "direction"] // direction: input | output
     )
     .unwrap()
@@ -47,7 +44,7 @@ pub static TOKENS_USED: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub static AGT_POLICY_EVALUATIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_agt_policy_evaluations_total",
+            "kars_agt_policy_evaluations_total",
             "Total AGT policy evaluations"
         ),
         &["decision"]
@@ -58,7 +55,7 @@ pub static AGT_POLICY_EVALUATIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 /// AGT policy evaluation latency in seconds.
 pub static AGT_EVAL_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     register_histogram!(
-        "azureclaw_agt_eval_latency_seconds",
+        "kars_agt_eval_latency_seconds",
         "AGT policy evaluation latency",
         vec![0.000_01, 0.000_05, 0.000_1, 0.000_5, 0.001, 0.005, 0.01]
     )
@@ -68,7 +65,7 @@ pub static AGT_EVAL_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
 /// Number of known agents in the trust store.
 pub static AGT_KNOWN_AGENTS: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(opts!(
-        "azureclaw_agt_known_agents",
+        "kars_agt_known_agents",
         "Number of agents in the trust store"
     ))
     .unwrap()
@@ -77,7 +74,7 @@ pub static AGT_KNOWN_AGENTS: LazyLock<IntGauge> = LazyLock::new(|| {
 /// Total AGT audit log entries.
 pub static AGT_AUDIT_ENTRIES: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(opts!(
-        "azureclaw_agt_audit_entries_total",
+        "kars_agt_audit_entries_total",
         "Total AGT audit log entries"
     ))
     .unwrap()
@@ -87,7 +84,7 @@ pub static AGT_AUDIT_ENTRIES: LazyLock<IntGauge> = LazyLock::new(|| {
 pub static AGT_CONTENT_FLAGS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_agt_content_flags_total",
+            "kars_agt_content_flags_total",
             "Content safety flags reported to AGT"
         ),
         &["category"]
@@ -101,7 +98,7 @@ pub static AGT_CONTENT_FLAGS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 /// Headlamp Mesh Topology view + operator CLI for per-sandbox traffic.
 pub static AGT_MESH_MESSAGES_SENT: LazyLock<prometheus::IntCounter> = LazyLock::new(|| {
     prometheus::register_int_counter!(opts!(
-        "azureclaw_mesh_messages_sent_total",
+        "kars_mesh_messages_sent_total",
         "Total AGT mesh messages sent by this router to the relay"
     ))
     .unwrap()
@@ -111,7 +108,7 @@ pub static AGT_MESH_MESSAGES_SENT: LazyLock<prometheus::IntCounter> = LazyLock::
 /// Same labelling story as `AGT_MESH_MESSAGES_SENT`.
 pub static AGT_MESH_MESSAGES_RECEIVED: LazyLock<prometheus::IntCounter> = LazyLock::new(|| {
     prometheus::register_int_counter!(opts!(
-        "azureclaw_mesh_messages_received_total",
+        "kars_mesh_messages_received_total",
         "Total AGT mesh messages received by this router from the relay"
     ))
     .unwrap()
@@ -123,7 +120,7 @@ pub static AGT_MESH_MESSAGES_RECEIVED: LazyLock<prometheus::IntCounter> = LazyLo
 /// on subsequent updates — bootstrap is a one-time event per peer.
 pub static AGT_TRUSTGRAPH_BOOTSTRAPS: LazyLock<prometheus::IntCounter> = LazyLock::new(|| {
     prometheus::register_int_counter!(opts!(
-        "azureclaw_agt_trustgraph_bootstraps_total",
+        "kars_agt_trustgraph_bootstraps_total",
         "Brand-new peers seeded with an AGT trust score derived from a TrustGraph projection edge"
     ))
     .unwrap()
@@ -137,7 +134,7 @@ pub static AGT_TRUSTGRAPH_PROJECTION_VERSION: LazyLock<prometheus::IntGaugeVec> 
     LazyLock::new(|| {
         prometheus::register_int_gauge_vec!(
             opts!(
-                "azureclaw_agt_trustgraph_projection_version",
+                "kars_agt_trustgraph_projection_version",
                 "Constant 1 — labeled with the loaded TrustGraph projection version-hash"
             ),
             &["version_hash"]
@@ -148,7 +145,7 @@ pub static AGT_TRUSTGRAPH_PROJECTION_VERSION: LazyLock<prometheus::IntGaugeVec> 
 /// Total behavior anomaly alerts.
 pub static AGT_BEHAVIOR_ALERTS: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(opts!(
-        "azureclaw_agt_behavior_alerts_total",
+        "kars_agt_behavior_alerts_total",
         "Cumulative behavior anomaly alerts"
     ))
     .unwrap()
@@ -157,7 +154,7 @@ pub static AGT_BEHAVIOR_ALERTS: LazyLock<IntGauge> = LazyLock::new(|| {
 /// Number of loaded policy rules.
 pub static AGT_POLICY_RULES: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(opts!(
-        "azureclaw_agt_policy_rules",
+        "kars_agt_policy_rules",
         "Number of loaded AGT policy rules"
     ))
     .unwrap()
@@ -167,7 +164,7 @@ pub static AGT_POLICY_RULES: LazyLock<IntGauge> = LazyLock::new(|| {
 pub static AGT_REDACTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_agt_redactions_total",
+            "kars_agt_redactions_total",
             "Credentials redacted from output"
         ),
         &["kind"]
@@ -179,7 +176,7 @@ pub static AGT_REDACTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub static AGT_RESPONSE_THREATS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_agt_response_threats_total",
+            "kars_agt_response_threats_total",
             "Response threats detected (prompt injection, exfil, etc.)"
         ),
         &["type"]
@@ -191,7 +188,7 @@ pub static AGT_RESPONSE_THREATS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub static AGT_TOOL_RATE_LIMITS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_agt_tool_rate_limits_total",
+            "kars_agt_tool_rate_limits_total",
             "Per-tool sliding window rate limit denials"
         ),
         &["tool"]
@@ -203,7 +200,7 @@ pub static AGT_TOOL_RATE_LIMITS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub static AGT_MESSAGE_SIGNATURES: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_agt_message_signatures_total",
+            "kars_agt_message_signatures_total",
             "Ed25519 message signing and verification"
         ),
         &["action"]
@@ -227,7 +224,7 @@ pub static AGT_MESSAGE_SIGNATURES: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub static HANDOFF_PENDING_EVENTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_handoff_pending_events_total",
+            "kars_handoff_pending_events_total",
             "Pending-handoff lifecycle events"
         ),
         &["action"]
@@ -243,7 +240,7 @@ pub static HANDOFF_PENDING_EVENTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub static HANDOFF_PHASE_TRANSITIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_handoff_phase_transitions_total",
+            "kars_handoff_phase_transitions_total",
             "Handoff session phase transitions"
         ),
         &["from", "to", "result"]
@@ -259,7 +256,7 @@ pub static HANDOFF_PHASE_TRANSITIONS: LazyLock<IntCounterVec> = LazyLock::new(||
 pub static UPSTREAM_RETRIES: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_upstream_retries_total",
+            "kars_upstream_retries_total",
             "Upstream Azure OpenAI retries on idempotent requests"
         ),
         &["sandbox", "reason"]
@@ -278,11 +275,11 @@ pub static UPSTREAM_RETRIES: LazyLock<IntCounterVec> = LazyLock::new(|| {
 /// Unix-epoch timestamp (seconds) of the most recent **successful**
 /// load for each policy bundle. Stays put across subsequent failures
 /// so dashboards can show "last good state" age via
-/// `time() - azureclaw_policy_bundle_loaded_at_seconds`.
+/// `time() - kars_policy_bundle_loaded_at_seconds`.
 pub static POLICY_BUNDLE_LOADED_AT: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     register_int_gauge_vec!(
         opts!(
-            "azureclaw_policy_bundle_loaded_at_seconds",
+            "kars_policy_bundle_loaded_at_seconds",
             "Unix timestamp of last successful policy-bundle load, per kind"
         ),
         &["kind"]
@@ -292,12 +289,12 @@ pub static POLICY_BUNDLE_LOADED_AT: LazyLock<IntGaugeVec> = LazyLock::new(|| {
 
 /// Health gauge per policy bundle: `1` when the last load attempt
 /// succeeded, `0` when the last attempt failed. Pair with
-/// `azureclaw_policy_bundle_reload_total{outcome="error"}` for
+/// `kars_policy_bundle_reload_total{outcome="error"}` for
 /// rate-of-failure alerts.
 pub static POLICY_BUNDLE_HEALTHY: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     register_int_gauge_vec!(
         opts!(
-            "azureclaw_policy_bundle_healthy",
+            "kars_policy_bundle_healthy",
             "1 if the most recent policy-bundle load succeeded, 0 otherwise"
         ),
         &["kind"]
@@ -311,7 +308,7 @@ pub static POLICY_BUNDLE_HEALTHY: LazyLock<IntGaugeVec> = LazyLock::new(|| {
 pub static POLICY_BUNDLE_RELOADS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         opts!(
-            "azureclaw_policy_bundle_reload_total",
+            "kars_policy_bundle_reload_total",
             "Policy-bundle reload attempts by kind and outcome"
         ),
         &["kind", "outcome"]

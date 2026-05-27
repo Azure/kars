@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 /// wins). See `docs/api/lifecycle.md` for resolution semantics.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
-    group = "azureclaw.azure.com",
+    group = "kars.azure.com",
     version = "v1alpha1",
     kind = "ToolPolicy",
     namespaced,
@@ -70,7 +70,7 @@ pub struct ToolPolicySpec {
     /// `agt-profile.yaml` and the sandbox inference-router loads it via
     /// the AGT policy engine. This is the **sole** source of AGT policy
     /// profiles post-Slice-1e — the bundled
-    /// `/opt/azureclaw-plugin/policies/*.yaml` fallback that older
+    /// `/opt/kars-plugin/policies/*.yaml` fallback that older
     /// releases shipped has been removed.
     ///
     /// Two sources are supported (mutually exclusive):
@@ -121,7 +121,7 @@ pub struct AgtProfileSource {
     /// across all signed-policy kinds).
     ///
     /// Artifact `artifactType` MUST be
-    /// `application/vnd.azureclaw.agt-profile.v1+yaml`; a mismatch
+    /// `application/vnd.kars.agt-profile.v1+yaml`; a mismatch
     /// surfaces as `Ready=False / reason=InvalidRef`.
     pub bundle_ref: Option<crate::crd::OciArtifactRef>,
 }

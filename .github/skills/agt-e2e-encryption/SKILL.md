@@ -1,11 +1,11 @@
 ---
-description: "AzureClaw AGT E2E encryption skill — how the Signal Protocol inter-agent messaging works, how to debug it, and what was patched."
+description: "Kars AGT E2E encryption skill — how the Signal Protocol inter-agent messaging works, how to debug it, and what was patched."
 ---
 
 # AGT E2E Encrypted Inter-Agent Communication
 
 ## Overview
-AzureClaw agents communicate via the official Microsoft Agent Governance Toolkit (AGT) — a decentralized, E2E encrypted messaging protocol using Signal Protocol (X3DH + Double Ratchet). Transport is provided through `@microsoft/agent-governance-sdk` (upstream) wrapped by the in-repo `@azureclaw/mesh` provider, selected at runtime via `createMeshTransport()`.
+Kars agents communicate via the official Microsoft Agent Governance Toolkit (AGT) — a decentralized, E2E encrypted messaging protocol using Signal Protocol (X3DH + Double Ratchet). Transport is provided through `@microsoft/agent-governance-sdk` (upstream) wrapped by the in-repo `@kars/mesh` provider, selected at runtime via `createMeshTransport()`.
 
 > **History note:** Earlier releases used a vendored fork of `@agentmesh/sdk` with 8+ local patches under `vendor/`. All upstream-relevant fixes have landed in AGT (PRs through the toolkit's 3.x line) and the vendored tree has been removed. The bug table below is preserved as a regression checklist — if any of these symptoms reappear, treat as a regression in the official SDK.
 
@@ -68,8 +68,8 @@ All originally fixed via patches in `vendor/` (removed in 2026-05). Listed here 
 The inference router exports two Prometheus counters that the
 Headlamp Mesh Topology and operator-CLI topology use:
 
-- `azureclaw_mesh_messages_sent_total`
-- `azureclaw_mesh_messages_received_total`
+- `kars_mesh_messages_sent_total`
+- `kars_mesh_messages_received_total`
 
 Defined in `inference-router/src/metrics.rs` (`AGT_MESH_MESSAGES_*`) and
 incremented in `inference-router/src/routes/mesh.rs` next to the

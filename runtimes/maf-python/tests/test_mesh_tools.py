@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from azureclaw_runtime_maf_python import build_mesh_tools, register_mesh_tools
+from kars_runtime_maf_python import build_mesh_tools, register_mesh_tools
 
 
 def test_mesh_tools_re_exported_via_package_init():
@@ -26,7 +26,7 @@ def test_build_mesh_tools_returns_two_named_tools():
     pytest.importorskip("agent_framework")
     tools = build_mesh_tools()
     names = [
-        getattr(t, "__azureclaw_tool_name__", None) or getattr(t, "name", None)
+        getattr(t, "__kars_tool_name__", None) or getattr(t, "name", None)
         for t in tools
     ]
     assert sorted(n for n in names if n) == ["mesh_inbox", "mesh_send"]

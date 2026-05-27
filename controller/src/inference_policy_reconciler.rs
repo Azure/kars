@@ -5,7 +5,7 @@
 //!
 //! Watches `InferencePolicy` CRs and, for each:
 //!
-//! 1. Ensures finalizer (`azureclaw.azure.com/inferencepolicy-cleanup`)
+//! 1. Ensures finalizer (`kars.azure.com/inferencepolicy-cleanup`)
 //!    so the published profile ConfigMap is cleaned up synchronously
 //!    on delete.
 //! 2. Runs the pure compile step
@@ -71,7 +71,7 @@ use crate::status::router_confirmation_io::{list_sandboxes_matching, poll_refere
 const FIELD_MANAGER: &str = crate::field_managers::INFERENCE_POLICY;
 
 /// Finalizer name (DNS subdomain).
-const FINALIZER: &str = "azureclaw.azure.com/inferencepolicy-cleanup";
+const FINALIZER: &str = "kars.azure.com/inferencepolicy-cleanup";
 
 /// Requeue cadence on success.
 const REQUEUE_OK: Duration = Duration::from_secs(300);
@@ -123,7 +123,7 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         .map(|f| f.iter().any(|s| s == FINALIZER))
         .unwrap_or(false)
     {
-        let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"InferencePolicy","metadata":{"finalizers":[FINALIZER]}});
+        let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"InferencePolicy","metadata":{"finalizers":[FINALIZER]}});
         api.patch(
             &name,
             &PatchParams::apply(FIELD_MANAGER).force(),
@@ -204,7 +204,7 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
     }
 
     // Slice 2a — close the §3 "Ready ⇔ router echo" loop. List
-    // ClawSandboxes that reference this InferencePolicy by
+    // KarsSandboxes that reference this InferencePolicy by
     // `spec.inferenceRef.name`, GET `/internal/policy-status` on
     // each router, and let the result drive both `phase` and the
     // Ready condition. The `compiled_digest` we just wrote is the
@@ -223,7 +223,7 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
                     inferencepolicy = %name,
                     ns = %ns,
                     error = %e,
-                    "ClawSandbox list failed; treating as no referrers"
+                    "KarsSandbox list failed; treating as no referrers"
                 );
                 Vec::new()
             }
@@ -233,7 +233,7 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
     };
 
     // Latest digest echoed by any referring router — surfaced in
-    // status for `kubectl describe` / `azureclaw inspect`. When
+    // status for `kubectl describe` / `kars inspect`. When
     // every router reports the same value we promote to Ready; in
     // the Awaiting branch we surface what we actually saw so the
     // operator can diff against `compiledDigest`.
@@ -291,7 +291,7 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
     }
 
     let status_patch = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "InferencePolicy",
         "status": InferencePolicyStatus {
             phase: Some(phase.into()),
@@ -652,7 +652,7 @@ fn build_conditions(
                     conditions::TYPE_READY,
                     cond_status::FALSE,
                     reason::NO_SANDBOXES_REFERENCING,
-                    "no ClawSandbox references this InferencePolicy; nothing to enforce",
+                    "no KarsSandbox references this InferencePolicy; nothing to enforce",
                     observed_generation,
                 ));
                 out.push(conditions::preserve_transition_time(
@@ -660,7 +660,7 @@ fn build_conditions(
                     conditions::TYPE_PROGRESSING,
                     cond_status::TRUE,
                     reason::NO_SANDBOXES_REFERENCING,
-                    "waiting for a ClawSandbox to reference this policy",
+                    "waiting for a KarsSandbox to reference this policy",
                     observed_generation,
                 ));
                 out.push(conditions::preserve_transition_time(
@@ -719,11 +719,11 @@ async fn ensure_profile_configmap(
     data.insert(INFERENCE_POLICY_FILENAME.into(), canonical_body.into());
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
-        "azureclaw.azure.com/inferencepolicy-version-hash".into(),
+        "kars.azure.com/inferencepolicy-version-hash".into(),
         v_hash.into(),
     );
     annotations.insert(
-        "azureclaw.azure.com/inference-policy-digest".into(),
+        "kars.azure.com/inference-policy-digest".into(),
         compiled_digest.into(),
     );
     let cm = ConfigMap {
@@ -733,11 +733,11 @@ async fn ensure_profile_configmap(
             labels: Some(BTreeMap::from([
                 (
                     "app.kubernetes.io/managed-by".into(),
-                    "azureclaw-controller".into(),
+                    "kars-controller".into(),
                 ),
-                ("azureclaw.azure.com/inferencepolicy".into(), owner.into()),
+                ("kars.azure.com/inferencepolicy".into(), owner.into()),
                 (
-                    "azureclaw.azure.com/artifact".into(),
+                    "kars.azure.com/artifact".into(),
                     "inference-policy-profile".into(),
                 ),
             ])),
@@ -780,7 +780,7 @@ async fn finalize(
         .as_ref()
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
-    let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"InferencePolicy","metadata":{"finalizers": finalizers}});
+    let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"InferencePolicy","metadata":{"finalizers": finalizers}});
     api.patch(
         name,
         &PatchParams::apply(FIELD_MANAGER).force(),
@@ -873,7 +873,7 @@ mod tests {
 
     #[test]
     fn build_conditions_no_referrers_is_compiled_not_ready() {
-        // Slice 2a: when no ClawSandbox references this
+        // Slice 2a: when no KarsSandbox references this
         // InferencePolicy there's nothing to enforce — Ready=False
         // with reason `NoSandboxesReferencing`, no Degraded.
         let conds = build_conditions(
@@ -1015,16 +1015,16 @@ mod tests {
     fn finalizer_constant_is_dns_subdomain() {
         assert!(FINALIZER.contains('/'));
         let (domain, key) = FINALIZER.split_once('/').unwrap();
-        assert_eq!(domain, "azureclaw.azure.com");
+        assert_eq!(domain, "kars.azure.com");
         assert!(!key.is_empty());
     }
 
     #[test]
     fn field_manager_is_per_reconciler() {
         // Distinct from S1 / S2 / S3 — required by §10.4 #1.
-        assert_eq!(FIELD_MANAGER, "azureclaw-controller/inferencepolicy");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/mcp");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/toolpolicy");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/a2aagent");
+        assert_eq!(FIELD_MANAGER, "kars-controller/inferencepolicy");
+        assert_ne!(FIELD_MANAGER, "kars-controller/mcp");
+        assert_ne!(FIELD_MANAGER, "kars-controller/toolpolicy");
+        assert_ne!(FIELD_MANAGER, "kars-controller/a2aagent");
     }
 }

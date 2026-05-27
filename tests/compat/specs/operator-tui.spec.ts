@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * Compat spec: `azureclaw operator` (headless TUI).
+ * Compat spec: `kars operator` (headless TUI).
  *
  * Flow: internal Phase 1 plan §5.1 #6.
  *
@@ -76,14 +76,14 @@ describe("compat: harness sanity", () => {
 
   it("snapshot() captures kind/label/content/children tree", () => {
     const screen = blessedMock.screen();
-    blessedMock.box({ parent: screen, label: "Header", content: "AzureClaw Operator" });
+    blessedMock.box({ parent: screen, label: "Header", content: "Kars Operator" });
     blessedMock.log({ parent: screen, label: "Log", content: "ready" });
     const snap = screen.snapshot();
     expect(snap.kind).toBe("screen");
     const children = snap.children as Array<{ kind: string; label: string | null; content: string }>;
     expect(children).toHaveLength(2);
     expect(children[0].label).toBe("Header");
-    expect(children[0].content).toBe("AzureClaw Operator");
+    expect(children[0].content).toBe("Kars Operator");
     expect(children[1].kind).toBe("log");
   });
 
@@ -113,12 +113,12 @@ describe("compat: protected flow catalogue (plan §5.1)", () => {
     expect(ids).toEqual(
       [
         "agt-interop",
-        "azureclaw-connect",
-        "azureclaw-dev",
-        "azureclaw-handoff",
-        "azureclaw-offload",
-        "azureclaw-operator",
-        "azureclaw-up",
+        "kars-connect",
+        "kars-dev",
+        "kars-handoff",
+        "kars-offload",
+        "kars-operator",
+        "kars-up",
         "plugin-lifecycle",
       ].sort(),
     );

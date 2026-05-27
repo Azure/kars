@@ -378,7 +378,7 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
 
     let sandbox_name: &str = &state.sandbox_name;
     let base = registry_url.trim_end_matches('/');
-    let provider = std::env::var("AZURECLAW_MESH_PROVIDER")
+    let provider = std::env::var("KARS_MESH_PROVIDER")
         .unwrap_or_else(|_| "vendored".into())
         .trim()
         .to_lowercase();

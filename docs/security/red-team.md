@@ -1,6 +1,6 @@
 # Internal Red-Team — Findings Log
 
-> Living log of internal red-team / adversarial-test exercises against AzureClaw. Each entry records what was tested, what was found, and how it was closed. Findings that are still open carry an `OPEN` tag and link to a tracking issue.
+> Living log of internal red-team / adversarial-test exercises against Kars. Each entry records what was tested, what was found, and how it was closed. Findings that are still open carry an `OPEN` tag and link to a tracking issue.
 
 This is **not** a coordinated-disclosure inbox. External researchers please use the procedure in [`SECURITY.md`](../../SECURITY.md).
 
@@ -31,13 +31,13 @@ The earlier surface was exercised against [`security/stride.md`](../security/str
 
 ### Current surface
 
-Today's capabilities have been exercised against the per-route threat model — CRD, ClawEval reconciler, ClawMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, and runtime-CLI hotspots. Each carries two-reviewer sign-off.
+Today's capabilities have been exercised against the per-route threat model — CRD, KarsEval reconciler, KarsMemory reconciler, A2A gateway, runtime adapters, MCP reconciler, content-safety floor, leader election, conditions/SSA, requeue jitter, chaos tier, controller metrics, and runtime-CLI hotspots. Each carries two-reviewer sign-off.
 
 ### Open list
 
 | ID | Date | Surface | Severity | Summary | Status |
 |----|------|---------|----------|---------|--------|
-| `RT-2026-01` | 2026-04-25 | Sandbox seccomp | Low | `azureclaw-strict` allows `getpid` (necessary for libc); confirmed not exploitable | **Closed** — by-design |
+| `RT-2026-01` | 2026-04-25 | Sandbox seccomp | Low | `kars-strict` allows `getpid` (necessary for libc); confirmed not exploitable | **Closed** — by-design |
 | `RT-2026-02` | 2026-04-26 | Inference router | Low | Long header values caused 100ms latency spikes; bounded buffer added | **Closed** — see PR archive |
 | `RT-2026-03` | 2026-04-28 | AgentMesh KNOCK | Medium | Anonymous peer (trust 0) could trigger registry lookups before policy check | **Closed** — by routing trust-evaluation before lookup; see vendored-patch audit |
 | `RT-2026-04` | 2026-04-30 | A2A gateway | Low | Non-allowlisted scheme echoed in error response | **Closed** — sanitised |

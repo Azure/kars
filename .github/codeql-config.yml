@@ -1,4 +1,4 @@
-name: "AzureClaw CodeQL Config"
+name: "Kars CodeQL Config"
 
 # No vendored AgentMesh source is present after the Phase 5.2 AGT-only migration.
 # Keep CodeQL focused on checked-in first-party source by default.

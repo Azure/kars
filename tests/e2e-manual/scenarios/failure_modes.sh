@@ -29,7 +29,7 @@ source "$LIB_DIR/cr_factory.sh"
 scenario_header "Failure modes — router crash, relay disconnect, OOM"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
 name="failmodes-openclaw"
 ns=$(new_ns "failmodes")
@@ -38,19 +38,19 @@ export MANUAL_E2E_SCENARIO=failures
 
 metric_start "admit_${name}"
 cr_openclaw "$name" "$ns" | kubectl apply -f - >/dev/null
-metric_finish "admit_${name}" failures admitClawSandbox "sandbox=${name}"
-wait_for_clawsandbox_ready "$ns" "$name" || {
+metric_finish "admit_${name}" failures admitKarsSandbox "sandbox=${name}"
+wait_for_karssandbox_ready "$ns" "$name" || {
     log_fail "initial sandbox never became Ready"
     cleanup_sandbox "$ns" "$name"; exit 1
 }
-pod=$(kubectl -n "$pod_ns" get pod -l "azureclaw.azure.com/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
+pod=$(kubectl -n "$pod_ns" get pod -l "kars.azure.com/sandbox=${name}" -o jsonpath='{.items[0].metadata.name}')
 
 # 1. Router crash
 log_step "[1/3] killing inference-router container"
 kubectl -n "$pod_ns" exec "$pod" -c inference-router -- sh -c 'kill 1' 2>/dev/null || true
 sleep 5
 metric_start "recover_router"
-if wait_for_clawsandbox_ready "$ns" "$name"; then
+if wait_for_karssandbox_ready "$ns" "$name"; then
     log_pass "sandbox recovered after inference-router restart"
     metric_finish "recover_router" failures recoveryRouterCrash "sandbox=${name}"
 else
@@ -100,7 +100,7 @@ else
     log_skip "[3/3] no restart observed — sandbox memory limits may be permissive in this profile"
 fi
 
-if wait_for_clawsandbox_ready "$ns" "$name"; then
+if wait_for_karssandbox_ready "$ns" "$name"; then
     log_pass "sandbox is Ready again at end of failure-modes scenario"
 else
     log_fail "sandbox not Ready at end of failure-modes scenario"

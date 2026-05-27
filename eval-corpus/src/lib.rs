@@ -2,11 +2,11 @@
 // Licensed under the MIT License.
 // ci:loc-ok: Slice-level module; decomposition tracked in §4.2 (see dev→main #320 promotion notes)
 
-//! `ClawEval` policy-conformance corpus library.
+//! `KarsEval` policy-conformance corpus library.
 //!
 //! Slice 6.1 shipped the parser + verdict function + built-in corpora.
 //! Slice 6.2 (this slice) makes those types load-bearing: the
-//! `azureclaw-conformance-runner` binary depends on this crate to
+//! `kars-conformance-runner` binary depends on this crate to
 //! load corpora and judge replay results. The controller depends on
 //! this crate from its `policy_canonical::eval_corpus` module for the
 //! `EvalCorpusKind` `PolicyKind` impl (signed-bundle lane).
@@ -130,7 +130,7 @@ pub enum Scenario {
     },
 
     /// Read a memory entry under `scope` with `key`. Tests
-    /// cross-sandbox isolation against ClawMemory.
+    /// cross-sandbox isolation against KarsMemory.
     MemoryRead { scope: String, key: String },
 }
 
@@ -210,7 +210,7 @@ pub enum PolicyKindRef {
     EgressAllowlist,
     InferencePolicy,
     ToolPolicy,
-    ClawMemory,
+    KarsMemory,
     McpServer,
 }
 
@@ -220,7 +220,7 @@ impl PolicyKindRef {
             Self::EgressAllowlist => "EgressAllowlist",
             Self::InferencePolicy => "InferencePolicy",
             Self::ToolPolicy => "ToolPolicy",
-            Self::ClawMemory => "ClawMemory",
+            Self::KarsMemory => "KarsMemory",
             Self::McpServer => "McpServer",
         }
     }
@@ -230,11 +230,11 @@ impl PolicyKindRef {
             "EgressAllowlist" => Ok(Self::EgressAllowlist),
             "InferencePolicy" => Ok(Self::InferencePolicy),
             "ToolPolicy" => Ok(Self::ToolPolicy),
-            "ClawMemory" => Ok(Self::ClawMemory),
+            "KarsMemory" => Ok(Self::KarsMemory),
             "McpServer" => Ok(Self::McpServer),
             other => Err(ParseError::Invalid(format!(
                 "byPolicyKind `{other}` not one of EgressAllowlist|InferencePolicy|\
-                 ToolPolicy|ClawMemory|McpServer"
+                 ToolPolicy|KarsMemory|McpServer"
             ))),
         }
     }
@@ -808,7 +808,7 @@ fn augment(e: ParseError, ctx: &str) -> ParseError {
 
 /// Canonical names of the corpora embedded in this crate. Each one is
 /// signed at release time and ships in the runner image; operators
-/// reference them by name from `ClawEval.spec.corpora[].builtin`.
+/// reference them by name from `KarsEval.spec.corpora[].builtin`.
 ///
 /// Adding a new built-in requires updating this constant and supplying
 /// the JSON file under `eval-corpus/src/eval_corpora/`. The
@@ -1069,7 +1069,7 @@ mod tests {
         let v = json!({ "schemaVersion": "v1", "name": "x", "cases": [{
             "id": "c1", "tags": ["isolation"],
             "scenario": { "kind": "MemoryRead", "scope": "other-sandbox", "key": "secrets" },
-            "expect": { "decision": "Blocked", "byPolicyKind": "ClawMemory" }
+            "expect": { "decision": "Blocked", "byPolicyKind": "KarsMemory" }
         }] });
         let c = parse(&serde_json::to_vec(&v).unwrap()).expect("parse");
         let Scenario::MemoryRead { scope, key } = &c.cases[0].scenario else {

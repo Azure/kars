@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 S9.3 — `azureclaw migrate from-kagent` translator.
+// Phase 2 S9.3 — `kars migrate from-kagent` translator.
 //
 // Pure translator (no I/O). Reads a kagent.dev/v1alpha2 `Agent` YAML
-// document and emits a deterministic AzureClaw resource bundle:
+// document and emits a deterministic Kars resource bundle:
 //
-//   1. ClawSandbox            (always)
+//   1. KarsSandbox            (always)
 //   2. InferencePolicy        (only if spec.declarative.modelConfig set)
 //   3. ToolPolicy             (one per (mcpServer, toolName) pair)
 //
@@ -17,7 +17,7 @@
 // kagent-dev/kagent @ 90212ab go/api/v1alpha2/agent_types.go.
 //
 // Target CRDs verified directly against:
-//   - controller/src/crd.rs (ClawSandbox)
+//   - controller/src/crd.rs (KarsSandbox)
 //   - controller/src/inference_policy.rs (InferencePolicy)
 //   - controller/src/tool_policy.rs (ToolPolicy)
 //
@@ -36,16 +36,16 @@ import { loadAgtProfile } from "../refs.js";
 export const KAGENT_API_VERSION = "kagent.dev/v1alpha2";
 export const KAGENT_KIND = "Agent";
 
-export const AZURECLAW_GROUP = "azureclaw.azure.com";
-export const AZURECLAW_VERSION = "v1alpha1";
-export const SANDBOX_LABEL_KEY = `${AZURECLAW_GROUP}/sandbox`;
+export const KARS_GROUP = "kars.azure.com";
+export const KARS_VERSION = "v1alpha1";
+export const SANDBOX_LABEL_KEY = `${KARS_GROUP}/sandbox`;
 
-const PROVENANCE_FROM_KEY = `${AZURECLAW_GROUP}/migrated-from`;
-const PROVENANCE_AGENT_KEY = `${AZURECLAW_GROUP}/kagent-agent`;
-const KAGENT_DESCRIPTION_KEY = `${AZURECLAW_GROUP}/kagent-description`;
-const KAGENT_DESCRIPTION_TRUNCATED_KEY = `${AZURECLAW_GROUP}/kagent-description-truncated`;
-const KAGENT_MODEL_CONFIG_KEY = `${AZURECLAW_GROUP}/kagent-model-config`;
-const KAGENT_TOOL_REF_KEY = `${AZURECLAW_GROUP}/kagent-tool-ref`;
+const PROVENANCE_FROM_KEY = `${KARS_GROUP}/migrated-from`;
+const PROVENANCE_AGENT_KEY = `${KARS_GROUP}/kagent-agent`;
+const KAGENT_DESCRIPTION_KEY = `${KARS_GROUP}/kagent-description`;
+const KAGENT_DESCRIPTION_TRUNCATED_KEY = `${KARS_GROUP}/kagent-description-truncated`;
+const KAGENT_MODEL_CONFIG_KEY = `${KARS_GROUP}/kagent-model-config`;
+const KAGENT_TOOL_REF_KEY = `${KARS_GROUP}/kagent-tool-ref`;
 
 const DESCRIPTION_CAP_BYTES = 4096;
 const DNS_NAME_MAX = 63;
@@ -234,7 +234,7 @@ export function envArrayToMap(
         warnings.push(
           warn(
             `${pathPrefix}[${i}]`,
-            `env '${name}': valueFrom is not supported by ClawSandbox.spec.runtime.openclaw.extraEnv (dropped)`,
+            `env '${name}': valueFrom is not supported by KarsSandbox.spec.runtime.openclaw.extraEnv (dropped)`,
           ),
         );
       }
@@ -329,9 +329,9 @@ export function translate(
   const description = asString(spec.description);
   const descProj = projectDescription(description, warnings);
 
-  // ---- ClawSandbox ---------------------------------------------------------
+  // ---- KarsSandbox ---------------------------------------------------------
   const sandboxLabels: Record<string, string> = { ...meta.labels };
-  // Inject deterministic AzureClaw-owned label so emitted ToolPolicies
+  // Inject deterministic Kars-owned label so emitted ToolPolicies
   // can match the sandbox via spec.appliesTo.sandboxMatchLabels. Refuse
   // a conflicting pre-existing value.
   if (
@@ -380,7 +380,7 @@ export function translate(
       warnings.push(
         warn(
           "spec.declarative",
-          "Declarative agents use the kagent ADK runtime image; AzureClaw does not bundle that runtime. Pass --image to override; the emitted ClawSandbox is NOT runnable as-is",
+          "Declarative agents use the kagent ADK runtime image; Kars does not bundle that runtime. Pass --image to override; the emitted KarsSandbox is NOT runnable as-is",
         ),
       );
     }
@@ -416,13 +416,13 @@ export function translate(
   const deployBase = `spec.${agentType === "BYO" ? "byo" : "declarative"}.deployment`;
   for (const [k, msg] of [
     ["replicas", "controller manages Deployment replicas (dropped)"],
-    ["imagePullSecrets", "imagePullSecrets not exposed via ClawSandbox (dropped)"],
-    ["volumes", "pod-level volumes not exposed via ClawSandbox (dropped)"],
+    ["imagePullSecrets", "imagePullSecrets not exposed via KarsSandbox (dropped)"],
+    ["volumes", "pod-level volumes not exposed via KarsSandbox (dropped)"],
     ["volumeMounts", "container-level volumeMounts not exposed (dropped)"],
     ["imagePullPolicy", "imagePullPolicy not exposed (dropped)"],
-    ["tolerations", "pod tolerations not exposed via ClawSandbox (dropped)"],
-    ["affinity", "pod affinity not exposed via ClawSandbox (dropped)"],
-    ["nodeSelector", "nodeSelector not exposed via ClawSandbox (dropped)"],
+    ["tolerations", "pod tolerations not exposed via KarsSandbox (dropped)"],
+    ["affinity", "pod affinity not exposed via KarsSandbox (dropped)"],
+    ["nodeSelector", "nodeSelector not exposed via KarsSandbox (dropped)"],
     ["securityContext", "container securityContext is controller-managed (dropped)"],
     ["podSecurityContext", "podSecurityContext is controller-managed (dropped)"],
     ["serviceAccountName", "ServiceAccount is controller-managed (dropped)"],
@@ -457,7 +457,7 @@ export function translate(
         warnings.push(
           warn(
             `spec.sandbox.network.allowedDomains[${i}]`,
-            `wildcard domain '${d}' has no documented ClawSandbox.networkPolicy semantics; passed through verbatim — verify behaviour before relying on it`,
+            `wildcard domain '${d}' has no documented KarsSandbox.networkPolicy semantics; passed through verbatim — verify behaviour before relying on it`,
           ),
         );
       }
@@ -476,7 +476,7 @@ export function translate(
     warnings.push(
       warn(
         "spec.skills",
-        "kagent skills (OCI/git refs) are not installed by AzureClaw S9.3; migrated agent may not function without manual remediation",
+        "kagent skills (OCI/git refs) are not installed by Kars S9.3; migrated agent may not function without manual remediation",
       ),
     );
   }
@@ -484,7 +484,7 @@ export function translate(
     warnings.push(
       warn(
         "spec.allowedNamespaces",
-        "Gateway-API cross-namespace pattern not modeled by AzureClaw (dropped)",
+        "Gateway-API cross-namespace pattern not modeled by Kars (dropped)",
       ),
     );
   }
@@ -493,15 +493,15 @@ export function translate(
   if (agentType === "Declarative" && isObj(spec.declarative)) {
     const d = spec.declarative;
     for (const [k, msg] of [
-      ["systemMessage", "system message not modeled by ClawSandbox (use spec.agent.instructions if Foundry agent is configured)"],
+      ["systemMessage", "system message not modeled by KarsSandbox (use spec.agent.instructions if Foundry agent is configured)"],
       ["systemMessageFrom", "system message source ref not modeled (dropped)"],
       ["promptTemplate", "prompt template processing not modeled (dropped)"],
       ["runtime", "kagent ADK runtime selector (python/go) is not applicable"],
       ["stream", "stream flag is router-side and not modeled here (dropped)"],
       ["executeCodeBlocks", "code execution flag not modeled (dropped)"],
-      ["memory", "memory binding is Phase 4 ClawMemory; preserved only as warning"],
+      ["memory", "memory binding is Phase 4 KarsMemory; preserved only as warning"],
       ["context", "context compaction config not modeled (dropped)"],
-      ["a2aConfig", "A2A skill list not faithfully translatable to ClawSandbox.spec.a2a (dropped)"],
+      ["a2aConfig", "A2A skill list not faithfully translatable to KarsSandbox.spec.a2a (dropped)"],
     ] as const) {
       if (d[k] !== undefined) warnings.push(warn(`spec.declarative.${k}`, msg));
     }
@@ -528,7 +528,7 @@ export function translate(
         );
       }
       warnings.push(
-        warn(path, "agent-as-tool not supported by AzureClaw ToolPolicy (dropped)"),
+        warn(path, "agent-as-tool not supported by Kars ToolPolicy (dropped)"),
       );
       continue;
     }
@@ -575,7 +575,7 @@ export function translate(
     warnings.push(
       warn(
         `${path}.mcpServer`,
-        `Tool references kagent McpServer '${mcpName}'; AzureClaw will not auto-create it — ensure an equivalent AzureClaw McpServer CR exists`,
+        `Tool references kagent McpServer '${mcpName}'; Kars will not auto-create it — ensure an equivalent Kars McpServer CR exists`,
       ),
     );
 
@@ -612,7 +612,7 @@ export function translate(
       }
 
       toolPolicies.push({
-        apiVersion: `${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`,
+        apiVersion: `${KARS_GROUP}/${KARS_VERSION}`,
         kind: "ToolPolicy",
         metadata: {
           name: tpName,
@@ -633,7 +633,7 @@ export function translate(
   // Stable bundle order: Sandbox, InferencePolicy, ToolPolicies (sorted).
   toolPolicies.sort((a, b) => a.metadata.name.localeCompare(b.metadata.name));
 
-  // ---- ClawSandbox spec assembly ------------------------------------------
+  // ---- KarsSandbox spec assembly ------------------------------------------
   const sbSpec: Record<string, unknown> = {
     sandbox: { isolation },
   };
@@ -650,7 +650,7 @@ export function translate(
   }
   if (resources) sbSpec.resources = resources;
   if (networkPolicy) sbSpec.networkPolicy = networkPolicy;
-  // S13: ClawSandbox.spec.inferenceRef is required. Emit a sibling
+  // S13: KarsSandbox.spec.inferenceRef is required. Emit a sibling
   // InferencePolicy CR named `<sandbox>-inference` and reference it.
   sbSpec.inferenceRef = { name: `${sandboxName}-inference` };
   if (governanceEnabled) {
@@ -664,9 +664,9 @@ export function translate(
     };
   }
 
-  const clawsandbox: KubeResource = {
-    apiVersion: `${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`,
-    kind: "ClawSandbox",
+  const karssandbox: KubeResource = {
+    apiVersion: `${KARS_GROUP}/${KARS_VERSION}`,
+    kind: "KarsSandbox",
     metadata: {
       name: sandboxName,
       namespace,
@@ -677,7 +677,7 @@ export function translate(
   };
 
   // ---- InferencePolicy ----------------------------------------------------
-  // S13: ClawSandbox.spec.inferenceRef is required, so always emit a
+  // S13: KarsSandbox.spec.inferenceRef is required, so always emit a
   // sibling `<sandbox>-inference` InferencePolicy CR. When the upstream
   // kagent Agent declared a `modelConfig`, preserve it as provenance.
   const inferencePolicies: KubeResource[] = [];
@@ -692,14 +692,14 @@ export function translate(
         warnings.push(
           warn(
             "spec.declarative.modelConfig",
-            `kagent ModelConfig '${modelConfig}' is preserved only as an InferencePolicy annotation; AzureClaw inference provider/model are not configured from it`,
+            `kagent ModelConfig '${modelConfig}' is preserved only as an InferencePolicy annotation; Kars inference provider/model are not configured from it`,
           ),
         );
         ipAnnotations[KAGENT_MODEL_CONFIG_KEY] = modelConfig;
       }
     }
     inferencePolicies.push({
-      apiVersion: `${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`,
+      apiVersion: `${KARS_GROUP}/${KARS_VERSION}`,
       kind: "InferencePolicy",
       metadata: {
         name: `${sandboxName}-inference`,
@@ -715,10 +715,10 @@ export function translate(
 
   // S13: when governance is on, emit a synthetic top-level
   // `<sandbox>-toolpolicy` aggregator (the per-tool CRs above stay; this
-  // one is what `ClawSandbox.spec.governance.toolPolicyRef` points at).
+  // one is what `KarsSandbox.spec.governance.toolPolicyRef` points at).
   if (governanceEnabled) {
     toolPolicies.push({
-      apiVersion: `${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`,
+      apiVersion: `${KARS_GROUP}/${KARS_VERSION}`,
       kind: "ToolPolicy",
       metadata: {
         name: `${sandboxName}-toolpolicy`,
@@ -742,7 +742,7 @@ export function translate(
   }
 
   const resourcesOut: KubeResource[] = [
-    clawsandbox,
+    karssandbox,
     ...inferencePolicies,
     ...toolPolicies,
   ];

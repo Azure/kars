@@ -43,18 +43,18 @@ source "$LIB_DIR/agent_invoke.sh"
 scenario_header "Inference smoke — runtime → router → Foundry"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
 export MANUAL_E2E_SCENARIO=inference_smoke
 
 # Comma-separated list of runtimes to probe. OpenClaw is mandatory
 # (only runtime with an in-pod HTTP API); the others share the
 # log-tail probe.
-runtimes_csv="${AZURECLAW_E2E_INF_RUNTIMES:-openclaw,maf-python,langgraph,oai-agents}"
+runtimes_csv="${KARS_E2E_INF_RUNTIMES:-openclaw,maf-python,langgraph,oai-agents}"
 IFS=',' read -r -a runtimes <<<"$runtimes_csv"
 
 declare -A pod_ns_of pod_of cr_ns_of
-created_clawsandboxes=()
+created_karssandboxes=()
 
 # ── Apply each sandbox in parallel-ish (admission only blocks briefly).
 for runtime in "${runtimes[@]}"; do
@@ -64,30 +64,30 @@ for runtime in "${runtimes[@]}"; do
     pod_ns_of["$runtime"]=$(pod_ns_for "$name")
     metric_start "admit_${name}"
     if cr_dispatch "$runtime" "$name" "$cr_ns" | kubectl apply -f - >/dev/null; then
-        metric_finish "admit_${name}" inference_smoke admitClawSandbox \
+        metric_finish "admit_${name}" inference_smoke admitKarsSandbox \
             "runtime=${runtime}" "sandbox=${name}"
-        log_pass "${runtime}: ClawSandbox admitted"
-        created_clawsandboxes+=("$runtime|$name|$cr_ns")
+        log_pass "${runtime}: KarsSandbox admitted"
+        created_karssandboxes+=("$runtime|$name|$cr_ns")
     else
         log_fail "${runtime}: admission rejected"
     fi
 done
 
 # ── Wait for each Ready, then probe.
-for entry in "${created_clawsandboxes[@]}"; do
+for entry in "${created_karssandboxes[@]}"; do
     IFS='|' read -r runtime name cr_ns <<<"$entry"
     pod_ns="${pod_ns_of[$runtime]}"
 
-    if ! wait_for_clawsandbox_ready "$cr_ns" "$name"; then
+    if ! wait_for_karssandbox_ready "$cr_ns" "$name"; then
         log_fail "${runtime}: never reached Ready, skipping probes"
         continue
     fi
 
     pod=$(kubectl -n "$pod_ns" get pod \
-        -l "azureclaw.azure.com/sandbox=${name}" \
+        -l "kars.azure.com/sandbox=${name}" \
         -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
     if [[ -z "$pod" ]]; then
-        log_fail "${runtime}: ClawSandbox=Ready but no pod (likely controller misclassification)"
+        log_fail "${runtime}: KarsSandbox=Ready but no pod (likely controller misclassification)"
         continue
     fi
     pod_of["$runtime"]="$pod"
@@ -138,7 +138,7 @@ else
 fi
 
 # ── Cleanup all admitted sandboxes.
-for entry in "${created_clawsandboxes[@]}"; do
+for entry in "${created_karssandboxes[@]}"; do
     IFS='|' read -r runtime name cr_ns <<<"$entry"
     cleanup_sandbox "$cr_ns" "$name"
 done

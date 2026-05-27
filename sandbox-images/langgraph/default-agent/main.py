@@ -1,5 +1,5 @@
 """
-AzureClaw default agent for the LangGraph (Python) runtime.
+Kars default agent for the LangGraph (Python) runtime.
 
 Builds a minimal single-node LangGraph that calls the router-pinned
 chat model. Replace this file by mounting agent code via `agentCode`.
@@ -14,10 +14,10 @@ import time
 # Bootstrap MUST run in this process so OPENAI_BASE_URL /
 # OPENAI_API_KEY (router-managed sentinel) and OTel are set
 # before any framework SDK is imported.
-from azureclaw_runtime_langgraph.runtime import bootstrap
+from kars_runtime_langgraph.runtime import bootstrap
 bootstrap()
 
-BANNER = "🔒 AzureClaw — LangGraph (default agent)"
+BANNER = "🔒 Kars — LangGraph (default agent)"
 
 
 def _env(name: str, default: str = "(unset)") -> str:
@@ -62,7 +62,7 @@ def _smoke_test() -> None:
 
         result = compiled.invoke({
             "messages": [
-                ("system", "You are a default smoke-test agent embedded in an AzureClaw sandbox."),
+                ("system", "You are a default smoke-test agent embedded in an Kars sandbox."),
                 ("user", "Reply with exactly one short sentence confirming you are alive."),
             ],
         })

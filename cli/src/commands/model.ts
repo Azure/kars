@@ -25,8 +25,8 @@ export function modelCommand(): Command {
         // that field was removed by the schema in S10.A1 and is silently
         // dropped on patch). Patch the InferencePolicy directly.
         const { stdout: refStdout } = await execa("kubectl", [
-          "get", "clawsandbox", name,
-          "-n", "azureclaw-system",
+          "get", "karssandbox", name,
+          "-n", "kars-system",
           "-o", "jsonpath={.spec.inferenceRef.name}",
         ], { stdio: "pipe" });
         const refName = refStdout.trim();
@@ -37,7 +37,7 @@ export function modelCommand(): Command {
         }
         await execa("kubectl", [
           "patch", "inferencepolicy", refName,
-          "-n", "azureclaw-system",
+          "-n", "kars-system",
           "--type", "merge",
           "-p", JSON.stringify({
             spec: {
@@ -51,14 +51,14 @@ export function modelCommand(): Command {
         // Mirror the model preference onto the sandbox annotation so
         // `model get` and other read paths stay consistent.
         await execa("kubectl", [
-          "annotate", "clawsandbox", name,
-          "-n", "azureclaw-system",
-          `azureclaw.azure.com/model=${model}`,
+          "annotate", "karssandbox", name,
+          "-n", "kars-system",
+          `kars.azure.com/model=${model}`,
           "--overwrite",
         ], { stdio: "pipe" }).catch(() => {});
 
         // Update the inference router env var on the deployment
-        const namespace = `azureclaw-${name}`;
+        const namespace = `kars-${name}`;
         await execa("kubectl", [
           "set", "env", `deploy/${name}`,
           "-n", namespace,
@@ -88,19 +88,19 @@ export function modelCommand(): Command {
         // referenced by spec.inferenceRef.name. Resolve via that ref; fall
         // back to the metadata annotation; finally to legacy spec.inference.
         const { stdout: sbJson } = await execa("kubectl", [
-          "get", "clawsandbox", name,
-          "-n", "azureclaw-system",
+          "get", "karssandbox", name,
+          "-n", "kars-system",
           "-o", "json",
         ], { stdio: "pipe" });
         const obj = JSON.parse(sbJson);
         const refName: string | undefined = obj.spec?.inferenceRef?.name;
-        const annotated: string | undefined = obj.metadata?.annotations?.["azureclaw.azure.com/model"];
+        const annotated: string | undefined = obj.metadata?.annotations?.["kars.azure.com/model"];
         let model = "";
         if (refName) {
           try {
             const { stdout: mp } = await execa("kubectl", [
               "get", "inferencepolicy", refName,
-              "-n", "azureclaw-system",
+              "-n", "kars-system",
               "-o", "jsonpath={.spec.modelPreference.primary.deployment}",
             ], { stdio: "pipe" });
             model = mp.trim();
@@ -123,7 +123,7 @@ export function modelCommand(): Command {
       if (name) {
         // Query live from the inference router inside the sandbox
         const { execa } = await import("execa");
-        const namespace = `azureclaw-${name}`;
+        const namespace = `kars-${name}`;
         try {
           const { stdout } = await execa("kubectl", [
             "exec", "-n", namespace, `deploy/${name}`,
@@ -145,7 +145,7 @@ export function modelCommand(): Command {
           if (Object.keys(groups).length > 15) {
             console.log(chalk.dim(`  ... and ${Object.keys(groups).length - 15} more groups`));
           }
-          console.log(chalk.dim(`\n  Total: ${models.length} models. Switch with: azureclaw model set ${name} <model>\n`));
+          console.log(chalk.dim(`\n  Total: ${models.length} models. Switch with: kars model set ${name} <model>\n`));
         } catch {
           console.log(chalk.red(`\n  Could not query models from '${name}'. Is the sandbox running?\n`));
         }
@@ -158,7 +158,7 @@ export function modelCommand(): Command {
         console.log("  Mistral:    Mistral-small-2503, Codestral-2501");
         console.log("  Anthropic:  claude-sonnet-4-5, claude-opus-4-6");
         console.log("  xAI:        grok-3, grok-4-fast-reasoning");
-        console.log(chalk.dim("\n  200+ models. Use: azureclaw model list <sandbox> for live query.\n"));
+        console.log(chalk.dim("\n  200+ models. Use: kars model list <sandbox> for live query.\n"));
       }
     });
 

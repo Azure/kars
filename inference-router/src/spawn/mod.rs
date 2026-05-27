@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Sandbox spawn — create/list/delete ClawSandbox sub-agents via K8s API.
+//! Sandbox spawn — create/list/delete KarsSandbox sub-agents via K8s API.
 //!
 //! The agent inside a sandbox has no kubectl or CLI access. This module exposes
-//! HTTP endpoints that the plugin's `/azureclaw-spawn` slash command calls to
+//! HTTP endpoints that the plugin's `/kars-spawn` slash command calls to
 //! manage sub-agent sandboxes through the pod's ServiceAccount.
 
 use k8s_openapi::api::core::v1::{Namespace, Secret};
@@ -23,13 +23,13 @@ fn default_true() -> bool {
     true
 }
 
-fn claw_sandbox_api_resource() -> ApiResource {
+fn kars_sandbox_api_resource() -> ApiResource {
     ApiResource {
-        group: "azureclaw.azure.com".into(),
+        group: "kars.azure.com".into(),
         version: "v1alpha1".into(),
-        api_version: "azureclaw.azure.com/v1alpha1".into(),
-        kind: "ClawSandbox".into(),
-        plural: "clawsandboxes".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: "KarsSandbox".into(),
+        plural: "karssandboxes".into(),
     }
 }
 
@@ -104,7 +104,7 @@ pub struct SubAgentEntry {
     pub governance: bool,
 }
 
-/// Create a ClawSandbox CRD for a sub-agent, or a Docker container in dev mode.
+/// Create a KarsSandbox CRD for a sub-agent, or a Docker container in dev mode.
 pub async fn create_sandbox(
     parent_name: &str,
     req: &SpawnRequest,
@@ -126,7 +126,7 @@ pub async fn create_sandbox(
 
     // Dev mode: spawn sibling Docker container instead of K8s CRD.
     // Exception: handoff spawns always target AKS (the whole point is moving to cloud).
-    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
+    let is_dev = std::env::var("KARS_DEV_MODE").unwrap_or_default() == "true";
     let is_handoff = req.handoff.as_ref().is_some_and(|h| h.mode == "restore");
     if is_dev && !is_handoff {
         return docker::create_sandbox_docker(parent_name, req).await;
@@ -143,10 +143,9 @@ pub async fn create_sandbox(
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let api: Api<DynamicObject> =
-        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
+        Api::namespaced_with(client, &namespace, &kars_sandbox_api_resource());
 
     // Sub-agents inherit the parent's model unless the spawn request explicitly
     // overrides it. The controller plumbs the parent's resolved
@@ -247,7 +246,7 @@ pub async fn create_sandbox(
             Ok(SpawnResponse {
                 status: "created".into(),
                 agent_id: req.agent_id.clone(),
-                namespace: Some(format!("azureclaw-{}", req.agent_id)),
+                namespace: Some(format!("kars-{}", req.agent_id)),
                 phase: Some("Pending".into()),
                 message: Some(format!(
                     "Sub-agent '{}' spawned (model: {}, governance: {}). Use AGT mesh to communicate.",
@@ -261,7 +260,7 @@ pub async fn create_sandbox(
             Ok(SpawnResponse {
                 status: "created".into(),
                 agent_id: req.agent_id.clone(),
-                namespace: Some(format!("azureclaw-{}", req.agent_id)),
+                namespace: Some(format!("kars-{}", req.agent_id)),
                 phase: Some("Running".into()),
                 message: Some(format!(
                     "Sub-agent '{}' already running (model: {}, governance: {}). Use AGT mesh to communicate.",
@@ -311,7 +310,7 @@ async fn propagate_credentials(client: &Client, child_name: &str) -> Result<(), 
         return Ok(());
     }
 
-    let target_ns = format!("azureclaw-{}", child_name);
+    let target_ns = format!("kars-{}", child_name);
     let secret_name = format!("{}-credentials", child_name);
 
     // Wait for the namespace to be created by the controller (up to 30s)
@@ -339,8 +338,8 @@ async fn propagate_credentials(client: &Client, child_name: &str) -> Result<(), 
             "name": secret_name,
             "namespace": target_ns,
             "labels": {
-                "azureclaw.azure.com/managed-by": "handoff",
-                "azureclaw.azure.com/predecessor": std::env::var("SANDBOX_NAME").unwrap_or_default(),
+                "kars.azure.com/managed-by": "handoff",
+                "kars.azure.com/predecessor": std::env::var("SANDBOX_NAME").unwrap_or_default(),
             }
         },
         "type": "Opaque",
@@ -352,7 +351,7 @@ async fn propagate_credentials(client: &Client, child_name: &str) -> Result<(), 
     secret_api
         .patch(
             &secret_name,
-            &PatchParams::apply("azureclaw-handoff"),
+            &PatchParams::apply("kars-handoff"),
             &Patch::Apply(secret),
         )
         .await
@@ -373,12 +372,11 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let api: Api<DynamicObject> =
-        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
+        Api::namespaced_with(client, &namespace, &kars_sandbox_api_resource());
 
-    let lp = ListParams::default().labels(&format!("azureclaw.azure.com/parent={parent_name}"));
+    let lp = ListParams::default().labels(&format!("kars.azure.com/parent={parent_name}"));
 
     let list = api
         .list(&lp)
@@ -407,7 +405,7 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
             let model = data
                 .get("metadata")
                 .and_then(|m| m.get("annotations"))
-                .and_then(|a| a.get("azureclaw.azure.com/model"))
+                .and_then(|a| a.get("kars.azure.com/model"))
                 .and_then(|m| m.as_str())
                 .map(String::from);
 
@@ -434,7 +432,7 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
 /// Get status of a specific sub-agent sandbox.
 pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
     // Dev mode: query Docker Engine API instead of K8s
-    if std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true" {
+    if std::env::var("KARS_DEV_MODE").unwrap_or_default() == "true" {
         return docker::get_sandbox_status_docker(name).await;
     }
 
@@ -442,10 +440,9 @@ pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let api: Api<DynamicObject> =
-        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
+        Api::namespaced_with(client, &namespace, &kars_sandbox_api_resource());
 
     let obj = api
         .get(name)
@@ -480,10 +477,9 @@ pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnRespon
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let api: Api<DynamicObject> =
-        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
+        Api::namespaced_with(client, &namespace, &kars_sandbox_api_resource());
 
     // Verify the sandbox was spawned by this parent (prevent deleting others' sandboxes)
     let obj = api
@@ -492,7 +488,7 @@ pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnRespon
         .map_err(|e| format!("Sandbox '{}' not found: {e}", name))?;
     let labels = obj.metadata.labels.as_ref();
     let actual_parent = labels
-        .and_then(|l| l.get("azureclaw.azure.com/parent"))
+        .and_then(|l| l.get("kars.azure.com/parent"))
         .map(String::as_str);
 
     if actual_parent != Some(parent_name) {
@@ -524,7 +520,7 @@ pub async fn collect_sub_agent_snapshots(
     parent_name: &str,
 ) -> Result<Vec<crate::handoff::SubAgentSnapshot>, String> {
     // Dev mode (Docker): list sub-agent containers
-    if std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true" {
+    if std::env::var("KARS_DEV_MODE").unwrap_or_default() == "true" {
         return docker::collect_sub_agent_snapshots_docker(parent_name).await;
     }
 
@@ -532,12 +528,11 @@ pub async fn collect_sub_agent_snapshots(
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let api: Api<DynamicObject> =
-        Api::namespaced_with(client, &namespace, &claw_sandbox_api_resource());
+        Api::namespaced_with(client, &namespace, &kars_sandbox_api_resource());
 
-    let lp = ListParams::default().labels(&format!("azureclaw.azure.com/parent={parent_name}"));
+    let lp = ListParams::default().labels(&format!("kars.azure.com/parent={parent_name}"));
     let list = api
         .list(&lp)
         .await
@@ -565,13 +560,13 @@ pub async fn collect_sub_agent_snapshots(
         }
 
         // Reconstruct SpawnRequest from CRD metadata + spec.
-        // Model lives on the `azureclaw.azure.com/model` annotation since
+        // Model lives on the `kars.azure.com/model` annotation since
         // S13 (delegated to InferencePolicy on-CR).
         let model = obj
             .data
             .get("metadata")
             .and_then(|m| m.get("annotations"))
-            .and_then(|a| a.get("azureclaw.azure.com/model"))
+            .and_then(|a| a.get("kars.azure.com/model"))
             .and_then(|m| m.as_str())
             .map(String::from);
 
@@ -654,7 +649,7 @@ pub async fn collect_sub_agent_snapshots(
 // Pure CRD builder (kept testable; called from `create_sandbox`)
 // ---------------------------------------------------------------------------
 
-/// Build the ClawSandbox CRD payload for a spawned sub-agent or handoff
+/// Build the KarsSandbox CRD payload for a spawned sub-agent or handoff
 /// target. Pure function — no I/O, no env vars except `FOUNDRY_AGENT_TOOLS`
 /// — so it round-trips through JSON-shape contract tests below, catching
 /// schema regressions to the pre-S10/S13 shape (`spec.openclaw`,
@@ -664,7 +659,7 @@ pub async fn collect_sub_agent_snapshots(
 ///
 /// **No-inherit invariant (Slice 3a/3b)**: the parent's
 /// `spec.memoryRef` is deliberately NOT propagated onto the spawned
-/// sub-agent. ClawMemory bindings are scoped to the agent that
+/// sub-agent. KarsMemory bindings are scoped to the agent that
 /// declared them and must not flow through `handoff` or `spawn`. The
 /// contract test `sub_agent_crd_never_inherits_memory_ref` asserts
 /// this by construction — if a future caller adds a `memory_ref`
@@ -672,7 +667,7 @@ pub async fn collect_sub_agent_snapshots(
 /// Slice 2 DoD #6 — parent-label inheritance.
 ///
 /// Pure label-merge: filter the parent's `metadata.labels` to drop
-/// azureclaw-controlled keys (anything starting with `azureclaw.`
+/// kars-controlled keys (anything starting with `kars.`
 /// and the `app.kubernetes.io/*` tracking labels), then start the
 /// child's label map from that filtered set. Spawn-tracking labels
 /// (`parent`, `spawned-by`, `predecessor`) are written last so they
@@ -681,9 +676,9 @@ pub async fn collect_sub_agent_snapshots(
 /// Operators who tag a parent with e.g. `tier=prod` /
 /// `team=payments` / `env=staging` get those same tags on every
 /// sub-agent the parent spawns — so a single `kubectl get
-/// clawsandbox -l tier=prod` returns the parent and every
+/// karssandbox -l tier=prod` returns the parent and every
 /// descendant without the operator having to walk the
-/// `azureclaw.azure.com/parent` graph by hand.
+/// `kars.azure.com/parent` graph by hand.
 pub(crate) fn inherit_parent_labels(
     parent_labels: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
@@ -692,7 +687,7 @@ pub(crate) fn inherit_parent_labels(
         // Drop labels we control — they get re-stamped per spawn
         // based on the *child's* role (handoff vs. agent vs. mesh)
         // and inheriting them would lie about the child's lineage.
-        if k.starts_with("azureclaw.azure.com/") || k.starts_with("app.kubernetes.io/") {
+        if k.starts_with("kars.azure.com/") || k.starts_with("app.kubernetes.io/") {
             continue;
         }
         out.insert(k.clone(), v.clone());
@@ -767,30 +762,24 @@ pub(crate) fn build_sub_agent_crd_with_labels(
     let mut labels = inherit_parent_labels(parent_labels);
     if req.handoff.is_some() {
         labels.insert(
-            "azureclaw.azure.com/spawned-by".to_string(),
+            "kars.azure.com/spawned-by".to_string(),
             "handoff".to_string(),
         );
         labels.insert(
-            "azureclaw.azure.com/predecessor".to_string(),
+            "kars.azure.com/predecessor".to_string(),
             parent_name.to_string(),
         );
     } else {
-        labels.insert(
-            "azureclaw.azure.com/parent".to_string(),
-            parent_name.to_string(),
-        );
-        labels.insert(
-            "azureclaw.azure.com/spawned-by".to_string(),
-            "agent".to_string(),
-        );
+        labels.insert("kars.azure.com/parent".to_string(), parent_name.to_string());
+        labels.insert("kars.azure.com/spawned-by".to_string(), "agent".to_string());
     }
 
     let mut annotations = BTreeMap::new();
-    annotations.insert("azureclaw.azure.com/model".to_string(), model.to_string());
+    annotations.insert("kars.azure.com/model".to_string(), model.to_string());
 
     serde_json::json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
-        "kind": "ClawSandbox",
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsSandbox",
         "metadata": {
             "name": req.agent_id,
             "namespace": namespace,
@@ -893,7 +882,7 @@ mod tests {
         // catches reverts to the legacy shape at `cargo test` time.
         let crd = build_sub_agent_crd_with_labels(
             "azclaw2",
-            "azureclaw-system",
+            "kars-system",
             "enhanced",
             "gpt-5.4",
             &minimal_req("viz"),
@@ -901,10 +890,10 @@ mod tests {
         );
 
         // 1. Top-level
-        assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
-        assert_eq!(crd["kind"], "ClawSandbox");
+        assert_eq!(crd["apiVersion"], "kars.azure.com/v1alpha1");
+        assert_eq!(crd["kind"], "KarsSandbox");
         assert_eq!(
-            crd["metadata"]["annotations"]["azureclaw.azure.com/model"],
+            crd["metadata"]["annotations"]["kars.azure.com/model"],
             "gpt-5.4"
         );
 
@@ -944,20 +933,20 @@ mod tests {
         });
         let crd = build_sub_agent_crd_with_labels(
             "azclaw2",
-            "azureclaw-system",
+            "kars-system",
             "enhanced",
             "gpt-5.4",
             &req,
             &BTreeMap::new(),
         );
 
-        assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
+        assert_eq!(crd["apiVersion"], "kars.azure.com/v1alpha1");
         assert_eq!(
-            crd["metadata"]["labels"]["azureclaw.azure.com/spawned-by"],
+            crd["metadata"]["labels"]["kars.azure.com/spawned-by"],
             "handoff"
         );
         assert_eq!(
-            crd["metadata"]["labels"]["azureclaw.azure.com/predecessor"],
+            crd["metadata"]["labels"]["kars.azure.com/predecessor"],
             "azclaw2"
         );
         // Handoff MUST request global registry mode for mesh comms.
@@ -970,7 +959,7 @@ mod tests {
 
     #[test]
     fn sub_agent_crd_never_inherits_memory_ref() {
-        // No-inherit invariant for ClawMemory (Slice 3a/3b):
+        // No-inherit invariant for KarsMemory (Slice 3a/3b):
         // a parent's compiled memory binding must NEVER flow through
         // sub-agent spawn or handoff. The builder takes no
         // `memory_ref` input from `SpawnRequest`, and `spec.memoryRef`
@@ -990,7 +979,7 @@ mod tests {
             }
             let crd = build_sub_agent_crd_with_labels(
                 "parent-with-memory",
-                "azureclaw-parent",
+                "kars-parent",
                 "default",
                 "gpt-5.4",
                 &req,
@@ -999,7 +988,7 @@ mod tests {
             assert!(
                 crd["spec"].get("memoryRef").is_none(),
                 "spec.memoryRef leaked into spawned sub-agent CRD (handoff={handoff:?}); \
-                 ClawMemory bindings must not inherit (Slice 3a no-inherit rule)"
+                 KarsMemory bindings must not inherit (Slice 3a no-inherit rule)"
             );
             // Belt-and-suspenders: governance block must also not
             // carry a memoryRef.
@@ -1013,18 +1002,15 @@ mod tests {
     // ── Slice 2 DoD #6 — parent label inheritance ────────────────────────
 
     #[test]
-    fn inherit_parent_labels_drops_azureclaw_controlled_keys() {
+    fn inherit_parent_labels_drops_kars_controlled_keys() {
         let mut parent = BTreeMap::new();
         parent.insert("tier".to_string(), "prod".to_string());
         parent.insert("team".to_string(), "payments".to_string());
         parent.insert(
-            "azureclaw.azure.com/parent".to_string(),
+            "kars.azure.com/parent".to_string(),
             "grandparent".to_string(),
         );
-        parent.insert(
-            "azureclaw.azure.com/spawned-by".to_string(),
-            "agent".to_string(),
-        );
+        parent.insert("kars.azure.com/spawned-by".to_string(), "agent".to_string());
         parent.insert(
             "app.kubernetes.io/managed-by".to_string(),
             "controller".to_string(),
@@ -1035,12 +1021,12 @@ mod tests {
         assert_eq!(inherited.get("tier"), Some(&"prod".to_string()));
         assert_eq!(inherited.get("team"), Some(&"payments".to_string()));
         assert!(
-            !inherited.contains_key("azureclaw.azure.com/parent"),
-            "azureclaw-controlled label leaked: child must re-stamp its own parent ref"
+            !inherited.contains_key("kars.azure.com/parent"),
+            "kars-controlled label leaked: child must re-stamp its own parent ref"
         );
         assert!(
-            !inherited.contains_key("azureclaw.azure.com/spawned-by"),
-            "azureclaw-controlled spawned-by leaked: child role depends on the spawn call, not the parent's"
+            !inherited.contains_key("kars.azure.com/spawned-by"),
+            "kars-controlled spawned-by leaked: child role depends on the spawn call, not the parent's"
         );
         assert!(
             !inherited.contains_key("app.kubernetes.io/managed-by"),
@@ -1059,7 +1045,7 @@ mod tests {
 
         let crd = build_sub_agent_crd_with_labels(
             "azclaw-parent",
-            "azureclaw-system",
+            "kars-system",
             "enhanced",
             "gpt-5.4",
             &minimal_req("child"),
@@ -1070,8 +1056,8 @@ mod tests {
         assert_eq!(child_labels["tier"], "prod");
         assert_eq!(child_labels["env"], "staging");
         // Spawn-tracking labels must coexist with inherited ones.
-        assert_eq!(child_labels["azureclaw.azure.com/parent"], "azclaw-parent");
-        assert_eq!(child_labels["azureclaw.azure.com/spawned-by"], "agent");
+        assert_eq!(child_labels["kars.azure.com/parent"], "azclaw-parent");
+        assert_eq!(child_labels["kars.azure.com/spawned-by"], "agent");
     }
 
     #[test]
@@ -1092,7 +1078,7 @@ mod tests {
 
         let crd = build_sub_agent_crd_with_labels(
             "local-parent",
-            "azureclaw-system",
+            "kars-system",
             "enhanced",
             "gpt-5.4",
             &req,
@@ -1101,17 +1087,14 @@ mod tests {
 
         let child_labels = &crd["metadata"]["labels"];
         assert_eq!(child_labels["tier"], "prod");
-        assert_eq!(child_labels["azureclaw.azure.com/spawned-by"], "handoff");
-        assert_eq!(
-            child_labels["azureclaw.azure.com/predecessor"],
-            "local-parent"
-        );
+        assert_eq!(child_labels["kars.azure.com/spawned-by"], "handoff");
+        assert_eq!(child_labels["kars.azure.com/predecessor"], "local-parent");
         // The handoff path intentionally omits the `parent` label
         // (predecessor takes its place semantically) — make sure
         // inheritance does not accidentally restore it.
         assert!(
-            child_labels.get("azureclaw.azure.com/parent").is_none()
-                || child_labels["azureclaw.azure.com/parent"].is_null(),
+            child_labels.get("kars.azure.com/parent").is_none()
+                || child_labels["kars.azure.com/parent"].is_null(),
             "handoff path must not stamp the `parent` label"
         );
     }
@@ -1119,16 +1102,16 @@ mod tests {
     #[test]
     fn spawn_tracking_labels_win_over_parent_labels_on_collision() {
         // Defence-in-depth: if a parent somehow carried
-        // `azureclaw.azure.com/parent=evil` (shouldn't happen — we
+        // `kars.azure.com/parent=evil` (shouldn't happen — we
         // filter it — but belt-and-suspenders), the child's
         // re-stamped value must win. This pins the ordering.
         let mut parent_labels = BTreeMap::new();
-        parent_labels.insert("azureclaw.azure.com/parent".to_string(), "evil".to_string());
+        parent_labels.insert("kars.azure.com/parent".to_string(), "evil".to_string());
         parent_labels.insert("tier".to_string(), "prod".to_string());
 
         let crd = build_sub_agent_crd_with_labels(
             "real-parent",
-            "azureclaw-system",
+            "kars-system",
             "enhanced",
             "gpt-5.4",
             &minimal_req("child"),
@@ -1136,7 +1119,7 @@ mod tests {
         );
 
         assert_eq!(
-            crd["metadata"]["labels"]["azureclaw.azure.com/parent"], "real-parent",
+            crd["metadata"]["labels"]["kars.azure.com/parent"], "real-parent",
             "spawn-tracking label must win on collision"
         );
         assert_eq!(crd["metadata"]["labels"]["tier"], "prod");
@@ -1150,7 +1133,7 @@ mod tests {
         // add spurious keys on the no-labels case.
         let crd = build_sub_agent_crd_with_labels(
             "parent",
-            "azureclaw-system",
+            "kars-system",
             "enhanced",
             "gpt-5.4",
             &minimal_req("child"),
@@ -1162,7 +1145,7 @@ mod tests {
             .expect("labels must be an object");
         // Exactly the two spawn-tracking keys, nothing else.
         assert_eq!(labels.len(), 2);
-        assert!(labels.contains_key("azureclaw.azure.com/parent"));
-        assert!(labels.contains_key("azureclaw.azure.com/spawned-by"));
+        assert!(labels.contains_key("kars.azure.com/parent"));
+        assert!(labels.contains_key("kars.azure.com/spawned-by"));
     }
 }

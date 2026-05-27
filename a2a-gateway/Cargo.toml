@@ -1,6 +1,6 @@
 [package]
-name = "azureclaw-a2a-gateway"
-description = "Public-ingress A2A 1.0.0 edge for AzureClaw — TLS termination, JWS verification, mTLS to inference-router. Phase 2 S3.5 (ADR-0001 #4)."
+name = "kars-a2a-gateway"
+description = "Public-ingress A2A 1.0.0 edge for Kars — TLS termination, JWS verification, mTLS to inference-router. Phase 2 S3.5 (ADR-0001 #4)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,13 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "azureclaw-a2a-gateway"
+name = "kars-a2a-gateway"
 path = "src/main.rs"
 
 [dependencies]
 # Shared A2A verifier (the entire reason this crate exists — same
 # byte-for-byte JWS path the router uses).
-azureclaw-a2a-core = { path = "../azureclaw-a2a-core", version = "0.1.0" }
+kars-a2a-core = { path = "../kars-a2a-core", version = "0.1.0" }
 
 # HTTP server / proxy
 axum.workspace = true
@@ -53,9 +53,9 @@ serde_json.workspace = true
 tempfile = "3"
 
 [package.metadata.cargo-machete]
-# `azureclaw-a2a-core` is the dependency this crate exists to wrap (see
+# `kars-a2a-core` is the dependency this crate exists to wrap (see
 # src/verify.rs doc comment). The wiring through `verify::ReplayCache` is
 # intentional and the explicit dep keeps the gateway aligned with the
 # router's verification path even though the import is not yet active in
 # the proxy hot path.
-ignored = ["azureclaw-a2a-core"]
+ignored = ["kars-a2a-core"]

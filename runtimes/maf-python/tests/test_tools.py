@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from azureclaw_runtime_maf_python import tools
+from kars_runtime_maf_python import tools
 
 
 def test_canonical_tool_names_match_router_catalog():
@@ -150,5 +150,5 @@ def test_platform_mcp_url_default():
 
 
 def test_platform_mcp_url_env_override(monkeypatch):
-    monkeypatch.setenv("AZURECLAW_PLATFORM_MCP_URL", "http://elsewhere/mcp")
+    monkeypatch.setenv("KARS_PLATFORM_MCP_URL", "http://elsewhere/mcp")
     assert tools._platform_mcp_url() == "http://elsewhere/mcp"

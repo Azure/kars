@@ -1,10 +1,10 @@
-// AzureClaw Infrastructure - Main Bicep Template
+// Kars Infrastructure - Main Bicep Template
 // Deploys: AKS (Azure Linux) + ACR + Key Vault + Azure OpenAI + Monitor
 
 targetScope = 'resourceGroup'
 
 @description('Base name for all resources')
-param baseName string = 'azureclaw'
+param baseName string = 'kars'
 
 @description('Azure region for deployment')
 param location string = resourceGroup().location

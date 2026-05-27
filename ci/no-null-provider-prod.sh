@@ -6,7 +6,7 @@
 #
 # Static mirror of the ValidatingAdmissionPolicy shipped in Phase 0:
 #   A YAML manifest with spec.*.provider: null|noop|disabled must carry
-#   metadata.labels."azureclaw.azure.com/dev-only": "true".
+#   metadata.labels."kars.azure.com/dev-only": "true".
 #
 # Scope: controller Helm chart + CLI templates + docs/examples.
 set -euo pipefail
@@ -38,8 +38,8 @@ while IFS= read -r f; do
   [ -f "$f" ] || continue
 
   # Check for the dev-only label within the same file.
-  if ! grep -q 'azureclaw\.azure\.com/dev-only:[[:space:]]*"\?true"\?' "$f"; then
-    echo "fail: $f uses a null/noop/disabled provider without 'azureclaw.azure.com/dev-only: \"true\"' label." >&2
+  if ! grep -q 'kars\.azure\.com/dev-only:[[:space:]]*"\?true"\?' "$f"; then
+    echo "fail: $f uses a null/noop/disabled provider without 'kars.azure.com/dev-only: \"true\"' label." >&2
     fail=1
   fi
 done <<< "$suspect_files"

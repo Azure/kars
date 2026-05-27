@@ -10,7 +10,7 @@
  *
  * Sole mesh transport implementation. Wire compatibility: speaks
  * AgentMesh Wire Protocol v1.0. Upstream MeshClient includes the
- * AzureClaw compatibility features (plaintextPeers, wsFactory hook,
+ * Kars compatibility features (plaintextPeers, wsFactory hook,
  * KNOCK pending queue). See agent-governance-typescript/src/encryption/mesh-client.ts.
  */
 
@@ -108,7 +108,7 @@ interface AgtMeshClient {
   addPlaintextPeer(peerId: string): void;
   removePlaintextPeer(peerId: string): void;
   isPlaintextPeer(peerId: string): boolean;
-  // Registry helpers (added in azureclaw-meshclient-event-hooks AGT branch).
+  // Registry helpers (added in kars-meshclient-event-hooks AGT branch).
   getRegistry?: () => AgtRegistryClient | null;
   discover?: (
     capability: string,
@@ -122,7 +122,7 @@ interface AgtMeshClient {
     }>
   >;
   registerSelf?: () => Promise<void>;
-  // Phase 2 event hooks (added in azureclaw-meshclient-event-hooks AGT branch)
+  // Phase 2 event hooks (added in kars-meshclient-event-hooks AGT branch)
   onError?: (
     handler: (kind: string, from: string, detail: string) => void,
   ) => void;
@@ -329,7 +329,7 @@ export class AgtTransport implements IMeshTransport {
     });
 
     // Bridge AGT MeshClient diagnostic hooks (added on the AGT side in
-    // branch `azureclaw-meshclient-event-hooks`). When AGT is too old to
+    // branch `kars-meshclient-event-hooks`). When AGT is too old to
     // expose these the methods are absent — we silently skip and the
     // runtime continues without them.
     this.client.onError?.((kind, from, detail) => {
@@ -366,7 +366,7 @@ export class AgtTransport implements IMeshTransport {
         // store.py but is dead code in production). Without this,
         // every alive agent looks "stale" 90s after spawn and gets
         // filtered out of discover. Required for sibling
-        // peer-discovery in the openclaw runtime (azureclaw_discover
+        // peer-discovery in the openclaw runtime (kars_discover
         // tool, runtimes/openclaw/src/core/agt-tools/agt.ts:~1579).
         // Best-effort; swallow errors so a flaky registry never
         // brings down message delivery.

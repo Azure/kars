@@ -2,14 +2,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AzureClaw Infrastructure E2E Test Suite
+# Kars Infrastructure E2E Test Suite
 #
 # Runs against a LIVE AKS cluster with Azure AI Foundry connectivity.
 # Validates all Foundry API routes through the inference router.
 #
 # Prerequisites:
 #   - kubectl configured with target AKS cluster
-#   - A running sandbox pod in azureclaw-foundry-test namespace
+#   - A running sandbox pod in kars-foundry-test namespace
 #   - Port-forward or direct pod access to inference router (port 8443)
 #
 # Usage:
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-NAMESPACE="${NAMESPACE:-azureclaw-foundry-test}"
+NAMESPACE="${NAMESPACE:-kars-foundry-test}"
 LOCAL_PORT="${LOCAL_PORT:-8892}"
 API_VERSION="api-version=2025-11-15-preview"
 PASS=0
@@ -91,7 +91,7 @@ test_api() {
 POD=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [[ -z "$POD" ]]; then
   echo -e "${RED}ERROR: No pods found in namespace $NAMESPACE${NC}"
-  echo "Run: azureclaw up --foundry-test first."
+  echo "Run: kars up --foundry-test first."
   exit 1
 fi
 
@@ -114,7 +114,7 @@ fi
 
 echo ""
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}  AZURECLAW INFRASTRUCTURE E2E TEST SUITE${NC}"
+echo -e "${BLUE}  KARS INFRASTRUCTURE E2E TEST SUITE${NC}"
 echo -e "${BLUE}  Pod: ${POD}${NC}"
 echo -e "${BLUE}  Namespace: ${NAMESPACE}${NC}"
 echo -e "${BLUE}  Router: localhost:${LOCAL_PORT} → 8443${NC}"
@@ -129,7 +129,7 @@ echo ""
 # ── Section 2: Foundry Project APIs ──────────────────────────────────────────
 echo -e "${BLUE}  ── Foundry Project APIs ─────────────────────────────────────${NC}"
 test_api "Memory Stores (list)" GET "memory_stores"
-test_api "Memory Store (search)" POST "memory_stores/azureclaw-memory:search_memories" \
+test_api "Memory Store (search)" POST "memory_stores/kars-memory:search_memories" \
   '{"scope":"default","options":{"max_memories":5}}'
 test_api "Indexes" GET "indexes"
 test_api "Evaluators" GET "evaluators"
@@ -159,12 +159,12 @@ echo -e "${BLUE}  ── Responses API (Foundry Tools) ────────�
 test_api "Code Interpreter" POST "openai/responses" \
   '{"model":"gpt-4.1","input":"Use Python: print(2+2)","tools":[{"type":"code_interpreter","container":{"type":"auto"}}],"store":false}'
 test_api "Memory Search" POST "openai/responses" \
-  '{"model":"gpt-4.1","input":"What does the user like?","tools":[{"type":"memory_search","memory_store_name":"azureclaw-memory","scope":"raw-curl-proof"}],"store":false}'
+  '{"model":"gpt-4.1","input":"What does the user like?","tools":[{"type":"memory_search","memory_store_name":"kars-memory","scope":"raw-curl-proof"}],"store":false}'
 echo ""
 
 # ── Section 5: Write operations ──────────────────────────────────────────────
 echo -e "${BLUE}  ── Write Operations ─────────────────────────────────────────${NC}"
-test_api "Memory Store (update_memories)" POST "memory_stores/azureclaw-memory:update_memories" \
+test_api "Memory Store (update_memories)" POST "memory_stores/kars-memory:update_memories" \
   '{"items":[{"role":"user","content":"e2e test datum","type":"message"}],"scope":"e2e-infra-test","update_delay":0}'
 test_api "Create Conversation" POST "openai/conversations" '{}'
 echo ""
@@ -172,7 +172,7 @@ echo ""
 # ── Section 6: Skills deployed ───────────────────────────────────────────────
 echo -e "${BLUE}  ── Skills in Container ──────────────────────────────────────${NC}"
 SKILL_COUNT=$(kubectl exec -n "$NAMESPACE" "$POD" -c openclaw -- \
-  sh -c 'find /sandbox/.openclaw/extensions/azureclaw/skills/ -name "SKILL.md" 2>/dev/null | wc -l' 2>/dev/null || echo "0")
+  sh -c 'find /sandbox/.openclaw/extensions/kars/skills/ -name "SKILL.md" 2>/dev/null | wc -l' 2>/dev/null || echo "0")
 SKILL_COUNT=$(echo "$SKILL_COUNT" | tr -d '[:space:]')
 if [[ "$SKILL_COUNT" -ge 9 ]]; then
   pass "Skills deployed: ${SKILL_COUNT} SKILL.md files"

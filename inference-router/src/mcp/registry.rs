@@ -7,7 +7,7 @@
 //! under per-name subdirectories of `MCP_JWKS_DIR`. For example:
 //!
 //! ```text
-//! /etc/azureclaw/mcp/
+//! /etc/kars/mcp/
 //! ├── github/
 //! │   └── jwks.json
 //! ├── internal-knowledge/
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn scan_missing_dir_returns_skip_entry_not_panic() {
-        let registry = scan("/nonexistent/path/azureclaw-test");
+        let registry = scan("/nonexistent/path/kars-test");
         assert!(registry.is_empty());
         assert_eq!(registry.skipped.len(), 1);
         assert!(registry.skipped[0].1.contains("read_dir failed"));

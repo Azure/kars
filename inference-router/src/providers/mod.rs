@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Provider contracts for AzureClaw.
+//! Provider contracts for Kars.
 //!
 //! ## Router-side seams (three real ones)
 //!
@@ -25,7 +25,7 @@
 //! WebSocket and registry HTTPS calls, and applies policy/audit hooks
 //! around them, but it never sees cleartext and holds no keys. Signal /
 //! X3DH / Double-Ratchet runs in the **agent** (TypeScript `mesh-plugin/`
-//! plus the Microsoft AGT SDK via `@azureclaw/mesh`). The `MeshProvider`
+//! plus the Microsoft AGT SDK via `@kars/mesh`). The `MeshProvider`
 //! trait file ships here as documentation of the cross-language contract
 //! and as the shape the conformance corpus targets, but it has **no
 //! router-side `impl` and should not get one**. See `providers/mesh.rs`
@@ -38,12 +38,12 @@
 //! * `In-tree` — implemented on `Governance`, today's behaviour.
 //! * `Agt*`    — AGT SDK backed (policy/audit/signing now, mesh later).
 //! * `Null*`   — dev-only; admission rejects in prod unless the manifest
-//!   carries `azureclaw.azure.com/dev-only: "true"`.
+//!   carries `kars.azure.com/dev-only: "true"`.
 //!
 //! **Outage semantics** (§1.3):
 //! * `Strict` (prod default) — fail-closed on AGT/Mesh down.
 //! * `CachedRead` — allow cached < TTL else fail-closed.
-//! * `DegradedDev` (`azureclaw dev` only) — fail-open with warning label.
+//! * `DegradedDev` (`kars dev` only) — fail-open with warning label.
 //!
 //! Every new implementation of any contract below MUST land with a
 //! `docs/internal/security-audits/YYYY-MM-DD-<slug>.md` covering the §0.2 #9 scope.

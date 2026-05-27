@@ -53,7 +53,7 @@
 # API & policy
 
 - [CRD reference](api/crd-reference.md)
-- [ClawEval (operator guide)](api/claweval.md)
+- [KarsEval (operator guide)](api/karseval.md)
 - [Lifecycle & reconciliation](api/lifecycle.md)
 - [Conditions](api/conditions.md)
 - [Policy canonical format](api/policy-canonical-format.md)

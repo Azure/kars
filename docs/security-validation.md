@@ -1,4 +1,4 @@
-# AzureClaw Security Validation Report — 2026-03-23 snapshot
+# Kars Security Validation Report — 2026-03-23 snapshot
 
 > **What this is.** A frozen-in-time evidence dump from one specific validation
 > run against an AKS cluster on 2026-03-23. The cluster, pod, and IP ranges
@@ -11,7 +11,7 @@
 > snapshot.
 
 **Date:** 2026-03-23  
-**Cluster:** `azureclaw-demo-aks` (eastus2) — *no longer in service*  
+**Cluster:** `kars-demo-aks` (eastus2) — *no longer in service*  
 **Agent:** `demo-agent` (gpt-4.1, confidential isolation)  
 **Pod:** `demo-agent-689b5cc899-ktll9` — *no longer in service*
 
@@ -115,7 +115,7 @@ Container escape attacks are trapped inside the VM boundary. The CRD specifies
 }
 ```
 
-The CRD specifies `seccompProfile: azureclaw-strict` (custom Localhost profile with
+The CRD specifies `seccompProfile: kars-strict` (custom Localhost profile with
 219 allowed syscalls, 28 explicitly blocked). On Kata VM pods, the runtime defaults to `RuntimeDefault`
 because the VM boundary provides the primary isolation. The custom strict profile is
 used on `enhanced` isolation level (standard container runtime).
@@ -128,7 +128,7 @@ used on `enhanced` isolation level (standard container runtime).
 
 ```
 NAME             POD-SELECTOR                            AGE
-sandbox-policy   azureclaw.azure.com/component=sandbox   4h31m
+sandbox-policy   kars.azure.com/component=sandbox   4h31m
 ```
 
 The CRD confirms:
@@ -186,12 +186,12 @@ inference proceeds normally.
 
 ### Content Safety Floor (admission-time enforcement)
 
-The `azureclaw-content-safety-floor` ValidatingAdmissionPolicy rejects any
+The `kars-content-safety-floor` ValidatingAdmissionPolicy rejects any
 `InferencePolicy` whose `spec.inference.contentSafetyMinimum` is set to a
 value less strict than the cluster floor (`Medium` by default).
 
 ```bash
-kubectl get validatingadmissionpolicy azureclaw-content-safety-floor \
+kubectl get validatingadmissionpolicy kars-content-safety-floor \
   -o jsonpath='{.spec.validations[0].expression}'
 # Output: object.spec.inference.contentSafetyMinimum >= clusterFloor
 ```
@@ -263,10 +263,10 @@ Different session UUIDs confirm independent cryptographic sessions.
 
 ---
 
-## `azureclaw attest` — Spec Hash & Reconcile Trace
+## `kars attest` — Spec Hash & Reconcile Trace
 
-`azureclaw attest <NAME>` surfaces tamper-evident evidence for a sandbox
-without requiring cluster-admin access. It reads only `ClawSandbox` status
+`kars attest <NAME>` surfaces tamper-evident evidence for a sandbox
+without requiring cluster-admin access. It reads only `KarsSandbox` status
 fields and Deployment annotations.
 
 | Evidence field | Source | Notes |
@@ -275,15 +275,15 @@ fields and Deployment annotations.
 | **SSA owner map** | `metadata.managedFields` | Lists field-level owners (controller, CLI, user) |
 | **Observed-generation lineage** | `status.observedGeneration` vs `metadata.generation` | Drift = pending reconcile |
 | **Policy version hashes** | `status.versionHash` per referenced policy | Changes when referenced `ToolPolicy` / `InferencePolicy` is updated |
-| **Reconcile trace ID** | `azureclaw.azure.com/last-trace-id` annotation on Deployment | Prints `(pending)` if the controller has not yet annotated the Deployment |
+| **Reconcile trace ID** | `kars.azure.com/last-trace-id` annotation on Deployment | Prints `(pending)` if the controller has not yet annotated the Deployment |
 | **AGT audit-receipt id** | Not yet wired into the surface | Currently `(pending)` in shipped builds |
 
 ```bash
 # Human-readable summary
-azureclaw attest <NAME>
+kars attest <NAME>
 
 # Machine-readable (for CI diff or SIEM ingestion)
-azureclaw attest <NAME> --format json
+kars attest <NAME> --format json
 ```
 
 ---
@@ -299,9 +299,9 @@ Validated by automated test suites (no live cluster needed):
 | `escapeHtml()` on OAuth callback page | `cli/src/commands/mesh.test.ts` ✅ |
 | TOCTOU-safe file reads (`openSync`+`fstatSync`+`readSync`) | `cli/src/plugin.test.ts` (offload + workspace transfer paths) ✅ |
 | `execFileSync("find", […])` — no shell, no head pipe | `cli/src/plugin.test.ts` ✅ |
-| Constant-time admin-token compare (`handoff::constant_time_eq`) | `cargo test --package azureclaw-inference-router` (handoff + trust + rate-limit suites) ✅ |
+| Constant-time admin-token compare (`handoff::constant_time_eq`) | `cargo test --package kars-inference-router` (handoff + trust + rate-limit suites) ✅ |
 | `#[serde(deny_unknown_fields)]` rejects typo'd `SpawnRequest` / `HandoffMeta` | `inference-router/src/spawn.rs` unit tests ✅ |
-| Sandbox hardening invariants (UID 1000, RO rootfs, drop ALL caps, seccomp `azureclaw-strict`, NET_ADMIN drop after init, iptables egress-guard, plugin+SDK root-owned RO) | `cli/src/testing/sandbox-hardening.test.ts` + controller-side reconciler regression test ✅ |
+| Sandbox hardening invariants (UID 1000, RO rootfs, drop ALL caps, seccomp `kars-strict`, NET_ADMIN drop after init, iptables egress-guard, plugin+SDK root-owned RO) | `cli/src/testing/sandbox-hardening.test.ts` + controller-side reconciler regression test ✅ |
 | `cargo audit` (RUSTSEC closure) | `.github/workflows/ci.yml` cargo-audit job ✅ (closed RUSTSEC-2026-0098/-0099/-0104 by bumping `rustls-webpki`) |
 | `npm audit` (vulnerable transitive bumps) | `cli/package.json` overrides → `npm audit` 0 vulnerabilities ✅ |
 | Fuzz / proptest coverage | `cargo +nightly fuzz` targets: handoff blob, blocklist domain, AGT policy, safety-response. `proptest`: chunking, Double-Ratchet, K8s names ✅ |
@@ -320,11 +320,11 @@ cargo audit
 
 ## Resource Lifecycle: Finalizer ✅
 
-The controller adds a `azureclaw.azure.com/namespace-cleanup` finalizer to every
-ClawSandbox CRD. On deletion, it cascades:
+The controller adds a `kars.azure.com/namespace-cleanup` finalizer to every
+KarsSandbox CRD. On deletion, it cascades:
 
 ```
-Finalizers: ["azureclaw.azure.com/namespace-cleanup"]
+Finalizers: ["kars.azure.com/namespace-cleanup"]
 ```
 
 1. Deletes the sandbox namespace (cascading all K8s resources)
@@ -371,7 +371,7 @@ Auth mode: Workload Identity (AKS mode)
 
 ## Reproduction
 
-All evidence can be regenerated on any AzureClaw cluster:
+All evidence can be regenerated on any Kars cluster:
 
 ```bash
 # Layer 0: API server IP restrictions
@@ -394,7 +394,7 @@ kubectl get networkpolicies -n <NS>
 kubectl logs -c inference-router ... | grep "Blocklist refreshed"
 
 # Layer 6: Content Safety
-kubectl get clawsandbox <NAME> -n azureclaw-system -o jsonpath='{.spec.inference}'
+kubectl get karssandbox <NAME> -n kars-system -o jsonpath='{.spec.inference}'
 
 # Layer 7: AGT Governance
 kubectl logs -c inference-router ... | grep "governance"

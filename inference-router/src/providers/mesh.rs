@@ -9,7 +9,7 @@
 //! The router is a **proxy** for mesh traffic, not a Signal-protocol
 //! participant. End-to-end encryption between agents is performed in the
 //! sandbox by the **agent** (today: OpenClaw + the TypeScript
-//! `mesh-plugin/` + the Microsoft AGT SDK via `@azureclaw/mesh`). Keys
+//! `mesh-plugin/` + the Microsoft AGT SDK via `@kars/mesh`). Keys
 //! live with the agent; the router only sees opaque ciphertext over the
 //! relay WebSocket.
 //!

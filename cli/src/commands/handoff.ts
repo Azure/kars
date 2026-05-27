@@ -7,25 +7,25 @@ import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadAgtProfile } from "../refs.js";
 
 /**
- * azureclaw handoff — live agent migration between local and cloud.
+ * kars handoff — live agent migration between local and cloud.
  *
  * OPERATOR-MODE ORCHESTRATION (CLI-driven)
  * This command is for direct operator use from the terminal. It calls router
  * endpoints directly (POST /init, /snapshot, /drain, etc.) without the
  * two-stage confirmation gate used by the LLM-driven path.
  *
- * The LLM-driven path lives in plugin.ts (azureclaw_handoff_request →
- * azureclaw_handoff_confirm → _runHandoffOrchestration). That path uses
+ * The LLM-driven path lives in plugin.ts (kars_handoff_request →
+ * kars_handoff_confirm → _runHandoffOrchestration). That path uses
  * the POST /pending + /confirm two-stage gate, transfers state via E2E mesh
- * (Signal Protocol), and reports progress via azureclaw_handoff_status.
+ * (Signal Protocol), and reports progress via kars_handoff_status.
  *
  * Both paths are intentional — CLI for operators, plugin for interactive
  * webchat. See docs/architecture-diagrams.md §11.5 for the comparison.
  *
- * Forward:  azureclaw handoff <name> --to cloud
- * Reverse:  azureclaw handoff <name> --to local
- * Status:   azureclaw handoff <name> --status
- * Abort:    azureclaw handoff <name> --abort
+ * Forward:  kars handoff <name> --to cloud
+ * Reverse:  kars handoff <name> --to local
+ * Status:   kars handoff <name> --status
+ * Abort:    kars handoff <name> --abort
  */
 export function handoffCommand(): Command {
   const cmd = new Command("handoff");
@@ -74,16 +74,16 @@ export function handoffCommand(): Command {
       if (!options.to) {
         console.log(chalk.red("\n  Specify --to cloud or --to local (or --status / --abort).\n"));
         console.log(chalk.dim(`  Examples:`));
-        console.log(chalk.dim(`    azureclaw handoff ${name} --to cloud    # migrate to AKS`));
-        console.log(chalk.dim(`    azureclaw handoff ${name} --to local    # migrate back`));
-        console.log(chalk.dim(`    azureclaw handoff ${name} --status      # check progress\n`));
+        console.log(chalk.dim(`    kars handoff ${name} --to cloud    # migrate to AKS`));
+        console.log(chalk.dim(`    kars handoff ${name} --to local    # migrate back`));
+        console.log(chalk.dim(`    kars handoff ${name} --status      # check progress\n`));
         process.exit(1);
       }
 
       const direction = options.to === "local" ? "aks_to_local" : "local_to_aks";
       const directionLabel = direction === "local_to_aks" ? "Local → Cloud" : "Cloud → Local";
 
-      banner("AzureClaw · Agent Handoff", directionLabel);
+      banner("Kars · Agent Handoff", directionLabel);
 
       const stepper = new Stepper({ totalSteps: direction === "aks_to_local" ? 13 : 7 });
 
@@ -127,7 +127,7 @@ export function handoffCommand(): Command {
   Current registry mode: ${chalk.bold(registryMode)}
 
   To enable handoff, restart with a global registry:
-    ${chalk.cyan(`azureclaw dev --global-registry <registry-url> --name ${name}`)}
+    ${chalk.cyan(`kars dev --global-registry <registry-url> --name ${name}`)}
 
   The global registry must be accessible from both local and cloud environments.
 `));
@@ -293,13 +293,13 @@ export function handoffCommand(): Command {
               try {
                 const interruptCmd = `mkdir -p /sandbox/.openclaw/workspace && echo '{"reason":"parent_handoff","time":"${new Date().toISOString()}"}' > /sandbox/.openclaw/workspace/.handoff-interrupt`;
                 if (isReverse) {
-                  const subNs = `azureclaw-${snap.name}`;
+                  const subNs = `kars-${snap.name}`;
                   await execa("kubectl", [
                     "exec", "-n", subNs, "-c", "openclaw",
                     `deploy/${snap.name}`, "--", "sh", "-c", interruptCmd,
                   ], { stdio: "pipe", timeout: 5000, reject: false });
                 } else {
-                  const containerName = `azureclaw-${snap.name}`;
+                  const containerName = `kars-${snap.name}`;
                   await execa("docker", [
                     "exec", containerName, "sh", "-c", interruptCmd,
                   ], { stdio: "pipe", timeout: 5000, reject: false });
@@ -312,7 +312,7 @@ export function handoffCommand(): Command {
             // Phase 2: Collect workspaces (sub-agents may have saved progress)
             for (const snap of subSnaps) {
               try {
-                const subNs = `azureclaw-${snap.name}`;
+                const subNs = `kars-${snap.name}`;
 
                 let tarB64 = "";
                 if (isReverse) {
@@ -324,7 +324,7 @@ export function handoffCommand(): Command {
                   tarB64 = stdout;
                 } else {
                   // Source is local Docker — docker exec into sub-agent container
-                  const containerName = `azureclaw-${snap.name}`;
+                  const containerName = `kars-${snap.name}`;
                   const { stdout } = await execa("docker", [
                     "exec", containerName, "sh", "-c", WORKSPACE_TAR_CMD,
                   ], { stdio: "pipe", timeout: 10000 });
@@ -370,11 +370,11 @@ export function handoffCommand(): Command {
         // Step 5: Transfer to target
 
         if (direction === "local_to_aks") {
-          // ── H4: Provision target on AKS via ClawSandbox CRD ──────────────
+          // ── H4: Provision target on AKS via KarsSandbox CRD ──────────────
           stepper.step("Transferring state to target...");
-          // 1. Apply a ClawSandbox CRD for the target agent
+          // 1. Apply a KarsSandbox CRD for the target agent
           const targetName = name; // same name on AKS
-          const targetNs = `azureclaw-${targetName}`;
+          const targetNs = `kars-${targetName}`;
 
           // Inherit the source agent's settings — cloud target should match parent
           let sourceIsolation = "enhanced";
@@ -400,21 +400,21 @@ export function handoffCommand(): Command {
           // Server-side apply is idempotent; the controller only restarts the
           // pod if the deployment spec actually changed.
           //
-          // Post-S10/S13 schema: ClawSandbox references InferencePolicy +
+          // Post-S10/S13 schema: KarsSandbox references InferencePolicy +
           // ToolPolicy by name. We mint per-target policy CRs alongside.
           const targetInferenceRef = `${targetName}-inference`;
           const targetToolPolicyRef = `${targetName}-toolpolicy`;
           const handoffModel = process.env.DEFAULT_MODEL || "gpt-5.4";
 
           const inferencePolicyManifest = JSON.stringify({
-            apiVersion: "azureclaw.azure.com/v1alpha1",
+            apiVersion: "kars.azure.com/v1alpha1",
             kind: "InferencePolicy",
             metadata: {
               name: targetInferenceRef,
-              namespace: "azureclaw-system",
+              namespace: "kars-system",
               labels: {
-                "azureclaw.azure.com/spawned-by": "handoff",
-                "azureclaw.azure.com/predecessor": name,
+                "kars.azure.com/spawned-by": "handoff",
+                "kars.azure.com/predecessor": name,
               },
             },
             spec: {
@@ -427,20 +427,20 @@ export function handoffCommand(): Command {
             },
           });
           const toolPolicyManifest = JSON.stringify({
-            apiVersion: "azureclaw.azure.com/v1alpha1",
+            apiVersion: "kars.azure.com/v1alpha1",
             kind: "ToolPolicy",
             metadata: {
               name: targetToolPolicyRef,
-              namespace: "azureclaw-system",
+              namespace: "kars-system",
               labels: {
-                "azureclaw.azure.com/spawned-by": "handoff",
-                "azureclaw.azure.com/predecessor": name,
+                "kars.azure.com/spawned-by": "handoff",
+                "kars.azure.com/predecessor": name,
               },
             },
             spec: {
               appliesTo: {
                 sandboxMatchLabels: {
-                  "azureclaw.azure.com/sandbox": targetName,
+                  "kars.azure.com/sandbox": targetName,
                 },
               },
               // Slice 1e (phase 2): controller hard-fails ToolPolicies
@@ -453,19 +453,19 @@ export function handoffCommand(): Command {
           });
 
           const crdManifest = JSON.stringify({
-            apiVersion: "azureclaw.azure.com/v1alpha1",
-            kind: "ClawSandbox",
+            apiVersion: "kars.azure.com/v1alpha1",
+            kind: "KarsSandbox",
             metadata: {
               name: targetName,
-              namespace: "azureclaw-system",
+              namespace: "kars-system",
               labels: {
-                "azureclaw.azure.com/spawned-by": "handoff",
-                "azureclaw.azure.com/predecessor": name,
+                "kars.azure.com/spawned-by": "handoff",
+                "kars.azure.com/predecessor": name,
               },
               annotations: {
-                "azureclaw.azure.com/handoff-mode": "restore",
-                "azureclaw.azure.com/handoff-predecessor": name,
-                "azureclaw.azure.com/model": handoffModel,
+                "kars.azure.com/handoff-mode": "restore",
+                "kars.azure.com/handoff-predecessor": name,
+                "kars.azure.com/model": handoffModel,
               },
             },
             spec: {
@@ -775,13 +775,13 @@ export function handoffCommand(): Command {
 
           // Delete parent + sub-agent CRDs. The controller will tear down the
           // namespaces, deployments, and services. A future forward handoff
-          // creates everything fresh via `azureclaw up`.
+          // creates everything fresh via `kars up`.
           stepper.step("Destroying cloud sandboxes...");
           const allCrds = [name, ...subAgentNames];
           for (const crdName of allCrds) {
             try {
               await execa("kubectl", [
-                "delete", "clawsandbox", crdName, "-n", "azureclaw-system",
+                "delete", "karssandbox", crdName, "-n", "kars-system",
                 "--ignore-not-found",
               ], { stdio: "pipe", timeout: 10000 });
             } catch { /* best effort */ }
@@ -842,20 +842,20 @@ export function handoffCommand(): Command {
 
         if (direction === "local_to_aks") {
           console.log(chalk.dim("  Next steps:"));
-          console.log(chalk.cyan(`    📡 Connect to cloud agent: azureclaw connect ${name}`));
-          console.log(chalk.cyan(`    📊 Monitor agents:         azureclaw operator`));
+          console.log(chalk.cyan(`    📡 Connect to cloud agent: kars connect ${name}`));
+          console.log(chalk.cyan(`    📊 Monitor agents:         kars operator`));
           console.log();
           if (process.env.TELEGRAM_BOT_TOKEN) {
             console.log(chalk.dim(`    📱 Telegram: Your bot is now handled by the cloud agent.`));
           }
-          console.log(chalk.dim(`    💤 Local agent is dormant (keys preserved). Reclaim: azureclaw handoff ${name} --to local`));
+          console.log(chalk.dim(`    💤 Local agent is dormant (keys preserved). Reclaim: kars handoff ${name} --to local`));
           console.log();
         } else {
           console.log(chalk.dim("  Your agent is back on local Docker."));
           console.log();
           console.log(chalk.dim("  Next steps:"));
-          console.log(chalk.cyan(`    📡 Connect: azureclaw connect ${name} --local`));
-          console.log(chalk.cyan(`    📊 Monitor: azureclaw operator`));
+          console.log(chalk.cyan(`    📡 Connect: kars connect ${name} --local`));
+          console.log(chalk.cyan(`    📊 Monitor: kars operator`));
           console.log();
           if (process.env.TELEGRAM_BOT_TOKEN) {
             console.log(chalk.dim(`    📱 Telegram: Your bot is now handled by the local agent.`));

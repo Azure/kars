@@ -42,7 +42,7 @@
 //!   `Microsoft.DefaultV2` severity levels (`Safe` / `Low` / `Medium`
 //!   / `High`); the router's existing parser already lifts these from
 //!   `prompt_filter_results` annotations.
-//! - Model preference: `ClawSandbox.spec.providers[]` enumeration of
+//! - Model preference: `KarsSandbox.spec.providers[]` enumeration of
 //!   `azure-openai` / `anthropic` / `gemini` / `bedrock` / `ollama`;
 //!   here we only declare *which* route is preferred and the fallback
 //!   order.
@@ -64,7 +64,7 @@ use crate::mcp_server::LocalObjectRef;
 /// selector; precedence resolution is router-side.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
-    group = "azureclaw.azure.com",
+    group = "kars.azure.com",
     version = "v1alpha1",
     kind = "InferencePolicy",
     namespaced,
@@ -125,7 +125,7 @@ pub struct InferencePolicySpec {
     /// error taxonomy across all signed-policy kinds).
     ///
     /// Artifact `artifactType` MUST be
-    /// `application/vnd.azureclaw.inference-policy.v1+json`; a
+    /// `application/vnd.kars.inference-policy.v1+json`; a
     /// mismatch surfaces as `Ready=False / reason=InvalidRef`.
     ///
     /// Mutually exclusive with the inline content fields
@@ -142,7 +142,7 @@ pub struct InferencePolicySpec {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceAppliesTo {
-    /// Exact sandbox name (`ClawSandbox.metadata.name`). Empty means
+    /// Exact sandbox name (`KarsSandbox.metadata.name`). Empty means
     /// any sandbox in the namespace.
     pub sandbox_name: Option<String>,
 
@@ -260,7 +260,7 @@ pub struct InferencePolicyStatus {
 
     /// `sha256:<full hex>` digest the controller wrote to the
     /// compiled-profile ConfigMap and the annotation
-    /// `azureclaw.azure.com/inference-policy-digest`. Computed by
+    /// `kars.azure.com/inference-policy-digest`. Computed by
     /// `inference_policy_compile::inference_policy_digest` from the
     /// canonical bytes of `inference-policy.json`. Distinct from
     /// `version_hash` (16-byte legacy short-hash kept for

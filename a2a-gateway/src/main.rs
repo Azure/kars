@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `azureclaw-a2a-gateway` binary entry-point.
+//! `kars-a2a-gateway` binary entry-point.
 //!
 //! Phase 3 S5: real proxy wiring. Replaces the v1 binary skeleton
 //! that bound only the admin port and let `_replay`/`_limiter` drop
@@ -28,12 +28,12 @@
 //! | `A2A_GATEWAY_TEST_MODE`         | `0`                                            | when `1`, plain-HTTP listener + plain-HTTP upstream    |
 //! | `A2A_GATEWAY_PUBLIC_PORT`       | `8443`                                         | inbound listener port                                  |
 //! | `A2A_GATEWAY_ADMIN_PORT`        | `9090`                                         | admin (`/healthz` `/readyz` `/metrics`) port           |
-//! | `A2A_GATEWAY_TLS_CERT`          | `/etc/azureclaw/a2a-gateway-tls/tls.crt`       | server PEM cert                                        |
-//! | `A2A_GATEWAY_TLS_KEY`           | `/etc/azureclaw/a2a-gateway-tls/tls.key`       | server PEM key                                         |
-//! | `A2A_GATEWAY_MTLS_CERT`         | `/etc/azureclaw/a2a-gateway-mtls/tls.crt`      | client cert presented to router                        |
-//! | `A2A_GATEWAY_MTLS_KEY`          | `/etc/azureclaw/a2a-gateway-mtls/tls.key`      | client key                                             |
-//! | `A2A_GATEWAY_ROUTER_CA`         | `/etc/azureclaw/router-ca/ca.crt`              | CA bundle to validate the router's cert                |
-//! | `A2A_GATEWAY_UPSTREAM_URL`      | `https://azureclaw-inference-router...:8444`   | upstream base URL (overridable for tests)              |
+//! | `A2A_GATEWAY_TLS_CERT`          | `/etc/kars/a2a-gateway-tls/tls.crt`       | server PEM cert                                        |
+//! | `A2A_GATEWAY_TLS_KEY`           | `/etc/kars/a2a-gateway-tls/tls.key`       | server PEM key                                         |
+//! | `A2A_GATEWAY_MTLS_CERT`         | `/etc/kars/a2a-gateway-mtls/tls.crt`      | client cert presented to router                        |
+//! | `A2A_GATEWAY_MTLS_KEY`          | `/etc/kars/a2a-gateway-mtls/tls.key`      | client key                                             |
+//! | `A2A_GATEWAY_ROUTER_CA`         | `/etc/kars/router-ca/ca.crt`              | CA bundle to validate the router's cert                |
+//! | `A2A_GATEWAY_UPSTREAM_URL`      | `https://kars-inference-router...:8444`   | upstream base URL (overridable for tests)              |
 //! | `A2A_GATEWAY_ANONYMOUS_OK`      | `0`                                            | when `1`, allows traffic without subject header        |
 //! | `A2A_GATEWAY_RATE_CAPACITY`     | `120`                                          | per-subject token bucket size                          |
 //! | `A2A_GATEWAY_RATE_REFILL`       | `2.0`                                          | per-subject refill (tokens/sec)                        |
@@ -53,12 +53,12 @@ use axum::routing::get;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-use azureclaw_a2a_gateway::health::ReadyState;
-use azureclaw_a2a_gateway::metrics::Metrics;
-use azureclaw_a2a_gateway::proxy_app::{ProxyState, UpstreamClient, router as proxy_router};
-use azureclaw_a2a_gateway::rate_limit::{BucketSpec, SubjectLimiter};
-use azureclaw_a2a_gateway::tls::spawn_reloader;
-use azureclaw_a2a_gateway::verify::ReplayCache;
+use kars_a2a_gateway::health::ReadyState;
+use kars_a2a_gateway::metrics::Metrics;
+use kars_a2a_gateway::proxy_app::{ProxyState, UpstreamClient, router as proxy_router};
+use kars_a2a_gateway::rate_limit::{BucketSpec, SubjectLimiter};
+use kars_a2a_gateway::tls::spawn_reloader;
+use kars_a2a_gateway::verify::ReplayCache;
 
 #[derive(Clone)]
 struct AdminState {
@@ -127,16 +127,16 @@ async fn main() -> anyhow::Result<()> {
                 })
             })
             .unwrap_or_else(|_| {
-                "https://azureclaw-inference-router.azureclaw-system.svc.cluster.local:8444".into()
+                "https://kars-inference-router.kars-system.svc.cluster.local:8444".into()
             });
         let cert: PathBuf = std::env::var("A2A_GATEWAY_MTLS_CERT")
-            .unwrap_or_else(|_| "/etc/azureclaw/a2a-gateway-mtls/tls.crt".into())
+            .unwrap_or_else(|_| "/etc/kars/a2a-gateway-mtls/tls.crt".into())
             .into();
         let key: PathBuf = std::env::var("A2A_GATEWAY_MTLS_KEY")
-            .unwrap_or_else(|_| "/etc/azureclaw/a2a-gateway-mtls/tls.key".into())
+            .unwrap_or_else(|_| "/etc/kars/a2a-gateway-mtls/tls.key".into())
             .into();
         let ca: PathBuf = std::env::var("A2A_GATEWAY_ROUTER_CA")
-            .unwrap_or_else(|_| "/etc/azureclaw/router-ca/ca.crt".into())
+            .unwrap_or_else(|_| "/etc/kars/router-ca/ca.crt".into())
             .into();
         info!(%url, ?cert, ?key, ?ca, "production: mTLS upstream client");
         let cert_pem = std::fs::read(&cert)?;
@@ -184,10 +184,10 @@ async fn main() -> anyhow::Result<()> {
         }
     } else {
         let cert: PathBuf = std::env::var("A2A_GATEWAY_TLS_CERT")
-            .unwrap_or_else(|_| "/etc/azureclaw/a2a-gateway-tls/tls.crt".into())
+            .unwrap_or_else(|_| "/etc/kars/a2a-gateway-tls/tls.crt".into())
             .into();
         let key: PathBuf = std::env::var("A2A_GATEWAY_TLS_KEY")
-            .unwrap_or_else(|_| "/etc/azureclaw/a2a-gateway-tls/tls.key".into())
+            .unwrap_or_else(|_| "/etc/kars/a2a-gateway-tls/tls.key".into())
             .into();
         info!(%public_addr, ?cert, ?key, "production: rustls public listener starting");
         let mut tls_rx = spawn_reloader(cert, key)?;

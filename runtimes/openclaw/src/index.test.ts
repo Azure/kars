@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * Tests for AzureClaw OpenClaw Plugin (plugin.ts)
+ * Tests for Kars OpenClaw Plugin (plugin.ts)
  *
  * Strategy: Since most functions are module-private, we test through:
  * 1. The plugin's `register()` method — captures registered tools and tests their execute()
@@ -24,8 +24,8 @@ function createMockApi(pluginConfig: Record<string, unknown> = {}) {
   const logMessages: string[] = [];
 
   const api = {
-    id: "azureclaw",
-    name: "AzureClaw",
+    id: "kars",
+    name: "Kars",
     version: "0.1.0",
     config: {},
     pluginConfig,
@@ -71,8 +71,8 @@ describe("azureClawPlugin object", () => {
   });
 
   it("has correct id and name", () => {
-    expect(plugin.id).toBe("azureclaw");
-    expect(plugin.name).toBe("AzureClaw");
+    expect(plugin.id).toBe("kars");
+    expect(plugin.name).toBe("Kars");
   });
 
   it("has a description", () => {
@@ -122,68 +122,68 @@ describe("plugin.register() — tool definitions", () => {
     vi.restoreAllMocks();
   });
 
-  it("registers azureclaw_spawn tool", () => {
-    expect(tools.has("azureclaw_spawn")).toBe(true);
-    const tool = tools.get("azureclaw_spawn")!;
+  it("registers kars_spawn tool", () => {
+    expect(tools.has("kars_spawn")).toBe(true);
+    const tool = tools.get("kars_spawn")!;
     expect(tool.label).toBe("Spawn Sub-Agent");
     expect(tool.parameters.required).toContain("name");
   });
 
-  it("registers azureclaw_spawn_status tool", () => {
-    expect(tools.has("azureclaw_spawn_status")).toBe(true);
-    const tool = tools.get("azureclaw_spawn_status")!;
+  it("registers kars_spawn_status tool", () => {
+    expect(tools.has("kars_spawn_status")).toBe(true);
+    const tool = tools.get("kars_spawn_status")!;
     expect(tool.parameters.required).toContain("name");
   });
 
-  it("azureclaw_spawn_status description references mesh_ready (not just phase)", () => {
+  it("kars_spawn_status description references mesh_ready (not just phase)", () => {
     // After the AKS mesh-registration fix, callers must poll mesh_ready, not phase alone.
     // Running pods need ~60s after Ready before they appear in the AGT registry.
-    const tool = tools.get("azureclaw_spawn_status")!;
+    const tool = tools.get("kars_spawn_status")!;
     expect(tool.description).toContain("mesh_ready");
     expect(tool.description).toContain("mesh_registered");
   });
 
-  it("azureclaw_mesh_send description documents unbounded retry while pod alive", () => {
+  it("kars_mesh_send description documents unbounded retry while pod alive", () => {
     // Regression: the old code used hand-rolled 12-attempt / 15-attempt windows
     // that were too short on AKS. The new behavior retries until the pod dies.
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     expect(tool.description).toMatch(/retr(y|ies).+alive/i);
     expect(tool.description).toMatch(/Failed|Terminating|Exited/);
   });
 
-  it("registers azureclaw_mesh_send with required to_agent and content", () => {
-    expect(tools.has("azureclaw_mesh_send")).toBe(true);
-    const tool = tools.get("azureclaw_mesh_send")!;
+  it("registers kars_mesh_send with required to_agent and content", () => {
+    expect(tools.has("kars_mesh_send")).toBe(true);
+    const tool = tools.get("kars_mesh_send")!;
     expect(tool.parameters.required).toContain("to_agent");
     expect(tool.parameters.required).toContain("content");
     expect(tool.description).toContain("E2E encrypted");
   });
 
-  it("registers azureclaw_mesh_inbox tool with no required params", () => {
-    expect(tools.has("azureclaw_mesh_inbox")).toBe(true);
-    const tool = tools.get("azureclaw_mesh_inbox")!;
+  it("registers kars_mesh_inbox tool with no required params", () => {
+    expect(tools.has("kars_mesh_inbox")).toBe(true);
+    const tool = tools.get("kars_mesh_inbox")!;
     expect(tool.parameters.properties).toBeDefined();
     expect(tool.parameters.required).toBeUndefined();
   });
 
-  it("registers azureclaw_spawn_destroy tool", () => {
-    expect(tools.has("azureclaw_spawn_destroy")).toBe(true);
-    const tool = tools.get("azureclaw_spawn_destroy")!;
+  it("registers kars_spawn_destroy tool", () => {
+    expect(tools.has("kars_spawn_destroy")).toBe(true);
+    const tool = tools.get("kars_spawn_destroy")!;
     expect(tool.parameters.required).toContain("name");
   });
 
-  it("registers azureclaw_spawn_list tool", () => {
-    expect(tools.has("azureclaw_spawn_list")).toBe(true);
+  it("registers kars_spawn_list tool", () => {
+    expect(tools.has("kars_spawn_list")).toBe(true);
   });
 
-  it("registers azureclaw_discover tool with query param", () => {
-    expect(tools.has("azureclaw_discover")).toBe(true);
-    const tool = tools.get("azureclaw_discover")!;
+  it("registers kars_discover tool with query param", () => {
+    expect(tools.has("kars_discover")).toBe(true);
+    const tool = tools.get("kars_discover")!;
     expect(tool.parameters.required).toContain("query");
   });
 
   it("logs a startup banner", () => {
-    const hasBanner = logMessages.some((m) => m.includes("AzureClaw") && m.includes("Secure"));
+    const hasBanner = logMessages.some((m) => m.includes("Kars") && m.includes("Secure"));
     expect(hasBanner).toBe(true);
   });
 });
@@ -192,7 +192,7 @@ describe("plugin.register() — tool definitions", () => {
 // 3. Tool execution — mesh_inbox (empty inbox)
 // ---------------------------------------------------------------------------
 
-describe("azureclaw_mesh_inbox — empty inbox", () => {
+describe("kars_mesh_inbox — empty inbox", () => {
   let plugin: any;
   let tools: Map<string, any>;
 
@@ -212,7 +212,7 @@ describe("azureclaw_mesh_inbox — empty inbox", () => {
   });
 
   it("returns empty messages array when inbox is empty", async () => {
-    const inboxTool = tools.get("azureclaw_mesh_inbox")!;
+    const inboxTool = tools.get("kars_mesh_inbox")!;
     const result = await inboxTool.execute("test-id", {});
     const text = result.content[0].text;
     const parsed = JSON.parse(text);
@@ -227,7 +227,7 @@ describe("azureclaw_mesh_inbox — empty inbox", () => {
 // 4. Tool execution — mesh_send without AGT client
 // ---------------------------------------------------------------------------
 
-describe("azureclaw_mesh_send — no AGT client", () => {
+describe("kars_mesh_send — no AGT client", () => {
   let plugin: any;
   let tools: Map<string, any>;
 
@@ -247,7 +247,7 @@ describe("azureclaw_mesh_send — no AGT client", () => {
   });
 
   it("returns error when mesh client is not initialized", async () => {
-    const sendTool = tools.get("azureclaw_mesh_send")!;
+    const sendTool = tools.get("kars_mesh_send")!;
     const result = await sendTool.execute("test-id", {
       to_agent: "test-agent",
       content: "Hello",
@@ -360,8 +360,8 @@ describe("tool parameter schemas", () => {
     vi.restoreAllMocks();
   });
 
-  it("azureclaw_spawn has name, model, and governance properties", () => {
-    const tool = tools.get("azureclaw_spawn")!;
+  it("kars_spawn has name, model, and governance properties", () => {
+    const tool = tools.get("kars_spawn")!;
     const props = tool.parameters.properties;
     expect(props.name).toBeDefined();
     expect(props.model).toBeDefined();
@@ -369,27 +369,27 @@ describe("tool parameter schemas", () => {
     expect(props.governance.type).toBe("boolean");
   });
 
-  it("azureclaw_mesh_send has to_agent and content properties", () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+  it("kars_mesh_send has to_agent and content properties", () => {
+    const tool = tools.get("kars_mesh_send")!;
     const props = tool.parameters.properties;
     expect(props.to_agent.type).toBe("string");
     expect(props.content.type).toBe("string");
   });
 
-  it("azureclaw_discover has query property", () => {
-    const tool = tools.get("azureclaw_discover")!;
+  it("kars_discover has query property", () => {
+    const tool = tools.get("kars_discover")!;
     const props = tool.parameters.properties;
     expect(props.query.type).toBe("string");
   });
 
-  it("azureclaw_spawn_destroy has name property", () => {
-    const tool = tools.get("azureclaw_spawn_destroy")!;
+  it("kars_spawn_destroy has name property", () => {
+    const tool = tools.get("kars_spawn_destroy")!;
     const props = tool.parameters.properties;
     expect(props.name.type).toBe("string");
   });
 
-  it("azureclaw_spawn_status has name property", () => {
-    const tool = tools.get("azureclaw_spawn_status")!;
+  it("kars_spawn_status has name property", () => {
+    const tool = tools.get("kars_spawn_status")!;
     const props = tool.parameters.properties;
     expect(props.name.type).toBe("string");
   });
@@ -404,7 +404,7 @@ describe("tool execute — error handling", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    process.env.KARS_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
@@ -414,40 +414,40 @@ describe("tool execute — error handling", () => {
 
   afterEach(() => {
     delete process.env.AGT_SKIP_INIT;
-    delete process.env.AZURECLAW_ROUTER_URL;
+    delete process.env.KARS_ROUTER_URL;
     vi.restoreAllMocks();
   });
 
-  it("azureclaw_spawn returns valid response when router is unreachable", async () => {
-    const tool = tools.get("azureclaw_spawn")!;
+  it("kars_spawn returns valid response when router is unreachable", async () => {
+    const tool = tools.get("kars_spawn")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
     expect(text).toContain("Spawn failed");
   });
 
-  it("azureclaw_spawn_status returns valid response when router is unreachable", async () => {
-    const tool = tools.get("azureclaw_spawn_status")!;
+  it("kars_spawn_status returns valid response when router is unreachable", async () => {
+    const tool = tools.get("kars_spawn_status")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
     expect(text).toContain("Status check failed");
   });
 
-  it("azureclaw_spawn_destroy returns valid response when router is unreachable", async () => {
-    const tool = tools.get("azureclaw_spawn_destroy")!;
+  it("kars_spawn_destroy returns valid response when router is unreachable", async () => {
+    const tool = tools.get("kars_spawn_destroy")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
     expect(text).toContain("Destroy failed");
   });
 
-  it("azureclaw_spawn_list returns valid response when router is unreachable", async () => {
-    const tool = tools.get("azureclaw_spawn_list")!;
+  it("kars_spawn_list returns valid response when router is unreachable", async () => {
+    const tool = tools.get("kars_spawn_list")!;
     const result = await tool.execute("test-id", {});
     const text = result.content[0].text;
     expect(text).toContain("List failed");
   });
 
-  it("azureclaw_discover returns empty list when router is unreachable", async () => {
-    const tool = tools.get("azureclaw_discover")!;
+  it("kars_discover returns empty list when router is unreachable", async () => {
+    const tool = tools.get("kars_discover")!;
     const result = await tool.execute("test-id", { query: "test" });
     const text = result.content[0].text;
     // mesh-registry abstraction swallows transport errors and returns []
@@ -537,18 +537,18 @@ describe("tool descriptions mention security", () => {
     vi.restoreAllMocks();
   });
 
-  it("azureclaw_spawn mentions isolated filesystem", () => {
-    const tool = tools.get("azureclaw_spawn")!;
+  it("kars_spawn mentions isolated filesystem", () => {
+    const tool = tools.get("kars_spawn")!;
     expect(tool.description).toContain("SEPARATE filesystem");
   });
 
-  it("azureclaw_mesh_send mentions E2E encrypted", () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+  it("kars_mesh_send mentions E2E encrypted", () => {
+    const tool = tools.get("kars_mesh_send")!;
     expect(tool.description).toContain("E2E encrypted");
   });
 
-  it("azureclaw_mesh_inbox mentions E2E encrypted", () => {
-    const tool = tools.get("azureclaw_mesh_inbox")!;
+  it("kars_mesh_inbox mentions E2E encrypted", () => {
+    const tool = tools.get("kars_mesh_inbox")!;
     expect(tool.description).toContain("E2E encrypted");
   });
 });
@@ -562,7 +562,7 @@ describe("tool output format consistency", () => {
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    process.env.KARS_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
@@ -572,12 +572,12 @@ describe("tool output format consistency", () => {
 
   afterEach(() => {
     delete process.env.AGT_SKIP_INIT;
-    delete process.env.AZURECLAW_ROUTER_URL;
+    delete process.env.KARS_ROUTER_URL;
     vi.restoreAllMocks();
   });
 
   it("mesh_inbox returns content array with text type", async () => {
-    const tool = tools.get("azureclaw_mesh_inbox")!;
+    const tool = tools.get("kars_mesh_inbox")!;
     const result = await tool.execute("test-id", {});
     expect(result.content).toBeDefined();
     expect(Array.isArray(result.content)).toBe(true);
@@ -586,7 +586,7 @@ describe("tool output format consistency", () => {
   });
 
   it("mesh_send returns content array with text type", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     const result = await tool.execute("test-id", {
       to_agent: "nonexistent",
       content: "hello",
@@ -597,7 +597,7 @@ describe("tool output format consistency", () => {
   });
 
   it("spawn returns content array with text type on error", async () => {
-    const tool = tools.get("azureclaw_spawn")!;
+    const tool = tools.get("kars_spawn")!;
     const result = await tool.execute("test-id", { name: "test" });
     expect(result.content).toBeDefined();
     expect(result.content[0].type).toBe("text");
@@ -656,7 +656,7 @@ describe("provider registration", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 15. Command registration — azureclaw commands
+// 15. Command registration — kars commands
 // ---------------------------------------------------------------------------
 
 describe("command registration", () => {
@@ -676,24 +676,24 @@ describe("command registration", () => {
     vi.restoreAllMocks();
   });
 
-  it("registers azureclaw command", () => {
-    expect(commands.has("azureclaw")).toBe(true);
+  it("registers kars command", () => {
+    expect(commands.has("kars")).toBe(true);
   });
 
-  it("registers azureclaw-models command", () => {
-    expect(commands.has("azureclaw-models")).toBe(true);
+  it("registers kars-models command", () => {
+    expect(commands.has("kars-models")).toBe(true);
   });
 
-  it("registers azureclaw-security command", () => {
-    expect(commands.has("azureclaw-security")).toBe(true);
+  it("registers kars-security command", () => {
+    expect(commands.has("kars-security")).toBe(true);
   });
 
-  it("registers azureclaw-agt command", () => {
-    expect(commands.has("azureclaw-agt")).toBe(true);
+  it("registers kars-agt command", () => {
+    expect(commands.has("kars-agt")).toBe(true);
   });
 
-  it("registers azureclaw-spawn command", () => {
-    expect(commands.has("azureclaw-spawn")).toBe(true);
+  it("registers kars-spawn command", () => {
+    expect(commands.has("kars-spawn")).toBe(true);
   });
 });
 
@@ -743,7 +743,7 @@ describe("Foundry tool registration", () => {
 // 17. mesh_inbox output structure after draining
 // ---------------------------------------------------------------------------
 
-describe("azureclaw_mesh_inbox — output structure", () => {
+describe("kars_mesh_inbox — output structure", () => {
   let tools: Map<string, any>;
 
   beforeEach(async () => {
@@ -761,7 +761,7 @@ describe("azureclaw_mesh_inbox — output structure", () => {
   });
 
   it("inbox result contains count, agt_relay_count, router_count fields", async () => {
-    const tool = tools.get("azureclaw_mesh_inbox")!;
+    const tool = tools.get("kars_mesh_inbox")!;
     const result = await tool.execute("id-1", {});
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed).toHaveProperty("count");
@@ -771,7 +771,7 @@ describe("azureclaw_mesh_inbox — output structure", () => {
   });
 
   it("inbox result count is sum of agt + router", async () => {
-    const tool = tools.get("azureclaw_mesh_inbox")!;
+    const tool = tools.get("kars_mesh_inbox")!;
     const result = await tool.execute("id-2", {});
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.count).toBe(parsed.agt_relay_count + parsed.router_count);
@@ -782,7 +782,7 @@ describe("azureclaw_mesh_inbox — output structure", () => {
 // 18. mesh_send error includes hint
 // ---------------------------------------------------------------------------
 
-describe("azureclaw_mesh_send — error includes hint", () => {
+describe("kars_mesh_send — error includes hint", () => {
   let tools: Map<string, any>;
 
   beforeEach(async () => {
@@ -800,7 +800,7 @@ describe("azureclaw_mesh_send — error includes hint", () => {
   });
 
   it("error response includes hint for remediation", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     const result = await tool.execute("test-id", {
       to_agent: "ghost-agent",
       content: "ping",
@@ -825,7 +825,7 @@ describe("DEFAULT_CONFIG values", () => {
     mod.default.register(mock.api);
     // The spawn tool's `model` param doc states inheritance from parent;
     // sub-agents inherit the parent's model when `model` is omitted.
-    const spawnTool = mock.tools.get("azureclaw_spawn")!;
+    const spawnTool = mock.tools.get("kars_spawn")!;
     expect(spawnTool.parameters.properties.model.description.toLowerCase()).toContain("inherit");
     delete process.env.AGT_SKIP_INIT;
   });
@@ -931,7 +931,7 @@ describe("mesh transport constants", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     // The mesh_transfer_file tool should exist and mention 30MB limit
-    const transferTool = mock.tools.get("azureclaw_mesh_transfer_file");
+    const transferTool = mock.tools.get("kars_mesh_transfer_file");
     expect(transferTool).toBeDefined();
     expect(transferTool!.description).toContain("file");
 
@@ -943,12 +943,12 @@ describe("mesh transport constants", () => {
 // 24. File transfer tool registration + validation
 // ---------------------------------------------------------------------------
 
-describe("azureclaw_mesh_transfer_file tool", () => {
+describe("kars_mesh_transfer_file tool", () => {
   let tools: Map<string, any>;
 
   beforeEach(async () => {
     process.env.AGT_SKIP_INIT = "1";
-    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    process.env.KARS_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./index.js");
     const mock = createMockApi();
     tools = mock.tools;
@@ -958,12 +958,12 @@ describe("azureclaw_mesh_transfer_file tool", () => {
 
   afterEach(() => {
     delete process.env.AGT_SKIP_INIT;
-    delete process.env.AZURECLAW_ROUTER_URL;
+    delete process.env.KARS_ROUTER_URL;
     vi.restoreAllMocks();
   });
 
   it("is registered with correct schema", () => {
-    const tool = tools.get("azureclaw_mesh_transfer_file");
+    const tool = tools.get("kars_mesh_transfer_file");
     expect(tool).toBeDefined();
     expect(tool.parameters.properties).toHaveProperty("to_agent");
     expect(tool.parameters.properties).toHaveProperty("file_path");
@@ -972,7 +972,7 @@ describe("azureclaw_mesh_transfer_file tool", () => {
   });
 
   it("rejects path traversal with ../", async () => {
-    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const tool = tools.get("kars_mesh_transfer_file")!;
     const result = await tool.execute("test-id", {
       to_agent: "some-agent",
       file_path: "../../etc/passwd",
@@ -983,7 +983,7 @@ describe("azureclaw_mesh_transfer_file tool", () => {
   });
 
   it("rejects absolute paths outside sandbox", async () => {
-    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const tool = tools.get("kars_mesh_transfer_file")!;
     const result = await tool.execute("test-id", {
       to_agent: "some-agent",
       file_path: "/etc/passwd",
@@ -993,7 +993,7 @@ describe("azureclaw_mesh_transfer_file tool", () => {
   });
 
   it("returns error when mesh is not connected", async () => {
-    const tool = tools.get("azureclaw_mesh_transfer_file")!;
+    const tool = tools.get("kars_mesh_transfer_file")!;
     const result = await tool.execute("test-id", {
       to_agent: "some-agent",
       file_path: "notes.txt",
@@ -1008,7 +1008,7 @@ describe("azureclaw_mesh_transfer_file tool", () => {
 // 25. Mesh send tool auto-chunking
 // ---------------------------------------------------------------------------
 
-describe("azureclaw_mesh_send — auto-chunking", () => {
+describe("kars_mesh_send — auto-chunking", () => {
   let tools: Map<string, any>;
 
   beforeEach(async () => {
@@ -1026,14 +1026,14 @@ describe("azureclaw_mesh_send — auto-chunking", () => {
   });
 
   it("mesh_send tool is registered with to_agent and content params", () => {
-    const tool = tools.get("azureclaw_mesh_send");
+    const tool = tools.get("kars_mesh_send");
     expect(tool).toBeDefined();
     expect(tool.parameters.properties).toHaveProperty("to_agent");
     expect(tool.parameters.properties).toHaveProperty("content");
   });
 
   it("mesh_send returns error when mesh is not connected", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     const result = await tool.execute("test-id", {
       to_agent: "test-peer",
       content: "hello world",
@@ -1064,12 +1064,12 @@ describe("handoff tool registration", () => {
     vi.restoreAllMocks();
   });
 
-  it("registers azureclaw_handoff_status tool", () => {
-    expect(tools.has("azureclaw_handoff_status")).toBe(true);
+  it("registers kars_handoff_status tool", () => {
+    expect(tools.has("kars_handoff_status")).toBe(true);
   });
 
   it("handoff_status returns status info without crash", async () => {
-    const tool = tools.get("azureclaw_handoff_status")!;
+    const tool = tools.get("kars_handoff_status")!;
     const result = await tool.execute("test-id", {});
     expect(result.content).toBeDefined();
     expect(result.content[0].type).toBe("text");
@@ -1091,22 +1091,22 @@ describe("handoff tool registration", () => {
 // 27. Router URL configuration via environment variable
 // ---------------------------------------------------------------------------
 
-describe("AZURECLAW_ROUTER_URL configuration", () => {
+describe("KARS_ROUTER_URL configuration", () => {
   afterEach(() => {
     delete process.env.AGT_SKIP_INIT;
-    delete process.env.AZURECLAW_ROUTER_URL;
+    delete process.env.KARS_ROUTER_URL;
     vi.restoreAllMocks();
   });
 
   it("spawn tools use configurable router URL", async () => {
     process.env.AGT_SKIP_INIT = "1";
-    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    process.env.KARS_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 100));
 
-    const tool = mock.tools.get("azureclaw_spawn")!;
+    const tool = mock.tools.get("kars_spawn")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
     // Should fail fast with connection refused on port 19876 (unused)
@@ -1116,13 +1116,13 @@ describe("AZURECLAW_ROUTER_URL configuration", () => {
 
   it("spawn_status uses configurable router URL", async () => {
     process.env.AGT_SKIP_INIT = "1";
-    process.env.AZURECLAW_ROUTER_URL = "http://127.0.0.1:19876";
+    process.env.KARS_ROUTER_URL = "http://127.0.0.1:19876";
     const mod = await import("./index.js");
     const mock = createMockApi();
     mod.default.register(mock.api);
     await new Promise((r) => setTimeout(r, 100));
 
-    const tool = mock.tools.get("azureclaw_spawn_status")!;
+    const tool = mock.tools.get("kars_spawn_status")!;
     const result = await tool.execute("test-id", { name: "test-agent" });
     const text = result.content[0].text;
     expect(text).toContain("Status check failed");
@@ -1145,8 +1145,8 @@ describe("post-handoff sub-agent restore logic", () => {
       restored: true,
       sub_agent_snapshots: 2,       // just a count
       sub_agent_results: [           // always populated when pods spawn
-        { name: "researcher", original_amid: "OLD_1", status: "spawned", namespace: "azureclaw-researcher" },
-        { name: "data-collector", original_amid: "OLD_2", status: "spawned", namespace: "azureclaw-data-collector" },
+        { name: "researcher", original_amid: "OLD_1", status: "spawned", namespace: "kars-researcher" },
+        { name: "data-collector", original_amid: "OLD_2", status: "spawned", namespace: "kars-data-collector" },
       ],
       sub_agent_workspaces: [],      // EMPTY — this was the bug trigger
     };
@@ -1318,7 +1318,7 @@ describe("post-handoff sub-agent restore logic", () => {
 //    placeholder file_transfer envelopes — see mesh-payload-guard.ts)
 // ---------------------------------------------------------------------------
 
-describe("mesh-payload-guard via azureclaw_mesh_send", () => {
+describe("mesh-payload-guard via kars_mesh_send", () => {
   let plugin: any;
   let tools: Map<string, any>;
 
@@ -1338,7 +1338,7 @@ describe("mesh-payload-guard via azureclaw_mesh_send", () => {
   });
 
   it("rejects file_transfer envelope with placeholder file_data", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     const result = await tool.execute("id", {
       to_agent: "writer",
       content: JSON.stringify({
@@ -1349,11 +1349,11 @@ describe("mesh-payload-guard via azureclaw_mesh_send", () => {
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error).toContain("placeholder");
-    expect(parsed.error).toContain("azureclaw_mesh_transfer_file");
+    expect(parsed.error).toContain("kars_mesh_transfer_file");
   });
 
   it("rejects file_transfer envelope with missing file_data", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     const result = await tool.execute("id", {
       to_agent: "writer",
       content: JSON.stringify({ type: "file_transfer", file_name: "chart.png" }),
@@ -1363,18 +1363,18 @@ describe("mesh-payload-guard via azureclaw_mesh_send", () => {
   });
 
   it("rejects payload referencing /sandbox/ path with no inlined data", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     const result = await tool.execute("id", {
       to_agent: "writer",
       content: JSON.stringify({ artifact_path: "/sandbox/data.json" }),
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error).toContain("local container path");
-    expect(parsed.error).toContain("azureclaw_mesh_transfer_file");
+    expect(parsed.error).toContain("kars_mesh_transfer_file");
   });
 
   it("does NOT reject plain text mentioning /sandbox/ path", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     // Plain text — not a JSON object — must be allowed even when it
     // mentions a /sandbox/... path. The downstream "AGT mesh not
     // initialized" error proves the guard let the call through.
@@ -1389,7 +1389,7 @@ describe("mesh-payload-guard via azureclaw_mesh_send", () => {
   });
 
   it("does NOT reject plain JSON metadata without local-path artifact keys", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     const result = await tool.execute("id", {
       to_agent: "viz",
       content: JSON.stringify({ trends: ["a", "b"], metrics: { foo: 1 } }),
@@ -1399,7 +1399,7 @@ describe("mesh-payload-guard via azureclaw_mesh_send", () => {
   });
 
   it("accepts a valid file_transfer envelope (real base64)", async () => {
-    const tool = tools.get("azureclaw_mesh_send")!;
+    const tool = tools.get("kars_mesh_send")!;
     const realB64 = Buffer.from("hello world", "utf-8").toString("base64");
     const result = await tool.execute("id", {
       to_agent: "writer",

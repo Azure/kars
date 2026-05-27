@@ -1,8 +1,8 @@
 # Lifecycle — what happens when you apply a CRD
 
-This page is the end-to-end story for every AzureClaw CRD: which CLI command writes it, what the controller does when it lands, what cluster artifacts get produced, and which component consumes those artifacts at runtime.
+This page is the end-to-end story for every Kars CRD: which CLI command writes it, what the controller does when it lands, what cluster artifacts get produced, and which component consumes those artifacts at runtime.
 
-If you only read one document about how AzureClaw fits together, read this one.
+If you only read one document about how Kars fits together, read this one.
 
 > Source of truth: `controller/src/*_reconciler.rs` and `inference-router/src/routes/*.rs`. Every diagram and table here is grounded in those files.
 
@@ -11,11 +11,11 @@ If you only read one document about how AzureClaw fits together, read this one.
 - [The big picture](#the-big-picture)
 - [Two reconcile patterns](#two-reconcile-patterns)
 - [CLI ↔ CRD ↔ artifact map](#cli--crd--artifact-map)
-- [`ClawSandbox` — the heavyweight reconcile](#clawsandbox--the-heavyweight-reconcile)
+- [`KarsSandbox` — the heavyweight reconcile](#karssandbox--the-heavyweight-reconcile)
 - [`InferencePolicy` — the policy compile pattern](#inferencepolicy--the-policy-compile-pattern)
 - [`McpServer` — declared MCP backend](#mcpserver--declared-mcp-backend)
 - [`A2AAgent` — public-ingress endpoint](#a2aagent--public-ingress-endpoint)
-- [`ToolPolicy` / `ClawMemory` / `ClawEval` / `TrustGraph`](#toolpolicy--clawmemory--clawevaluation--trustgraph)
+- [`ToolPolicy` / `KarsMemory` / `KarsEval` / `TrustGraph`](#toolpolicy--karsmemory--karsevaluation--trustgraph)
 - [Status, conditions, requeue](#status-conditions-requeue)
 - [Deletion & finalizers](#deletion--finalizers)
 
@@ -25,9 +25,9 @@ If you only read one document about how AzureClaw fits together, read this one.
 
 ```mermaid
 flowchart LR
-  CLI["azureclaw CLI<br/>or GitOps / kubectl"]
+  CLI["kars CLI<br/>or GitOps / kubectl"]
   CRD[("CRD<br/>(9 kinds)")]
-  Ctrl["azureclaw-controller<br/>(kube-rs)"]
+  Ctrl["kars-controller<br/>(kube-rs)"]
   Art[("Cluster artifacts<br/>Namespace · ServiceAccount · NetworkPolicy<br/>Deployment · Service · ConfigMap · Secret<br/>FederatedIdentityCredential")]
   Runtime["Runtime data plane<br/>inference-router · A2A gateway · sandbox pod"]
 
@@ -40,7 +40,7 @@ flowchart LR
 
 Three things happen in order:
 
-1. **A CRD lands in etcd.** Either you ran an `azureclaw <verb>` command (which is just sugar over `kubectl apply`), or your GitOps tool synced one, or you ran `kubectl apply -f` directly. They are all equivalent.
+1. **A CRD lands in etcd.** Either you ran an `kars <verb>` command (which is just sugar over `kubectl apply`), or your GitOps tool synced one, or you ran `kubectl apply -f` directly. They are all equivalent.
 2. **The controller reconciles it.** It reads the spec, compiles it into Kubernetes-native objects, and server-side-applies them. Then it patches `status.conditions` so observers can see what happened.
 3. **The data plane consumes the artifacts.** The inference router reads governance / inference / tool / trust profiles from mounted `ConfigMap`s. The A2A gateway reads `AgentCard`s from a `ConfigMap`. The sandbox pod runs the runtime image the controller chose for `spec.runtime.kind`.
 
@@ -50,12 +50,12 @@ This is the whole loop. Everything else on this page is detail.
 
 ## Two reconcile patterns
 
-AzureClaw's nine user-facing CRDs split into two operational shapes:
+Kars's nine user-facing CRDs split into two operational shapes:
 
 | Pattern | CRDs | What gets produced |
 |---|---|---|
-| **Compile-to-artifact** | `InferencePolicy`, `ToolPolicy`, `A2AAgent`, `McpServer`, `ClawMemory`, `ClawEval`, `TrustGraph`, `EgressApproval` | A deterministic `ConfigMap` (and sometimes a `Secret`) that the router or gateway mounts. The CRD spec is hashed; the hash is stored in `status.versionHash` or equivalent. |
-| **Heavyweight namespace** | `ClawSandbox` | A whole tenant namespace: `Namespace` + `ServiceAccount` + Workload-Identity federated credential + `NetworkPolicy` + governance `ConfigMap` + `Deployment` + `Service`. |
+| **Compile-to-artifact** | `InferencePolicy`, `ToolPolicy`, `A2AAgent`, `McpServer`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval` | A deterministic `ConfigMap` (and sometimes a `Secret`) that the router or gateway mounts. The CRD spec is hashed; the hash is stored in `status.versionHash` or equivalent. |
+| **Heavyweight namespace** | `KarsSandbox` | A whole tenant namespace: `Namespace` + `ServiceAccount` + Workload-Identity federated credential + `NetworkPolicy` + governance `ConfigMap` + `Deployment` + `Service`. |
 
 ### The reconciler map
 
@@ -63,22 +63,22 @@ All reconcilers run in the same controller pod under one leader-election lease, 
 
 ```mermaid
 graph TD
-  subgraph operator["controller pod (replicas: 2, ns: azureclaw-system)"]
+  subgraph operator["controller pod (replicas: 2, ns: kars-system)"]
     direction TB
     LE["Leader election<br/>coordination.k8s.io/v1 Lease<br/>(env: LEADER_ELECTION_ENABLED, default true)"]
     subgraph reconcilers["Reconciler tasks (spawn after leader gate)"]
       direction LR
-      R1["ClawSandbox<br/>fm: clawsandbox"]
+      R1["KarsSandbox<br/>fm: karssandbox"]
       R2["McpServer<br/>fm: mcp"]
       R3["ToolPolicy<br/>fm: toolpolicy"]
       R4["InferencePolicy<br/>fm: inferencepolicy"]
       R5["A2AAgent<br/>fm: a2aagent"]
-      R6["ClawMemory<br/>fm: clawmemory"]
-      R7["ClawEval<br/>fm: claweval"]
+      R6["KarsMemory<br/>fm: karsmemory"]
+      R7["KarsEval<br/>fm: karseval"]
       R8["TrustGraph<br/>fm: trustgraph"]
       R9["EgressApproval<br/>fm: egressapproval"]
     end
-    R10["ClawPairing reconciler<br/>(internal — bound by ClawSandbox)"]
+    R10["KarsPairing reconciler<br/>(internal — bound by KarsSandbox)"]
     MESH["mesh-peer reconciler<br/>(own lease — agentmesh-mesh-peer-leader)"]
     METR["Metrics + health server<br/>:9091 — /metrics /healthz /readyz"]
   end
@@ -121,21 +121,21 @@ Every CLI command is a thin wrapper around `kubectl apply`. The CLI does no orch
 
 | CLI command | CRD written | Cluster artifact produced | Consumed by |
 |---|---|---|---|
-| `azureclaw up` | `ClawSandbox` (one or more) | Tenant namespace + everything inside it | The agent pod itself |
-| `azureclaw add <name>` | `ClawSandbox` | Same as above | Same |
-| `azureclaw destroy <name>` | Deletes `ClawSandbox` | Cascades via finalizer to delete the namespace + federated credential | — |
-| `azureclaw inferencepolicy apply` | `InferencePolicy` | `ConfigMap` `inferencepolicy-<name>-profile` | Inference router (`/v1/chat`, `/v1/responses`) |
-| `azureclaw toolpolicy apply` | `ToolPolicy` | `ConfigMap` `toolpolicy-<name>-profile` | Inference router (every tool dispatch) |
-| `azureclaw mcp add` | `McpServer` | `Secret` `mcp-<name>-signing` (Ed25519 keypair) <br/> `ConfigMap` `mcp-<name>-jwks` (when `productionMode=true`) | Inference router (`/mcp` proxy — multi-issuer OAuth verifier + namespaced `{server}.{tool}` dispatch) |
-| `azureclaw a2a-agent apply` | `A2AAgent` | `ConfigMap` `a2aagent-<name>-card` (signed AgentCard) | A2A gateway (inbound JWS verification) |
-| `azureclaw eval` | `ClawEval` | `ConfigMap` `claweval-<name>-spec` <br/> `Job` (when run-now) | Eval harness |
-| `azureclaw mesh ...` | `TrustGraph` | `ConfigMap` `trustgraph-<name>-graph` | Sandbox agent SDK (KNOCK accept/deny via `@microsoft/agent-governance-sdk`); inference router tracks the post-decision trust-score map for audit/governance |
+| `kars up` | `KarsSandbox` (one or more) | Tenant namespace + everything inside it | The agent pod itself |
+| `kars add <name>` | `KarsSandbox` | Same as above | Same |
+| `kars destroy <name>` | Deletes `KarsSandbox` | Cascades via finalizer to delete the namespace + federated credential | — |
+| `kars inferencepolicy apply` | `InferencePolicy` | `ConfigMap` `inferencepolicy-<name>-profile` | Inference router (`/v1/chat`, `/v1/responses`) |
+| `kars toolpolicy apply` | `ToolPolicy` | `ConfigMap` `toolpolicy-<name>-profile` | Inference router (every tool dispatch) |
+| `kars mcp add` | `McpServer` | `Secret` `mcp-<name>-signing` (Ed25519 keypair) <br/> `ConfigMap` `mcp-<name>-jwks` (when `productionMode=true`) | Inference router (`/mcp` proxy — multi-issuer OAuth verifier + namespaced `{server}.{tool}` dispatch) |
+| `kars a2a-agent apply` | `A2AAgent` | `ConfigMap` `a2aagent-<name>-card` (signed AgentCard) | A2A gateway (inbound JWS verification) |
+| `kars eval` | `KarsEval` | `ConfigMap` `karseval-<name>-spec` <br/> `Job` (when run-now) | Eval harness |
+| `kars mesh ...` | `TrustGraph` | `ConfigMap` `trustgraph-<name>-graph` | Sandbox agent SDK (KNOCK accept/deny via `@microsoft/agent-governance-sdk`); inference router tracks the post-decision trust-score map for audit/governance |
 
 > The CLI's `apply` and `get` verbs round-trip through `kubectl` for parity with GitOps. There is no hidden CLI-only state.
 
 ---
 
-## `ClawSandbox` — the heavyweight reconcile
+## `KarsSandbox` — the heavyweight reconcile
 
 ```mermaid
 sequenceDiagram
@@ -146,16 +146,16 @@ sequenceDiagram
   participant AAD as Microsoft Graph<br/>(Workload Identity)
   participant Pod as Sandbox pod
 
-  U->>K: kubectl apply ClawSandbox
+  U->>K: kubectl apply KarsSandbox
   K-->>C: watch event
   C->>C: validate name (lowercase / hyphens / ≤63)
-  C->>K: add finalizer<br/>azureclaw.azure.com/namespace-cleanup
+  C->>K: add finalizer<br/>kars.azure.com/namespace-cleanup
   C->>C: dispatch on spec.runtime.kind<br/>(runtime.rs → image + cmd + args)
   alt unsupported runtime
     C->>K: patch_status (Degraded, AdapterMissing)
     Note over C: requeue 5 min
   end
-  C->>K: ensure Namespace azureclaw-[name]
+  C->>K: ensure Namespace kars-[name]
   C->>K: ensure ServiceAccount<br/>(annotated for Workload Identity)
   C->>AAD: ensure federated credential<br/>(maps SA token → AAD)
   C->>K: ensure ClusterRoleBinding<br/>(spawner role for sub-agents)
@@ -254,10 +254,10 @@ If JWKS fetch fails the CR is stamped `Degraded / JwksFetchFailed` and the contr
 
 ### Plural binding (`mcpServerRefs`)
 
-A `ClawSandbox` may bind up to **8** `McpServer`s via `spec.mcpServerRefs: []LocalObjectReference`. The legacy singular form `spec.mcpServerRef` is accepted on input and folded into the plural list on reconcile (a `Warning` event is emitted to nudge migration). For every referenced server the controller mirrors a per-server volume into the sandbox pod:
+A `KarsSandbox` may bind up to **8** `McpServer`s via `spec.mcpServerRefs: []LocalObjectReference`. The legacy singular form `spec.mcpServerRef` is accepted on input and folded into the plural list on reconcile (a `Warning` event is emitted to nudge migration). For every referenced server the controller mirrors a per-server volume into the sandbox pod:
 
 ```
-/etc/azureclaw/mcp/
+/etc/kars/mcp/
   ├── <name-a>/
   │   ├── jwks.json   ← mirrored issuer JWKS
   │   └── meta.json   ← { url, issuer, audience, allowed_tools }
@@ -293,7 +293,7 @@ sequenceDiagram
   C->>C: version_hash = sha256(card)
   C->>CM: SSA: { agentcard.json }
   C->>K: patch_status (phase, cardConfigMapRef, versionHash)
-  Note over GW: gateway watches the<br/>a2aagent-*-card ConfigMaps and<br/>uses them to route inbound traffic<br/>to the matching ClawSandbox.
+  Note over GW: gateway watches the<br/>a2aagent-*-card ConfigMaps and<br/>uses them to route inbound traffic<br/>to the matching KarsSandbox.
 ```
 
 **Verified against**: `controller/src/a2a_agent_reconciler.rs:96-200` and `controller/src/a2a_agent_compile.rs`.
@@ -302,22 +302,22 @@ When an external peer hits the A2A gateway with a JWS-signed envelope, the gatew
 
 ---
 
-## `ToolPolicy` / `ClawMemory` / `ClawEval` / `TrustGraph`
+## `ToolPolicy` / `KarsMemory` / `KarsEval` / `TrustGraph`
 
 Each follows the compile-to-ConfigMap pattern with one added wrinkle:
 
 | CRD | Adds | Where the artifact is consumed |
 |---|---|---|
 | `ToolPolicy` | Compiles allow / deny / approval rules into a flat decision profile | Inference router on every tool dispatch (`/v1/mcp/*`, `/v1/spawn`, `/v1/handoff`) |
-| `ClawMemory` | Resolves storage backend (Cosmos / blob / in-memory) and stamps a binding token | Inference router on `/v1/memory/*` proxy |
-| `ClawEval` | Compiles spec into a `Job` template; spawns one `Job` per `run-now` request | Eval harness pod; results PVC-mounted |
+| `KarsMemory` | Resolves storage backend (Cosmos / blob / in-memory) and stamps a binding token | Inference router on `/v1/memory/*` proxy |
+| `KarsEval` | Compiles spec into a `Job` template; spawns one `Job` per `run-now` request | Eval harness pod; results PVC-mounted |
 | `TrustGraph` | Snapshots peer identities + trust scores into a ConfigMap | Sandbox agent SDK on the KNOCK accept/deny path (mesh ingress); inference router only mirrors the post-decision trust-score map |
 
 **Code references**:
 
 - `controller/src/tool_policy_reconciler.rs` + `tool_policy_compile.rs`
-- `controller/src/claw_memory_reconciler.rs` + `claw_memory_compile.rs`
-- `controller/src/claw_eval_reconciler.rs` + `claw_eval_compile.rs`
+- `controller/src/kars_memory_reconciler.rs` + `kars_memory_compile.rs`
+- `controller/src/kars_eval_reconciler.rs` + `kars_eval_compile.rs`
 - `controller/src/trust_graph_reconciler.rs` + `trust_graph_compile.rs`
 
 All four follow the same `compile → version_hash → SSA ConfigMap → patch_status` shape as `InferencePolicy`. The reconcile loops are intentionally near-identical so the failure modes and observability are uniform.
@@ -335,13 +335,13 @@ Every reconcile ends with a `patch_status` call. The status block always carries
 
 ### Phase vocabulary
 
-The `status.phase` string is part of the public contract: `azureclaw connect`, `kubectl wait`, GitOps tooling and the Headlamp plugin all branch on it. The taxonomy is closed — reconcilers must use one of these values (constants live in `controller/src/status/phase.rs`):
+The `status.phase` string is part of the public contract: `kars connect`, `kubectl wait`, GitOps tooling and the Headlamp plugin all branch on it. The taxonomy is closed — reconcilers must use one of these values (constants live in `controller/src/status/phase.rs`):
 
 | Phase | Meaning | `Ready` condition | When the controller stamps it |
 |---|---|---|---|
 | `Pending` | Controller accepted the CR but has not yet produced a compiled artifact (waiting on an admit step or finalizer cleanup). | `False` | Reserved for async admission flows; not stamped by today's reconcilers. |
-| `Compiled` | Spec parsed, `ConfigMap` written, but the **router has not yet echoed back the loaded digest**. The artifact exists; the data plane is not yet enforcing it. | `False` (reason `AwaitingRouterEnforcement` or `NoSandboxesReferencing`) | Any policy CRD whose enforcement loop is router-side: `ClawMemory`, `ToolPolicy` with `spec.agtProfile.inline`, `InferencePolicy`. The controller polls each referencing `ClawSandbox`'s `inference-router /internal/policy-status` endpoint and stays in `Compiled` while any of the relevant digests (token budget, content safety floors, prompt-shields flag, model-preference override) are unconfirmed, or while no `ClawSandbox` references the policy yet. The `modelPreference.fallback` health-aware failover path is the last piece still being wired — a policy that relies on it stays `Compiled` until that consumer echoes back. A `Warning` Event with reason `PolicyNotEnforced` is emitted on every reconcile in this state so operators see the gap in `kubectl describe`. |
-| `Ready` | Spec compiled **and** the consuming component (router, runtime, etc.) has confirmed it is enforcing the artifact. `kubectl wait --for=condition=Ready` must only return at this point. | `True` | `ToolPolicy` **without** `spec.agtProfile` (runtime-side enforcement of commerce / rate-limit / approval is co-located in the in-process AGT plugin); `ToolPolicy` with `spec.agtProfile.inline` after every referencing `ClawSandbox`'s router echoes the published digest on `/internal/policy-status` (reason `RouterEnforcing`); `InferencePolicy` after every referencing `ClawSandbox`'s router echoes the inference-policy digest on the same endpoint (reason `RouterEnforcing`); `ClawMemory` after the binding digest is echoed (reason `RouterEnforcing`); `McpServer` (`ClawSandbox.spec.mcpServerRefs` mirrors up to 8 servers; the singular `spec.mcpServerRef` remains an accepted alias with a deprecation warning); `A2AAgent`, `ClawSandbox`, `TrustGraph`. |
+| `Compiled` | Spec parsed, `ConfigMap` written, but the **router has not yet echoed back the loaded digest**. The artifact exists; the data plane is not yet enforcing it. | `False` (reason `AwaitingRouterEnforcement` or `NoSandboxesReferencing`) | Any policy CRD whose enforcement loop is router-side: `KarsMemory`, `ToolPolicy` with `spec.agtProfile.inline`, `InferencePolicy`. The controller polls each referencing `KarsSandbox`'s `inference-router /internal/policy-status` endpoint and stays in `Compiled` while any of the relevant digests (token budget, content safety floors, prompt-shields flag, model-preference override) are unconfirmed, or while no `KarsSandbox` references the policy yet. The `modelPreference.fallback` health-aware failover path is the last piece still being wired — a policy that relies on it stays `Compiled` until that consumer echoes back. A `Warning` Event with reason `PolicyNotEnforced` is emitted on every reconcile in this state so operators see the gap in `kubectl describe`. |
+| `Ready` | Spec compiled **and** the consuming component (router, runtime, etc.) has confirmed it is enforcing the artifact. `kubectl wait --for=condition=Ready` must only return at this point. | `True` | `ToolPolicy` **without** `spec.agtProfile` (runtime-side enforcement of commerce / rate-limit / approval is co-located in the in-process AGT plugin); `ToolPolicy` with `spec.agtProfile.inline` after every referencing `KarsSandbox`'s router echoes the published digest on `/internal/policy-status` (reason `RouterEnforcing`); `InferencePolicy` after every referencing `KarsSandbox`'s router echoes the inference-policy digest on the same endpoint (reason `RouterEnforcing`); `KarsMemory` after the binding digest is echoed (reason `RouterEnforcing`); `McpServer` (`KarsSandbox.spec.mcpServerRefs` mirrors up to 8 servers; the singular `spec.mcpServerRef` remains an accepted alias with a deprecation warning); `A2AAgent`, `KarsSandbox`, `TrustGraph`. |
 | `Degraded` | Spec is valid but a dependency is failing (Foundry 5xx, JWKS fetch timeout, etc.). Retry will help — the reconciler requeues at `REQUEUE_FAIL`. | `False` (reason describes the dependency) | Any reconciler on transient failure. |
 | `Failed` | Spec is invalid and will not converge without user editing the CR (validation, signature mismatch, malformed reference). | `False` | Any reconciler on permanent failure. |
 
@@ -366,8 +366,8 @@ Every reconciler installs a finalizer on first reconcile. This blocks Kubernetes
 
 | CRD | Finalizer | Cleanup work |
 |---|---|---|
-| `ClawSandbox` | `azureclaw.azure.com/namespace-cleanup` | Delete the tenant namespace (cascades to all resources), delete spawner ClusterRoleBinding, **delete federated credential**, release pairing slot, then remove finalizer. |
-| Compile-pattern CRDs | `azureclaw.azure.com/<kind>-cleanup` | Delete the produced `ConfigMap` (and `Secret`, where present), then remove finalizer. |
+| `KarsSandbox` | `kars.azure.com/namespace-cleanup` | Delete the tenant namespace (cascades to all resources), delete spawner ClusterRoleBinding, **delete federated credential**, release pairing slot, then remove finalizer. |
+| Compile-pattern CRDs | `kars.azure.com/<kind>-cleanup` | Delete the produced `ConfigMap` (and `Secret`, where present), then remove finalizer. |
 
 The federated-credential delete is the one cleanup that crosses the cluster boundary into Microsoft Graph. See `controller/src/fedcred_reaper.rs` for the orphan-collector that backstops force-delete and pre-finalizer CRs.
 

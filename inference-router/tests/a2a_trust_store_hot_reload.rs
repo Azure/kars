@@ -39,7 +39,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
-use azureclaw_inference_router::a2a::{
+use kars_inference_router::a2a::{
     A2aAgentSigningKeySpec, A2aAgentSpec, AgentCard, AgentCardConfig, AgentSkill,
     CardVerifierConfig, TrustStore, TrustStoreBuilder, build_card, project_anchors, sign_card,
     verify_inbound_card,
@@ -116,7 +116,7 @@ fn agent_spec_with_keys(keys: &[(&str, &VerifyingKey, Option<i64>)]) -> A2aAgent
 fn project_into_snapshot(
     spec: &A2aAgentSpec,
     generation: u64,
-) -> azureclaw_inference_router::a2a::TrustStoreSnapshot {
+) -> kars_inference_router::a2a::TrustStoreSnapshot {
     let anchors = project_anchors(spec, "test/agent").expect("project_anchors");
     let mut builder = TrustStoreBuilder::new().generation(generation);
     for a in anchors {

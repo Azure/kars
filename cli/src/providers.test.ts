@@ -58,7 +58,7 @@ describe("providers — selectionHasNull", () => {
 });
 
 describe("providers — selectionToEnv", () => {
-  it("emits the four AZURECLAW_PROVIDER_* env vars", () => {
+  it("emits the four KARS_PROVIDER_* env vars", () => {
     const env = selectionToEnv({
       mesh: "vendored",
       policy: "agt",
@@ -66,10 +66,10 @@ describe("providers — selectionToEnv", () => {
       signing: "agt",
     });
     expect(env).toEqual({
-      AZURECLAW_PROVIDER_MESH: "vendored",
-      AZURECLAW_PROVIDER_POLICY: "agt",
-      AZURECLAW_PROVIDER_AUDIT: "vendored",
-      AZURECLAW_PROVIDER_SIGNING: "agt",
+      KARS_PROVIDER_MESH: "vendored",
+      KARS_PROVIDER_POLICY: "agt",
+      KARS_PROVIDER_AUDIT: "vendored",
+      KARS_PROVIDER_SIGNING: "agt",
     });
   });
 });
@@ -91,7 +91,7 @@ describe("providers — outage mode", () => {
 
 describe("providers — dev-only label constants", () => {
   it("match the controller-side / ci/no-null-provider-prod.sh expectations", () => {
-    expect(DEV_ONLY_LABEL_KEY).toBe("azureclaw.azure.com/dev-only");
+    expect(DEV_ONLY_LABEL_KEY).toBe("kars.azure.com/dev-only");
     expect(DEV_ONLY_LABEL_VALUE).toBe("true");
   });
 });

@@ -2,11 +2,11 @@
 // Licensed under the MIT License.
 
 /**
- * Memory-binding reader — resolves the canonical ClawMemory store name (and
+ * Memory-binding reader — resolves the canonical KarsMemory store name (and
  * default scope) for this sandbox from the mounted ConfigMap at
- *   /etc/azureclaw/memory/binding.json
+ *   /etc/kars/memory/binding.json
  *
- * The ConfigMap is projected by the AzureClaw controller when a ClawSandbox
+ * The ConfigMap is projected by the Kars controller when a KarsSandbox
  * has `spec.memoryRef.name` set. Its shape mirrors `LoadedMemoryBinding` on
  * the router side (see inference-router/src/mcp/platform.rs):
  *   {
@@ -16,7 +16,7 @@
  *     ...
  *   }
  *
- * When the file is missing (legacy sandbox without ClawMemory CR, or
+ * When the file is missing (legacy sandbox without KarsMemory CR, or
  * operator hasn't wired memoryRef yet) we fall back to the historical
  * plugin convention `memory-${agentName}` so existing sandboxes keep
  * working unchanged.
@@ -30,8 +30,8 @@
 import { existsSync, readFileSync } from "node:fs";
 
 const BINDING_PATH =
-  process.env.AZURECLAW_MEMORY_BINDING_PATH ||
-  "/etc/azureclaw/memory/binding.json";
+  process.env.KARS_MEMORY_BINDING_PATH ||
+  "/etc/kars/memory/binding.json";
 
 interface MemoryBinding {
   storeName?: string;

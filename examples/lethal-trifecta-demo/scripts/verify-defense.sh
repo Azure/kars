@@ -5,20 +5,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# The ClawSandbox CR is declared in `azureclaw-claw`, but the controller
+# The KarsSandbox CR is declared in `kars-claw`, but the controller
 # materialises the actual sandbox Deployment in
-# `azureclaw-realestate-agent` per the standard per-sandbox-namespace
+# `kars-realestate-agent` per the standard per-sandbox-namespace
 # pattern. All `kubectl logs` / `kubectl exec` against the live pod
-# target that namespace; `azureclaw audit verify` targets the CR
-# namespace (`azureclaw-claw`).
-SANDBOX_CR_NS="azureclaw-claw"
-SANDBOX_POD_NS="azureclaw-realestate-agent"
+# target that namespace; `kars audit verify` targets the CR
+# namespace (`kars-claw`).
+SANDBOX_CR_NS="kars-claw"
+SANDBOX_POD_NS="kars-realestate-agent"
 
 echo "═══ Audit chain ($SANDBOX_CR_NS) ═══"
-if command -v azureclaw >/dev/null 2>&1; then
-  azureclaw audit verify --namespace "$SANDBOX_CR_NS" --agent realestate-agent || true
+if command -v kars >/dev/null 2>&1; then
+  kars audit verify --namespace "$SANDBOX_CR_NS" --agent realestate-agent || true
 else
-  echo "(azureclaw CLI not on PATH — falling back to raw logs)"
+  echo "(kars CLI not on PATH — falling back to raw logs)"
   kubectl logs -n "$SANDBOX_POD_NS" deploy/realestate-agent -c inference-router \
     | grep -E 'audit|deny|safety|budget|quarantin' | tail -20 || true
 fi

@@ -4,9 +4,9 @@
 
 
 /**
- * AzureClaw CLI — Enterprise-grade runtime for OpenClaw on Azure.
+ * Kars CLI — Enterprise-grade runtime for OpenClaw on Azure.
  *
- * This is the primary entrypoint for the azureclaw command.
+ * This is the primary entrypoint for the kars command.
  */
 
 import { createCli } from "./cli.js";

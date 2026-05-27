@@ -71,7 +71,7 @@ describe("inspect — renderEntry", () => {
     const out = renderEntry({
       kind: "ToolPolicy",
       digest: "sha256:0123456789abcdef0123456789abcdef",
-      source_path: "/var/run/azureclaw/toolpolicy/tools.json",
+      source_path: "/var/run/kars/toolpolicy/tools.json",
       loaded_at: new Date(Date.now() - 30_000).toISOString(),
       last_error: null,
     });
@@ -86,7 +86,7 @@ describe("inspect — renderEntry", () => {
     const out = renderEntry({
       kind: "ToolPolicy",
       digest: null,
-      source_path: "/var/run/azureclaw/toolpolicy/tools.json",
+      source_path: "/var/run/kars/toolpolicy/tools.json",
       loaded_at: "1970-01-01T00:00:00Z",
       last_error: "parse error: unexpected EOF",
     });
@@ -104,7 +104,7 @@ describe("inspect — POLICY_KIND_LABEL", () => {
     //   ToolPolicy (Slice 1b/c) — compiled ToolPolicy artifacts.
     //   InferencePolicy (Slice 2a) — compiled InferencePolicy.
     //   Egress (future) — defensive carry-over.
-    //   Memory (Slice 3a) — compiled ClawMemory binding.
+    //   Memory (Slice 3a) — compiled KarsMemory binding.
     //
     // A partial-rollout cluster where the router is ahead of the CLI
     // still prints sensible labels for the kinds the CLI knows.
@@ -120,12 +120,12 @@ describe("inspect — POLICY_KIND_LABEL", () => {
     }
   });
 
-  it("renders the Slice 3a `Memory` wire kind as `ClawMemory`", () => {
+  it("renders the Slice 3a `Memory` wire kind as `KarsMemory`", () => {
     // Slice 3a contract: the router emits `PolicyKind::Memory`
     // (as_str="Memory") for the compiled binding mounted at
-    // `/etc/azureclaw/memory/binding.json`. The CLI must display
+    // `/etc/kars/memory/binding.json`. The CLI must display
     // the user-facing CRD name so `inspect` reads naturally next
-    // to `kubectl get clawmemory`.
-    expect(POLICY_KIND_LABEL["Memory"]).toBe("ClawMemory");
+    // to `kubectl get karsmemory`.
+    expect(POLICY_KIND_LABEL["Memory"]).toBe("KarsMemory");
   });
 });

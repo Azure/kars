@@ -1,7 +1,7 @@
 # Image Supply Chain Security — Notation + Ratify
 
 ## Overview
-AzureClaw uses Notation for image signing and Ratify for admission verification.
+Kars uses Notation for image signing and Ratify for admission verification.
 Only signed images from the trusted ACR can be deployed as sandbox containers.
 
 ## Setup
@@ -14,12 +14,12 @@ brew install notation  # macOS
 ### 2. Sign images during build
 ```bash
 # Generate a key (one-time)
-notation key generate azureclaw-signing
+notation key generate kars-signing
 
 # Sign the image after push
-notation sign azureclawacr.azurecr.io/azureclaw-controller:0.1.0
-notation sign azureclawacr.azurecr.io/azureclaw-inference-router:0.1.0
-notation sign azureclawacr.azurecr.io/openclaw-sandbox:latest
+notation sign karsacr.azurecr.io/kars-controller:0.1.0
+notation sign karsacr.azurecr.io/kars-inference-router:0.1.0
+notation sign karsacr.azurecr.io/openclaw-sandbox:latest
 ```
 
 ### 3. Install Ratify on AKS
@@ -54,13 +54,13 @@ spec:
     trustPolicyDoc:
       version: "1.0"
       trustPolicies:
-        - name: azureclaw-images
+        - name: kars-images
           registryScopes:
-            - "azureclawacr.azurecr.io/*"
+            - "karsacr.azurecr.io/*"
           signatureVerification:
             level: strict
           trustStores:
-            - "ca:azureclaw-signing"
+            - "ca:kars-signing"
 ```
 
 ### 5. Gatekeeper constraint
@@ -68,16 +68,16 @@ spec:
 apiVersion: constraints.gatekeeper.sh/v1beta1
 kind: K8sAllowedImages
 metadata:
-  name: azureclaw-signed-images-only
+  name: kars-signed-images-only
 spec:
   match:
     namespaces:
-      - "azureclaw-*"
+      - "kars-*"
   parameters:
     allowedImages:
-      - "azureclawacr.azurecr.io/*"
+      - "karsacr.azurecr.io/*"
 ```
 
 ## Automation
-The `azureclaw up` flow will include Notation signing + Ratify deployment
+The `kars up` flow will include Notation signing + Ratify deployment
 when `--sign-images` flag is provided.

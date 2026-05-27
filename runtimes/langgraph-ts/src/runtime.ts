@@ -6,7 +6,7 @@
  *
  * Called from `sandbox-images/langgraph-ts/entrypoint.sh` immediately
  * before the user's graph code runs. Idempotent — guarded by
- * `__AZURECLAW_RUNTIME_INITIALIZED__` so re-imports during user code
+ * `__KARS_RUNTIME_INITIALIZED__` so re-imports during user code
  * or tests are no-ops.
  *
  * LangGraph TS is provider-agnostic, but every realistic graph
@@ -28,9 +28,9 @@
 
 import { initTelemetry } from './otel';
 
-export const ENV_INITIALIZED = '__AZURECLAW_RUNTIME_INITIALIZED__';
+export const ENV_INITIALIZED = '__KARS_RUNTIME_INITIALIZED__';
 export const ROUTER_MANAGED_KEY_SENTINEL = 'router-managed';
-export const SERVICE_NAME = 'azureclaw-runtime-langgraph-ts';
+export const SERVICE_NAME = 'kars-runtime-langgraph-ts';
 
 interface ProviderPin {
   baseUrlEnv: string;
@@ -66,7 +66,7 @@ function installSignalHandlers(): void {
   const handler = (signal: NodeJS.Signals) => {
     // eslint-disable-next-line no-console
     console.error(
-      `[azureclaw-runtime-langgraph-ts] received ${signal} — exiting`,
+      `[kars-runtime-langgraph-ts] received ${signal} — exiting`,
     );
     // Allow batched span exporters a brief drain window.
     setTimeout(() => process.exit(0), 50).unref();
@@ -88,7 +88,7 @@ export interface BootstrapOptions {
 /**
  * Idempotently initialize the in-pod adapter.
  *
- * 1. Skip if `__AZURECLAW_RUNTIME_INITIALIZED__` is already set.
+ * 1. Skip if `__KARS_RUNTIME_INITIALIZED__` is already set.
  * 2. Pin each known provider base URL to the router sidecar so
  *    LangChain factories cannot reach the public model endpoints
  *    directly (egress-guard would drop the packet anyway).
@@ -122,6 +122,6 @@ export async function bootstrap(
   process.env[ENV_INITIALIZED] = '1';
   // eslint-disable-next-line no-console
   console.error(
-    '[azureclaw-runtime-langgraph-ts] bootstrapped: providers pinned to router',
+    '[kars-runtime-langgraph-ts] bootstrapped: providers pinned to router',
   );
 }

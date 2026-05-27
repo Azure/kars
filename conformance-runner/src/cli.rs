@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Command-line argument parsing for `azureclaw-conformance-runner`.
+//! Command-line argument parsing for `kars-conformance-runner`.
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -9,8 +9,8 @@ use std::time::Duration;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
-    name = "azureclaw-conformance-runner",
-    about = "Replay an EvalCorpus against a live AzureClaw inference router and emit a RunReport.",
+    name = "kars-conformance-runner",
+    about = "Replay an EvalCorpus against a live Kars inference router and emit a RunReport.",
     long_about = None,
 )]
 pub struct Cli {

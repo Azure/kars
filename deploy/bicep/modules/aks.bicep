@@ -1,4 +1,4 @@
-// AzureClaw - AKS Module
+// Kars - AKS Module
 // Deploys AKS cluster with Azure Linux node pools
 // Governance: Azure Policy add-on (no Defender for Cloud required)
 
@@ -72,10 +72,10 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
         enableFIPS: enableFips
         enableEncryptionAtHost: true
         nodeTaints: [
-          'azureclaw.azure.com/sandbox=true:NoSchedule'
+          'kars.azure.com/sandbox=true:NoSchedule'
         ]
         nodeLabels: {
-          'azureclaw.azure.com/pool': 'sandbox'
+          'kars.azure.com/pool': 'sandbox'
         }
       }
     ], enableKata ? [
@@ -90,10 +90,10 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
         enableEncryptionAtHost: true
         workloadRuntime: 'KataMshvVmIsolation'
         nodeTaints: [
-          'azureclaw.azure.com/sandbox=true:NoSchedule'
+          'kars.azure.com/sandbox=true:NoSchedule'
         ]
         nodeLabels: {
-          'azureclaw.azure.com/pool': 'sandbox-kata'
+          'kars.azure.com/pool': 'sandbox-kata'
         }
       }
     ] : [])
@@ -140,10 +140,10 @@ resource sandboxIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-
 
 resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
   parent: sandboxIdentity
-  name: 'azureclaw-sandbox'
+  name: 'kars-sandbox'
   properties: {
     issuer: aks.properties.oidcIssuerProfile.issuerURL
-    subject: 'system:serviceaccount:azureclaw-system:azureclaw-sandbox'
+    subject: 'system:serviceaccount:kars-system:kars-sandbox'
     audiences: [
       'api://AzureADTokenExchange'
     ]
@@ -153,10 +153,10 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
 // Controller SA fedcred — lets the controller get ARM tokens via WI to create sandbox fedcreds
 resource controllerFederatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
   parent: sandboxIdentity
-  name: 'azureclaw-controller-sa'
+  name: 'kars-controller-sa'
   properties: {
     issuer: aks.properties.oidcIssuerProfile.issuerURL
-    subject: 'system:serviceaccount:azureclaw-system:azureclaw-controller'
+    subject: 'system:serviceaccount:kars-system:kars-controller'
     audiences: [
       'api://AzureADTokenExchange'
     ]

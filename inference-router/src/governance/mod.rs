@@ -10,13 +10,13 @@
 
 use agentmesh::AuditLogger;
 use agentmesh::identity::AgentIdentity;
-use agentmesh::mcp::rate_limit::{InMemoryRateLimitStore, McpSlidingRateLimiter};
-use agentmesh::mcp::redactor::{CredentialKind, CredentialRedactor};
-use agentmesh::mcp::response::{McpResponseScanner, McpResponseThreatType};
-use agentmesh::mcp::{InMemoryAuditSink, McpMetricsCollector, SystemClock};
 use agentmesh::policy::PolicyEngine;
 use agentmesh::trust::{TrustConfig, TrustManager};
 use agentmesh::types::PolicyDecision;
+use agentmesh_mcp::rate_limit::{InMemoryRateLimitStore, McpSlidingRateLimiter};
+use agentmesh_mcp::redactor::{CredentialKind, CredentialRedactor};
+use agentmesh_mcp::response::{McpResponseScanner, McpResponseThreatType};
+use agentmesh_mcp::{InMemoryAuditSink, McpMetricsCollector, SystemClock};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -163,7 +163,7 @@ impl Governance {
 
         let identity = AgentIdentity::generate(
             sandbox_name,
-            vec!["azureclaw-agent".into(), "task-execution".into()],
+            vec!["kars-agent".into(), "task-execution".into()],
         )
         .unwrap_or_else(|e| {
             tracing::error!("Failed to generate AGT identity: {}", e);
@@ -180,8 +180,8 @@ impl Governance {
         // `.expect()` inside the constructor. See agentmesh-3.7.0
         // src/mcp/redactor.rs.
         let redactor = CredentialRedactor::new();
-        let mcp_clock: std::sync::Arc<dyn agentmesh::mcp::Clock> = std::sync::Arc::new(SystemClock);
-        let mcp_audit: std::sync::Arc<dyn agentmesh::mcp::McpAuditSink> =
+        let mcp_clock: std::sync::Arc<dyn agentmesh_mcp::Clock> = std::sync::Arc::new(SystemClock);
+        let mcp_audit: std::sync::Arc<dyn agentmesh_mcp::McpAuditSink> =
             std::sync::Arc::new(InMemoryAuditSink::new(CredentialRedactor::new()));
         let mcp_metrics = McpMetricsCollector::default();
         let response_scanner = McpResponseScanner::new(
@@ -233,7 +233,7 @@ impl Governance {
             rate_limiter: RateLimiter::new(500.0, 1000.0, 50.0, 100.0),
             behavior: BehaviorMonitor::new(
                 // Behavior-monitor thresholds. Defaults tuned for interactive
-                // AzureClaw sandboxes; offload workers (research loops with
+                // Kars sandboxes; offload workers (research loops with
                 // many tool/inference calls in short bursts) get higher
                 // limits injected via env vars by the controller reconciler.
                 std::env::var("AGT_BEHAVIOR_BURST_THRESHOLD")
@@ -421,8 +421,7 @@ impl Governance {
 
     /// Reload policies from disk (for hot-reload).
     pub fn reload_policies(&self) {
-        let dir =
-            std::env::var("AGT_POLICY_DIR").unwrap_or_else(|_| "/etc/azureclaw/policies".into());
+        let dir = std::env::var("AGT_POLICY_DIR").unwrap_or_else(|_| "/etc/kars/policies".into());
         match self.load_policies_from_dir(&dir) {
             Ok(count) => tracing::info!(rules = count, "Policy hot-reloaded"),
             Err(e) => tracing::warn!(error = %e, "Policy hot-reload failed"),
@@ -432,8 +431,7 @@ impl Governance {
     /// Spawn a background task that watches AGT_POLICY_DIR for changes
     /// and reloads policies when file mtimes change.
     pub fn spawn_policy_watcher(governance: std::sync::Arc<Self>) {
-        let dir =
-            std::env::var("AGT_POLICY_DIR").unwrap_or_else(|_| "/etc/azureclaw/policies".into());
+        let dir = std::env::var("AGT_POLICY_DIR").unwrap_or_else(|_| "/etc/kars/policies".into());
         let interval_secs: u64 = std::env::var("AGT_POLICY_WATCH_INTERVAL")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -617,7 +615,7 @@ impl Governance {
     /// Scan model response text for threats (prompt injection, exfil URLs, etc.).
     /// Returns the sanitized text and whether any threats were found.
     ///
-    /// When `AZURECLAW_SUPPRESS_EXFIL_URL=1` is set, the upstream AGT
+    /// When `KARS_SUPPRESS_EXFIL_URL=1` is set, the upstream AGT
     /// `ExfiltrationUrl` finding is downgraded: the threat is still recorded
     /// (metrics + warn log + audit), but URLs are NOT redacted from the model
     /// response. Rationale: AGT 3.1.0 / 3.3.0 use a naive substring guard
@@ -664,7 +662,7 @@ impl Governance {
                         "flagged",
                     );
 
-                    let suppress_exfil = std::env::var("AZURECLAW_SUPPRESS_EXFIL_URL")
+                    let suppress_exfil = std::env::var("KARS_SUPPRESS_EXFIL_URL")
                         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                         .unwrap_or(false);
                     if suppress_exfil {

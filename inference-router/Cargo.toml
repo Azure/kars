@@ -1,6 +1,6 @@
 [package]
-name = "azureclaw-inference-router"
-description = "High-performance inference router for AzureClaw — routes LLM calls to Azure OpenAI / AI Foundry with Managed Identity auth, content safety, and token budgets"
+name = "kars-inference-router"
+description = "High-performance inference router for Kars — routes LLM calls to Azure OpenAI / AI Foundry with Managed Identity auth, content safety, and token budgets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -43,6 +43,7 @@ async-trait.workspace = true
 # AGT governance (policy YAML parsing + native policy/trust/audit)
 serde_yaml = "0.9"
 agentmesh.workspace = true
+agentmesh-mcp.workspace = true
 
 # TCP keepalive for tunnel dead-connection detection
 socket2 = "0.6"
@@ -58,7 +59,7 @@ tokio-stream = "0.1.18"
 # A2A 1.0.0 verifier + AgentCard schema — lifted into a workspace
 # library crate in S3.5 (ADR-0001 #4) so the public-edge `a2a-gateway`
 # binary can share the exact same JWS path.
-azureclaw-a2a-core = { path = "../azureclaw-a2a-core", version = "0.1.0" }
+kars-a2a-core = { path = "../kars-a2a-core", version = "0.1.0" }
 
 # Handoff encryption (AES-256-GCM + HKDF key derivation + SHA-256 verification)
 aes-gcm = "0.10"

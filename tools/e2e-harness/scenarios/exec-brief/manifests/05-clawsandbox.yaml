@@ -1,4 +1,4 @@
-# 05-clawsandbox.yaml — the actual sandbox that runs the executive-brief
+# 05-karssandbox.yaml — the actual sandbox that runs the executive-brief
 # pipeline. Three sub-agents (analyst, viz, writer) are spawned at
 # runtime by the parent agent based on the prompt's coordination
 # protocol; they share the inference router on 127.0.0.1:8443, the
@@ -7,16 +7,16 @@
 #
 # Channels: Telegram is enabled so the parent agent can post the
 # milestone status pings the prompt asks for. The bot token lives in a
-# K8s Secret named "execbrief-credentials" (created by `azureclaw
+# K8s Secret named "execbrief-credentials" (created by `kars
 # credentials update execbrief --telegram-token ...` or out of band).
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: execbrief
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/channels: telegram
+    kars.azure.com/channels: telegram
 spec:
   runtime:
     kind: OpenClaw
@@ -24,7 +24,7 @@ spec:
       version: "2026.3.13"
       # Do NOT pin `image:` here — the controller fills it from the
       # `SANDBOX_IMAGE` env var on its own deployment (set by
-      # `azureclaw up` to `<your-acr>/openclaw-sandbox:latest`). A
+      # `kars up` to `<your-acr>/openclaw-sandbox:latest`). A
       # hard-coded image with the wrong ACR registry causes
       # ImagePullBackOff and is the kind of drift the
       # "image tags: always use :latest, never hardcode" convention
@@ -35,7 +35,7 @@ spec:
 
   sandbox:
     isolation: "enhanced"
-    seccompProfile: "azureclaw-strict"
+    seccompProfile: "kars-strict"
     readOnlyRootFilesystem: true
     runAsNonRoot: true
     allowPrivilegeEscalation: false
@@ -46,19 +46,19 @@ spec:
   inferenceRef:
     name: execbrief-inference
 
-  # ClawMemory binding (top-level memoryRef, NOT under governance — the
-  # controller reads cs.spec.memoryRef.name; without this the ClawMemory
+  # KarsMemory binding (top-level memoryRef, NOT under governance — the
+  # controller reads cs.spec.memoryRef.name; without this the KarsMemory
   # CR stays Compiled/NoSandboxesReferencing forever and the
-  # /etc/azureclaw/memory/binding.json ConfigMap is never projected,
+  # /etc/kars/memory/binding.json ConfigMap is never projected,
   # so plugin falls back to "memory-<sandbox>" instead of the
-  # CR-declared storeName). See controller/src/claw_memory_reconciler.rs.
+  # CR-declared storeName). See controller/src/kars_memory_reconciler.rs.
   memoryRef:
     name: execbrief-memory
 
   # Behavioral governance: turn the AGT in-pod plugin on and bind it
   # to the single ToolPolicy CR that carries the AGT profile. The
-  # controller resolves `toolPolicyRef.name` in this ClawSandbox's
-  # namespace (azureclaw-system) and mounts the compiled profile at
+  # controller resolves `toolPolicyRef.name` in this KarsSandbox's
+  # namespace (kars-system) and mounts the compiled profile at
   # /etc/agt/policies/agt-profile.yaml inside the sandbox; the runtime
   # plugin reads it and gates every tool call. Without this block the
   # ToolPolicy CR is dead weight (reconciler/mod.rs:570 — governance
@@ -92,7 +92,7 @@ spec:
   # see what it actually reaches in `BlockedBuffer`.
   #
   # In production this list is typically replaced by an `allowlistRef`
-  # pointing at a cosign-signed OCI artifact (see `azureclaw egress sign`)
+  # pointing at a cosign-signed OCI artifact (see `kars egress sign`)
   # so the policy is content-addressed and tamper-evident. We keep it
   # inline here so the harness needs no out-of-band signing step.
   networkPolicy:

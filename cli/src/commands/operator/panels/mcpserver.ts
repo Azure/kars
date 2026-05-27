@@ -25,7 +25,7 @@ export const mcpServerPanel: Panel = {
     // every McpServer in the same namespace as the sandbox (best we can
     // do without resolving label selectors here).
     const items = opts?.sandbox
-      ? state.mcpServers.filter((m) => m.namespace === `azureclaw-${opts.sandbox}`)
+      ? state.mcpServers.filter((m) => m.namespace === `kars-${opts.sandbox}`)
       : state.mcpServers;
     if (items.length === 0) return EMPTY;
 

@@ -14,12 +14,12 @@ export function credentialsCommand(): Command {
 
   cmd
     .description(
-      "Manage AzureClaw credentials (inference provider, channel tokens, API keys)"
+      "Manage Kars credentials (inference provider, channel tokens, API keys)"
     )
     .action(async () => {
       const { default: inquirer } = await import("inquirer");
 
-      banner("AzureClaw · Credentials", "Secure AI Agent Runtime on Azure");
+      banner("Kars · Credentials", "Secure AI Agent Runtime on Azure");
 
       // Show current state
       const secrets = loadSecrets();
@@ -132,9 +132,9 @@ export function credentialsCommand(): Command {
       console.log(`  ${chalk.bold(String(count))} secret${count !== 1 ? "s" : ""} stored in ${chalk.dim(SECRETS_FILE)}`);
       console.log();
       section("Next Steps");
-      console.log(`  Dev:    ${chalk.cyan("azureclaw dev")}               ${chalk.dim("— tokens auto-loaded")}`);
-      console.log(`  Add:    ${chalk.cyan("azureclaw add <name>")}        ${chalk.dim("— tokens auto-loaded")}`);
-      console.log(`  List:   ${chalk.cyan("azureclaw credentials list")}  ${chalk.dim("— show all (masked)")}`);
+      console.log(`  Dev:    ${chalk.cyan("kars dev")}               ${chalk.dim("— tokens auto-loaded")}`);
+      console.log(`  Add:    ${chalk.cyan("kars add <name>")}        ${chalk.dim("— tokens auto-loaded")}`);
+      console.log(`  List:   ${chalk.cyan("kars credentials list")}  ${chalk.dim("— show all (masked)")}`);
       console.log();
     });
 
@@ -189,7 +189,7 @@ export function credentialsCommand(): Command {
       const secrets = loadSecrets();
       const keys = Object.keys(secrets);
       if (keys.length === 0) {
-        console.log(chalk.dim("  No secrets stored. Use: azureclaw credentials set <key> <value>"));
+        console.log(chalk.dim("  No secrets stored. Use: kars credentials set <key> <value>"));
         return;
       }
       console.log(chalk.bold("\n  Stored secrets:\n"));
@@ -274,7 +274,7 @@ export function credentialsCommand(): Command {
         process.exit(1);
       }
 
-      const namespace = `azureclaw-${name}`;
+      const namespace = `kars-${name}`;
       const secretName = `${name}-credentials`;
       const spinner = ora(`Updating credentials for '${name}'...`).start();
 

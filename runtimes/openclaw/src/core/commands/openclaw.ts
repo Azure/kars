@@ -6,9 +6,9 @@
 //
 // Final closure-bound block lifted out of `register()`:
 //   • Foundry model provider registration (`api.registerProvider`).
-//   • CLI subcommand registrar `openclaw azureclaw …`
+//   • CLI subcommand registrar `openclaw kars …`
 //     (`api.registerCli`).
-//   • ~12 slash-command (`/azureclaw …`) definitions
+//   • ~12 slash-command (`/kars …`) definitions
 //     (`api.registerCommand`).
 //
 // None of this code talks to the AGT mesh — it's all router HTTP
@@ -34,7 +34,7 @@ export interface OpenClawCommandsDeps {
   policy: () => any;
   trustStore: () => any;
   auditLogger: () => any;
-  // Memory sync coupling — used by the /azureclaw model-switch command to
+  // Memory sync coupling — used by the /kars model-switch command to
   // flush buffered tool-call summaries before the LLM swaps under us.
   memorySyncBuffer: string[];
   syncToFoundryMemory: (
@@ -74,9 +74,9 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
 
   api.registerProvider({
     id: "azure-openai",
-    label: "Azure AI Foundry (via AzureClaw)",
-    docsPath: "https://github.com/Azure/azureclaw",
-    aliases: ["azure", "azureclaw", "foundry"],
+    label: "Azure AI Foundry (via Kars)",
+    docsPath: "https://github.com/Azure/kars",
+    aliases: ["azure", "kars", "foundry"],
     envVars: ["AZURE_OPENAI_API_KEY"],
     models: { chat: chatModels },
     auth: [
@@ -85,19 +85,19 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         type: "api-key",
         envVar: "AZURE_OPENAI_API_KEY",
         headerName: "api-key",
-        label: "Azure API Key (or 'routed-via-inference-router' for AzureClaw)",
+        label: "Azure API Key (or 'routed-via-inference-router' for Kars)",
       },
     ],
   });
 
-  // ── Register CLI subcommands: openclaw azureclaw <cmd> ────────────────
+  // ── Register CLI subcommands: openclaw kars <cmd> ────────────────
   api.registerCli(
     (ctx: any) => {
-      const azureclaw = ctx.program
-        .command("azureclaw")
-        .description("AzureClaw — secure AI agent runtime on Azure");
+      const kars = ctx.program
+        .command("kars")
+        .description("Kars — secure AI agent runtime on Azure");
 
-      azureclaw
+      kars
         .command("status")
         .description("Show sandbox health, security, and inference metrics")
         .action(async () => {
@@ -112,75 +112,75 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
               req.on("error", reject);
               req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
             });
-            console.log("AzureClaw Inference Router — Prometheus Metrics\n");
+            console.log("Kars Inference Router — Prometheus Metrics\n");
             console.log(body);
           } catch {
-            console.log(`AzureClaw Inference Router: not reachable (${routerUrl("/metrics")})`);
+            console.log(`Kars Inference Router: not reachable (${routerUrl("/metrics")})`);
           }
         });
 
-      azureclaw
+      kars
         .command("connect")
         .description("Connect to the sandbox (host-side only)")
         .action(async () => {
           console.log("'connect' is a host-side command. Inside the sandbox, you're already connected.");
-          console.log("From the host, run: azureclaw connect");
+          console.log("From the host, run: kars connect");
         });
 
-      azureclaw
+      kars
         .command("dev")
         .description("Start a local sandbox (host-side only)")
         .action(async () => {
           console.log("'dev' is a host-side command. This sandbox is already running.");
-          console.log("From the host, run: azureclaw dev");
+          console.log("From the host, run: kars dev");
         });
 
-      azureclaw
+      kars
         .command("logs")
         .option("-f, --follow", "Follow log output")
         .description("Stream sandbox logs (host-side only)")
         .action(async () => {
           console.log("'logs' is a host-side command.");
-          console.log("From the host, run: azureclaw logs");
+          console.log("From the host, run: kars logs");
         });
     },
-    { commands: ["azureclaw"] }
+    { commands: ["kars"] }
   );
 
-  // ── Register /azureclaw slash command ─────────────────────────────────
+  // ── Register /kars slash command ─────────────────────────────────
   api.registerCommand({
-    name: "azureclaw",
-    description: "Show AzureClaw sandbox status, models, and security info",
+    name: "kars",
+    description: "Show Kars sandbox status, models, and security info",
     handler: async () => {
       return {
         text: [
-          "**AzureClaw Sandbox** (Foundry-integrated)",
+          "**Kars Sandbox** (Foundry-integrated)",
           `Model: ${config.model}`,
           `Sandbox: ${config.sandboxName}`,
           `Endpoint: ${config.endpoint || "(configured via Foundry)"}`,
           "",
           "**Slash Commands:**",
-          "- `/azureclaw` — this help",
-          "- `/azureclaw-models` — list available Foundry models",
-          "- `/azureclaw-switch <model>` — switch AI model live",
-          "- `/azureclaw-agents` — list Foundry agents",
-          "- `/azureclaw-memory <agent-id>` — view agent memory (threads)",
-          "- `/azureclaw-security` — show isolation level + security posture",
+          "- `/kars` — this help",
+          "- `/kars-models` — list available Foundry models",
+          "- `/kars-switch <model>` — switch AI model live",
+          "- `/kars-agents` — list Foundry agents",
+          "- `/kars-memory <agent-id>` — view agent memory (threads)",
+          "- `/kars-security` — show isolation level + security posture",
           "",
           "**CLI Commands (from host):**",
-          "- `azureclaw model list foundry-agent` — live model catalog",
-          "- `azureclaw model set foundry-agent Phi-4` — switch model",
-          "- `azureclaw policy get foundry-agent` — show network policy",
-          "- `azureclaw approve --list` — pending egress requests",
-          "- `azureclaw trace foundry-agent --exec` — eBPF tracing",
+          "- `kars model list foundry-agent` — live model catalog",
+          "- `kars model set foundry-agent Phi-4` — switch model",
+          "- `kars policy get foundry-agent` — show network policy",
+          "- `kars approve --list` — pending egress requests",
+          "- `kars trace foundry-agent --exec` — eBPF tracing",
         ].join("\n"),
       };
     },
   });
 
-  // ── /azureclaw-models — list available models from Foundry ────────────
+  // ── /kars-models — list available models from Foundry ────────────
   api.registerCommand({
-    name: "azureclaw-models",
+    name: "kars-models",
     description: "List available AI models from Azure Foundry",
     handler: async () => {
       try {
@@ -189,7 +189,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         const body = await new Promise<string>((resolve, reject) => {
           const req = http.get(
             routerUrl("/deployments?api-version=2025-11-15-preview"),
-            { headers: { "x-azureclaw-sandbox": "self" } },
+            { headers: { "x-kars-sandbox": "self" } },
             (res) => {
               let data = "";
               res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
@@ -213,7 +213,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
             "",
             ...lines,
             "",
-            "Switch with: `/azureclaw-switch <model>`",
+            "Switch with: `/kars-switch <model>`",
           ].join("\n"),
         };
       } catch {
@@ -265,7 +265,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         }
       }
       const modelsArr = [...allModels].map(id => ({
-        id, name: `${id} (Azure via AzureClaw)`, reasoning: false,
+        id, name: `${id} (Azure via Kars)`, reasoning: false,
         input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000, maxTokens: 8192, api: "openai-completions",
       }));
@@ -311,10 +311,10 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     }
   }
 
-  // ── /azureclaw-switch — switch model with memory handoff ──────────────
+  // ── /kars-switch — switch model with memory handoff ──────────────
   api.registerCommand({
-    name: "azureclaw-switch",
-    description: "Switch AI model (e.g. /azureclaw-switch gpt-5.4-mini)",
+    name: "kars-switch",
+    description: "Switch AI model (e.g. /kars-switch gpt-5.4-mini)",
     acceptsArgs: true,
     handler: async (ctx: any) => {
       const model = ctx.args?.trim();
@@ -322,7 +322,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         const available = deps.getFoundryProject()?.deployments
           ?.filter((d: any) => !d.id?.includes("embedding"))
           ?.map((d: any) => d.id).join(", ") || "unknown";
-        return { text: `Usage: /azureclaw-switch <model-name>\nAvailable: ${available}` };
+        return { text: `Usage: /kars-switch <model-name>\nAvailable: ${available}` };
       }
       return { text: await switchModelInternal(model) };
     },
@@ -374,9 +374,9 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     },
   });
 
-  // ── /azureclaw-security — show security posture ───────────────────────
+  // ── /kars-security — show security posture ───────────────────────
   api.registerCommand({
-    name: "azureclaw-security",
+    name: "kars-security",
     description: "Show sandbox security posture",
     handler: async () => {
       const uname = await import("node:child_process");
@@ -390,16 +390,16 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
       const isKata = kernel.includes("mshv");
       return {
         text: [
-          "**AzureClaw Security Posture**",
+          "**Kars Security Posture**",
           "",
           `Kernel: ${kernel}`,
           `User: ${user}`,
           `Isolation: ${isKata ? "confidential (Kata VM)" : "enhanced (runc + seccomp)"}`,
           `Root filesystem: read-only`,
           `Capabilities: ALL dropped`,
-          `Seccomp: ${isKata ? "RuntimeDefault (VM boundary)" : "Localhost (azureclaw-strict)"}`,
+          `Seccomp: ${isKata ? "RuntimeDefault (VM boundary)" : "Localhost (kars-strict)"}`,
           `Network: default-deny egress + iptables UID guard`,
-          `Inference: routed through AzureClaw inference router`,
+          `Inference: routed through Kars inference router`,
           `Foundry Agent API: proxied via ${routerBase()}/agents/*`,
           `Auth: IMDS (kubelet MI, zero keys)`,
         ].join("\n"),
@@ -407,15 +407,15 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     },
   });
 
-  // ── /azureclaw-agt — AGT governance status + policy evaluation ────────
+  // ── /kars-agt — AGT governance status + policy evaluation ────────
   api.registerCommand({
-    name: "azureclaw-agt",
-    description: "AGT governance status. /azureclaw-agt check <action> to evaluate policy",
+    name: "kars-agt",
+    description: "AGT governance status. /kars-agt check <action> to evaluate policy",
     acceptsArgs: true,
     handler: async (ctx: any) => {
       const args = ctx.args?.trim() || "";
 
-      // Policy check mode: /azureclaw-agt check shell:rm -rf /
+      // Policy check mode: /kars-agt check shell:rm -rf /
       if (args.startsWith("check ")) {
         const action = args.slice(6).trim();
         // Application-layer fast path: small inline allow/deny table via mesh transport.
@@ -438,7 +438,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
       }
 
       // Status mode
-      const sdkStatus = "router-native (mesh transport via @azureclaw/mesh)";
+      const sdkStatus = "router-native (mesh transport via @kars/mesh)";
       const trustStatus = deps.meshClient() ? "active (Ed25519 via node:crypto, 0-1000 scale)" : "unavailable";
       const auditStatus = "router-native (hash-chain)";
       const meshStatus = deps.meshClient()
@@ -457,9 +457,9 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         const parsed = JSON.parse(body);
         return {
           text: [
-            "**AzureClaw AGT Governance**",
+            "**Kars AGT Governance**",
             "",
-            "**Application Layer** (plugin, @azureclaw/mesh + node:crypto):",
+            "**Application Layer** (plugin, @kars/mesh + node:crypto):",
             `  Identity: ${identityStatus}`,
             `  Mesh client: ${meshStatus}`,
             `  Policy engine: ${sdkStatus}`,
@@ -478,17 +478,17 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
             "**Overlap resolution:**",
             "  Tool policy → AGT SDK (plugin)",
             "  Mesh routing → Rust router (K8s DNS)",
-            "  Content safety → AzureClaw (Azure AI)",
-            "  Token budgets → AzureClaw (router)",
-            "  Network/FS → AzureClaw (iptables/seccomp)",
+            "  Content safety → Kars (Azure AI)",
+            "  Token budgets → Kars (router)",
+            "  Network/FS → Kars (iptables/seccomp)",
             "",
-            "Check policy: `/azureclaw-agt check shell:rm -rf /`",
+            "Check policy: `/kars-agt check shell:rm -rf /`",
           ].filter(Boolean).join("\n"),
         };
       } catch {
         return {
           text: [
-            "**AzureClaw AGT Governance**",
+            "**Kars AGT Governance**",
             `Policy engine: ${sdkStatus}`,
             `Trust store: ${trustStatus}`,
             `Audit logger: ${auditStatus}`,
@@ -500,9 +500,9 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     },
   });
 
-  // ── /azureclaw-agents — list Foundry agents via proxied API ───────────
+  // ── /kars-agents — list Foundry agents via proxied API ───────────
   api.registerCommand({
-    name: "azureclaw-agents",
+    name: "kars-agents",
     description: "List Foundry agents available in this sandbox",
     handler: async () => {
       try {
@@ -539,7 +539,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
             "",
             ...agents.map((a: any) => `- **${a.name || a.id}** (model: ${a.model || "default"}, id: ${a.id})`),
             "",
-            "Use `/azureclaw-memory <agent-id>` to view threads.",
+            "Use `/kars-memory <agent-id>` to view threads.",
           ].join("\n"),
         };
       } catch {
@@ -548,15 +548,15 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     },
   });
 
-  // ── /azureclaw-memory — list Foundry threads (agent memory) ───────────
+  // ── /kars-memory — list Foundry threads (agent memory) ───────────
   api.registerCommand({
-    name: "azureclaw-memory",
-    description: "List Foundry threads (agent memory) — /azureclaw-memory [agent-id]",
+    name: "kars-memory",
+    description: "List Foundry threads (agent memory) — /kars-memory [agent-id]",
     acceptsArgs: true,
     handler: async (ctx: any) => {
       const agentId = ctx.args?.trim();
       if (!agentId) {
-        return { text: "Usage: `/azureclaw-memory <agent-id>`\n\nUse `/azureclaw-agents` to list agents first." };
+        return { text: "Usage: `/kars-memory <agent-id>`\n\nUse `/kars-agents` to list agents first." };
       }
       try {
         const http = await import("node:http");
@@ -590,17 +590,17 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     },
   });
 
-  // ── /azureclaw-spawn — spawn a sub-agent sandbox via router ────────────
+  // ── /kars-spawn — spawn a sub-agent sandbox via router ────────────
   api.registerCommand({
-    name: "azureclaw-spawn",
-    description: "Spawn a sub-agent sandbox — /azureclaw-spawn <name> [--model X] [--governance] [--learn-egress]",
+    name: "kars-spawn",
+    description: "Spawn a sub-agent sandbox — /kars-spawn <name> [--model X] [--governance] [--learn-egress]",
     acceptsArgs: true,
     handler: async (ctx: any) => {
       const raw = ctx.args?.trim() || "";
       if (!raw) {
         return {
           text: [
-            "**Usage:** `/azureclaw-spawn <name> [options]`",
+            "**Usage:** `/kars-spawn <name> [options]`",
             "",
             "**Options:**",
             "  `--model <name>` — model deployment (default: gpt-4.1)",
@@ -610,12 +610,12 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
             "  `--token-budget-daily <n>` — daily token limit",
             "",
             "**Examples:**",
-            "  `/azureclaw-spawn sub-analyst --model gpt-4.1 --governance`",
-            "  `/azureclaw-spawn sub-coder --model DeepSeek-V3.2 --learn-egress`",
+            "  `/kars-spawn sub-analyst --model gpt-4.1 --governance`",
+            "  `/kars-spawn sub-coder --model DeepSeek-V3.2 --learn-egress`",
             "",
             "**After spawning:**",
-            "  `/azureclaw-spawn-list` — list your sub-agents",
-            "  Use the azureclaw_mesh_send tool to communicate (E2E encrypted)",
+            "  `/kars-spawn-list` — list your sub-agents",
+            "  Use the kars_mesh_send tool to communicate (E2E encrypted)",
           ].join("\n"),
         };
       }
@@ -687,10 +687,10 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
             "",
             "**Next steps:**",
             body.governance
-              ? "- Send tasks via azureclaw_mesh_send tool (E2E encrypted)"
+              ? "- Send tasks via kars_mesh_send tool (E2E encrypted)"
               : "- Enable governance for inter-agent communication",
-            "- Check status: `/azureclaw-spawn-list`",
-            "- Tear down: `/azureclaw-spawn-destroy " + name + "`",
+            "- Check status: `/kars-spawn-list`",
+            "- Tear down: `/kars-spawn-destroy " + name + "`",
           ].join("\n"),
         };
       } catch {
@@ -699,9 +699,9 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     },
   });
 
-  // ── /azureclaw-spawn-list — list spawned sub-agents ───────────────────
+  // ── /kars-spawn-list — list spawned sub-agents ───────────────────
   api.registerCommand({
-    name: "azureclaw-spawn-list",
+    name: "kars-spawn-list",
     description: "List sub-agents spawned from this sandbox",
     handler: async () => {
       try {
@@ -721,7 +721,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         }
         const sandboxes = parsed.sandboxes || [];
         if (sandboxes.length === 0) {
-          return { text: "No sub-agents spawned yet. Use `/azureclaw-spawn <name>` to create one." };
+          return { text: "No sub-agents spawned yet. Use `/kars-spawn <name>` to create one." };
         }
         return {
           text: [
@@ -731,8 +731,8 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
               `- **${s.agent_id}** — ${s.phase || "unknown"} (model: ${s.model || "default"}, governance: ${s.governance ? "on" : "off"})`
             ),
             "",
-            "Communicate via azureclaw_mesh_send tool (E2E encrypted)",
-            "Destroy: `/azureclaw-spawn-destroy <name>`",
+            "Communicate via kars_mesh_send tool (E2E encrypted)",
+            "Destroy: `/kars-spawn-destroy <name>`",
           ].join("\n"),
         };
       } catch {
@@ -741,15 +741,15 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     },
   });
 
-  // ── /azureclaw-spawn-destroy — tear down a sub-agent ──────────────────
+  // ── /kars-spawn-destroy — tear down a sub-agent ──────────────────
   api.registerCommand({
-    name: "azureclaw-spawn-destroy",
-    description: "Destroy a spawned sub-agent — /azureclaw-spawn-destroy <name>",
+    name: "kars-spawn-destroy",
+    description: "Destroy a spawned sub-agent — /kars-spawn-destroy <name>",
     acceptsArgs: true,
     handler: async (ctx: any) => {
       const name = ctx.args?.trim();
       if (!name) {
-        return { text: "Usage: `/azureclaw-spawn-destroy <name>`\n\nUse `/azureclaw-spawn-list` to see your sub-agents." };
+        return { text: "Usage: `/kars-spawn-destroy <name>`\n\nUse `/kars-spawn-list` to see your sub-agents." };
       }
       try {
         const http = await import("node:http");
@@ -782,15 +782,15 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     },
   });
 
-  // ── /azureclaw-spawn-status — check status of a sub-agent ─────────────
+  // ── /kars-spawn-status — check status of a sub-agent ─────────────
   api.registerCommand({
-    name: "azureclaw-spawn-status",
-    description: "Check status of a spawned sub-agent — /azureclaw-spawn-status <name>",
+    name: "kars-spawn-status",
+    description: "Check status of a spawned sub-agent — /kars-spawn-status <name>",
     acceptsArgs: true,
     handler: async (ctx: any) => {
       const name = ctx.args?.trim();
       if (!name) {
-        return { text: "Usage: `/azureclaw-spawn-status <name>`\n\nUse `/azureclaw-spawn-list` to see your sub-agents." };
+        return { text: "Usage: `/kars-spawn-status <name>`\n\nUse `/kars-spawn-list` to see your sub-agents." };
       }
       try {
         const http = await import("node:http");
@@ -815,7 +815,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
             parsed.namespace ? `Namespace: ${parsed.namespace}` : "",
             "",
             ready
-              ? "Send a task via azureclaw_mesh_send tool with to_agent: \"" + name + "\""
+              ? "Send a task via kars_mesh_send tool with to_agent: \"" + name + "\""
               : "Wait for phase=Running before sending mesh messages.",
           ].filter(Boolean).join("\n"),
         };

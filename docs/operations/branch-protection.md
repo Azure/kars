@@ -1,7 +1,7 @@
 # Branch Protection — `dev` and `main`
 
 This is the canonical list of CI jobs that must be set as **required
-status checks** on `dev` and `main` for AzureClaw. Setting these as
+status checks** on `dev` and `main` for Kars. Setting these as
 required is the source of truth for what blocks a merge.
 
 ## Required checks
@@ -18,7 +18,7 @@ before merge:
 | `mesh-plugin-build`     | AgentMesh plugin build + `npm audit --audit-level=high` |
 | `python-sidecar`        | Python sidecar tests                                   |
 | `bicep-validate`        | Bicep template validation                              |
-| `helm-lint`             | `helm lint deploy/helm/azureclaw`                      |
+| `helm-lint`             | `helm lint deploy/helm/kars`                      |
 | `security-scan`         | Trivy filesystem scan                                  |
 | `container-scan`        | Trivy image scan                                       |
 | `dockerfile-lint`       | `hadolint` for every Dockerfile                        |

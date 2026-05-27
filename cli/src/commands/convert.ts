@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * `azureclaw convert` — translate between AzureClaw and upstream
+ * `kars convert` — translate between Kars and upstream
  * `agents.x-k8s.io/v1alpha1` Sandbox manifests (YAML in / YAML out).
  *
  * Phase 2 S9.2: real translator. Phase 0 emitted exit 3.
@@ -12,9 +12,9 @@
  * `controller/src/crd.rs:25-405`).
  *
  * **Targets:**
- *   - `clawsandbox`        — upstream `Sandbox` → `ClawSandbox` (lossy inverse)
- *   - `upstream-sandbox`   — `ClawSandbox` → upstream `Sandbox`  (lossy forward)
- *   - `overlay`            — upstream `Sandbox` → fresh `ClawSandbox`
+ *   - `karssandbox`        — upstream `Sandbox` → `KarsSandbox` (lossy inverse)
+ *   - `upstream-sandbox`   — `KarsSandbox` → upstream `Sandbox`  (lossy forward)
+ *   - `overlay`            — upstream `Sandbox` → fresh `KarsSandbox`
  *                            skeleton with `spec.upstreamCompatibility` set
  *                            (governance overlay only; pod owned by upstream)
  *
@@ -37,15 +37,15 @@ import { readFileSync } from "node:fs";
 import chalk from "chalk";
 import { parse as yamlParse, parseAllDocuments, stringify as yamlStringify } from "yaml";
 
-const CLAW_API_VERSION = "azureclaw.azure.com/v1alpha1";
-const CLAW_KIND = "ClawSandbox";
+const CLAW_API_VERSION = "kars.azure.com/v1alpha1";
+const CLAW_KIND = "KarsSandbox";
 const UPSTREAM_API_VERSION = "agents.x-k8s.io/v1alpha1";
 const UPSTREAM_KIND = "Sandbox";
 
-type ConvertTarget = "clawsandbox" | "upstream-sandbox" | "overlay";
+type ConvertTarget = "karssandbox" | "upstream-sandbox" | "overlay";
 
 const TARGETS: ReadonlyArray<ConvertTarget> = [
-  "clawsandbox",
+  "karssandbox",
   "upstream-sandbox",
   "overlay",
 ];
@@ -118,9 +118,9 @@ function cleanMetadata(
 }
 
 /**
- * Forward translation: `ClawSandbox` → upstream `Sandbox`.
+ * Forward translation: `KarsSandbox` → upstream `Sandbox`.
  *
- * Lossy on AzureClaw-only fields (governance, inference, a2a, agent,
+ * Lossy on Kars-only fields (governance, inference, a2a, agent,
  * azureServices, networkPolicy, upstreamCompatibility). Each emits a warning.
  *
  * Mirrors controller seccomp/runtimeClass logic
@@ -130,10 +130,10 @@ function cleanMetadata(
  *   - `seccompProfile == "RuntimeDefault"` or empty → RuntimeDefault
  *   - otherwise → `Localhost` with `profiles/<name>.json`
  */
-function clawsandboxToUpstreamSandbox(parsed: ParsedManifest): TranslateResult {
-  if (parsed.kind !== CLAW_KIND || !parsed.apiVersion.startsWith("azureclaw.azure.com/")) {
+function karssandboxToUpstreamSandbox(parsed: ParsedManifest): TranslateResult {
+  if (parsed.kind !== CLAW_KIND || !parsed.apiVersion.startsWith("kars.azure.com/")) {
     throw new Error(
-      `expected source kind=${CLAW_KIND} apiVersion=azureclaw.azure.com/...; got kind=${parsed.kind} apiVersion=${parsed.apiVersion}`,
+      `expected source kind=${CLAW_KIND} apiVersion=kars.azure.com/...; got kind=${parsed.kind} apiVersion=${parsed.apiVersion}`,
     );
   }
   const warnings: string[] = [];
@@ -149,7 +149,7 @@ function clawsandboxToUpstreamSandbox(parsed: ParsedManifest): TranslateResult {
   const runtimeKind = typeof runtime.kind === "string" ? runtime.kind : "OpenClaw";
   if (runtimeKind !== "OpenClaw") {
     throw new Error(
-      `ClawSandbox.spec.runtime.kind="${runtimeKind}" cannot be converted to upstream Sandbox; only OpenClaw runtime is supported by the upstream sigs/agent-sandbox shape`,
+      `KarsSandbox.spec.runtime.kind="${runtimeKind}" cannot be converted to upstream Sandbox; only OpenClaw runtime is supported by the upstream sigs/agent-sandbox shape`,
     );
   }
   const openclaw = (runtime.openclaw ?? {}) as Record<string, unknown>;
@@ -158,7 +158,7 @@ function clawsandboxToUpstreamSandbox(parsed: ParsedManifest): TranslateResult {
 
   const image = typeof openclaw.image === "string" ? openclaw.image : undefined;
   if (!image) {
-    throw new Error("ClawSandbox.spec.runtime.openclaw.image required for upstream-sandbox conversion");
+    throw new Error("KarsSandbox.spec.runtime.openclaw.image required for upstream-sandbox conversion");
   }
 
   const env = mapToEnvArray((openclaw.extraEnv ?? {}) as Record<string, unknown>);
@@ -166,7 +166,7 @@ function clawsandboxToUpstreamSandbox(parsed: ParsedManifest): TranslateResult {
   const isolation = typeof sandbox.isolation === "string" ? sandbox.isolation : "enhanced";
   const seccompProfileName = typeof sandbox.seccompProfile === "string"
     ? sandbox.seccompProfile
-    : "azureclaw-strict";
+    : "kars-strict";
 
   let seccompProfile: Record<string, unknown>;
   if (
@@ -255,7 +255,7 @@ function mapToEnvArray(extraEnv: Record<string, unknown>): Array<{ name: string;
 }
 
 /**
- * Inverse translation: upstream `Sandbox` → `ClawSandbox`.
+ * Inverse translation: upstream `Sandbox` → `KarsSandbox`.
  *
  * Lossy on shutdownTime, shutdownPolicy, volumes, volumeClaimTemplates,
  * replicas != 1, multi-container pods, pod-level security/scheduling fields,
@@ -306,7 +306,7 @@ function upstreamSandboxToClawsandbox(parsed: ParsedManifest): TranslateResult {
   let isolation = "enhanced";
   if (runtimeClass === "kata-vm-isolation") {
     isolation = "confidential";
-  } else if (runtimeClass !== "" && runtimeClass !== "azureclaw-runc") {
+  } else if (runtimeClass !== "" && runtimeClass !== "kars-runc") {
     warnings.push(
       `unknown runtimeClassName="${runtimeClass}" (expected kata-vm-isolation for confidential); defaulting isolation to enhanced`,
     );
@@ -344,7 +344,7 @@ function upstreamSandboxToClawsandbox(parsed: ParsedManifest): TranslateResult {
         kind: "OpenClaw",
         openclaw,
       },
-      // Post-S10/S13: ClawSandbox MUST reference an InferencePolicy CR
+      // Post-S10/S13: KarsSandbox MUST reference an InferencePolicy CR
       // by name. We can't infer model preference from a Sigs upstream
       // AgentSandbox (no analog), so we emit a placeholder ref and warn
       // the operator to mint `<name>-inference` before applying.
@@ -360,18 +360,18 @@ function upstreamSandboxToClawsandbox(parsed: ParsedManifest): TranslateResult {
   }
 
   // Lossy upstream-only field warnings.
-  if (spec.shutdownTime !== undefined) warnings.push("dropped spec.shutdownTime (no ClawSandbox analog)");
-  if (spec.shutdownPolicy !== undefined) warnings.push("dropped spec.shutdownPolicy (no ClawSandbox analog)");
-  if (spec.volumeClaimTemplates !== undefined) warnings.push("dropped spec.volumeClaimTemplates (no ClawSandbox analog)");
+  if (spec.shutdownTime !== undefined) warnings.push("dropped spec.shutdownTime (no KarsSandbox analog)");
+  if (spec.shutdownPolicy !== undefined) warnings.push("dropped spec.shutdownPolicy (no KarsSandbox analog)");
+  if (spec.volumeClaimTemplates !== undefined) warnings.push("dropped spec.volumeClaimTemplates (no KarsSandbox analog)");
   if (spec.replicas !== undefined && spec.replicas !== 1) {
-    warnings.push(`dropped spec.replicas=${String(spec.replicas)} (ClawSandbox always 1)`);
+    warnings.push(`dropped spec.replicas=${String(spec.replicas)} (KarsSandbox always 1)`);
   }
   if (podSpec.volumes !== undefined) warnings.push("dropped podTemplate.spec.volumes");
   if (podSpec.initContainers !== undefined) warnings.push("dropped podTemplate.spec.initContainers");
   if (podSpec.serviceAccountName !== undefined) warnings.push("dropped podTemplate.spec.serviceAccountName (controller manages SA)");
-  if (podSpec.hostNetwork === true) warnings.push("dropped podTemplate.spec.hostNetwork=true (forbidden by AzureClaw posture)");
-  if (podSpec.hostPID === true) warnings.push("dropped podTemplate.spec.hostPID=true (forbidden by AzureClaw posture)");
-  if (podSpec.hostIPC === true) warnings.push("dropped podTemplate.spec.hostIPC=true (forbidden by AzureClaw posture)");
+  if (podSpec.hostNetwork === true) warnings.push("dropped podTemplate.spec.hostNetwork=true (forbidden by Kars posture)");
+  if (podSpec.hostPID === true) warnings.push("dropped podTemplate.spec.hostPID=true (forbidden by Kars posture)");
+  if (podSpec.hostIPC === true) warnings.push("dropped podTemplate.spec.hostIPC=true (forbidden by Kars posture)");
   if (podSpec.nodeSelector !== undefined) warnings.push("dropped podTemplate.spec.nodeSelector (controller picks pool from isolation)");
   if (podSpec.affinity !== undefined) warnings.push("dropped podTemplate.spec.affinity");
   if (podSpec.tolerations !== undefined) warnings.push("dropped podTemplate.spec.tolerations");
@@ -379,7 +379,7 @@ function upstreamSandboxToClawsandbox(parsed: ParsedManifest): TranslateResult {
 
   // podTemplate.metadata.{labels,annotations} (verified against
   // kubernetes-sigs/agent-sandbox@c8c85f5 api/v1alpha1/sandbox_types.go).
-  // ClawSandbox does not model pod-level labels/annotations directly — the
+  // KarsSandbox does not model pod-level labels/annotations directly — the
   // controller adds its own.
   const podMeta = podTemplate.metadata as Record<string, unknown> | undefined;
   if (podMeta) {
@@ -451,18 +451,18 @@ function canonicaliseSeccomp(
   if (type === "RuntimeDefault") {
     if (isolation !== "confidential") {
       warnings.push(
-        "seccompProfile.type=RuntimeDefault on non-confidential pod; mapping to ClawSandbox default (azureclaw-strict)",
+        "seccompProfile.type=RuntimeDefault on non-confidential pod; mapping to KarsSandbox default (kars-strict)",
       );
     }
     return undefined;
   }
   if (type !== "Localhost") {
-    warnings.push(`unknown seccompProfile.type="${String(type)}"; using ClawSandbox default`);
+    warnings.push(`unknown seccompProfile.type="${String(type)}"; using KarsSandbox default`);
     return undefined;
   }
   const path = sp.localhostProfile;
   if (typeof path !== "string" || path === "") {
-    warnings.push("seccompProfile.type=Localhost without localhostProfile; using ClawSandbox default");
+    warnings.push("seccompProfile.type=Localhost without localhostProfile; using KarsSandbox default");
     return undefined;
   }
   // Canonical: profiles/<name>.json
@@ -480,12 +480,12 @@ function canonicaliseSeccomp(
     warnings.push(`seccompProfile.localhostProfile="${path}" not in canonical profiles/<name>.json form; treating as bare profile name`);
     return path;
   }
-  warnings.push(`seccompProfile.localhostProfile="${path}" is non-canonical; using ClawSandbox default`);
+  warnings.push(`seccompProfile.localhostProfile="${path}" is non-canonical; using KarsSandbox default`);
   return undefined;
 }
 
 /**
- * Emit a fresh ClawSandbox skeleton overlay-bound to an upstream Sandbox.
+ * Emit a fresh KarsSandbox skeleton overlay-bound to an upstream Sandbox.
  *
  * Output is purely the governance overlay: namespace + name + an
  * `upstreamCompatibility` block. Pod-template fields (image, env, resources,
@@ -553,10 +553,10 @@ interface DispatchOptions {
 
 function dispatch(parsed: ParsedManifest, opts: DispatchOptions): TranslateResult {
   switch (opts.target) {
-    case "clawsandbox":
+    case "karssandbox":
       return upstreamSandboxToClawsandbox(parsed);
     case "upstream-sandbox":
-      return clawsandboxToUpstreamSandbox(parsed);
+      return karssandboxToUpstreamSandbox(parsed);
     case "overlay":
       if (!opts.sandboxRef || opts.sandboxRef === "") {
         throw new Error("--to overlay requires --sandbox-ref=<name|namespace/name>");
@@ -570,13 +570,13 @@ export function convertCommand(): Command {
 
   cmd
     .description(
-      "Translate between ClawSandbox and upstream agents.x-k8s.io/v1alpha1 Sandbox",
+      "Translate between KarsSandbox and upstream agents.x-k8s.io/v1alpha1 Sandbox",
     )
     .requiredOption("-f, --file <path>", "Source manifest YAML")
     .option(
       "--to <target>",
       `Target kind (${TARGETS.join(" | ")})`,
-      "clawsandbox",
+      "karssandbox",
     )
     .option(
       "--sandbox-ref <ns/name>",
@@ -596,9 +596,9 @@ export function convertCommand(): Command {
       "after",
       `
 Examples:
-  $ azureclaw convert -f sandbox.yaml --to clawsandbox > clawsandbox.yaml
-  $ azureclaw convert -f clawsandbox.yaml --to upstream-sandbox --allow-lossy
-  $ azureclaw convert -f sandbox.yaml --to overlay --sandbox-ref=prod/web
+  $ kars convert -f sandbox.yaml --to karssandbox > karssandbox.yaml
+  $ kars convert -f karssandbox.yaml --to upstream-sandbox --allow-lossy
+  $ kars convert -f sandbox.yaml --to overlay --sandbox-ref=prod/web
 
 See docs/internal/sigs-agent-sandbox-compat.md for the normative mapping.
 `,
@@ -674,7 +674,7 @@ export const __test = {
   TARGETS,
   parseManifest,
   cleanMetadata,
-  clawsandboxToUpstreamSandbox,
+  karssandboxToUpstreamSandbox,
   upstreamSandboxToClawsandbox,
   emitOverlay,
   envArrayToMap,

@@ -1,0 +1,19 @@
+{{- if .Values.monitoring.inspektorGadget.enabled }}
+# Inspektor Gadget is deployed via 'kubectl gadget deploy' (official method).
+# This is a placeholder — the actual DaemonSet is managed by the kubectl-gadget plugin.
+#
+# To install:
+#   kubectl krew install gadget
+#   kubectl gadget deploy
+#
+# Usage:
+#   kubectl gadget run trace_open:latest -n kars-<sandbox-name>
+#   kubectl gadget run trace_exec:latest -n kars-<sandbox-name>
+#   kubectl gadget run trace_tcp:latest -n kars-<sandbox-name>
+#   kubectl gadget run trace_dns:latest -n kars-<sandbox-name>
+#
+# Or via Kars CLI:
+#   kars trace <sandbox-name> --exec
+#   kars trace <sandbox-name> --network
+#   kars trace <sandbox-name> --dns
+{{- end }}

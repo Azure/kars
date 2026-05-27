@@ -46,7 +46,7 @@ use crate::crd::{
 /// controller deployment level via the `OPENAI_AGENTS_RUNTIME_IMAGE`
 /// env var (read by [`openai_agents_default_image`]).
 pub const DEFAULT_OPENAI_AGENTS_IMAGE: &str =
-    "azureclawacr.azurecr.io/azureclaw-runtime-openai-agents:latest";
+    "karsacr.azurecr.io/kars-runtime-openai-agents:latest";
 
 /// Resolve the OpenAI Agents adapter image, honouring an operator
 /// override via `OPENAI_AGENTS_RUNTIME_IMAGE`. Falls back to
@@ -69,8 +69,7 @@ pub fn openai_agents_default_image() -> String {
 /// `docs/internal/agt-upstream-asks.md` §3). Until then, requesting
 /// `language: dotnet` falls through to a `ShapeInvalid` error stamped
 /// as `Degraded / SpecInvalid` in the Conditions chain.
-pub const DEFAULT_MAF_PYTHON_IMAGE: &str =
-    "azureclawacr.azurecr.io/azureclaw-runtime-maf-python:latest";
+pub const DEFAULT_MAF_PYTHON_IMAGE: &str = "karsacr.azurecr.io/kars-runtime-maf-python:latest";
 
 /// Resolve the MAF Python adapter image, honouring an operator
 /// override via `MAF_RUNTIME_IMAGE`. Falls back to
@@ -91,8 +90,7 @@ pub fn maf_python_default_image() -> String {
 /// substitutes ANTHROPIC_API_KEY with a sentinel (router brokers the
 /// real credential on egress), and inherits the standard AAD broker /
 /// OTel / AgentMesh wiring.
-pub const DEFAULT_ANTHROPIC_IMAGE: &str =
-    "azureclawacr.azurecr.io/azureclaw-runtime-anthropic:latest";
+pub const DEFAULT_ANTHROPIC_IMAGE: &str = "karsacr.azurecr.io/kars-runtime-anthropic:latest";
 
 /// Resolve the Anthropic adapter image, honouring an operator
 /// override via `ANTHROPIC_RUNTIME_IMAGE`. Falls back to
@@ -113,14 +111,12 @@ pub fn anthropic_default_image() -> String {
 /// model factories that read `OPENAI_BASE_URL` (and provider-specific
 /// equivalents) at construction time. The adapter pins those to the
 /// router sidecar and wires AGT/OTel/AAD broker on bootstrap.
-pub const DEFAULT_LANGGRAPH_PYTHON_IMAGE: &str =
-    "azureclawacr.azurecr.io/azureclaw-runtime-langgraph:latest";
+pub const DEFAULT_LANGGRAPH_PYTHON_IMAGE: &str = "karsacr.azurecr.io/kars-runtime-langgraph:latest";
 
 /// Default container image for the LangGraph **TypeScript** runtime
 /// (LangGraph.js). Mirrors the Python adapter via a Node 22 sandbox
 /// image. Operators pin via `LANGGRAPH_TS_RUNTIME_IMAGE`.
-pub const DEFAULT_LANGGRAPH_TS_IMAGE: &str =
-    "azureclawacr.azurecr.io/azureclaw-runtime-langgraph-ts:latest";
+pub const DEFAULT_LANGGRAPH_TS_IMAGE: &str = "karsacr.azurecr.io/kars-runtime-langgraph-ts:latest";
 
 /// Resolve the LangGraph Python adapter image, honouring an operator
 /// override via `LANGGRAPH_RUNTIME_IMAGE`. Falls back to
@@ -151,8 +147,7 @@ pub fn langgraph_ts_default_image() -> String {
 /// adapter pins each known provider base URL to the router sidecar
 /// at bootstrap and substitutes API keys with router-managed
 /// sentinels — same defence pattern as LangGraph.
-pub const DEFAULT_PYDANTIC_AI_IMAGE: &str =
-    "azureclawacr.azurecr.io/azureclaw-runtime-pydantic-ai:latest";
+pub const DEFAULT_PYDANTIC_AI_IMAGE: &str = "karsacr.azurecr.io/kars-runtime-pydantic-ai:latest";
 
 /// Resolve the Pydantic-AI adapter image, honouring an operator
 /// override via `PYDANTIC_AI_RUNTIME_IMAGE`. Falls back to
@@ -261,7 +256,7 @@ pub fn kind_str(kind: &RuntimeKind) -> &'static str {
 
 /// Defensive guard: verify that exactly the variant struct matching
 /// `kind` is set, and the others are absent. Mirrors the 7 bidirectional
-/// `XValidation` rules in `deploy/helm/azureclaw/templates/crd.yaml`.
+/// `XValidation` rules in `deploy/helm/kars/templates/crd.yaml`.
 ///
 /// On a CEL-enabled apiserver this is a no-op (admission already rejected
 /// shape-mismatched CRs). The guard exists for CEL-disabled apiservers
@@ -463,7 +458,7 @@ fn plan_byo(cfg: &ByoRuntimeConfig) -> RuntimeDeploymentPlan {
 ///    proxy. The user's agent uses the standard `openai` SDK with no
 ///    Azure-specific code; the router handles AAD / IMDS upstream auth
 ///    and InferencePolicy enforcement.
-/// 2. Sets `AZURECLAW_PLATFORM_MCP_URL` to the platform MCP server
+/// 2. Sets `KARS_PLATFORM_MCP_URL` to the platform MCP server
 ///    (S10.B). Adapters / user code that want Foundry-shim affordances
 ///    (web search, code execute, memory store, …) point their MCP
 ///    client at this URL.
@@ -487,7 +482,7 @@ fn plan_openai_agents(cfg: &OpenAIAgentsConfig) -> RuntimeDeploymentPlan {
     // `OPENAI_AGENTS_LOG_LEVEL`, etc. Reserved-prefix filtering of
     // user `extraEnv` happens in the deployment builder, not here —
     // mirroring `plan_openclaw` semantics. NB: we deliberately do NOT
-    // use the `AZURECLAW_*` prefix here — that prefix is reserved and
+    // use the `KARS_*` prefix here — that prefix is reserved and
     // would be stripped by the deployment builder. `RUNTIME_*` is the
     // free-to-use convention for runtime-adapter-visible settings.
     let mut runtime_extra_env = BTreeMap::new();
@@ -693,7 +688,7 @@ mod tests {
     /// leak into another test's `*_default_image()` call, producing
     /// flaky failures of the shape:
     ///   left: "myacr.azurecr.io/openai-agents:pinned"
-    ///   right: "azureclawacr.azurecr.io/azureclaw-runtime-openai-agents:latest"
+    ///   right: "karsacr.azurecr.io/kars-runtime-openai-agents:latest"
     /// All env-mutating tests in this module take the lock at the top.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -943,8 +938,8 @@ mod tests {
         };
         let plan = build_runtime_plan(&rt, "ignored").expect("anthropic plan ok");
         assert_eq!(plan.kind_str, "Anthropic");
-        assert!(plan.image.contains("azureclaw-runtime-anthropic"));
-        // No reserved AZURECLAW_/ANTHROPIC_ leak from the producer —
+        assert!(plan.image.contains("kars-runtime-anthropic"));
+        // No reserved KARS_/ANTHROPIC_ leak from the producer —
         // the deployment builder owns those.
         for k in plan.runtime_extra_env.keys() {
             assert!(
@@ -952,8 +947,8 @@ mod tests {
                 "producer must not emit ANTHROPIC_* keys: {k}"
             );
             assert!(
-                !k.starts_with("AZURECLAW_"),
-                "producer must not emit AZURECLAW_* keys: {k}"
+                !k.starts_with("KARS_"),
+                "producer must not emit KARS_* keys: {k}"
             );
         }
     }
@@ -1028,7 +1023,7 @@ mod tests {
         };
         let plan = build_runtime_plan(&rt, "ignored").expect("default (Python) must plan");
         assert_eq!(plan.kind_str, "LangGraph");
-        assert!(plan.image.contains("azureclaw-runtime-langgraph"));
+        assert!(plan.image.contains("kars-runtime-langgraph"));
         assert_eq!(
             plan.runtime_extra_env.get("RUNTIME_LANGGRAPH_LANGUAGE"),
             Some(&"python".to_string())
@@ -1126,11 +1121,11 @@ mod tests {
         };
         let plan = build_runtime_plan(&rt, "ignored").expect("pydantic_ai plan ok");
         assert_eq!(plan.kind_str, "PydanticAi");
-        assert!(plan.image.contains("azureclaw-runtime-pydantic-ai"));
+        assert!(plan.image.contains("kars-runtime-pydantic-ai"));
         for k in plan.runtime_extra_env.keys() {
             assert!(
-                !k.starts_with("AZURECLAW_"),
-                "producer must not emit AZURECLAW_* keys: {k}"
+                !k.starts_with("KARS_"),
+                "producer must not emit KARS_* keys: {k}"
             );
         }
     }

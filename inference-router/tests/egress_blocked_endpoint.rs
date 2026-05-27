@@ -16,29 +16,28 @@ use axum::{
 use serde_json::Value;
 use tower::ServiceExt;
 
-use azureclaw_inference_router::auth::WorkloadIdentityAuth;
-use azureclaw_inference_router::blocklist::Blocklist;
-use azureclaw_inference_router::budget::TokenBudgetTracker;
-use azureclaw_inference_router::config::{Config, RegistryMode};
-use azureclaw_inference_router::egress_blocked::BlockedBuffer;
-use azureclaw_inference_router::governance::Governance;
-use azureclaw_inference_router::handoff::{
+use kars_inference_router::auth::WorkloadIdentityAuth;
+use kars_inference_router::blocklist::Blocklist;
+use kars_inference_router::budget::TokenBudgetTracker;
+use kars_inference_router::config::{Config, RegistryMode};
+use kars_inference_router::egress_blocked::BlockedBuffer;
+use kars_inference_router::governance::Governance;
+use kars_inference_router::handoff::{
     DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore,
 };
-use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
-use azureclaw_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
-use azureclaw_inference_router::routes::{AppState, egress_routes};
+use kars_inference_router::mesh::{MeshInbox, MeshMetrics};
+use kars_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
+use kars_inference_router::routes::{AppState, egress_routes};
 
 fn test_state() -> AppState {
-    let policy_status =
-        Arc::new(azureclaw_inference_router::policy_status::PolicyStatusRegistry::new());
+    let policy_status = Arc::new(kars_inference_router::policy_status::PolicyStatusRegistry::new());
     let governance = Arc::new(Governance::new_with_status(
         "sb-test",
         policy_status.clone(),
     ));
     AppState {
         auth: Arc::new(WorkloadIdentityAuth::new()),
-        copilot: Arc::new(azureclaw_inference_router::copilot_auth::CopilotTokenCache::from_env()),
+        copilot: Arc::new(kars_inference_router::copilot_auth::CopilotTokenCache::from_env()),
         client: reqwest::Client::new(),
         config: Arc::new(Config {
             port: 0,
@@ -73,11 +72,11 @@ fn test_state() -> AppState {
         drain_state: DrainState::new(),
         pending_handoff: PendingHandoffStore::new(),
         policy_status,
-        inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
-        memory_binding: azureclaw_inference_router::memory_binding_loader::empty_handle(),
-        egress_allowlist: azureclaw_inference_router::egress_allowlist_loader::empty_handle(),
+        inference_policy: kars_inference_router::inference_policy_loader::empty_handle(),
+        memory_binding: kars_inference_router::memory_binding_loader::empty_handle(),
+        egress_allowlist: kars_inference_router::egress_allowlist_loader::empty_handle(),
         deployment_health: std::sync::Arc::new(
-            azureclaw_inference_router::deployment_health::DeploymentHealthRegistry::new(),
+            kars_inference_router::deployment_health::DeploymentHealthRegistry::new(),
         ),
     }
 }
@@ -145,7 +144,7 @@ async fn endpoint_returns_recorded_blocks() {
 
 fn internal_app(state: AppState) -> Router {
     Router::new()
-        .merge(azureclaw_inference_router::routes::internal_routes())
+        .merge(kars_inference_router::routes::internal_routes())
         .with_state(state)
 }
 

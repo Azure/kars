@@ -1,16 +1,16 @@
-# AzureClaw Example: OpenAI Agents Python runtime
+# Kars Example: OpenAI Agents Python runtime
 #
-# Hosts an OpenAI Agents SDK (Python) agent inside an AzureClaw sandbox.
+# Hosts an OpenAI Agents SDK (Python) agent inside an Kars sandbox.
 # The controller swaps the OpenClaw image for `sandbox-images/openai-agents/`
 # and points the SDK at the local inference router (HTTPS_PROXY=127.0.0.1:8444).
 # Egress guard, AGT governance, AgentMesh E2E, and seccomp/Landlock isolation
 # are identical to the OpenClaw default — only the agent process changes.
 #
 # Apply with:
-#   kubectl apply -f examples/openai-agents-quickstart/clawsandbox.yaml
+#   kubectl apply -f examples/openai-agents-quickstart/karssandbox.yaml
 #
 # Pre-reqs:
-#   - AzureClaw control plane installed (`azureclaw up`)
+#   - Kars control plane installed (`kars up`)
 #   - InferencePolicy below references an Azure OpenAI deployment named
 #     `gpt-4.1` reachable through your project. Adjust if needed.
 #   - Your agent code is published to a public OCI image. The example uses
@@ -20,15 +20,15 @@
 
 ---
 # S13 phase2-config-authority-refs — InferencePolicy is referenced from
-# ClawSandbox.spec.inferenceRef rather than inlined. The router consumes
+# KarsSandbox.spec.inferenceRef rather than inlined. The router consumes
 # this CR to enforce model selection, content safety, and token budget.
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: oai-quickstart-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: oai-quickstart
+    kars.azure.com/sandbox: oai-quickstart
 spec:
   appliesTo:
     sandboxName: oai-quickstart
@@ -42,11 +42,11 @@ spec:
     dailyTokens: 500000
     perRequestTokens: 128000
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: oai-quickstart
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: OpenAIAgents
@@ -70,7 +70,7 @@ spec:
 
   sandbox:
     isolation: "enhanced"
-    seccompProfile: "azureclaw-strict"
+    seccompProfile: "kars-strict"
     readOnlyRootFilesystem: true
     runAsNonRoot: true
     allowPrivilegeEscalation: false

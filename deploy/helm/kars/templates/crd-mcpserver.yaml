@@ -1,0 +1,335 @@
+# Kars McpServer CRD
+#
+# DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
+# schema in `controller/src/mcp_server.rs` plus the CEL rules in
+# `controller/src/crd_validations.rs::mcp_server_validations`.
+#
+# Drift between this file and the Rust schema is caught at `cargo test`
+# time by `controller/src/helm_drift.rs::helm_crd_matches_rust_schema`.
+# To regenerate after schema changes, run:
+#
+#   DUMP_MCP_CRD_YAML=1 cargo test --bin kars-controller \
+#       helm_drift::tests::dump_mcp_crd_yaml -- --nocapture
+#
+# and replace the body below with the captured YAML.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mcpservers.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: McpServer
+    plural: mcpservers
+    shortNames:
+    - mcp
+    singular: mcpserver
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.url
+      name: URL
+      type: string
+    - jsonPath: .spec.productionMode
+      name: Production
+      type: boolean
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for McpServerSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              `McpServer.spec` — declares an MCP 2026 server reachable from sandboxes
+              in the same namespace (or, if `crossNamespaceAllowed: true` on the
+              server side, cluster-wide).
+
+              ## Two authoring paths
+
+              The content fields (`url`, `oauth`, `productionMode`, `scopes`,
+              `allowedTools`, `displayName`) are mutually exclusive with
+              [`bundle_ref`](McpServerSpec::bundle_ref): either inline the values
+              (no supply-chain attestation) or reference a signed OCI artifact
+              (cosign-verified against the cluster `SignerPolicy`). The
+              `allowedSandboxes` selector is owned exclusively by the CR — one
+              signed server bundle can be referenced by multiple `McpServer` CRs
+              with different sandbox selectors.
+            properties:
+              allowedSandboxes:
+                description: |-
+                  Selector restricting which sandboxes can reach this server.
+                  Empty = same-namespace only.
+
+                  **CR-owned field**: deliberately NOT part of any signed bundle.
+                  The selector is a deployment-time concern; one signed server
+                  bundle can be referenced by multiple `McpServer` CRs in
+                  different environments with different selectors.
+                nullable: true
+                properties:
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    default: {}
+                    description: |-
+                      Match labels on `KarsSandbox` resources. Standard label selector
+                      semantics; AND across keys.
+                    type: object
+                type: object
+              allowedTools:
+                description: |-
+                  Allow-list of tool names. Empty list means "no tools allowed";
+                  to allow all tools, use `["*"]` and lean on `ToolPolicy` for
+                  per-tool governance. Default empty — fail-closed.
+                items:
+                  type: string
+                nullable: true
+                type: array
+              bearerFromEnv:
+                description: |-
+                  Slice 4d.4.1 — outbound static-bearer authentication.
+
+                  Name of an environment variable visible to the inference-router
+                  container whose value should be attached as
+                  `Authorization: Bearer <value>` on every outbound `tools/list`
+                  and `tools/call` request to this server.
+
+                  Designed to reuse pre-existing sandbox env vars without
+                  introducing new mounts. The primary intended consumer is the
+                  GitHub Copilot dev-credential path (`COPILOT_GITHUB_TOKEN`),
+                  which already contains a GitHub OAuth token that authenticates
+                  against `https://api.githubcopilot.com/mcp`.
+
+                  Behaviour when the named env var is unset or empty: the router
+                  records a `skipped` entry and continues — non-fatal. Other
+                  servers in the registry remain advertised. This keeps Foundry
+                  deployments (which do not set `COPILOT_GITHUB_TOKEN`) from
+                  breaking when a github MCP CR is present.
+
+                  OAuth on-behalf-of (where the *agent's* incoming bearer is
+                  re-used) is deferred to Slice 4d.5 and tracked as a separate
+                  CR field there.
+                nullable: true
+                type: string
+              bundleRef:
+                description: |-
+                  Reference to a signed OCI artifact carrying the policy content
+                  (`url`, `oauth`, `productionMode`, `scopes`, `allowedTools`,
+                  `displayName`). Mutually exclusive with inline content fields —
+                  enforced by admission CEL and re-checked by the reconciler.
+
+                  Slice 1c.5 of `crd-well-oiled-machine`.
+                nullable: true
+                properties:
+                  artifactType:
+                    description: |-
+                      OCI artifactType media-type, e.g.
+                      `application/vnd.kars.egress-allowlist.v1+yaml`. Consumers MUST
+                      reject artifacts whose pulled `artifactType` doesn't match.
+                    type: string
+                  digest:
+                    description: |-
+                      Content-addressed digest, including the algorithm prefix
+                      (`sha256:abc…`). The digest covers the canonical artifact bytes —
+                      see `docs/internal/policy-canonical-format.md` for the egress-allowlist
+                      canonicalization rules.
+                    type: string
+                  registry:
+                    description: Registry hostname (e.g. `myacr.azurecr.io`, `ghcr.io`).
+                    type: string
+                  repository:
+                    description: Repository path (e.g. `kars/policies/sandbox-foo`).
+                    type: string
+                required:
+                - artifactType
+                - digest
+                - registry
+                - repository
+                type: object
+              displayName:
+                description: Optional human-readable label for operator-TUI display.
+                nullable: true
+                type: string
+              oauth:
+                description: 'OAuth 2.1 configuration. Required when `productionMode: true`.'
+                nullable: true
+                properties:
+                  audience:
+                    description: Audience claim required on bearer tokens calling this server.
+                    nullable: true
+                    type: string
+                  issuer:
+                    description: |-
+                      OAuth 2.1 issuer URL (must serve a discovery document at
+                      `<issuer>/.well-known/oauth-authorization-server` or
+                      `/.well-known/openid-configuration`). Validated lazily on
+                      reconcile; failures land in `Conditions`.
+                    type: string
+                  pkce:
+                    default: S256
+                    description: |-
+                      PKCE method. Always S256 in this scaffold; field exists for
+                      future protocol negotiation.
+                    type: string
+                  resource:
+                    description: Required `resource` indicator value for token exchange.
+                    nullable: true
+                    type: string
+                required:
+                - issuer
+                type: object
+              productionMode:
+                description: |-
+                  When true, the router rejects calls that are not bearer-token-
+                  authenticated against `oauth.issuer` with a verified PKCE flow.
+                  `false` allows unauthenticated calls — dev-only; admission policy
+                  rejects this for non-dev tenants (mirrors `Null*` provider rule).
+
+                  Optional: a signed bundle can supply this. When neither inline
+                  nor bundle sets the field, the effective value defaults to
+                  `false` (back-compat with the pre-1c.5 schema).
+                nullable: true
+                type: boolean
+              scopes:
+                description: |-
+                  OAuth 2.1 scopes that the router will request when fronting calls
+                  from sandboxes to this server. The actual per-tool gating is
+                  expressed in `ToolPolicy` resources, not here.
+                items:
+                  type: string
+                nullable: true
+                type: array
+              url:
+                description: |-
+                  Server endpoint URL. MUST be `https://` when `productionMode: true`.
+                  Validated by admission CEL.
+
+                  Optional: a signed bundle can supply this via [`bundle_ref`]. At
+                  reconcile time, exactly one of `url` or `bundle_ref.url` must
+                  resolve to a non-empty value, otherwise the reconciler stamps
+                  `Degraded=True/SpecInvalid`.
+                nullable: true
+                type: string
+            type: object
+            x-kubernetes-validations:
+            - message: productionMode requires spec.oauth.issuer to be set
+              reason: FieldValueInvalid
+              rule: has(self.bundleRef) || !has(self.productionMode) || self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)
+            - message: productionMode requires spec.url to begin with https://
+              reason: FieldValueInvalid
+              rule: has(self.bundleRef) || !has(self.productionMode) || self.productionMode == false || (has(self.url) && self.url.startsWith('https://'))
+            - message: spec.oauth.pkce, when set, must be 'S256' (RFC 7636 §4.2)
+              reason: FieldValueInvalid
+              rule: '!has(self.oauth) || !has(self.oauth.pkce) || self.oauth.pkce == ''S256'''
+            - message: spec.bundleRef is mutually exclusive with spec.url, spec.oauth, spec.productionMode, spec.scopes, spec.allowedTools, and spec.displayName
+              reason: FieldValueInvalid
+              rule: '!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.allowedTools) && !has(self.displayName))'
+          status:
+            nullable: true
+            properties:
+              bundleRefDigest:
+                description: |-
+                  OCI manifest digest of the verified signed bundle, when the
+                  `bundleRef` authoring path was taken. Operator-visible proof
+                  that the signature was checked and the bundle's bytes shaped
+                  the effective server config.
+
+                  `None` when the inline path was used.
+
+                  Slice 1c.5 of `crd-well-oiled-machine`.
+                nullable: true
+                type: string
+              conditions:
+                description: Standard K8s Conditions, KEP-1623 shape.
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              jwksConfigMapRef:
+                description: |-
+                  Reference to the ConfigMap caching the issuer's JWKS. Present
+                  only when `spec.productionMode == true`. Single key `jwks.json`
+                  holds the raw RFC 7517 JWKSet bytes. Field-managed by
+                  `kars-controller/mcp`.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              lastProbedAt:
+                description: Last health-check timestamp (RFC 3339).
+                nullable: true
+                type: string
+              observedGeneration:
+                description: '`metadata.generation` last successfully reconciled. KEP-1623.'
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: 'Lifecycle phase: `Pending` | `Ready` | `Degraded` | `Unknown`.'
+                nullable: true
+                type: string
+              signingKeyRef:
+                description: |-
+                  Reference to the Secret holding the Ed25519 signing keypair this
+                  reconciler emits. The Secret has type
+                  `kars.azure.com/mcp-signing-key` with two keys:
+                  `signing-key.private` (raw 32-byte Ed25519 seed) and
+                  `signing-key.public` (raw 32-byte verifying key). Field-managed
+                  by `kars-controller/mcp`.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+            type: object
+        required:
+        - spec
+        title: McpServer
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+

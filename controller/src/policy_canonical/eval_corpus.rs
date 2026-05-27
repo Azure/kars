@@ -1,31 +1,31 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `ClawEval` corpus canonical-form `PolicyKind` impl.
+//! `KarsEval` corpus canonical-form `PolicyKind` impl.
 //!
 //! Wires the shared eval-corpus parser (the
-//! [`azureclaw_eval_corpus`] crate) into the kind-agnostic
+//! [`kars_eval_corpus`] crate) into the kind-agnostic
 //! [`crate::policy_fetcher::fetch_and_verify_generic`] pipeline so
-//! operator-supplied signed corpora (`ClawEval.spec.corpora[].bundleRef`)
+//! operator-supplied signed corpora (`KarsEval.spec.corpora[].bundleRef`)
 //! pull through the same OCI + cosign trust root as every other policy
 //! kind. The reconciler consumer lands in slice 6.3.
 //!
-//! Built-in corpora ([`azureclaw_eval_corpus::BUILTIN_NAMES`]) **do not**
+//! Built-in corpora ([`kars_eval_corpus::BUILTIN_NAMES`]) **do not**
 //! travel this path — they are compiled into the runner image and
-//! verified against the AzureClaw release public key by the runner
+//! verified against the Kars release public key by the runner
 //! itself. This `PolicyKind` impl exists exclusively for the
 //! `bundleRef` lane.
 
 // Slice 6.1 shipped the parser, PolicyKind impl, and cache for the
-// eval-corpus signing pipeline. The bundleRef consumer (the `ClawEval`
+// eval-corpus signing pipeline. The bundleRef consumer (the `KarsEval`
 // reconciler that calls `fetch_and_verify_generic::<EvalCorpusKind>`)
 // lands in slice 6.3. Note: the `Corpus`/`parse`/`judge` parts of the
 // library are NOT dead — they are consumed by the `conformance-runner`
-// workspace crate (slice 6.2) and the `claw_eval_reconciler` (slice 6.3).
+// workspace crate (slice 6.2) and the `kars_eval_reconciler` (slice 6.3).
 
 use super::{CachedValue, PolicyKind};
 use crate::policy_fetcher::{CACHE_TTL, FetchError};
-use azureclaw_eval_corpus::{Corpus, ParseError, parse};
+use kars_eval_corpus::{Corpus, ParseError, parse};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
@@ -33,7 +33,7 @@ use std::time::{Instant, SystemTime};
 /// OCI media type for the v1 eval-corpus artifact. v2 corpora MUST
 /// bump the suffix; v1 consumers MUST refuse v2 artifacts so a
 /// schema-incompatible bundle cannot be silently downgraded.
-pub const EVAL_CORPUS_V1_MEDIA_TYPE: &str = "application/vnd.azureclaw.eval-corpus.v1+json";
+pub const EVAL_CORPUS_V1_MEDIA_TYPE: &str = "application/vnd.kars.eval-corpus.v1+json";
 
 /// A verified eval-corpus bundle. Wraps [`Corpus`] with the signing-
 /// pipeline accounting that every kind carries.
@@ -55,8 +55,8 @@ pub struct EvalCorpusKind;
 
 impl PolicyKind for EvalCorpusKind {
     const MEDIA_TYPE: &'static str = EVAL_CORPUS_V1_MEDIA_TYPE;
-    const API_VERSION: &'static str = "azureclaw.azure.com/v1alpha1";
-    const KIND: &'static str = "ClawEval";
+    const API_VERSION: &'static str = "kars.azure.com/v1alpha1";
+    const KIND: &'static str = "KarsEval";
     type Output = VerifiedEvalCorpus;
 
     fn parse(bytes: &[u8]) -> Result<Self::Output, FetchError> {
@@ -128,7 +128,7 @@ fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azureclaw_eval_corpus::Decision;
+    use kars_eval_corpus::Decision;
 
     fn minimal_bytes() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
@@ -147,7 +147,7 @@ mod tests {
     fn media_type_is_v1_json() {
         assert_eq!(
             EvalCorpusKind::MEDIA_TYPE,
-            "application/vnd.azureclaw.eval-corpus.v1+json"
+            "application/vnd.kars.eval-corpus.v1+json"
         );
     }
 

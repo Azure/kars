@@ -17,16 +17,16 @@ import {
   buildEmitManifestYaml,
   describeSignerIdentity,
   ensureSigningTools,
-  patchClawSandbox,
+  patchKarsSandbox,
   pushArtifact,
-  readClawSandboxState,
+  readKarsSandboxState,
   signArtifact,
   writeEmitManifest,
 } from "./egress/sign.js";
 
 export function egressCommand(): Command {
   const cmd = new Command("egress");
-  // Slice 5a — `azureclaw egress blocked <sandbox>` subcommand surfaces
+  // Slice 5a — `kars egress blocked <sandbox>` subcommand surfaces
   // the router's /internal/egress/blocked view. Kept as a subcommand
   // rather than another top-level flag so --watch/--top/--since don't
   // collide with the existing flat-options surface.
@@ -58,7 +58,7 @@ export function egressCommand(): Command {
     .option("--sign-key <ref>", "Cosign key reference (path or KMS URI like azurekms://...) — required for --sign-mode keyed")
     .option("--registry <fqdn>", "Override target ACR for the artifact push (default: auto-discover)")
     .option("--repository <repo>", "Repository path within the registry (default: policy/egress-allowlist/<sandbox>)")
-    .option("--emit-manifest <path>", "GitOps mode: write the ClawSandbox patch to <path> instead of running 'kubectl patch'. Requires signing (default-on). Refuses to overwrite without --force.")
+    .option("--emit-manifest <path>", "GitOps mode: write the KarsSandbox patch to <path> instead of running 'kubectl patch'. Requires signing (default-on). Refuses to overwrite without --force.")
     .option("--force", "With --emit-manifest, overwrite an existing file.")
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
@@ -115,7 +115,7 @@ export function egressCommand(): Command {
         );
       }
 
-      const containerName = `azureclaw-${name}`;
+      const containerName = `kars-${name}`;
       const ns = options.namespace || containerName;
 
       // Detect whether this is a local Docker container or a Kubernetes pod
@@ -221,9 +221,9 @@ export function egressCommand(): Command {
             console.log(chalk.dim(`  Learn mode is now OFF. Only allowlisted domains will pass.`));
             console.log(chalk.dim(`  New domains will go to pending approval.\n`));
             console.log(chalk.dim(`  Commands:`));
-            console.log(chalk.dim(`    azureclaw egress ${name} --pending         Show pending requests`));
-            console.log(chalk.dim(`    azureclaw egress ${name} --approve <domain> Approve a new domain`));
-            console.log(chalk.dim(`    azureclaw egress ${name} --learn           Re-enable learn mode\n`));
+            console.log(chalk.dim(`    kars egress ${name} --pending         Show pending requests`));
+            console.log(chalk.dim(`    kars egress ${name} --approve <domain> Approve a new domain`));
+            console.log(chalk.dim(`    kars egress ${name} --learn           Re-enable learn mode\n`));
           }
         } catch (e: any) {
           console.log(chalk.red(`\n  Failed to enforce: ${e.message}\n`));
@@ -246,7 +246,7 @@ export function egressCommand(): Command {
               console.log(`    ${chalk.yellow("⏳")} ${chalk.white(p.domain)}`);
               console.log(chalk.dim(`       URL: ${p.url}`));
               console.log(chalk.dim(`       Time: ${p.timestamp}`));
-              console.log(chalk.dim(`       Approve: azureclaw egress ${name} --approve ${p.domain}`));
+              console.log(chalk.dim(`       Approve: kars egress ${name} --approve ${p.domain}`));
               console.log();
             }
             console.log(chalk.dim(`  ${data.count} domain(s) pending approval.\n`));
@@ -285,7 +285,7 @@ export function egressCommand(): Command {
           await routerPost("/egress/learn", { enabled: true });
           console.log(chalk.green(`\n  ✅ Learn mode enabled for '${name}'.`));
           console.log(chalk.dim(`     All accessed domains will be logged (blocklist still enforced).`));
-          console.log(chalk.dim(`     Run ${chalk.white(`azureclaw egress ${name} --learned`)} to see discovered domains.\n`));
+          console.log(chalk.dim(`     Run ${chalk.white(`kars egress ${name} --learned`)} to see discovered domains.\n`));
         } catch (e: any) {
           console.log(chalk.red(`\n  Failed to enable learn mode: ${e.message}\n`));
         }
@@ -352,16 +352,16 @@ export function egressCommand(): Command {
             console.log(`    ${chalk.cyan("◉")} ${d}`);
           }
           console.log();
-          console.log(chalk.hex("#0078D4")(`  → Ready to enforce? Run: ${chalk.white(`azureclaw egress ${name} --enforce`)}`));
+          console.log(chalk.hex("#0078D4")(`  → Ready to enforce? Run: ${chalk.white(`kars egress ${name} --enforce`)}`));
           console.log(chalk.dim(`    This promotes ${learned.count} learned domain(s) to allowlist and activates enforcement.\n`));
         }
         console.log(chalk.dim(`  Commands:`));
-        console.log(chalk.dim(`    azureclaw egress ${name} --enforce                Promote learned → allowlist, enforce`));
-        console.log(chalk.dim(`    azureclaw egress ${name} --pending               Show pending requests`));
-        console.log(chalk.dim(`    azureclaw egress ${name} --approve <domain>      Approve a domain`));
-        console.log(chalk.dim(`    azureclaw egress ${name} --deny <domain>         Deny a domain`));
-        console.log(chalk.dim(`    azureclaw egress ${name} --allowlist             Show approved domains`));
-        console.log(chalk.dim(`    azureclaw egress ${name} --learned               Show discovered domains`));
+        console.log(chalk.dim(`    kars egress ${name} --enforce                Promote learned → allowlist, enforce`));
+        console.log(chalk.dim(`    kars egress ${name} --pending               Show pending requests`));
+        console.log(chalk.dim(`    kars egress ${name} --approve <domain>      Approve a domain`));
+        console.log(chalk.dim(`    kars egress ${name} --deny <domain>         Deny a domain`));
+        console.log(chalk.dim(`    kars egress ${name} --allowlist             Show approved domains`));
+        console.log(chalk.dim(`    kars egress ${name} --learned               Show discovered domains`));
         console.log();
       } catch (e: any) {
         console.log(chalk.red(`\n  Failed to query status: ${e.message}\n`));
@@ -386,38 +386,38 @@ async function runSignFlow(
   try {
     const { orasPath, cosignPath } = await ensureSigningTools();
 
-    // The pod-namespace `azureclaw-<name>` is where the sandbox's pod, NetworkPolicy,
-    // and per-sandbox secrets live — but the *ClawSandbox CR* itself is created
+    // The pod-namespace `kars-<name>` is where the sandbox's pod, NetworkPolicy,
+    // and per-sandbox secrets live — but the *KarsSandbox CR* itself is created
     // by the operator in the operator's release namespace (default
-    // `azureclaw-system`). Read/patch always need the CR's namespace, NOT the
+    // `kars-system`). Read/patch always need the CR's namespace, NOT the
     // pod ns. Discover it once via cross-ns lookup.
-    const crNamespace = await discoverClawSandboxNamespace(name, ns);
+    const crNamespace = await discoverKarsSandboxNamespace(name, ns);
 
     // Resolve registry: explicit flag wins; otherwise auto-discover via
     // existing context (kubectl current-context's ACR is recorded by
-    // `azureclaw context`). For the CLI we read it from azd / config
+    // `kars context`). For the CLI we read it from azd / config
     // by shelling out — but to keep this slice tight, we require
-    // either --registry or AZURECLAW_REGISTRY.
+    // either --registry or KARS_REGISTRY.
     const registry =
       options.registry ||
-      process.env.AZURECLAW_REGISTRY ||
+      process.env.KARS_REGISTRY ||
       (await discoverRegistry());
     if (!registry) {
       throw new Error(
-        `--registry not set and could not auto-discover. Pass --registry <acr.azurecr.io> or set AZURECLAW_REGISTRY.`,
+        `--registry not set and could not auto-discover. Pass --registry <acr.azurecr.io> or set KARS_REGISTRY.`,
       );
     }
     const repository = options.repository || `policy/egress-allowlist/${name}`;
 
-    // Read live ClawSandbox state — generation + endpoints.
-    const state = await readClawSandboxState({
+    // Read live KarsSandbox state — generation + endpoints.
+    const state = await readKarsSandboxState({
       kubectlPath: "kubectl",
       namespace: crNamespace,
       name,
     });
     if (state.endpoints.length === 0) {
       throw new Error(
-        `ClawSandbox ${crNamespace}/${name} has no spec.networkPolicy.allowedEndpoints — refusing to sign empty allowlist.`,
+        `KarsSandbox ${crNamespace}/${name} has no spec.networkPolicy.allowedEndpoints — refusing to sign empty allowlist.`,
       );
     }
 
@@ -478,7 +478,7 @@ async function runSignFlow(
 
     if (options.emitManifest) {
       // S12.g — GitOps mode. Skip kubectl patch; write a byte-stable
-      // ClawSandbox manifest the operator commits to their GitOps
+      // KarsSandbox manifest the operator commits to their GitOps
       // repo. The cluster never sees this command.
       const manifest = buildEmitManifestYaml({
         namespace: crNamespace,
@@ -515,7 +515,7 @@ async function runSignFlow(
       return;
     }
 
-    await patchClawSandbox({
+    await patchKarsSandbox({
       kubectlPath: "kubectl",
       namespace: crNamespace,
       name,
@@ -582,11 +582,11 @@ async function discoverRegistry(): Promise<string | null> {
 }
 
 /**
- * Find the namespace where the ClawSandbox CR lives. The pod-namespace
- * `azureclaw-<name>` (used as a fallback) is where the *pod* runs, but
- * the controller creates the ClawSandbox CR in its own release namespace
- * (default `azureclaw-system`). Earlier sign attempts were querying the
- * pod ns and failing with `clawsandbox/<name> not found`.
+ * Find the namespace where the KarsSandbox CR lives. The pod-namespace
+ * `kars-<name>` (used as a fallback) is where the *pod* runs, but
+ * the controller creates the KarsSandbox CR in its own release namespace
+ * (default `kars-system`). Earlier sign attempts were querying the
+ * pod ns and failing with `karssandbox/<name> not found`.
  *
  * Strategy: try the operator's standard namespace first (cheap, fast),
  * then fall back to a cross-namespace lookup, and finally to the
@@ -594,21 +594,21 @@ async function discoverRegistry(): Promise<string | null> {
  * for unusual setups). Surfaces a clear error rather than letting
  * a downstream kubectl call fail with a confusing 'not found'.
  */
-async function discoverClawSandboxNamespace(name: string, podNs: string): Promise<string> {
+async function discoverKarsSandboxNamespace(name: string, podNs: string): Promise<string> {
   const { execa } = await import("execa");
   // 1) Operator default — covers >99% of installs.
   try {
     await execa("kubectl", [
-      "get", `clawsandbox/${name}`, "-n", "azureclaw-system", "-o", "name",
+      "get", `karssandbox/${name}`, "-n", "kars-system", "-o", "name",
     ], { stdio: "pipe", timeout: 5_000 });
-    return "azureclaw-system";
+    return "kars-system";
   } catch {
     /* fall through */
   }
   // 2) Cross-namespace lookup — handles non-default operator releases.
   try {
     const { stdout } = await execa("kubectl", [
-      "get", "clawsandbox", "-A", "-o",
+      "get", "karssandbox", "-A", "-o",
       `jsonpath={range .items[?(@.metadata.name=="${name}")]}{.metadata.namespace}{"\\n"}{end}`,
     ], { stdio: "pipe", timeout: 5_000 });
     const ns = stdout.trim().split("\n").map((s) => s.trim()).filter(Boolean)[0];
@@ -619,7 +619,7 @@ async function discoverClawSandboxNamespace(name: string, podNs: string): Promis
   // 3) Last-ditch: pod ns. Will likely fail downstream with a clear
   //    "not found" — and the operator can pass --namespace explicitly.
   throw new Error(
-    `ClawSandbox '${name}' not found in 'azureclaw-system' or any other namespace. ` +
+    `KarsSandbox '${name}' not found in 'kars-system' or any other namespace. ` +
     `Pass --namespace <ns> to specify the operator's release namespace.`,
   );
   // (intentionally unused; kept to silence linter about podNs param)

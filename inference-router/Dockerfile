@@ -1,4 +1,4 @@
-# AzureClaw Inference Router — multi-stage Rust build (Azure Linux)
+# Kars Inference Router — multi-stage Rust build (Azure Linux)
 # Produces a minimal distroless binary (~15MB)
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:35149ae8dd179684f969944f54a337c665a64e702486154eb44253fb39c2505b
@@ -20,7 +20,7 @@ COPY Cargo.toml Cargo.lock* ./
 COPY inference-router/ inference-router/
 COPY controller/ controller/
 COPY a2a-gateway/ a2a-gateway/
-COPY azureclaw-a2a-core/ azureclaw-a2a-core/
+COPY kars-a2a-core/ kars-a2a-core/
 COPY eval-corpus/ eval-corpus/
 COPY conformance-runner/ conformance-runner/
 COPY tests/ tests/
@@ -28,7 +28,7 @@ COPY tests/ tests/
 # Cache-bust: changing this ARG invalidates the cargo build layer
 ARG ROUTER_CACHE_BUST=0
 
-RUN cargo build --release --package azureclaw-inference-router
+RUN cargo build --release --package kars-inference-router
 
 # ─── Runtime ──────────────────────────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ RUN tdnf install -y ca-certificates shadow-utils iptables curl && tdnf clean all
 # Non-root user
 RUN groupadd -g 1000 router && useradd -u 1000 -g router -s /sbin/nologin router
 
-COPY --from=builder /build/target/release/azureclaw-inference-router /usr/local/bin/azureclaw-inference-router
+COPY --from=builder /build/target/release/kars-inference-router /usr/local/bin/kars-inference-router
 
 USER router
 EXPOSE 8443
@@ -51,13 +51,13 @@ EXPOSE 8443
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD curl -fsS --max-time 2 http://127.0.0.1:8443/healthz || exit 1
 
-LABEL org.opencontainers.image.title="AzureClaw Inference Router" \
-      org.opencontainers.image.description="High-performance inference proxy for AzureClaw" \
+LABEL org.opencontainers.image.title="Kars Inference Router" \
+      org.opencontainers.image.description="High-performance inference proxy for Kars" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT"
 
-ENTRYPOINT ["azureclaw-inference-router"]
+ENTRYPOINT ["kars-inference-router"]
 
 # SBOM generation: run `syft` on the final image to produce an SPDX SBOM
-# Usage: docker buildx build --sbom=true or syft azureclaw-inference-router:tag -o spdx-json
+# Usage: docker buildx build --sbom=true or syft kars-inference-router:tag -o spdx-json

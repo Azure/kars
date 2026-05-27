@@ -17,7 +17,7 @@
 #   [4/4] deny         — POST /egress/deny to block a learned domain,
 #                         re-probe → expect block.
 #
-# We never invoke `azureclaw egress … --sign` here — the cosign+ACR
+# We never invoke `kars egress … --sign` here — the cosign+ACR
 # signing path has its own integration coverage in the controller crate
 # and would require a writable ACR + cosign keys for E2E. This
 # scenario validates the in-cluster control plane only.
@@ -34,33 +34,33 @@ source "$LIB_DIR/cr_factory.sh"
 scenario_header "Egress allowlist lifecycle"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
 name="egress-loop"
 ns=$(new_ns "egress-loop")
 pod_ns=$(pod_ns_for "$name")
 export MANUAL_E2E_SCENARIO=egress_lifecycle
 
-# Apply the sandbox with a learn-mode patch baked into the ClawSandbox.
+# Apply the sandbox with a learn-mode patch baked into the KarsSandbox.
 metric_start "admit_${name}"
 cr_dispatch openclaw "$name" "$ns" \
   | yq eval '
-        select(.kind == "ClawSandbox")
+        select(.kind == "KarsSandbox")
             | .spec.egress.mode = "learn"
         ,
-        select(.kind != "ClawSandbox")
+        select(.kind != "KarsSandbox")
     ' - \
   | kubectl apply -f - >/dev/null
-metric_finish "admit_${name}" egress_lifecycle admitClawSandbox
+metric_finish "admit_${name}" egress_lifecycle admitKarsSandbox
 
-if ! wait_for_clawsandbox_ready "$ns" "$name"; then
+if ! wait_for_karssandbox_ready "$ns" "$name"; then
     log_fail "sandbox never reached Ready"
     cleanup_sandbox "$ns" "$name"
     scenario_summary "Egress allowlist lifecycle"
     exit 1
 fi
 
-pod=$(kubectl -n "$pod_ns" get pod -l "azureclaw.azure.com/sandbox=${name}" \
+pod=$(kubectl -n "$pod_ns" get pod -l "kars.azure.com/sandbox=${name}" \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [[ -z "$pod" ]]; then
     log_fail "no pod for sandbox ${name}"

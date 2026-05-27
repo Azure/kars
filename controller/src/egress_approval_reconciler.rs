@@ -9,12 +9,12 @@
 //! ## State machine
 //!
 //! - **Pending** — the approval was admitted but is not yet in effect.
-//!   Reasons: the named sibling `ClawSandbox` does not exist or is not
+//!   Reasons: the named sibling `KarsSandbox` does not exist or is not
 //!   yet `phase=Ready`, the router has not yet echoed the merged
 //!   digest, or a defense-in-depth validation failed (bad TTL, bad
 //!   reason bytes).
 //! - **Active** — the per-approval file is in the sandbox's
-//!   `clawsandbox-{sandbox}-egress-approvals` ConfigMap, the router
+//!   `karssandbox-{sandbox}-egress-approvals` ConfigMap, the router
 //!   has echoed the merged-allowlist digest under
 //!   `PolicyKind::EgressApproval`, and `effective_at + ttl` has not
 //!   yet elapsed. `effective_at` is stamped once and never moves.
@@ -25,7 +25,7 @@
 //!
 //! ## Authority model
 //!
-//! K8s RBAC. The `azureclaw:egress-approver` ClusterRole (shipped in
+//! K8s RBAC. The `kars:egress-approver` ClusterRole (shipped in
 //! 5e.1) grants `create / get / list / delete` on this CRD; the k8s
 //! audit log records who acted. The cryptographic attestation lane
 //! (Slice 5e+, demand-gated) layers an optional ed25519 signature on
@@ -34,7 +34,7 @@
 //! ## §3 Ready ⇔ router echo
 //!
 //! Same shape as every other policy reconciler in this codebase
-//! (ToolPolicy 1c, InferencePolicy 2a, ClawMemory 3a):
+//! (ToolPolicy 1c, InferencePolicy 2a, KarsMemory 3a):
 //!
 //! 1. Controller compiles the canonical merged-allowlist bytes
 //!    (`baseline ∪ all active sibling approvals' hosts`) and hashes
@@ -51,7 +51,7 @@
 //!
 //! ## Finalizer
 //!
-//! `azureclaw.azure.com/egress-approval-cleanup`. Ensures the CM key
+//! `kars.azure.com/egress-approval-cleanup`. Ensures the CM key
 //! is dropped before the CR is removed (so the router's next mtime
 //! poll observes the file disappear and immediately drops the host
 //! from the L7 allowlist).
@@ -70,7 +70,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::crd::{ClawSandbox, EndpointConfig};
+use crate::crd::{EndpointConfig, KarsSandbox};
 use crate::egress_approval::{
     EgressApproval, EgressApprovalStatus,
     condition_reasons::{
@@ -87,7 +87,7 @@ use crate::status::router_confirmation::{RouterEnforcementState, decide_enforcem
 use crate::status::router_confirmation_io::poll_referencing_sandboxes;
 
 const FIELD_MANAGER: &str = crate::field_managers::EGRESS_APPROVAL;
-const FINALIZER: &str = "azureclaw.azure.com/egress-approval-cleanup";
+const FINALIZER: &str = "kars.azure.com/egress-approval-cleanup";
 
 /// Cluster-wide hard ceiling. The Helm-tunable `maxApprovalTtl` is
 /// the soft, operator-visible default (24h); this is the absolute
@@ -287,7 +287,7 @@ fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
 }
 
 /// Read the baseline allowlist endpoints from the controller-published
-/// `clawsandbox-{sandbox}-egress-allowlist` ConfigMap (data key
+/// `karssandbox-{sandbox}-egress-allowlist` ConfigMap (data key
 /// `allowlist.json`). Missing CM / missing key / malformed JSON all
 /// degrade gracefully to "empty baseline" — the merged digest just
 /// reflects the approvals alone, and the router still drains its
@@ -298,7 +298,7 @@ async fn read_baseline_endpoints(
     configmaps: &Api<ConfigMap>,
     sandbox: &str,
 ) -> Vec<EndpointConfig> {
-    let cm_name = format!("clawsandbox-{sandbox}-egress-allowlist");
+    let cm_name = format!("karssandbox-{sandbox}-egress-allowlist");
     let cm = match configmaps.get_opt(&cm_name).await {
         Ok(Some(cm)) => cm,
         _ => return Vec::new(),
@@ -393,9 +393,9 @@ async fn ensure_approval_cm_key(
         "metadata": {
             "name": cm_name,
             "labels": {
-                "app.kubernetes.io/managed-by": "azureclaw-controller",
-                "azureclaw.azure.com/sandbox": sandbox,
-                "azureclaw.azure.com/artifact": "egress-approvals",
+                "app.kubernetes.io/managed-by": "kars-controller",
+                "kars.azure.com/sandbox": sandbox,
+                "kars.azure.com/artifact": "egress-approvals",
             },
         },
         "data": {
@@ -433,9 +433,9 @@ async fn drop_approval_cm_key(
         "metadata": {
             "name": cm_name,
             "labels": {
-                "app.kubernetes.io/managed-by": "azureclaw-controller",
-                "azureclaw.azure.com/sandbox": sandbox,
-                "azureclaw.azure.com/artifact": "egress-approvals",
+                "app.kubernetes.io/managed-by": "kars-controller",
+                "kars.azure.com/sandbox": sandbox,
+                "kars.azure.com/artifact": "egress-approvals",
             },
         },
         "data": {}
@@ -481,7 +481,7 @@ async fn ensure_finalizer(
         return Ok(false);
     }
     let patch = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "EgressApproval",
         "metadata": { "finalizers": [FINALIZER] },
     });
@@ -509,7 +509,7 @@ async fn remove_finalizer(
     // manager so the API server treats removal correctly without
     // forcing whole-object ownership.
     let patch = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "EgressApproval",
         "metadata": { "finalizers": remaining },
     });
@@ -525,7 +525,7 @@ async fn remove_finalizer(
 /// Per-approval field manager — scoped so two approvals on the same
 /// sandbox cannot fight over the merged CM's keys. The name still
 /// embeds the base field manager prefix so audit tools that filter
-/// on `azureclaw-controller/*` still pick it up.
+/// on `kars-controller/*` still pick it up.
 fn approval_field_manager(approval_name: &str) -> String {
     format!("{FIELD_MANAGER}/{approval_name}")
 }
@@ -610,7 +610,7 @@ fn build_status_patch(
         conditions: Some(conds),
     };
     json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "EgressApproval",
         "status": status,
     })
@@ -635,14 +635,14 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
     let ns = approval.namespace().unwrap_or_else(|| "default".into());
     let api: Api<EgressApproval> = Api::namespaced(ctx.client.clone(), &ns);
     // The approvals ConfigMap is consumed by the per-sandbox router which
-    // mounts it from the sandbox *pod* namespace (`azureclaw-<sandbox>`),
+    // mounts it from the sandbox *pod* namespace (`kars-<sandbox>`),
     // NOT from the namespace where the EgressApproval CR lives (which is
-    // typically the operator ns `azureclaw-system`). Bind the ConfigMap
+    // typically the operator ns `kars-system`). Bind the ConfigMap
     // Api to the sandbox pod namespace so the CM lands where the router
     // can read it.
-    let sandbox_pod_ns = format!("azureclaw-{}", approval.spec.sandbox);
+    let sandbox_pod_ns = format!("kars-{}", approval.spec.sandbox);
     let configmaps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &sandbox_pod_ns);
-    let sandboxes: Api<ClawSandbox> = Api::namespaced(ctx.client.clone(), &ns);
+    let sandboxes: Api<KarsSandbox> = Api::namespaced(ctx.client.clone(), &ns);
 
     if approval.metadata.deletion_timestamp.is_some() {
         return finalize(&api, &configmaps, &approval, &name).await;
@@ -693,7 +693,7 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
     let sandbox = match sandboxes.get_opt(&approval.spec.sandbox).await? {
         Some(s) => s,
         None => {
-            let msg = format!("ClawSandbox '{}' not found", approval.spec.sandbox);
+            let msg = format!("KarsSandbox '{}' not found", approval.spec.sandbox);
             let patch = build_status_patch(
                 &prior_conditions,
                 prior_effective_at,
@@ -719,7 +719,7 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
         .unwrap_or("");
     if sandbox_phase != PHASE_SANDBOX_RUNNING {
         let msg = format!(
-            "ClawSandbox '{}' is not Running (phase='{}')",
+            "KarsSandbox '{}' is not Running (phase='{}')",
             approval.spec.sandbox, sandbox_phase
         );
         let patch = build_status_patch(
@@ -1439,15 +1439,15 @@ mod tests {
     fn finalizer_constant_is_dns_subdomain() {
         assert!(FINALIZER.contains('/'));
         let (domain, _) = FINALIZER.split_once('/').unwrap();
-        assert_eq!(domain, "azureclaw.azure.com");
+        assert_eq!(domain, "kars.azure.com");
     }
 
     #[test]
     fn field_manager_distinct_from_other_reconcilers() {
-        assert_eq!(FIELD_MANAGER, "azureclaw-controller/egressapproval");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/claweval");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/clawmemory");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/toolpolicy");
+        assert_eq!(FIELD_MANAGER, "kars-controller/egressapproval");
+        assert_ne!(FIELD_MANAGER, "kars-controller/karseval");
+        assert_ne!(FIELD_MANAGER, "kars-controller/karsmemory");
+        assert_ne!(FIELD_MANAGER, "kars-controller/toolpolicy");
     }
 
     #[test]

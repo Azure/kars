@@ -50,7 +50,7 @@ export interface SecurityState {
   sandbox: string;
   isolation: string;
   runtime: string;         // "runc" | "kata-vm-isolation"
-  seccomp: string;         // "azureclaw-strict" | "RuntimeDefault"
+  seccomp: string;         // "kars-strict" | "RuntimeDefault"
   networkPolicy: boolean;
   adminAuth: boolean;
   readyz: boolean;

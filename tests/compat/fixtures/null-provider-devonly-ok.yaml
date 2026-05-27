@@ -1,15 +1,15 @@
 # Null-provider admission fixtures — positive case.
-# Dev-labelled ClawSandbox explicitly opts into a null provider. The
-# ValidatingAdmissionPolicy in deploy/helm/azureclaw/templates/
+# Dev-labelled KarsSandbox explicitly opts into a null provider. The
+# ValidatingAdmissionPolicy in deploy/helm/kars/templates/
 # admission-null-provider.yaml must ACCEPT this manifest.
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: dev-null-provider-ok-inference
-  namespace: azureclaw-fixtures
+  namespace: kars-fixtures
   labels:
-    azureclaw.azure.com/sandbox: dev-null-provider-ok
+    kars.azure.com/sandbox: dev-null-provider-ok
 spec:
   appliesTo:
     sandboxName: dev-null-provider-ok
@@ -19,13 +19,13 @@ spec:
       deployment: gpt-4.1
       endpoint: "https://example.openai.azure.com"
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: dev-null-provider-ok
-  namespace: azureclaw-fixtures
+  namespace: kars-fixtures
   labels:
-    azureclaw.azure.com/dev-only: "true"
+    kars.azure.com/dev-only: "true"
 spec:
   runtime:
     kind: OpenClaw

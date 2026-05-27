@@ -22,9 +22,9 @@
 //!
 //! All tests call [`process_request`] directly, no axum, no network.
 
-use azureclaw_inference_router::mcp::initialize::{InitializeConfig, SessionMinter};
-use azureclaw_inference_router::mcp::pipeline::{ProcessOutcome, process_request};
-use azureclaw_inference_router::mcp::streamable_http::{
+use kars_inference_router::mcp::initialize::{InitializeConfig, SessionMinter};
+use kars_inference_router::mcp::pipeline::{ProcessOutcome, process_request};
+use kars_inference_router::mcp::streamable_http::{
     MAX_FRAME_BYTES, MCP_PROTOCOL_VERSION, SessionId,
 };
 use serde_json::{Value, json};

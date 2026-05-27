@@ -3,9 +3,9 @@
 
 //! Azure federated identity credential management via ARM REST API.
 //!
-//! When the controller reconciles a new ClawSandbox, it creates a federated
+//! When the controller reconciles a new KarsSandbox, it creates a federated
 //! credential mapping `system:serviceaccount:{namespace}:sandbox` → the
-//! AzureClaw managed identity. This allows sub-agent pods to use Workload
+//! Kars managed identity. This allows sub-agent pods to use Workload
 //! Identity for Foundry API access without manual `az` CLI intervention.
 
 use serde::Deserialize;
@@ -62,10 +62,10 @@ struct TokenResponse {
 #[derive(Debug, Clone)]
 pub struct FedCredEntry {
     /// ARM resource name of the federated credential
-    /// (e.g. `azureclaw-akstest`).
+    /// (e.g. `kars-akstest`).
     pub name: String,
     /// Kubernetes ServiceAccount subject claim
-    /// (e.g. `system:serviceaccount:azureclaw-akstest:sandbox`).
+    /// (e.g. `system:serviceaccount:kars-akstest:sandbox`).
     pub subject: String,
 }
 
@@ -234,7 +234,7 @@ impl FedCredManager {
         let token = self.get_arm_token().await?;
 
         // Fedcred name: must be DNS-safe, max 120 chars
-        let cred_name = format!("azureclaw-{sandbox_name}");
+        let cred_name = format!("kars-{sandbox_name}");
 
         let url = format!(
             "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{}/federatedIdentityCredentials/{}?api-version=2023-01-31",
@@ -330,7 +330,7 @@ impl FedCredManager {
     /// Delete a federated identity credential (cleanup on sandbox deletion).
     pub async fn delete_federated_credential(&self, sandbox_name: &str) -> Result<(), String> {
         let token = self.get_arm_token().await?;
-        let cred_name = format!("azureclaw-{sandbox_name}");
+        let cred_name = format!("kars-{sandbox_name}");
 
         let url = format!(
             "https://management.azure.com/subscriptions/{}/resourceGroups/{}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{}/federatedIdentityCredentials/{}?api-version=2023-01-31",

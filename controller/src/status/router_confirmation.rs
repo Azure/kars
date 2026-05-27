@@ -134,7 +134,7 @@ pub enum ConfirmError {
 
 /// Fetch `GET {base_url}/internal/policy-status` with the supplied
 /// admin token. `base_url` should be the router service root without
-/// trailing slash, e.g. `http://my-sandbox.azureclaw-my-sandbox.svc.cluster.local:8443`.
+/// trailing slash, e.g. `http://my-sandbox.kars-my-sandbox.svc.cluster.local:8443`.
 ///
 /// The function:
 /// 1. Sends `Authorization: Bearer <token>`.
@@ -181,7 +181,7 @@ pub async fn fetch_router_policy_status(
 ///
 /// This is the principles.md §3 binding shared by every CRD that
 /// participates in the "Ready ⇔ router echo" loop (ToolPolicy
-/// in Slice 1c, InferencePolicy in Slice 2a, ClawMemory in Slice 3,
+/// in Slice 1c, InferencePolicy in Slice 2a, KarsMemory in Slice 3,
 /// fleet-of-McpServer in Slice 4). Each reconciler's only job after
 /// computing the published digest is to pick one of these states;
 /// everything downstream (phase, conditions, requeue cadence) is a
@@ -224,7 +224,7 @@ pub enum RouterEnforcementState {
 ///   the policy (e.g. `find_digest("AgtProfile")` for ToolPolicy,
 ///   `find_digest("InferencePolicy")` for InferencePolicy).
 /// * `kind` is the `PolicyKind` string the router uses on the wire
-///   — `"AgtProfile"`, `"InferencePolicy"`, `"ClawMemory"`, … — and
+///   — `"AgtProfile"`, `"InferencePolicy"`, `"KarsMemory"`, … — and
 ///   must match `inference-router/src/policy_status.rs` exactly.
 /// * `results` is one entry per referencing sandbox: either the
 ///   parsed router response or the network/parse error encountered
@@ -289,11 +289,11 @@ pub fn decide_enforcement_state(
 
 /// Build the in-cluster router admin URL for a sandbox whose
 /// `metadata.name` is `sandbox_name`. The controller creates per-
-/// sandbox `Service`s in namespace `azureclaw-<sandbox_name>` whose
+/// sandbox `Service`s in namespace `kars-<sandbox_name>` whose
 /// admin port is `8443` (see `reconciler/mod.rs::ensure_router_service`).
 pub fn router_admin_url(sandbox_name: &str) -> String {
     format!(
-        "http://{name}.azureclaw-{name}.svc.cluster.local:8443",
+        "http://{name}.kars-{name}.svc.cluster.local:8443",
         name = sandbox_name
     )
 }
@@ -322,7 +322,7 @@ mod tests {
     fn router_admin_url_format_is_in_cluster_dns() {
         assert_eq!(
             router_admin_url("dev01"),
-            "http://dev01.azureclaw-dev01.svc.cluster.local:8443"
+            "http://dev01.kars-dev01.svc.cluster.local:8443"
         );
     }
 
@@ -545,7 +545,7 @@ mod tests {
     // Per-CRD reconcilers test their own calling conventions (e.g.
     // `tool_policy_reconciler::tests` covers `"AgtProfile"`). These
     // tests pin the generic-over-kind contract so a future reconciler
-    // (InferencePolicy, ClawMemory, McpServer) can pass any kind
+    // (InferencePolicy, KarsMemory, McpServer) can pass any kind
     // string and get the same pure-function behaviour.
 
     fn mk_resp(kind: &str, digest: Option<&str>, last_error: Option<&str>) -> PolicyStatusResponse {
@@ -555,7 +555,7 @@ mod tests {
             entries: vec![PolicyStatusEntry {
                 kind: kind.into(),
                 digest: digest.map(String::from),
-                source_path: "/etc/azureclaw/policies".into(),
+                source_path: "/etc/kars/policies".into(),
                 loaded_at: "2026-05-13T09:00:00.000Z".into(),
                 last_error: last_error.map(String::from),
             }],
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn decide_no_results_yields_no_sandboxes_referencing_regardless_of_kind() {
         // The empty-results branch is kind-agnostic — verify it.
-        for kind in ["AgtProfile", "InferencePolicy", "ClawMemory"] {
+        for kind in ["AgtProfile", "InferencePolicy", "KarsMemory"] {
             let s = decide_enforcement_state("sha256:abc", kind, &[]);
             assert_eq!(
                 s,

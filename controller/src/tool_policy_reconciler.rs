@@ -5,7 +5,7 @@
 //!
 //! Watches `ToolPolicy` CRs and, for each:
 //!
-//! 1. Ensures a finalizer (`azureclaw.azure.com/toolpolicy-cleanup`) so
+//! 1. Ensures a finalizer (`kars.azure.com/toolpolicy-cleanup`) so
 //!    the compiled-profile ConfigMap is cleaned up synchronously when
 //!    the CR is removed.
 //! 2. Runs the pure compile step
@@ -59,7 +59,7 @@ use crate::tool_policy_compile::{
 const FIELD_MANAGER: &str = crate::field_managers::TOOL_POLICY;
 
 /// Finalizer name (DNS subdomain).
-const FINALIZER: &str = "azureclaw.azure.com/toolpolicy-cleanup";
+const FINALIZER: &str = "kars.azure.com/toolpolicy-cleanup";
 
 /// Requeue cadence on success.
 const REQUEUE_OK: Duration = Duration::from_secs(300);
@@ -113,7 +113,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .map(|f| f.iter().any(|s| s == FINALIZER))
         .unwrap_or(false)
     {
-        let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"ToolPolicy","metadata":{"finalizers":[FINALIZER]}});
+        let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"ToolPolicy","metadata":{"finalizers":[FINALIZER]}});
         api.patch(
             &name,
             &PatchParams::apply(FIELD_MANAGER).force(),
@@ -229,7 +229,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                             toolpolicy = %name,
                             ns = %ns,
                             error = %e,
-                            "ClawSandbox list failed; treating as no referrers"
+                            "KarsSandbox list failed; treating as no referrers"
                         );
                         Vec::new()
                     }
@@ -294,7 +294,7 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // SSA requires apiVersion + kind in the patch body — without
     // them, the API server returns "invalid object type: /, Kind=".
     let status_patch = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "ToolPolicy",
         "status": ToolPolicyStatus {
             phase: Some(phase.into()),
@@ -572,7 +572,7 @@ fn build_conditions(
                     conditions::TYPE_READY,
                     cond_status::FALSE,
                     reason::NO_SANDBOXES_REFERENCING,
-                    "no ClawSandbox references this ToolPolicy; nothing to enforce",
+                    "no KarsSandbox references this ToolPolicy; nothing to enforce",
                     observed_generation,
                 ));
                 out.push(conditions::preserve_transition_time(
@@ -580,7 +580,7 @@ fn build_conditions(
                     conditions::TYPE_PROGRESSING,
                     cond_status::TRUE,
                     reason::NO_SANDBOXES_REFERENCING,
-                    "waiting for a ClawSandbox to reference this policy",
+                    "waiting for a KarsSandbox to reference this policy",
                     observed_generation,
                 ));
                 out.push(conditions::preserve_transition_time(
@@ -647,11 +647,11 @@ async fn ensure_profile_configmap(
     }
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
-        "azureclaw.azure.com/toolpolicy-version-hash".into(),
+        "kars.azure.com/toolpolicy-version-hash".into(),
         v_hash.into(),
     );
     if let Some(d) = agt_profile_digest {
-        annotations.insert("azureclaw.azure.com/agt-profile-digest".into(), d.into());
+        annotations.insert("kars.azure.com/agt-profile-digest".into(), d.into());
     }
     let cm = ConfigMap {
         metadata: ObjectMeta {
@@ -660,13 +660,10 @@ async fn ensure_profile_configmap(
             labels: Some(BTreeMap::from([
                 (
                     "app.kubernetes.io/managed-by".into(),
-                    "azureclaw-controller".into(),
+                    "kars-controller".into(),
                 ),
-                ("azureclaw.azure.com/toolpolicy".into(), owner.into()),
-                (
-                    "azureclaw.azure.com/artifact".into(),
-                    "compiled-profile".into(),
-                ),
+                ("kars.azure.com/toolpolicy".into(), owner.into()),
+                ("kars.azure.com/artifact".into(), "compiled-profile".into()),
             ])),
             ..Default::default()
         },
@@ -707,7 +704,7 @@ async fn finalize(
         .as_ref()
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
-    let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"ToolPolicy","metadata":{"finalizers": finalizers}});
+    let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"ToolPolicy","metadata":{"finalizers": finalizers}});
     api.patch(
         name,
         &PatchParams::apply(FIELD_MANAGER).force(),
@@ -1109,15 +1106,15 @@ mod tests {
     fn finalizer_constant_is_dns_subdomain() {
         assert!(FINALIZER.contains('/'));
         let (domain, key) = FINALIZER.split_once('/').unwrap();
-        assert_eq!(domain, "azureclaw.azure.com");
+        assert_eq!(domain, "kars.azure.com");
         assert!(!key.is_empty());
     }
 
     #[test]
     fn field_manager_is_per_reconciler() {
         // Distinct from the McpServer manager — required by §10.4 #1.
-        assert_eq!(FIELD_MANAGER, "azureclaw-controller/toolpolicy");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/mcp");
+        assert_eq!(FIELD_MANAGER, "kars-controller/toolpolicy");
+        assert_ne!(FIELD_MANAGER, "kars-controller/mcp");
     }
 
     /// `resolve_agt_profile_source` for the four spec-shape cases that
@@ -1198,11 +1195,11 @@ mod tests {
                 inline: Some("version: 1\nagent: a\npolicies: []\n".to_string()),
                 bundle_ref: Some(crate::crd::OciArtifactRef {
                     registry: "example.azurecr.io".into(),
-                    repository: "azureclaw/tools".into(),
+                    repository: "kars/tools".into(),
                     digest:
                         "sha256:0000000000000000000000000000000000000000000000000000000000000000"
                             .into(),
-                    artifact_type: "application/vnd.azureclaw.agt-profile.v1+yaml".into(),
+                    artifact_type: "application/vnd.kars.agt-profile.v1+yaml".into(),
                 }),
             })),
         );

@@ -1,8 +1,8 @@
-# @azureclaw/mesh — OpenClaw Federation Plugin
+# @kars/mesh — OpenClaw Federation Plugin
 
-Connect any OpenClaw agent to an AzureClaw cluster for secure cloud offload and inter-agent communication via E2E encrypted AgentMesh.
+Connect any OpenClaw agent to an Kars cluster for secure cloud offload and inter-agent communication via E2E encrypted AgentMesh.
 
-**No Docker, no Rust, no AzureClaw CLI required on the client side.**
+**No Docker, no Rust, no Kars CLI required on the client side.**
 
 ## What it does
 
@@ -17,17 +17,17 @@ Connect any OpenClaw agent to an AzureClaw cluster for secure cloud offload and 
 
 - **Node.js 20+** (22 recommended)
 - **OpenClaw** installed and working locally
-- An AzureClaw cluster admin who can generate a pairing token for you
+- An Kars cluster admin who can generate a pairing token for you
 
 ## Install
 
 ```bash
 # From npm (when published)
-npm install -g @azureclaw/mesh
+npm install -g @kars/mesh
 
 # From source
-git clone https://github.com/AzureClaw/azureclaw.git
-cd azureclaw/mesh-plugin
+git clone https://github.com/Kars/kars.git
+cd kars/mesh-plugin
 npm install && npm run build
 ```
 
@@ -38,10 +38,10 @@ Add to your OpenClaw config (`~/.openclaw/openclaw.json`):
 ```json
 {
   "plugins": {
-    "allow": ["azureclaw-mesh"],
+    "allow": ["kars-mesh"],
     "entries": [
       {
-        "name": "azureclaw-mesh",
+        "name": "kars-mesh",
         "enabled": true,
         "path": "/path/to/mesh-plugin/dist/index.js"
       }
@@ -55,12 +55,12 @@ Or if installed globally via npm:
 ```json
 {
   "plugins": {
-    "allow": ["azureclaw-mesh"],
+    "allow": ["kars-mesh"],
     "entries": [
       {
-        "name": "azureclaw-mesh",
+        "name": "kars-mesh",
         "enabled": true,
-        "module": "@azureclaw/mesh"
+        "module": "@kars/mesh"
       }
     ]
   }
@@ -71,11 +71,11 @@ Or if installed globally via npm:
 
 ### 1. Get a pairing token
 
-Ask your AzureClaw cluster admin to generate one:
+Ask your Kars cluster admin to generate one:
 
 ```bash
-# On the AzureClaw cluster (admin runs this)
-azureclaw pair generate --name alice-laptop --budget 500000 --expires 30d
+# On the Kars cluster (admin runs this)
+kars pair generate --name alice-laptop --budget 500000 --expires 30d
 ```
 
 They'll give you a token like: `azcp_1_eyJjb250cm9sbGVyX2FtaWQiOi...`
@@ -84,7 +84,7 @@ They'll give you a token like: `azcp_1_eyJjb250cm9sbGVyX2FtaWQiOi...`
 
 In your OpenClaw agent session, say:
 
-> "Pair with AzureClaw using this token: azcp_1_eyJ..."
+> "Pair with Kars using this token: azcp_1_eyJ..."
 
 Or directly invoke the tool:
 
@@ -92,7 +92,7 @@ Or directly invoke the tool:
 mesh_pair(token: "azcp_1_eyJ...")
 ```
 
-Pairing is **one-time**. Your identity is saved at `~/.azureclaw/identity.json`.
+Pairing is **one-time**. Your identity is saved at `~/.kars/identity.json`.
 
 ### 3. Offload a task
 
@@ -114,7 +114,7 @@ The plugin automatically receives status updates and the final result via the me
 
 | Tool | Description |
 |------|-------------|
-| `mesh_pair` | One-time pairing with an AzureClaw cluster |
+| `mesh_pair` | One-time pairing with an Kars cluster |
 | `cloud_offload` | Delegate a task to a governed cloud sandbox |
 | `offload_status` | Check progress of an active offload |
 | `mesh_send` | Send an E2E encrypted message to another agent |
@@ -125,31 +125,31 @@ The plugin automatically receives status updates and the final result via the me
 
 ```
 ┌─────────────────┐     WebSocket      ┌──────────────┐     K8s API     ┌──────────────────┐
-│  Your OpenClaw   │◄──── AgentMesh ───►│  AzureClaw   │───────────────►│  Offload Sandbox │
+│  Your OpenClaw   │◄──── AgentMesh ───►│  Kars   │───────────────►│  Offload Sandbox │
 │  + mesh plugin   │     Relay (E2E)    │  Controller  │                │  (AKS pod)       │
 └─────────────────┘                     └──────────────┘                └──────────────────┘
-   ~/.azureclaw/                          K8s Secret                     OFFLOAD_MODE=true
+   ~/.kars/                          K8s Secret                     OFFLOAD_MODE=true
    identity.json                          mesh identity                  runs task → result
-   pairings.json                          ClawPairing CRD                relayed back via mesh
+   pairings.json                          KarsPairing CRD                relayed back via mesh
 ```
 
 1. **Pairing**: Your plugin connects to the relay, sends a `pair_request` with the token. The controller validates it, binds your AMID (Agent Mesh ID), and responds.
 
-2. **Offload**: You send an `offload_request`. The controller validates your pairing/budget, creates a ClawSandbox CRD → pod runs your task → controller watches pod completion → reads result from pod logs → sends `offload_done` back to you via the relay.
+2. **Offload**: You send an `offload_request`. The controller validates your pairing/budget, creates a KarsSandbox CRD → pod runs your task → controller watches pod completion → reads result from pod logs → sends `offload_done` back to you via the relay.
 
-3. **Security**: All relay messages are opaque base64 payloads. The pairing token is never stored (only its SHA-256 hash). Your Ed25519 identity provides authentication. The sandbox runs with full AzureClaw security (seccomp, NetworkPolicy, read-only rootfs, Content Safety).
+3. **Security**: All relay messages are opaque base64 payloads. The pairing token is never stored (only its SHA-256 hash). Your Ed25519 identity provides authentication. The sandbox runs with full Kars security (seccomp, NetworkPolicy, read-only rootfs, Content Safety).
 
 ## Files created
 
 | Path | Purpose |
 |------|---------|
-| `~/.azureclaw/identity.json` | Ed25519 keypair (AES-256-GCM encrypted) + AMID |
-| `~/.azureclaw/pairings.json` | Stored pairing metadata (relay URL, cluster name, budget) |
+| `~/.kars/identity.json` | Ed25519 keypair (AES-256-GCM encrypted) + AMID |
+| `~/.kars/pairings.json` | Stored pairing metadata (relay URL, cluster name, budget) |
 
 ## NemoClaw / OpenShell sandbox setup
 
 NemoClaw sandboxes enforce deny-by-default networking. The plugin needs
-an egress policy preset to reach the AzureClaw relay (WebSocket) and
+an egress policy preset to reach the Kars relay (WebSocket) and
 registry (REST). A ready-made preset is included in `nemoclaw/policies/presets/`.
 
 ### 1. Copy the preset into your NemoClaw blueprint
@@ -168,7 +168,7 @@ cd mesh-plugin/nemoclaw
 Or copy manually (you'll need to replace `__HOST_IP__` yourself):
 
 ```bash
-cp mesh-plugin/nemoclaw/policies/presets/azureclaw-mesh.yaml \
+cp mesh-plugin/nemoclaw/policies/presets/kars-mesh.yaml \
    ~/.nemoclaw/source/nemoclaw-blueprint/policies/presets/
 ```
 
@@ -178,17 +178,17 @@ Copy the compiled plugin into the NemoClaw source tree so it's included
 in the next image build:
 
 ```bash
-mkdir -p ~/.nemoclaw/source/scripts/azureclaw-mesh
-cp -r mesh-plugin/dist/ ~/.nemoclaw/source/scripts/azureclaw-mesh/dist/
-cp mesh-plugin/openclaw.plugin.json ~/.nemoclaw/source/scripts/azureclaw-mesh/
-cp mesh-plugin/package.json ~/.nemoclaw/source/scripts/azureclaw-mesh/
+mkdir -p ~/.nemoclaw/source/scripts/kars-mesh
+cp -r mesh-plugin/dist/ ~/.nemoclaw/source/scripts/kars-mesh/dist/
+cp mesh-plugin/openclaw.plugin.json ~/.nemoclaw/source/scripts/kars-mesh/
+cp mesh-plugin/package.json ~/.nemoclaw/source/scripts/kars-mesh/
 ```
 
 Then add this `COPY` to your NemoClaw `Dockerfile` (before the
 entrypoint):
 
 ```dockerfile
-COPY scripts/azureclaw-mesh/ /sandbox/.openclaw-data/extensions/azureclaw-mesh/
+COPY scripts/kars-mesh/ /sandbox/.openclaw-data/extensions/kars-mesh/
 ```
 
 Rebuild the sandbox image.
@@ -198,7 +198,7 @@ Rebuild the sandbox image.
 After the sandbox is running:
 
 ```bash
-nemoclaw <sandbox-name> policy-add azureclaw-mesh
+nemoclaw <sandbox-name> policy-add kars-mesh
 ```
 
 The preset includes `allowed_ips` for SSRF override, so
@@ -209,7 +209,7 @@ approval.
 
 Inside the sandbox agent session:
 
-> "Pair with AzureClaw using this token: azcp_1_eyJ..."
+> "Pair with Kars using this token: azcp_1_eyJ..."
 
 ### How the proxy tunnel works
 
@@ -256,33 +256,33 @@ Public hostnames don't need `allowed_ips` (no SSRF override required).
 2. Install this plugin (see [Install](#install))
 3. Register the plugin in your OpenClaw config
 4. Start your agent: `openclaw agent --local`
-5. Pair with your AzureClaw cluster (get token from admin)
+5. Pair with your Kars cluster (get token from admin)
 6. Try: "Offload a task to analyze a simple math problem"
 
 ## Cluster admin setup
 
-To enable federation on your AzureClaw cluster:
+To enable federation on your Kars cluster:
 
 ```yaml
-# In your Helm values (deploy/helm/azureclaw/values.yaml)
+# In your Helm values (deploy/helm/kars/values.yaml)
 meshPeer:
   enabled: true
   relayUrl: "wss://relay.agentmesh.online/v1/connect"  # or your own relay
-  clusterName: "my-azureclaw-cluster"
+  clusterName: "my-kars-cluster"
 ```
 
 Then upgrade:
 
 ```bash
-helm upgrade azureclaw deploy/helm/azureclaw -n azureclaw-system
+helm upgrade kars deploy/helm/kars -n kars-system
 ```
 
 Generate pairing tokens:
 
 ```bash
-azureclaw pair generate --name alice-laptop --budget 500000 --expires 30d
-azureclaw pair list
-azureclaw pair revoke alice-laptop
+kars pair generate --name alice-laptop --budget 500000 --expires 30d
+kars pair list
+kars pair revoke alice-laptop
 ```
 
 ## Troubleshooting
@@ -290,14 +290,14 @@ azureclaw pair revoke alice-laptop
 | Problem | Solution |
 |---------|----------|
 | "Not paired" | Run `mesh_pair` with a token from your cluster admin |
-| "Pairing expired" | Ask admin for a new token (`azureclaw pair generate`) |
+| "Pairing expired" | Ask admin for a new token (`kars pair generate`) |
 | "Connection lost" | Plugin auto-reconnects. If persistent, check relay URL |
 | "No available slots" | Wait for current offload to finish, or ask admin to increase slots |
 | "Budget exceeded" | Ask admin to create a new pairing with higher budget |
 | Tools not showing | Verify plugin is in `plugins.allow` AND `plugins.entries` in OpenClaw config |
-| ECONNREFUSED in sandbox | Apply the `azureclaw-mesh` preset (`nemoclaw <name> policy-add azureclaw-mesh`) |
+| ECONNREFUSED in sandbox | Apply the `kars-mesh` preset (`nemoclaw <name> policy-add kars-mesh`) |
 | Proxy CONNECT denied | Check `allowed_ips` in preset matches the resolved IP. Run `nemoclaw <name> policy-list` to verify preset is applied |
-| `engine:ssrf` in proxy log | The host resolves to a private IP. Add `allowed_ips` to the preset endpoint (see `nemoclaw/policies/presets/azureclaw-mesh.yaml`) |
+| `engine:ssrf` in proxy log | The host resolves to a private IP. Add `allowed_ips` to the preset endpoint (see `nemoclaw/policies/presets/kars-mesh.yaml`) |
 
 ## Development
 

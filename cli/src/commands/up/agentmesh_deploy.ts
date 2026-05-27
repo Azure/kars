@@ -9,7 +9,7 @@
 //   - external-registry shortcut (--global-registry)
 //   - optional AGIC Ingress for public endpoints (--expose-registry)
 //
-// Returns the registry-mode triple consumed by the ClawSandbox CR
+// Returns the registry-mode triple consumed by the KarsSandbox CR
 // creation step (d.4) and the saveContext() call at end-of-deploy.
 import path from "node:path";
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
@@ -18,9 +18,9 @@ import { kvLine } from "../../stepper.js";
 
 export interface AgentMeshDeployContext {
   repoRoot: string;
-  /** Bare ACR name (e.g. "azureclawacr"). */
+  /** Bare ACR name (e.g. "karsacr"). */
   acr: string;
-  /** ACR login server (e.g. "azureclawacr.azurecr.io"). */
+  /** ACR login server (e.g. "karsacr.azurecr.io"). */
   acrLoginServer: string;
   /** Cluster base name (cluster name with -aks suffix stripped). */
   baseName: string;
@@ -88,7 +88,7 @@ export async function deployAgentMesh(
       // Substitute ACR login server in the manifest
       const manifest = readFileSync(agentmeshManifest, "utf-8");
       const patchedManifest = manifest.replaceAll(
-        "azureclawacr.azurecr.io",
+        "karsacr.azurecr.io",
         acrLoginServer,
       );
       const tmpManifest = path.join(repoRoot, `.tmp-${manifestName}`);
@@ -125,7 +125,7 @@ export async function deployAgentMesh(
       const ingressManifest = path.join(repoRoot, "deploy", "agentmesh-ingress.yaml");
       if (existsSync(ingressManifest)) {
         const ingressYaml = readFileSync(ingressManifest, "utf-8");
-        const domain = `${baseName}.azureclaw.dev`;
+        const domain = `${baseName}.kars.dev`;
         const { stdout: currentSubId } = await execa("az", [
           "account", "show", "--query", "id", "--output", "tsv",
         ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
@@ -133,7 +133,7 @@ export async function deployAgentMesh(
           .replace(/DOMAIN_PLACEHOLDER/g, domain)
           .replace(/SUBSCRIPTION_ID/g, currentSubId.trim())
           .replace(/RESOURCE_GROUP/g, rg)
-          .replace(/azureclawacr\.azurecr\.io/g, acrLoginServer);
+          .replace(/karsacr\.azurecr\.io/g, acrLoginServer);
         const tmpIngress = path.join(repoRoot, ".tmp-agentmesh-ingress.yaml");
         try {
           writeFileSync(tmpIngress, patchedIngress);

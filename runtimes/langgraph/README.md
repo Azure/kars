@@ -1,8 +1,8 @@
-# azureclaw-runtime-langgraph
+# kars-runtime-langgraph
 
 In-pod adapter for the [LangGraph](https://github.com/langchain-ai/langgraph)
 agent framework (Python). Ships pre-installed in the
-`azureclaw-runtime-langgraph` sandbox image; user agent code only needs to
+`kars-runtime-langgraph` sandbox image; user agent code only needs to
 build the graph.
 
 ## What this adapter does
@@ -11,14 +11,14 @@ build the graph.
 |---|---|
 | **LLM provider routing** | Pins `OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, `ANTHROPIC_BASE_URL` to the inference-router sidecar at bootstrap so LangChain model factories cannot reach the public endpoints directly. |
 | **API keys** | Each provider API-key env (`OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) is set to the literal `router-managed`. The router strips this header on egress and substitutes the real AAD-attested credential. **No real provider key ever lives in the sandbox pod.** |
-| **AAD broker** | `aad.py` re-exposes the IMDS / Workload Identity broker used by every other AzureClaw runtime. |
+| **AAD broker** | `aad.py` re-exposes the IMDS / Workload Identity broker used by every other Kars runtime. |
 | **AgentMesh** | `mesh.py` wires the `a2a_agentmesh` SDK to the in-cluster relay so LangGraph nodes can `spawn` / `handoff` to peer agents under AGT trust gating. |
-| **OTel** | `otel.py` auto-initialises tracing/metrics with `service.name=azureclaw-runtime-langgraph`. |
+| **OTel** | `otel.py` auto-initialises tracing/metrics with `service.name=kars-runtime-langgraph`. |
 
 ## Usage
 
 ```python
-from azureclaw_runtime_langgraph import bootstrap
+from kars_runtime_langgraph import bootstrap
 
 bootstrap()  # idempotent; safe to call multiple times
 

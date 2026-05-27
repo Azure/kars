@@ -20,14 +20,14 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use axum::routing::any;
-use azureclaw_inference_router::auth::WorkloadIdentityAuth;
-use azureclaw_inference_router::deployment_health::DeploymentHealthRegistry;
-use azureclaw_inference_router::failover::forward_with_failover;
-use azureclaw_inference_router::inference_policy_loader::{
+use bytes::Bytes;
+use kars_inference_router::auth::WorkloadIdentityAuth;
+use kars_inference_router::deployment_health::DeploymentHealthRegistry;
+use kars_inference_router::failover::forward_with_failover;
+use kars_inference_router::inference_policy_loader::{
     InferencePolicySnapshot, ModelPreference, ModelRef,
 };
-use azureclaw_inference_router::proxy::UpstreamConfig;
-use bytes::Bytes;
+use kars_inference_router::proxy::UpstreamConfig;
 use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;

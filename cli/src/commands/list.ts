@@ -8,7 +8,7 @@ export function listCommand(): Command {
   const cmd = new Command("list");
 
   cmd
-    .description("List all AzureClaw sandboxes (Docker + AKS)")
+    .description("List all Kars sandboxes (Docker + AKS)")
     .option("--aks-only", "Only show AKS sandboxes")
     .option("--docker-only", "Only show local Docker sandboxes")
     .action(async (options) => {
@@ -16,14 +16,14 @@ export function listCommand(): Command {
       const blue = chalk.hex("#0078D4");
       let found = false;
 
-      console.log(blue(`\n  AzureClaw · Sandbox Inventory\n`));
+      console.log(blue(`\n  Kars · Sandbox Inventory\n`));
 
       // ── Local Docker sandboxes ──
       if (!options.aksOnly) {
         try {
           const { stdout } = await execa("docker", [
             "ps", "-a",
-            "--filter", "name=azureclaw-",
+            "--filter", "name=kars-",
             "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
           ], { stdio: "pipe" });
 
@@ -32,7 +32,7 @@ export function listCommand(): Command {
             console.log(chalk.dim("  ─────────────────────────────────────────────────────────────────"));
             for (const line of stdout.trim().split("\n")) {
               const [name, status, image] = line.split("\t");
-              const agentName = name.replace(/^azureclaw-/, "");
+              const agentName = name.replace(/^kars-/, "");
               const isUp = status.toLowerCase().startsWith("up");
               const icon = isUp ? chalk.green("●") : chalk.red("●");
               const shortStatus = status.replace(/ \(.*\)/, "");
@@ -44,12 +44,12 @@ export function listCommand(): Command {
         } catch { /* docker not available */ }
       }
 
-      // ── AKS sandboxes (ClawSandbox CRDs) ──
+      // ── AKS sandboxes (KarsSandbox CRDs) ──
       if (!options.dockerOnly) {
         try {
           const { stdout } = await execa("kubectl", [
-            "get", "clawsandbox",
-            "-n", "azureclaw-system",
+            "get", "karssandbox",
+            "-n", "kars-system",
             "-o", "json",
           ], { stdio: "pipe" });
 
@@ -67,7 +67,7 @@ export function listCommand(): Command {
               const model = sb.spec?.inference?.model || "gpt-4.1";
               const isolation = sb.spec?.sandbox?.isolation || "enhanced";
               const runtimeKind = sb.spec?.runtime?.kind || "OpenClaw";
-              const ns = `azureclaw-${name}`;
+              const ns = `kars-${name}`;
 
               let icon: string;
               if (phase === "Running") icon = chalk.green("●");
@@ -90,7 +90,7 @@ export function listCommand(): Command {
 
       if (!found) {
         console.log(chalk.dim("  No sandboxes found.\n"));
-        console.log(chalk.dim("  Create one with: azureclaw dev (local) or azureclaw add <name> (AKS)\n"));
+        console.log(chalk.dim("  Create one with: kars dev (local) or kars add <name> (AKS)\n"));
       }
     });
 

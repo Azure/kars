@@ -1,52 +1,52 @@
 # 02-toolpolicy.yaml — single ToolPolicy CR for the exec-brief sandbox.
 #
 # `agtProfile.inline` is the **verbatim** contents of the canonical
-# `azureclaw-default` AGT profile that the CLI inlines whenever you
-# run `azureclaw add --governance` (see cli/src/refs.ts::loadAgtProfile
-# and cli/profiles/agt/azureclaw-default.yaml). Keeping the bytes in
+# `kars-default` AGT profile that the CLI inlines whenever you
+# run `kars add --governance` (see cli/src/refs.ts::loadAgtProfile
+# and cli/profiles/agt/kars-default.yaml). Keeping the bytes in
 # sync with that file means the harness exercises the same policy
 # surface a real user would get — no custom drift.
 #
-# Why one CR (and not eight): `ClawSandbox.spec.governance.toolPolicyRef`
+# Why one CR (and not eight): `KarsSandbox.spec.governance.toolPolicyRef`
 # is singular (controller/src/crd.rs `GovernanceConfig`) and the
 # controller resolves exactly one ToolPolicy by name in the same
-# namespace as the ClawSandbox CR. Per-tool granularity lives inside
+# namespace as the KarsSandbox CR. Per-tool granularity lives inside
 # the AGT profile body below, which the in-pod
 # `@microsoft/agent-governance-sdk` engine interprets using
 # action-pattern globs (`mesh:*`, `foundry:*`, `tool:*`, …).
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: execbrief-toolpolicy
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: execbrief
+    kars.azure.com/sandbox: execbrief
   annotations:
-    azureclaw.azure.com/profile: default
+    kars.azure.com/profile: default
 spec:
   appliesTo:
     sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: execbrief
+      kars.azure.com/sandbox: execbrief
   agtProfile:
     inline: |
-      # AzureClaw AGT Governance Policy — agentmesh PolicyEngine format
+      # Kars AGT Governance Policy — agentmesh PolicyEngine format
       #
       # Uses agentmesh PolicyEngine action-pattern matching (glob: shell:*, inference:*).
       # Rules are evaluated by priority (higher = first); first match wins.
       # Type: capability (allow/deny lists), approval, rate_limit.
       #
-      # Action format used by AzureClaw router:
+      # Action format used by Kars router:
       #   inference:chat_completions:<model>   inference:responses:<model>
       #   image_generation:<deployment>        spawn:create:<name>
       #   shell:<command>                      tool:<tool_name>
       #   mesh:send:<peer>   mesh:receive      admin:<operation>
       #
       # Infrastructure controls (network, filesystem, IMDS, content safety, tokens)
-      # are handled by AzureClaw at kernel/router level — not duplicated here.
+      # are handled by Kars at kernel/router level — not duplicated here.
 
       version: "1.0"
-      agent: azureclaw-default
+      agent: kars-default
 
       policies:
         # ── Shell safety ─────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ spec:
           window: "60s"
           priority: 40
 
-      # NOT included — AzureClaw handles these at infrastructure level:
+      # NOT included — Kars handles these at infrastructure level:
       # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
       # ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
       # ✗ content-safety (Azure AI Content Safety — router-level enforcement)

@@ -68,7 +68,7 @@ pub struct A2aRouteState {
     /// verbatim instead of rebuilding+signing on every request. This
     /// is the production path when the controller mirrors a signed
     /// `A2AAgent` card ConfigMap into the sandbox at
-    /// `/etc/azureclaw/a2a-card/agent.json` — the public signing keys
+    /// `/etc/kars/a2a-card/agent.json` — the public signing keys
     /// live in the A2AAgent CR; the controller has no access to the
     /// private signing key, so the pre-signed bytes are authoritative.
     pub pre_signed_card: Option<Arc<Vec<u8>>>,
@@ -147,7 +147,7 @@ impl A2aRouteState {
             security_requirements: None,
         };
         let card_config = AgentCardConfig {
-            name: "azureclaw-a2a-agent".into(),
+            name: "kars-a2a-agent".into(),
             description:
                 "Pre-signed card; see /.well-known/agent.json for the authoritative document."
                     .into(),

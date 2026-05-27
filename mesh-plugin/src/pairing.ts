@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const PAIRINGS_DIR = path.join(os.homedir(), ".azureclaw");
+const PAIRINGS_DIR = path.join(os.homedir(), ".kars");
 const PAIRINGS_FILE = path.join(PAIRINGS_DIR, "pairings.json");
 
 const TOKEN_PREFIX = "azcp_1_";

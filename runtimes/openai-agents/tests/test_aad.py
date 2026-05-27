@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from azureclaw_runtime_openai_agents import aad
+from kars_runtime_openai_agents import aad
 
 
 @dataclass

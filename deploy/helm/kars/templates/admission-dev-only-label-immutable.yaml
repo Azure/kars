@@ -1,0 +1,67 @@
+{{- /*
+  Phase 1 deliverable (implementation-plan.md §7 item 13 / "core VAP set").
+
+  ValidatingAdmissionPolicy that prevents removal of the
+  kars.azure.com/dev-only=true label from any resource that has
+  ever carried it. Pairs with admission-null-provider.yaml.
+
+  Rationale
+  ---------
+  The "dev-only" label is the single mechanism by which a tenant opts
+  out of production fail-closed defaults (Null* providers,
+  productionMode=false on McpServer, fail-open AGT outage modes, etc).
+  An attacker who flips the label OFF without admin intent would
+  silently re-enable strict policy on a pre-existing dev resource —
+  which is normally fine — BUT a more dangerous direction is the
+  reverse: if the label is *also* used as a compliance-exclusion
+  marker, the apiserver audit log must show a deliberate label
+  removal, not a silent CR replacement.
+
+  This VAP requires that ANY transition from
+  metadata.labels["kars.azure.com/dev-only"] == "true" → absent
+  carry the audit annotation
+  kars.azure.com/dev-only-removal-reason on the new object.
+
+  Break-glass
+  -----------
+  Set the annotation kars.azure.com/dev-only-removal-reason
+  to a non-empty value on the new object. The annotation is logged
+  at the apiserver audit layer.
+
+  Scope
+  -----
+  Applies to KarsSandbox, McpServer, ToolPolicy. Add new resources to
+  matchConstraints.resourceRules as their CRDs land.
+*/ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-dev-only-label-immutable
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kars.azure.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources:
+          - karssandboxes
+          - mcpservers
+          - toolpolicies
+  validations:
+    - expression: |
+        !(
+          oldObject.metadata.?labels["kars.azure.com/dev-only"].orValue("") == "true" &&
+          object.metadata.?labels["kars.azure.com/dev-only"].orValue("") != "true" &&
+          object.metadata.?annotations["kars.azure.com/dev-only-removal-reason"].orValue("") == ""
+        )
+      message: "Removing the kars.azure.com/dev-only=true label requires an kars.azure.com/dev-only-removal-reason annotation on the new object (audit trail)."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-dev-only-label-immutable-binding
+spec:
+  policyName: kars-dev-only-label-immutable
+  validationActions: [Deny, Audit]

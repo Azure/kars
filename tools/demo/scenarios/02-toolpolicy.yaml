@@ -4,16 +4,16 @@
 # explicit approval (channel = Telegram) before the router lets it
 # through. ToolPolicy CRDs are one tool per CR; deploy one per gate.
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: demo-web-fetch
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   appliesTo:
     tool: "web.fetch"
     sandboxMatchLabels:
-      azureclaw.azure.com/sandbox: demo-agent
+      kars.azure.com/sandbox: demo-agent
   approval:
     mode: "always"
     channel: "telegram"

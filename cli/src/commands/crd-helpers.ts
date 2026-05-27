@@ -10,7 +10,7 @@
 
 import * as YAML from "yaml";
 
-export const CRD_API_VERSION = "azureclaw.azure.com/v1alpha1";
+export const CRD_API_VERSION = "kars.azure.com/v1alpha1";
 
 // DNS-1123 subdomain for object names.
 const DNS_1123_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;

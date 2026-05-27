@@ -11,7 +11,7 @@
 // the `/egress/approve` and `/egress/deny` router endpoints. Domain
 // approval is no longer an in-memory side door — the allowlist is
 // signed and published by the controller, so the operator-facing
-// surface is now `azureclaw policy sign --kind egress-allowlist`
+// surface is now `kars policy sign --kind egress-allowlist`
 // (future Slice 1c.2 generalization). `enforceEgress` also no
 // longer hits the deleted `/egress/enforce` route; the CRD patch
 // is the authoritative path.
@@ -38,7 +38,7 @@ export function createActions(ctx: ActionContext): OperatorActions {
     if (!sb.podName) return;
     try {
       await execa("kubectl", kctl([
-        "patch", "clawsandbox", sb.name, "-n", "azureclaw-system",
+        "patch", "karssandbox", sb.name, "-n", "kars-system",
         "--type", "merge", "-p",
         JSON.stringify({ spec: { networkPolicy: { egressMode: "Strict" } } }),
       ], kubeContext), { stdio: "pipe" });
@@ -59,7 +59,7 @@ export function createActions(ctx: ActionContext): OperatorActions {
         "http://localhost:8443/egress/learn",
       ], kubeContext), { stdio: "pipe" });
       await execa("kubectl", kctl([
-        "patch", "clawsandbox", sb.name, "-n", "azureclaw-system",
+        "patch", "karssandbox", sb.name, "-n", "kars-system",
         "--type", "merge", "-p",
         JSON.stringify({ spec: { networkPolicy: { egressMode: "Learn" } } }),
       ], kubeContext), { stdio: "pipe" }).catch(() => {});

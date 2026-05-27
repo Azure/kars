@@ -1,18 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Slice 6.4 — `azureclaw eval` operator surface for the ClawEval CRD.
+// Slice 6.4 — `kars eval` operator surface for the KarsEval CRD.
 //
-// Replaces the legacy Foundry-Evals wrapper. ClawEval is now a
+// Replaces the legacy Foundry-Evals wrapper. KarsEval is now a
 // policy-conformance runner driven by signed corpora (slice 6.1) +
 // the conformance-runner image (slice 6.2) + the controller
 // reconciler (slice 6.3). This CLI is the read/trigger surface
 // operators reach for day-to-day:
 //
-//   azureclaw eval list                       — list ClawEvals across the controller ns
-//   azureclaw eval show <name>                — print spec + last-run + drift status
-//   azureclaw eval run <name>                 — set `azureclaw.azure.com/run-now=true`
-//   azureclaw eval diff <name>                — diff the two most recent runs in history
+//   kars eval list                       — list KarsEvals across the controller ns
+//   kars eval show <name>                — print spec + last-run + drift status
+//   kars eval run <name>                 — set `kars.azure.com/run-now=true`
+//   kars eval diff <name>                — diff the two most recent runs in history
 //
 // All commands hit the apiserver directly via `kubectl`; no router
 // admin token required (operator can still see the CR even when the
@@ -23,10 +23,10 @@ import chalk from "chalk";
 
 import { formatAge, formatTable } from "./crd-helpers.js";
 
-const PLURAL = "clawevals";
-const DEFAULT_NS = "azureclaw-system";
+const PLURAL = "karsevals";
+const DEFAULT_NS = "kars-system";
 
-interface ClawEvalCondition {
+interface KarsEvalCondition {
   type?: string;
   status?: string;
   reason?: string;
@@ -54,16 +54,16 @@ interface EvalResult {
   cases?: EvalCaseResult[];
 }
 
-interface ClawEvalStatus {
+interface KarsEvalStatus {
   phase?: string;
   observedGeneration?: number;
-  conditions?: ClawEvalCondition[];
+  conditions?: KarsEvalCondition[];
   lastRunAt?: string;
   lastResult?: EvalResult;
   history?: EvalResult[];
 }
 
-interface ClawEvalSpec {
+interface KarsEvalSpec {
   targetSandboxRef?: { name?: string };
   corpus?: {
     builtin?: string;
@@ -81,20 +81,20 @@ interface ClawEvalSpec {
   notifyWebhook?: { url?: string };
 }
 
-interface ClawEvalCR {
+interface KarsEvalCR {
   metadata?: {
     name?: string;
     namespace?: string;
     creationTimestamp?: string;
     annotations?: Record<string, string>;
   };
-  spec?: ClawEvalSpec;
-  status?: ClawEvalStatus;
+  spec?: KarsEvalSpec;
+  status?: KarsEvalStatus;
 }
 
-/** Shape one row of `azureclaw eval list` output. Exported so tests
+/** Shape one row of `kars eval list` output. Exported so tests
  *  can drive it without spawning `kubectl`. */
-export function summarizeEvalRow(item: ClawEvalCR, now: Date = new Date()): string[] {
+export function summarizeEvalRow(item: KarsEvalCR, now: Date = new Date()): string[] {
   const md = item.metadata ?? {};
   const spec = item.spec ?? {};
   const status = item.status ?? {};
@@ -117,7 +117,7 @@ export function summarizeEvalRow(item: ClawEvalCR, now: Date = new Date()): stri
 }
 
 /** Pretty-print the show subcommand. Exported for tests. */
-export function renderEvalShow(item: ClawEvalCR): string {
+export function renderEvalShow(item: KarsEvalCR): string {
   const lines: string[] = [];
   const md = item.metadata ?? {};
   const spec = item.spec ?? {};
@@ -125,7 +125,7 @@ export function renderEvalShow(item: ClawEvalCR): string {
   const last = status.lastResult;
 
   lines.push("");
-  lines.push(chalk.bold(`  ClawEval/${md.name ?? "<unknown>"}`));
+  lines.push(chalk.bold(`  KarsEval/${md.name ?? "<unknown>"}`));
   lines.push(`    namespace:           ${md.namespace ?? DEFAULT_NS}`);
   lines.push(`    target sandbox:      ${spec.targetSandboxRef?.name ?? "—"}`);
   if (spec.corpus?.builtin) {
@@ -264,14 +264,14 @@ async function listEvals(namespace: string, jsonOutput: boolean): Promise<void> 
       ["get", PLURAL, "-n", namespace, "-o", "json"],
       { stdio: "pipe" },
     );
-    const parsed = JSON.parse(stdout) as { items?: ClawEvalCR[] };
+    const parsed = JSON.parse(stdout) as { items?: KarsEvalCR[] };
     const items = parsed.items ?? [];
     if (jsonOutput) {
       process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);
       return;
     }
     if (items.length === 0) {
-      console.log(chalk.dim(`  No ClawEvals found in namespace '${namespace}'.`));
+      console.log(chalk.dim(`  No KarsEvals found in namespace '${namespace}'.`));
       return;
     }
     const headers = ["NAME", "TARGET", "CORPUS", "PHASE", "AGE", "LAST"];
@@ -283,14 +283,14 @@ async function listEvals(namespace: string, jsonOutput: boolean): Promise<void> 
   }
 }
 
-async function getEval(name: string, namespace: string): Promise<ClawEvalCR> {
+async function getEval(name: string, namespace: string): Promise<KarsEvalCR> {
   const { execa } = await import("execa");
   const { stdout } = await execa(
     "kubectl",
     ["get", PLURAL, name, "-n", namespace, "-o", "json"],
     { stdio: "pipe" },
   );
-  return JSON.parse(stdout) as ClawEvalCR;
+  return JSON.parse(stdout) as KarsEvalCR;
 }
 
 async function showEval(name: string, namespace: string, jsonOutput: boolean): Promise<void> {
@@ -314,17 +314,17 @@ async function runEval(name: string, namespace: string): Promise<void> {
     // reconciler picks this up, spawns a one-shot Job, and clears the
     // annotation after Job creation (slice 6.3 reconciler).
     const patch = JSON.stringify({
-      metadata: { annotations: { "azureclaw.azure.com/run-now": "true" } },
+      metadata: { annotations: { "kars.azure.com/run-now": "true" } },
     });
     await execa(
       "kubectl",
       ["annotate", PLURAL, name, "-n", namespace,
-       "azureclaw.azure.com/run-now=true", "--overwrite"],
+       "kars.azure.com/run-now=true", "--overwrite"],
       { stdio: "pipe" },
     );
     void patch; // patch object kept for documentation; we use `kubectl annotate` which is simpler
-    console.log(chalk.green(`\n  ✓ Run triggered for ClawEval/${name}\n`));
-    console.log(chalk.dim(`    Watch progress with: azureclaw eval show ${name}`));
+    console.log(chalk.green(`\n  ✓ Run triggered for KarsEval/${name}\n`));
+    console.log(chalk.dim(`    Watch progress with: kars eval show ${name}`));
     console.log("");
   } catch (e) {
     console.error(chalk.red(`\nError triggering run: ${e instanceof Error ? e.message : String(e)}\n`));
@@ -352,7 +352,7 @@ async function diffEval(name: string, namespace: string): Promise<void> {
     }
 
     if (!older || !newer) {
-      console.log(chalk.dim(`  ClawEval/${name} has fewer than 2 runs — nothing to diff.`));
+      console.log(chalk.dim(`  KarsEval/${name} has fewer than 2 runs — nothing to diff.`));
       process.exitCode = 0;
       return;
     }
@@ -367,11 +367,11 @@ async function diffEval(name: string, namespace: string): Promise<void> {
 export function evalCommand(): Command {
   const cmd = new Command("eval");
 
-  cmd.description("Manage and inspect ClawEval conformance runs (slice 6 — policy conformance corpus runner)");
+  cmd.description("Manage and inspect KarsEval conformance runs (slice 6 — policy conformance corpus runner)");
 
   cmd
     .command("list")
-    .description("List ClawEvals in the controller namespace")
+    .description("List KarsEvals in the controller namespace")
     .option("-n, --namespace <ns>", "Controller namespace", DEFAULT_NS)
     .option("--json", "Emit JSON instead of a table", false)
     .action(async (opts: { namespace: string; json: boolean }) => {
@@ -380,7 +380,7 @@ export function evalCommand(): Command {
 
   cmd
     .command("show <name>")
-    .description("Show spec + status for one ClawEval, including last-run results")
+    .description("Show spec + status for one KarsEval, including last-run results")
     .option("-n, --namespace <ns>", "Controller namespace", DEFAULT_NS)
     .option("--json", "Emit JSON instead of human-readable output", false)
     .action(async (name: string, opts: { namespace: string; json: boolean }) => {
@@ -389,7 +389,7 @@ export function evalCommand(): Command {
 
   cmd
     .command("run <name>")
-    .description("Trigger a one-shot run by annotating the CR with azureclaw.azure.com/run-now=true")
+    .description("Trigger a one-shot run by annotating the CR with kars.azure.com/run-now=true")
     .option("-n, --namespace <ns>", "Controller namespace", DEFAULT_NS)
     .action(async (name: string, opts: { namespace: string }) => {
       await runEval(name, opts.namespace);

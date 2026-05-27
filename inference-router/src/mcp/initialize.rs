@@ -102,7 +102,7 @@ impl Default for InitializeConfig {
     fn default() -> Self {
         Self {
             server_info: ServerInfo {
-                name: "azureclaw-inference-router".into(),
+                name: "kars-inference-router".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
             capabilities: ServerCapabilities::default(),

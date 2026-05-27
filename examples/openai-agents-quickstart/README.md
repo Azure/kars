@@ -1,7 +1,7 @@
 # OpenAI Agents Python — Quickstart
 
 This blueprint hosts an [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) (Python)
-agent inside an AzureClaw sandbox. The agent runs unmodified — AzureClaw
+agent inside an Kars sandbox. The agent runs unmodified — Kars
 provides isolation, governance, and egress control without touching SDK code.
 
 ## What you get
@@ -20,9 +20,9 @@ provides isolation, governance, and egress control without touching SDK code.
 ## Apply
 
 ```bash
-azureclaw up                                 # one-time control-plane install
-kubectl apply -f examples/openai-agents-quickstart/clawsandbox.yaml
-kubectl get clawsandboxes -n azureclaw-system oai-quickstart
+kars up                                 # one-time control-plane install
+kubectl apply -f examples/openai-agents-quickstart/karssandbox.yaml
+kubectl get karssandboxes -n kars-system oai-quickstart
 ```
 
 The controller patches the sandbox pod to launch the OpenAI Agents adapter

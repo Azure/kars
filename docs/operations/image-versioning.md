@@ -1,9 +1,9 @@
 # Image versioning & release tagging
 
-AzureClaw produces eight container images: the controller, the
+Kars produces eight container images: the controller, the
 inference router, the sandbox base + slim overlay, the AgentMesh relay
 + registry, and the five runtime adapter images
-(`azureclaw-runtime-{anthropic,langgraph,langgraph-ts,maf-python,openai-agents,pydantic-ai}`).
+(`kars-runtime-{anthropic,langgraph,langgraph-ts,maf-python,openai-agents,pydantic-ai}`).
 
 The build system supports two parallel tag channels for every image:
 
@@ -51,7 +51,7 @@ make images push push-runtimes  # uses VERSION from package.json + GIT_SHA
 
 - The controller's image-default constants (`controller/src/reconciler/runtime.rs`)
   fall back to `:latest` when no override env var is set. This is the
-  zero-config developer-experience path — `azureclaw up` against a
+  zero-config developer-experience path — `kars up` against a
   freshly-built ACR Just Works without the operator computing a SHA.
 - Every Helm chart override (`controller.image.tag` etc.) silently
   defaults to the chart's own version when omitted; explicit `:latest`
@@ -63,11 +63,11 @@ make images push push-runtimes  # uses VERSION from package.json + GIT_SHA
 
 ```bash
 # Resolve the floating tag to a digest:
-docker buildx imagetools inspect $(REGISTRY)/azureclaw-controller:latest
+docker buildx imagetools inspect $(REGISTRY)/kars-controller:latest
 
 # Verify the Cosign signature on the digest (keyless OIDC):
-cosign verify $(REGISTRY)/azureclaw-controller@sha256:<digest> \
-  --certificate-identity-regexp '^https://github.com/Azure/azureclaw' \
+cosign verify $(REGISTRY)/kars-controller@sha256:<digest> \
+  --certificate-identity-regexp '^https://github.com/Azure/kars' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 

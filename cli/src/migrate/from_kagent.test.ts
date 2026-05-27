@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 S9.3 — vitest cases for the kagent → AzureClaw translator.
+// Phase 2 S9.3 — vitest cases for the kagent → Kars translator.
 //
 // Pure-helper coverage. CLI runner I/O is exercised separately via
 // the existing migrate command e2e tests.
@@ -9,8 +9,8 @@
 import { describe, expect, it } from "vitest";
 import {
   __test,
-  AZURECLAW_GROUP,
-  AZURECLAW_VERSION,
+  KARS_GROUP,
+  KARS_VERSION,
   InvalidInputError,
   KAGENT_API_VERSION,
   KAGENT_KIND,
@@ -226,19 +226,19 @@ describe("translate: input gating", () => {
   });
 });
 
-describe("translate: ClawSandbox basics", () => {
-  it("emits a ClawSandbox with sandbox-label and provenance annotations", () => {
+describe("translate: KarsSandbox basics", () => {
+  it("emits a KarsSandbox with sandbox-label and provenance annotations", () => {
     const r = translate(baseAgent, {});
     const cs = r.resources[0]!;
-    expect(cs.kind).toBe("ClawSandbox");
-    expect(cs.apiVersion).toBe(`${AZURECLAW_GROUP}/${AZURECLAW_VERSION}`);
+    expect(cs.kind).toBe("KarsSandbox");
+    expect(cs.apiVersion).toBe(`${KARS_GROUP}/${KARS_VERSION}`);
     expect(cs.metadata.name).toBe("alice");
     expect(cs.metadata.namespace).toBe("team-a");
     expect(cs.metadata.labels![SANDBOX_LABEL_KEY]).toBe("alice");
-    expect(cs.metadata.annotations![`${AZURECLAW_GROUP}/migrated-from`]).toBe(
+    expect(cs.metadata.annotations![`${KARS_GROUP}/migrated-from`]).toBe(
       `${KAGENT_API_VERSION} ${KAGENT_KIND}`,
     );
-    expect(cs.metadata.annotations![`${AZURECLAW_GROUP}/kagent-agent`]).toBe(
+    expect(cs.metadata.annotations![`${KARS_GROUP}/kagent-agent`]).toBe(
       "team-a/alice",
     );
     expect(((cs.spec.runtime as { openclaw: { image: string } }).openclaw).image).toBe(
@@ -315,7 +315,7 @@ describe("translate: Declarative agent runnability", () => {
     },
   };
 
-  it("emits a non-runnable ClawSandbox when no image is provided", () => {
+  it("emits a non-runnable KarsSandbox when no image is provided", () => {
     const r = translate(decl, {});
     expect(r.summary.runnable).toBe(false);
     expect(r.resources[0]!.spec.runtime).toBeUndefined();
@@ -336,7 +336,7 @@ describe("translate: Declarative agent runnability", () => {
     const r = translate(decl, { image: "myorg/runtime:v1" });
     const ip = r.resources.find((x) => x.kind === "InferencePolicy");
     expect(ip).toBeDefined();
-    expect(ip!.metadata.annotations![`${AZURECLAW_GROUP}/kagent-model-config`]).toBe(
+    expect(ip!.metadata.annotations![`${KARS_GROUP}/kagent-model-config`]).toBe(
       "gpt4-config",
     );
     expect((ip!.spec.appliesTo as { sandboxName: string }).sandboxName).toBe(
@@ -355,7 +355,7 @@ describe("translate: Declarative agent runnability", () => {
     const r = translate(noModel, { image: "x" });
     const ip = r.resources.find((x) => x.kind === "InferencePolicy");
     expect(ip).toBeDefined();
-    expect(ip!.metadata.annotations?.[`${AZURECLAW_GROUP}/kagent-model-config`]).toBeUndefined();
+    expect(ip!.metadata.annotations?.[`${KARS_GROUP}/kagent-model-config`]).toBeUndefined();
     expect(r.summary.inferencePolicyCount).toBe(1);
   });
 });
@@ -386,7 +386,7 @@ describe("translate: Tools", () => {
       ["read", "write"],
     );
     // governance auto-enabled when at least one ToolPolicy is emitted.
-    const sandbox = r.resources.find((x) => x.kind === "ClawSandbox")!;
+    const sandbox = r.resources.find((x) => x.kind === "KarsSandbox")!;
     expect((sandbox.spec.governance as { enabled: boolean }).enabled).toBe(
       true,
     );
@@ -641,7 +641,7 @@ describe("translate: networking", () => {
 });
 
 describe("translate: bundle ordering and JSON shape", () => {
-  it("orders bundle: ClawSandbox, InferencePolicy, ToolPolicies", () => {
+  it("orders bundle: KarsSandbox, InferencePolicy, ToolPolicies", () => {
     const r = translate(
       {
         apiVersion: KAGENT_API_VERSION,
@@ -660,7 +660,7 @@ describe("translate: bundle ordering and JSON shape", () => {
       { image: "x" },
     );
     expect(r.resources.map((x) => x.kind)).toEqual([
-      "ClawSandbox",
+      "KarsSandbox",
       "InferencePolicy",
       "ToolPolicy",
       "ToolPolicy",
@@ -707,7 +707,7 @@ describe("translate: description handling", () => {
       {},
     );
     expect(
-      r.resources[0]!.metadata.annotations![`${AZURECLAW_GROUP}/kagent-description`],
+      r.resources[0]!.metadata.annotations![`${KARS_GROUP}/kagent-description`],
     ).toBe("a friendly agent");
     expect(r.warnings.filter((w) => w.path === "spec.description")).toHaveLength(0);
   });
@@ -721,7 +721,7 @@ describe("translate: description handling", () => {
     );
     expect(
       r.resources[0]!.metadata.annotations![
-        `${AZURECLAW_GROUP}/kagent-description-truncated`
+        `${KARS_GROUP}/kagent-description-truncated`
       ],
     ).toBe("true");
     expect(r.warnings.some((w) => w.path === "spec.description")).toBe(true);

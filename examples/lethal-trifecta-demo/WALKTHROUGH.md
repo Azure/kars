@@ -1,7 +1,7 @@
 # Walkthrough: The Lethal Trifecta, Defused
 
 A timed, ~7-minute live or recorded demo. Two AKS namespaces, one
-poisoned skill, six AzureClaw layers — each one alone catches the
+poisoned skill, six Kars layers — each one alone catches the
 attack.
 
 > **Premise.** The user uploads a `.docx` "real-estate appraisals"
@@ -20,16 +20,16 @@ Two namespaces, one cluster.
 
 ```bash
 ./scripts/deploy.sh
-kubectl get pods -n naked-claw && kubectl get pods -n azureclaw-realestate-agent
+kubectl get pods -n naked-claw && kubectl get pods -n kars-realestate-agent
 ```
 
 | Namespace | Agent | Defenses |
 |---|---|---|
 | `naked-claw` | Vanilla OpenClaw Pod | Egress allowlist only. `api.openai.com` is on it (the agent legitimately needs LLM calls). |
-| `azureclaw-claw` | `ClawSandbox` CR | Full nine-layer stack — InferencePolicy, ToolPolicy with method allowlist, ClawIdentity, egress-guard, Content Safety, audit chain. |
+| `kars-claw` | `KarsSandbox` CR | Full nine-layer stack — InferencePolicy, ToolPolicy with method allowlist, ClawIdentity, egress-guard, Content Safety, audit chain. |
 
 **Talking point:** *"Same agent. Same model. Same task. Same allowlist
-contains the same exfil host. The only difference is whether AzureClaw
+contains the same exfil host. The only difference is whether Kars
 is enforcing policy."*
 
 ---
@@ -72,10 +72,10 @@ firing in production."*
 
 ---
 
-## Act 4 — AzureClaw defeats it, six different ways (3:00–6:00)
+## Act 4 — Kars defeats it, six different ways (3:00–6:00)
 
 ```bash
-./scripts/run-attack.sh azureclaw
+./scripts/run-attack.sh kars
 ```
 
 Each layer is shown by toggling off the *previous* layers and watching
@@ -89,7 +89,7 @@ the next one engage. Six independent layers — any one stops the attack.
 ```
 
 The Foundry guardrail catches the injection before the model ever runs.
-**Show:** `kubectl logs -n azureclaw-realestate-agent deploy/realestate-agent -c inference-router | grep prompt_shields`
+**Show:** `kubectl logs -n kars-realestate-agent deploy/realestate-agent -c inference-router | grep prompt_shields`
 
 > *(GitHub-Models mode skips this layer — see [security.md](../../docs/security.md#what-we-do-not-defend-against). The other five layers still fire.)*
 
@@ -111,7 +111,7 @@ networkPolicy:
 ```
 
 **Talking point:** *"This is the Claude Cowork lesson. Domains are not
-enough — methods and paths matter. AzureClaw enforces that natively."*
+enough — methods and paths matter. Kars enforces that natively."*
 
 ### Layer 3 · ClawIdentity strips attacker-controlled bearer (4:00–4:25)
 
@@ -130,7 +130,7 @@ Even if all router policy is bypassed, the agent process itself can't
 reach the network:
 
 ```bash
-kubectl exec -n azureclaw-realestate-agent deploy/realestate-agent -c openclaw -- \
+kubectl exec -n kars-realestate-agent deploy/realestate-agent -c openclaw -- \
   curl -v https://api.openai.com/v1/files
 # curl: (7) Failed to connect to api.openai.com port 443: Connection refused
 ```
@@ -191,11 +191,11 @@ Output (abbreviated):
 (no audit records — naked claw has no audit pipeline)
 
 ═══ Memory store integrity ═══
-azureclaw-claw  realestate-memory  hash unchanged ✅
+kars-claw  realestate-memory  hash unchanged ✅
 naked-claw      realestate-memory  EXFILTRATED to attacker ❌
 ```
 
-**Talking point:** *"This is what `azureclaw audit verify` produces in
+**Talking point:** *"This is what `kars audit verify` produces in
 production. Every block, every drop, every quarantine — hash-chained,
 signed, replayable. Your security team can prove the policy fired, and
 when, and why."*
@@ -214,7 +214,7 @@ when, and why."*
 
 **Why `api.openai.com` and not `api.anthropic.com`?**
 The original Cowork attack exfiltrated through the Anthropic API. We
-swap to the OpenAI host because (a) it's the host AzureClaw users will
+swap to the OpenAI host because (a) it's the host Kars users will
 have on their allowlist by default (Foundry / Azure OpenAI), making
 the demo more honest, and (b) it keeps the launch story inside the
 Microsoft / Azure narrative.
@@ -225,7 +225,7 @@ to a `make-docx.py` helper that produces the actual 1-pt-font
 white-on-white `.docx` if you want to demo with the binary format.
 
 **Can the layers really be independently bypassed for the demo?**
-Yes — `scenarios/02-azureclaw-sandbox.yaml` ships every layer ON. The
+Yes — `scenarios/02-kars-sandbox.yaml` ships every layer ON. The
 script `run-attack.sh --bypass=<layer>` patches the policy to exclude
 one layer at a time so you can show the next layer engage. In
 production you'd run all six.

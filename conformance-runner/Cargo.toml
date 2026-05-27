@@ -1,6 +1,6 @@
 [package]
-name = "azureclaw-conformance-runner"
-description = "In-cluster runner that replays signed ClawEval corpora against the live inference router and emits per-case verdicts. Consumed by the ClawEval reconciler (slice 6.3) which launches one runner Pod per scheduled run; the binary is endpoint-agnostic and CR-agnostic — it reads a corpus path + router base URL, writes a JSON report, exits non-zero on judge failures."
+name = "kars-conformance-runner"
+description = "In-cluster runner that replays signed KarsEval corpora against the live inference router and emits per-case verdicts. Consumed by the KarsEval reconciler (slice 6.3) which launches one runner Pod per scheduled run; the binary is endpoint-agnostic and CR-agnostic — it reads a corpus path + router base URL, writes a JSON report, exits non-zero on judge failures."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "azureclaw-conformance-runner"
+name = "kars-conformance-runner"
 path = "src/main.rs"
 
 [dependencies]
-azureclaw-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
+kars-eval-corpus = { path = "../eval-corpus", version = "0.1.0" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

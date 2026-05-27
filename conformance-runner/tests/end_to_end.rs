@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! End-to-end test for the `azureclaw-conformance-runner` binary.
+//! End-to-end test for the `kars-conformance-runner` binary.
 //!
 //! Two router surfaces are mocked here:
 //!
@@ -23,7 +23,7 @@ use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn runner_binary() -> std::path::PathBuf {
-    let p = env!("CARGO_BIN_EXE_azureclaw-conformance-runner");
+    let p = env!("CARGO_BIN_EXE_kars-conformance-runner");
     std::path::PathBuf::from(p)
 }
 

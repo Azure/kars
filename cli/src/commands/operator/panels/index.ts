@@ -14,26 +14,26 @@ export type {
   ClusterState,
   CrdCondition,
   CrdItem,
-  ClawPairingItem,
+  KarsPairingItem,
   McpServerItem,
   ToolPolicyItem,
   InferencePolicyItem,
   A2AAgentItem,
-  ClawMemoryItem,
-  ClawEvalItem,
+  KarsMemoryItem,
+  KarsEvalItem,
   ProviderState,
   ProviderStatusSnapshot,
 } from "./types.js";
 export { emptyClusterState } from "./types.js";
 
-export { clawSandboxPanel } from "./clawsandbox.js";
-export { clawPairingPanel } from "./clawpairing.js";
+export { clawSandboxPanel } from "./karssandbox.js";
+export { clawPairingPanel } from "./karspairing.js";
 export { mcpServerPanel } from "./mcpserver.js";
 export { toolPolicyPanel } from "./toolpolicy.js";
 export { inferencePolicyPanel } from "./inferencepolicy.js";
 export { a2aAgentPanel } from "./a2aagent.js";
-export { clawMemoryPanel } from "./clawmemory.js";
-export { clawEvalPanel } from "./claweval.js";
+export { clawMemoryPanel } from "./karsmemory.js";
+export { clawEvalPanel } from "./karseval.js";
 export { providerStatusPanel } from "./provider_status.js";
 
 export {

@@ -1,16 +1,16 @@
 # Blueprint 03 — Managed public offload service
 
-> "I run a managed AzureClaw offering. Maybe I'm a hyperscale SaaS, maybe I'm a 3-person MSP, maybe I'm a community co-op renting capacity to hobbyists. My customers want to offload heavier or sensitive agent tasks — bigger models, longer runs, parallel fan-out — that don't fit on their laptops. I want to host them all on one cluster, in different Entra tenants, none with kubectl access, all onboarded by token, all isolated from each other and from me at every layer including the host kernel."
+> "I run a managed Kars offering. Maybe I'm a hyperscale SaaS, maybe I'm a 3-person MSP, maybe I'm a community co-op renting capacity to hobbyists. My customers want to offload heavier or sensitive agent tasks — bigger models, longer runs, parallel fan-out — that don't fit on their laptops. I want to host them all on one cluster, in different Entra tenants, none with kubectl access, all onboarded by token, all isolated from each other and from me at every layer including the host kernel."
 
 > **Status: ✅ Runtime shipping. 🚧 SaaS productization in progress.** The hardware-isolated sandbox runtime, the pairing protocol, the per-tenant namespace + Workload Identity scoping, the confidential-mode Kata VM + AMD SEV-SNP nodepool, the audit chain, and the Foundry-side Content Safety are all validated end-to-end on live AKS today (see [`docs/security-validation.md`](../security-validation.md)). What's "🚧" is the *SaaS wrapper* around it: portal + billing + automated onboarding + per-tenant Foundry-quota sharding. The scary parts (isolation + crypto) are not the parts that need productizing.
 
 ## Why this blueprint matters
 
-This is the use case where AzureClaw's threat model earns its complexity. In every other blueprint, you (the operator) and the agent user are in the same trust domain — you'd both lose if a sandbox escaped. Here, **the provider is one of the parties the customer is defending against**: a malicious or compromised provider operator could otherwise tail a customer's prompts, exfiltrate their files, or impersonate them to upstream services.
+This is the use case where Kars's threat model earns its complexity. In every other blueprint, you (the operator) and the agent user are in the same trust domain — you'd both lose if a sandbox escaped. Here, **the provider is one of the parties the customer is defending against**: a malicious or compromised provider operator could otherwise tail a customer's prompts, exfiltrate their files, or impersonate them to upstream services.
 
 The customers don't have to be enterprises either. The same primitives that let a Fortune-500 trust a hyperscaler also let a hobbyist trust a 3-person MSP, or a researcher trust a community co-op renting GPU time. The economic shape changes (one tenant per customer, not one tenant per business unit); the security shape doesn't.
 
-AzureClaw makes that attack mathematically infeasible by stacking three independent isolation primitives:
+Kars makes that attack mathematically infeasible by stacking three independent isolation primitives:
 
 1. **Signal-Protocol mesh** — the relay sees only ciphertext (X3DH + Double Ratchet). The provider can't read what the customer sent over the wire even with a `tcpdump` on the cluster ingress.
 2. **Confidential Containers (Kata + AMD SEV-SNP)** — the sandbox pod runs in a hardware-isolated lightweight VM with its own kernel. Pod memory is encrypted by the CPU with a key the host doesn't have. The provider's cluster-admin cannot `kubectl exec` into the pod (VAP blocks it) and cannot read the pod's RAM from the host (SEV-SNP enforces it).
@@ -20,7 +20,7 @@ Net effect: the customer's cleartext exists for ~milliseconds, only inside an SE
 
 ## Persona & intent
 
-- **You are:** a managed-AzureClaw provider — at any scale. A hyperscaler running a public offering. A regional MSP white-labelling agentic compute. A 3-person team renting GPU minutes. A community co-op pooling capacity for hobbyists. Your customers run OpenClaw / NemoClaw / any-OpenClaw on their laptops, in their offices, in their own clusters — anywhere — and offload tasks they can't (or don't want to) run locally to your AKS.
+- **You are:** a managed-Kars provider — at any scale. A hyperscaler running a public offering. A regional MSP white-labelling agentic compute. A 3-person team renting GPU minutes. A community co-op pooling capacity for hobbyists. Your customers run OpenClaw / NemoClaw / any-OpenClaw on their laptops, in their offices, in their own clusters — anywhere — and offload tasks they can't (or don't want to) run locally to your AKS.
 - **Who your customers are:** anyone whose home setup doesn't fit the job. Indie devs who need a 70B model their MacBook can't host. Researchers parallelising 1,000 prompts overnight. Field engineers offloading a long-running agent so their laptop can sleep. Privacy-sensitive users who'd rather rent a confidential sandbox than send prompts to an LLM proxy that logs everything. Enterprises picking a smaller specialist provider over a hyperscaler for compliance or cost reasons.
 - **You want:** a single AKS cluster (or a few regional clusters) hosting many tenants. Self-service onboarding via your portal (or a Telegram bot, or a CLI sub-command — pairing is just a one-time token). Per-tenant token budgets, slot caps, capability scopes. Provider-side observability without ever decrypting customer mesh traffic.
 - **You do not want:** to ever hold customer-side LLM context in cleartext on a host you control. To require customers to install your CLI. To leak one tenant's audit chain to another. To have a cluster-admin compromise read customer prompts in flight.
@@ -30,20 +30,20 @@ Net effect: the customer's cleartext exists for ~milliseconds, only inside an SE
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart LR
-  subgraph Customers["Customers (no AzureClaw CLI required)"]
+  subgraph Customers["Customers (no Kars CLI required)"]
     direction TB
     subgraph Cust1["🏢 'Acme'"]
       A1["NemoClaw on laptop"]
     end
     subgraph Cust2["🏢 'Globex'"]
-      G1["custom OpenClaw image<br/>+ azureclaw-mesh plugin"]
+      G1["custom OpenClaw image<br/>+ kars-mesh plugin"]
     end
   end
 
   subgraph Provider["☁️ Provider AKS (multi-tenant)"]
     direction TB
     Portal["customer portal<br/>(Entra ID + billing)"]
-    PairAPI["pair-issuance API<br/>wraps azureclaw pair generate"]
+    PairAPI["pair-issuance API<br/>wraps kars pair generate"]
 
     subgraph AKS["☸️ AKS cluster"]
       direction TB
@@ -57,12 +57,12 @@ flowchart LR
         direction TB
         subgraph T1NS["namespace: tenant-acme"]
           subgraph T1Encl["🛡 SEV-SNP enclave (per-pod VM)"]
-            T1SBX["ClawSandbox 'offload-N'<br/>openclaw + router"]
+            T1SBX["KarsSandbox 'offload-N'<br/>openclaw + router"]
           end
         end
         subgraph T2NS["namespace: tenant-globex"]
           subgraph T2Encl["🛡 SEV-SNP enclave (per-pod VM)"]
-            T2SBX["ClawSandbox 'offload-M'<br/>openclaw + router"]
+            T2SBX["KarsSandbox 'offload-M'<br/>openclaw + router"]
           end
         end
       end
@@ -215,14 +215,14 @@ sequenceDiagram
     participant Portal as Provider portal
     participant API as pair-issuance API
     participant Ctrl as controller
-    participant Plugin as azureclaw-mesh plugin
+    participant Plugin as kars-mesh plugin
     participant Reg as registry
     participant Rly as relay
     participant Encl as 🛡 SEV-SNP enclave (sandbox)
 
     Cust->>Portal: sign up (Entra B2C / billing)
     Portal->>API: POST /pair { tenantId, plan: confidential }
-    API->>API: azureclaw pair generate \<br/>--namespace tenant-acme --slots 5 \<br/>--token-budget 5M --expires 30d \<br/>--isolation confidential
+    API->>API: kars pair generate \<br/>--namespace tenant-acme --slots 5 \<br/>--token-budget 5M --expires 30d \<br/>--isolation confidential
     API->>Ctrl: kubectl apply Pairing (tokenHash only,<br/>spec.requiredIsolation = confidential)
     API-->>Portal: token (one-time)
     Portal-->>Cust: secure-share / portal download
@@ -232,7 +232,7 @@ sequenceDiagram
     Plugin->>Rly: KNOCK + X3DH
     Rly-->>Plugin: session established
 
-    Cust->>Plugin: "offload <task> to AzureClaw"
+    Cust->>Plugin: "offload <task> to Kars"
     Plugin->>Rly: encrypted request
     Rly->>Ctrl: route to controller AMID
     Ctrl->>Encl: spawn pod onto Kata pool<br/>(isolation: confidential)
@@ -254,14 +254,14 @@ Each tenant namespace gets its own set of CRDs so budgets, policies, and memory 
 |---|---|
 | `InferencePolicy` | Token budget cap per tenant (`dailyTokens`, `monthlyTokens`). Sandboxes reference by name via `spec.inferenceRef.name`. Missing → `Degraded/InferencePolicyNotFound`. |
 | `ToolPolicy` | Commerce caps (`dailyCap`, `monthlyCap`), AP2 counterparty allowlist, per-tool rate limits. Budget plan → `ToolPolicy` CR; plan upgrade = new CR, old token revoked. |
-| `ClawMemory` | Foundry Memory Store binding scoped to the tenant's store/scope key. Memories never cross tenant boundaries. |
-| `ClawEval` | Scheduled regression evals on tenant sandbox at provider-defined cadence. Providers can gate plan tiers on `EvalsPassed` condition. |
+| `KarsMemory` | Foundry Memory Store binding scoped to the tenant's store/scope key. Memories never cross tenant boundaries. |
+| `KarsEval` | Scheduled regression evals on tenant sandbox at provider-defined cadence. Providers can gate plan tiers on `EvalsPassed` condition. |
 | `McpServer` | Tenant-scoped private MCP tools (e.g., a tenant's internal API gateway). Admission-denied from other namespaces. |
 | `A2AAgent` | A2A 1.2 agent card for cross-org collaboration. Tenants using the federation tier get their own `A2AAgent` CR; see Blueprint 04. |
 
 ```yaml
 # Per-tenant bootstrap (emitted by your portal automation, not a human):
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: acme-budget
@@ -273,7 +273,7 @@ spec:
   contentSafety:
     requirePromptShields: true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: acme-tools
@@ -282,7 +282,7 @@ spec:
   appliesTo:
     tool: "*"
     sandboxMatchLabels:
-      azureclaw.azure.com/tenant: acme
+      kars.azure.com/tenant: acme
   rateLimit:
     rps: 10
     burst: 20
@@ -292,15 +292,15 @@ spec:
 
 ```bash
 # Per regional cluster (one-time):
-azureclaw up --multi-tenant --regions eastus,westeurope \
+kars up --multi-tenant --regions eastus,westeurope \
   --kata-pool-min 3 --kata-pool-vm-size Standard_DC4as_v6   # SEV-SNP-capable AMD EPYC
-azureclaw mesh promote                                       # public endpoint (App Gateway + WAF)
+kars mesh promote                                       # public endpoint (App Gateway + WAF)
 helm install provider-portal …                               # your portal + billing on the same AKS
 
 # Per tenant onboarding (automated by your portal, not a human):
 kubectl create namespace tenant-acme
 kubectl apply -f tenant-acme-rbac.yaml         # ServiceAccount + Workload Identity
-azureclaw pair generate \
+kars pair generate \
   --name acme-prod \
   --namespace tenant-acme \
   --slots 5 \
@@ -310,7 +310,7 @@ azureclaw pair generate \
   --required-isolation confidential            # admission-deny anything weaker
 
 # Day-2:
-azureclaw operator --tenant tenant-acme        # operator TUI scoped to one tenant
+kars operator --tenant tenant-acme        # operator TUI scoped to one tenant
 ```
 
 ## What's unique to this blueprint
@@ -319,10 +319,10 @@ azureclaw operator --tenant tenant-acme        # operator TUI scoped to one tena
 
 - **Customers don't install your CLI.** Customer-side install is the OpenClaw plugin, which is upstreamed. Your portal hands them a token; that's the entire onboarding UX.
 - **Confidential by default for offload sandboxes.** Pairing CRs can carry `spec.requiredIsolation: confidential` so the controller refuses to spawn anything weaker than a Kata + SEV-SNP pod for that tenant's offloads. Customers shopping for a SaaS that won't read their prompts have a one-bit answer.
-- **Per-tenant namespace + per-tenant audit destination.** AzureClaw already namespaces every sandbox by name; the SaaS pattern just stamps a tenant prefix. Audit chains land in per-tenant Log Analytics workspaces (one workspace per Pairing CR's `tenantId` annotation).
+- **Per-tenant namespace + per-tenant audit destination.** Kars already namespaces every sandbox by name; the SaaS pattern just stamps a tenant prefix. Audit chains land in per-tenant Log Analytics workspaces (one workspace per Pairing CR's `tenantId` annotation).
 - **Pairing tokens are commerce-aware.** `--token-budget`, `--slots`, `--expires`, `--capabilities`, `--required-isolation` map directly to your billing plan. Plan upgrade = new Pairing CR with bigger limits; old token revoked.
 - **Provider observability without decryption.** You can see *that* tenant `acme` exchanged 142 mesh frames in the last hour and consumed 1.2M Foundry tokens. You cannot see *what was in those frames* — neither in flight (Signal Protocol) nor at rest in the sandbox (SEV-SNP).
-- **Operator HA out of the box.** Two controller replicas with leader election and jittered requeue are the cluster-level defaults. `azureclaw_controller_reconcile_errors_total` and `_retries_total` on `:9091` give you per-tenant incident signals.
+- **Operator HA out of the box.** Two controller replicas with leader election and jittered requeue are the cluster-level defaults. `kars_controller_reconcile_errors_total` and `_retries_total` on `:9091` give you per-tenant incident signals.
 - **CNCF Kubernetes AI Conformance v1.35+.** The platform and all nine CRDs pass the CNCF AI Conformance suite — a vendor-neutral benchmark for enterprise and ISV customers who require auditable AI infrastructure.
 - **Future:** managed AP2 (Agent Payments Protocol) lets your customers spend their token budget through signed mandates with audit. Schema present today; mounting deferred to a future phase.
 
@@ -333,7 +333,7 @@ The runtime is shipping; what wraps around it for SaaS is the productization tra
 - [ ] Customer portal (Entra B2C signup + billing + token issuance UX, copy-to-clipboard, secure-share fallback)
 - [ ] Per-tenant Foundry quota sharding (per-Pairing-CR Foundry quota bucket; soft + hard caps in router)
 - [ ] Multi-region failover (App Gateway → Front Door, regional registry/relay pairs, RPO/RTO targets)
-- [ ] Tenant-scoped operator TUI (`azureclaw operator --tenant <id>` already works; SaaS portal mirror is what's missing)
+- [ ] Tenant-scoped operator TUI (`kars operator --tenant <id>` already works; SaaS portal mirror is what's missing)
 - [ ] Status page + customer-visible metrics (mesh frames, sandbox count, audit-chain hash head)
 - [ ] SEV-SNP attestation report exposure (a `/.well-known/attestation/<sandbox>` JSON the customer can verify before trusting a sandbox enclave)
 - [ ] SOC 2 / ISO 27001 audit pack (the runtime's audit chain + threat model are most of what's needed; the rest is policy + process)
@@ -344,8 +344,8 @@ None of these change the trust model. They change the customer-facing UX around 
 
 - Not a deployment customers run themselves. For that, see Blueprint 02 — they get the same controller and CRDs in their own subscription.
 - Not a substitute for tenant-level WAF / DDoS controls — App Gateway + Front Door are still your job.
-- Not a model marketplace. The Foundry project remains provider-side; if a customer wants their own model, route to a tenant-bound Foundry connection (`azureclaw model set --tenant`).
-- Not a guarantee against AMD platform-level vulnerabilities. AzureClaw inherits the SEV-SNP threat model; if AMD ships a TCB update, you patch your nodes.
+- Not a model marketplace. The Foundry project remains provider-side; if a customer wants their own model, route to a tenant-bound Foundry connection (`kars model set --tenant`).
+- Not a guarantee against AMD platform-level vulnerabilities. Kars inherits the SEV-SNP threat model; if AMD ships a TCB update, you patch your nodes.
 
 ## Operational guardrails
 
@@ -361,10 +361,10 @@ None of these change the trust model. They change the customer-facing UX around 
 - `controller/src/leader_election.rs` + `controller/src/backoff.rs` + `controller/src/metrics.rs` (operator HA + jitter + `:9091` metrics)
 - `inference-router/src/auth.rs` (per-namespace Workload Identity selection)
 - `cli/src/commands/pair.ts` (`--namespace`, `--capabilities`, `--token-budget`, `--required-isolation`)
-- `deploy/helm/azureclaw/templates/vap*.yaml` (admission policies enforcing posture invariants)
+- `deploy/helm/kars/templates/vap*.yaml` (admission policies enforcing posture invariants)
 - `docs/security-validation.md` (live-AKS validation of all 9 defence-in-depth layers, including Kata VM)
 - `docs/multi-tenant.md` (per-namespace tenant isolation patterns)
 - `docs/security.md` § Layer 2 (Kata VM Isolation)
-- `docs/api/crd-reference.md` (all 8 CRDs, especially `InferencePolicy`, `ToolPolicy`, `ClawMemory`, `A2AAgent`)
+- `docs/api/crd-reference.md` (all 8 CRDs, especially `InferencePolicy`, `ToolPolicy`, `KarsMemory`, `A2AAgent`)
 - `docs/use-cases.md` Scenario 2 (the customer-side experience)
 - ADR-0001 (A2A ingress front-edge, identical pattern for A2A 1.0.0 inbound)

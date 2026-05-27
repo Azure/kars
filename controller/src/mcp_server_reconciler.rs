@@ -6,12 +6,12 @@
 //!
 //! Watches `McpServer` CRs and, for each:
 //!
-//! 1. Ensures a finalizer (`azureclaw.azure.com/mcpserver-cleanup`) so
+//! 1. Ensures a finalizer (`kars.azure.com/mcpserver-cleanup`) so
 //!    cascading Secret + ConfigMap deletion runs synchronously when the
 //!    CR is removed.
 //! 2. Generates an Ed25519 signing keypair the first time we see the CR
 //!    and stores it as a `Secret` of type
-//!    `azureclaw.azure.com/mcp-signing-key`. Subsequent reconciles
+//!    `kars.azure.com/mcp-signing-key`. Subsequent reconciles
 //!    reuse the existing Secret — rotation is a Phase 3 hardening
 //!    concern (see audit doc §4).
 //! 3. When `spec.productionMode == true` and `spec.oauth.issuer` is set,
@@ -61,16 +61,16 @@ const FIELD_MANAGER: &str = crate::field_managers::MCP_SERVER;
 
 /// Finalizer name (DNS subdomain). Mirrors
 /// `crate::reconciler::FINALIZER` shape.
-const FINALIZER: &str = "azureclaw.azure.com/mcpserver-cleanup";
+const FINALIZER: &str = "kars.azure.com/mcpserver-cleanup";
 
 /// Custom Secret type — makes a `kubectl get secrets` listing
 /// self-documenting and lets RBAC carve permissions per type.
-const SECRET_TYPE: &str = "azureclaw.azure.com/mcp-signing-key";
+const SECRET_TYPE: &str = "kars.azure.com/mcp-signing-key";
 
 /// Annotation written on the Secret holding the JWK `kid` (key id) the
 /// router will see in the matching `verifying-key`. Useful for
 /// operator-side rotation work and audit-log correlation.
-const KID_ANNOTATION: &str = "azureclaw.azure.com/mcp-signing-kid";
+const KID_ANNOTATION: &str = "kars.azure.com/mcp-signing-kid";
 
 /// Maximum size of a JWKS document we will accept. Issuers serve
 /// well-formed JWKS responses in the low-kilobytes; anything past 256 KiB
@@ -250,7 +250,7 @@ fn parse_jwks_key_count(raw: &[u8]) -> Result<usize, FetchError> {
 
 async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
     let name = mcp.name_any();
-    let ns = mcp.namespace().unwrap_or_else(|| "azureclaw-system".into());
+    let ns = mcp.namespace().unwrap_or_else(|| "kars-system".into());
     tracing::info!(mcp = %name, ns = %ns, "Reconciling McpServer");
 
     let api: Api<McpServer> = Api::namespaced(ctx.client.clone(), &ns);
@@ -270,7 +270,7 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .map(|f| f.iter().any(|s| s == FINALIZER))
         .unwrap_or(false)
     {
-        let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"McpServer","metadata":{"finalizers":[FINALIZER]}});
+        let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"McpServer","metadata":{"finalizers":[FINALIZER]}});
         api.patch(
             &name,
             &PatchParams::apply(FIELD_MANAGER).force(),
@@ -302,7 +302,7 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // `allowedTools` that the inference-router's `McpServerRegistry`
     // needs to forward calls, and its presence is also what the sandbox
     // reconciler mirrors into the sandbox namespace at
-    // `/etc/azureclaw/mcp/<name>/`. When `productionMode=false` we emit
+    // `/etc/kars/mcp/<name>/`. When `productionMode=false` we emit
     // an empty `{"keys": []}` JWKS default (no inbound OAuth
     // verification needed in dev mode — `/mcp` is mounted on the
     // loopback-only dev surface) but still register the URL so
@@ -383,7 +383,7 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         PHASE_DEGRADED
     } else {
         // Slice 0 honesty: McpServer reconciler today binds exactly
-        // one server per ClawSandbox via `spec.mcp:` (singular).
+        // one server per KarsSandbox via `spec.mcp:` (singular).
         // Slice 4 of crd-well-oiled-machine introduces a plural
         // multi-server model + per-server enable/disable. We keep
         // `Ready` here (the singular path *does* work end-to-end and
@@ -397,7 +397,7 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // SSA requires apiVersion + kind in the patch body — without
     // them, the API server returns "invalid object type: /, Kind=".
     let status_patch = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "McpServer",
         "status": McpServerStatus {
             phase: Some(phase.into()),
@@ -574,9 +574,9 @@ async fn ensure_signing_secret(
             labels: Some(BTreeMap::from([
                 (
                     "app.kubernetes.io/managed-by".into(),
-                    "azureclaw-controller".into(),
+                    "kars-controller".into(),
                 ),
-                ("azureclaw.azure.com/mcp-server".into(), owner.into()),
+                ("kars.azure.com/mcp-server".into(), owner.into()),
             ])),
             ..Default::default()
         },
@@ -699,9 +699,9 @@ async fn ensure_jwks_configmap(
             labels: Some(BTreeMap::from([
                 (
                     "app.kubernetes.io/managed-by".into(),
-                    "azureclaw-controller".into(),
+                    "kars-controller".into(),
                 ),
-                ("azureclaw.azure.com/mcp-server".into(), owner.into()),
+                ("kars.azure.com/mcp-server".into(), owner.into()),
             ])),
             ..Default::default()
         },
@@ -755,7 +755,7 @@ async fn finalize(
         .as_ref()
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
-    let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"McpServer","metadata":{"finalizers": finalizers}});
+    let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"McpServer","metadata":{"finalizers": finalizers}});
     api.patch(
         name,
         &PatchParams::apply(FIELD_MANAGER).force(),
@@ -940,7 +940,7 @@ async fn resolve_mcp_source(
 
 /// Merge the verified bundle's content fields onto the CR's
 /// `allowedSandboxes` selector. The bundle owns the content; the CR
-/// owns the selector — same pattern as InferencePolicy + ClawMemory.
+/// owns the selector — same pattern as InferencePolicy + KarsMemory.
 fn merge_bundle_with_selector(
     cr_spec: &crate::mcp_server::McpServerSpec,
     verified: &crate::policy_canonical::mcp_server::VerifiedMcpServerBundle,

@@ -8,7 +8,7 @@ the in-process criterion bench in `inference-router/benches/proxy_bench.rs`.
 
 ```bash
 # 1. Start the router (or any HTTP target) on 127.0.0.1:8443.
-cargo run --bin azureclaw-inference-router &
+cargo run --bin kars-inference-router &
 
 # 2. Run k6.
 k6 run tests/k6/router_smoke.js

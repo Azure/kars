@@ -17,17 +17,17 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt; // for oneshot()
 
-use azureclaw_inference_router::auth::WorkloadIdentityAuth;
-use azureclaw_inference_router::blocklist::Blocklist;
-use azureclaw_inference_router::budget::TokenBudgetTracker;
-use azureclaw_inference_router::config::{Config, RegistryMode};
-use azureclaw_inference_router::governance::Governance;
-use azureclaw_inference_router::handoff::{
+use kars_inference_router::auth::WorkloadIdentityAuth;
+use kars_inference_router::blocklist::Blocklist;
+use kars_inference_router::budget::TokenBudgetTracker;
+use kars_inference_router::config::{Config, RegistryMode};
+use kars_inference_router::governance::Governance;
+use kars_inference_router::handoff::{
     DrainState, HandoffSession, HandoffTokenStore, PendingHandoffStore,
 };
-use azureclaw_inference_router::mesh::{MeshInbox, MeshMetrics};
-use azureclaw_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
-use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_routes};
+use kars_inference_router::mesh::{MeshInbox, MeshMetrics};
+use kars_inference_router::providers::{AuditSink, PolicyDecisionProvider, SigningProvider};
+use kars_inference_router::routes::{AppState, mesh_routes, sensitive_agt_routes};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,12 +35,11 @@ use azureclaw_inference_router::routes::{AppState, mesh_routes, sensitive_agt_ro
 
 /// Build a minimal AppState suitable for testing (no env vars, no network).
 fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
-    let policy_status =
-        Arc::new(azureclaw_inference_router::policy_status::PolicyStatusRegistry::new());
+    let policy_status = Arc::new(kars_inference_router::policy_status::PolicyStatusRegistry::new());
     let governance = Arc::new(Governance::new_with_status(sandbox, policy_status.clone()));
     AppState {
         auth: Arc::new(WorkloadIdentityAuth::new()),
-        copilot: Arc::new(azureclaw_inference_router::copilot_auth::CopilotTokenCache::from_env()),
+        copilot: Arc::new(kars_inference_router::copilot_auth::CopilotTokenCache::from_env()),
         client: reqwest::Client::new(),
         config: Arc::new(Config {
             port: 0,
@@ -64,7 +63,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         governance,
         blocklist: Blocklist::disabled(),
         blocked_egress: Arc::new(
-            azureclaw_inference_router::egress_blocked::BlockedBuffer::with_defaults(),
+            kars_inference_router::egress_blocked::BlockedBuffer::with_defaults(),
         ),
         sandbox_name: Arc::new(sandbox.to_string()),
         inbox: Arc::new(MeshInbox::new()),
@@ -77,11 +76,11 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         drain_state: DrainState::new(),
         pending_handoff: PendingHandoffStore::new(),
         policy_status,
-        inference_policy: azureclaw_inference_router::inference_policy_loader::empty_handle(),
-        memory_binding: azureclaw_inference_router::memory_binding_loader::empty_handle(),
-        egress_allowlist: azureclaw_inference_router::egress_allowlist_loader::empty_handle(),
+        inference_policy: kars_inference_router::inference_policy_loader::empty_handle(),
+        memory_binding: kars_inference_router::memory_binding_loader::empty_handle(),
+        egress_allowlist: kars_inference_router::egress_allowlist_loader::empty_handle(),
         deployment_health: std::sync::Arc::new(
-            azureclaw_inference_router::deployment_health::DeploymentHealthRegistry::new(),
+            kars_inference_router::deployment_health::DeploymentHealthRegistry::new(),
         ),
     }
 }
@@ -359,7 +358,7 @@ async fn trust_update_with_valid_admin_header() {
         &app,
         "/agt/trust",
         json!({"agent_id": "peer-1", "score": 700, "interactions": 1}),
-        &[("x-azureclaw-admin", "secret-token")],
+        &[("x-kars-admin", "secret-token")],
     )
     .await;
 
@@ -393,7 +392,7 @@ async fn trust_update_with_wrong_token() {
         &app,
         "/agt/trust",
         json!({"agent_id": "peer-1", "score": 700}),
-        &[("x-azureclaw-admin", "wrong-token")],
+        &[("x-kars-admin", "wrong-token")],
     )
     .await;
 
@@ -454,12 +453,8 @@ async fn trust_delete_with_valid_token() {
     state.governance.update_trust("target", 500, 1).unwrap();
     let app = test_app(state);
 
-    let (status, body) = delete_with_headers(
-        &app,
-        "/agt/trust/target",
-        &[("x-azureclaw-admin", "admin-key")],
-    )
-    .await;
+    let (status, body) =
+        delete_with_headers(&app, "/agt/trust/target", &[("x-kars-admin", "admin-key")]).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ok"], true);
@@ -671,7 +666,7 @@ async fn trust_update_then_delete_cleans_up() {
         &app,
         "/agt/trust",
         json!({"agent_id": "temp-peer", "score": 600}),
-        &[("x-azureclaw-admin", "tk")],
+        &[("x-kars-admin", "tk")],
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -688,7 +683,7 @@ async fn trust_update_then_delete_cleans_up() {
 
     // Delete it
     let (s, body) =
-        delete_with_headers(&app, "/agt/trust/temp-peer", &[("x-azureclaw-admin", "tk")]).await;
+        delete_with_headers(&app, "/agt/trust/temp-peer", &[("x-kars-admin", "tk")]).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["deleted"], true);
 }

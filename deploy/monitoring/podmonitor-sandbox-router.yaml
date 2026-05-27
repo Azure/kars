@@ -1,20 +1,20 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: azureclaw-sandbox-router
+  name: kars-sandbox-router
   namespace: monitoring
   labels:
-    app.kubernetes.io/part-of: azureclaw
+    app.kubernetes.io/part-of: kars
     release: kps
 spec:
-  # Scrape every azureclaw sandbox pod across all azureclaw-* namespaces.
+  # Scrape every kars sandbox pod across all kars-* namespaces.
   # The router /metrics is on port 8443 (HTTP, cluster-internal — the
   # TLS-terminating ingress is loopback-only).
   namespaceSelector:
     any: true
   selector:
     matchLabels:
-      azureclaw.azure.com/component: sandbox
+      kars.azure.com/component: sandbox
   podMetricsEndpoints:
     - port: inference        # container port name on the router container
       path: /metrics
@@ -22,7 +22,7 @@ spec:
       scrapeTimeout: 10s
       scheme: http
       relabelings:
-        - sourceLabels: [__meta_kubernetes_pod_label_azureclaw_azure_com_sandbox]
+        - sourceLabels: [__meta_kubernetes_pod_label_kars_azure_com_sandbox]
           targetLabel: sandbox
         - sourceLabels: [__meta_kubernetes_namespace]
           targetLabel: sandbox_namespace

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // ci:loc-ok — Phase 2 multi-CRD reconciler / generated module; intentional. Tracked in plan.md §S15 follow-up.
-// AzureClaw AGT tool registrations — extracted from plugin.ts in S15.f.9.
+// Kars AGT tool registrations — extracted from plugin.ts in S15.f.9.
 //
 // Stateful tools that interact with the AGT mesh (Signal Protocol session
 // over WebSocket relay), sandbox lifecycle (spawn/destroy/list/status), and
@@ -13,12 +13,12 @@
 // plugin.ts and this module share the same reference.
 //
 // Tools registered:
-//   azureclaw_spawn               azureclaw_spawn_status
-//   azureclaw_mesh_send           azureclaw_mesh_inbox
-//   azureclaw_mesh_transfer_file  azureclaw_spawn_destroy
-//   azureclaw_spawn_list          azureclaw_discover
-//   azureclaw_handoff_status      azureclaw_handoff_request
-//   azureclaw_handoff_confirm
+//   kars_spawn               kars_spawn_status
+//   kars_mesh_send           kars_mesh_inbox
+//   kars_mesh_transfer_file  kars_spawn_destroy
+//   kars_spawn_list          kars_discover
+//   kars_handoff_status      kars_handoff_request
+//   kars_handoff_confirm
 //
 // The handoff_request + handoff_confirm tools are only registered when
 // AGT_REGISTRY_MODE === "global" (mirrors the previous inline conditional).
@@ -71,7 +71,7 @@ export interface AgtToolsDeps {
   bannerAlreadyPrinted: boolean;
   inbox: AgtInboxEntry[];
   /**
-   * Inbox + gateway diagnostics. Surfaced inside `azureclaw_mesh_inbox`
+   * Inbox + gateway diagnostics. Surfaced inside `kars_mesh_inbox`
    * responses so the LLM (and operators triaging "inbox empty"-style
    * reports) can distinguish a never-arrived message from one that the
    * agent already received and consumed on a prior turn, vs a gateway
@@ -123,7 +123,7 @@ export interface AgtToolsDeps {
   ) => Promise<void>;
   /**
    * Server-side blocking wait for the next non-internal inbox entry. Used
-   * by `azureclaw_mesh_inbox` (block_until_message) and `azureclaw_mesh_await`
+   * by `kars_mesh_inbox` (block_until_message) and `kars_mesh_await`
    * to obviate the LLM's poll-and-yield loop. Returns true on wake, false
    * on timeout. Always resolves — never rejects. May be omitted by hosts
    * that haven't wired the wake mechanism (older index.ts revisions); when
@@ -140,7 +140,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   const _runHandoffOrchestration = deps.runHandoffOrchestration;
   const handoffState = deps.handoffState;
 
-  // Probe sub-agent pod phase. Used by azureclaw_spawn_status.
+  // Probe sub-agent pod phase. Used by kars_spawn_status.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async function probeSubAgentAlive(
     name: string,
@@ -175,20 +175,20 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   }
   void probeSubAgentAlive;
 
-  // ── Register AzureClaw agent tools (spawn, mesh, status, destroy) ────
+  // ── Register Kars agent tools (spawn, mesh, status, destroy) ────
   // These are first-class tools the LLM can call directly.
   // Registered as required tools (always available, no tools.allow needed).
   // API: execute(_id, params) → { content: [{ type: "text", text }] }
 
   // Spawn tools are always registered — AGT policy profile decides whether
   // the sandbox may actually invoke them. Offload sandboxes use the "offload"
-  // policy profile which denies spawn:* + tool:azureclaw_spawn_* actions.
+  // policy profile which denies spawn:* + tool:kars_spawn_* actions.
   // Normal interactive sandboxes use "default" and retain full spawn capability.
 
   api.registerTool({
-    name: "azureclaw_spawn",
+    name: "kars_spawn",
     label: "Spawn Sub-Agent",
-    description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted mesh communication (Signal Protocol). The sub-agent runs in its own container with a SEPARATE filesystem — it CANNOT see your files. Exchange data via azureclaw_mesh_send (include content in the message body). Sub-agents can also message EACH OTHER directly via mesh — you can instruct one sub-agent to forward its results to another sub-agent by name (e.g. 'send your analysis to the writer agent'). You don't need to relay everything yourself. ALWAYS pass a `role` describing the sub-agent's persona (e.g. 'data analyst', 'graphic designer', 'technical writer') — the platform builds a Peer roster from this and prepends it to every mesh task so siblings can resolve role references to canonical names without guessing.",
+    description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted mesh communication (Signal Protocol). The sub-agent runs in its own container with a SEPARATE filesystem — it CANNOT see your files. Exchange data via kars_mesh_send (include content in the message body). Sub-agents can also message EACH OTHER directly via mesh — you can instruct one sub-agent to forward its results to another sub-agent by name (e.g. 'send your analysis to the writer agent'). You don't need to relay everything yourself. ALWAYS pass a `role` describing the sub-agent's persona (e.g. 'data analyst', 'graphic designer', 'technical writer') — the platform builds a Peer roster from this and prepends it to every mesh task so siblings can resolve role references to canonical names without guessing.",
     parameters: {
       type: "object",
       properties: {
@@ -210,7 +210,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           content: [{
             type: "text",
             text:
-              "❌ azureclaw_spawn is DISABLED in offload sandboxes. You ARE the " +
+              "❌ kars_spawn is DISABLED in offload sandboxes. You ARE the " +
               "offload executor — do NOT try to delegate this task to another " +
               "sandbox. Execute the task directly here. Write output files to " +
               "/sandbox/.openclaw/workspace/ (use exec_command) so they are " +
@@ -292,7 +292,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         if (phase !== "Running") {
           return { content: [{ type: "text", text: JSON.stringify({
             ...result,
-            warning: `Sub-agent created but not yet Running (phase: ${phase}). It may still be booting. Use azureclaw_spawn_status to check.`,
+            warning: `Sub-agent created but not yet Running (phase: ${phase}). It may still be booting. Use kars_spawn_status to check.`,
           }, null, 2) }] };
         }
 
@@ -365,7 +365,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         const siblings = [...amidToName.values()].filter(n => n !== agentName && n !== (process.env.SANDBOX_NAME || ""));
 
         // Record this sibling's role in the spawn roster so subsequent
-        // azureclaw_mesh_send calls can prepend a deterministic "Peer roster:"
+        // kars_mesh_send calls can prepend a deterministic "Peer roster:"
         // block to outbound task content. The roster removes the LLM heuristic
         // step of guessing which named peer matches a role reference like "the
         // writer" or "the graphic designer" — siblings see canonical names.
@@ -423,7 +423,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         return { content: [{ type: "text", text: JSON.stringify({
           ...result,
           phase: "Running",
-          message: `Sub-agent '${agentName}' is Running and ready for mesh communication. Use azureclaw_mesh_send to send it a task.`,
+          message: `Sub-agent '${agentName}' is Running and ready for mesh communication. Use kars_mesh_send to send it a task.`,
           ...(siblings.length > 0 ? { mesh_peers: `This agent can communicate directly with other sub-agents: ${siblings.join(", ")}. You can instruct it to forward results to them by name.` } : {}),
         }, null, 2) }] };
       } catch (e: any) {
@@ -433,7 +433,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   api.registerTool({
-    name: "azureclaw_spawn_status",
+    name: "kars_spawn_status",
     label: "Sub-Agent Status",
     description: "Check the status of a spawned sub-agent. Returns phase (Pending/Running/Terminating), namespace, mesh_registered (true once the sub-agent has registered with the AGT mesh), and mesh_ready (Running AND mesh_registered). Prefer polling until mesh_ready=true before sending mesh messages — phase=Running alone is not sufficient because mesh registration happens asynchronously (~60s on AKS) after the pod becomes Ready.",
     parameters: {
@@ -468,9 +468,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   api.registerTool({
-    name: "azureclaw_mesh_send",
+    name: "kars_mesh_send",
     label: "Send Mesh Task",
-    description: "Send a TEXT/JSON task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any data the agent needs directly in the message body. To send a FILE / IMAGE / BINARY, use `azureclaw_mesh_transfer_file` instead — peer agents cannot read your /sandbox or /tmp paths, so a hand-crafted file_transfer envelope with placeholder file_data will be rejected by the payload guard. Plain JSON metadata and free-form text are accepted. Automatically retries registry discovery and prekey exchange for as long as the sub-agent pod is alive; aborts only if the pod reaches Failed/Terminating/Exited, the sandbox is deleted, or meshSend returns a non-transient error. Then waits up to 5.5 minutes for the reply. If no reply arrives, check azureclaw_mesh_inbox later.",
+    description: "Send a TEXT/JSON task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any data the agent needs directly in the message body. To send a FILE / IMAGE / BINARY, use `kars_mesh_transfer_file` instead — peer agents cannot read your /sandbox or /tmp paths, so a hand-crafted file_transfer envelope with dummy file_data will be rejected by the payload guard. Plain JSON metadata and free-form text are accepted. Automatically retries registry discovery and prekey exchange for as long as the sub-agent pod is alive; aborts only if the pod reaches Failed/Terminating/Exited, the sandbox is deleted, or meshSend returns a non-transient error. Then waits up to 5.5 minutes for the reply. If no reply arrives, check kars_mesh_inbox later.",
     parameters: {
       type: "object",
       properties: {
@@ -487,7 +487,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       // tool with their own sandbox name or an arbitrary sibling. Force
       // routing to 'parent' — the only legitimate destination in offload mode.
       if (process.env.OFFLOAD_REQUEST_ID && agentName !== "parent") {
-        log.warn(`azureclaw_mesh_send: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
+        log.warn(`kars_mesh_send: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
         agentName = "parent";
       }
 
@@ -504,7 +504,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         const parentNameSym = (process as any)[Symbol.for("agt-parent-name")];
         const parentDisplayName = process.env.PARENT_SANDBOX || parentNameSym;
         if (parentDisplayName && typeof parentDisplayName === "string") {
-          log.info(`azureclaw_mesh_send: alias 'parent' → '${parentDisplayName}'`);
+          log.info(`kars_mesh_send: alias 'parent' → '${parentDisplayName}'`);
           agentName = parentDisplayName;
         } else {
           // Root-agent guard. The top-level agent (the one the user is
@@ -518,7 +518,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // to relay sibling clarification messages upstream. Return a clear
           // structured error so the LLM stops trying to relay and instead
           // replies directly to the user via its assistant message.
-          log.warn("azureclaw_mesh_send: 'parent' unresolvable — this agent has no PARENT_SANDBOX (it is the root)");
+          log.warn("kars_mesh_send: 'parent' unresolvable — this agent has no PARENT_SANDBOX (it is the root)");
           return { content: [{ type: "text", text: safeJson({
             error: "no_parent",
             message: "This agent IS the root — there is no upstream 'parent' to send to. Reply directly to the user via your final assistant message; do not attempt to relay messages to a non-existent parent. If you meant to message a sibling, pass its explicit name as to_agent.",
@@ -550,7 +550,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           const rosterBlock =
             "Peer roster (AUTHORITATIVE — use these EXACT agent names with mesh_send / mesh_transfer_file; never invent or substitute names):\n" +
             rosterLines.join("\n") +
-            "\n\nThe roster above is the SOLE source of truth for sibling names. Trust it over any discover() result, even if discover returns an empty/short list (sibling registrations race at spawn — the roster is correct even when the registry hasn't caught up). Do NOT call azureclaw_discover for sibling resolution when this roster is present; only use discover for agents OUTSIDE this spawn group. When your task references a peer by role/persona (e.g. 'the writer', 'the analyst', 'the graphic designer'), route to the corresponding name in the roster above. If the roster does not disambiguate a role reference, FIRST call azureclaw_discover(pattern='*') — a sibling spawned in parallel may have registered after this roster was built. Only after discover also fails to identify the canonical name, send one mesh_send to 'parent' asking for the canonical name and wait for the reply — do not guess.\n\n---\n\n";
+            "\n\nThe roster above is the SOLE source of truth for sibling names. Trust it over any discover() result, even if discover returns an empty/short list (sibling registrations race at spawn — the roster is correct even when the registry hasn't caught up). Do NOT call kars_discover for sibling resolution when this roster is present; only use discover for agents OUTSIDE this spawn group. When your task references a peer by role/persona (e.g. 'the writer', 'the analyst', 'the graphic designer'), route to the corresponding name in the roster above. If the roster does not disambiguate a role reference, FIRST call kars_discover(pattern='*') — a sibling spawned in parallel may have registered after this roster was built. Only after discover also fails to identify the canonical name, send one mesh_send to 'parent' asking for the canonical name and wait for the reply — do not guess.\n\n---\n\n";
           msgContent = rosterBlock + (msgContent || "");
         }
       }
@@ -558,9 +558,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       // Guard: reject malformed file_transfer envelopes / cross-container
       // path references before they hit the wire. The peer agent runs in a
       // separate container and cannot read this filesystem.
-      const guardErr = validateMeshPayload(msgContent, { transferToolName: "azureclaw_mesh_transfer_file" });
+      const guardErr = validateMeshPayload(msgContent, { transferToolName: "kars_mesh_transfer_file" });
       if (guardErr) {
-        log.warn(`azureclaw_mesh_send: payload guard rejected — ${guardErr.slice(0, 160)}`);
+        log.warn(`kars_mesh_send: payload guard rejected — ${guardErr.slice(0, 160)}`);
         return { content: [{ type: "text", text: safeJson({
           error: guardErr,
           to_agent: agentName,
@@ -577,7 +577,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             try { await deps.meshClient().disconnect(); } catch { /* ignore */ }
             await deps.meshClient().connect({
               displayName: deps.sandboxName(),
-              capabilities: ["azureclaw-agent", "task-execution", deps.sandboxName()],
+              capabilities: ["kars-agent", "task-execution", deps.sandboxName()],
             });
             log.info("AGT relay: reconnected successfully");
           } catch (reconErr: any) {
@@ -614,7 +614,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                 reason: probe.reason,
                 phase: probe.phase,
                 agent: agentName,
-                hint: "Sub-agent was deleted, failed, or is terminating. Respawn with azureclaw_spawn before retrying.",
+                hint: "Sub-agent was deleted, failed, or is terminating. Respawn with kars_spawn before retrying.",
               }, null, 2) }] };
             }
 
@@ -687,7 +687,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               error: "E2E encrypted send failed — message NOT delivered",
               reason: finalSendErr?.message || "unknown",
               agent: agentName,
-              hint: "Non-transient send error — verify the sub-agent is healthy with azureclaw_spawn_status.",
+              hint: "Non-transient send error — verify the sub-agent is healthy with kars_spawn_status.",
             }, null, 2) }] };
           }
 
@@ -874,7 +874,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
             } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
           } else {
-            result.note = "No reply within timeout — use azureclaw_mesh_inbox to check later.";
+            result.note = "No reply within timeout — use kars_mesh_inbox to check later.";
           }
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         } catch (agtErr: any) {
@@ -897,7 +897,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   api.registerTool({
-    name: "azureclaw_mesh_inbox",
+    name: "kars_mesh_inbox",
     label: "Check Mesh Inbox",
     description:
       "Read messages received via the E2E encrypted AGT mesh inbox. ALWAYS " +
@@ -1149,24 +1149,24 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     },
   });
 
-  // ── azureclaw_mesh_await ─────────────────────────────────────────────
+  // ── kars_mesh_await ─────────────────────────────────────────────
   // Server-side barrier: block until ALL named senders have delivered ≥1
   // unread, non-internal message (or timeout). Returns the matched
   // messages plus a `missing` list when partial. The intended pattern is
   // for assembly steps that need multiple sibling outputs — call ONCE
   // before assembly instead of polling mesh_inbox in a loop.
   api.registerTool({
-    name: "azureclaw_mesh_await",
+    name: "kars_mesh_await",
     label: "Await Mesh Messages from Senders",
     description:
       "Block server-side until ALL listed senders have delivered ≥1 unread " +
       "message via the AGT mesh (or until `timeout_seconds` elapses). USE " +
-      "THIS instead of polling `azureclaw_mesh_inbox` in a loop when your " +
+      "THIS instead of polling `kars_mesh_inbox` in a loop when your " +
       "next step needs outputs from multiple siblings (e.g. writer needs " +
       "both analyst's JSON and viz's images before it can assemble the " +
       "brief). Returns the matched message ids per sender plus a `missing` " +
       "list of senders that didn't deliver in time. The matched messages " +
-      "stay in the inbox — call `azureclaw_mesh_inbox` to read their " +
+      "stay in the inbox — call `kars_mesh_inbox` to read their " +
       "contents (or pass `mark_read=true` here to flag them as seen on the " +
       "way out). Internal protocol messages (handoff, file_transfer_ack, " +
       "task_progress) do NOT satisfy the wait — only content-bearing " +
@@ -1292,8 +1292,8 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           waited_seconds: Math.round((Date.now() - startedAt) / 1000),
           timeout_seconds: timeoutSeconds,
           note: missing.length === 0
-            ? "All requested senders have delivered. Call azureclaw_mesh_inbox to read message contents."
-            : `Timeout: missing ${missing.join(", ")}. Call azureclaw_mesh_inbox to inspect what did arrive, then either retry mesh_await for the missing senders, or proceed with partial input.`,
+            ? "All requested senders have delivered. Call kars_mesh_inbox to read message contents."
+            : `Timeout: missing ${missing.join(", ")}. Call kars_mesh_inbox to inspect what did arrive, then either retry mesh_await for the missing senders, or proceed with partial input.`,
         }, null, 2) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `mesh_await failed: ${e.message}` }] };
@@ -1302,7 +1302,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   api.registerTool({
-    name: "azureclaw_mesh_transfer_file",
+    name: "kars_mesh_transfer_file",
     label: "Transfer File via Mesh",
     description: "Send a file to another agent via E2E encrypted mesh. The file is read from your local workspace, base64-encoded, and sent via the chunked transfer protocol — files up to ~30MB are supported. The receiving agent gets a file_transfer message in their inbox with the file content. Great for sharing datasets, configs, code, or any file between agents.",
     parameters: {
@@ -1323,24 +1323,24 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       // only ship files back to 'parent'. Seen in the wild: agent sent
       // aks-pricing-cheatsheet.md to its own sandbox name instead of parent.
       if (process.env.OFFLOAD_REQUEST_ID && agentName !== "parent") {
-        log.warn(`azureclaw_mesh_transfer_file: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
+        log.warn(`kars_mesh_transfer_file: offload mode — rewriting to_agent '${agentName}' → 'parent'`);
         agentName = "parent";
       }
 
       // Alias 'parent' → actual parent sandbox display_name (same rationale
-      // as azureclaw_mesh_send above). Without this, file transfers to
+      // as kars_mesh_send above). Without this, file transfers to
       // 'parent' from regular spawned sub-agents fail with no prekey bundle.
       if (agentName === "parent" && !process.env.OFFLOAD_REQUEST_ID) {
         const parentNameSym = (process as any)[Symbol.for("agt-parent-name")];
         const parentDisplayName = process.env.PARENT_SANDBOX || parentNameSym;
         if (parentDisplayName && typeof parentDisplayName === "string") {
-          log.info(`azureclaw_mesh_transfer_file: alias 'parent' → '${parentDisplayName}'`);
+          log.info(`kars_mesh_transfer_file: alias 'parent' → '${parentDisplayName}'`);
           agentName = parentDisplayName;
         } else {
-          // Root-agent guard — see azureclaw_mesh_send for full rationale.
+          // Root-agent guard — see kars_mesh_send for full rationale.
           // The top-level agent has no upstream parent; failing fast here
           // prevents the LLM from looping on bogus "delivery failed" errors.
-          log.warn("azureclaw_mesh_transfer_file: 'parent' unresolvable — this agent has no PARENT_SANDBOX (it is the root)");
+          log.warn("kars_mesh_transfer_file: 'parent' unresolvable — this agent has no PARENT_SANDBOX (it is the root)");
           return { content: [{ type: "text", text: safeJson({
             error: "no_parent",
             message: "This agent IS the root — there is no upstream 'parent' to ship files to. Files produced at the root remain on the root's local filesystem; reference them in your assistant message instead. If you meant to ship to a sibling, pass its explicit name as to_agent.",
@@ -1413,7 +1413,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         if (!targetAmid) {
           return { content: [{ type: "text", text: JSON.stringify({
             error: `Agent '${agentName}' not found in mesh registry`,
-            hint: "Ensure the agent is running and registered. Use azureclaw_discover to search.",
+            hint: "Ensure the agent is running and registered. Use kars_discover to search.",
           }, null, 2) }] };
         }
 
@@ -1495,7 +1495,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   api.registerTool({
     name: "telegram_status",
     label: "Send Telegram Status",
-    description: "Send a short status update to the user's Telegram chat configured for this sandbox. Use this for live progress pings during long-running multi-agent tasks (e.g. 'analyst done — 8 sources, 4 platforms scored'). Takes only the text — the chat ID is read from the sandbox's TELEGRAM_ALLOW_FROM env var (configured at `azureclaw up` time). No need to specify channel routing or chat IDs. Returns delivery status without leaking the bot token.",
+    description: "Send a short status update to the user's Telegram chat configured for this sandbox. Use this for live progress pings during long-running multi-agent tasks (e.g. 'analyst done — 8 sources, 4 platforms scored'). Takes only the text — the chat ID is read from the sandbox's TELEGRAM_ALLOW_FROM env var (configured at `kars up` time). No need to specify channel routing or chat IDs. Returns delivery status without leaking the bot token.",
     parameters: {
       type: "object",
       properties: {
@@ -1513,7 +1513,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       if (!tgToken || !tgAllowFrom) {
         return { content: [{ type: "text", text: safeJson({
           error: "telegram_status: Telegram is not configured for this sandbox",
-          hint: "Run `azureclaw credentials update <name> --telegram-token <token> --telegram-chat-id <id>` to enable.",
+          hint: "Run `kars credentials update <name> --telegram-token <token> --telegram-chat-id <id>` to enable.",
         }) }] };
       }
       const chatIds = tgAllowFrom.split(",").map((s: string) => s.trim()).filter(Boolean);
@@ -1523,7 +1523,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       const truncated = text.length > 4096 ? text.slice(0, 4093) + "..." : text;
       // Defensive: strip a leading "bot" prefix from the token if present.
       // grammY's transport prepends "bot" when building URLs; if a user (or
-      // `azureclaw up --telegram-token`) supplied the raw "bot…:…" form, we
+      // `kars up --telegram-token`) supplied the raw "bot…:…" form, we
       // would otherwise emit /botbot…/sendMessage and get a 404.
       const tgTokenClean = tgToken.startsWith("bot") ? tgToken.slice(3) : tgToken;
       const results: Array<{ chat_id: string; ok: boolean; status?: number; error?: string }> = [];
@@ -1567,7 +1567,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   api.registerTool({
-    name: "azureclaw_spawn_destroy",
+    name: "kars_spawn_destroy",
     label: "Destroy Sub-Agent",
     description: "Destroy a spawned sub-agent sandbox. Tears down the K8s namespace, deployment, and all resources. Use this to clean up after the sub-agent has completed its task.",
     parameters: {
@@ -1604,7 +1604,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   api.registerTool({
-    name: "azureclaw_spawn_list",
+    name: "kars_spawn_list",
     label: "List Sub-Agents",
     description: "List all sub-agents spawned from this sandbox. Returns name, phase, model, and governance status for each.",
     parameters: { type: "object", properties: {} },
@@ -1619,9 +1619,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   api.registerTool({
-    name: "azureclaw_discover",
+    name: "kars_discover",
     label: "Discover Agents",
-    description: "Search the AgentMesh registry for other agents by name or capability. Returns their AMID, display name, tier, capabilities, and reputation score. Use this to find agents to communicate with via azureclaw_mesh_send or azureclaw_relay.",
+    description: "Search the AgentMesh registry for other agents by name or capability. Returns their AMID, display name, tier, capabilities, and reputation score. Use this to find agents to communicate with via kars_mesh_send or kars_relay.",
     parameters: {
       type: "object",
       properties: {
@@ -1632,13 +1632,13 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     async execute(_id: string, params: Record<string, unknown>) {
       const query = (params.query as string) || "*";
       try {
-        const searchCap = query === "*" ? "azureclaw-agent" : query;
+        const searchCap = query === "*" ? "kars-agent" : query;
         const STALE_AFTER_MS = 90_000;
 
         // Filter graveyard entries. The agentmesh registry does NOT prune
         // offline agents from `search_capabilities` results — every sandbox
         // that ever registered remains in the index until manually revoked,
-        // and the controller-side `azureclaw destroy` path was missing a
+        // and the controller-side `kars destroy` path was missing a
         // deregistration call for a long time. Without filtering, a brand-new
         // top-level agent calling discover sees ALL historical sandboxes (we've
         // observed 170+ stale entries in a single dev cluster), which:
@@ -1691,12 +1691,12 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
 
         if (isFreshBoot && isEnumerationQuery && looksRaced(fresh)) {
           for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
-            log.info(`azureclaw_discover: registration-race retry ${attempt + 1}/${RETRY_DELAYS_MS.length} (got ${fresh.length} fresh, ${agents.length} raw, uptime=${process.uptime().toFixed(1)}s)`);
+            log.info(`kars_discover: registration-race retry ${attempt + 1}/${RETRY_DELAYS_MS.length} (got ${fresh.length} fresh, ${agents.length} raw, uptime=${process.uptime().toFixed(1)}s)`);
             await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]));
             agents = await getMeshRegistry(routerUrl).search(searchCap, { timeoutMs: 5000 });
             fresh = filterFresh(agents);
             if (!looksRaced(fresh)) {
-              log.info(`azureclaw_discover: registration-race resolved after ${attempt + 1} retries (${fresh.length} fresh agents)`);
+              log.info(`kars_discover: registration-race resolved after ${attempt + 1} retries (${fresh.length} fresh agents)`);
               break;
             }
           }
@@ -1731,7 +1731,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   // when the user asks to "continue from the cloud" or similar.
 
   api.registerTool({
-    name: "azureclaw_handoff_status",
+    name: "kars_handoff_status",
     label: "Handoff Status",
     description: "Check handoff (live migration) progress. Returns the current phase and NEW steps since your last poll. Pass since_step (the total_steps from your last call) to get only new updates. Relay each new step to the user immediately as a live update. Keep polling every 3-5 seconds until status is 'complete', 'error', or 'partial'.",
     parameters: {
@@ -1778,15 +1778,15 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   // Only register mutation handoff tools when global registry is active.
-  // In local mode the LLM only sees azureclaw_handoff_status which reports
+  // In local mode the LLM only sees kars_handoff_status which reports
   // handoff_available: false — no point exposing tools that would 409.
   const registryMode = process.env.AGT_REGISTRY_MODE || "local";
   if (registryMode === "global") {
 
   api.registerTool({
-    name: "azureclaw_handoff_request",
+    name: "kars_handoff_request",
     label: "Request Handoff",
-    description: "Request a live handoff (migration) of this agent to the cloud or back to local. This creates a PENDING request with a confirmation code that is sent DIRECTLY to the user's Telegram (you will NOT receive the code). The user must type the code back to you, and you pass it to azureclaw_handoff_confirm. Do NOT fabricate or guess the confirmation code. Direction: 'cloud' (local→AKS) or 'local' (AKS→local). IMPORTANT: Always call azureclaw_handoff_status first to check if handoff is available.",
+    description: "Request a live handoff (migration) of this agent to the cloud or back to local. This creates a PENDING request with a confirmation code that is sent DIRECTLY to the user's Telegram (you will NOT receive the code). The user must type the code back to you, and you pass it to kars_handoff_confirm. Do NOT fabricate or guess the confirmation code. Direction: 'cloud' (local→AKS) or 'local' (AKS→local). IMPORTANT: Always call kars_handoff_status first to check if handoff is available.",
     parameters: {
       type: "object",
       properties: {
@@ -1809,10 +1809,10 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           reason,
           instruction: `Reverse handoff must be initiated from the user's laptop. ` +
             `Tell the user to run this command on their terminal:`,
-          command: `azureclaw handoff ${agentName} --to local`,
+          command: `kars handoff ${agentName} --to local`,
           display: `🔄 Ready to migrate back to local!\n\n` +
             `The handoff back to your laptop needs to be run from your terminal:\n\n` +
-            `  azureclaw handoff ${agentName} --to local\n\n` +
+            `  kars handoff ${agentName} --to local\n\n` +
             `This will:\n` +
             `  1. Wake your dormant local agent\n` +
             `  2. Transfer all state (chat history, trust scores, workspace)\n` +
@@ -1888,9 +1888,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   });
 
   api.registerTool({
-    name: "azureclaw_handoff_confirm",
+    name: "kars_handoff_confirm",
     label: "Confirm Handoff",
-    description: "Confirm a pending handoff request using the confirmation code that the USER typed. You do NOT have the code — it was sent directly to the user's Telegram. You MUST wait for the user to type it. If the user hasn't provided a code, ask them to check their Telegram. After confirming, poll azureclaw_handoff_status every 3-5 seconds and relay each new step to the user as a real-time progress update.",
+    description: "Confirm a pending handoff request using the confirmation code that the USER typed. You do NOT have the code — it was sent directly to the user's Telegram. You MUST wait for the user to type it. If the user hasn't provided a code, ask them to check their Telegram. After confirming, poll kars_handoff_status every 3-5 seconds and relay each new step to the user as a real-time progress update.",
     parameters: {
       type: "object",
       properties: {
@@ -1920,7 +1920,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         if (handoffState.current?.status === "running") {
           return { content: [{ type: "text", text: safeJson({
             status: "error",
-            error: "A handoff is already in progress. Use azureclaw_handoff_status to check.",
+            error: "A handoff is already in progress. Use kars_handoff_status to check.",
           }) }] };
         }
 
@@ -1974,9 +1974,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     },
   });
 
-  if (!bannerAlreadyPrinted) log.info(`AzureClaw handoff tools registered (registry_mode=${registryMode}): azureclaw_handoff_request, azureclaw_handoff_confirm`);
+  if (!bannerAlreadyPrinted) log.info(`Kars handoff tools registered (registry_mode=${registryMode}): kars_handoff_request, kars_handoff_confirm`);
 
   } else {
-    if (!bannerAlreadyPrinted) log.info(`AzureClaw handoff mutation tools skipped (registry_mode=${registryMode}) — only azureclaw_handoff_status available`);
+    if (!bannerAlreadyPrinted) log.info(`Kars handoff mutation tools skipped (registry_mode=${registryMode}) — only kars_handoff_status available`);
   }
 }

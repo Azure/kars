@@ -910,7 +910,7 @@ mod tests {
         // Use a deliberately-unset env var name. SAFETY: single-threaded
         // env mutation is safe inside #[tokio::test]; we read but never
         // set this var.
-        let env_name = "AZURECLAW_TEST_UNSET_BEARER_DO_NOT_DEFINE";
+        let env_name = "KARS_TEST_UNSET_BEARER_DO_NOT_DEFINE";
         unsafe {
             std::env::remove_var(env_name);
         }
@@ -937,7 +937,7 @@ mod tests {
     /// header is attached on both tools/list and tools/call.
     #[tokio::test]
     async fn discover_with_bearer_attaches_authorization_header() {
-        let env_name = "AZURECLAW_TEST_BEARER_FIXTURE";
+        let env_name = "KARS_TEST_BEARER_FIXTURE";
         let token_value = "ghp_test_fixture_token_xyz";
         unsafe {
             std::env::set_var(env_name, token_value);

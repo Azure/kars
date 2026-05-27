@@ -13,7 +13,7 @@ please review the latest guidance for Microsoft repositories at
 
 <!-- END MICROSOFT SECURITY.MD BLOCK -->
 
-## AzureClaw-Specific Security Information
+## Kars-Specific Security Information
 
 ### Reporting a Vulnerability
 
@@ -36,7 +36,7 @@ Nine independent defense-in-depth layers, all active by default:
 2. **Azure Linux** — SELinux-enforcing nodes, automatic security patching
 3. **Kata VM** (confidential) — per-pod dedicated kernel
 4. **Container Hardening** — read-only rootfs, non-root (UID 1000), drop ALL capabilities
-5. **Kernel Confinement** — custom seccomp profile (`azureclaw-strict`) with a deny-by-default syscall allowlist
+5. **Kernel Confinement** — custom seccomp profile (`kars-strict`) with a deny-by-default syscall allowlist
 6. **Network Segmentation** — iptables UID-based egress + egress proxy with allowlist/learn mode + a large domain blocklist (tens of thousands of entries; see [`blocklists/`](blocklists/))
 7. **Inference Safety** — Content Safety + Prompt Shields (Foundry-side guardrails, parsed from model responses) + per-sandbox token budgets
 8. **AGT Governance** — PolicyEngine (YAML rules) gates tool execution pre-call, TrustManager (Ed25519-signed scoring), SHA-256 Merkle audit chain, RateLimiter, BehaviorMonitor. Denies sensitive file access, recon tools, cloud metadata, destructive commands.

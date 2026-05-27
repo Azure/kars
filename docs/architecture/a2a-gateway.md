@@ -39,7 +39,7 @@ sequenceDiagram
   Peer->>Ing: HTTPS + signed AgentCard envelope
   Ing->>GW: forward (TLS terminated at ingress)
   GW->>GW: rustls TLS termination (leaf cert rotates)
-  GW->>GW: JWS verify (azureclaw-a2a-core)
+  GW->>GW: JWS verify (kars-a2a-core)
   alt invalid signature / no trust anchor
     GW-->>Peer: 401 untrusted_card
   end
@@ -69,11 +69,11 @@ The gateway runs as **UID 1002**, distroless static, read-only filesystem. Privi
 |---|---|
 | Eavesdropping on the public path | TLS 1.2/1.3 via rustls. |
 | Stolen TLS leaf | `notify::Watcher` triggers `Arc<ServerConfig>` swap on cert rotation; old sessions drain. |
-| Forged AgentCard | JWS Ed25519 verify in `azureclaw_a2a_core::verify_inbound_card` against a pinned trust store; `alg` allow-list is hard-coded to `EdDSA`. The gateway today consumes the verified subject from the `X-A2A-Agent-Subject` header populated by the upstream Gateway API mTLS handshake; wiring the verifier directly as an axum layer is tracked in the [roadmap](../roadmap.md). |
+| Forged AgentCard | JWS Ed25519 verify in `kars_a2a_core::verify_inbound_card` against a pinned trust store; `alg` allow-list is hard-coded to `EdDSA`. The gateway today consumes the verified subject from the `X-A2A-Agent-Subject` header populated by the upstream Gateway API mTLS handshake; wiring the verifier directly as an axum layer is tracked in the [roadmap](../roadmap.md). |
 | Replay of a valid envelope | Nonce cache with 5 min TTL and 100k entry cap. |
-| Untrusted gateway impersonating router | Router :8445 verifies client cert against the gateway-only CA bundle at `/etc/azureclaw/a2a-gateway-ca.pem`. |
+| Untrusted gateway impersonating router | Router :8445 verifies client cert against the gateway-only CA bundle at `/etc/kars/a2a-gateway-ca.pem`. |
 | Burst flood from one subject | Per-subject token bucket (60 burst / 5 rps); over-budget calls return 429. |
-| Container escape from the gateway | Distroless static base, read-only root FS, drop ALL caps, UID 1002, seccomp `azureclaw-strict.json`. |
+| Container escape from the gateway | Distroless static base, read-only root FS, drop ALL caps, UID 1002, seccomp `kars-strict.json`. |
 
 ### Known limitations (v1)
 
@@ -89,11 +89,11 @@ The JWS verifier and agent-card schema live in a shared workspace crate so the r
 
 | Module | Crate | Purpose |
 |---|---|---|
-| `signature.rs` | `azureclaw-a2a-core` | RFC 7515 signing-input construction. |
-| `agent_card.rs` | `azureclaw-a2a-core` | A2A §5.5 schema. |
-| `card_signing.rs` | `azureclaw-a2a-core` | Ed25519 sign + verify. |
-| `card_verifier.rs` | `azureclaw-a2a-core` | Inbound caller pin against the trust store. |
-| `error.rs` | `azureclaw-a2a-core` | A2A §3.3.2 error codes. |
+| `signature.rs` | `kars-a2a-core` | RFC 7515 signing-input construction. |
+| `agent_card.rs` | `kars-a2a-core` | A2A §5.5 schema. |
+| `card_signing.rs` | `kars-a2a-core` | Ed25519 sign + verify. |
+| `card_verifier.rs` | `kars-a2a-core` | Inbound caller pin against the trust store. |
+| `error.rs` | `kars-a2a-core` | A2A §3.3.2 error codes. |
 
 The router re-exports each module under its original path (`crate::a2a::signature::*`, etc.) so existing call sites keep compiling unchanged.
 

@@ -12,16 +12,16 @@
 //     --template-file deploy/bicep/standalone/controller-acrpull.bicep \
 //     --parameters acrName=<acr> controllerIdentityName=<uami>
 //
-// Defaults match the live `azureclaw-westus3` RG so the typical
+// Defaults match the live `kars-westus3` RG so the typical
 // invocation reduces to:
-//   az deployment group create -g azureclaw-westus3 \
+//   az deployment group create -g kars-westus3 \
 //     -f deploy/bicep/standalone/controller-acrpull.bicep
 
 @description('ACR (registry) name in this resource group.')
-param acrName string = 'azureclawacr'
+param acrName string = 'karsacr'
 
 @description('User-assigned managed identity used by the AKS sandbox / controller workload identity.')
-param controllerIdentityName string = 'azureclaw-aks-sandbox-wi'
+param controllerIdentityName string = 'kars-aks-sandbox-wi'
 
 resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
   name: acrName

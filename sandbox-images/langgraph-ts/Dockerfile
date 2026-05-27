@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 #
-# AzureClaw runtime image: LangGraph (LangChain.js) for TypeScript /
+# Kars runtime image: LangGraph (LangChain.js) for TypeScript /
 # Node.js 22.
 #
-# Ships the in-pod adapter package `@azureclaw/runtime-langgraph-ts`,
+# Ships the in-pod adapter package `@kars/runtime-langgraph-ts`,
 # which is invoked from `entrypoint.sh` before the user agent code
 # runs. The adapter:
 #   - pins each LLM provider base URL (OPENAI_BASE_URL,
@@ -22,8 +22,8 @@
 # Contract this image must honor:
 #   - Process runs as UID 1000 (egress-guard pin in `reconciler/mod.rs`).
 #   - LLM traffic goes via `http://127.0.0.1:8443` (router sidecar).
-#   - Reads MCP gateway from `AZURECLAW_PLATFORM_MCP_URL`.
-#   - Honors `AZURECLAW_*` env wiring (router URL, AGT relay URL, identity SAN).
+#   - Reads MCP gateway from `KARS_PLATFORM_MCP_URL`.
+#   - Honors `KARS_*` env wiring (router URL, AGT relay URL, identity SAN).
 #   - Does not bind privileged ports; default `securityContext` only.
 #
 # Build context MUST be the repo root (the COPY paths are anchored at
@@ -42,11 +42,11 @@ RUN ./node_modules/.bin/tsc -p .
 # ---- Production stage ----------------------------------------------------
 FROM mcr.microsoft.com/azurelinux/base/nodejs:24
 
-LABEL org.azureclaw.runtime.contract="v1"
-LABEL org.azureclaw.runtime.kind="LangGraph"
-LABEL org.azureclaw.runtime.language="typescript"
+LABEL org.kars.runtime.contract="v1"
+LABEL org.kars.runtime.kind="LangGraph"
+LABEL org.kars.runtime.language="typescript"
 
-WORKDIR /opt/azureclaw-runtime-langgraph-ts
+WORKDIR /opt/kars-runtime-langgraph-ts
 
 COPY runtimes/langgraph-ts/package.json ./
 RUN npm install --omit=dev --no-audit --no-fund --no-package-lock
@@ -54,8 +54,8 @@ RUN npm install --omit=dev --no-audit --no-fund --no-package-lock
 COPY --from=builder /build/runtime/dist ./dist
 
 # ---- Adapter entrypoint --------------------------------------------------
-COPY sandbox-images/langgraph-ts/entrypoint.sh /usr/local/bin/azureclaw-langgraph-ts-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/azureclaw-langgraph-ts-entrypoint.sh
+COPY sandbox-images/langgraph-ts/entrypoint.sh /usr/local/bin/kars-langgraph-ts-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/kars-langgraph-ts-entrypoint.sh
 
 # Workspace where the controller mounts user-supplied agent code via
 # `agentCode: { oci | git }` (see `LangGraphConfig` in crd.rs).
@@ -64,5 +64,5 @@ RUN mkdir -p /sandbox/agent && chown -R 1000:1000 /sandbox
 USER 1000
 WORKDIR /sandbox/agent
 
-ENTRYPOINT ["/usr/local/bin/azureclaw-langgraph-ts-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/kars-langgraph-ts-entrypoint.sh"]
 CMD ["node", "/sandbox/agent/index.js"]

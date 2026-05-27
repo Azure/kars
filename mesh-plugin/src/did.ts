@@ -11,7 +11,7 @@
  *   where fingerprint = hex(sha256(raw_ed25519_pub))[:16]
  *
  * This is a simplified form of AGT's TS SDK format (`did:agentmesh:<agentId>:<fingerprint>`)
- * without the agentId segment, since AzureClaw identities are key-derived,
+ * without the agentId segment, since Kars identities are key-derived,
  * not name-derived. The full form is accepted as input and normalized.
  *
  * Accepted input formats (all normalized to canonical on parse):
@@ -31,7 +31,7 @@ import * as crypto from "node:crypto";
  * Derive the canonical DID from a raw Ed25519 signing public key (32 bytes).
  *
  * Uses the same hash as AGT's TS SDK (`sha256(pubkey).hex[:16]`) but over
- * raw key bytes (not SPKI-wrapped), matching AzureClaw's existing identity
+ * raw key bytes (not SPKI-wrapped), matching Kars's existing identity
  * module. The fingerprint is self-verifying: anyone with the public key can
  * recompute it.
  */

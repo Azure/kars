@@ -37,7 +37,7 @@ use std::sync::LazyLock;
 /// Adding/removing entries from this list is itself a config-hash
 /// change and should be called out in the audit trail.
 pub const CONFIG_HASH_INPUTS: &[&str] = &[
-    "AZURECLAW_DISABLE_ENTRA_AUTH",
+    "KARS_DISABLE_ENTRA_AUTH",
     "AZURE_AUTHORITY_HOST",
     "AZURE_OPENAI_ENDPOINT",
     "AZURE_SUBSCRIPTION_ID",
@@ -110,12 +110,12 @@ pub fn compute_from_env() -> String {
 pub static CONTROLLER_CONFIG_INFO: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     register_int_gauge_vec!(
         opts!(
-            "azureclaw_controller_config_info",
+            "kars_controller_config_info",
             "Controller config hash info-metric (always 1; hash is a label)"
         ),
         &["config_hash"]
     )
-    .expect("failed to register azureclaw_controller_config_info")
+    .expect("failed to register kars_controller_config_info")
 });
 
 /// Stamp the gauge with the current config hash. Idempotent.
@@ -197,7 +197,7 @@ mod tests {
         let families = prometheus::gather();
         prometheus::Encoder::encode(&encoder, &families, &mut buf).unwrap();
         let rendered = String::from_utf8(buf).unwrap();
-        assert!(rendered.contains("azureclaw_controller_config_info"));
+        assert!(rendered.contains("kars_controller_config_info"));
         assert!(rendered.contains("deadbeefcafebabe"));
     }
 

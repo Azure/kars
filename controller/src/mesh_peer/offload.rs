@@ -39,8 +39,8 @@ use super::{
 /// fallbacks, so every ToolPolicy CR — including the ones synthesized by
 /// this module — must populate `spec.agtProfile.inline` or the
 /// reconciler will fail closed with `Degraded / SpecInvalid`.
-const OFFLOAD_AGT_PROFILE: &str = include_str!("../../../cli/profiles/agt/azureclaw-offload.yaml");
-use crate::pairing::{ClawPairing, phase};
+const OFFLOAD_AGT_PROFILE: &str = include_str!("../../../cli/profiles/agt/kars-offload.yaml");
+use crate::pairing::{KarsPairing, phase};
 
 // ---------------------------------------------------------------------------
 // Offload orchestration
@@ -48,7 +48,7 @@ use crate::pairing::{ClawPairing, phase};
 
 /// Handle an offload_request from a paired external agent.
 /// Validates the pairing, checks budget/slots, creates file ConfigMap if needed,
-/// creates a ClawSandbox CRD, watches pod completion, and relays results back.
+/// creates a KarsSandbox CRD, watches pod completion, and relays results back.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_offload_request(
     state: &Arc<MeshPeerState>,
@@ -113,10 +113,9 @@ pub(super) async fn handle_offload_request(
         .and_then(|p| p.model.as_deref())
         .unwrap_or("gpt-5.4");
     let timeout_minutes = preferences.and_then(|p| p.timeout_minutes).unwrap_or(30);
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
 
-    // Post-S10/S13 ClawSandbox shape:
+    // Post-S10/S13 KarsSandbox shape:
     //   - `runtime` (required) — multi-runtime selector
     //   - `inferenceRef` (required) — by-name ref to an InferencePolicy CR
     //   - `governance.toolPolicyRef` (required) — by-name ref to a ToolPolicy CR
@@ -140,7 +139,7 @@ pub(super) async fn handle_offload_request(
         &tool_policy_ref_name,
     );
 
-    // No OFFLOAD_MODE — sandbox starts as a full AzureClaw agent.
+    // No OFFLOAD_MODE — sandbox starts as a full Kars agent.
     // The external agent talks to it directly via existing mesh protocol
     // (mesh_send, mesh_transfer_file). AGT_TRUSTED_PEERS locks the sandbox
     // so only the paired external agent can communicate with it.
@@ -151,19 +150,19 @@ pub(super) async fn handle_offload_request(
         "OFFLOAD_TASK": task,
     });
 
-    // S10.A1 / S13: ClawSandbox now references InferencePolicy + ToolPolicy
+    // S10.A1 / S13: KarsSandbox now references InferencePolicy + ToolPolicy
     // CRs by name; we mint them alongside so the controller can reconcile
     // the sandbox immediately. (`additionalProperties: false` means we
     // can't fall back to inline policy blocks any more.)
     let inference_policy = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "InferencePolicy",
         "metadata": {
             "name": inference_ref_name,
             "namespace": namespace,
             "labels": {
-                "azureclaw.azure.com/spawned-by": "offload",
-                "azureclaw.azure.com/sandbox": sandbox_name.clone(),
+                "kars.azure.com/spawned-by": "offload",
+                "kars.azure.com/sandbox": sandbox_name.clone(),
             }
         },
         "spec": {
@@ -180,20 +179,20 @@ pub(super) async fn handle_offload_request(
         }
     });
     let tool_policy = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "ToolPolicy",
         "metadata": {
             "name": tool_policy_ref_name,
             "namespace": namespace,
             "labels": {
-                "azureclaw.azure.com/spawned-by": "offload",
-                "azureclaw.azure.com/sandbox": sandbox_name.clone(),
+                "kars.azure.com/spawned-by": "offload",
+                "kars.azure.com/sandbox": sandbox_name.clone(),
             }
         },
         "spec": {
             "appliesTo": {
                 "sandboxMatchLabels": {
-                    "azureclaw.azure.com/sandbox": sandbox_name.clone()
+                    "kars.azure.com/sandbox": sandbox_name.clone()
                 }
             },
             "agtProfile": {
@@ -203,16 +202,16 @@ pub(super) async fn handle_offload_request(
     });
 
     let inference_policy_ar = kube::api::ApiResource {
-        group: "azureclaw.azure.com".into(),
+        group: "kars.azure.com".into(),
         version: "v1alpha1".into(),
-        api_version: "azureclaw.azure.com/v1alpha1".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
         kind: "InferencePolicy".into(),
         plural: "inferencepolicies".into(),
     };
     let tool_policy_ar = kube::api::ApiResource {
-        group: "azureclaw.azure.com".into(),
+        group: "kars.azure.com".into(),
         version: "v1alpha1".into(),
-        api_version: "azureclaw.azure.com/v1alpha1".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
         kind: "ToolPolicy".into(),
         plural: "toolpolicies".into(),
     };
@@ -265,11 +264,11 @@ pub(super) async fn handle_offload_request(
 
     // Create the sandbox itself.
     let api_resource = kube::api::ApiResource {
-        group: "azureclaw.azure.com".into(),
+        group: "kars.azure.com".into(),
         version: "v1alpha1".into(),
-        api_version: "azureclaw.azure.com/v1alpha1".into(),
-        kind: "ClawSandbox".into(),
-        plural: "clawsandboxes".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: "KarsSandbox".into(),
+        plural: "karssandboxes".into(),
     };
     let api: Api<kube::api::DynamicObject> =
         Api::namespaced_with(state.client.clone(), &namespace, &api_resource);
@@ -329,7 +328,7 @@ pub(super) async fn handle_offload_request(
 
     // Update pairing usage
     let pairing_name = pairing.name_any();
-    let pairings_api: Api<ClawPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
+    let pairings_api: Api<KarsPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
     let usage_patch = json!({
         "status": {
             "slotsUsed": pairing.status.as_ref().and_then(|s| s.slots_used).unwrap_or(0) + 1,
@@ -402,40 +401,39 @@ pub(super) async fn handle_offload_request(
 /// directly via the existing mesh protocol (mesh_send, mesh_transfer_file).
 /// AGT_TRUSTED_PEERS on the sandbox ensures only the paired agent can talk to it.
 ///
-/// NOTE: ClawSandbox reconciliation creates the pod in a dedicated namespace
-/// named `azureclaw-<sandbox_name>`, and labels it with
-/// `azureclaw.azure.com/sandbox=<sandbox_name>` (NOT request-id). The watcher
+/// NOTE: KarsSandbox reconciliation creates the pod in a dedicated namespace
+/// named `kars-<sandbox_name>`, and labels it with
+/// `kars.azure.com/sandbox=<sandbox_name>` (NOT request-id). The watcher
 /// must use that namespace + label, otherwise it lists zero pods forever and
 /// times out at 5 minutes.
-/// Handle an offload_cleanup from the parent agent. Finds the ClawSandbox CRD
+/// Handle an offload_cleanup from the parent agent. Finds the KarsSandbox CRD
 /// labeled with the given request_id (set only by the offload_request handler,
 /// so non-offload sandboxes are never targeted) and deletes it. The reconciler
 /// in reconciler.rs:141 picks up the deletion and tears down the per-sandbox
 /// namespace, deployment, service, and NetworkPolicy.
 ///
 /// Also verifies that the requester AMID matches the CRD's
-/// `azureclaw.azure.com/offload-requester` annotation — only the original
+/// `kars.azure.com/offload-requester` annotation — only the original
 /// requester can clean up their own offload.
 pub(super) async fn handle_offload_cleanup(
     state: &Arc<MeshPeerState>,
     from_amid: &str,
     request_id: &str,
 ) -> Result<()> {
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
 
     let api_resource = kube::api::ApiResource {
-        group: "azureclaw.azure.com".into(),
+        group: "kars.azure.com".into(),
         version: "v1alpha1".into(),
-        api_version: "azureclaw.azure.com/v1alpha1".into(),
-        kind: "ClawSandbox".into(),
-        plural: "clawsandboxes".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: "KarsSandbox".into(),
+        plural: "karssandboxes".into(),
     };
     let api: Api<kube::api::DynamicObject> =
         Api::namespaced_with(state.client.clone(), &namespace, &api_resource);
 
-    let lp = kube::api::ListParams::default()
-        .labels(&format!("azureclaw.azure.com/request-id={request_id}"));
+    let lp =
+        kube::api::ListParams::default().labels(&format!("kars.azure.com/request-id={request_id}"));
     let list = match api.list(&lp).await {
         Ok(list) => list,
         Err(e) => {
@@ -451,7 +449,7 @@ pub(super) async fn handle_offload_cleanup(
     if list.items.is_empty() {
         tracing::info!(
             request_id = %request_id,
-            "offload_cleanup: no matching ClawSandbox (already cleaned up?)"
+            "offload_cleanup: no matching KarsSandbox (already cleaned up?)"
         );
         return Ok(());
     }
@@ -467,14 +465,14 @@ pub(super) async fn handle_offload_cleanup(
             .metadata
             .labels
             .as_ref()
-            .and_then(|l| l.get("azureclaw.azure.com/offload-requester"))
+            .and_then(|l| l.get("kars.azure.com/offload-requester"))
             .map(|v| v == from_amid)
             .unwrap_or(false)
             || item
                 .metadata
                 .annotations
                 .as_ref()
-                .and_then(|a| a.get("azureclaw.azure.com/offload-parent-amid"))
+                .and_then(|a| a.get("kars.azure.com/offload-parent-amid"))
                 .map(|v| v == from_amid)
                 .unwrap_or(false);
 
@@ -493,14 +491,14 @@ pub(super) async fn handle_offload_cleanup(
                 tracing::info!(
                     sandbox = %name,
                     request_id = %request_id,
-                    "offload_cleanup: ClawSandbox deletion requested; reconciler will clean up namespace"
+                    "offload_cleanup: KarsSandbox deletion requested; reconciler will clean up namespace"
                 );
             }
             Err(kube::Error::Api(e)) if e.code == 404 => {
                 tracing::info!(
                     sandbox = %name,
                     request_id = %request_id,
-                    "offload_cleanup: ClawSandbox already deleted"
+                    "offload_cleanup: KarsSandbox already deleted"
                 );
             }
             Err(e) => {
@@ -525,9 +523,9 @@ pub(super) async fn watch_sandbox_ready(
     _namespace: &str,
     epoch: u64,
 ) -> Result<()> {
-    let sandbox_ns = format!("azureclaw-{sandbox_name}");
+    let sandbox_ns = format!("kars-{sandbox_name}");
     let pods: Api<Pod> = Api::namespaced(state.client.clone(), &sandbox_ns);
-    let label_selector = format!("azureclaw.azure.com/sandbox={sandbox_name}");
+    let label_selector = format!("kars.azure.com/sandbox={sandbox_name}");
     // 5 minutes should be enough for pod scheduling + container pull + startup
     let timeout = Duration::from_secs(300);
 
@@ -606,7 +604,7 @@ pub(super) async fn watch_sandbox_ready(
                 },
             )?;
 
-            // Idempotency marker — annotate the ClawSandbox CRD so we don't
+            // Idempotency marker — annotate the KarsSandbox CRD so we don't
             // re-send `ready` after a controller restart-and-rewatch.
             let _ = annotate_ready_sent(state, sandbox_name).await;
         }
@@ -641,25 +639,24 @@ pub(super) async fn watch_sandbox_ready(
     Ok(())
 }
 
-/// Mark an offload ClawSandbox CRD as having had its `ready` event emitted,
+/// Mark an offload KarsSandbox CRD as having had its `ready` event emitted,
 /// so a controller restart doesn't re-send the event (and we can use the
 /// annotation to decide whether to resume-watch after a leader handover).
 pub(super) async fn annotate_ready_sent(state: &MeshPeerState, sandbox_name: &str) -> Result<()> {
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let api_resource = kube::api::ApiResource {
-        group: "azureclaw.azure.com".into(),
+        group: "kars.azure.com".into(),
         version: "v1alpha1".into(),
-        api_version: "azureclaw.azure.com/v1alpha1".into(),
-        kind: "ClawSandbox".into(),
-        plural: "clawsandboxes".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: "KarsSandbox".into(),
+        plural: "karssandboxes".into(),
     };
     let api: Api<kube::api::DynamicObject> =
         Api::namespaced_with(state.client.clone(), &namespace, &api_resource);
     let patch = json!({
         "metadata": {
             "annotations": {
-                "azureclaw.azure.com/offload-ready-sent": Utc::now().to_rfc3339(),
+                "kars.azure.com/offload-ready-sent": Utc::now().to_rfc3339(),
             }
         }
     });
@@ -679,20 +676,19 @@ pub(super) async fn annotate_ready_sent(state: &MeshPeerState, sandbox_name: &st
 /// in the `scheduled` phase forever (watcher task was lost with the old
 /// process).
 pub(super) async fn resume_pending_offload_watchers(state: &Arc<MeshPeerState>) -> Result<()> {
-    let namespace =
-        std::env::var("AZURECLAW_NAMESPACE").unwrap_or_else(|_| "azureclaw-system".into());
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let api_resource = kube::api::ApiResource {
-        group: "azureclaw.azure.com".into(),
+        group: "kars.azure.com".into(),
         version: "v1alpha1".into(),
-        api_version: "azureclaw.azure.com/v1alpha1".into(),
-        kind: "ClawSandbox".into(),
-        plural: "clawsandboxes".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: "KarsSandbox".into(),
+        plural: "karssandboxes".into(),
     };
     let api: Api<kube::api::DynamicObject> =
         Api::namespaced_with(state.client.clone(), &namespace, &api_resource);
 
     let list = api
-        .list(&ListParams::default().labels("azureclaw.azure.com/spawned-by=offload"))
+        .list(&ListParams::default().labels("kars.azure.com/spawned-by=offload"))
         .await
         .context("list offload sandboxes")?;
 
@@ -700,15 +696,15 @@ pub(super) async fn resume_pending_offload_watchers(state: &Arc<MeshPeerState>) 
     for sandbox in list.items {
         let sandbox_name = sandbox.name_any();
         let annotations = sandbox.metadata.annotations.clone().unwrap_or_default();
-        if annotations.contains_key("azureclaw.azure.com/offload-ready-sent") {
+        if annotations.contains_key("kars.azure.com/offload-ready-sent") {
             continue;
         }
-        let parent = match annotations.get("azureclaw.azure.com/offload-parent-amid") {
+        let parent = match annotations.get("kars.azure.com/offload-parent-amid") {
             Some(v) => v.clone(),
             None => continue,
         };
         let labels = sandbox.metadata.labels.clone().unwrap_or_default();
-        let request_id = match labels.get("azureclaw.azure.com/request-id") {
+        let request_id = match labels.get("kars.azure.com/request-id") {
             Some(v) => v.clone(),
             None => continue,
         };
@@ -756,8 +752,8 @@ pub(super) async fn resume_pending_offload_watchers(state: &Arc<MeshPeerState>) 
 pub(super) async fn validate_pairing_for_offload(
     state: &MeshPeerState,
     from_amid: &str,
-) -> Result<ClawPairing, String> {
-    let pairings: Api<ClawPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
+) -> Result<KarsPairing, String> {
+    let pairings: Api<KarsPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
     let pairing_list = pairings
         .list(&kube::api::ListParams::default())
         .await
@@ -807,10 +803,10 @@ pub(super) async fn validate_pairing_for_offload(
 // Pure CRD builders (kept testable; called from `handle_offload_request`)
 // ---------------------------------------------------------------------------
 
-/// Build the ClawSandbox CRD payload for a cross-cluster offload sandbox.
+/// Build the KarsSandbox CRD payload for a cross-cluster offload sandbox.
 ///
 /// Pure function — no I/O — so it round-trips through
-/// `serde_json::from_value::<ClawSandboxSpec>` in unit tests, catching
+/// `serde_json::from_value::<KarsSandboxSpec>` in unit tests, catching
 /// schema regressions (legacy `spec.openclaw` / `spec.inference` /
 /// `governance.toolPolicy: <string>` shapes are rejected by the
 /// post-S10/S13 schema with `additionalProperties: false`).
@@ -852,21 +848,21 @@ pub(crate) fn build_offload_sandbox_crd(
     });
 
     json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
-        "kind": "ClawSandbox",
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsSandbox",
         "metadata": {
             "name": sandbox_name,
             "namespace": namespace,
             "labels": {
-                "azureclaw.azure.com/spawned-by": "offload",
-                "azureclaw.azure.com/offload-requester": from_amid,
-                "azureclaw.azure.com/request-id": request_id,
+                "kars.azure.com/spawned-by": "offload",
+                "kars.azure.com/offload-requester": from_amid,
+                "kars.azure.com/request-id": request_id,
             },
             "annotations": {
-                "azureclaw.azure.com/offload-task": &task[..task.len().min(256)],
-                "azureclaw.azure.com/offload-timeout": format!("{timeout_minutes}m"),
-                "azureclaw.azure.com/offload-parent-amid": from_amid,
-                "azureclaw.azure.com/model": model,
+                "kars.azure.com/offload-task": &task[..task.len().min(256)],
+                "kars.azure.com/offload-timeout": format!("{timeout_minutes}m"),
+                "kars.azure.com/offload-parent-amid": from_amid,
+                "kars.azure.com/model": model,
             }
         },
         "spec": spec,
@@ -880,20 +876,20 @@ pub(crate) fn build_offload_sandbox_crd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::ClawSandboxSpec;
+    use crate::crd::KarsSandboxSpec;
 
     #[test]
-    fn offload_payload_round_trips_through_clawsandboxspec() {
+    fn offload_payload_round_trips_through_karssandboxspec() {
         // CI guard for the audit class of bugs: any json! shape we send
         // to the API server MUST parse cleanly through the canonical
-        // `ClawSandboxSpec` (post-S10/S13). This catches reverts to the
+        // `KarsSandboxSpec` (post-S10/S13). This catches reverts to the
         // legacy `spec.openclaw` / `spec.inference` / `governance.toolPolicy`
         // shapes — the API server rejects them at admission time
         // (`additionalProperties: false`), but admission is only reached
         // in the live cluster; this test fails at `cargo test` time.
         let crd = build_offload_sandbox_crd(
             "offload-abcdef12",
-            "azureclaw-system",
+            "kars-system",
             "did:agentmesh:peer.example",
             "abcdef1234567890",
             "summarize the attached PDF",
@@ -904,16 +900,16 @@ mod tests {
         );
 
         // 1. Top-level CRD shape.
-        assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
-        assert_eq!(crd["kind"], "ClawSandbox");
+        assert_eq!(crd["apiVersion"], "kars.azure.com/v1alpha1");
+        assert_eq!(crd["kind"], "KarsSandbox");
 
-        // 2. Spec must round-trip through ClawSandboxSpec.
+        // 2. Spec must round-trip through KarsSandboxSpec.
         let spec_value = crd
             .get("spec")
             .cloned()
             .expect("offload payload missing `spec`");
-        let spec: ClawSandboxSpec = serde_json::from_value(spec_value)
-            .expect("offload payload must deserialize as ClawSandboxSpec");
+        let spec: KarsSandboxSpec = serde_json::from_value(spec_value)
+            .expect("offload payload must deserialize as KarsSandboxSpec");
 
         // 3. Required references are present.
         assert_eq!(spec.inference_ref.name, "offload-abcdef12-inference");
@@ -949,12 +945,12 @@ mod tests {
 
     #[test]
     fn offload_payload_uses_canonical_api_group() {
-        // Pre-S10 prototype briefly used `azureclaw.io/v1alpha1`. The
-        // canonical group is `azureclaw.azure.com`; using anything else
+        // Pre-S10 prototype briefly used `kars.io/v1alpha1`. The
+        // canonical group is `kars.azure.com`; using anything else
         // makes the API server return 404 for the resource path.
         let crd = build_offload_sandbox_crd(
             "x",
-            "azureclaw-system",
+            "kars-system",
             "p",
             "rid",
             "t",
@@ -963,6 +959,6 @@ mod tests {
             "x-inference",
             "x-toolpolicy",
         );
-        assert_eq!(crd["apiVersion"], "azureclaw.azure.com/v1alpha1");
+        assert_eq!(crd["apiVersion"], "kars.azure.com/v1alpha1");
     }
 }

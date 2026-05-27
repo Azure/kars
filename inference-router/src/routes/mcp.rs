@@ -34,7 +34,7 @@
 //!
 //! [`protected_mcp_route`] applies [`crate::mcp::OAuthLayer`] in front
 //! of [`mcp_route`]. Production deployments select the protected
-//! variant; `azureclaw dev` and the test suite use the bare variant.
+//! variant; `kars dev` and the test suite use the bare variant.
 //! Selection is a deployment-time decision: when an `McpServer` CR has
 //! `spec.productionMode == true` the controller routes traffic through
 //! the protected mount; otherwise through the bare mount.
@@ -98,7 +98,7 @@ impl McpRouteState {
     /// Agent Framework, BYO) discovers them through one MCP endpoint.
     /// See `mcp/platform.rs` and `plan.md` S10.B.
     ///
-    /// Slice 3b.3: takes an optional ClawMemory binding handle so the
+    /// Slice 3b.3: takes an optional KarsMemory binding handle so the
     /// dispatcher's `foundry.memory` calls can prefer the CRD-driven
     /// `store_name` over the chart-fed env. `None` keeps the legacy
     /// env-only behaviour (for sandboxes without `spec.memoryRef`).
@@ -107,7 +107,7 @@ impl McpRouteState {
     /// the dispatcher can surface upstream Foundry Memory Store
     /// 401/403s as `AuthMisconfigured:` prefixed `last_error` entries
     /// on `PolicyKind::Memory`. Without this, 403s still propagate to
-    /// the agent envelope but never reach the ClawMemory CRD status.
+    /// the agent envelope but never reach the KarsMemory CRD status.
     pub fn platform(
         memory_binding: Option<crate::memory_binding_loader::LoadedMemoryBindingHandle>,
         policy_status: Option<Arc<crate::policy_status::PolicyStatusRegistry>>,

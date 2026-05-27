@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Pair-request handling: validates a `pair_request` against a `ClawPairing`
+//! Pair-request handling: validates a `pair_request` against a `KarsPairing`
 //! CRD, binds the requester's AMID, and produces the `PairResponse`.
 //!
 //! Extracted from `mesh_peer/mod.rs` to keep the run loop file under its
@@ -14,7 +14,7 @@ use kube::{
 };
 use serde_json::json;
 
-use crate::pairing::{ClawPairing, phase};
+use crate::pairing::{KarsPairing, phase};
 
 use super::{FederationMessage, IDENTITY_NAMESPACE, MeshPeerState, hex_sha256};
 
@@ -27,11 +27,11 @@ pub(super) async fn handle_pair_request(
 ) -> FederationMessage {
     let token_hash = hex_sha256(secret);
 
-    let pairings: Api<ClawPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
+    let pairings: Api<KarsPairing> = Api::namespaced(state.client.clone(), IDENTITY_NAMESPACE);
     let pairing_list = match pairings.list(&ListParams::default()).await {
         Ok(list) => list,
         Err(e) => {
-            tracing::error!("Failed to list ClawPairings: {e}");
+            tracing::error!("Failed to list KarsPairings: {e}");
             return pair_error("Internal error — could not verify token");
         }
     };

@@ -1,8 +1,8 @@
-# AzureClaw runtime adapter — OpenAI Agents (Python)
+# Kars runtime adapter — OpenAI Agents (Python)
 
-`azureclaw_runtime_openai_agents` is the in-pod adapter that wires the
+`kars_runtime_openai_agents` is the in-pod adapter that wires the
 [OpenAI Agents Python SDK](https://github.com/openai/openai-agents-python)
-into the AzureClaw sandbox. It ships inside the
+into the Kars sandbox. It ships inside the
 `sandbox-images/openai-agents` container image and is invoked from
 `entrypoint.sh` before the user's agent code runs.
 
@@ -31,9 +31,9 @@ into the AzureClaw sandbox. It ships inside the
    streamable-HTTP MCP.
 6. **Router base URL** — sets `OPENAI_BASE_URL` to the local router so
    the vanilla `openai` SDK (used by `openai-agents`) routes everything
-   through the AzureClaw governance gate.
+   through the Kars governance gate.
 
-`bootstrap()` is idempotent: if `__AZURECLAW_RUNTIME_INITIALIZED__` is
+`bootstrap()` is idempotent: if `__KARS_RUNTIME_INITIALIZED__` is
 already set in the environment it is a no-op.
 
 ## Usage
@@ -41,7 +41,7 @@ already set in the environment it is a no-op.
 ```python
 # main.py — user agent code
 from agents import Agent, Runner
-from azureclaw_runtime_openai_agents import (
+from kars_runtime_openai_agents import (
     bootstrap,
     register_foundry_tools,
     register_mesh_tools,

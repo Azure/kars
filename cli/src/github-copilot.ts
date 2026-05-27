@@ -32,7 +32,7 @@ export const COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/tok
  *  scope `gh auth login` produces). Models access is gated by the user's
  *  Copilot subscription, not by token scope. */
 export const COPILOT_PAT_CREATE_URL =
-  "https://github.com/settings/tokens/new?description=AzureClaw%20CLI%20(Copilot)&scopes=read:user";
+  "https://github.com/settings/tokens/new?description=Kars%20CLI%20(Copilot)&scopes=read:user";
 
 /** Public OAuth client_id used by the Copilot device-flow integration. The
  *  same id is used by the JetBrains/Neovim Copilot plugins and several

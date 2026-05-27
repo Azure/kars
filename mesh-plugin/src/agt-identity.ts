@@ -9,7 +9,7 @@
  * The bare-base58 portion equals the legacy AMID, so registries that
  * index by AMID continue to resolve.
  *
- * Persisted at $HOME/.azureclaw/mesh-identity-agt.json. The file is
+ * Persisted at $HOME/.kars/mesh-identity-agt.json. The file is
  * `chmod 0600` and contains the raw private key material — the
  * envelope is *not* encrypted at rest. An older revision wrapped the
  * payload in AES-256-GCM with a KEK derived from `os.hostname() +
@@ -27,7 +27,7 @@ import * as path from "node:path";
 
 import type { IMeshIdentity } from "./transport-interface.js";
 
-const IDENTITY_DIR = path.join(os.homedir(), ".azureclaw");
+const IDENTITY_DIR = path.join(os.homedir(), ".kars");
 const IDENTITY_FILE = path.join(IDENTITY_DIR, "mesh-identity-agt.json");
 const BASE58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -58,7 +58,7 @@ export function deriveDid(signingPublicKey: Uint8Array): string {
 }
 
 function deriveEncryptionKey(): Buffer {
-  const seed = `azureclaw:agt-mesh-identity:${os.hostname()}:${os.homedir()}`;
+  const seed = `kars:agt-mesh-identity:${os.hostname()}:${os.homedir()}`;
   return crypto.createHash("sha256").update(seed).digest();
 }
 

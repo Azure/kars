@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 / S15.b: `azureclaw mesh auth` subcommand body extracted
+// Phase 2 / S15.b: `kars mesh auth` subcommand body extracted
 // from mesh.ts. Attaches as a subcommand of an existing Commander command.
 
 import chalk from "chalk";
@@ -29,7 +29,7 @@ export function attachAuthSubcommand(cmd: Command): void {
     .option("--provider <provider>", "OAuth provider (github, entra)", "github")
     .option("--no-browser", "Print URL instead of opening browser")
     .action(async (opts: { registry: string; provider: string; browser: boolean }) => {
-      banner("AzureClaw · Mesh Auth", "AgentMesh Identity & Registration");
+      banner("Kars · Mesh Auth", "AgentMesh Identity & Registration");
 
       const registryUrl = opts.registry.replace(/\/+$/, "");
       const provider = opts.provider.toLowerCase();
@@ -207,7 +207,7 @@ export function attachAuthSubcommand(cmd: Command): void {
           console.log(
             chalk.dim(
               `    Use ${chalk.cyan(
-                `azureclaw dev --global-registry ${registryUrl}`
+                `kars dev --global-registry ${registryUrl}`
               )} to connect agents.`
             )
           );

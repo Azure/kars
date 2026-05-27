@@ -2,12 +2,12 @@
 
 ## Where the policy lives
 
-Egress policy is **not its own CRD**. It's a sub-block of the `ClawSandbox`
+Egress policy is **not its own CRD**. It's a sub-block of the `KarsSandbox`
 spec, alongside everything else that scopes to a single agent:
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: my-agent
 spec:
@@ -26,7 +26,7 @@ The controller compiles this into **one enforcement point with one safety net**:
 
 - **Router-side allowlist** (the **policy point**) — L7 host-header / SNI
   matching on every outbound HTTP request, served from `inference-router`
-  shared state and reloaded on `ClawSandbox` updates. This is where egress
+  shared state and reloaded on `KarsSandbox` updates. This is where egress
   policy is actually decided.
 - **Kubernetes `NetworkPolicy`** (a **safety net**) — L3/L4 egress to peer
   pods, cluster DNS, and the explicit pod-IP allowlist generated from
@@ -36,7 +36,7 @@ The controller compiles this into **one enforcement point with one safety net**:
 `allowlistRef` is an _advisory_ second source today (cosign-signed OCI artifact
 for supply-chain integrity); when set, the controller verifies it on every
 reconcile and surfaces `AllowlistVerified` / `AllowlistDrift` conditions on the
-`ClawSandbox`. Inline `allowedEndpoints` remains the runtime source of truth
+`KarsSandbox`. Inline `allowedEndpoints` remains the runtime source of truth
 until the authority flip lands — tracked in [`roadmap.md`](roadmap.md). See
 **Signed OCI egress allowlist** below.
 
@@ -173,16 +173,16 @@ stateDiagram-v2
   state "Enforce mode" as Enforce
   [*] --> Learn
   note right of Learn
-    azureclaw add <name>
+    kars add <name>
     All domains logged
     Blocklist still enforced
   end note
   note right of Review
-    azureclaw egress <name> --learned
+    kars egress <name> --learned
     operator approves / denies per domain
   end note
   note right of Enforce
-    azureclaw egress <name> --no-learn
+    kars egress <name> --no-learn
     Only allowlisted domains pass
     New domains → PendingApproval
   end note
@@ -204,14 +204,14 @@ unknown, non-malicious domains.
 ### 2. Review Discovered Domains
 
 ```bash
-azureclaw egress <name>           # Show status + summary
-azureclaw egress <name> --learned # Detailed list of discovered domains
+kars egress <name>           # Show status + summary
+kars egress <name> --learned # Detailed list of discovered domains
 ```
 
 ### 3. Approve Trusted Domains
 
 ```bash
-azureclaw egress <name> --approve api.telegram.org
+kars egress <name> --approve api.telegram.org
 ```
 
 Approving a parent domain (e.g., `telegram.org`) covers all subdomains
@@ -220,7 +220,7 @@ Approving a parent domain (e.g., `telegram.org`) covers all subdomains
 ### 4. Lock Down
 
 ```bash
-azureclaw egress <name> --no-learn
+kars egress <name> --no-learn
 ```
 
 After disabling learn mode, only explicitly allowlisted domains are reachable.
@@ -231,16 +231,16 @@ approval queue.
 
 | Command | Description |
 |---------|-------------|
-| `azureclaw egress <name>` | Show egress status (blocklist, learn mode, counts) |
-| `azureclaw egress <name> --pending` | Show domains pending operator approval |
-| `azureclaw egress <name> --approve <domain>` | Approve a domain for egress |
-| `azureclaw egress <name> --deny <domain>` | Deny and remove a pending domain request |
-| `azureclaw egress <name> --allowlist` | Show currently approved domains |
-| `azureclaw egress <name> --learned` | Show domains discovered during learn mode |
-| `azureclaw egress <name> --learn` | Enable learn mode |
-| `azureclaw egress <name> --no-learn` | Disable learn mode |
-| `azureclaw egress <name> --status` | Show blocklist and learn mode status |
-| `azureclaw egress <name> --namespace <ns>` | Target a specific Kubernetes namespace |
+| `kars egress <name>` | Show egress status (blocklist, learn mode, counts) |
+| `kars egress <name> --pending` | Show domains pending operator approval |
+| `kars egress <name> --approve <domain>` | Approve a domain for egress |
+| `kars egress <name> --deny <domain>` | Deny and remove a pending domain request |
+| `kars egress <name> --allowlist` | Show currently approved domains |
+| `kars egress <name> --learned` | Show domains discovered during learn mode |
+| `kars egress <name> --learn` | Enable learn mode |
+| `kars egress <name> --no-learn` | Disable learn mode |
+| `kars egress <name> --status` | Show blocklist and learn mode status |
+| `kars egress <name> --namespace <ns>` | Target a specific Kubernetes namespace |
 
 The CLI discovers the running pod via `kubectl get pods` and executes `curl`
 commands inside the `inference-router` container to interact with the router API.
@@ -287,7 +287,7 @@ All endpoints are served by the inference router on `127.0.0.1:8443`.
 {
   "error": "Domain 'evil.com' not on allowlist — pending operator approval",
   "url": "https://evil.com/exfil",
-  "action": "Run 'azureclaw egress <name> --pending' to see pending requests, then 'azureclaw egress <name> --approve <domain>' to allow."
+  "action": "Run 'kars egress <name> --pending' to see pending requests, then 'kars egress <name> --approve <domain>' to allow."
 }
 ```
 
@@ -316,7 +316,7 @@ The blocklist stays current through multiple refresh mechanisms:
 | Mechanism | Frequency | Source |
 |-----------|-----------|--------|
 | Router background task | Every 6 hours | Fetches latest feeds from [OISD](https://oisd.nl/) and [URLhaus](https://urlhaus.abuse.ch/) |
-| K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/azureclaw/blocklist/domains.txt` |
+| K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/kars/blocklist/domains.txt` |
 | GitHub Actions CI | Daily | Refreshes the seed file in the repository (≤ 24h old) |
 
 **Safe refresh:** If all upstream feeds fail, the previous entries are preserved — no wipe-on-failure. The router logs a warning and retries on the next cycle.
@@ -345,20 +345,20 @@ decisions are recorded in the governance audit log.
 |------|-------------|
 | `inference-router/src/blocklist.rs` | Blocklist engine, allowlist, pending approvals, learn mode |
 | `inference-router/src/routes/egress.rs` | HTTP handlers for `/egress/*` endpoints |
-| `cli/src/commands/egress.ts` | CLI `azureclaw egress` command |
+| `cli/src/commands/egress.ts` | CLI `kars egress` command |
 | `controller/src/reconciler/mod.rs` | iptables init container + NetworkPolicy generation |
 
 ## Signed OCI egress allowlist
 
 This adds supply-chain integrity for egress allowlists.
 The `--sign` flag seals the current allowlist as a content-addressed,
-cosign-signed OCI artifact and wires the digest into the `ClawSandbox` CRD
+cosign-signed OCI artifact and wires the digest into the `KarsSandbox` CRD
 so the controller can verify it on every reconcile.
 
 ### Signing an allowlist
 
 ```bash
-azureclaw egress <name> --enforce --sign \
+kars egress <name> --enforce --sign \
   --registry myacr.azurecr.io \
   [--repository policy/egress-allowlist/<name>] \
   [--sign-mode keyless|identity-token|keyed] \
@@ -370,7 +370,7 @@ an error.
 
 **What happens (in order):**
 
-1. CLI reads `ClawSandbox.spec.networkPolicy.allowedEndpoints` +
+1. CLI reads `KarsSandbox.spec.networkPolicy.allowedEndpoints` +
    `metadata.generation`.
 2. Builds a byte-stable canonical YAML (`buildCanonicalAllowlist`): keys
    sorted, no trailing whitespace, LF line endings, `generation` and the
@@ -380,7 +380,7 @@ an error.
 5. Patches `spec.networkPolicy.allowlistRef` with the resulting
    `<registry>/<repo>@sha256:<digest>` reference (`buildPatchArgv`).
 6. If `oras push` or `cosign sign` fails, the patch is skipped — no orphan
-   `allowlistRef` ever lands on a `ClawSandbox`.
+   `allowlistRef` ever lands on a `KarsSandbox`.
 
 ### Sign-mode auto-detection
 
@@ -397,21 +397,21 @@ Override with `--sign-mode` if auto-detection picks the wrong mode.
 When `spec.networkPolicy.allowlistRef` is set the controller verifies the
 artifact on every reconcile using the `SignerPolicy` ConfigMap.
 
-**`SignerPolicy` ConfigMap wire shape** (name: `azureclaw-signer-policy`,
-namespace: `azureclaw-system`):
+**`SignerPolicy` ConfigMap wire shape** (name: `kars-signer-policy`,
+namespace: `kars-system`):
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: azureclaw-signer-policy
-  namespace: azureclaw-system
+  name: kars-signer-policy
+  namespace: kars-system
 data:
   fulcioIssuers: |
     https://token.actions.githubusercontent.com
     https://accounts.google.com
   sanPatterns: |
-    https://github.com/Azure/azureclaw/*
+    https://github.com/Azure/kars/*
     *.microsoft.com
 ```
 
@@ -419,10 +419,10 @@ Both keys are required and must contain at least one non-comment line.
 A malformed or empty ConfigMap sets `SignerPolicyMalformed` condition and
 blocks verification — there is no silent fallback to permissive defaults.
 If the ConfigMap is absent, the controller falls back to the
-`AZURECLAW_SIGNER_FULCIO_ISSUERS` / `AZURECLAW_SIGNER_SAN_PATTERNS`
+`KARS_SIGNER_FULCIO_ISSUERS` / `KARS_SIGNER_SAN_PATTERNS`
 environment variables as an emergency operator override.
 
-### Status conditions on `ClawSandbox`
+### Status conditions on `KarsSandbox`
 
 | Condition | Value | Meaning |
 |-----------|-------|---------|
@@ -451,12 +451,12 @@ reachable.
 To produce a Kubernetes manifest instead of patching live:
 
 ```bash
-azureclaw egress <name> --enforce --sign \
+kars egress <name> --enforce --sign \
   --registry myacr.azurecr.io \
   --emit-manifest ./egress-allowlist-<name>.yaml
 ```
 
-The emitted manifest is a `ClawSandbox` patch fragment with
+The emitted manifest is a `KarsSandbox` patch fragment with
 `spec.networkPolicy.allowlistRef` pre-filled. Commit it to Git;
 apply with `kubectl apply -f`. The YAML is deterministic (same input
 → same bytes) to enable diff-based drift detection in CI.
@@ -482,7 +482,7 @@ Both must be in `$PATH`.
 
 Sometimes an agent needs to reach a host *just once* — debugging, a
 short-lived API key validation, a one-shot data import. Editing the
-baseline `ClawSandbox.spec.networkPolicy.allowedEndpoints` for these is
+baseline `KarsSandbox.spec.networkPolicy.allowedEndpoints` for these is
 poor hygiene: the change persists indefinitely, ripples through GitOps,
 and pollutes audit history. **`EgressApproval`** is the explicit, ephemeral,
 auditable grant lane.
@@ -490,13 +490,13 @@ auditable grant lane.
 ### Shape
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: EgressApproval
 metadata:
   name: debug-stripe-2026-05-14
-  namespace: azureclaw-system   # same namespace as the sandbox
+  namespace: kars-system   # same namespace as the sandbox
 spec:
-  sandbox: my-agent             # name of the sibling ClawSandbox
+  sandbox: my-agent             # name of the sibling KarsSandbox
   hosts:                        # 1..16 entries (small scoped grants only)
     - host: api.stripe.com
       port: 443
@@ -536,13 +536,13 @@ spec:
 The controller computes a merged-allowlist sha256 digest (baseline
 `allowedEndpoints` ∪ all approval hosts, length-prefixed canonical
 encoding) and writes per-approval files into a sibling ConfigMap
-`clawsandbox-<sandbox>-egress-approvals`. The inference-router mounts
+`karssandbox-<sandbox>-egress-approvals`. The inference-router mounts
 this CM, unions the entries with the baseline allowlist, and POSTs the
 loaded digest back to `controller/internal/policy-status`. **The
 controller only promotes `phase=Pending → Active` when the loaded digest
 exactly matches the compiled merged digest** — the same `Ready ⇔
 router echo` invariant used by `ToolPolicy`, `InferencePolicy`, and
-`ClawMemory`.
+`KarsMemory`.
 
 On TTL expiry the reconciler:
 
@@ -555,7 +555,7 @@ On TTL expiry the reconciler:
 
 ```bash
 # Grant
-azureclaw egress allow-extra <sandbox> \
+kars egress allow-extra <sandbox> \
   --host api.stripe.com:443 \
   --host hooks.stripe.com \
   --reason "INC-4421 debug pipe" \
@@ -563,10 +563,10 @@ azureclaw egress allow-extra <sandbox> \
   --ttl PT2H
 
 # List active + pending grants for a sandbox
-azureclaw egress approvals <sandbox>
+kars egress approvals <sandbox>
 
 # Revoke early (before TTL elapses)
-azureclaw egress revoke debug-stripe-2026-05-14
+kars egress revoke debug-stripe-2026-05-14
 ```
 
 `allow-extra` builds an `EgressApproval` CR and applies it via `kubectl
@@ -576,12 +576,12 @@ and recomputing the digest.
 
 ### Headlamp panel
 
-The AzureClaw Headlamp plugin registers `EgressApproval` in the sidebar
-(list view, CR detail page). Every `ClawSandbox` detail page also renders
+The Kars Headlamp plugin registers `EgressApproval` in the sidebar
+(list view, CR detail page). Every `KarsSandbox` detail page also renders
 an **Egress Approvals** card listing all approvals scoped to that sandbox
 with columns: NAME, PHASE, HOSTS, TTL, EXPIRES, REASON, MERGED-DIGEST.
 
-### Why a separate CRD instead of a `ClawSandbox` field?
+### Why a separate CRD instead of a `KarsSandbox` field?
 
 | Concern | Inline field | Separate CR |
 |---------|--------------|-------------|
@@ -601,7 +601,7 @@ that on every outbound request.
 | Type | Status | Reason | Meaning |
 |------|--------|--------|---------|
 | `Ready` | `True` | `RouterConfirmed` | Grant is live on the data plane. |
-| `Ready` | `False` | `BlockedOnSandbox` | Sibling `ClawSandbox` is not yet `phase=Ready`. |
+| `Ready` | `False` | `BlockedOnSandbox` | Sibling `KarsSandbox` is not yet `phase=Ready`. |
 | `Ready` | `False` | `AwaitingRouterEcho` | Merged CM written; router hasn't echoed digest yet. |
 | `Ready` | `False` | `ReasonInvalid` | `spec.reason` violated server-side validation. |
 | `Ready` | `False` | `Expired` | Terminal — TTL elapsed; grant is no longer in effect. |

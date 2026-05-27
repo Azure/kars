@@ -1,4 +1,4 @@
-# AzureClaw Example: Telegram-Connected Agent
+# Kars Example: Telegram-Connected Agent
 #
 # Deploys an OpenClaw agent with Telegram channel integration.
 # The agent responds to Telegram messages and optionally uses Bing web search
@@ -10,19 +10,19 @@
 #
 # Credentials are stored in a K8s secret named "telegram-agent-credentials"
 # and mounted via envFrom (optional: true). Create with:
-#   azureclaw credentials update telegram-agent --telegram-token "YOUR_TOKEN"
+#   kars credentials update telegram-agent --telegram-token "YOUR_TOKEN"
 #
 # Or deploy via CLI (creates the secret automatically):
-#   azureclaw add telegram-agent --channels telegram --telegram-token "YOUR_TOKEN"
+#   kars add telegram-agent --channels telegram --telegram-token "YOUR_TOKEN"
 
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: telegram-agent-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: telegram-agent
+    kars.azure.com/sandbox: telegram-agent
 spec:
   appliesTo:
     sandboxName: telegram-agent
@@ -36,19 +36,19 @@ spec:
     dailyTokens: 500000
     perRequestTokens: 128000
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: telegram-agent
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/channels: telegram
+    kars.azure.com/channels: telegram
 spec:
   runtime:
     kind: OpenClaw
     openclaw:
       # Image and version intentionally unset: the controller resolves
-      # the sandbox image from its SANDBOX_IMAGE env (set by `azureclaw
+      # the sandbox image from its SANDBOX_IMAGE env (set by `kars
       # up`). Pinning a registry path here breaks the example for users
       # who haven't pushed to the same registry.
       config:
@@ -57,7 +57,7 @@ spec:
 
   sandbox:
     isolation: "enhanced"
-    seccompProfile: "azureclaw-strict"
+    seccompProfile: "kars-strict"
     readOnlyRootFilesystem: true
     runAsNonRoot: true
     allowPrivilegeEscalation: false

@@ -5,8 +5,8 @@
 > nasty security hole."* — Simon Willison, [The Lethal Trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
 
 This demo reproduces a **real, very recent** agentic-AI attack against two
-identical agents on the same AKS cluster — one wrapped by AzureClaw, one
-not — and shows exactly which AzureClaw layer catches the attack at every
+identical agents on the same AKS cluster — one wrapped by Kars, one
+not — and shows exactly which Kars layer catches the attack at every
 step.
 
 ## The attack we reproduce
@@ -32,7 +32,7 @@ and it's the lesson this demo delivers.
 
 ## What the demo proves
 
-| | Naked OpenClaw | OpenClaw on AzureClaw |
+| | Naked OpenClaw | OpenClaw on Kars |
 |---|---|---|
 | Inline Content Safety prompt-shield | ❌ none | ✅ Foundry DefaultV2 → 403 |
 | URL-method allowlist (not just domain) | ❌ domain-only | ✅ ToolPolicy: `GET` only on that host |
@@ -40,7 +40,7 @@ and it's the lesson this demo delivers.
 | Egress guard (UID-based iptables) | ❌ none | ✅ UID 1000 → `ECONNREFUSED` |
 | Token budget cap | ❌ none | ✅ 100-token / request budget |
 | AGT BehaviorMonitor auto-quarantine | ❌ none | ✅ 3 flags → rate-limit 0 |
-| Tamper-evident audit chain | ❌ none | ✅ `azureclaw audit verify` |
+| Tamper-evident audit chain | ❌ none | ✅ `kars audit verify` |
 
 **Six independent layers. Each one alone catches the attack.**
 
@@ -54,8 +54,8 @@ examples/lethal-trifecta-demo/
 │   └── poisoned-skill.md              # the injection payload (1pt-font equivalent)
 ├── scenarios/
 │   ├── 00-namespaces.yaml             # the two namespaces
-│   ├── 01-naked-claw.yaml             # vanilla OpenClaw agent (no AzureClaw)
-│   ├── 02-azureclaw-sandbox.yaml      # ClawSandbox + InferencePolicy + ToolPolicy
+│   ├── 01-naked-claw.yaml             # vanilla OpenClaw agent (no Kars)
+│   ├── 02-kars-sandbox.yaml      # KarsSandbox + InferencePolicy + ToolPolicy
 │   └── 03-bait-server.yaml            # serves the poisoned skill on cluster-internal HTTP
 └── scripts/
     ├── deploy.sh                      # apply everything in order
@@ -66,7 +66,7 @@ examples/lethal-trifecta-demo/
 
 ## Prereqs
 
-- An AzureClaw deployment via `azureclaw up` ([Getting Started](../../docs/getting-started.md))
+- An Kars deployment via `kars up` ([Getting Started](../../docs/getting-started.md))
 - `kubectl` context pointing at that cluster
 - One Foundry / Azure OpenAI deployment (the demo uses it for the `gpt-4.1` model;
   GitHub-Models mode also works but Layer 1 — inline Content Safety — won't fire,
@@ -85,7 +85,7 @@ cd examples/lethal-trifecta-demo
 ```
 
 > **What works out of the box** — `deploy.sh` and `teardown.sh` run end-to-end on
-> local-k8s and AKS; both Deployments reach `Ready` and the AzureClaw sandbox
+> local-k8s and AKS; both Deployments reach `Ready` and the Kars sandbox
 > stack (egress-guard, inference-router, NetworkPolicy, InferencePolicy) all
 > reconcile.
 >
@@ -93,11 +93,11 @@ cd examples/lethal-trifecta-demo
 > 1. The `naked-claw` container needs a working OpenClaw runtime config (mounted
 >    or templated into `01-naked-claw.yaml`); without it the vanilla pod
 >    crashloops at startup before it can attempt the attack.
-> 2. The `azureclaw-realestate-agent` namespace is governed by the cluster-wide
->    `ValidatingAdmissionPolicy/azureclaw-sandbox-exec-ban` ValidatingAdmissionPolicy,
+> 2. The `kars-realestate-agent` namespace is governed by the cluster-wide
+>    `ValidatingAdmissionPolicy/kars-sandbox-exec-ban` ValidatingAdmissionPolicy,
 >    so `kubectl exec` into the `openclaw` container is denied by design. For
 >    the demo's exec-driven attack path, label the namespace
->    `azureclaw.azure.com/break-glass=true` first — every bypass is audited.
+>    `kars.azure.com/break-glass=true` first — every bypass is audited.
 >
 > If either prerequisite isn't met, `deploy.sh` still demonstrates the
 > deploy-time defense posture (network policy, egress guard, governance
@@ -113,7 +113,7 @@ say at each second mark for a recorded or live demo.
 - **The naked-claw failure is not theatrical.** A standard OpenClaw deploy
   with a normal egress allowlist *will* fall to this exact attack. We aren't
   setting up a strawman.
-- **No layer is hidden.** Every defense in the AzureClaw column is a YAML in
+- **No layer is hidden.** Every defense in the Kars column is a YAML in
   `scenarios/` you can read, copy, and audit. There's no magic; it's policy.
 
 ## Credits

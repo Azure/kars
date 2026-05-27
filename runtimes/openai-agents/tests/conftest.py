@@ -9,7 +9,7 @@ from typing import Iterator
 
 import pytest
 
-from azureclaw_runtime_openai_agents import aad, mesh, otel, tools
+from kars_runtime_openai_agents import aad, mesh, otel, tools
 
 
 @pytest.fixture(autouse=True)
@@ -21,16 +21,16 @@ def _reset_module_state() -> Iterator[None]:
     otel._reset_for_tests()
     # Wipe env vars that bleed between tests.
     for key in (
-        "AZURECLAW_AGENT_DID",
-        "AZURECLAW_AGENT_NAME",
-        "AZURECLAW_AGT_RELAY_URL",
-        "AZURECLAW_AGT_REGISTRY_URL",
-        "AZURECLAW_PLATFORM_MCP_URL",
+        "KARS_AGENT_DID",
+        "KARS_AGENT_NAME",
+        "KARS_AGT_RELAY_URL",
+        "KARS_AGT_REGISTRY_URL",
+        "KARS_PLATFORM_MCP_URL",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
         "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
         "OPENAI_BASE_URL",
-        "__AZURECLAW_RUNTIME_INITIALIZED__",
+        "__KARS_RUNTIME_INITIALIZED__",
     ):
         os.environ.pop(key, None)
     # Suppress otel SDK's retry-loop log noise on tests that exercise

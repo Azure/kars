@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 /**
- * Unit tests for `azureclaw convert` (S9.2).
+ * Unit tests for `kars convert` (S9.2).
  *
  * Tests the pure helpers exposed via `__test`. No filesystem or kubectl IO.
  *
  * Mapping verified against:
  *   - kubernetes-sigs/agent-sandbox @ c8c85f5 (api/v1alpha1/sandbox_types.go)
- *   - controller/src/crd.rs:25-405 (ClawSandbox shape)
+ *   - controller/src/crd.rs:25-405 (KarsSandbox shape)
  *   - controller/src/reconciler/mod.rs:34-78 (seccomp + runtimeClass logic)
  */
 import { describe, it, expect } from "vitest";
@@ -18,7 +18,7 @@ import { __test } from "./convert.js";
 const {
   parseManifest,
   cleanMetadata,
-  clawsandboxToUpstreamSandbox,
+  karssandboxToUpstreamSandbox,
   upstreamSandboxToClawsandbox,
   emitOverlay,
   envArrayToMap,
@@ -31,9 +31,9 @@ const {
 
 function clawSandboxFixture(overrides: Record<string, unknown> = {}): string {
   const base = {
-    apiVersion: "azureclaw.azure.com/v1alpha1",
-    kind: "ClawSandbox",
-    metadata: { name: "demo", namespace: "azureclaw-demo" },
+    apiVersion: "kars.azure.com/v1alpha1",
+    kind: "KarsSandbox",
+    metadata: { name: "demo", namespace: "kars-demo" },
     spec: {
       runtime: {
         kind: "OpenClaw",
@@ -44,7 +44,7 @@ function clawSandboxFixture(overrides: Record<string, unknown> = {}): string {
       },
       sandbox: {
         isolation: "enhanced",
-        seccompProfile: "azureclaw-strict",
+        seccompProfile: "kars-strict",
         readOnlyRootFilesystem: true,
         runAsNonRoot: true,
         allowPrivilegeEscalation: false,
@@ -59,7 +59,7 @@ function upstreamSandboxFixture(overrides: Record<string, unknown> = {}): string
   const base = {
     apiVersion: "agents.x-k8s.io/v1alpha1",
     kind: "Sandbox",
-    metadata: { name: "demo", namespace: "azureclaw-demo" },
+    metadata: { name: "demo", namespace: "kars-demo" },
     spec: {
       podTemplate: {
         spec: {
@@ -77,7 +77,7 @@ function upstreamSandboxFixture(overrides: Record<string, unknown> = {}): string
                 allowPrivilegeEscalation: false,
                 seccompProfile: {
                   type: "Localhost",
-                  localhostProfile: "profiles/azureclaw-strict.json",
+                  localhostProfile: "profiles/kars-strict.json",
                 },
               },
             },
@@ -93,7 +93,7 @@ function upstreamSandboxFixture(overrides: Record<string, unknown> = {}): string
 
 describe("parseTarget", () => {
   it("accepts the three known targets", () => {
-    expect(parseTarget("clawsandbox")).toBe("clawsandbox");
+    expect(parseTarget("karssandbox")).toBe("karssandbox");
     expect(parseTarget("upstream-sandbox")).toBe("upstream-sandbox");
     expect(parseTarget("overlay")).toBe("overlay");
   });
@@ -107,8 +107,8 @@ describe("parseTarget", () => {
 describe("parseManifest", () => {
   it("parses a single document with apiVersion+kind", () => {
     const r = parseManifest(clawSandboxFixture());
-    expect(r.kind).toBe("ClawSandbox");
-    expect(r.apiVersion).toBe("azureclaw.azure.com/v1alpha1");
+    expect(r.kind).toBe("KarsSandbox");
+    expect(r.apiVersion).toBe("kars.azure.com/v1alpha1");
   });
   it("rejects multi-document YAML", () => {
     const yaml = `${clawSandboxFixture()}---\n${clawSandboxFixture()}`;
@@ -218,22 +218,22 @@ describe("canonicaliseSeccomp", () => {
   it("Localhost profiles/<name>.json -> bare name (no warning)", () => {
     const w: string[] = [];
     expect(
-      canonicaliseSeccomp({ type: "Localhost", localhostProfile: "profiles/azureclaw-strict.json" }, w, "enhanced"),
-    ).toBe("azureclaw-strict");
+      canonicaliseSeccomp({ type: "Localhost", localhostProfile: "profiles/kars-strict.json" }, w, "enhanced"),
+    ).toBe("kars-strict");
     expect(w).toEqual([]);
   });
   it("Localhost <name>.json -> bare name + warn", () => {
     const w: string[] = [];
     expect(
-      canonicaliseSeccomp({ type: "Localhost", localhostProfile: "azureclaw-strict.json" }, w, "enhanced"),
-    ).toBe("azureclaw-strict");
+      canonicaliseSeccomp({ type: "Localhost", localhostProfile: "kars-strict.json" }, w, "enhanced"),
+    ).toBe("kars-strict");
     expect(w[0]).toMatch(/lacks profiles\/ prefix/);
   });
   it("Localhost bare name -> bare name + warn", () => {
     const w: string[] = [];
     expect(
-      canonicaliseSeccomp({ type: "Localhost", localhostProfile: "azureclaw-strict" }, w, "enhanced"),
-    ).toBe("azureclaw-strict");
+      canonicaliseSeccomp({ type: "Localhost", localhostProfile: "kars-strict" }, w, "enhanced"),
+    ).toBe("kars-strict");
     expect(w[0]).toMatch(/not in canonical/);
   });
   it("RuntimeDefault on confidential -> no warning", () => {
@@ -258,10 +258,10 @@ describe("canonicaliseSeccomp", () => {
   });
 });
 
-describe("clawsandboxToUpstreamSandbox (forward)", () => {
+describe("karssandboxToUpstreamSandbox (forward)", () => {
   it("maps standard fields under enhanced isolation", () => {
     const parsed = parseManifest(clawSandboxFixture());
-    const r = clawsandboxToUpstreamSandbox(parsed);
+    const r = karssandboxToUpstreamSandbox(parsed);
     expect(r.warnings.filter(w => !w.includes("inferenceRef"))).toEqual([]);
     const m = r.manifest as Record<string, unknown>;
     expect(m.apiVersion).toBe("agents.x-k8s.io/v1alpha1");
@@ -279,7 +279,7 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
     const sc = ctn.securityContext as Record<string, unknown>;
     expect(sc.seccompProfile).toEqual({
       type: "Localhost",
-      localhostProfile: "profiles/azureclaw-strict.json",
+      localhostProfile: "profiles/kars-strict.json",
     });
     expect(sc.readOnlyRootFilesystem).toBe(true);
     expect(sc.runAsNonRoot).toBe(true);
@@ -289,10 +289,10 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
   it("confidential isolation emits kata runtimeClass + RuntimeDefault seccomp", () => {
     const parsed = parseManifest(
       clawSandboxFixture({
-        sandbox: { isolation: "confidential", seccompProfile: "azureclaw-strict" },
+        sandbox: { isolation: "confidential", seccompProfile: "kars-strict" },
       }),
     );
-    const r = clawsandboxToUpstreamSandbox(parsed);
+    const r = karssandboxToUpstreamSandbox(parsed);
     const podSpec = (
       (r.manifest.spec as Record<string, unknown>).podTemplate as Record<string, unknown>
     ).spec as Record<string, unknown>;
@@ -309,7 +309,7 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
           sandbox: { isolation: "enhanced", seccompProfile: seccomp },
         }),
       );
-      const r = clawsandboxToUpstreamSandbox(parsed);
+      const r = karssandboxToUpstreamSandbox(parsed);
       const sc = (
         ((r.manifest.spec as Record<string, unknown>).podTemplate as Record<string, unknown>)
           .spec as Record<string, unknown>
@@ -320,7 +320,7 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
     }
   });
 
-  it("warns once per AzureClaw-only field", () => {
+  it("warns once per Kars-only field", () => {
     const parsed = parseManifest(
       clawSandboxFixture({
         inference: { provider: "azure-openai", model: "gpt-4o" },
@@ -332,7 +332,7 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
         upstreamCompatibility: { sigsAgentSandbox: "off" },
       }),
     );
-    const r = clawsandboxToUpstreamSandbox(parsed);
+    const r = karssandboxToUpstreamSandbox(parsed);
     expect(r.warnings).toHaveLength(7);
     expect(r.warnings.some((w) => w.includes("spec.inference"))).toBe(true);
     expect(r.warnings.some((w) => w.includes("spec.governance"))).toBe(true);
@@ -345,37 +345,37 @@ describe("clawsandboxToUpstreamSandbox (forward)", () => {
 
   it("rejects wrong source kind", () => {
     const parsed = parseManifest(upstreamSandboxFixture());
-    expect(() => clawsandboxToUpstreamSandbox(parsed)).toThrow(/expected source kind=ClawSandbox/);
+    expect(() => karssandboxToUpstreamSandbox(parsed)).toThrow(/expected source kind=KarsSandbox/);
   });
 
   it("rejects missing image", () => {
     const yaml = yamlStringify({
-      apiVersion: "azureclaw.azure.com/v1alpha1",
-      kind: "ClawSandbox",
+      apiVersion: "kars.azure.com/v1alpha1",
+      kind: "KarsSandbox",
       metadata: { name: "x" },
       spec: { runtime: { kind: "OpenClaw", openclaw: {} }, sandbox: { isolation: "enhanced" } },
     });
-    expect(() => clawsandboxToUpstreamSandbox(parseManifest(yaml))).toThrow(/image required/);
+    expect(() => karssandboxToUpstreamSandbox(parseManifest(yaml))).toThrow(/image required/);
   });
 
   it("warns on dropped status block", () => {
     const yaml = yamlStringify({
-      apiVersion: "azureclaw.azure.com/v1alpha1",
-      kind: "ClawSandbox",
+      apiVersion: "kars.azure.com/v1alpha1",
+      kind: "KarsSandbox",
       metadata: { name: "x" },
       spec: {
         runtime: { kind: "OpenClaw", openclaw: { image: "x:1" } },
-        sandbox: { isolation: "enhanced", seccompProfile: "azureclaw-strict" },
+        sandbox: { isolation: "enhanced", seccompProfile: "kars-strict" },
       },
       status: { phase: "Ready" },
     });
-    const r = clawsandboxToUpstreamSandbox(parseManifest(yaml));
+    const r = karssandboxToUpstreamSandbox(parseManifest(yaml));
     expect(r.warnings.some((w) => w.includes("status block"))).toBe(true);
   });
 });
 
 describe("upstreamSandboxToClawsandbox (inverse)", () => {
-  it("happy-path round-trip restores ClawSandbox shape", () => {
+  it("happy-path round-trip restores KarsSandbox shape", () => {
     const r = upstreamSandboxToClawsandbox(parseManifest(upstreamSandboxFixture()));
     expect(r.warnings.filter(w => !w.includes("inferenceRef"))).toEqual([]);
     const spec = (r.manifest as Record<string, unknown>).spec as Record<string, unknown>;
@@ -386,7 +386,7 @@ describe("upstreamSandboxToClawsandbox (inverse)", () => {
     expect(openclaw.extraEnv).toEqual({ ALPHA: "1", FOO: "bar" });
     const sandbox = spec.sandbox as Record<string, unknown>;
     expect(sandbox.isolation).toBe("enhanced");
-    expect(sandbox.seccompProfile).toBe("azureclaw-strict");
+    expect(sandbox.seccompProfile).toBe("kars-strict");
     expect(sandbox.readOnlyRootFilesystem).toBe(true);
   });
 
@@ -545,12 +545,12 @@ describe("upstreamSandboxToClawsandbox (inverse)", () => {
 });
 
 describe("emitOverlay", () => {
-  it("emits a fresh ClawSandbox skeleton with overlay binding", () => {
+  it("emits a fresh KarsSandbox skeleton with overlay binding", () => {
     const r = emitOverlay(parseManifest(upstreamSandboxFixture()), "demo");
     const m = r.manifest as Record<string, unknown>;
-    expect(m.apiVersion).toBe("azureclaw.azure.com/v1alpha1");
-    expect(m.kind).toBe("ClawSandbox");
-    expect((m.metadata as Record<string, unknown>).namespace).toBe("azureclaw-demo");
+    expect(m.apiVersion).toBe("kars.azure.com/v1alpha1");
+    expect(m.kind).toBe("KarsSandbox");
+    expect((m.metadata as Record<string, unknown>).namespace).toBe("kars-demo");
     const spec = m.spec as Record<string, unknown>;
     const upc = spec.upstreamCompatibility as Record<string, unknown>;
     expect(upc.sigsAgentSandbox).toBe("overlay");
@@ -562,7 +562,7 @@ describe("emitOverlay", () => {
   });
 
   it("accepts ns/name and validates against input namespace", () => {
-    const r = emitOverlay(parseManifest(upstreamSandboxFixture()), "azureclaw-demo/demo");
+    const r = emitOverlay(parseManifest(upstreamSandboxFixture()), "kars-demo/demo");
     const upc = (
       (r.manifest as Record<string, unknown>).spec as Record<string, unknown>
     ).upstreamCompatibility as Record<string, unknown>;
@@ -575,7 +575,7 @@ describe("emitOverlay", () => {
     ).toThrow(/does not match input metadata.namespace/);
   });
 
-  it("rejects ClawSandbox source", () => {
+  it("rejects KarsSandbox source", () => {
     expect(() => emitOverlay(parseManifest(clawSandboxFixture()), "demo")).toThrow(
       /requires source kind=Sandbox/,
     );
@@ -587,9 +587,9 @@ describe("emitOverlay", () => {
 });
 
 describe("dispatch", () => {
-  it("clawsandbox target -> inverse", () => {
-    const r = dispatch(parseManifest(upstreamSandboxFixture()), { target: "clawsandbox" });
-    expect((r.manifest as Record<string, unknown>).kind).toBe("ClawSandbox");
+  it("karssandbox target -> inverse", () => {
+    const r = dispatch(parseManifest(upstreamSandboxFixture()), { target: "karssandbox" });
+    expect((r.manifest as Record<string, unknown>).kind).toBe("KarsSandbox");
   });
   it("upstream-sandbox target -> forward", () => {
     const r = dispatch(parseManifest(clawSandboxFixture()), { target: "upstream-sandbox" });
@@ -612,9 +612,9 @@ describe("formatYaml", () => {
 });
 
 describe("round-trip stability", () => {
-  it("ClawSandbox -> upstream -> ClawSandbox preserves core fields", () => {
+  it("KarsSandbox -> upstream -> KarsSandbox preserves core fields", () => {
     const original = clawSandboxFixture();
-    const forward = clawsandboxToUpstreamSandbox(parseManifest(original));
+    const forward = karssandboxToUpstreamSandbox(parseManifest(original));
     const inverse = upstreamSandboxToClawsandbox(parseManifest(yamlStringify(forward.manifest)));
     const spec = (inverse.manifest as Record<string, unknown>).spec as Record<string, unknown>;
     const runtime = spec.runtime as Record<string, unknown>;
@@ -624,6 +624,6 @@ describe("round-trip stability", () => {
     expect(openclaw.extraEnv).toEqual({ ALPHA: "1", FOO: "bar" });
     const sandbox = spec.sandbox as Record<string, unknown>;
     expect(sandbox.isolation).toBe("enhanced");
-    expect(sandbox.seccompProfile).toBe("azureclaw-strict");
+    expect(sandbox.seccompProfile).toBe("kars-strict");
   });
 });

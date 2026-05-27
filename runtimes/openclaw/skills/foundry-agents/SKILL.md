@@ -35,7 +35,7 @@ curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-p
 ```bash
 curl -s -X POST 'http://localhost:8443/openai/responses?api-version=2025-11-15-preview' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4.1","input":"What beverage does the user prefer?","tools":[{"type":"memory_search","memory_store_name":"azureclaw-memory","scope":"default"}],"store":false}'
+  -d '{"model":"gpt-4.1","input":"What beverage does the user prefer?","tools":[{"type":"memory_search","memory_store_name":"kars-memory","scope":"default"}],"store":false}'
 ```
 
 ## Querying Foundry Infrastructure

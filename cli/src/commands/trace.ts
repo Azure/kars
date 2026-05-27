@@ -18,7 +18,7 @@ export function traceCommand(): Command {
     .option("--dns", "Show DNS lookups only", false)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
-      const namespace = `azureclaw-${name}`;
+      const namespace = `kars-${name}`;
 
       // Check kubectl-gadget is installed
       try {

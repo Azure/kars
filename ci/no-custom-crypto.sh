@@ -28,13 +28,13 @@ ALLOW_PATHS=(
   'inference-router/src/a2a/card_signing.rs'    # RFC 7515 JWS / RFC 8037 EdDSA over AgentCards (A2A 1.0.0 §4.4.7) — standard JOSE primitive
   'inference-router/src/a2a/card_verifier.rs'   # inbound caller-card verifier — uses ed25519-dalek::VerifyingKey only (no signing primitives)
   # Phase 2 S3.5 (ADR-0001 #4): the verifier + AgentCard schema were lifted into the
-  # `azureclaw-a2a-core` workspace member so the new public-edge `a2a-gateway` shares
+  # `kars-a2a-core` workspace member so the new public-edge `a2a-gateway` shares
   # the exact same JWS path as the router. Same files, same crypto surface — just
   # under a new path. The router still re-exports them at `crate::a2a::*`.
-  'azureclaw-a2a-core/src/agent_card.rs'        # see inference-router/src/a2a/agent_card.rs above
-  'azureclaw-a2a-core/src/card_signing.rs'      # see inference-router/src/a2a/card_signing.rs above
-  'azureclaw-a2a-core/src/card_verifier.rs'     # see inference-router/src/a2a/card_verifier.rs above
-  'azureclaw-a2a-core/src/signature.rs'         # RFC 7515 base64url + signing-input helper; no crypto math
+  'kars-a2a-core/src/agent_card.rs'        # see inference-router/src/a2a/agent_card.rs above
+  'kars-a2a-core/src/card_signing.rs'      # see inference-router/src/a2a/card_signing.rs above
+  'kars-a2a-core/src/card_verifier.rs'     # see inference-router/src/a2a/card_verifier.rs above
+  'kars-a2a-core/src/signature.rs'         # RFC 7515 base64url + signing-input helper; no crypto math
   'inference-router/src/a2a/jsonrpc_dispatch.rs' # JSON-RPC 2.0 binding for message/send / tasks/* — no crypto math; references ed25519-dalek types only via AP2 trust glue
   'inference-router/src/a2a/mandate_signing.rs' # AP2 IntentMandate / CartMandate / PaymentMandate Ed25519 sign — RFC 8032 EdDSA via ed25519-dalek; signs only, no key derivation
   'inference-router/src/a2a/mandate_trust_store.rs' # AP2 mandate verifier-side public-key store; uses ed25519-dalek::VerifyingKey only (no signing primitives)
@@ -53,8 +53,8 @@ ALLOW_PATHS=(
   'controller/src/tool_policy_compile.rs'      # ToolPolicy → AGT YAML profile (S2)
   'controller/src/a2a_agent_compile.rs'        # A2AAgent card-signing key Secret + AGT profile (S3)
   'controller/src/inference_policy_compile.rs' # InferencePolicy → AGT-profile compile (S4)
-  'controller/src/claw_memory_compile.rs'      # ClawMemory binding compile (S5)
-  'controller/src/claw_eval_compile.rs'        # ClawEval suite compile (S6)
+  'controller/src/kars_memory_compile.rs'      # KarsMemory binding compile (S5)
+  'controller/src/kars_eval_compile.rs'        # KarsEval suite compile (S6)
   'controller/src/trust_graph_compile.rs'      # Phase F1: TrustGraph edge signature verifier — pure conduit to ed25519-dalek::{Signature, Verifier, VerifyingKey} + sha2 for the version-hash; no hand-rolled crypto math, domain-separated canonical payload defined in PAYLOAD_DOMAIN constant
   'controller/src/egress_allowlist_compile.rs' # Slice 5c.1: signed egress allowlist OCI artifact — sha2::Sha256 only for content-hashing the compiled YAML; no signing math (signatures applied by cosign upstream)
   'controller/src/egress_approval_compile.rs'  # Slice 5e.2: EgressApproval CEL profile compile — sha2::Sha256 only for canonical-form content hashing; no signing math

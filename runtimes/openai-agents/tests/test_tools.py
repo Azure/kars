@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from azureclaw_runtime_openai_agents import tools
+from kars_runtime_openai_agents import tools
 
 
 def test_canonical_tool_names_match_router_catalog():
@@ -26,7 +26,7 @@ def test_canonical_tool_names_match_router_catalog():
 def test_build_foundry_tools_returns_nine():
     built = tools.build_foundry_tools()
     assert len(built) == 9
-    names = [getattr(t, "__azureclaw_tool_name__", None) for t in built]
+    names = [getattr(t, "__kars_tool_name__", None) for t in built]
     assert set(names) == set(tools.FOUNDRY_TOOL_NAMES)
 
 
@@ -112,7 +112,7 @@ def test_register_foundry_tools_adds_nine_to_agent():
     agent = _FakeAgent()
     tools.register_foundry_tools(agent)
     assert len(agent.tools) == 9
-    names = {getattr(t, "__azureclaw_tool_name__", None) for t in agent.tools}
+    names = {getattr(t, "__kars_tool_name__", None) for t in agent.tools}
     assert names == set(tools.FOUNDRY_TOOL_NAMES)
 
 
@@ -148,5 +148,5 @@ def test_platform_mcp_url_default():
 
 
 def test_platform_mcp_url_env_override(monkeypatch):
-    monkeypatch.setenv("AZURECLAW_PLATFORM_MCP_URL", "http://elsewhere/mcp")
+    monkeypatch.setenv("KARS_PLATFORM_MCP_URL", "http://elsewhere/mcp")
     assert tools._platform_mcp_url() == "http://elsewhere/mcp"

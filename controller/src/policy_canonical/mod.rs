@@ -106,7 +106,7 @@ pub trait PolicyKind: 'static {
     /// artifacts — see canonical-format doc §"Forward compatibility").
     const MEDIA_TYPE: &'static str;
 
-    /// Pinned canonical `apiVersion` (e.g. `azureclaw.dev/v1alpha1`).
+    /// Pinned canonical `apiVersion` (e.g. `kars.dev/v1alpha1`).
     #[allow(dead_code)] // used by per-kind tests + future sub-slices
     const API_VERSION: &'static str;
 

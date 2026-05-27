@@ -7,23 +7,23 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 // Redirect homedir() to a per-test tmp dir so context.json writes are
-// isolated from the user's real ~/.azureclaw.
-let tmpHome: string = mkdtempSync(join(tmpdir(), "azureclaw-resume-test-"));
+// isolated from the user's real ~/.kars.
+let tmpHome: string = mkdtempSync(join(tmpdir(), "kars-resume-test-"));
 vi.mock("os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("os")>();
   return { ...actual, homedir: () => tmpHome };
 });
 
 beforeEach(() => {
-  tmpHome = mkdtempSync(join(tmpdir(), "azureclaw-resume-test-"));
-  mkdirSync(join(tmpHome, ".azureclaw"), { recursive: true });
+  tmpHome = mkdtempSync(join(tmpdir(), "kars-resume-test-"));
+  mkdirSync(join(tmpHome, ".kars"), { recursive: true });
 });
 
 afterEach(() => {
   rmSync(tmpHome, { recursive: true, force: true });
 });
 
-const CONTEXT_PATH = () => join(tmpHome, ".azureclaw", "context.json");
+const CONTEXT_PATH = () => join(tmpHome, ".kars", "context.json");
 
 function writeContext(ctx: Record<string, unknown>): void {
   writeFileSync(CONTEXT_PATH(), JSON.stringify(ctx, null, 2), "utf-8");
@@ -78,15 +78,15 @@ describe("up/resume", () => {
     writeContext({
       phase: "network",
       region: "eastus2",
-      resourceGroup: "azureclaw-eastus2",
-      aksCluster: "azureclaw-aks",
+      resourceGroup: "kars-eastus2",
+      aksCluster: "kars-aks",
       sandboxName: "my-assistant",
       savedAt: new Date().toISOString(),
     });
     const { loadResumeState } = await loadModules();
     const state = loadResumeState(
       {},
-      { region: "eastus2", resourceGroup: "azureclaw-eastus2", aksCluster: "azureclaw-aks", sandboxName: "my-assistant" },
+      { region: "eastus2", resourceGroup: "kars-eastus2", aksCluster: "kars-aks", sandboxName: "my-assistant" },
     );
     expect(state).not.toBeNull();
     expect(state?.resumeFromPhase).toBe("network");

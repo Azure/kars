@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 /**
  * Tests for the `add` command's sandbox manifest generation logic.
  *
- * The action handler in add.ts builds a ClawSandbox object inline, so we
+ * The action handler in add.ts builds a KarsSandbox object inline, so we
  * extract and test the manifest-building logic by replicating the pure
  * data-transformation portion (no kubectl/execa calls).
  */
@@ -52,12 +52,12 @@ function defaultOptions(overrides: Partial<AddOptions> = {}): AddOptions {
   };
 }
 
-/** Build the ClawSandbox manifest object (mirrors add.ts action logic). */
+/** Build the KarsSandbox manifest object (mirrors add.ts action logic). */
 function buildSandboxManifest(name: string, options: AddOptions) {
   const sandbox: Record<string, unknown> = {
-    apiVersion: "azureclaw.azure.com/v1alpha1",
-    kind: "ClawSandbox",
-    metadata: { name, namespace: "azureclaw-system" },
+    apiVersion: "kars.azure.com/v1alpha1",
+    kind: "KarsSandbox",
+    metadata: { name, namespace: "kars-system" },
     spec: {
       runtime: {
         kind: "OpenClaw",
@@ -69,7 +69,7 @@ function buildSandboxManifest(name: string, options: AddOptions) {
       },
       sandbox: {
         isolation: options.isolation,
-        seccompProfile: options.isolation === "standard" ? "RuntimeDefault" : "azureclaw-strict",
+        seccompProfile: options.isolation === "standard" ? "RuntimeDefault" : "kars-strict",
         readOnlyRootFilesystem: true,
         runAsNonRoot: true,
         allowPrivilegeEscalation: false,
@@ -165,18 +165,18 @@ function buildSecrets(options: AddOptions) {
 
 // --- Tests ---
 
-describe("ClawSandbox manifest generation", () => {
+describe("KarsSandbox manifest generation", () => {
   it("generates correct apiVersion and kind", () => {
     const manifest = buildSandboxManifest("agent1", defaultOptions());
-    expect(manifest.apiVersion).toBe("azureclaw.azure.com/v1alpha1");
-    expect(manifest.kind).toBe("ClawSandbox");
+    expect(manifest.apiVersion).toBe("kars.azure.com/v1alpha1");
+    expect(manifest.kind).toBe("KarsSandbox");
   });
 
   it("sets metadata name and namespace", () => {
     const manifest = buildSandboxManifest("my-agent", defaultOptions());
     expect(manifest.metadata).toEqual({
       name: "my-agent",
-      namespace: "azureclaw-system",
+      namespace: "kars-system",
     });
   });
 
@@ -204,18 +204,18 @@ describe("ClawSandbox manifest generation", () => {
     expect(spec.sandbox.seccompProfile).toBe("RuntimeDefault");
   });
 
-  it("sets enhanced isolation with azureclaw-strict seccomp", () => {
+  it("sets enhanced isolation with kars-strict seccomp", () => {
     const manifest = buildSandboxManifest("a", defaultOptions({ isolation: "enhanced" }));
     const spec = manifest.spec as any;
     expect(spec.sandbox.isolation).toBe("enhanced");
-    expect(spec.sandbox.seccompProfile).toBe("azureclaw-strict");
+    expect(spec.sandbox.seccompProfile).toBe("kars-strict");
   });
 
-  it("sets confidential isolation with azureclaw-strict seccomp", () => {
+  it("sets confidential isolation with kars-strict seccomp", () => {
     const manifest = buildSandboxManifest("a", defaultOptions({ isolation: "confidential" }));
     const spec = manifest.spec as any;
     expect(spec.sandbox.isolation).toBe("confidential");
-    expect(spec.sandbox.seccompProfile).toBe("azureclaw-strict");
+    expect(spec.sandbox.seccompProfile).toBe("kars-strict");
   });
 
   it("references the InferencePolicy CR by name (token budget lives on the policy)", () => {

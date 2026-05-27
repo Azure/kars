@@ -5,7 +5,7 @@
 //!
 //! ## Why jitter?
 //!
-//! All nine `ClawSandbox` / per-CRD reconcilers in this controller use
+//! All nine `KarsSandbox` / per-CRD reconcilers in this controller use
 //! `Action::requeue(Duration::from_secs(N))` to schedule the next
 //! reconcile attempt — for both success requeues (poll Foundry agent
 //! status, refresh policies, etc.) and error requeues (retry after a

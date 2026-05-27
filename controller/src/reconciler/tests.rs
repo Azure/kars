@@ -28,14 +28,14 @@ fn standard_isolation_uses_runtime_default_seccomp() {
 fn enhanced_isolation_uses_localhost_seccomp() {
     let cfg = SandboxConfig {
         isolation: "enhanced".into(),
-        seccomp_profile: "azureclaw-strict".into(),
+        seccomp_profile: "kars-strict".into(),
         ..Default::default()
     };
     let ctx = build_pod_security_context(&cfg);
     assert_eq!(ctx["seccompProfile"]["type"], "Localhost");
     assert_eq!(
         ctx["seccompProfile"]["localhostProfile"],
-        "profiles/azureclaw-strict.json"
+        "profiles/kars-strict.json"
     );
 }
 
@@ -43,7 +43,7 @@ fn enhanced_isolation_uses_localhost_seccomp() {
 fn confidential_isolation_uses_runtime_default_seccomp() {
     let cfg = SandboxConfig {
         isolation: "confidential".into(),
-        seccomp_profile: "azureclaw-strict".into(),
+        seccomp_profile: "kars-strict".into(),
         ..Default::default()
     };
     let ctx = build_pod_security_context(&cfg);
@@ -103,7 +103,7 @@ fn crd_defaults_are_secure() {
     assert!(cfg.read_only_root_filesystem);
     assert!(cfg.run_as_non_root);
     assert!(!cfg.allow_privilege_escalation);
-    assert_eq!(cfg.seccomp_profile, "azureclaw-strict");
+    assert_eq!(cfg.seccomp_profile, "kars-strict");
     assert!(cfg.selinux_context.is_empty());
 }
 
@@ -111,18 +111,18 @@ fn crd_defaults_are_secure() {
 
 /// Build namespace JSON the same way reconcile() does (line 224-239).
 fn build_namespace_json(sandbox_name: &str) -> serde_json::Value {
-    let sandbox_ns = format!("azureclaw-{sandbox_name}");
+    let sandbox_ns = format!("kars-{sandbox_name}");
     json!({
         "apiVersion": "v1",
         "kind": "Namespace",
         "metadata": {
             "name": sandbox_ns,
             "labels": {
-                "app.kubernetes.io/name": "azureclaw",
+                "app.kubernetes.io/name": "kars",
                 "app.kubernetes.io/component": "sandbox",
-                "azureclaw.azure.com/sandbox": sandbox_name,
-                "azureclaw.azure.com/role": "sandbox",
-                "azureclaw.azure.com/isolated": "strict",
+                "kars.azure.com/sandbox": sandbox_name,
+                "kars.azure.com/role": "sandbox",
+                "kars.azure.com/isolated": "strict",
                 "pod-security.kubernetes.io/enforce": "privileged",
                 "pod-security.kubernetes.io/audit": "baseline",
                 "pod-security.kubernetes.io/warn": "baseline"
@@ -133,7 +133,7 @@ fn build_namespace_json(sandbox_name: &str) -> serde_json::Value {
 
 /// Build ServiceAccount JSON the same way reconcile() does (line 250-263).
 fn build_sa_json(sandbox_name: &str, wi_client_id: &str) -> serde_json::Value {
-    let sandbox_ns = format!("azureclaw-{sandbox_name}");
+    let sandbox_ns = format!("kars-{sandbox_name}");
     json!({
         "apiVersion": "v1",
         "kind": "ServiceAccount",
@@ -141,7 +141,7 @@ fn build_sa_json(sandbox_name: &str, wi_client_id: &str) -> serde_json::Value {
             "name": "sandbox",
             "namespace": sandbox_ns,
             "labels": {
-                "azureclaw.azure.com/sandbox": sandbox_name
+                "kars.azure.com/sandbox": sandbox_name
             },
             "annotations": {
                 "azure.workload.identity/client-id": wi_client_id
@@ -152,22 +152,22 @@ fn build_sa_json(sandbox_name: &str, wi_client_id: &str) -> serde_json::Value {
 
 /// Build ClusterRoleBinding JSON the same way reconcile() does (line 289-309).
 fn build_crb_json(sandbox_name: &str) -> serde_json::Value {
-    let sandbox_ns = format!("azureclaw-{sandbox_name}");
-    let crb_name = format!("azureclaw-spawner-{sandbox_name}");
+    let sandbox_ns = format!("kars-{sandbox_name}");
+    let crb_name = format!("kars-spawner-{sandbox_name}");
     json!({
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "ClusterRoleBinding",
         "metadata": {
             "name": crb_name,
             "labels": {
-                "azureclaw.azure.com/sandbox": sandbox_name,
-                "app.kubernetes.io/managed-by": "azureclaw-controller"
+                "kars.azure.com/sandbox": sandbox_name,
+                "app.kubernetes.io/managed-by": "kars-controller"
             }
         },
         "roleRef": {
             "apiGroup": "rbac.authorization.k8s.io",
             "kind": "ClusterRole",
-            "name": "azureclaw-sandbox-spawner"
+            "name": "kars-sandbox-spawner"
         },
         "subjects": [{
             "kind": "ServiceAccount",
@@ -196,11 +196,11 @@ fn build_default_egress_rules() -> Vec<serde_json::Value> {
             "ports": [{"protocol": "TCP", "port": 443}]
         }),
         json!({
-            "to": [{"namespaceSelector": {"matchLabels": {"azureclaw.azure.com/role": "sandbox"}}}],
+            "to": [{"namespaceSelector": {"matchLabels": {"kars.azure.com/role": "sandbox"}}}],
             "ports": [{"protocol": "TCP", "port": 8443}]
         }),
         json!({
-            "to": [{"namespaceSelector": {"matchLabels": {"app.kubernetes.io/managed-by": "azureclaw"}}}],
+            "to": [{"namespaceSelector": {"matchLabels": {"app.kubernetes.io/managed-by": "kars"}}}],
             "ports": [{"protocol": "TCP", "port": 8765}, {"protocol": "TCP", "port": 8080}]
         }),
     ]
@@ -221,7 +221,7 @@ fn build_openclaw_container(image: &str, cfg: &SandboxConfig, model: &str) -> se
         "env": [
             {"name": "OPENCLAW_MODEL", "value": model},
             {"name": "AZURE_OPENAI_ENDPOINT", "value": "https://test.openai.azure.com"},
-            {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"},
+            {"name": "KARS_AUTH_MODE", "value": "workload-identity"},
             {"name": "OPENCLAW_GATEWAY_TOKEN", "valueFrom": {"secretKeyRef": {"name": "gateway-token", "key": "token"}}},
         ],
         "securityContext": {
@@ -233,7 +233,7 @@ fn build_openclaw_container(image: &str, cfg: &SandboxConfig, model: &str) -> se
         "volumeMounts": [
             {"name": "sandbox-data", "mountPath": "/sandbox"},
             {"name": "tmp", "mountPath": "/tmp"},
-            {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
+            {"name": "admin-token", "mountPath": "/etc/kars/secrets", "readOnly": true}
         ],
         "resources": {
             "requests": {"cpu": "500m", "memory": "1Gi"},
@@ -272,7 +272,7 @@ fn build_router_container(
             {"name": "FOUNDRY_PROJECT_ENDPOINT", "value": "https://test.foundry.azure.com/project"},
             {"name": "IMDS_CLIENT_ID", "value": "test-imds-id"},
             {"name": "AZURE_OPENAI_DEPLOYMENT", "value": model},
-            {"name": "AZURECLAW_AUTH_MODE", "value": "workload-identity"},
+            {"name": "KARS_AUTH_MODE", "value": "workload-identity"},
             {"name": "CONTENT_SAFETY_ENABLED", "value": "true"},
             {"name": "PROMPT_SHIELDS_ENABLED", "value": "true"},
             {"name": "CONTENT_SAFETY_ENDPOINT", "value": "https://test.contentsafety.azure.com"},
@@ -303,7 +303,7 @@ fn build_router_container(
             "periodSeconds": 5
         },
         "volumeMounts": [
-            {"name": "admin-token", "mountPath": "/etc/azureclaw/secrets", "readOnly": true}
+            {"name": "admin-token", "mountPath": "/etc/kars/secrets", "readOnly": true}
         ]
     })
 }
@@ -332,22 +332,22 @@ fn build_init_container(image: &str) -> serde_json::Value {
 // ── Namespace creation tests ────────────────────────────────────────
 
 #[test]
-fn namespace_name_follows_azureclaw_prefix() {
+fn namespace_name_follows_kars_prefix() {
     let name = "my-agent";
-    let sandbox_ns = format!("azureclaw-{name}");
-    assert_eq!(sandbox_ns, "azureclaw-my-agent");
-    assert!(sandbox_ns.starts_with("azureclaw-"));
+    let sandbox_ns = format!("kars-{name}");
+    assert_eq!(sandbox_ns, "kars-my-agent");
+    assert!(sandbox_ns.starts_with("kars-"));
 }
 
 #[test]
 fn namespace_labels_include_app_and_role() {
     let ns = build_namespace_json("test-agent");
     let labels = &ns["metadata"]["labels"];
-    assert_eq!(labels["app.kubernetes.io/name"], "azureclaw");
+    assert_eq!(labels["app.kubernetes.io/name"], "kars");
     assert_eq!(labels["app.kubernetes.io/component"], "sandbox");
-    assert_eq!(labels["azureclaw.azure.com/sandbox"], "test-agent");
-    assert_eq!(labels["azureclaw.azure.com/role"], "sandbox");
-    assert_eq!(labels["azureclaw.azure.com/isolated"], "strict");
+    assert_eq!(labels["kars.azure.com/sandbox"], "test-agent");
+    assert_eq!(labels["kars.azure.com/role"], "sandbox");
+    assert_eq!(labels["kars.azure.com/isolated"], "strict");
 }
 
 #[test]
@@ -398,7 +398,7 @@ fn mesh_egress_targets_sandbox_namespaces() {
     let rules = build_default_egress_rules();
     let mesh_rule = &rules[3];
     assert_eq!(
-        mesh_rule["to"][0]["namespaceSelector"]["matchLabels"]["azureclaw.azure.com/role"],
+        mesh_rule["to"][0]["namespaceSelector"]["matchLabels"]["kars.azure.com/role"],
         "sandbox"
     );
     assert_eq!(mesh_rule["ports"][0]["port"], 8443);
@@ -410,7 +410,7 @@ fn relay_egress_targets_agentmesh_namespace() {
     let relay_rule = &rules[4];
     assert_eq!(
         relay_rule["to"][0]["namespaceSelector"]["matchLabels"]["app.kubernetes.io/managed-by"],
-        "azureclaw"
+        "kars"
     );
     let ports = relay_rule["ports"].as_array().unwrap();
     assert_eq!(ports[0]["port"], 8765); // relay WebSocket
@@ -443,21 +443,21 @@ fn service_account_has_workload_identity_annotation() {
 #[test]
 fn service_account_namespace_matches_sandbox() {
     let sa = build_sa_json("my-agent", "cid");
-    assert_eq!(sa["metadata"]["namespace"], "azureclaw-my-agent");
+    assert_eq!(sa["metadata"]["namespace"], "kars-my-agent");
 }
 
 #[test]
 fn cluster_role_binding_references_spawner_role() {
     let crb = build_crb_json("my-agent");
     assert_eq!(crb["roleRef"]["kind"], "ClusterRole");
-    assert_eq!(crb["roleRef"]["name"], "azureclaw-sandbox-spawner");
+    assert_eq!(crb["roleRef"]["name"], "kars-sandbox-spawner");
     assert_eq!(crb["roleRef"]["apiGroup"], "rbac.authorization.k8s.io");
 }
 
 #[test]
 fn cluster_role_binding_name_includes_sandbox_name() {
     let crb = build_crb_json("my-agent");
-    assert_eq!(crb["metadata"]["name"], "azureclaw-spawner-my-agent");
+    assert_eq!(crb["metadata"]["name"], "kars-spawner-my-agent");
 }
 
 #[test]
@@ -466,7 +466,7 @@ fn cluster_role_binding_subject_is_sandbox_sa() {
     let subject = &crb["subjects"][0];
     assert_eq!(subject["kind"], "ServiceAccount");
     assert_eq!(subject["name"], "sandbox");
-    assert_eq!(subject["namespace"], "azureclaw-my-agent");
+    assert_eq!(subject["namespace"], "kars-my-agent");
 }
 
 #[test]
@@ -474,7 +474,7 @@ fn cluster_role_binding_has_managed_by_label() {
     let crb = build_crb_json("test");
     assert_eq!(
         crb["metadata"]["labels"]["app.kubernetes.io/managed-by"],
-        "azureclaw-controller"
+        "kars-controller"
     );
 }
 
@@ -759,9 +759,9 @@ fn router_default_resource_limits() {
 #[test]
 fn finalizer_name_is_namespace_cleanup() {
     // The reconcile function uses this exact finalizer name (line 127)
-    let expected = "azureclaw.azure.com/namespace-cleanup";
+    let expected = "kars.azure.com/namespace-cleanup";
     // Verify the format matches the domain/purpose convention
-    assert!(expected.starts_with("azureclaw.azure.com/"));
+    assert!(expected.starts_with("kars.azure.com/"));
     assert!(expected.contains("namespace-cleanup"));
 }
 

@@ -7,7 +7,7 @@
 //! the JSON bytes that the future GET `/.well-known/agent.json` route
 //! will serve. Pure synchronous function. The route handler is a thin
 //! wrapper around [`build_signed_card`]: invoke at sandbox startup,
-//! cache the bytes, serve forever (or until `azureclaw push` rotates
+//! cache the bytes, serve forever (or until `kars push` rotates
 //! the key).
 //!
 //! This mirrors the symmetry already established by [`crate::mcp::pipeline`]:
@@ -68,7 +68,7 @@ pub enum CardServerError {
 /// Declarative inputs for the AgentCard a sandbox should publish.
 ///
 /// All fields are owned strings/values so the config can come from a
-/// `ClawSandbox.spec.a2a.*` projection, an env var, a file, or any
+/// `KarsSandbox.spec.a2a.*` projection, an env var, a file, or any
 /// other source without lifetime gymnastics.
 #[derive(Debug, Clone)]
 pub struct AgentCardConfig {

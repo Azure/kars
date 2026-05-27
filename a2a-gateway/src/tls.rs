@@ -4,7 +4,7 @@
 //! Server TLS for the public listener.
 //!
 //! Loads cert + key from PEM files (typically projected from a K8s
-//! `Secret` mounted at `/etc/azureclaw/a2a-gateway-tls/`). Watches
+//! `Secret` mounted at `/etc/kars/a2a-gateway-tls/`). Watches
 //! the directory for changes via `notify` and rebuilds the
 //! `rustls::ServerConfig` atomically on rotation.
 //!

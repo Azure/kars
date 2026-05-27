@@ -66,12 +66,12 @@
 
 #![forbid(unsafe_code)]
 
-// Lifted to the shared `azureclaw-a2a-core` crate in Phase 2 S3.5
+// Lifted to the shared `kars-a2a-core` crate in Phase 2 S3.5
 // (ADR-0001 #4). Re-exported here under the original module paths so
 // every existing `crate::a2a::signature::*` / `crate::a2a::card_signing::*`
 // call site keeps compiling unchanged. The router and the new
 // public-edge `a2a-gateway` now share a single verifier implementation.
-pub use azureclaw_a2a_core::{agent_card, card_signing, card_verifier, error, signature};
+pub use kars_a2a_core::{agent_card, card_signing, card_verifier, error, signature};
 
 pub mod agent_projection;
 pub mod ap2;

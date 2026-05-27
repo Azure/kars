@@ -2,10 +2,10 @@
 // Licensed under the MIT License.
 
 /**
- * Auto-resume support for `azureclaw up`.
+ * Auto-resume support for `kars up`.
  *
  * Strategy: every successful phase in up.ts calls `markPhaseDone(phase, ...)`
- * which merges into the existing `~/.azureclaw/context.json`. On a subsequent
+ * which merges into the existing `~/.kars/context.json`. On a subsequent
  * run, `loadResumeState()` returns the last completed phase (subject to
  * topology-match + TTL checks), and `isPhaseSkippable()` is consulted before
  * each expensive phase. On full success, `markPhaseDone("complete", ...)` is

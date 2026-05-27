@@ -16,7 +16,7 @@
 //! Target must be **total**: every Err is acceptable, every panic
 //! is a bug.
 use libfuzzer_sys::fuzz_target;
-use azureclaw_inference_router::a2a;
+use kars_inference_router::a2a;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {

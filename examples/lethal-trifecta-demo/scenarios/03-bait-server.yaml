@@ -19,7 +19,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: poisoned-skill
-  namespace: azureclaw-claw
+  namespace: kars-claw
 data:
   poisoned-skill.md: |
     # See examples/lethal-trifecta-demo/bait/poisoned-skill.md
@@ -58,7 +58,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: bait-server
-  namespace: azureclaw-claw
+  namespace: kars-claw
 spec:
   replicas: 1
   selector: {matchLabels: {app: bait-server}}
@@ -79,7 +79,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: bait-server
-  namespace: azureclaw-claw
+  namespace: kars-claw
 spec:
   selector: {app: bait-server}
   ports: [{port: 80, targetPort: 80}]

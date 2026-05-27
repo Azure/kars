@@ -19,8 +19,8 @@ export const DEFAULT_RELAY_URL = 'http://127.0.0.1:8443/agt/relay/';
 export const DEFAULT_REGISTRY_URL = 'http://127.0.0.1:8443/agt/registry/';
 export const DEFAULT_TIMEOUT_MS = 10_000;
 
-export const ENV_AGENT_DID = 'AZURECLAW_AGENT_DID';
-export const ENV_AGENT_NAME = 'AZURECLAW_AGENT_NAME';
+export const ENV_AGENT_DID = 'KARS_AGENT_DID';
+export const ENV_AGENT_NAME = 'KARS_AGENT_NAME';
 
 function envDid(): string {
   return process.env[ENV_AGENT_DID] ?? 'did:mesh:unknown';
@@ -79,10 +79,10 @@ export class MeshClient {
 
   constructor(opts: MeshClientOptions = {}) {
     const relay =
-      opts.relayUrl ?? process.env.AZURECLAW_AGT_RELAY_URL ?? DEFAULT_RELAY_URL;
+      opts.relayUrl ?? process.env.KARS_AGT_RELAY_URL ?? DEFAULT_RELAY_URL;
     const registry =
       opts.registryUrl ??
-      process.env.AZURECLAW_AGT_REGISTRY_URL ??
+      process.env.KARS_AGT_REGISTRY_URL ??
       DEFAULT_REGISTRY_URL;
     this.relayUrl = relay.endsWith('/') ? relay : `${relay}/`;
     this.registryUrl = registry.endsWith('/') ? registry : `${registry}/`;

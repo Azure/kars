@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  REGISTRY: azureclawacr.azurecr.io
+  REGISTRY: karsacr.azurecr.io
   VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
 jobs:
@@ -30,10 +30,10 @@ jobs:
         component:
           - name: controller
             dockerfile: controller/Dockerfile
-            image: azureclaw-controller
+            image: kars-controller
           - name: inference-router
             dockerfile: inference-router/Dockerfile
-            image: azureclaw-inference-router
+            image: kars-inference-router
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 

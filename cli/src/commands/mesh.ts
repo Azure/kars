@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// AzureClaw mesh CLI: identity/auth and registry management.
+// Kars mesh CLI: identity/auth and registry management.
 //
 // S15.b decomposition: identity/crypto + OAuth callback + port-health
 // helpers + the `mesh promote` subcommand body now live in ./mesh/*
@@ -59,14 +59,14 @@ export function meshCommand(): Command {
     .command("status")
     .description("Show current mesh identity")
     .action(async () => {
-      banner("AzureClaw · Mesh Identity", "AgentMesh Identity Status");
+      banner("Kars · Mesh Identity", "AgentMesh Identity Status");
 
       const identity = loadIdentity();
       if (!identity) {
         console.log(chalk.dim("  No mesh identity found."));
         console.log(
           chalk.dim(
-            `  Run ${chalk.cyan("azureclaw mesh auth --registry <url>")} to create one.`
+            `  Run ${chalk.cyan("kars mesh auth --registry <url>")} to create one.`
           )
         );
         return;
@@ -101,14 +101,14 @@ export function meshCommand(): Command {
     .command("list")
     .description("List mesh pairings and offload sandboxes on the cluster")
     .action(async () => {
-      banner("AzureClaw · Mesh List", "Pairings & Offload Sandboxes");
+      banner("Kars · Mesh List", "Pairings & Offload Sandboxes");
 
-      const ns = "azureclaw-system";
+      const ns = "kars-system";
 
       // Pairings
       try {
         const { stdout } = await execa("kubectl", [
-          "get", "clawpairings", "-n", ns, "-o", "json",
+          "get", "karspairings", "-n", ns, "-o", "json",
         ], { stdio: "pipe" });
         const list = JSON.parse(stdout);
         const items = list.items as Array<{
@@ -144,14 +144,14 @@ export function meshCommand(): Command {
       // Offload sandboxes
       try {
         const { stdout } = await execa("kubectl", [
-          "get", "clawsandboxes", "-n", ns, "-o", "json",
+          "get", "karssandboxes", "-n", ns, "-o", "json",
         ], { stdio: "pipe" });
         const list = JSON.parse(stdout);
         const items = list.items as Array<{
           metadata: { name: string; creationTimestamp: string; labels?: Record<string, string>; annotations?: Record<string, string> };
           status?: { phase?: string };
         }>;
-        const offloads = items.filter((s) => s.metadata.labels?.["azureclaw.azure.com/spawned-by"] === "offload");
+        const offloads = items.filter((s) => s.metadata.labels?.["kars.azure.com/spawned-by"] === "offload");
 
         section("Offload Sandboxes");
         if (offloads.length === 0) {
@@ -159,8 +159,8 @@ export function meshCommand(): Command {
         } else {
           for (const s of offloads) {
             const phase = s.status?.phase || "Unknown";
-            const requester = s.metadata.labels?.["azureclaw.azure.com/offload-requester"] || "-";
-            const task = s.metadata.annotations?.["azureclaw.azure.com/offload-task"] || "-";
+            const requester = s.metadata.labels?.["kars.azure.com/offload-requester"] || "-";
+            const task = s.metadata.annotations?.["kars.azure.com/offload-task"] || "-";
             const icon = phase === "Running" ? "🟢" : phase === "Pending" ? "🟡" : "🔴";
             console.log(`  ${icon} ${chalk.bold(s.metadata.name)}`);
             kvLine("  Phase", phase);
@@ -177,7 +177,7 @@ export function meshCommand(): Command {
       // Leader info
       try {
         const { stdout } = await execa("kubectl", [
-          "get", "lease", "azureclaw-mesh-peer-leader", "-n", ns,
+          "get", "lease", "kars-mesh-peer-leader", "-n", ns,
           "-o", "jsonpath={.spec.holderIdentity}",
         ], { stdio: "pipe" });
         if (stdout) {
@@ -235,7 +235,7 @@ export function meshCommand(): Command {
     .option("-n, --namespace <ns>", "AgentMesh namespace", "agentmesh")
     .option("--deployment <name>", "Relay deployment name", "relay")
     .action(async (mode: string, opts: { namespace: string; deployment: string }) => {
-      banner("AzureClaw · Mesh Security", "Relay registration enforcement");
+      banner("Kars · Mesh Security", "Relay registration enforcement");
 
       const normalized = mode.toLowerCase();
       if (!["open", "strict", "status"].includes(normalized)) {
@@ -343,7 +343,7 @@ export function meshCommand(): Command {
         console.log(
           normalized === "open"
             ? chalk.yellow(
-                "  ⚠️  Mode: OPEN — revert with `azureclaw mesh security strict` once bootstrap is complete."
+                "  ⚠️  Mode: OPEN — revert with `kars mesh security strict` once bootstrap is complete."
               )
             : chalk.green(
                 "  🔒 Mode: STRICT — only registered agents may connect."
@@ -351,7 +351,7 @@ export function meshCommand(): Command {
         );
         console.log(
           chalk.dim(
-            "  Note: `azureclaw up` re-applies deploy/agentmesh.yaml which resets this to the manifest default."
+            "  Note: `kars up` re-applies deploy/agentmesh.yaml which resets this to the manifest default."
           )
         );
       } catch (e: unknown) {
@@ -372,10 +372,10 @@ export function meshCommand(): Command {
     .description(
       "Toggle controller mesh federation (mode: enable | disable | status). When disabled, external agents cannot pair."
     )
-    .option("-n, --namespace <ns>", "Controller namespace", "azureclaw-system")
-    .option("--deployment <name>", "Controller deployment name", "azureclaw-controller")
+    .option("-n, --namespace <ns>", "Controller namespace", "kars-system")
+    .option("--deployment <name>", "Controller deployment name", "kars-controller")
     .action(async (mode: string, opts: { namespace: string; deployment: string }) => {
-      banner("AzureClaw · Mesh Peer", "Controller federation (pair_request handler)");
+      banner("Kars · Mesh Peer", "Controller federation (pair_request handler)");
 
       const normalized = mode.toLowerCase();
       if (!["enable", "disable", "status", "on", "off"].includes(normalized)) {
@@ -472,12 +472,12 @@ export function meshCommand(): Command {
                 "  🔗 Mesh peer ENABLED — controller will join the relay shortly and pair_request messages will be answered."
               )
             : chalk.yellow(
-                "  🚫 Mesh peer DISABLED — external agent pairing will not work. Re-enable with `azureclaw mesh peer enable`."
+                "  🚫 Mesh peer DISABLED — external agent pairing will not work. Re-enable with `kars mesh peer enable`."
               )
         );
         console.log(
           chalk.dim(
-            "  Note: `azureclaw up` re-applies Helm values (default: enabled). Pass --no-mesh-peer to keep it disabled."
+            "  Note: `kars up` re-applies Helm values (default: enabled). Pass --no-mesh-peer to keep it disabled."
           )
         );
       } catch (e: unknown) {
@@ -499,12 +499,12 @@ export function meshCommand(): Command {
     .option("--all", "Delete all pairings without prompting")
     .option("--name <name>", "Delete a specific pairing by name")
     .action(async (opts: { all?: boolean; name?: string }) => {
-      banner("AzureClaw · Mesh Unpair", "Remove Pairings");
+      banner("Kars · Mesh Unpair", "Remove Pairings");
 
-      const ns = "azureclaw-system";
+      const ns = "kars-system";
       try {
         const { stdout } = await execa("kubectl", [
-          "get", "clawpairings", "-n", ns,
+          "get", "karspairings", "-n", ns,
           "-o", "json",
         ], { stdio: "pipe" });
         const list = JSON.parse(stdout);
@@ -522,7 +522,7 @@ export function meshCommand(): Command {
             console.log(chalk.dim(`  Available: ${items.map((p) => p.metadata.name).join(", ")}`));
             return;
           }
-          await execa("kubectl", ["delete", "clawpairing", opts.name, "-n", ns], { stdio: "pipe" });
+          await execa("kubectl", ["delete", "karspairing", opts.name, "-n", ns], { stdio: "pipe" });
           checkLine(true, `Deleted pairing: ${opts.name}`);
           return;
         }
@@ -538,7 +538,7 @@ export function meshCommand(): Command {
         console.log();
 
         if (opts.all) {
-          await execa("kubectl", ["delete", "clawpairings", "--all", "-n", ns], { stdio: "pipe" });
+          await execa("kubectl", ["delete", "karspairings", "--all", "-n", ns], { stdio: "pipe" });
           checkLine(true, `Deleted all ${items.length} pairing(s)`);
           return;
         }
@@ -562,7 +562,7 @@ export function meshCommand(): Command {
         }
 
         for (const name of targets) {
-          await execa("kubectl", ["delete", "clawpairing", name, "-n", ns], { stdio: "pipe" });
+          await execa("kubectl", ["delete", "karspairing", name, "-n", ns], { stdio: "pipe" });
           checkLine(true, `Deleted: ${name}`);
         }
       } catch (e: unknown) {
@@ -583,7 +583,7 @@ export function meshCommand(): Command {
     .command("demote")
     .description("Demote the registry back to cluster-local (remove public endpoints)")
     .action(async () => {
-      banner("AzureClaw · Mesh Demote", "Demote Registry to Local");
+      banner("Kars · Mesh Demote", "Demote Registry to Local");
 
       const ctx = loadContext();
       if (!ctx?.aksCluster || !ctx?.resourceGroup) {
@@ -599,7 +599,7 @@ export function meshCommand(): Command {
       if (ctx.promoteMode === "port-forward") {
         // Kill port-forward processes
         section("Stopping Port-Forward Tunnels");
-        const pidFile = path.join(os.homedir(), ".azureclaw", "port-forward-pids.json");
+        const pidFile = path.join(os.homedir(), ".kars", "port-forward-pids.json");
         if (fs.existsSync(pidFile)) {
           try {
             const pids = JSON.parse(fs.readFileSync(pidFile, "utf-8")) as Record<string, number>;

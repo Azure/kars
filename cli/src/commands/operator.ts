@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * AzureClaw Operator TUI — live terminal dashboard for managing sandboxes.
+ * Kars Operator TUI — live terminal dashboard for managing sandboxes.
  *
  * The rendered layout, key bindings, and status-bar copy are documented
  * alongside their extracted data in `./operator/keymap.ts` (per plan
@@ -112,7 +112,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   const screen = blessed.screen({
     smartCSR: true,
-    title: "AzureClaw Operator",
+    title: "Kars Operator",
     fullUnicode: true,
   });
 
@@ -778,7 +778,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       activityLog.log(`{cyan-fg}⏳ ${sb.name} → ${model}...{/}`);
       screen.render();
       try {
-        await execa("azureclaw", ["model", "set", sb.name, model], { stdio: "pipe" });
+        await execa("kars", ["model", "set", sb.name, model], { stdio: "pipe" });
         activityLog.log(`{green-fg}✓ Model{/} ${sb.name} → ${model}`);
       } catch (e: any) {
         activityLog.log(`{red-fg}✗ Model fail:{/} ${(e.stderr || e.message)?.substring(0, 50)}`);
@@ -887,7 +887,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   // ── Boot ──────────────────────────────────────────────────────────
 
-  activityLog.log("{green-fg}🔱 AzureClaw Operator{/}");
+  activityLog.log("{green-fg}🔱 Kars Operator{/}");
   activityLog.log(`{gray-fg}ctx: ${clusterName}{/}`);
   activityLog.log(`{gray-fg}refresh: ${refreshInterval / 1000}s{/}`);
   render();

@@ -72,7 +72,7 @@ export function selectionHasNull(sel: ProviderSelection): boolean {
  * Label used by the admission policy (VAP) to permit `null` providers.
  * `ci/no-null-provider-prod.sh` is the static mirror.
  */
-export const DEV_ONLY_LABEL_KEY = "azureclaw.azure.com/dev-only";
+export const DEV_ONLY_LABEL_KEY = "kars.azure.com/dev-only";
 export const DEV_ONLY_LABEL_VALUE = "true";
 
 /**
@@ -81,15 +81,15 @@ export const DEV_ONLY_LABEL_VALUE = "true";
  */
 export function selectionToEnv(sel: ProviderSelection): Record<string, string> {
   return {
-    AZURECLAW_PROVIDER_MESH: sel.mesh,
-    AZURECLAW_PROVIDER_POLICY: sel.policy,
-    AZURECLAW_PROVIDER_AUDIT: sel.audit,
-    AZURECLAW_PROVIDER_SIGNING: sel.signing,
+    KARS_PROVIDER_MESH: sel.mesh,
+    KARS_PROVIDER_POLICY: sel.policy,
+    KARS_PROVIDER_AUDIT: sel.audit,
+    KARS_PROVIDER_SIGNING: sel.signing,
   };
 }
 
 /**
- * Outage mode selected per `ClawSandbox.spec.agt.outageMode`.
+ * Outage mode selected per `KarsSandbox.spec.agt.outageMode`.
  * See internal Phase 1 plan §1.3.
  */
 export type OutageMode = "strict" | "cached-read" | "degraded-dev";

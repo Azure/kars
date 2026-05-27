@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to AzureClaw will be documented in this file.
+All notable changes to Kars will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -20,7 +20,7 @@ E2E coverage. No controller, router, CLI, or Headlamp code touched.
   the §3 honest-state triple `(phase, Ready, reason)` ∈
   `{(Pending,False,BlockedOnSandbox), (Pending,False,AwaitingRouterEcho), (Active,True,RouterConfirmed)}`,
   confirms the finalizer is set, and exercises delete-with-finalizer.
-  Pattern mirrors `test_crd_claw_memory` (§3 honest-state acceptance
+  Pattern mirrors `test_crd_kars_memory` (§3 honest-state acceptance
   set) since the sibling sandbox doesn't reliably reach `Ready` in Kind.
 - `test_crd_egress_approval_cel_rejects` confirms the four most
   operator-facing CEL gates reject malformed CRs at the apiserver:
@@ -45,25 +45,25 @@ E2E coverage. No controller, router, CLI, or Headlamp code touched.
 - `shellcheck -S warning tests/e2e/run.sh` clean on new code.
 - No code changes outside docs + e2e harness.
 
-### Slice 5e.3 — `azureclaw egress allow-extra/approvals/revoke` CLI + Headlamp panel
+### Slice 5e.3 — `kars egress allow-extra/approvals/revoke` CLI + Headlamp panel
 
 Operator surface for the producer-consumer loop landed in Slice 5e.2. Three
-new CLI subcommands under `azureclaw egress` and a sandbox-detail card in
+new CLI subcommands under `kars egress` and a sandbox-detail card in
 the Headlamp plugin. No new controller or router code — pure operator UX.
 
 **CLI (`cli/src/commands/egress/approval.ts`, ~430 LOC + 52 vitest cases)**
 
-- `azureclaw egress allow-extra <sandbox> --host h1 [--host h2 ...] --reason "<text>" [--ttl PT4H] [--ticket INC-123] [--name explicit-name] [--dry-run]`
+- `kars egress allow-extra <sandbox> --host h1 [--host h2 ...] --reason "<text>" [--ttl PT4H] [--ticket INC-123] [--name explicit-name] [--dry-run]`
   Builds an `EgressApproval` CR scoped to the named sandbox, applies via
   `kubectl apply -f -` with namespace defaulted from kube-context. Reuses
   `buildCR/stripUndefined` from `crd-helpers.ts` plus parsers mirroring the
   controller-side `parse_iso8601_duration_secs` and `validate_reason`. Host
   syntax: `host[:port]` parsed by `parseHostEndpoint`. `--from-file <path>`
   bypasses flag construction for advanced callers.
-- `azureclaw egress approvals <sandbox> [--namespace ns] [--json]` lists
+- `kars egress approvals <sandbox> [--namespace ns] [--json]` lists
   current `EgressApproval` CRs filtered by `spec.sandbox=<sandbox>`,
   rendered through `formatTable` with columns `NAME PHASE HOSTS TTL EXPIRES REASON`.
-- `azureclaw egress revoke <name> [--namespace ns] [--yes]` deletes a single
+- `kars egress revoke <name> [--namespace ns] [--yes]` deletes a single
   approval with a confirm prompt by default; reconciler will tear down the
   CM key + finalizer.
 - `__test` export surfaces `parseHostEndpoint`, `parseIsoDurationSecs`,
@@ -73,13 +73,13 @@ the Headlamp plugin. No new controller or router code — pure operator UX.
 
 **Headlamp plugin (`tools/headlamp-plugin/src/index.tsx`)**
 
-- `EgressApproval` registered in `AZURECLAW_CRDS` — auto-wires list view,
+- `EgressApproval` registered in `KARS_CRDS` — auto-wires list view,
   sidebar entry, and CR detail page (Spec / Status / Conditions tables).
 - New `SandboxEgressApprovalsCard` rendered inside `SandboxExtras` on every
-  ClawSandbox detail page: lists approvals whose `spec.sandbox` matches the
+  KarsSandbox detail page: lists approvals whose `spec.sandbox` matches the
   current sandbox in the same namespace; columns `NAME PHASE HOSTS TTL EXPIRES REASON MERGED-DIGEST`.
   Cross-resource read pattern mirrors the existing "Related Resources" card
-  for ToolPolicy/InferencePolicy/ClawMemory links.
+  for ToolPolicy/InferencePolicy/KarsMemory links.
 
 **Tests / verify gates**
 
@@ -105,7 +105,7 @@ satisfied.
 **Producer side (controller)**
 
 - `controller/src/egress_approval_compile.rs` (new, ~360 LOC including
-  tests): `approvals_configmap_name(sandbox) → clawsandbox-{sandbox}-egress-approvals`,
+  tests): `approvals_configmap_name(sandbox) → karssandbox-{sandbox}-egress-approvals`,
   `approval_file_key(name) → approval-{name}.json`, `compile_approval_file`
   (canonical JSON: name, sandbox, hosts (sorted, deduped), reason, ticket,
   effectiveAt, expiresAt), and `merged_allowlist_digest` — the
@@ -128,19 +128,19 @@ satisfied.
     JSON-merge `null` defense-in-depth), stamps `phase=Expired`, and
     removes the finalizer.
   - **CM write**: SSA-apply under per-approval field manager
-    `azureclaw-controller/egressapproval/{approval_name}` so siblings on
+    `kars-controller/egressapproval/{approval_name}` so siblings on
     the same ConfigMap don't trample each other.
   - **Router poll**: `poll_referencing_sandboxes` against the merged
     digest under `PolicyKind::EgressApproval`. `Confirmed → Active`;
     `Awaiting → Pending(AwaitingRouterEcho)` + 5s requeue.
-  - **Finalizer**: `azureclaw.azure.com/egress-approval-cleanup`.
+  - **Finalizer**: `kars.azure.com/egress-approval-cleanup`.
   - **Env knob**: `EGRESS_APPROVAL_MAX_TTL_SECONDS` (default 86400 / 1d via
     Helm; capped at one week absolute).
 - `controller/src/main.rs` spawns the reconciler in its own `select!` arm
   next to the existing CRDs.
 - `controller/src/reconciler/mod.rs` injects an optional ConfigMap mount
   for the per-sandbox approvals CM into the `inference-router` container
-  at `/etc/azureclaw/egress-approvals`, with `EGRESS_APPROVAL_DIR` env
+  at `/etc/kars/egress-approvals`, with `EGRESS_APPROVAL_DIR` env
   pushed alongside.
 - `controller/src/reconciler/governance_mounts.rs` adds the
   `EGRESS_APPROVAL_DIR` path constant.
@@ -161,12 +161,12 @@ satisfied.
   `PolicyKind::EgressApproval`, and rebuild the L7 blocklist
   accordingly. The watcher reacts to mtime changes in either directory.
 - `inference-router/src/main.rs` boot now wires the approvals dir via
-  `EGRESS_APPROVAL_DIR` env (default `/etc/azureclaw/egress-approvals`).
+  `EGRESS_APPROVAL_DIR` env (default `/etc/kars/egress-approvals`).
 
 **Helm / RBAC**
 
-- `deploy/helm/azureclaw/values.yaml`: new `egressApproval.maxTtlSeconds: 86400`.
-- `deploy/helm/azureclaw/templates/controller-deployment.yaml`: pushes
+- `deploy/helm/kars/values.yaml`: new `egressApproval.maxTtlSeconds: 86400`.
+- `deploy/helm/kars/templates/controller-deployment.yaml`: pushes
   `EGRESS_APPROVAL_MAX_TTL_SECONDS` env onto the controller pod.
 
 **Test coverage**
@@ -185,7 +185,7 @@ Helm drift: green (egressapproval CRD unchanged from 5e.1).
 Opens the **grant lane** of `principles.md §2.4` /
 `signing-model.md §6`: a namespaced, short-TTL, attributable widening
 of a sandbox's baseline egress allowlist. The CRD shape, admission
-CEL, Helm manifest, and `azureclaw:egress-approver` ClusterRole all
+CEL, Helm manifest, and `kars:egress-approver` ClusterRole all
 land here; the reconciler + router merge + CLI ship in Slices 5e.2 →
 5e.4.
 
@@ -203,7 +203,7 @@ any side effect on running sandboxes.
   a `condition_reasons` module pinning the seven stable reason strings
   (`BlockedOnSandbox`, `RouterConfirmed`, `AwaitingRouterEcho`,
   `TtlExceedsCeiling`, `TtlInvalid`, `ReasonInvalid`, `Expired`).
-  Group `azureclaw.azure.com`, version `v1alpha1`, shortname `eappr`,
+  Group `kars.azure.com`, version `v1alpha1`, shortname `eappr`,
   five printer columns (Sandbox / Phase / Expires / Hosts / Age).
   `hosts` reuses the existing `crd::EndpointConfig` — no parallel
   endpoint type.
@@ -226,17 +226,17 @@ registry is the future verification anchor.
 
 **Helm**
 
-- `deploy/helm/azureclaw/templates/crd-egressapproval.yaml` (new) —
+- `deploy/helm/kars/templates/crd-egressapproval.yaml` (new) —
   the helm-installed CRD manifest. Schema generated via the standard
   `DUMP_EGRESSAPPROVAL_CRD_YAML=1 cargo test` workflow + helm labels
   applied. Helm-drift test passes byte-for-byte.
-- `deploy/helm/azureclaw/templates/rbac.yaml` —
-  - extends the existing `azureclaw-controller` ClusterRole with
+- `deploy/helm/kars/templates/rbac.yaml` —
+  - extends the existing `kars-controller` ClusterRole with
     `egressapprovals` / `egressapprovals/status` /
     `egressapprovals/finalizers` (the reconciler in 5e.2 needs all
     three);
-  - adds a new `azureclaw:egress-approver` ClusterRole carrying
-    `get/list` on `clawsandboxes` (so an approver can verify the
+  - adds a new `kars:egress-approver` ClusterRole carrying
+    `get/list` on `karssandboxes` (so an approver can verify the
     target before granting) and `get/list/watch/create/delete` on
     `egressapprovals` (`update` intentionally excluded — approvals
     are immutable; revocation is `delete`). Aggregation labels
@@ -269,7 +269,7 @@ registry is the future verification anchor.
   beyond CEL) — Slice 5e.2.
 - Router-side merge logic + per-approval usage counter +
   `/internal/policy-status` echo extension — Slice 5e.3.
-- CLI surface (`azureclaw egress approve / revoke / approvals`) —
+- CLI surface (`kars egress approve / revoke / approvals`) —
   Slice 5e.4.
 - Cryptographic attestation (ed25519 signature over canonical
   approval bytes, verified against `SignerPolicy.spec.ed25519Keys[]`)
@@ -277,7 +277,7 @@ registry is the future verification anchor.
 - Headlamp panel — Slice 5e.6 (deferable, mirrors the 1c.6 chip
   deferral pattern).
 
-### Slice 1c.6 — `SignerPolicy.spec.ed25519Keys[]` + unified `azureclaw policy sign --kind X`
+### Slice 1c.6 — `SignerPolicy.spec.ed25519Keys[]` + unified `kars policy sign --kind X`
 
 Wraps the Slice 1c-real signing-generalization arc with two
 forward-compat surfaces: the controller-side registration point for
@@ -309,7 +309,7 @@ single CLI dispatch covering all five signed policy artifact kinds.
 **CLI side**
 
 - New `cli/src/commands/policy/sign.ts` registers
-  `azureclaw policy sign --kind {egress-allowlist | agt-profile |
+  `kars policy sign --kind {egress-allowlist | agt-profile |
    inference-policy | memory-binding | mcp-server-bundle}
    --file <path> --registry <host> --repository <repo>` (plus
   optional `--tag`, `--sign-mode`, `--sign-key`, `--json`,
@@ -321,7 +321,7 @@ single CLI dispatch covering all five signed policy artifact kinds.
   as-is via `oras push` + `cosign sign` — canonical-form validation
   remains the controller's authoritative responsibility, exposed
   via crisp `Degraded / SpecInvalid` conditions on the consuming
-  CRD. `azureclaw egress … --sign` stays unchanged for back-compat
+  CRD. `kars egress … --sign` stays unchanged for back-compat
   (it owns the egress-specific canonical-bytes builder). 13 new
   CLI unit tests cover the per-kind media-type table, unknown-kind
   rejection, the file pre-flight branches (missing / empty /
@@ -361,7 +361,7 @@ event all land here so 5e's PR is pure consumer wiring.
 Fifth and final per-kind step in the Slice 1c-real
 signing-generalization arc. `McpServer` now joins `EgressAllowlist`
 (1c.1), `ToolPolicy` (1c.2), `InferencePolicy` (1c.3), and
-`ClawMemory` (1c.4) on the unified
+`KarsMemory` (1c.4) on the unified
 `policy_fetcher::fetch_and_verify_generic` pipeline.
 
 **Producer side (controller)**
@@ -377,7 +377,7 @@ signing-generalization arc. `McpServer` now joins `EgressAllowlist`
   established in 1c.4). Structural validation: type-checked
   scalars, non-empty string arrays, RFC 7636 PKCE constraint
   surfaced via the canonical-form parser too. Media type
-  `application/vnd.azureclaw.mcp-server-bundle.v1+json`. Per-kind
+  `application/vnd.kars.mcp-server-bundle.v1+json`. Per-kind
   cache slot via `OnceLock<CachedValue::McpServer(...)>` on the
   shared `policy_canonical` cache. 22 unit tests covering every
   rejection path.
@@ -391,7 +391,7 @@ signing-generalization arc. `McpServer` now joins `EgressAllowlist`
 - `mcp_server_reconciler::resolve_mcp_source` — 4-way match
   (no inline / inline only / bundle only / both) mirroring
   `inference_policy_reconciler::resolve_inference_source` and
-  `claw_memory_reconciler::resolve_memory_source`. On the bundle
+  `kars_memory_reconciler::resolve_memory_source`. On the bundle
   path, merges the verified content onto the CR's
   `allowedSandboxes` selector to produce the effective spec
   consumed by the rest of the reconcile loop (JWKS write,
@@ -416,7 +416,7 @@ signing-generalization arc. `McpServer` now joins `EgressAllowlist`
 
 **Schema**
 
-- Regenerated `deploy/helm/azureclaw/templates/crd-mcpserver.yaml`
+- Regenerated `deploy/helm/kars/templates/crd-mcpserver.yaml`
   via `DUMP_MCP_CRD_YAML=1 cargo test …
   helm_drift::tests::dump_mcp_crd_yaml`. Adds the `spec.bundleRef`
   block, makes the content fields optional in the schema, and adds
@@ -425,7 +425,7 @@ signing-generalization arc. `McpServer` now joins `EgressAllowlist`
 
 **Out of scope (deferred)**
 
-- CLI dispatch `azureclaw policy sign --kind mcp-server-bundle`
+- CLI dispatch `kars policy sign --kind mcp-server-bundle`
   — lands with the unified CLI in Slice 1c.6.
 - `SignerPolicy.ed25519Keys[]` forward-compat for the grant lane
   — Slice 1c.6.
@@ -438,10 +438,10 @@ untouched — wire contract unchanged (per-server JWKS bytes are
 identical whether the spec is inline or merged from a verified
 bundle).
 
-### Slice 1c.4 — `ClawMemory.spec.bundleRef` (signed OCI artifact)
+### Slice 1c.4 — `KarsMemory.spec.bundleRef` (signed OCI artifact)
 
 Fourth step in the Slice 1c-real signing-generalization arc.
-`ClawMemory` now joins `EgressAllowlist` (1c.1), `ToolPolicy` (1c.2),
+`KarsMemory` now joins `EgressAllowlist` (1c.1), `ToolPolicy` (1c.2),
 and `InferencePolicy` (1c.3) on the unified
 `policy_fetcher::fetch_and_verify_generic` pipeline.
 
@@ -452,22 +452,22 @@ and `InferencePolicy` (1c.3) on the unified
   `retentionDays`, `deleteOnSandboxDelete`, `displayName`. The
   `sandboxRef` selector stays in the CR — the parser explicitly
   rejects it inside a bundle so one signed artifact can be referenced
-  by multiple `ClawMemory` CRs targeting different sandboxes.
+  by multiple `KarsMemory` CRs targeting different sandboxes.
   Structural validation: DNS-label `storeName` (1-63), non-empty
   `scope`, `retentionDays > 0`, type-checked `deleteOnSandboxDelete`
   / `displayName`. Media type
-  `application/vnd.azureclaw.memory-binding.v1+json`. Per-kind cache
+  `application/vnd.kars.memory-binding.v1+json`. Per-kind cache
   slot via `OnceLock<CachedValue::Memory(...)>` on the shared
   `policy_canonical` cache. 18 unit tests covering every rejection
   path.
-- `ClawMemorySpec.bundleRef: Option<OciArtifactRef>` added; the
+- `KarsMemorySpec.bundleRef: Option<OciArtifactRef>` added; the
   inline content fields (`storeName`, `scope`, `retentionDays`,
   `deleteOnSandboxDelete`, `displayName`) are now `Option`-typed and
   required only on the inline path.
-- `ClawMemoryStatus.bundleRefDigest: Option<String>` surfaces the
+- `KarsMemoryStatus.bundleRefDigest: Option<String>` surfaces the
   verified OCI manifest digest after a successful
   `fetch_and_verify_generic::<MemoryKind>` call.
-- `claw_memory_reconciler::resolve_memory_source` — 4-way match
+- `kars_memory_reconciler::resolve_memory_source` — 4-way match
   (no inline / inline only / bundle only / both) mirroring
   `inference_policy_reconciler::resolve_inference_source`. On the
   bundle path, merges the verified content onto the CR's
@@ -477,14 +477,14 @@ and `InferencePolicy` (1c.3) on the unified
   branch (mutex / fetch / verify) the binding ConfigMap write is
   skipped so the router's last-good binding remains in force until
   the operator fixes the spec.
-- `claw_memory_compile::compile_to_binding` now tolerates the new
+- `kars_memory_compile::compile_to_binding` now tolerates the new
   Optional spec fields, applying the same defaults the inline path
   always implied (`deleteOnSandboxDelete` defaults to `true`, others
   to empty / `None`).
 
 **Admission**
 
-- CEL rule on `ClawMemorySpec`:
+- CEL rule on `KarsMemorySpec`:
   `!has(self.bundleRef) || (!has(self.storeName) && !has(self.scope) && !has(self.retentionDays) && !has(self.deleteOnSandboxDelete) && !has(self.displayName))`
   — rejects mixed shapes at apply-time. The pre-existing `storeName`
   and `scope` rules are wrapped in `has(self.bundleRef) || …` so the
@@ -492,16 +492,16 @@ and `InferencePolicy` (1c.3) on the unified
 
 **Schema**
 
-- Regenerated `deploy/helm/azureclaw/templates/crd-clawmemory.yaml`
+- Regenerated `deploy/helm/kars/templates/crd-karsmemory.yaml`
   via `DUMP_CLAWMEMORY_CRD_YAML=1 cargo test …
-  helm_drift::tests::dump_clawmemory_crd_yaml`. Adds the
+  helm_drift::tests::dump_karsmemory_crd_yaml`. Adds the
   `spec.bundleRef` block, relaxes `required: [storeName, scope]` on
   the spec to `required: [sandboxRef]`, and adds the new CEL mutex
   rule + `status.bundleRefDigest`. CNCF C10 labels preserved.
 
 **Out of scope (deferred)**
 
-- CLI dispatch `azureclaw policy sign --kind memory-binding` — lands
+- CLI dispatch `kars policy sign --kind memory-binding` — lands
   with the unified CLI in Slice 1c.6.
 
 Test deltas: controller 636 → 654 (+18 memory parser tests).
@@ -515,7 +515,7 @@ spec regardless of provenance).
 Third step in the Slice 1c-real signing-generalization arc.
 `InferencePolicy` now joins `EgressAllowlist` (1c.1) and `ToolPolicy`
 (1c.2) on the unified `policy_fetcher::fetch_and_verify_generic`
-pipeline: a single `azureclaw policy sign --kind inference-policy`
+pipeline: a single `kars policy sign --kind inference-policy`
 command (lands in Slice 1c.6) produces a cosign-signed OCI artifact
 that the controller pulls by digest and validates per
 `SignerPolicy`.
@@ -531,7 +531,7 @@ that the controller pulls by digest and validates per
   selectors). Structural validation rejects negative budgets,
   unrecognised severity types, empty `primary.deployment`,
   malformed `fallback[]` entries, and mis-typed `requirePromptShields`.
-  Media type `application/vnd.azureclaw.inference-policy.v1+json`.
+  Media type `application/vnd.kars.inference-policy.v1+json`.
   Per-kind cache slot via `OnceLock<CachedValue::Inference(...)>` on
   the shared `policy_canonical` cache, gated by `policy_fetcher::CACHE_TTL`.
   17 unit tests covering every rejection path.
@@ -562,7 +562,7 @@ that the controller pulls by digest and validates per
 
 **Schema**
 
-- Regenerated `deploy/helm/azureclaw/templates/crd-inferencepolicy.yaml`
+- Regenerated `deploy/helm/kars/templates/crd-inferencepolicy.yaml`
   via `DUMP_INFERENCEPOLICY_CRD_YAML=1 cargo test …
   helm_drift::tests::dump_inferencepolicy_crd_yaml`. Adds the new
   `spec.bundleRef` block + the new CEL rule + the new
@@ -570,7 +570,7 @@ that the controller pulls by digest and validates per
 
 **Out of scope (deferred)**
 
-- CLI dispatch `azureclaw policy sign --kind inference-policy`
+- CLI dispatch `kars policy sign --kind inference-policy`
   — lands with the unified CLI in Slice 1c.6.
 
 Test deltas: controller 619 → 636 (+17 inference parser tests).
@@ -596,7 +596,7 @@ accepts a signed OCI artifact as an alternative to inline YAML.
   the bytes; the length-prefixed content digest (Slice 1b) closes the
   echo loop the same way either way.
 - **OCI artifact media type:**
-  `application/vnd.azureclaw.agt-profile.v1+yaml`. Mismatches surface
+  `application/vnd.kars.agt-profile.v1+yaml`. Mismatches surface
   as `Ready=False / reason=InvalidRef`.
 - **`ToolPolicyStatus.agtProfileBundleDigest`** — new status field
   carrying the verified OCI manifest digest (distinct from
@@ -645,7 +645,7 @@ tests (was 597 at 1c.1), clippy `-D warnings` clean, fmt clean.
 ### Slice 5d — `AllowlistDrift` structured diff + Headlamp banner
 
 Closes Slice 5 DoD #5. The `AllowlistDrift=True` condition already
-fires when a `ClawSandbox` carries both `allowedEndpoints` (inline)
+fires when a `KarsSandbox` carries both `allowedEndpoints` (inline)
 and `allowlistRef` (signed artifact) and they diverge — but until
 now the message was a single human sentence with no machine-readable
 diff. Operators had to manually compare two host lists to see what
@@ -661,7 +661,7 @@ the bundle was missing.
   payload at all (legacy message preserved). Pinned in
   `controller/src/policy_fetcher.rs::DriftSummary` and
   serde-roundtrip-tested.
-- **Headlamp plugin banner.** Every `ClawSandbox` detail view now
+- **Headlamp plugin banner.** Every `KarsSandbox` detail view now
   shows a yellow "Allowlist drift detected" section when the
   `AllowlistDrift` condition is `True`. The banner parses the
   trailing JSON and renders a two-row table (only-in-inline /
@@ -675,7 +675,7 @@ the bundle was missing.
 
 ### Slice 5c.2 — `Unsigned` warning condition + helm `requireSigned` fail-closed toggle
 
-Surfaces the gap when a `ClawSandbox` uses
+Surfaces the gap when a `KarsSandbox` uses
 `spec.networkPolicy.allowedEndpoints` (inline) without a signed
 `spec.networkPolicy.allowlistRef`, and gives operators a single
 helm switch to flip the policy from *allow with warning* to
@@ -684,7 +684,7 @@ helm switch to flip the policy from *allow with warning* to
 - **Default behaviour (no change to working sandboxes):** inline
   allowlists keep reconciling. The controller now additionally
   stamps `AllowlistVerified=False / reason=Unsigned` so operators
-  see the missing attestation in `kubectl describe clawsandbox` and
+  see the missing attestation in `kubectl describe karssandbox` and
   in the Headlamp panel. The L4 NetworkPolicy and the L7 router
   allowlist mount are still programmed from the inline list — no
   egress regression.
@@ -722,7 +722,7 @@ helm switch to flip the policy from *allow with warning* to
 
 Wires the controller-published signed egress allowlist into the
 router's L7 enforcement via the same ConfigMap → mount → loader →
-`/internal/policy-status` echo pattern used by ClawMemory (Slice 3a).
+`/internal/policy-status` echo pattern used by KarsMemory (Slice 3a).
 Also strips the decorative, unsigned in-memory mutable allowlist
 surface that had no audit trail and no signing.
 
@@ -731,12 +731,12 @@ surface that had no audit trail and no signing.
   pure compiler from `EgressAllowlistSpec` → canonical JSON +
   length-prefixed sha256 (`u64-BE(name.len()) || name || u64-BE(body.len()) || body`).
   Hosts sorted by `(host,port)`, lowercased, dedup, port default 443.
-  Identical wire layout to ClawMemory binding. 12 unit tests.
+  Identical wire layout to KarsMemory binding. 12 unit tests.
 - `controller/src/reconciler/mod.rs` — publishes
-  `clawsandbox-{name}-egress-allowlist` ConfigMap, mirrors into
-  sandbox namespace, mounts at `/etc/azureclaw/egress/allowlist.json`,
-  sets `EGRESS_ALLOWLIST_DIR=/etc/azureclaw/egress` env, stamps
-  `azureclaw.azure.com/egress-allowlist-digest` annotation.
+  `karssandbox-{name}-egress-allowlist` ConfigMap, mirrors into
+  sandbox namespace, mounts at `/etc/kars/egress/allowlist.json`,
+  sets `EGRESS_ALLOWLIST_DIR=/etc/kars/egress` env, stamps
+  `kars.azure.com/egress-allowlist-digest` annotation.
 
 **Router (consumer):**
 - `inference-router/src/egress_allowlist_loader.rs` (new, ~480 lines)
@@ -755,7 +755,7 @@ surface that had no audit trail and no signing.
 
 **Decorative surface removal (no signing, no audit ⇒ deleted):**
 - `controller/src/crd.rs` — `NetworkPolicyConfig.approval_required`
-  field gone; `ClawSandboxStatus.pending_approvals` gone.
+  field gone; `KarsSandboxStatus.pending_approvals` gone.
 - `controller/src/status/mod.rs` — `pendingApprovals` JSON literals
   gone.
 - `controller/src/mesh_peer/offload.rs` — auto-minted CR no longer
@@ -787,7 +787,7 @@ surface that had no audit trail and no signing.
 
 **Wire contract:**
 - File: `allowlist.json`, env: `EGRESS_ALLOWLIST_DIR`,
-  mount: `/etc/azureclaw/egress/`,
+  mount: `/etc/kars/egress/`,
   PolicyKind wire string: `"EgressAllowlist"`.
 - Schema: `{"schemaVersion":1,"endpoints":[{"host","port"}]}`.
 
@@ -814,7 +814,7 @@ if the router is bypassed or compromised.
 
 ### Slice 5b — `egressMode` enum replaces `learnEgress` bool (DoD #3)
 
-Replaces `ClawSandbox.spec.networkPolicy.learnEgress: bool` with
+Replaces `KarsSandbox.spec.networkPolicy.learnEgress: bool` with
 `egressMode: Strict | Learn` enum across the controller, router,
 CLI, Headlamp plugin, helm CRD schema, and docs. Default = `Learn`.
 The `Approval` variant is deferred to Slice 5c (no consumer yet
@@ -832,7 +832,7 @@ deprecated.
 - `inference-router/src/spawn/mod.rs`: sub-agent CR builder reads
   `networkPolicy.egressMode` and emits the new field on respawn.
   Internal `SpawnRequest.learn_egress: bool` retained (not wire).
-- `deploy/helm/azureclaw/templates/crd.yaml`: `learnEgress` removed
+- `deploy/helm/kars/templates/crd.yaml`: `learnEgress` removed
   from the schema; `egressMode` enum-validated.
 - `cli/src/commands/{add,policy,handoff,handoff/helpers,up/sandbox_bringup,
   dev/local-k8s,operator/actions}.ts`: every CR producer/reader migrated.
@@ -844,7 +844,7 @@ deprecated.
 ### Slice 5a — Surface blocked egress attempts (DoD #1)
 
 First slice in the Slice 5 "egress polish + observability" sequence.
-Closes Slice 5 DoD #1 (*"`azureclaw egress blocked` lists every host the
+Closes Slice 5 DoD #1 (*"`kars egress blocked` lists every host the
 agent attempted that the enforcement layer refused"*) by exposing the
 existing in-process `BlockedBuffer` over operator-facing surfaces.
 
@@ -867,9 +867,9 @@ existing in-process `BlockedBuffer` over operator-facing surfaces.
   relative `-Nm` form, malformed input → `0`, the `n ≤ 100` cap, and
   the `window` default of 5m.
 - `cli/src/commands/egress/blocked.ts`: new
-  `azureclaw egress blocked <sandbox> [--since 10m] [--top]
+  `kars egress blocked <sandbox> [--since 10m] [--top]
   [--window 1h] [--n 20] [--watch] [--json]` subcommand. Mirrors
-  the `azureclaw inspect` token-resolution path
+  the `kars inspect` token-resolution path
   (`router-admin-token` secret first, in-pod `admin-token` file
   fallback) and uses in-pod `kubectl exec curl` to avoid
   port-forward collisions. `--watch` re-renders every 5s with VT
@@ -894,7 +894,7 @@ remaining gap was stale singular-form prose:
 
 - `docs/api/crd-reference.md`: `spec.mcpRefs` corrected to
   `spec.mcpServerRefs`; `McpServer` section rewritten to reflect the
-  Slice 4 plural model — per-server `/etc/azureclaw/mcp/<name>/`
+  Slice 4 plural model — per-server `/etc/kars/mcp/<name>/`
   volumes, multi-issuer `OAuthVerifier`, namespaced
   `{server}.{tool}` dispatch, `allowed_tools` semantics
   (`["*"]` vs explicit subset vs empty = fail-closed).
@@ -902,7 +902,7 @@ remaining gap was stale singular-form prose:
   `/mcp` (the actual route); new "Plural binding (`mcpServerRefs`,
   Slice 4)" subsection documents the per-server volume layout,
   OAuth verifier population (4d.3), and namespaced forwarder
-  catalog (4d.4); `Ready` row gains plural-McpServer + ClawMemory
+  catalog (4d.4); `Ready` row gains plural-McpServer + KarsMemory
   echo coverage. Stale-file sweep (DoD #6) explicitly documented
   as producer-side: each reconcile rewrites the current ref set,
   removed-server volumes disappear on next kubelet pod sync.
@@ -1029,7 +1029,7 @@ JWKS"*). Each McpServer now has its OAuth tokens validated against
 *its own* JWKS, with a per-issuer `audience` and `scopes` override —
 all driven by a `meta.json` file the controller writes alongside
 `jwks.json` into the per-server ConfigMap mounted at
-`/etc/azureclaw/mcp/<name>/`.
+`/etc/kars/mcp/<name>/`.
 
 What this PR adds:
 
@@ -1102,19 +1102,19 @@ What this PR adds:
   `governance_config.effective_mcp_server_refs()` list instead of
   short-circuiting at length > 1. Each ref produces its own
   ConfigMap/Secret pair mounted at per-name subdirectories:
-  - `/etc/azureclaw/mcp/<name>/jwks.json` (from `mcp-<name>-jwks` CM)
-  - `/etc/azureclaw/mcp-signing/<name>/...` (from `mcp-<name>-signing` Secret)
+  - `/etc/kars/mcp/<name>/jwks.json` (from `mcp-<name>-jwks` CM)
+  - `/etc/kars/mcp-signing/<name>/...` (from `mcp-<name>-signing` Secret)
 
   Volume names follow `mcp-jwks-<name>` / `mcp-signing-<name>`. The
   CRD's `maxItems: 8` on `mcpServerRefs` plus the DNS-1123 constraint
   on ref names keeps total volume names ≤ 63 chars.
 
 - **Legacy env-var contract preserved.** The first entry (idx 0)
-  continues to set `MCP_JWKS_PATH=/etc/azureclaw/mcp/<name0>/jwks.json`
-  and `MCP_SIGNING_KEY_DIR=/etc/azureclaw/mcp-signing/<name0>` so the
+  continues to set `MCP_JWKS_PATH=/etc/kars/mcp/<name0>/jwks.json`
+  and `MCP_SIGNING_KEY_DIR=/etc/kars/mcp-signing/<name0>` so the
   existing single-JWKS OAuth verifier in
   `inference-router/src/main.rs::build_mcp_router()` keeps working
-  unchanged. New env `MCP_JWKS_DIR=/etc/azureclaw/mcp` is set once
+  unchanged. New env `MCP_JWKS_DIR=/etc/kars/mcp` is set once
   per pod whenever any McpServer ref mirrored — the discovery hook
   consumes it.
 
@@ -1133,7 +1133,7 @@ What this PR adds:
 
   ```text
   Discovered 3 McpServer JWKS file(s)
-    mcp_jwks_dir = "/etc/azureclaw/mcp"
+    mcp_jwks_dir = "/etc/kars/mcp"
     count = 3
     servers = ["foundry-builtins", "github", "internal-knowledge"]
   ```
@@ -1171,7 +1171,7 @@ What is explicitly **not** in this slice (deferred to Slice 4d.3):
 - Per-server signing-key selection for outbound tool calls.
 
 The discovery log surface is the operator-facing closure of DoD #1:
-operators apply a `ClawSandbox` with N `mcpServerRefs`, then verify
+operators apply a `KarsSandbox` with N `mcpServerRefs`, then verify
 via `kubectl logs` that the inference router enumerates exactly N
 server names. This is a real consumer (principles §5 — no
 scaffolding) even though OAuth verification is single-JWKS today.
@@ -1214,7 +1214,7 @@ What this PR adds:
   reconcile is the most honest surface until Slice 4d.2 lands
   (principles §3: typed contract with truthful
   "not-yet-enforced" signal; never silently drop entries 2..N).
-- `deploy/helm/azureclaw/templates/crd.yaml` — admission CEL:
+- `deploy/helm/kars/templates/crd.yaml` — admission CEL:
   mutex between singular and plural (`!(has(self.mcpServerRef) &&
   size(self.mcpServerRefs) > 0)`), `maxItems: 8` (router-side
   scheme is sized for this; beyond that operators should use
@@ -1237,7 +1237,7 @@ Out of scope for 4d.1 (queued for 4d.2):
 ### Slice 4c — Azure Monitor remote audit sink (DoD #5)
 
 Slice 4a (PR #287) shipped the sandbox-local JSONL audit log. Slice 4b
-(PR #289) shipped `azureclaw audit tail`. Slice 4c closes Slice 4 DoD
+(PR #289) shipped `kars audit tail`. Slice 4c closes Slice 4 DoD
 #5 — *"audit rows reach a remote sink"* — by introducing an
 `AuditSink` trait and a real Azure Monitor (Log Ingestion API) sink
 that delivers rows asynchronously to a Data Collection Endpoint.
@@ -1253,7 +1253,7 @@ What this PR adds:
     POSTs are `tokio::spawn`-ed per row so the audit chain stays
     non-blocking — request handling never waits on the network.
   - `build_sink_from_env(sandbox, auth)` composes the right sink set
-    from `AZURECLAW_AUDIT_DIR` + `AZURECLAW_AUDIT_AZMON_{DCE,DCR_ID,STREAM}`.
+    from `KARS_AUDIT_DIR` + `KARS_AUDIT_AZMON_{DCE,DCR_ID,STREAM}`.
   - 7 unit tests covering config parsing, composite fan-out, URL
     composition, and the `TimeGenerated` wire shape.
 - `inference-router/src/governance/mod.rs` — swapped
@@ -1268,9 +1268,9 @@ any missing → AzMon sink disabled silently, local JSONL still on):
 
 | Var | Meaning |
 |-----|---------|
-| `AZURECLAW_AUDIT_AZMON_DCE` | Data Collection Endpoint URL (e.g. `https://my-dce.eastus-1.ingest.monitor.azure.com`) |
-| `AZURECLAW_AUDIT_AZMON_DCR_ID` | Immutable ID of the Data Collection Rule (`dcr-…`) |
-| `AZURECLAW_AUDIT_AZMON_STREAM` | Custom stream name on the DCR (e.g. `Custom-AzureClawAudit_CL`) |
+| `KARS_AUDIT_AZMON_DCE` | Data Collection Endpoint URL (e.g. `https://my-dce.eastus-1.ingest.monitor.azure.com`) |
+| `KARS_AUDIT_AZMON_DCR_ID` | Immutable ID of the Data Collection Rule (`dcr-…`) |
+| `KARS_AUDIT_AZMON_STREAM` | Custom stream name on the DCR (e.g. `Custom-KarsAudit_CL`) |
 
 The sandbox UAMI needs **Monitoring Metrics Publisher** on the DCR.
 
@@ -1293,24 +1293,24 @@ The typed `McpServer.spec.auditSink` CRD field (replacing env-var
 bootstrap) is deferred to **Slice 4d** alongside the plural McpServer
 migration so the CRD shape and the plural namespacing land together.
 
-### Slice 4b — `azureclaw audit tail` CLI (DoD #7)
+### Slice 4b — `kars audit tail` CLI (DoD #7)
 
 Slice 4a wrote a durable JSONL audit log to
-`/var/log/azureclaw/audit/{YYYY-MM-DD}.jsonl` inside the
+`/var/log/kars/audit/{YYYY-MM-DD}.jsonl` inside the
 `inference-router` container. Slice 4b gives operators a first-class
 way to read it — no port-forward, no `kubectl exec` incantation
 memorisation, no jq pipelines on a 50 KB-line file.
 
 What this PR adds:
 
-- New `cli/src/commands/audit.ts` — `azureclaw audit tail <sandbox>`
+- New `cli/src/commands/audit.ts` — `kars audit tail <sandbox>`
   shells into the sandbox pod's `inference-router` container and
   `tail`s the day-keyed JSONL file. Supports `--follow` for live
   streams, `--lines N` (cap 10000), `--decision`, `--agent`,
   `--action` substring filters, `--date YYYY-MM-DD` for historical
   files, `--json` for machine-readable output, and `--dir` to
   override the in-pod audit directory when the operator has changed
-  `AZURECLAW_AUDIT_DIR`.
+  `KARS_AUDIT_DIR`.
 - Pretty render colours by decision (`allowed`/`success` green,
   `denied`/`flagged`/`rejected` red, `sanitized` yellow); truncates
   long agent_ids and actions with `…`; aligns columns for grep.
@@ -1333,7 +1333,7 @@ The router's audit chain has always been an in-memory `Vec<AuditEntry>`
 (via `agentmesh::AuditLogger`). On router restart, every audit row was
 lost — fine for the hash-chain receipt embedded in each response, but
 unworkable for the operator-facing audit story Slice 4 demands
-(`azureclaw audit tail`, remote sinks). This slice closes DoD #4 by
+(`kars audit tail`, remote sinks). This slice closes DoD #4 by
 mirroring every chain entry to a sandbox-local JSONL file as a
 side-effect of the existing `audit.log()` call.
 
@@ -1350,15 +1350,15 @@ What this PR adds:
   `governance/trust_ops.rs`, and `providers/audit_impl.rs` go
   through it. The handful of test-only `audit.log(...)` calls
   remain direct.
-- New env var `AZURECLAW_AUDIT_DIR` (default
-  `/var/log/azureclaw/audit`, set to literal `"disabled"` to
+- New env var `KARS_AUDIT_DIR` (default
+  `/var/log/kars/audit`, set to literal `"disabled"` to
   short-circuit in tests).
 - JSONL failures degrade to warn-level logs — the audited request
   is never denied because the disk filled up.
 
 Out of scope for 4a (queued for 4b / 4c):
 
-- `azureclaw audit tail` CLI subcommand → Slice 4b.
+- `kars audit tail` CLI subcommand → Slice 4b.
 - Remote audit sinks (Azure Monitor, Loki, Storage) →
   Slice 4c.
 - McpServer plural migration + per-server JWKS + namespaced
@@ -1366,22 +1366,22 @@ Out of scope for 4a (queued for 4b / 4c):
 
 ### Slice 2 DoD #6 — sub-agent parent-label inheritance
 
-When a parent `ClawSandbox` spawns a sub-agent (via the router's
+When a parent `KarsSandbox` spawns a sub-agent (via the router's
 `/spawn` endpoint or via `handoff`), the spawned sub-agent now
 inherits the parent's `metadata.labels` so operators can
-`kubectl get clawsandbox -l tier=prod` and see the parent and
+`kubectl get karssandbox -l tier=prod` and see the parent and
 every descendant in one shot — without walking the
-`azureclaw.azure.com/parent` annotation graph by hand. Closes
+`kars.azure.com/parent` annotation graph by hand. Closes
 Slice 2 DoD #6.
 
 What this PR adds:
 
 - `inference-router/src/spawn/mod.rs`: new pure helper
   `inherit_parent_labels(&BTreeMap<String,String>) ->
-  BTreeMap<String,String>` filters out azureclaw-controlled label
-  keys (`azureclaw.azure.com/*` and `app.kubernetes.io/*`) before
+  BTreeMap<String,String>` filters out kars-controlled label
+  keys (`kars.azure.com/*` and `app.kubernetes.io/*`) before
   handing the parent's user labels through to the child. The
-  filter is essential — re-stamping `azureclaw.azure.com/parent`
+  filter is essential — re-stamping `kars.azure.com/parent`
   from the parent's own labels would lie about the child's
   lineage.
 - New builder `build_sub_agent_crd_with_labels` takes
@@ -1396,7 +1396,7 @@ What this PR adds:
   hiccup), we log a warn and fall back to an empty map. Spawn
   always succeeds — inherited labels are operator quality-of-life,
   not a governance gate.
-- 5 unit tests covering: filter behaviour (azureclaw keys
+- 5 unit tests covering: filter behaviour (kars keys
   dropped), regular spawn inheritance, handoff-path inheritance
   (the alternate label-stamping branch in the same builder),
   collision precedence (spawn-tracking wins), and the
@@ -1455,7 +1455,7 @@ When a `foundry.memory.{search,update}` MCP call hits a Foundry
 Memory Store that does not exist yet, the router now auto-provisions
 it transparently and retries the original call exactly once. This
 closes Slice 3 DoD #2 ("Router auto-provisions on 404") and turns
-the common "fresh ClawMemory CR, no store created yet" case from a
+the common "fresh KarsMemory CR, no store created yet" case from a
 Degraded condition into a self-healing first request.
 
 What this PR adds:
@@ -1485,16 +1485,16 @@ skipping the ensure path entirely. Total router lib tests: 784 (+5).
 
 The wire contract back to the controller is unchanged: same prefix
 strings (`AuthMisconfigured:`, `MemoryStoreMissing:`) on the same
-`PolicyKind::Memory` entry. The `claw_memory_reconciler` pre-scan
+`PolicyKind::Memory` entry. The `kars_memory_reconciler` pre-scan
 keeps working without modification. The new path is **transparent**
 — successful auto-provision leaves no trail on the CRD, which is
 the correct surface (the store now exists; nothing for the operator
 to fix).
 
-### Slice 2-/3-hot-reload — InferencePolicy + ClawMemory loaders watch their mount dirs
+### Slice 2-/3-hot-reload — InferencePolicy + KarsMemory loaders watch their mount dirs
 
 Closes the long-running gap where the InferencePolicy
-(`inference_policy_loader::load_and_install`) and ClawMemory
+(`inference_policy_loader::load_and_install`) and KarsMemory
 (`memory_binding_loader::load_and_install`) loaders were one-shot at
 router startup. After the initial load, the file on disk could change
 (operator `kubectl edit`s the CR, controller recompiles and rewrites
@@ -1518,7 +1518,7 @@ What this PR adds:
 - `load_and_install` semantics tightened in both loaders:
   - `Loaded` → handle overwritten with new value (unchanged).
   - `NoBinding` / `NoPolicy` → handle **cleared**. Removing
-    `spec.memoryRef` / `spec.inferenceRef` from a `ClawSandbox` now
+    `spec.memoryRef` / `spec.inferenceRef` from a `KarsSandbox` now
     actually unbinds the in-memory state on the next tick (instead
     of the router pretending the policy is still in effect until the
     pod restarts).
@@ -1543,16 +1543,16 @@ No CR shape change. No new env vars required for production (5s
 default ticks at exactly the Slice 3 DoD SLO). Other watchers
 (`Governance::spawn_policy_watcher`) untouched.
 
-### Slice 3b.5 — `MemoryStoreMissing` Degraded condition for ClawMemory
+### Slice 3b.5 — `MemoryStoreMissing` Degraded condition for KarsMemory
 
 When the upstream Foundry Memory Store returns HTTP 404 on a
 `foundry.memory.{search,update}` call — the bound store does not
 exist on the Foundry account yet — the controller now elevates the
-ClawMemory status to `Degraded=True / reason=MemoryStoreMissing /
+KarsMemory status to `Degraded=True / reason=MemoryStoreMissing /
 Ready=False`. Today the openclaw runtime auto-creates stores lazily
 on first sync via `ensureMemoryStore`, but until that fires any
 direct router-side `foundry.memory.*` call against a fresh
-ClawMemory will 404, and operators need to know. Slice 3c.1 will
+KarsMemory will 404, and operators need to know. Slice 3c.1 will
 ship router-side auto-provision at binding install, retiring this
 surface.
 
@@ -1560,7 +1560,7 @@ surface.
   prefix `MEMORY_STORE_MISSING_PREFIX = "MemoryStoreMissing:"` in
   `controller/src/status/conditions.rs`. Lives next to the Slice
   3b.4 `AuthMisconfigured` siblings.
-- `claw_memory_reconciler` factors the auth-misconfigured detector
+- `kars_memory_reconciler` factors the auth-misconfigured detector
   and the new missing-store detector through a shared
   `first_prefixed_memory_error` helper. Both pre-scan
   `find_last_error("Memory")` for the prefix and emit a
@@ -1584,7 +1584,7 @@ Closes the wire contract opened in Slice 3b.4. The inference router's
 `AuthMisconfigured:` prefixed `last_error` on the `Memory` policy
 kind when the upstream Foundry Memory Store returns HTTP 401 or 403.
 The controller's Slice 3b.4 consumer-side scan then elevates the
-ClawMemory status to `Degraded=True / AuthMisconfigured`.
+KarsMemory status to `Degraded=True / AuthMisconfigured`.
 
 - `PlatformDispatcher` gains an optional
   `policy_status: Arc<PolicyStatusRegistry>` handle wired via a new
@@ -1610,13 +1610,13 @@ ClawMemory status to `Degraded=True / AuthMisconfigured`.
   matrix and the legacy no-handle path. 771 router lib tests
   (was 766).
 
-### Slice 3b.4 — `AuthMisconfigured` Degraded condition for ClawMemory
+### Slice 3b.4 — `AuthMisconfigured` Degraded condition for KarsMemory
 
 When a referencing sandbox's router reports an upstream authentication
-failure on the compiled ClawMemory binding (today: Foundry Memory Store
+failure on the compiled KarsMemory binding (today: Foundry Memory Store
 returning 403 on `foundry.memory.{search,update}` because the
 project MI is missing `Azure AI User` on the resource group — see the
-`azureclaw-deployment` skill notes), the controller now elevates the
+`kars-deployment` skill notes), the controller now elevates the
 status to `Degraded=True / reason=AuthMisconfigured / Ready=False`
 instead of folding it into a generic
 `Awaiting / AwaitingRouterEnforcement` message. Auth misconfigs are
@@ -1629,7 +1629,7 @@ not transient digest gaps; operators need a clear pointer at RBAC.
   `PolicyStatusRegistry::record_error` messages on the `Memory`
   policy kind, the controller scans for it on the
   `/internal/policy-status` echo.
-- `claw_memory_reconciler::first_auth_misconfigured_message` is a
+- `kars_memory_reconciler::first_auth_misconfigured_message` is a
   pure helper over `&[(String, Result<PolicyStatusResponse,
   ConfirmError>)]` that scans **before** `decide_enforcement_state`
   collapses per-sandbox structure into the aggregated Awaiting
@@ -1653,10 +1653,10 @@ not transient digest gaps; operators need a clear pointer at RBAC.
 Verified: 543 controller tests pass (+5 from 538 prior), clippy
 `-D warnings` clean across workspace, fmt clean.
 
-### Slice 3b.3 — `foundry.memory` MCP tool reads ClawMemory binding
+### Slice 3b.3 — `foundry.memory` MCP tool reads KarsMemory binding
 
-The first **real consumer** of the Slice 3a ClawMemory binding: when
-a sandbox attaches a `ClawMemory` via `spec.memoryRef`, the compiled
+The first **real consumer** of the Slice 3a KarsMemory binding: when
+a sandbox attaches a `KarsMemory` via `spec.memoryRef`, the compiled
 binding's `store_name` now wins over the chart-fed
 `FOUNDRY_MEMORY_STORE_ID` env on every `foundry.memory.{search,update}`
 call. CRD is the source of truth; env stays as the backward-compatible
@@ -1687,9 +1687,9 @@ fallback for sandboxes without `spec.memoryRef`.
 No CRD/Helm/controller change. Pure router-side consumer of the
 binding contract Slice 3a published.
 
-### Slice 3b.2 — ClawMemory no-inherit invariant for sub-agent spawn
+### Slice 3b.2 — KarsMemory no-inherit invariant for sub-agent spawn
 
-Pins the design rule that ClawMemory bindings are scoped to the agent
+Pins the design rule that KarsMemory bindings are scoped to the agent
 that declared them: a parent's `spec.memoryRef` MUST NOT propagate
 onto sub-agents created via `inference-router/src/spawn` (regular
 spawn or handoff). Today this holds by construction — `SpawnRequest`
@@ -1707,61 +1707,61 @@ makes it explicit:
 
 No producer/consumer behaviour change. Pure invariant-pinning slice.
 
-### Slice 3b.1 — ClawMemory operator UX (inspect CLI + Headlamp panel)
+### Slice 3b.1 — KarsMemory operator UX (inspect CLI + Headlamp panel)
 
 Operator-facing surface for the §3 echo loop closed in Slice 3a. The
 producer-side facts (`compiledDigest`, `loadedDigest`, `Ready` reason)
 now light up where operators already look:
 
-* `azureclaw inspect <sandbox>` — the `Memory` wire kind now maps to
-  the user-facing display label `ClawMemory` (was the stale planning
+* `kars inspect <sandbox>` — the `Memory` wire kind now maps to
+  the user-facing display label `KarsMemory` (was the stale planning
   name `MemoryStore`). The tree groups Memory entries under their own
   header next to `ToolPolicy` and `InferencePolicy`.
 * Headlamp plugin `RouterPolicyStatusPanel` — now renders for
-  `clawmemories` (in addition to `toolpolicies` + `inferencepolicies`),
+  `karsmemories` (in addition to `toolpolicies` + `inferencepolicies`),
   surfacing the compiled/loaded digest pair and the `Ready` reason
   chip. Zero new API traffic — pure read of fields the controller
   already writes in Slice 3a.
 
-### Slice 3a — ClawMemory router-echo
+### Slice 3a — KarsMemory router-echo
 
 Closes principles.md §3 ("Ready ⇔ router echo") for the third CRD
 (after ToolPolicy in 1c and InferencePolicy in 2a). Same shape: the
 controller compiles the binding to a ConfigMap, mirrors it into each
 referencing sandbox namespace, mounts it onto the inference-router at
-`/etc/azureclaw/memory/binding.json`, and only promotes
+`/etc/kars/memory/binding.json`, and only promotes
 `phase=Compiled → Ready` once every router echoes the matching digest
 via `GET /internal/policy-status`. Digest-echo only — Foundry Memory
 Store auto-provision + AuthMisconfigured + no-inherit + signed
 `bundleRef` are deferred to Slice 3b/3c.
 
-**Controller (`azureclaw-controller`)**
+**Controller (`kars-controller`)**
 
 * `crd.rs` — new `spec.memoryRef: Option<LocalObjectRef>` on
-  `ClawSandboxSpec`; sibling reference, same-namespace only.
-* `claw_memory_compile.rs` — new `MEMORY_BINDING_FILENAME = "binding.json"`
-  + `canonical_bytes_for_digest` + `claw_memory_digest` (length-prefixed
+  `KarsSandboxSpec`; sibling reference, same-namespace only.
+* `kars_memory_compile.rs` — new `MEMORY_BINDING_FILENAME = "binding.json"`
+  + `canonical_bytes_for_digest` + `kars_memory_digest` (length-prefixed
   sha256 matching the router byte-for-byte; cross-validated by golden
   vectors). The ConfigMap data key is `binding.json` and the bytes are
   exactly what the digest covers.
-* `claw_memory.rs` — `ClawMemoryStatus` gains `compiledDigest` and
+* `kars_memory.rs` — `KarsMemoryStatus` gains `compiledDigest` and
   `loadedDigest` (`Option<String>`). The former is the digest the
   controller published; the latter is what the router last echoed —
   populated only in the `Confirmed` branch.
-* `claw_memory_reconciler.rs` — full rewrite around the
+* `kars_memory_reconciler.rs` — full rewrite around the
   `RouterEnforcementState` enum (`NotApplicable`, `NoSandboxesReferencing`,
   `Awaiting`, `Confirmed`). `decide_enforcement_state(&compiled, "Memory", &results)`
   drives phase + conditions; `Compiled→Ready` only fires on `Confirmed`.
-  ConfigMap write stamps annotation `azureclaw.azure.com/claw-memory-digest`.
+  ConfigMap write stamps annotation `kars.azure.com/claw-memory-digest`.
   `PolicyNotEnforced` Warning event now fires only while truly awaiting
   (stops the moment confirmed — no more eternal noise; matches Slice 1c
   honesty bar). 8 new unit tests.
-* `reconciler/mod.rs` — new ClawMemory mirror+mount block after the
+* `reconciler/mod.rs` — new KarsMemory mirror+mount block after the
   InferencePolicy block, gated by `spec.memoryRef`. Mirrors the compiled
   ConfigMap into the sandbox namespace, mounts onto the
   `inference-router` container at `paths::MEMORY_BINDING_DIR`, sets env
   `MEMORY_BINDING_DIR`. Fail-open at mount layer (mount is optional).
-* `reconciler/governance_mounts.rs::paths` — new `MEMORY_BINDING_DIR = "/etc/azureclaw/memory"`
+* `reconciler/governance_mounts.rs::paths` — new `MEMORY_BINDING_DIR = "/etc/kars/memory"`
   constant (matches router default).
 
 **Router (`inference-router`)**
@@ -1770,18 +1770,18 @@ Store auto-provision + AuthMisconfigured + no-inherit + signed
   (`as_str() = "Memory"`).
 * `memory_binding_loader.rs` (new, ~340 lines) — mirror of
   `inference_policy_loader.rs` stripped to digest-echo. Reads
-  `/etc/azureclaw/memory/binding.json`, parses optional `storeName` +
+  `/etc/kars/memory/binding.json`, parses optional `storeName` +
   `scope`, registers digest under `PolicyKind::Memory`. Hot-reload via
   the existing 5-second mtime poller. 11 unit tests (tempfile fixtures
   + golden-vector cross-validation against the controller's
-  `claw_memory_digest`).
+  `kars_memory_digest`).
 * `routes/mod.rs` — `AppState.memory_binding: LoadedMemoryBindingHandle`
   field; loader installed at startup right after the InferencePolicy
   loader.
 
 **Helm**
 
-* `crd-clawmemory.yaml` regenerated to include the new
+* `crd-karsmemory.yaml` regenerated to include the new
   `compiledDigest` + `loadedDigest` status fields.
 * `crd.yaml` (hand-maintained) — added `spec.memoryRef` schema with
   same-namespace CEL validation matching `spec.inferenceRef`.
@@ -1809,7 +1809,7 @@ Store auto-provision + AuthMisconfigured + no-inherit + signed
   generalised).
 * MCP `foundry.memory.*` tool rewire from env-fed
   `FOUNDRY_MEMORY_STORE_ID` to per-policy lookup.
-* `azureclaw inspect` panel + Headlamp UI panel for ClawMemory (mirrors
+* `kars inspect` panel + Headlamp UI panel for KarsMemory (mirrors
   Slice 1d / 1d.2 for ToolPolicy + InferencePolicy).
 
 ### Slice 2d.2 — health-aware `modelPreference.fallback[]` failover
@@ -1852,7 +1852,7 @@ deferred (one inference provider per process today).
 * `routes/internal.rs` — `GET /internal/policy-status` response gains
   an additive `deployment_health: Vec<DeploymentHealthSnapshot>` field
   (additive within `schema_version: 1`; clients ignoring it work
-  unchanged). Lets the controller, `azureclaw inspect`, and the
+  unchanged). Lets the controller, `kars inspect`, and the
   Headlamp panel see fallback activity without scraping request logs.
 * Audit logging: a single `tracing::warn!` per failover transition
   (`from`, `to`, `status`, `digest`, `sandbox`) keeps activity visible
@@ -1913,7 +1913,7 @@ inline now degrades the reconcile with `SpecInvalid`.
   condition type, `BUNDLED_PROFILE_FALLBACK` reason, and the two
   associated unit tests. The condition is no longer reachable.
 * `mesh_peer/offload.rs` — embed the offload-tier profile at compile
-  time via `include_str!("../../../cli/profiles/agt/azureclaw-offload.yaml")`
+  time via `include_str!("../../../cli/profiles/agt/kars-offload.yaml")`
   and inline it into the auto-minted ToolPolicy when honouring a
   cross-tenant offload request. One source of truth shared with the
   CLI; no duplication.
@@ -1935,14 +1935,14 @@ inline now degrades the reconcile with `SpecInvalid`.
   `cli/profiles/seccomp/` layout; covered by the existing
   `cp -r profiles dist/profiles` build step.
 * `refs.ts` — new `loadAgtProfile(profile)` helper resolves
-  `azureclaw-<profile>.yaml` from either the `dist/` or `src/` profile
+  `kars-<profile>.yaml` from either the `dist/` or `src/` profile
   directory (depending on how the CLI is invoked). Falls back to
   `default` on unknown profile names with a console warning; throws a
   clear error if the assets directory is missing entirely.
 * `refs.ts::buildToolPolicy`, `commands/handoff.ts`, and
   `migrate/from_kagent.ts` — every CLI-minted ToolPolicy now populates
   `spec.agtProfile.inline` via `loadAgtProfile()`. The
-  `azureclaw.azure.com/profile` annotation is written unconditionally.
+  `kars.azure.com/profile` annotation is written unconditionally.
 * `tests/e2e-manual/scenarios/cross_runtime_mesh.sh` and
   `tests/e2e-manual/scenarios/agt_mesh.sh` — ToolPolicy heredocs gained
   a minimal allow-all `agtProfile.inline` so they remain reconcilable
@@ -1955,7 +1955,7 @@ inline now degrades the reconcile with `SpecInvalid`.
   `DUMP_TOOLPOLICY_CRD_YAML=1` workflow documented at the top of the
   file. `helm_drift::tests::helm_toolpolicy_crd_matches_rust_schema`
   is back to green.
-* `crd.yaml` (ClawSandbox — hand-maintained, no drift check) prose
+* `crd.yaml` (KarsSandbox — hand-maintained, no drift check) prose
   updated for `toolPolicyRef` to drop the stale `AGT_POLICY_PROFILE`
   mention.
 
@@ -2004,14 +2004,14 @@ consumer loop and doesn't fit a single overnight PR).
 ### Slice 1e (phase 1) — `BundledProfileInUse` deprecation condition
 
 Surfaces the deprecated bundled `AGT_POLICY_PROFILE` env-var
-fallback as a Kubernetes status condition on `ClawSandbox` CRs, so
+fallback as a Kubernetes status condition on `KarsSandbox` CRs, so
 operators see it in `kubectl describe` / Headlamp / dashboards
 rather than only as a one-line warning buried in entrypoint logs.
 
 **Detection logic** (controller): `governance.enabled=true`,
 `toolPolicyRef` resolves, but the referenced `ToolPolicy` has no
 `spec.agtProfile.inline` (or it's whitespace-only). That sandbox
-runs off `/opt/azureclaw-plugin/policies/azureclaw-<profile>.yaml`
+runs off `/opt/kars-plugin/policies/kars-<profile>.yaml`
 baked into the image — exactly the path Slice 1e phase 2 will
 remove.
 
@@ -2057,7 +2057,7 @@ Pure read of `status.compiledDigest` / `status.agtProfileDigest` /
 `status.loadedDigest` / `status.conditions` — fields the controller
 already writes. **Zero new API traffic, no kube-apiserver service
 proxy, no admin-token plumbing in the operator browser.** Mirrors
-the data the `azureclaw inspect <sandbox>` CLI surfaces, but on the
+the data the `kars inspect <sandbox>` CLI surfaces, but on the
 producer side rather than the consumer side, so an operator can
 diagnose a Compiled-stuck-at-amber CR without leaving the dashboard.
 
@@ -2065,7 +2065,7 @@ Defensive defaults: unknown phase or condition reason renders as
 amber/warning rather than success. Unknown digest format passes
 through unchanged (no slicing crash on non-sha256 algorithms).
 
-### Slice 1d — `azureclaw inspect <sandbox>` CLI
+### Slice 1d — `kars inspect <sandbox>` CLI
 
 Operator-facing data-plane view of the policy CRDs a sandbox's
 router is actually enforcing. Hits the router's
@@ -2081,10 +2081,10 @@ Three operator pain points solved at once:
   No background tunnel, no port-forward retries.
 * **Admin token never crosses argv.** The token is resolved either
   from the `router-admin-token` Secret (fast path, same pattern as
-  `azureclaw handoff`'s `getAksAdminToken`) or — when RBAC blocks
-  the secret read — from the `/etc/azureclaw/secrets/admin-token`
+  `kars handoff`'s `getAksAdminToken`) or — when RBAC blocks
+  the secret read — from the `/etc/kars/secrets/admin-token`
   file inside the pod. It then flows to the in-pod curl on **stdin**
-  (`read -r AZURECLAW_ADMIN_TOKEN <&0`), never `ps`-visible.
+  (`read -r KARS_ADMIN_TOKEN <&0`), never `ps`-visible.
 * **Latency-free.** Zero new server-side work — every byte the
   command renders was already produced by the router's
   `PolicyStatusRegistry` snapshot. The CLI is a pure consumer.
@@ -2288,7 +2288,7 @@ persistence.
   budget check. Env-driven `TOKEN_BUDGET_DAILY` stays as a fallback
   default (back-compat) — applied only when no policy is loaded.
 - `routes/mod.rs` AppState init now uses `with_persistence` by default,
-  pointed at `/var/lib/azureclaw/token-budgets.json` (override via
+  pointed at `/var/lib/kars/token-budgets.json` (override via
   `TOKEN_BUDGET_PERSIST_PATH=`; empty string disables persistence for
   tests). `mkdir -p` is best-effort; falls back to in-memory if the
   dir cannot be created.
@@ -2336,7 +2336,7 @@ AwaitingRouterEnforcement` — they land in Slices 2b/2c/2d.
   notes that adding a variant is a public-API change requiring
   controller-side wiring in the same PR; Slice 2a satisfies that).
 - `AppState.inference_policy` field; loaded at startup from
-  `INFERENCE_POLICY_DIR` env (default `/etc/azureclaw/inference`).
+  `INFERENCE_POLICY_DIR` env (default `/etc/kars/inference`).
 - `chat_completions` preflight gate: pure `decide_per_request_gate(cap,
   requested) -> PerRequestGate` + `extract_requested_max_tokens(body)`
   (prefers `max_completion_tokens` over legacy `max_tokens`). 9 unit
@@ -2356,7 +2356,7 @@ AwaitingRouterEnforcement` — they land in Slices 2b/2c/2d.
   (golden-vector cross-validates the router-side layout byte-for-byte).
 - `InferencePolicyStatus`: new `compiledDigest` + `loadedDigest` fields
   with doc comments tying back to §3.
-- `inference_policy_reconciler`: now lists `ClawSandbox`es by
+- `inference_policy_reconciler`: now lists `KarsSandbox`es by
   `spec.inferenceRef.name == name`, polls each router's
   `/internal/policy-status`, runs the shared
   `decide_enforcement_state(&digest, "InferencePolicy", &results)`
@@ -2367,7 +2367,7 @@ AwaitingRouterEnforcement` — they land in Slices 2b/2c/2d.
   moment Confirmed fires, mirroring Slice 1c.
 - Compiled ConfigMap now uses canonical key `inference-policy.json`
   (was: pretty-printed `profile.json`). Annotation
-  `azureclaw.azure.com/inference-policy-digest` on the CM stamps the
+  `kars.azure.com/inference-policy-digest` on the CM stamps the
   digest for human inspection. The bytes written are **exactly** what
   the digest covers — any reformatting silently breaks the §3 echo
   contract.
@@ -2383,7 +2383,7 @@ AwaitingRouterEnforcement` — they land in Slices 2b/2c/2d.
 - `reconciler::mod.rs` mirrors the `inferencepolicy-{name}-profile`
   ConfigMap from the user namespace into the sandbox namespace and
   injects an `inject_configmap_mount` against the inference-router
-  container at `/etc/azureclaw/inference` with env
+  container at `/etc/kars/inference` with env
   `INFERENCE_POLICY_DIR`. Mount path constant added to
   `governance_mounts::paths`.
 - Failure mode is fail-open at the mount layer (router boots without
@@ -2435,7 +2435,7 @@ tests, -1 deleted wrapper test). clippy `-D warnings` clean.
 ### Slice 2 prep — shared router-confirmation helper extracted
 
 Pre-refactor to unblock Slice 2 (InferencePolicy) and later
-consumers (ClawMemory, McpServer fleet). The k8s I/O helpers
+consumers (KarsMemory, McpServer fleet). The k8s I/O helpers
 that drive the "Ready ⇔ router echo" loop were inlined in
 `controller/src/tool_policy_reconciler.rs` after Slice 1c; they
 now live in a shared module so the next reconciler doesn't
@@ -2444,13 +2444,13 @@ have to duplicate them.
 - New `controller/src/status/router_confirmation_io.rs` module:
   - `list_sandboxes_matching(client, ns, |cs| …)` — generic
     discovery helper; the caller supplies the
-    `FnMut(&ClawSandbox) -> bool` predicate so each CRD can
+    `FnMut(&KarsSandbox) -> bool` predicate so each CRD can
     bind to its own ref field (`spec.governance.toolPolicyRef`,
     `spec.inferenceRef`, etc.) without baking a CRD-kind enum
     into the helper. Replaces the ToolPolicy-only
     `list_referencing_sandboxes` from Slice 1c.
   - `read_admin_token(client, sandbox)` — verbatim move; reads
-    `Secret azureclaw-<sandbox>/router-admin-token` key
+    `Secret kars-<sandbox>/router-admin-token` key
     `token`. Now reusable from any reconciler.
   - `poll_referencing_sandboxes(client, http, sandboxes)` —
     verbatim move; same `Err(ConfirmError::HttpStatus(0))`
@@ -2477,12 +2477,12 @@ have to duplicate them.
 
 Closes the consumer half of the principles.md §3 invariant for
 ToolPolicy: the controller now polls every referencing
-`ClawSandbox`'s inference-router on `GET /internal/policy-status`
+`KarsSandbox`'s inference-router on `GET /internal/policy-status`
 (the endpoint Slice 1a shipped), compares the echoed digest to
 the one the controller published (Slice 1b), and only promotes
 `phase=Compiled → Ready` when every referencing router echoes
 the exact bytes. This is the first complete end-to-end closure
-of "Ready ⇔ router echo" for any AzureClaw CRD.
+of "Ready ⇔ router echo" for any Kars CRD.
 
 - New `controller/src/status/router_confirmation.rs` module:
   `PolicyStatusResponse` / `PolicyStatusEntry` mirror the
@@ -2510,11 +2510,11 @@ of "Ready ⇔ router echo" for any AzureClaw CRD.
   function factors out the aggregation logic. 6 unit tests
   cover all four state transitions, multi-sandbox mismatch,
   unreachable sandbox, and `last_error` propagation.
-- `list_referencing_sandboxes` lists all `ClawSandbox`es in the
+- `list_referencing_sandboxes` lists all `KarsSandbox`es in the
   ToolPolicy's namespace and filters by
   `spec.governance.toolPolicyRef.name`.
 - `read_admin_token` reads `Secret
-  azureclaw-<sandbox>/router-admin-token` key `token`; a
+  kars-<sandbox>/router-admin-token` key `token`; a
   missing Secret counts as a transient awaiting-router
   condition (the per-sandbox reconciler may not yet have
   completed).
@@ -2581,7 +2581,7 @@ consuming `profile.json` already).
 - `ensure_profile_configmap` now writes `agt-profile.yaml` (raw
   inline bytes) alongside the existing `profile.json` key and
   stamps the ConfigMap annotation
-  `azureclaw.azure.com/agt-profile-digest` so any observer (the
+  `kars.azure.com/agt-profile-digest` so any observer (the
   Slice 1c poller, Headlamp, `kubectl describe`) can verify
   what the controller intended to publish without re-reading the
   CR.
@@ -2643,7 +2643,7 @@ together with its first real producer (AGT).
 
 - **`status.phase=Compiled` introduced** as the load-bearing distinction
   between "controller wrote the artifact" and "data plane is enforcing the
-  artifact". `InferencePolicy` and `ClawMemory` now stamp `Compiled` on the
+  artifact". `InferencePolicy` and `KarsMemory` now stamp `Compiled` on the
   success path (instead of `Ready`) and the `Ready` condition is `False` with
   reason `AwaitingRouterEnforcement`. Each reconciler also emits a `Warning`
   Event (`reason=PolicyNotEnforced`) so operators see the gap in
@@ -2672,13 +2672,13 @@ together with its first real producer (AGT).
 
 ### Changed
 
-- **Phase 5.2 completed the AGT-only mesh migration.** AzureClaw now runs
+- **Phase 5.2 completed the AGT-only mesh migration.** Kars now runs
   Microsoft AGT AgentMesh exclusively: the historical vendored AgentMesh SDK
   and relay/registry forks were removed after upstream AGT PR #2090 merged
-  all 18 AzureClaw gap-closing patches.
+  all 18 Kars gap-closing patches.
 - The OpenClaw runtime and `mesh-plugin` no longer depend on `@agentmesh/sdk`;
   identity, signing, and verification use Node.js native `crypto` helpers
-  re-exported by `@azureclaw/mesh`, while transport uses
+  re-exported by `@kars/mesh`, while transport uses
   `@microsoft/agent-governance-sdk`.
 - The controller and inference-router dropped the `Provider::Vendored` branch.
   Helm `mesh.provider` is AGT-only and no longer documents or renders a
@@ -2686,14 +2686,14 @@ together with its first real producer (AGT).
 
 ### Added
 
-- `azureclaw dev --target local-k8s` now deploys the mesh stack into the
+- `kars dev --target local-k8s` now deploys the mesh stack into the
   kind cluster. Previously the controller would start expecting
   `agentmesh-relay:8765` in namespace `agentmesh` but the namespace
   didn't exist locally. The new flow builds the AGT (or vendored) relay
   and registry images, loads them into kind, rewrites the manifest's
   ACR image refs to local tags + `imagePullPolicy=Never`, applies, and
   waits for both rollouts before reporting the cluster ready.
-- `azureclaw dev --no-mesh` opt-out for pure controller smoke tests on
+- `kars dev --no-mesh` opt-out for pure controller smoke tests on
   hardware without enough RAM for the full stack.
 
 ## [1.0.0-rc.1] — Release candidate (release engineering pass)
@@ -2712,11 +2712,11 @@ First release candidate cut for the v1.0.0 line. No new feature surface beyond w
 - `runtimes/{anthropic,langgraph,maf-python,openai-agents,pydantic-ai}/src/.../mesh_tools.py` — first-class AgentMesh tool wrappers per adapter.
 - `runtimes/langgraph-ts/` — full TypeScript LangGraph adapter (mirrors Python adapter).
 - `sandbox-images/langgraph-ts/` — Dockerfile + entrypoint for the TS adapter.
-- `examples/byo-quickstart/k8s/clawsandbox-strict-demo.yaml` — strict-mode demo CR.
+- `examples/byo-quickstart/k8s/karssandbox-strict-demo.yaml` — strict-mode demo CR.
 - Makefile targets: per-runtime image build/push (`image-langgraph`, `image-anthropic`, `image-maf-python`, `image-pydantic-ai`, `image-langgraph-ts`) plus aggregators (`image-runtimes`, `push-runtimes`).
 - `docs/operations/image-versioning.md` — tag policy, runtime image overrides, dual-tag immutability rule.
 - `docs/architecture/crd-versioning.md` — `v1alpha1` freeze policy + `v1alpha2` + conversion-webhook plan.
-- `docs/architecture/agt-boundary.md` — responsibility split between AGT and AzureClaw, four provider contracts, outage modes.
+- `docs/architecture/agt-boundary.md` — responsibility split between AGT and Kars, four provider contracts, outage modes.
 - `docs/operations/secret-rotation.md` — runbook for sandbox credentials, TLS, AgentMesh identities, Azure creds, cosign keys.
 - `docs/security/stride.md` — STRIDE × trust-boundary matrix (T1–T4).
 - `docs/security/red-team.md` — internal red-team findings log.
@@ -2727,8 +2727,8 @@ First release candidate cut for the v1.0.0 line. No new feature surface beyond w
 ### Changed
 
 - `docs/README.md` rewritten as the canonical index for the public-facing tree.
-- `CRD `ClawSandbox.spec.runtime.maf.language` enum narrowed: `Dotnet` removed (no `AgentMeshClient` in `Microsoft.AgentGovernance` 3.3.0). `[GAP-V1]` recorded.
-- `deploy/helm/azureclaw/Chart.yaml` — `version` and `appVersion` bumped to `1.0.0-rc.1`.
+- `CRD `KarsSandbox.spec.runtime.maf.language` enum narrowed: `Dotnet` removed (no `AgentMeshClient` in `Microsoft.AgentGovernance` 3.3.0). `[GAP-V1]` recorded.
+- `deploy/helm/kars/Chart.yaml` — `version` and `appVersion` bumped to `1.0.0-rc.1`.
 - New `make helm-package` target wraps `bash deploy/helm/package.sh` (lint + package + sha256). Output goes to gitignored `dist/charts/`.
 - New manually-runnable E2E suite at `tests/e2e-manual/` (PR #189). The CI Kind suite at `tests/e2e/run.sh` is unchanged.
 - `docs/site/` — mdbook configuration for rendering the canonical `docs/` tree as a browsable static site. `make docs-site` builds to `./target/book/`; `make docs-site-serve` previews live. The site uses the existing markdown as-is — no content duplication.
@@ -2740,14 +2740,14 @@ First release candidate cut for the v1.0.0 line. No new feature surface beyond w
 ### Internal / docs
 
 - `docs/backlog.md`, `docs/phase-0-1-capabilities.md`, `docs/security-reviewers.md` moved to `docs/internal/`. Stale link in `README.md` to a gitignored `implementation-plan.md` removed; lingering reference in `docs/security.md` reworded.
-- A2A gateway architectural picture aligned with reality: `a2a-gateway/src/lib.rs`, `a2a-gateway/src/verify.rs`, and `docs/architecture/a2a-gateway.md` no longer claim the gateway binary runs the JWS verifier in its hot path. The verifier remains complete and tested at the `azureclaw-a2a-core` library level; in-binary wiring is documented as a v1.1 follow-up. `docs/roadmap.md` reflects the same.
+- A2A gateway architectural picture aligned with reality: `a2a-gateway/src/lib.rs`, `a2a-gateway/src/verify.rs`, and `docs/architecture/a2a-gateway.md` no longer claim the gateway binary runs the JWS verifier in its hot path. The verifier remains complete and tested at the `kars-a2a-core` library level; in-binary wiring is documented as a v1.1 follow-up. `docs/roadmap.md` reflects the same.
 
 ### `[GAP-V1]` markers (accepted for v1.0)
 
 - Cosign-on-admission gating (read surface shipped; admission enforcement is v1.1).
 - TrustGraph live updates (projection captured at sandbox creation; v1.1).
 - Microsoft Agent Framework **.NET** adapter (returns when AGT lands `AgentMeshClient` for .NET).
-- A2A gateway in-binary JWS verifier (`azureclaw_a2a_core::verify_inbound_card` is library-complete & tested; the gateway binary today consumes the verified-caller subject from the upstream Gateway-API mTLS handshake. Wiring the verifier as an opt-in axum layer inside the gateway is a v1.1 task).
+- A2A gateway in-binary JWS verifier (`kars_a2a_core::verify_inbound_card` is library-complete & tested; the gateway binary today consumes the verified-caller subject from the upstream Gateway-API mTLS handshake. Wiring the verifier as an opt-in axum layer inside the gateway is a v1.1 task).
 
 ---
 
@@ -2758,18 +2758,18 @@ First release candidate cut for the v1.0.0 line. No new feature surface beyond w
 CNCF Kubernetes AI Conformance (v1.35+) gap-fix and supply-chain CI hardening.
 
 **Conformance gap-fixes (controller + helm):**
-- `ClawPairing` now ships a `status.conditions[]` array (Rust + helm CRD)
+- `KarsPairing` now ships a `status.conditions[]` array (Rust + helm CRD)
   with the standard k8s condition shape (`type`/`status`/`lastTransitionTime`/
   `reason`/`message`/`observedGeneration`) and a new `Ready` printer column
   driven by `.status.conditions[?(@.type=="Ready")].status`.
-- `ClawPairing` schema gains two `x-kubernetes-validations` CEL rules
+- `KarsPairing` schema gains two `x-kubernetes-validations` CEL rules
   (`spec.slotsMax >= 1`, `spec.tokenBudget >= 0`).
-- All six split-file CRDs (`a2aagent`, `claweval`, `clawmemory`,
+- All six split-file CRDs (`a2aagent`, `karseval`, `karsmemory`,
   `inferencepolicy`, `mcpserver`, `toolpolicy`) carry the recommended
-  `app.kubernetes.io/name: azureclaw` and `app.kubernetes.io/component: crd`
+  `app.kubernetes.io/name: kars` and `app.kubernetes.io/component: crd`
   labels. Helm-drift comparison strips labels, so no Rust schema change.
 - New `operator-default-deny-networkpolicy.yaml` template installs an
-  empty-podSelector default-deny policy in `azureclaw-system` (Ingress +
+  empty-podSelector default-deny policy in `kars-system` (Ingress +
   Egress in `policyTypes`), with allow-list exceptions for kube-DNS,
   kube-apiserver, and Prometheus scrapes of `:9091`.
 
@@ -2796,12 +2796,12 @@ CNCF Kubernetes AI Conformance (v1.35+) gap-fix and supply-chain CI hardening.
   ci.yml supply-chain rows, deny.toml shape.
 - Binary `cncf-conformance` writes `tests/cncf-conformance/CONFORMANCE-REPORT.md`
   and exits non-zero on any failure.
-- Suite renders the helm chart with `helm template ac deploy/helm/azureclaw
-  --namespace azureclaw-system` to avoid in-process Helm-token stripping
+- Suite renders the helm chart with `helm template ac deploy/helm/kars
+  --namespace kars-system` to avoid in-process Helm-token stripping
   (serde_yaml 0.9 hangs on action blocks like `{{ if }}"0"{{ else }}"1"{{ end }}`
   that strip to `value: "0""1"`).
 
-**Status:** 15 / 15 criteria pass. Run `cargo run -p azureclaw-cncf-conformance
+**Status:** 15 / 15 criteria pass. Run `cargo run -p kars-cncf-conformance
 --bin cncf-conformance` to regenerate the report.
 
 
@@ -2814,7 +2814,7 @@ code paths are modified.**
 
 What landed:
 
-- **`tests/chaos/` Rust crate** (`azureclaw-chaos-tests`, `publish = false`)
+- **`tests/chaos/` Rust crate** (`kars-chaos-tests`, `publish = false`)
   with 22 fault-injection tests across four reliability categories:
   - `tests/chaos/tests/k8s_api_flakes.rs` (8 cases) — 500/503 storms,
     429 + Retry-After, stale resourceVersion 410 GONE, truncated watch
@@ -2874,7 +2874,7 @@ router. Existing :8443 mesh path is byte-for-byte unchanged.
 
 Workspace restructure:
 
-- New library-only crate `azureclaw-a2a-core` (workspace member).
+- New library-only crate `kars-a2a-core` (workspace member).
   Lifted `signature.rs`, `agent_card.rs`, `card_signing.rs`,
   `card_verifier.rs`, and `error.rs` from `inference-router/src/a2a/`.
   The router re-exports them under their original module paths so
@@ -2882,13 +2882,13 @@ Workspace restructure:
   router and the new gateway now share the same byte-for-byte JWS
   verifier — no second implementation introduced (§0.2 #8).
 
-New crate `azureclaw-a2a-gateway` (binary):
+New crate `kars-a2a-gateway` (binary):
 
 - `tls` — server TLS for the public listener (rustls + ring),
   hot reload via `notify::Watcher` on cert rotation.
 - `mtls` — client TLS toward the router (CA-pinned).
 - `verify` — `ReplayCache` (TTL + cap, oldest-expiry eviction)
-  wrapping `azureclaw_a2a_core::verify_inbound_card`.
+  wrapping `kars_a2a_core::verify_inbound_card`.
 - `proxy` — single-upstream URL builder; preserves
   `X-A2A-Agent-Subject` header with the verified JWS subject.
 - `rate_limit` — per-subject token bucket; `SharedRedisLimiter`
@@ -2920,18 +2920,18 @@ Helm:
 Image build:
 
 - New `a2a-gateway/Dockerfile` — two-stage, distroless static
-  base, musl target. Single binary `azureclaw-a2a-gateway`.
+  base, musl target. Single binary `kars-a2a-gateway`.
 - New matrix entry in `.github/workflows/image-cache-publish.yml`;
   trigger paths extended to `a2a-gateway/**` and
-  `azureclaw-a2a-core/**`.
+  `kars-a2a-core/**`.
 
 Test deltas:
 
-- `azureclaw-a2a-core`: 73 (lifted from router; round-trip,
+- `kars-a2a-core`: 73 (lifted from router; round-trip,
   replay, expired-token, wrong-issuer coverage retained).
-- `azureclaw-a2a-gateway`: 31 (TLS load, mTLS load, replay cache,
+- `kars-a2a-gateway`: 31 (TLS load, mTLS load, replay cache,
   rate limiter, metrics, health, proxy URL builder).
-- `azureclaw-inference-router`: +1 (`a2a_mtls` config).
+- `kars-inference-router`: +1 (`a2a_mtls` config).
 - Workspace total 1022 → 1127.
 
 Docs:
@@ -2944,8 +2944,8 @@ Docs:
 
 ### S12.g — Sign-by-default + emit-manifest GitOps mode (S12 close-out)
 
-- **BREAKING (CLI default flip).** `azureclaw egress … --enforce`
-  and `azureclaw egress … --approve <domain>` now sign the resulting
+- **BREAKING (CLI default flip).** `kars egress … --enforce`
+  and `kars egress … --approve <domain>` now sign the resulting
   allowlist by default. The `--sign` flag is no longer required —
   pass `--no-sign` to opt out (with a loud yellow warning that
   the controller will emit
@@ -2955,11 +2955,11 @@ Docs:
   install a `SignerPolicy` (see S12.d).
 - **New `--emit-manifest <path>` flag (GitOps mode).** When set, the
   CLI pushes + signs the artifact as before but **does not** call
-  `kubectl patch`; instead it writes a byte-stable `ClawSandbox`
+  `kubectl patch`; instead it writes a byte-stable `KarsSandbox`
   patch YAML to `<path>` for the operator to commit to their GitOps
   repo. The file's leading comment surfaces the artifact digest +
   signer identity for human review. The marker annotation
-  `azureclaw.io/applied-via-gitops=true` is set on the resource so
+  `kars.io/applied-via-gitops=true` is set on the resource so
   cluster-side audit can distinguish GitOps-applied allowlists.
 - **`--force` flag.** With `--emit-manifest`, refuses to overwrite
   existing files unless `--force` is set (typical in CI re-runs).
@@ -2967,10 +2967,10 @@ Docs:
   promotes off-cluster; an unsigned artifact would fail
   authoritative-mode verify with no operator present to retry.
   Fail-fast at flag-parse time.
-- **`azureclaw migrate from-kagent` integration.** When the
+- **`kars migrate from-kagent` integration.** When the
   translated bundle includes an egress allowlist, the runner emits a
   "Next step (S12.g)" hint to stderr with the exact
-  `azureclaw egress … --emit-manifest …` command to run.
+  `kars egress … --emit-manifest …` command to run.
 - **Byte-stable manifest emitter.** Hand-rolled (no `yaml`/`js-yaml`)
   with fixed key order, LF line endings, single trailing newline, no
   trailing whitespace, no timestamps. `git diff` between two emit
@@ -2991,7 +2991,7 @@ Docs:
 
 ### S12.e — Authoritative-ref mode (fail-closed)
 
-- **`AZURECLAW_FEATURE_SIGNED_ALLOWLIST` env gate lifted.** Signed
+- **`KARS_FEATURE_SIGNED_ALLOWLIST` env gate lifted.** Signed
   allowlist verification is now always-on. When
   `spec.networkPolicy.allowlistRef` is set, the verified canonical
   artifact is **authoritative** for NetworkPolicy egress — the
@@ -3032,9 +3032,9 @@ Docs:
   passing — net +11 after dropping 5 feature-gate-specific tests
   whose code path no longer exists).
 - **Migration**: none. There is no installed base; the prior gate
-  (`AZURECLAW_FEATURE_SIGNED_ALLOWLIST`) defaulted off so no production
+  (`KARS_FEATURE_SIGNED_ALLOWLIST`) defaulted off so no production
   cluster relied on it. Operators with an `allowlistRef` set on a
-  `ClawSandbox` will see verify run on the next reconcile; either
+  `KarsSandbox` will see verify run on the next reconcile; either
   publish a SignerPolicy (cluster ConfigMap or env fallback) or unset
   the ref to keep using inline endpoints.
 
@@ -3043,19 +3043,19 @@ Docs:
 - New `cli/src/commands/operator/panels/` directory: `Panel` interface,
   `ClusterDataSource` abstraction (`KubectlDataSource` + `FixtureDataSource`),
   registry + layout, and one panel per Phase-2 CRD.
-  - `clawsandbox`, `clawpairing` — refactored from existing operator
+  - `karssandbox`, `karspairing` — refactored from existing operator
     surface into the panel shape.
   - `mcpserver` (S1) — list + Conditions + JWKS Secret presence (`<present>`/`<missing>`/`<unknown>`).
   - `toolpolicy` (S2) — list + appliesTo + commerce / approval / rate-limit summary.
   - `inferencepolicy` (S4) — list + budgets + guardrail floor + ordered model preference.
   - `a2aagent` (S3) — list + Conditions + AgentCard publication status.
-  - `clawmemory` (S5) — list + Foundry binding + RBAC scope summary.
-  - `claweval` (S6) — list + lastRunAt + lastScore + nextScheduledAt.
+  - `karsmemory` (S5) — list + Foundry binding + RBAC scope summary.
+  - `karseval` (S6) — list + lastRunAt + lastScore + nextScheduledAt.
   - `provider_status` — Foundry, AGT, ACR pull-through, AGC ingress,
     Identity (WI). Probes that can't observe the truth surface as
     `unknown` with a verbatim reason — never invented data
     (plan §0.2 #10 "verify, don't guess").
-- New `azureclaw operator` flags: `--panels <a,b,c>` (filter), `--per-sandbox`
+- New `kars operator` flags: `--panels <a,b,c>` (filter), `--per-sandbox`
   (group panels vertically per sandbox-name), `--snapshot` (one-shot
   stdout render, no TUI). Live TUI gains a Shift-P overlay for the
   modular-panels view.
@@ -3074,13 +3074,13 @@ Docs:
 
 **BREAKING (in-place v1alpha1 schema edit; pre-release, no conversion webhook).**
 
-The `ClawSandbox` spec no longer carries inline inference or tool-policy
+The `KarsSandbox` spec no longer carries inline inference or tool-policy
 configuration. Instead, the sandbox holds same-namespace references to
 sibling `InferencePolicy` and `ToolPolicy` CRDs which become the single
 source of truth.
 
 Schema changes (`controller/src/crd.rs`,
-`deploy/helm/azureclaw/templates/crd.yaml`):
+`deploy/helm/kars/templates/crd.yaml`):
 
 - `spec.inference: InferenceConfig` → **removed**.
 - `spec.inferenceRef: { name: string }` → **new, required**. References
@@ -3095,9 +3095,9 @@ Schema changes (`controller/src/crd.rs`,
   emitted on `Degraded` when a referenced CR is missing.
 
 CLI updates (`cli/src/commands/{up/sandbox_bringup,add,attest}.ts`,
-`cli/src/migrate/from_kagent.ts`, new `cli/src/refs.ts`): the `azureclaw
-up` and `azureclaw add` commands now emit a multi-doc bundle
-(`InferencePolicy` + optional `ToolPolicy` + `ClawSandbox`) and apply
+`cli/src/migrate/from_kagent.ts`, new `cli/src/refs.ts`): the `kars
+up` and `kars add` commands now emit a multi-doc bundle
+(`InferencePolicy` + optional `ToolPolicy` + `KarsSandbox`) and apply
 all three in one shot. Naming convention: `<sandbox>-inference` and
 `<sandbox>-toolpolicy`, DNS-1123 truncated to 63 chars. The
 `from-kagent` migrator now always emits an `<sandbox>-inference`
@@ -3113,7 +3113,7 @@ two-doc-per-sandbox shape.
 ### S12.d — SignerPolicy ConfigMap (Fulcio issuer + SAN allowlist)
 
 - New `controller/src/signer_policy.rs` — cluster-scoped
-  `azureclaw-signer-policy` ConfigMap watcher (filtered by name +
+  `kars-signer-policy` ConfigMap watcher (filtered by name +
   controller-namespace). Parses `data.fulcioIssuers` /
   `data.sanPatterns` (newline-separated, `#` comments stripped) into a
   `SharedSignerPolicy` handle that the policy fetcher consults on every
@@ -3123,7 +3123,7 @@ two-doc-per-sandbox shape.
   `controller/src/policy_fetcher.rs`; `reason_for_error` maps to
   `"SignerPolicyMalformed"`. Reconciler now emits
   `AllowlistVerified=False/SignerPolicyMalformed` on affected
-  `ClawSandbox` resources when the cluster ConfigMap fails to parse —
+  `KarsSandbox` resources when the cluster ConfigMap fails to parse —
   distinct from `SignerPolicyMissing` so operators can disambiguate
   "I never installed one" from "the one I installed is broken".
 - `policy_fetcher::maybe_verify_allowlist` rewired to consult a
@@ -3132,9 +3132,9 @@ two-doc-per-sandbox shape.
   handle for unit-test cleanliness. Resolution order:
   ConfigMap-configured → use it; ConfigMap-malformed →
   `SignerPolicyMalformed` (no env fallback); ConfigMap-absent →
-  fall back to env (`AZURECLAW_SIGNER_FULCIO_ISSUERS` /
-  `AZURECLAW_SIGNER_SAN_PATTERNS` — emergency-override path).
-- New Helm template `deploy/helm/azureclaw/templates/signer-policy-configmap.yaml`
+  fall back to env (`KARS_SIGNER_FULCIO_ISSUERS` /
+  `KARS_SIGNER_SAN_PATTERNS` — emergency-override path).
+- New Helm template `deploy/helm/kars/templates/signer-policy-configmap.yaml`
   with `signerPolicy.enabled` (default `true`), `signerPolicy.fulcioIssuers`
   (defaults: GitHub Actions OIDC + Entra workload-identity placeholder),
   `signerPolicy.sanPatterns` (default: repo-scoped CI workflow SAN).
@@ -3147,7 +3147,7 @@ two-doc-per-sandbox shape.
   `get/list/watch` on `configmaps`. The new watcher fits within the
   existing rule; no broadening introduced. (A future least-privilege
   pass could narrow this to a namespace-scoped Role on
-  `azureclaw-system`.)
+  `kars-system`.)
 - 18 new unit tests; controller test count 383 → 401. Workspace green;
   clippy clean; `cargo fmt` clean; `helm lint` clean.
 
@@ -3175,16 +3175,16 @@ two-doc-per-sandbox shape.
   artifacts via `oci-client`, verifies cosign signature + signer identity via
   `sigstore-rs`, re-validates canonical-form rules from
   `docs/internal/policy-canonical-format.md`. Result cached by digest with 1h TTL.
-- `AllowlistVerified` condition surfaced on `ClawSandbox` status when
+- `AllowlistVerified` condition surfaced on `KarsSandbox` status when
   `spec.networkPolicy.allowlistRef` is set and
-  `AZURECLAW_FEATURE_SIGNED_ALLOWLIST=1`. Reasons: `Verified`,
+  `KARS_FEATURE_SIGNED_ALLOWLIST=1`. Reasons: `Verified`,
   `SignerPolicyMissing`, `SignatureVerifyFailed`, `IdentityMismatch`,
   `CanonicalFormViolation`, `DigestMismatch`, `Unauthorized`, `NotFound`,
   `InvalidRef`. `Transient` errors preserve the prior condition (no flap).
 - Status-only: `NetworkPolicy` continues to derive from inline
   `allowedEndpoints`. Authoritative-mode flip ships in S12.e.
 - SignerPolicy still configured via env in S12.b
-  (`AZURECLAW_SIGNER_FULCIO_ISSUERS`, `AZURECLAW_SIGNER_SAN_PATTERNS`);
+  (`KARS_SIGNER_FULCIO_ISSUERS`, `KARS_SIGNER_SAN_PATTERNS`);
   ConfigMap watcher ships in S12.d. With no SignerPolicy configured, the
   fetcher returns `SignerPolicyMissing` (intended fail-closed behavior).
 - ACR auth via Workload Identity → ACR token-exchange flow implemented
@@ -3200,11 +3200,11 @@ two-doc-per-sandbox shape.
 
 ### S12.c — CLI `--sign` flag (egress allowlist artifact producer)
 
-- New `cli/src/commands/egress/sign.ts` — canonical YAML serializer (matches `docs/internal/policy-canonical-format.md` byte-for-byte), `oras push` artifact uploader, `cosign sign` orchestrator (keyless / identity-token / keyed), `kubectl patch` of `ClawSandbox.spec.networkPolicy.allowlistRef`.
-- New flags on `azureclaw egress`: `--sign`, `--sign-mode <keyless|identity-token|keyed>`, `--sign-key <ref>`, `--registry`, `--repository`, `--no-sign`.
+- New `cli/src/commands/egress/sign.ts` — canonical YAML serializer (matches `docs/internal/policy-canonical-format.md` byte-for-byte), `oras push` artifact uploader, `cosign sign` orchestrator (keyless / identity-token / keyed), `kubectl patch` of `KarsSandbox.spec.networkPolicy.allowlistRef`.
+- New flags on `kars egress`: `--sign`, `--sign-mode <keyless|identity-token|keyed>`, `--sign-key <ref>`, `--registry`, `--repository`, `--no-sign`.
 - Status: **non-authoritative** — inline `allowedEndpoints` remains the source of truth in this slice. The controller-side fetcher (S12.b) verifies the artifact and surfaces `AllowlistVerified`. The flip to authoritative ships in S12.e.
 - Auto-mode-detection: keyless when TTY + no token; identity-token when `SIGSTORE_ID_TOKEN`/`OIDC_TOKEN` env present; keyed when `--sign-mode keyed`+`--sign-key` set.
-- Fail-closed: signature push failure aborts the flow before patching the CR — no orphan refs on `ClawSandbox` resources.
+- Fail-closed: signature push failure aborts the flow before patching the CR — no orphan refs on `KarsSandbox` resources.
 - Requires `oras` and `cosign` in `$PATH`; clear actionable errors if missing.
 - 41 new vitest tests across `cli/src/commands/egress/sign.test.ts` and `cli/src/commands/egress.test.ts`; CLI test count 354 → 395 (passing). Lint clean; typecheck clean; `npm run build` green.
 
@@ -3220,13 +3220,13 @@ runtime/CLI/controller behavior change yet; existing CRs round-trip unchanged.
   signed, content-addressed OCI artifact: `{ registry, repository, digest,
   artifactType }`. Sized to be reusable by future supply-chain-grade
   references (not just egress allowlists).
-- New optional `ClawSandbox.spec.networkPolicy.allowlistRef: OciArtifactRef`
+- New optional `KarsSandbox.spec.networkPolicy.allowlistRef: OciArtifactRef`
   field. Audit-only in S12.a — no consumer reads it yet. Becomes
-  status-surfaced in S12.b behind `AZURECLAW_FEATURE_SIGNED_ALLOWLIST`,
+  status-surfaced in S12.b behind `KARS_FEATURE_SIGNED_ALLOWLIST`,
   authoritative in S12.e.
 - `docs/internal/policy-canonical-format.md` — byte-stable canonicalization rules
   for the v1 egress allowlist artifact (artifactType
-  `application/vnd.azureclaw.egress-allowlist.v1+yaml`). Locks down: IDNA
+  `application/vnd.kars.egress-allowlist.v1+yaml`). Locks down: IDNA
   2008 host normalization, explicit ports, `(host, port)` deduplication,
   lexicographic sort, `metadata.generation` for replay protection,
   forward-compat path for v2.
@@ -3296,19 +3296,19 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
   `set -o pipefail`, run `openclaw doctor --fix` without `|| true` mask,
   log staging stats. Doctor's own success is the source of truth.
 
-### S15.g.3 `phase2-cli-rename` — `@azure/azureclaw` → `@azureclaw/cli`
+### S15.g.3 `phase2-cli-rename` — `@azure/kars` → `@kars/cli`
 
 #### Refactored
 
-- `cli/package.json` `name` field: `@azure/azureclaw` → `@azureclaw/cli`.
-  Aligns with the existing `@azureclaw/{runtime-openclaw,mesh,tests-compat,
+- `cli/package.json` `name` field: `@azure/kars` → `@kars/cli`.
+  Aligns with the existing `@kars/{runtime-openclaw,mesh,tests-compat,
   tests-conformance}` packages — the entire workspace now lives under one
   scope.
 - Removed three stale entries from `cli/package.json` left behind by S15.g.1:
   `main: dist/plugin.js`, `types: dist/plugin.d.ts`, and
   `openclaw.extensions: ["./dist/plugin.js"]`. The CLI is a pure binary
   package (only `bin` is needed); the OpenClaw plugin entrypoint moved to
-  the `@azureclaw/runtime-openclaw` package in S15.g.1 and `cli/dist/plugin.js`
+  the `@kars/runtime-openclaw` package in S15.g.1 and `cli/dist/plugin.js`
   has not been emitted since.
 - Updated `.github/copilot-instructions.md` package-name reference.
 - `cli/package-lock.json` regenerated with the new package name.
@@ -3365,7 +3365,7 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
 
 #### Refactored
 
-- New top-level package `runtimes/openclaw/` (`@azureclaw/runtime-openclaw`).
+- New top-level package `runtimes/openclaw/` (`@kars/runtime-openclaw`).
   The OpenClaw runtime adapter (formerly intermingled with the operator CLI
   under `cli/src/`) now lives in its own package, sibling to the future
   `runtimes/openai-agents/` and `runtimes/maf/` adapters that S10.A3+S10.A4
@@ -3380,7 +3380,7 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
   | `cli/src/router-url.test.ts` | `runtimes/openclaw/src/router-url.test.ts` |
   | `cli/openclaw.plugin.json` | `runtimes/openclaw/openclaw.plugin.json` |
 
-- New `runtimes/openclaw/package.json` (`@azureclaw/runtime-openclaw`)
+- New `runtimes/openclaw/package.json` (`@kars/runtime-openclaw`)
   + `tsconfig.json` mirroring the cli's compiler options. `main` /
   `openclaw.extensions` point at `dist/index.js` (was
   `dist/plugin.js`). Runtime deps narrowed to the actual surface
@@ -3392,16 +3392,16 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
   now `COPY runtimes/openclaw/{package.json,package-lock.json,
   tsconfig.json,src/}` and runs `npm ci && npm run build` there;
   the runtime stage copies `runtimes/openclaw/dist/` →
-  `/opt/azureclaw-plugin/`. `cli/skills/` and `cli/policies/` are
+  `/opt/kars-plugin/`. `cli/skills/` and `cli/policies/` are
   still copied at the same destination (S15.g.2 will move skills).
   The `policy-engine/profiles/` copy was removed from the
   `cli-builder` stage because it was only needed by cli's own build
-  script (host-side `azureclaw dev` seccomp staging) — the
+  script (host-side `kars dev` seccomp staging) — the
   in-sandbox runtime adapter has no use for those profile JSONs.
 - The misleadingly-named top-level `policy-engine/` directory has
   been renamed to `cli/profiles/`. It only ever contained a single
   seccomp JSON (no engine), and its only consumer is now
-  `cli/src/commands/dev.ts` (host-side `azureclaw dev`). cli's
+  `cli/src/commands/dev.ts` (host-side `kars dev`). cli's
   `build` script becomes `cp -r profiles dist/profiles`. CI scope
   regexes (`security-audit-required.sh`, `no-stubs.sh`,
   `no-custom-crypto.sh`) and docs (`README.md`,
@@ -3458,9 +3458,9 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
 
 #### Verification
 
-- `cargo build -p azureclaw-inference-router` clean.
-- `cargo clippy -p azureclaw-inference-router --all-targets -- -D warnings` clean.
-- `cargo test -p azureclaw-inference-router --lib` 608 passed / 0 failed.
+- `cargo build -p kars-inference-router` clean.
+- `cargo clippy -p kars-inference-router --all-targets -- -D warnings` clean.
+- `cargo test -p kars-inference-router --lib` 608 passed / 0 failed.
 
 
 
@@ -3471,8 +3471,8 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
   now 537 LOC under cap.
 - The final closure-bound block inside `register()` — the Foundry
   `api.registerProvider` call, the `api.registerCli` registrar
-  emitting `openclaw azureclaw {status,connect,dev,logs}`, and the
-  ~12 `api.registerCommand` slash-command (`/azureclaw …`)
+  emitting `openclaw kars {status,connect,dev,logs}`, and the
+  ~12 `api.registerCommand` slash-command (`/kars …`)
   definitions — extracted to `cli/src/core/commands/openclaw.ts`
   (~833 LOC). Command/tool bodies are byte-identical; closure
   capture is replaced with explicit `OpenClawCommandsDeps` threading
@@ -3519,12 +3519,12 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
 
 #### Tools moved (registered via `registerAgtTools(api, deps)`)
 
-- `azureclaw_spawn` / `azureclaw_spawn_status` /
-  `azureclaw_spawn_destroy` / `azureclaw_spawn_list`
-- `azureclaw_mesh_send` / `azureclaw_mesh_inbox` /
-  `azureclaw_mesh_transfer_file` / `azureclaw_discover`
-- `azureclaw_handoff_status` (always registered)
-- `azureclaw_handoff_request` / `azureclaw_handoff_confirm`
+- `kars_spawn` / `kars_spawn_status` /
+  `kars_spawn_destroy` / `kars_spawn_list`
+- `kars_mesh_send` / `kars_mesh_inbox` /
+  `kars_mesh_transfer_file` / `kars_discover`
+- `kars_handoff_status` (always registered)
+- `kars_handoff_request` / `kars_handoff_confirm`
   (gated on `AGT_REGISTRY_MODE === "global"`, same as before)
 
 #### Deps surface (`AgtToolsDeps`)
@@ -3594,7 +3594,7 @@ session — e.g. on re-init or reconnect).
 
 - Tool names, parameters, descriptions, and execute-body semantics
   are unchanged — vendored extension manifest in
-  `~/.openclaw-data/extensions/azureclaw/` keeps surfacing the
+  `~/.openclaw-data/extensions/kars/` keeps surfacing the
   identical 10-tool list. Backward-compatible.
 - No new mesh / spawn / handoff / OpenClaw-specific surface
   changes — those clusters remain in `plugin.ts` for S15.f.9.
@@ -3874,7 +3874,7 @@ session — e.g. on re-init or reconnect).
 
 - `cli/src/commands/up.ts` 1182 → **766 LOC** — final sub-slice of
   the S15.d up.ts multi-PR sub-train. Sandbox bring-up phase
-  (federated credentials + Foundry RBAC + ClawSandbox CR + wait
+  (federated credentials + Foundry RBAC + KarsSandbox CR + wait
   for Running + WebUI port-forward + deployment summary +
   `saveContext()`) extracted to
   `cli/src/commands/up/sandbox_bringup.ts` (482 LOC). Caller is a
@@ -3904,7 +3904,7 @@ session — e.g. on re-init or reconnect).
   ingress) extracted to `cli/src/commands/up/agentmesh_deploy.ts`
   (174 LOC). The result triple `{ registryMode,
   globalRegistryUrl, globalRelayUrl }` flows forward unchanged to
-  the ClawSandbox CR creation step and `saveContext()`.
+  the KarsSandbox CR creation step and `saveContext()`.
 
 #### Tests
 
@@ -3982,7 +3982,7 @@ session — e.g. on re-init or reconnect).
 
 #### Tests
 
-- `cargo test --package azureclaw-inference-router --lib`: **608
+- `cargo test --package kars-inference-router --lib`: **608
   passed; 0 failed**. `cargo build`, `cargo clippy --all-targets
   -- -D warnings`, `cargo fmt --all -- --check` all clean. No
   behavioral change — handler body moved verbatim, visibility
@@ -4054,8 +4054,8 @@ session — e.g. on re-init or reconnect).
 
 #### Added
 
-- `azureclaw_controller_reconcile_duration_seconds{crd_kind, outcome}`
-  Histogram and `azureclaw_controller_reconcile_total{crd_kind,
+- `kars_controller_reconcile_duration_seconds{crd_kind, outcome}`
+  Histogram and `kars_controller_reconcile_total{crd_kind,
   outcome}` IntCounterVec on the controller's `:9091/metrics`
   surface. Closes the second half of S7.E (operator-craftsmanship
   observability per `docs/implementation-plan.md` §9 P0).
@@ -4067,10 +4067,10 @@ session — e.g. on re-init or reconnect).
 
 #### Wired
 
-- All 8 reconcilers — `reconciler/mod.rs` (ClawSandbox),
-  `a2a_agent_reconciler.rs`, `claw_eval_reconciler.rs`,
-  `claw_memory_reconciler.rs`, `inference_policy_reconciler.rs`,
-  `mcp_server_reconciler.rs`, `pairing_reconciler.rs` (ClawPairing),
+- All 8 reconcilers — `reconciler/mod.rs` (KarsSandbox),
+  `a2a_agent_reconciler.rs`, `kars_eval_reconciler.rs`,
+  `kars_memory_reconciler.rs`, `inference_policy_reconciler.rs`,
+  `mcp_server_reconciler.rs`, `pairing_reconciler.rs` (KarsPairing),
   `tool_policy_reconciler.rs`. Reconcile-fn bodies are untouched.
 
 #### Tests
@@ -4110,12 +4110,12 @@ session — e.g. on re-init or reconnect).
 
 #### Added
 
-- **`deploy/helm/azureclaw/templates/admission-content-safety-floor.yaml`** —
+- **`deploy/helm/kars/templates/admission-content-safety-floor.yaml`** —
   ValidatingAdmissionPolicy + Binding rejecting `InferencePolicy.spec.contentSafety.{hate,selfHarm,sexual,violence}` values that are *more permissive* than the cluster minimum (Azure Content Safety ordering: Safe < Low < Medium < High; lower ordinal = stricter floor).
 - **`admission.contentSafetyFloor`** Helm values:
   `enabled` (default `true`), `minimum` (default `"Medium"`,
   validated at chart-render time against `Safe|Low|Medium|High`).
-- Per-CR opt-out via `azureclaw.azure.com/dev-only: "true"` label,
+- Per-CR opt-out via `kars.azure.com/dev-only: "true"` label,
   consistent with the null-provider-block VAP convention.
 
 #### Tests
@@ -4134,8 +4134,8 @@ session — e.g. on re-init or reconnect).
 #### Added
 
 - **`controller/src/metrics.rs`** — Prometheus counter registration:
-  `azureclaw_controller_reconcile_errors_total{crd_kind, error_class}`
-  and `azureclaw_controller_reconcile_retries_total{crd_kind}`. Helper
+  `kars_controller_reconcile_errors_total{crd_kind, error_class}`
+  and `kars_controller_reconcile_retries_total{crd_kind}`. Helper
   `record_reconcile_error(...)` increments both. Bounded-cardinality
   labels (no CR names / namespaces in labels).
 - **`controller/src/metrics_server.rs`** — minimal axum HTTP server
@@ -4180,8 +4180,8 @@ session — e.g. on re-init or reconnect).
   the same 30-second tick. Touched: `reconciler/mod.rs`,
   `pairing_reconciler.rs`, `mcp_server_reconciler.rs`,
   `tool_policy_reconciler.rs`, `a2a_agent_reconciler.rs`,
-  `inference_policy_reconciler.rs`, `claw_memory_reconciler.rs`,
-  `claw_eval_reconciler.rs`. Sandbox's
+  `inference_policy_reconciler.rs`, `kars_memory_reconciler.rs`,
+  `kars_eval_reconciler.rs`. Sandbox's
   `error_requeue_duration(error)` keeps its kind-based base (30s for
   `Kube`, 300s for `SerdeJson`); jitter applies after.
 
@@ -4238,7 +4238,7 @@ session — e.g. on re-init or reconnect).
 
 #### Added
 
-- **`Progressing` Condition** now emitted on every `ClawSandbox` status
+- **`Progressing` Condition** now emitted on every `KarsSandbox` status
   patch path: `build_running_status_patch` (`Progressing=False / Reconciled`),
   `build_degraded_status_patch` (`Progressing=False / <degraded-reason>`),
   and `build_runtime_unsupported_status_patch`
@@ -4273,16 +4273,16 @@ session — e.g. on re-init or reconnect).
 
 - **`controller/src/field_managers.rs`** — central registry of every
   Server-Side Apply `fieldManager` the controller emits. Each per-CRD
-  reconciler (MCP / ToolPolicy / A2A / InferencePolicy / ClawMemory /
-  ClawEval) and each subsystem (ClawSandbox / pairing / mesh-peer /
+  reconciler (MCP / ToolPolicy / A2A / InferencePolicy / KarsMemory /
+  KarsEval) and each subsystem (KarsSandbox / pairing / mesh-peer /
   provider-bridge) now sources its manager string from this single
-  module. Eliminates the five bare `"azureclaw-controller"` /
-  `"azureclaw-mesh-peer"` literals scattered across `reconciler/mod.rs`,
+  module. Eliminates the five bare `"kars-controller"` /
+  `"kars-mesh-peer"` literals scattered across `reconciler/mod.rs`,
   `pairing.rs`, `pairing_reconciler.rs`, `mesh_peer/offload.rs`,
   `mesh_peer/pair.rs`.
 - **`ALL_FIELD_MANAGERS`** registry slice + uniqueness invariant:
   `all_field_managers_are_unique`, `field_managers_use_namespaced_format`,
-  `no_bare_azureclaw_controller_string`, `legacy_provider_constants_match`
+  `no_bare_kars_controller_string`, `legacy_provider_constants_match`
   tests (4 new — controller test count 324 → 328).
 - **`providers::field_managers`** preserved as a backwards-compat
   re-export so legacy import paths keep working.
@@ -4290,7 +4290,7 @@ session — e.g. on re-init or reconnect).
 #### Changed
 
 - `controller/src/reconciler/mod.rs` (13 SSA call sites) now uses
-  `crate::field_managers::CLAWSANDBOX` (`azureclaw-controller/clawsandbox`).
+  `crate::field_managers::CLAWSANDBOX` (`kars-controller/karssandbox`).
 - `controller/src/pairing.rs` + `pairing_reconciler.rs` (3 sites)
   use `crate::field_managers::PAIRING`.
 - `controller/src/mesh_peer/offload.rs` + `pair.rs` (3 sites) use
@@ -4298,7 +4298,7 @@ session — e.g. on re-init or reconnect).
   ownership migration on existing clusters).
 - Per-CRD reconcilers (`mcp_server_reconciler`, `tool_policy_reconciler`,
   `a2a_agent_reconciler`, `inference_policy_reconciler`,
-  `claw_memory_reconciler`, `claw_eval_reconciler`) now declare their
+  `kars_memory_reconciler`, `kars_eval_reconciler`) now declare their
   `FIELD_MANAGER` const as a re-export of the central constant.
 
 #### Out of scope (subsequent S7 sub-slices)
@@ -4328,17 +4328,17 @@ session — e.g. on re-init or reconnect).
   `runtimeKindFromCr` (live-CR reader with safe `OpenClaw` fallback
   for legacy/unknown values), and `buildRuntimeBlock` (emits the
   variant-correct `spec.runtime` block).
-- **`azureclaw add --runtime <kind>`** — accepts `openclaw` (default),
+- **`kars add --runtime <kind>`** — accepts `openclaw` (default),
   `openai-agents`, `microsoft-agent-framework`, `byo`. Tier-2 kinds
   rejected with discoverable error listing the wired set. BYO
   requires `--byo-image`; `--byo-contract-version` defaults to `v1`.
   MAF defaults `--maf-language python`; `dotnet` rejected client-side
   with explicit Phase 3 / upstream-blocker message.
-- **`azureclaw connect <name>`** — fetches the live ClawSandbox CR
+- **`kars connect <name>`** — fetches the live KarsSandbox CR
   and addresses the correct container with `kubectl exec -c` based
   on `spec.runtime.kind`. Backward-compatible: legacy CRs without
   `spec.runtime` fall back to `openclaw`.
-- **`azureclaw list`** — adds a `RUNTIME` column showing each
+- **`kars list`** — adds a `RUNTIME` column showing each
   sandbox's `spec.runtime.kind` (defaults to `OpenClaw` for legacy
   CRs).
 - **`cli/src/runtime.test.ts`** — 19 vitest unit tests covering
@@ -4354,7 +4354,7 @@ session — e.g. on re-init or reconnect).
 #### Closes
 
 - §14.6 column 11 (Multi-runtime hosting) **operator-accessible** —
-  the value prop now reachable via `azureclaw add --runtime <kind>`
+  the value prop now reachable via `kars add --runtime <kind>`
   rather than hand-edited CRs.
 
 ---
@@ -4379,10 +4379,10 @@ session — e.g. on re-init or reconnect).
 - **`sandbox-images/maf-python/`** — Dockerfile (Python 3.12 +
   `agent-framework>=0.1,<0.2` + `azure-identity` for the eventual AAD
   shim) + `entrypoint.sh` exporting `OPENAI_BASE_URL`,
-  `AZURE_OPENAI_ENDPOINT`, `AZURECLAW_PLATFORM_MCP_URL` — all pointed
+  `AZURE_OPENAI_ENDPOINT`, `KARS_PLATFORM_MCP_URL` — all pointed
   at the router sidecar. Image declares
-  `LABEL org.azureclaw.runtime.contract="v1"` and
-  `LABEL org.azureclaw.runtime.kind="MicrosoftAgentFramework"`.
+  `LABEL org.kars.runtime.contract="v1"` and
+  `LABEL org.kars.runtime.kind="MicrosoftAgentFramework"`.
 - 9 new controller tests (315 → 324, all green): default Python
   image, explicit Python success, dotnet → ShapeInvalid (with msg
   assertions for upstream-blocker + Phase 3), entrypoint propagation,
@@ -4405,11 +4405,11 @@ S10.A4 closes the column-11 bar:
 - ✓ MAF Python adapter (this slice)
 - ✓ BYO end-to-end (S10.A2.b)
 - ✓ OverlayMode for sigs/agent-sandbox (S8)
-- ✓ kagent migration via `azureclaw migrate from-kagent` (S9.3)
+- ✓ kagent migration via `kars migrate from-kagent` (S9.3)
 
 #### Deferred
 
-- **In-pod adapter Python package** (`azureclaw-runtime-maf-python`
+- **In-pod adapter Python package** (`kars-runtime-maf-python`
   PyPI) — AAD shim (`DefaultAzureCredential` → bearer-on-router),
   `AZURE_OPENAI_ENDPOINT` rewriting, AGT-init compat, MAF-specific
   MCP client glue, OTel SDK wiring. Immediate follow-up.
@@ -4435,7 +4435,7 @@ S10.A4 closes the column-11 bar:
   short-circuit landed in S10.A2 with a real
   `RuntimeDeploymentPlan` for `RuntimeKind::OpenAIAgents`. Resolves
   the adapter image via `DEFAULT_OPENAI_AGENTS_IMAGE` (default
-  `azureclawacr.azurecr.io/azureclaw-runtime-openai-agents:latest`)
+  `karsacr.azurecr.io/kars-runtime-openai-agents:latest`)
   with `OPENAI_AGENTS_RUNTIME_IMAGE` env override (whitespace
   treated as unset). Propagates `python_version` →
   `RUNTIME_PYTHON_VERSION` env (non-reserved prefix so it survives
@@ -4447,10 +4447,10 @@ S10.A4 closes the column-11 bar:
   3.12 + `openai-agents>=0.1,<0.2`) + `entrypoint.sh` exporting
   `OPENAI_BASE_URL=http://127.0.0.1:8443/openai/v1` (router sidecar
   is the only LLM endpoint allowed by NetworkPolicy + egress-guard)
-  and `AZURECLAW_PLATFORM_MCP_URL=http://127.0.0.1:8443/platform/mcp`
+  and `KARS_PLATFORM_MCP_URL=http://127.0.0.1:8443/platform/mcp`
   (S10.B platform MCP server: every runtime gets the 9 Foundry shim
   tools for free). Image declares
-  `LABEL org.azureclaw.runtime.contract="v1"` so the existing BYO
+  `LABEL org.kars.runtime.contract="v1"` so the existing BYO
   contract verifier recognises it.
 - 8 new controller tests (315/315 green): default image, env-override
   image (set / unset / whitespace-as-unset), `python_version` →
@@ -4477,7 +4477,7 @@ S10.A4 closes the column-11 bar:
 
 #### Deferred
 
-- **In-pod adapter Python package** (`azureclaw-runtime-openai-agents`
+- **In-pod adapter Python package** (`kars-runtime-openai-agents`
   PyPI) — AAD shim for Azure OpenAI, `AZURE_OPENAI_ENDPOINT`
   rewriting based on `InferencePolicy`, AGT-init compat, OTel SDK
   wiring. The Dockerfile + entrypoint scaffolding is contract-labelled
@@ -4629,7 +4629,7 @@ OpenClaw-only.
 #### Tests
 - 307/307 controller tests pass (was 306 in S10.A2; +1 new
   dispatcher test).
-- `cargo clippy --package azureclaw-controller --all-targets -- -D
+- `cargo clippy --package kars-controller --all-targets -- -D
   warnings` clean.
 - `cargo fmt --all -- --check` clean.
 
@@ -4693,7 +4693,7 @@ OpenClaw-only.
   ordering, same reserved-prefix filter). For non-OpenClaw kinds the
   AdapterMissing skip is preserved exactly (same status condition,
   same 300 s requeue). BYO end-to-end deployment (split container
-  builder + registry-side `org.azureclaw.runtime.contract=v1` label
+  builder + registry-side `org.kars.runtime.contract=v1` label
   check) is deferred to S10.A2.b.
 
 ### S10.A1 `phase2-multi-runtime-crd` — `spec.openclaw` → `spec.runtime` discriminated union
@@ -4704,8 +4704,8 @@ OpenClaw-only.
   discriminator and per-variant config (`openclaw`, `openaiAgents`,
   `microsoftAgentFramework`, `semanticKernel`, `langGraph`, `anthropic`,
   `byo` with required `contractVersion` + nested `agentCode` exactly-one
-  `oci|git`); `ClawSandboxStatus.runtime_kind` field surfaces the
-  reconciled kind for `kubectl get clawsandbox -o wide` (printer column
+  `oci|git`); `KarsSandboxStatus.runtime_kind` field surfaces the
+  reconciled kind for `kubectl get karssandbox -o wide` (printer column
   `Runtime`). Tier-1 variants (`OpenClaw` / `OpenAIAgents` /
   `MicrosoftAgentFramework`) get controller adapters in S10.A3/A4;
   Tier-2 placeholders (`SemanticKernel` / `LangGraph` / `Anthropic`)
@@ -4713,7 +4713,7 @@ OpenClaw-only.
   stamps `RuntimeReady=False / AdapterMissing` until adapters land.
   11 round-trip tests assert each variant deserialises in isolation
   and rejects shape conflicts.
-- **`deploy/helm/azureclaw/templates/crd.yaml`** — schema mirror with 7
+- **`deploy/helm/kars/templates/crd.yaml`** — schema mirror with 7
   CEL `XValidation` bidirectional rules (`(self.kind=='OpenClaw') ==
   has(self.openclaw)` etc., one per variant) plus nested AgentCodeRef
   exactly-one CEL on every variant that carries agent code. Printer
@@ -4746,7 +4746,7 @@ OpenClaw-only.
     `cli/src/migrate/from_kagent.ts`, `cli/src/commands/migrate.ts`
     `--image` help text.
   - CLI readers: `cli/src/commands/handoff.ts` (model inheritance).
-  - Examples (6 yamls): `examples/{basic,confidential,telegram}-agent/clawsandbox.yaml`
+  - Examples (6 yamls): `examples/{basic,confidential,telegram}-agent/karssandbox.yaml`
     and `examples/demo-clawshield/{fabrikam-legal,contoso-bank,northwind-trade}-agent.yaml`.
   - Compat fixtures (2 yamls): `tests/compat/fixtures/null-provider-{prod-denied,devonly-ok}.yaml`.
 - **`build_running_status_patch` / `running_status_matches` /
@@ -4764,7 +4764,7 @@ OpenClaw-only.
   `controller/src/reconciler/runtime.rs` (single seam consuming one plan
   per kind so we don't grow N parallel small helpers).
 - Per-variant image / entrypoint / env / `agentCode` mount resolution.
-- BYO contract verifier (`org.azureclaw.runtime.contract=v1` label
+- BYO contract verifier (`org.kars.runtime.contract=v1` label
   check; `RuntimeReady` Condition reflects compliance).
 - `validate_runtime_shape` defensive guard mirroring the CEL rules in
   case of CRD downgrade.
@@ -4776,21 +4776,21 @@ OpenClaw-only.
   `McpServer` CRD (Phase 1 shipped schema-only). Generates an Ed25519 signing
   keypair (raw 32-byte form, mirroring `mesh_peer/mod.rs::MeshIdentity::generate`
   to avoid pulling the `pkcs8` feature on `ed25519-dalek`), persists it in a
-  Secret of type `azureclaw.azure.com/mcp-signing-key` with a `kid` annotation,
+  Secret of type `kars.azure.com/mcp-signing-key` with a `kid` annotation,
   fetches the issuer's JWKS via OpenID Discovery (`/.well-known/openid-configuration`
   → `jwks_uri`, https-only, 10s timeout), and caches the JWKS as a ConfigMap
   named `mcp-{name}-jwks`. Pluggable `JwksFetcher` trait keeps tests
   network-free.
-- **Finalizer `azureclaw.azure.com/mcpserver-cleanup`** — cascades Secret +
+- **Finalizer `kars.azure.com/mcpserver-cleanup`** — cascades Secret +
   ConfigMap deletion before the CR is removed.
 - **Status surface extended** — new `signing_key_ref` and `jwks_config_map_ref`
   `LocalObjectRef` fields on `McpServerStatus`; reuses the
   `status/conditions.rs` vocabulary (`Ready` / `Progressing` / `Degraded`)
   shipped in Phase 1.
 - **Server-Side Apply throughout** — reconciler uses field manager
-  `azureclaw-controller/mcp` per §10.4 #1; lays the SSA pattern S2 (ToolPolicy)
+  `kars-controller/mcp` per §10.4 #1; lays the SSA pattern S2 (ToolPolicy)
   and S3 (A2AAgent) reuse.
-- **Helm CRD mirror** — `deploy/helm/azureclaw/templates/crd-mcpserver.yaml`.
+- **Helm CRD mirror** — `deploy/helm/kars/templates/crd-mcpserver.yaml`.
   `controller/src/helm_drift.rs` enforces no drift between the Rust
   `mcp_server_crd()` definition and the helm template via a unit test that
   fails the build on divergence; a one-shot `DUMP_MCP_CRD_YAML=1` test is
@@ -4840,20 +4840,20 @@ OpenClaw-only.
   on `mcp_server_reconciler.rs` (S1). Watches `ToolPolicy` CRs, compiles
   spec → AGT profile JSON, persists it as a ConfigMap
   `toolpolicy-{name}-profile` with key `profile.json`, annotates with
-  `azureclaw.azure.com/toolpolicy-version-hash`, and labels with
-  `azureclaw.azure.com/artifact=compiled-profile` so the S7 router-side
+  `kars.azure.com/toolpolicy-version-hash`, and labels with
+  `kars.azure.com/artifact=compiled-profile` so the S7 router-side
   informer can select on them. Adds finalizer
-  `azureclaw.azure.com/toolpolicy-cleanup` and deletes the ConfigMap before
+  `kars.azure.com/toolpolicy-cleanup` and deletes the ConfigMap before
   releasing the CR.
 - **Status surface uses the Phase 1 `status/conditions.rs` vocabulary** —
   emits `Progressing` / `Ready` / `Degraded` with the same code constants
   as S1; preserves `last_transition_time` when condition status is
   unchanged (verified by unit test `conditions_preserve_last_transition_time`).
-- **Server-Side Apply with field manager `azureclaw-controller/toolpolicy`** —
-  distinct from the S1 `…/mcp` and the legacy `…/reconciler` (ClawSandbox)
+- **Server-Side Apply with field manager `kars-controller/toolpolicy`** —
+  distinct from the S1 `…/mcp` and the legacy `…/reconciler` (KarsSandbox)
   managers per §10.4 #1; the unit test `field_manager_is_per_reconciler`
   is the tripwire.
-- **Helm CRD mirror** — `deploy/helm/azureclaw/templates/crd-toolpolicy.yaml`,
+- **Helm CRD mirror** — `deploy/helm/kars/templates/crd-toolpolicy.yaml`,
   generated from `tool_policy_crd()` via the same dumper-test +
   `helm_drift.rs` drift-detector pattern S1 introduced. `helm_drift.rs`
   generalised in this slice to handle multiple CRDs (per-CRD constants
@@ -4893,7 +4893,7 @@ OpenClaw-only.
 
 #### Added
 - **`controller/src/a2a_agent.rs`** — full `A2AAgent` CRD struct (group
-  `azureclaw.azure.com`, version `v1alpha1`, kind `A2AAgent`, shortname `a2a`).
+  `kars.azure.com`, version `v1alpha1`, kind `A2AAgent`, shortname `a2a`).
   Spec sub-types: `A2aSigningKey` (kid/alg/publicKeyB64u/notAfter — shape
   identical to `inference-router::a2a::agent_projection::A2aAgentSigningKeySpec`
   so the published AgentCard JSON traverses controller → ConfigMap → router
@@ -4910,11 +4910,11 @@ OpenClaw-only.
   determinism, namespace/name in hash, hex shape, serde-round-trip stability.
 - **`controller/src/a2a_agent_reconciler.rs`** — full reconciler modelled
   on `tool_policy_reconciler.rs` (S2). Field manager
-  `azureclaw-controller/a2aagent` (distinct from `/mcp`, `/toolpolicy`,
+  `kars-controller/a2aagent` (distinct from `/mcp`, `/toolpolicy`,
   `/reconciler`, `/mesh`, `/pairing`). Finalizer
-  `azureclaw.azure.com/a2aagent-cleanup`. Compiles spec → publishes
+  `kars.azure.com/a2aagent-cleanup`. Compiles spec → publishes
   ConfigMap `a2aagent-{name}-card` with key `agent.json`, label
-  `azureclaw.azure.com/artifact=agent-card`. Status writes
+  `kars.azure.com/artifact=agent-card`. Status writes
   `agentCardConfigMapRef`, `versionHash`, `lastCompiledAt`. 7 unit tests
   including closed-set `error_class` (log-injection prevention),
   three-condition matrix, finalizer cleanup, field-manager-per-reconciler.
@@ -4928,7 +4928,7 @@ OpenClaw-only.
   `a2a_agent_crd_has_spec_validations_after_injection`,
   `a2a_agent_rules_mention_signing_keys_and_eddsa_invariants`,
   `a2a_agent_crd_is_serde_round_trippable`).
-- **`deploy/helm/azureclaw/templates/crd-a2aagent.yaml`** — helm-side CRD
+- **`deploy/helm/kars/templates/crd-a2aagent.yaml`** — helm-side CRD
   generated by the dumper. Drift-tested at `cargo test` time by
   `helm_drift::tests::helm_a2aagent_crd_matches_rust_schema` (sixth helm
   drift test alongside mcpserver + toolpolicy).
@@ -4951,7 +4951,7 @@ OpenClaw-only.
   (unmodified) remains the policy authority; this slice ships K8s
   ergonomics (CRD + reconciler + ConfigMap + helm) for AgentCard
   publication, not a parallel decision engine.
-- Public-edge gateway (`azureclaw-a2a-gateway` binary, ADR-0001
+- Public-edge gateway (`kars-a2a-gateway` binary, ADR-0001
   implementation step #4) remains pending — added as new slice
   **S3.5 `phase2-a2a-gateway-component`** (`docs/implementation-plan.md`
   §8 scope item 2a). Without it, only outbound A2A is usable end-to-end;
@@ -4976,7 +4976,7 @@ S7. The compiled JSON ConfigMap is the hand-off contract.
 #### Added
 
 - **`InferencePolicy` CRD** — `controller/src/inference_policy.rs`,
-  group `azureclaw.azure.com`, version `v1alpha1`, namespaced,
+  group `kars.azure.com`, version `v1alpha1`, namespaced,
   shortname `ip`. Sub-types: `InferenceAppliesTo` (sandboxName,
   sandboxMatchLabels, action), `TokenBudget` (perRequestTokens,
   dailyTokens, monthlyTokens), `ContentSafetyFloor` (hate, selfHarm,
@@ -4992,15 +4992,15 @@ S7. The compiled JSON ConfigMap is the hand-off contract.
   no parallel hot-reload core.
 - **Reconciler** — `controller/src/inference_policy_reconciler.rs`,
   modeled directly on `a2a_agent_reconciler.rs` (S3). Field manager
-  `azureclaw-controller/inferencepolicy` (distinct per §10.4 #1);
-  finalizer `azureclaw.azure.com/inferencepolicy-cleanup`. Emits
+  `kars-controller/inferencepolicy` (distinct per §10.4 #1);
+  finalizer `kars.azure.com/inferencepolicy-cleanup`. Emits
   `Ready`/`Progressing`/`Degraded` Conditions reusing
   `status::conditions` helpers; preserves `lastTransitionTime` when
   status doesn't flip. Closed-set `error_class`
   (`kube_api`/`serde`) per §15.3.
 - **Profile ConfigMap** — name `inferencepolicy-{name}-profile`, key
   `profile.json`, annotated with version hash, labelled
-  `azureclaw.azure.com/artifact=inference-policy-profile` for the S7
+  `kars.azure.com/artifact=inference-policy-profile` for the S7
   router-side informer label selector.
 - **CEL admission rules** (6) — `inference_policy_validations`:
   `monthlyTokens >= dailyTokens`,
@@ -5010,7 +5010,7 @@ S7. The compiled JSON ConfigMap is the hand-off contract.
   `modelPreference.primary` non-empty provider+deployment,
   `modelPreference.fallback[*]` non-empty provider+deployment,
   `appliesTo.action` ∈ `{chat,responses,image,embeddings,*}`.
-- **Helm CRD** — `deploy/helm/azureclaw/templates/crd-inferencepolicy.yaml`,
+- **Helm CRD** — `deploy/helm/kars/templates/crd-inferencepolicy.yaml`,
   emitted by `helm_drift::tests::dump_inferencepolicy_crd_yaml` (env-gated)
   and drift-checked by `helm_inferencepolicy_crd_matches_rust_schema`.
 - **Audit doc** — `docs/internal/security-audits/2026-04-27-phase2-inferencepolicy-reconciler.md`,
@@ -5054,12 +5054,12 @@ floor compare-and-block, model-preference selection).
 - The runtime gate `inference-router::routes::inference_policy::check`
   (Phase 1) is **not modified in this slice**.
 
-### S9.3 `phase2-migrate-from-kagent` — `azureclaw migrate from-kagent` translator
+### S9.3 `phase2-migrate-from-kagent` — `kars migrate from-kagent` translator
 
 Operator-facing one-shot translator from a kagent.dev/v1alpha2 `Agent` CR
-into an AzureClaw resource bundle:
+into an Kars resource bundle:
 
-- **ClawSandbox** (always) — name + namespace + labels + provenance
+- **KarsSandbox** (always) — name + namespace + labels + provenance
   annotations preserved; `spec.openclaw.image` from `spec.byo.deployment.image`
   for BYO agents (`--image` override required for Declarative agents that
   use the kagent ADK runtime); `spec.sandbox.network.allowedDomains` →
@@ -5067,8 +5067,8 @@ into an AzureClaw resource bundle:
   to `spec.openclaw.extraEnv` (last-literal-wins, `valueFrom` dropped + warned).
 - **InferencePolicy** — emitted only when `spec.declarative.modelConfig`
   is set; carries the kagent ModelConfig name as a provenance annotation
-  (`azureclaw.azure.com/kagent-model-config`). Inference *enforcement* is
-  not migrated — that needs an equivalent AzureClaw `InferencePolicy`
+  (`kars.azure.com/kagent-model-config`). Inference *enforcement* is
+  not migrated — that needs an equivalent Kars `InferencePolicy`
   hand-authored separately.
 - **ToolPolicy** — one per `(McpServer, toolName)` pair. `requireApproval`
   list maps to `spec.approval.mode = "always"`. Empty `toolNames` emits
@@ -5090,12 +5090,12 @@ Lossy fields explicitly catalogued and warned:
 - `spec.{byo,declarative}.deployment.{tolerations,affinity,nodeSelector,
   volumes,volumeMounts,imagePullSecrets,imagePullPolicy,securityContext,
   podSecurityContext,serviceAccountName,serviceAccountConfig,replicas}` —
-  controller-managed in AzureClaw.
+  controller-managed in Kars.
 - `spec.allowedNamespaces` — Gateway-API cross-namespace pattern not modeled.
 - `spec.sandbox.network.allowedDomains` wildcards — passed through
-  verbatim with a warning (ClawSandbox `EndpointConfig.host` wildcard
+  verbatim with a warning (KarsSandbox `EndpointConfig.host` wildcard
   semantics are not documented; operators must verify).
-- `spec.byo.deployment.{cmd,args}` — not exposed by ClawSandbox.
+- `spec.byo.deployment.{cmd,args}` — not exposed by KarsSandbox.
 - env entries with `valueFrom`.
 
 Aspirational mappings explicitly **rejected** during pre-implementation
@@ -5108,19 +5108,19 @@ critique:
 - `McpServer` auto-emission — we cannot reconstruct MCP server endpoints
   from a kagent `TypedReference`; ToolPolicies carry the original
   reference as a provenance annotation
-  (`azureclaw.azure.com/kagent-tool-ref`) and operators are warned that
-  an equivalent AzureClaw `McpServer` must already exist.
+  (`kars.azure.com/kagent-tool-ref`) and operators are warned that
+  an equivalent Kars `McpServer` must already exist.
 - `InferencePolicy` enforcement from `modelConfig` — kagent ModelConfig
   is a separate CRD; we preserve only provenance, not behaviour.
 
-**Subcommand:** `azureclaw migrate from-kagent <input-yaml-or-stdin>`
+**Subcommand:** `kars migrate from-kagent <input-yaml-or-stdin>`
 with `--allow-lossy`, `--namespace`, `--isolation`, `--image`,
 `--out-dir`, `--force`, `--format yaml|json`, `--dry-run`.
 
 **Output:**
 
 - `--format yaml` (default) — multi-doc YAML stream on stdout, deterministic
-  ordering: ClawSandbox, InferencePolicy, ToolPolicies (sorted by name).
+  ordering: KarsSandbox, InferencePolicy, ToolPolicies (sorted by name).
 - `--format json` — single Kubernetes `v1.List` object on stdout (pipes
   cleanly to `kubectl apply -f -`).
 - `--out-dir <dir>` — splits the bundle into `<kind>-<name>.yaml` files;
@@ -5139,7 +5139,7 @@ with `--allow-lossy`, `--namespace`, `--isolation`, `--image`,
   determinism + collision distinguishability, env projection (last-wins,
   `valueFrom`, prior-literal-purge), description truncation, input
   gating (apiVersion / kind / spec.type / metadata.name / BYO image),
-  ClawSandbox label and annotation injection, sandbox-label conflict
+  KarsSandbox label and annotation injection, sandbox-label conflict
   rejection, namespace override warning, declarative no-image
   non-runnability, declarative `--image` escape hatch, `InferencePolicy`
   conditional emit, ToolPolicy fan-out, approval-list mapping, wildcard
@@ -5157,28 +5157,28 @@ GitHub MCP. Target CRD shapes verified directly against
 `controller/src/{crd.rs, inference_policy.rs, tool_policy.rs}`.
 
 Closes §15.2 #8 ("kagent migration tool"). Day-1 use case: an operator
-running kagent declarative agents adopts AzureClaw governance by running
-`azureclaw migrate from-kagent agent.yaml --image my/runtime:v1
+running kagent declarative agents adopts Kars governance by running
+`kars migrate from-kagent agent.yaml --image my/runtime:v1
 --allow-lossy | kubectl apply -f -`, then hand-edits the emitted
-ClawSandbox to set `spec.inference.{provider,endpoint,model}` per their
-ModelConfig and creates an AzureClaw `McpServer` for each kagent
+KarsSandbox to set `spec.inference.{provider,endpoint,model}` per their
+ModelConfig and creates an Kars `McpServer` for each kagent
 McpServer reference.
 
-### S9.2 `phase2-convert-translator` — real `azureclaw convert` translator
+### S9.2 `phase2-convert-translator` — real `kars convert` translator
 
-Phase 0 shipped `azureclaw convert` as an exit-3 skeleton to lock in the CLI
+Phase 0 shipped `kars convert` as an exit-3 skeleton to lock in the CLI
 surface; this slice ships the translator. Operators can now move manifests
-between AzureClaw's `ClawSandbox` and upstream
+between Kars's `KarsSandbox` and upstream
 `agents.x-k8s.io/v1alpha1 Sandbox` (kubernetes-sigs/agent-sandbox) without
-hand-editing YAML, and bootstrap a fresh `ClawSandbox` overlay against an
+hand-editing YAML, and bootstrap a fresh `KarsSandbox` overlay against an
 existing upstream Sandbox.
 
 #### Added
 
 - **`cli/src/commands/convert.ts` — pure translator** with three target modes:
-  `--to clawsandbox` (upstream → ClawSandbox, lossy inverse),
-  `--to upstream-sandbox` (ClawSandbox → upstream, lossy forward),
-  `--to overlay --sandbox-ref=<name|ns/name>` (upstream → fresh ClawSandbox
+  `--to karssandbox` (upstream → KarsSandbox, lossy inverse),
+  `--to upstream-sandbox` (KarsSandbox → upstream, lossy forward),
+  `--to overlay --sandbox-ref=<name|ns/name>` (upstream → fresh KarsSandbox
   skeleton with `spec.upstreamCompatibility.sigsAgentSandbox=overlay` +
   `upstreamSandboxRef`). All translation logic is in pure helpers exposed via
   `__test` — no filesystem, no kubectl IO inside the translator. Phase 3
@@ -5227,15 +5227,15 @@ existing upstream Sandbox.
   on convert would be a footgun.
 - **48 new vitest cases** in `cli/src/commands/convert.test.ts` covering
   parser, target dispatch, forward/inverse happy path, every
-  AzureClaw-only and upstream-only lossy field, multi-doc rejection,
+  Kars-only and upstream-only lossy field, multi-doc rejection,
   malformed input, env collisions and `valueFrom` edge cases, all four
   seccomp canonicalisation paths, kata isolation round-trip, overlay
   namespace pin, multi-container, missing image, and a forward→inverse
   round-trip stability assertion. CLI workspace test count: 337 → 382.
 - **End-to-end smoke**: `node dist/index.js convert -f sandbox.yaml --to
-  clawsandbox` exits 0 on a clean confidential-mode upstream Sandbox and
-  emits a valid `ClawSandbox` with `isolation: confidential`. Overlay
-  emit on the same input produces a governance-skeleton ClawSandbox with
+  karssandbox` exits 0 on a clean confidential-mode upstream Sandbox and
+  emits a valid `KarsSandbox` with `isolation: confidential`. Overlay
+  emit on the same input produces a governance-skeleton KarsSandbox with
   the warning that no governance fields are bound.
 
 #### Verified upstream
@@ -5249,50 +5249,50 @@ existing upstream Sandbox.
 
 #### Not in this slice
 
-- **`azureclaw migrate from-kagent`** — separate slice (S9.3); kagent CRDs
+- **`kars migrate from-kagent`** — separate slice (S9.3); kagent CRDs
   have a fundamentally different shape (Agent / ToolServer / Identity rather
   than a single Sandbox primitive) and warrant their own translator path.
 - **Round-trip lossless mode** — there is no canonical lossless round-trip
-  because AzureClaw and upstream are deliberately different governance
+  because Kars and upstream are deliberately different governance
   scopes. The forward `lossy-by-default` posture is the right safety
   contract; future work can add `--strict` for CI lint use cases.
 - **Live-cluster import** — `convert` reads YAML from `--file`. Pulling a
-  manifest from a live cluster (`kubectl get … -o yaml | azureclaw
+  manifest from a live cluster (`kubectl get … -o yaml | kars
   convert`) works today via shell pipe + `--file=/dev/stdin`; an
   `--from-cluster ns/name` shortcut may land in a later UX-polish slice.
 
-### S9.1 `phase2-migrate-mode-switch` — `azureclaw migrate` mode-switch CLI
+### S9.1 `phase2-migrate-mode-switch` — `kars migrate` mode-switch CLI
 
-Operator-facing tool to flip a ClawSandbox between the four
+Operator-facing tool to flip a KarsSandbox between the four
 upstream-compatibility modes that S8 (#57) shipped on the controller
 side. The CLI surface that drives day-zero adoption: take an existing
-upstream `sigs.k8s.io/agent-sandbox` Sandbox and bolt AzureClaw
+upstream `sigs.k8s.io/agent-sandbox` Sandbox and bolt Kars
 governance on without rewriting the YAML.
 
 **Real workflow this unlocks:**
 
 ```bash
 # operator already has an upstream Sandbox CR called 'legacy-agent';
-# wraps it with AzureClaw governance:
-$ azureclaw migrate to-overlay legacy --upstream-ref legacy-agent
+# wraps it with Kars governance:
+$ kars migrate to-overlay legacy --upstream-ref legacy-agent
   legacy: native → overlay (upstream sandbox 'legacy-agent')
   ✓ patched
 
-# later: drop the upstream, return to native AzureClaw
-$ azureclaw migrate from-overlay legacy
+# later: drop the upstream, return to native Kars
+$ kars migrate from-overlay legacy
   legacy: overlay → native
   ✓ patched
 ```
 
 **Subcommands shipped:**
 
-- `azureclaw migrate to-overlay <name> --upstream-ref <upstream>` —
+- `kars migrate to-overlay <name> --upstream-ref <upstream>` —
   flip to OverlayMode (governance overlay only; upstream owns the Pod).
-- `azureclaw migrate from-overlay <name>` — revert to native AzureClaw
+- `kars migrate from-overlay <name>` — revert to native Kars
   (controller resumes Pod / Service / NetworkPolicy ownership).
-- `azureclaw migrate to-translate <name>` — SandboxClaim translate mode.
-- `azureclaw migrate to-observe <name>` — status-mirror mode.
-- `azureclaw migrate to-native <name>` — alias for native (`off`).
+- `kars migrate to-translate <name>` — SandboxClaim translate mode.
+- `kars migrate to-observe <name>` — status-mirror mode.
+- `kars migrate to-native <name>` — alias for native (`off`).
 
 All five accept `--namespace`, `--dry-run`, `--format human|json`.
 
@@ -5314,7 +5314,7 @@ All five accept `--namespace`, `--dry-run`, `--format human|json`.
   from "infrastructure problem").
 
 **Pre-flight + transition summary:** before applying, the orchestrator
-runs `kubectl get clawsandbox <name> -o json`, reads the current mode
+runs `kubectl get karssandbox <name> -o json`, reads the current mode
 + ref, and prints `current → target` (e.g. `native → overlay (upstream
 sandbox 'legacy-agent')`). If the sandbox is already in the target
 state, the orchestrator skips the patch entirely and reports it as a
@@ -5322,11 +5322,11 @@ no-op — JSON output sets `noop: true` for scripting.
 
 **Out of scope (S9.2 — separate PR):**
 
-- `azureclaw migrate from-kagent` — Solo.io kagent CR → ClawSandbox
+- `kars migrate from-kagent` — Solo.io kagent CR → KarsSandbox
   translator (heavier; needs upstream kagent shape mapping).
-- Real `azureclaw convert` — YAML translator from upstream
+- Real `kars convert` — YAML translator from upstream
   agent-sandbox shapes (currently a Phase 0 exit-3 skeleton).
-- `azureclaw migrate verify` — validates that an OverlayMode sandbox
+- `kars migrate verify` — validates that an OverlayMode sandbox
   is in sync with its upstream Sandbox (needs upstream CRD informer;
   Phase 3 candidate).
 
@@ -5340,7 +5340,7 @@ ci/no-stubs + ci/no-custom-crypto + ci/check-loc all green with
 
 ### S11.1 `phase2-attest-baseline` — drift-aware `--baseline` diff
 
-Outcome-shaped follow-up to S11. Turns `azureclaw attest` from a
+Outcome-shaped follow-up to S11. Turns `kars attest` from a
 "print attestation JSON" command into a CI-gate / change-control
 primitive: pass `--baseline <file>` and the command compares the live
 sandbox against a previously-saved attestation, surfaces typed deltas,
@@ -5351,11 +5351,11 @@ pipeline step can `set -e` against it.
 
 ```bash
 # Day 0 — capture approved posture
-$ azureclaw attest demo --format json > approved.json
+$ kars attest demo --format json > approved.json
 $ git add approved.json && git commit -m "approved: demo posture"
 
 # Every PR / nightly job — fail the build on drift
-$ azureclaw attest demo --baseline approved.json || exit $?
+$ kars attest demo --baseline approved.json || exit $?
 ✗ ToolPolicy 'tp-prod' versionHash drifted (sha256:abc1234… → sha256:def5678…)
 ✗ new SSA manager touched the object: 'kubectl-edit'
 DRIFT: 2 delta(s) — exit code 2
@@ -5363,7 +5363,7 @@ DRIFT: 2 delta(s) — exit code 2
 
 **What deltas are surfaced (one human-meaningful change per delta):**
 
-- `specHash` — the `ClawSandbox.spec` itself changed (the most
+- `specHash` — the `KarsSandbox.spec` itself changed (the most
   important signal; all other deltas are downstream of this *or* of
   a referenced policy).
 - `phase` — sandbox moved between Running / Overlay / Degraded.
@@ -5385,7 +5385,7 @@ set is unchanged. Asserted directly in tests.
 only new logic; it has no IO, no time, no kubectl. The CLI orchestrator
 calls it after `buildReport` (which is what shells out). Means the
 diff is unit-testable without a cluster, and a future Phase 3
-`azureclaw verify <bundle>` companion can reuse `diffAttestations`
+`kars verify <bundle>` companion can reuse `diffAttestations`
 unchanged.
 
 **Exit codes (CI-friendly):**
@@ -5408,7 +5408,7 @@ file). CLI workspace 304 → 315 (+11).
 
 **Audit:** `docs/internal/security-audits/2026-04-28-phase2-attest-baseline.md`.
 
-### S11 `phase2-attest-cli` — `azureclaw attest <name>` read surface
+### S11 `phase2-attest-cli` — `kars attest <name>` read surface
 
 This slice ships the **read consumer** half of implementation-plan §15.2
 item 11 and §14.6 column 7 (provenance / attestation). The signed audit
@@ -5418,10 +5418,10 @@ the CLI command shape, the deterministic spec-hash recipe, and all
 read-side scaffolding so flipping the controller to emit signatures
 later does not require a CLI change.
 
-**What `azureclaw attest <name>` prints today:**
+**What `kars attest <name>` prints today:**
 
 1. **Spec hash** — SHA-256 over a canonicalised JSON of
-   `ClawSandbox.spec` (recursive key-sort, no whitespace). Matches the
+   `KarsSandbox.spec` (recursive key-sort, no whitespace). Matches the
    `versionHash` recipe used by every Phase 2 policy CRD, so a future
    signed audit chain can compose them without re-hashing.
 2. **Generation lineage** — `metadata.generation` vs
@@ -5433,19 +5433,19 @@ later does not require a CLI change.
    Shows "who edited this object last" without dumping the full SSA
    tree.
 4. **Referenced policy versions** — for every policy CR referenced by
-   `ClawSandbox.spec` (ToolPolicy, InferencePolicy, A2AAgent, plus the
+   `KarsSandbox.spec` (ToolPolicy, InferencePolicy, A2AAgent, plus the
    legacy `governance.toolPolicy.ref` shape), resolves the referenced
-   object in `azureclaw-<name>` and prints its `status.versionHash` +
+   object in `kars-<name>` and prints its `status.versionHash` +
    binding ConfigMap name (both shipped by S2/S3/S4).
 5. **Reconcile trace ID** — best-effort lookup from the sandbox-
-   namespace Deployment's `azureclaw.azure.com/last-trace-id`
+   namespace Deployment's `kars.azure.com/last-trace-id`
    annotation. Phase 2 controller does not yet stamp this; the field
    prints `(Phase 3)` when absent.
 6. **AGT audit-receipt id** + **signature** — `(Phase 3)` today.
 
 **Output formats:** `--format human` (default; pretty TUI table with
 colour-coded phase) and `--format json` (deterministic, machine-grep-
-able; emits a versioned `apiVersion: "azureclaw.azure.com/v1alpha1-attest"`
+able; emits a versioned `apiVersion: "kars.azure.com/v1alpha1-attest"`
 + `kind: "Attestation"` envelope so consumers can detect schema breakage).
 
 **Reuse map (§0.2 #11):**
@@ -5454,7 +5454,7 @@ able; emits a versioned `apiVersion: "azureclaw.azure.com/v1alpha1-attest"`
   one shipped by `controller/src/tool_policy_compile.rs`,
   `controller/src/a2a_agent_compile.rs`,
   `controller/src/inference_policy_compile.rs`, and
-  `controller/src/claw_eval.rs`. CLI re-implements the recipe in TS
+  `controller/src/kars_eval.rs`. CLI re-implements the recipe in TS
   (`canonicalJson` + `node:crypto` `createHash("sha256")`) — there is
   no shared TS↔Rust hashing crate available, but the recipe is
   documented + asserted-deterministic so the two sides cannot drift
@@ -5471,7 +5471,7 @@ able; emits a versioned `apiVersion: "azureclaw.azure.com/v1alpha1-attest"`
 - Signed reconcile audit chain (cosign keyless on the controller side,
   receipt IDs, verifiable signatures).
 - AGT AuditLogger receipt-ID emission + retrieval.
-- `metadata.annotations.azureclaw.azure.com/last-trace-id` stamping
+- `metadata.annotations.kars.azure.com/last-trace-id` stamping
   by the controller (the lookup is in place; the writer is not).
 - A `kubectl claw verify <attestation.json>` companion command — the
   JSON envelope is versioned now to make this trivially additive.
@@ -5499,18 +5499,18 @@ sign-offs.
 
 ### S8 `phase2-overlaymode` — sigs/agent-sandbox OverlayMode
 
-This slice flips `ClawSandbox.spec.upstreamCompatibility.sigsAgentSandbox`
+This slice flips `KarsSandbox.spec.upstreamCompatibility.sigsAgentSandbox`
 from a Phase-1 schema-only field into a real reconciler branch, closing
 implementation-plan §2.1's third sandbox mode (Native | Translate |
 **Overlay**) and contributing to §14.6 column 11 (Multi-runtime hosting).
 
 **Behaviour:** when `sigsAgentSandbox: "overlay"`, the operator already
 manages an upstream `Sandbox` CR (sigs.k8s.io/agent-sandbox) in the
-namespace and `ClawSandbox.spec.upstreamCompatibility.upstreamSandboxRef.name`
+namespace and `KarsSandbox.spec.upstreamCompatibility.upstreamSandboxRef.name`
 points at it. The controller still creates the *governance overlay*
 (namespace, sandbox ServiceAccount with Workload-Identity binding,
 egress + ingress NetworkPolicy, governance ConfigMap, Azure RBAC SA
-annotations) but **skips** the AzureClaw Pod Deployment and the
+annotations) but **skips** the Kars Pod Deployment and the
 blocklist seed-ConfigMap + 6h refresh CronJob — those would have nothing
 to mount into.
 
@@ -5518,20 +5518,20 @@ to mount into.
 `Ready=True / Reason=OverlayMode`, `Progressing=False / Reason=OverlayMode`,
 and a new `Suspended=True / Reason=OverlayMode` condition whose message
 names the upstream CR. `status.sandboxPod` is set to
-`upstream/<name>` so `kubectl get clawsandbox` makes the upstream
+`upstream/<name>` so `kubectl get karssandbox` makes the upstream
 relationship obvious. New `overlay_status_matches` idempotency guard
 mirrors `running_status_matches` to keep `.status` PATCH traffic flat.
 
-**Admission gate:** runtime-only (no ClawSandbox CEL admission rules
+**Admission gate:** runtime-only (no KarsSandbox CEL admission rules
 exist yet — schema-only Phase 1). The reconciler stamps `Degraded=True /
 Reason=SpecInvalid` when `sigsAgentSandbox == "overlay"` but
 `upstreamSandboxRef.name` is missing/empty, or when an unknown value
 (typo such as `"Overlay"` or `"overaly"`) is supplied. Future slice can
-hoist into CEL once a `claw_sandbox_validations()` function is added.
+hoist into CEL once a `kars_sandbox_validations()` function is added.
 
 **Out of scope (deferred):** watching the upstream `Sandbox` CR's
 status (would require the upstream CRD discovery + informer); mirroring
-its conditions back onto `ClawSandbox.status`; `kubectl claw convert`
+its conditions back onto `KarsSandbox.status`; `kubectl claw convert`
 upstream→overlay path (lands in S9). `Translate` mode remains
 schema-only — no runtime path beyond what already lands here.
 
@@ -5570,7 +5570,7 @@ schema-only — no runtime path beyond what already lands here.
 - No new file managers, no new CRDs, no helm `crd.yaml` change
   (`upstreamCompatibility` was schema-only in Phase 1 — kube-rs
   registers the runtime schema; helm template stays admission-only
-  until a `claw_sandbox_validations()` lands).
+  until a `kars_sandbox_validations()` lands).
 
 **Tests:** controller workspace 264 → 276 (+12: 5 CRD helpers + 6 status
 helpers + 1 condition constant exercise via overlay tests). Workspace
@@ -5579,23 +5579,23 @@ green (router 595, integration 26).
 **Audit:** `docs/internal/security-audits/2026-04-27-phase2-overlaymode.md` — 2
 sign-offs.
 
-### S6 `phase2-claweval` — ClawEval CRD + binding ConfigMap + helm CRD
+### S6 `phase2-karseval` — KarsEval CRD + binding ConfigMap + helm CRD
 
 This slice ships the controller side of the Azure AI Foundry Evals
-binding K8s primitive only. Per §3 non-compete, `ClawEval` is a
+binding K8s primitive only. Per §3 non-compete, `KarsEval` is a
 **binding/provisioning resource over Foundry Evals** — it *configures*
 eval runs; it is **not** an in-cluster eval engine. The runtime
 enforcement substrate stays on Phase 1 (`cli/src/commands/eval.ts` →
 `/openai/evals` + `/evaluators` proxies in
 `inference-router/src/routes/inference.rs`, executed under the
 sandbox router's Workload Identity). The compiled JSON ConfigMap
-(`claweval-{name}-binding`) is the hand-off contract; the sandbox-side
+(`karseval-{name}-binding`) is the hand-off contract; the sandbox-side
 cron actuator / on-demand trigger that consumes it is deferred to S7.
 
 #### Added
 
-- **`ClawEval` CRD** — `controller/src/claw_eval.rs`, group
-  `azureclaw.azure.com`, version `v1alpha1`, namespaced, shortname
+- **`KarsEval` CRD** — `controller/src/kars_eval.rs`, group
+  `kars.azure.com`, version `v1alpha1`, namespaced, shortname
   `ceval`. Spec fields: `sandboxRef.name`, `suite`
   (`foundry-evals` | `promptfoo` | `inspect-ai`, default
   `foundry-evals`), `evaluators?` (required + non-empty when
@@ -5609,24 +5609,24 @@ cron actuator / on-demand trigger that consumes it is deferred to S7.
   `lastPass`) declared in the schema for SSA preservation by the
   S7 runtime writer. Six print columns surface sandbox, suite,
   schedule, score, pass, age.
-- **Pure compile module** — `controller/src/claw_eval_compile.rs`
+- **Pure compile module** — `controller/src/kars_eval_compile.rs`
   with `compile_to_binding()` + `version_hash()` (sha256 first 16
   bytes hex). 9 unit tests cover deterministic compile, all suite
   serialisations, both threshold ops, default `regressionAction`
   always materialising, hash sensitivity, hash stability across
-  serde round-trip. Mirrors S5 `claw_memory_compile.rs` shape.
-- **Reconciler** — `controller/src/claw_eval_reconciler.rs`:
-  finalizer `azureclaw.azure.com/claweval-cleanup`, field manager
-  `azureclaw-controller/claweval`, SSA throughout. Compiles the
-  spec, persists as ConfigMap (`claweval-{name}-binding`, key
+  serde round-trip. Mirrors S5 `kars_memory_compile.rs` shape.
+- **Reconciler** — `controller/src/kars_eval_reconciler.rs`:
+  finalizer `kars.azure.com/karseval-cleanup`, field manager
+  `kars-controller/karseval`, SSA throughout. Compiles the
+  spec, persists as ConfigMap (`karseval-{name}-binding`, key
   `binding.json`, standard labels). Status patch sets all six
   controller-owned fields and explicit `None` for the three
   runtime-owned fields so SSA leaves them untouched once the
-  S7-side writer (`azureclaw-router/claweval`) applies them. Seven
+  S7-side writer (`kars-router/karseval`) applies them. Seven
   unit tests including `field_manager_distinct_from_runtime_writer`
   which documents and asserts the S7 forward contract.
 - **CEL admission rules** — `controller/src/crd_validations.rs`
-  `claw_eval_validations()` ships eight rules: `sandboxRef.name`
+  `kars_eval_validations()` ships eight rules: `sandboxRef.name`
   shape, `evaluators` required+bounded for `foundry-evals` suite,
   per-evaluator length cap, `schedule` 5-or-6 token cron shape,
   `threshold.score` ∈ `[0,1]`, `dataset.configMapRef`/`inline`
@@ -5634,15 +5634,15 @@ cron actuator / on-demand trigger that consumes it is deferred to S7.
   `displayName` length cap. Five unit tests assert non-emptiness,
   message presence, post-injection rule count, core invariants
   coverage, and serde round-trip.
-- **Helm CRD mirror** — `deploy/helm/azureclaw/templates/crd-claweval.yaml`
+- **Helm CRD mirror** — `deploy/helm/kars/templates/crd-karseval.yaml`
   generated via `DUMP_CLAWEVAL_CRD_YAML=1` dumper.
-  `helm_claweval_crd_matches_rust_schema` drift test enforces
+  `helm_karseval_crd_matches_rust_schema` drift test enforces
   Rust ↔ helm parity on every CI run.
 - **Controller wiring** — `controller/src/main.rs` registers the
-  three new modules and spawns `claw_eval_reconciler::run` in
+  three new modules and spawns `kars_eval_reconciler::run` in
   the existing `tokio::select!` (REQUEUE_OK 300s, REQUEUE_FAIL 60s).
 - **Audit doc** —
-  `docs/internal/security-audits/2026-04-27-phase2-claweval-reconciler.md`
+  `docs/internal/security-audits/2026-04-27-phase2-karseval-reconciler.md`
   with two sign-offs, full STRIDE coverage, AGT boundary
   verification (AGT 3.3.0 has no eval module — confirmed), 12-seam
   reuse map, explicit out-of-scope list (runtime trigger,
@@ -5660,66 +5660,66 @@ cron actuator / on-demand trigger that consumes it is deferred to S7.
   (`cli/src/commands/eval.ts`) is **not modified in this slice**.
 - This slice closes the §14.6 column-12 destination: five full
   CRDs (`McpServer`, `ToolPolicy`, `InferencePolicy`, `A2AAgent`,
-  `ClawEval`) + the `ClawMemory` binding now ship as K8s
+  `KarsEval`) + the `KarsMemory` binding now ship as K8s
   primitives. Governance-as-K8s-primitives → ✓.
 - Hard-deferred to S7+: runtime trigger (cron actuator), threshold
   pass/fail computation, regression actuator (mutating
-  `ClawSandbox.spec.suspend`), AGT chain emission of eval
+  `KarsSandbox.spec.suspend`), AGT chain emission of eval
   outcomes.
 
-### S5 `phase2/clawmemory-reconciler` — ClawMemory CRD + binding ConfigMap + helm CRD
+### S5 `phase2/karsmemory-reconciler` — KarsMemory CRD + binding ConfigMap + helm CRD
 
 This slice ships the controller side of the Foundry Memory Store
-binding K8s primitive only. Per §3 non-compete, `ClawMemory` is a
+binding K8s primitive only. Per §3 non-compete, `KarsMemory` is a
 **binding/provisioning resource over Azure AI Foundry Memory Store**
 — it *configures* FMS for a sandbox; it is **not** a separate
 in-cluster memory backend. The runtime enforcement substrate stays on
 Phase 1 (`cli/src/plugin.ts::ensureMemoryStore` lazy-create through
 the router's Workload Identity + the existing `/memory_stores/*`
 proxy in `inference-router/src/routes/inference.rs`). The compiled
-JSON ConfigMap (`clawmemory-{name}-binding`) is the hand-off contract;
+JSON ConfigMap (`karsmemory-{name}-binding`) is the hand-off contract;
 the sandbox-side informer that consumes it is deferred to S7.
 
 #### Added
 
-- **`ClawMemory` CRD** — `controller/src/claw_memory.rs`, group
-  `azureclaw.azure.com`, version `v1alpha1`, namespaced, shortname
+- **`KarsMemory` CRD** — `controller/src/kars_memory.rs`, group
+  `kars.azure.com`, version `v1alpha1`, namespaced, shortname
   `cmem`. Spec fields: `storeName`, `sandboxRef.name`, `scope`,
   `retentionDays?`, `deleteOnSandboxDelete` (default `true`),
   `displayName?`. Status: `phase`, `observedGeneration`,
   `conditions`, `bindingConfigMapRef`, `versionHash`,
   `lastReconciledAt`. Print columns surface sandbox, store, scope,
   phase, age.
-- **Pure compile module** — `controller/src/claw_memory_compile.rs`
+- **Pure compile module** — `controller/src/kars_memory_compile.rs`
   with `compile_to_binding()` + `version_hash()` (sha256 first 16
   bytes hex). 6 unit tests cover deterministic compile, full vs
   minimal spec round-trip, hash sensitivity to spec changes, hash
   stability across serde round-trip, and hash hex shape. Mirrors S4
   `inference_policy_compile.rs` shape.
-- **Reconciler** — `controller/src/claw_memory_reconciler.rs`:
-  finalizer `azureclaw.azure.com/clawmemory-cleanup`, field manager
-  `azureclaw-controller/clawmemory`, SSA throughout. Compiles the
-  spec, persists as ConfigMap (`clawmemory-{name}-binding`, key
+- **Reconciler** — `controller/src/kars_memory_reconciler.rs`:
+  finalizer `kars.azure.com/karsmemory-cleanup`, field manager
+  `kars-controller/karsmemory`, SSA throughout. Compiles the
+  spec, persists as ConfigMap (`karsmemory-{name}-binding`, key
   `binding.json`, labels `app.kubernetes.io/managed-by`,
-  `azureclaw.azure.com/clawmemory`,
-  `azureclaw.azure.com/artifact=claw-memory-binding`), sets full
+  `kars.azure.com/karsmemory`,
+  `kars.azure.com/artifact=claw-memory-binding`), sets full
   status with `Ready`/`Progressing`/`Degraded` conditions reusing
   `status/conditions.rs` (no condition-vocabulary fork). 7 unit tests.
 - **CEL admission rules** — 4 rules in
-  `controller/src/crd_validations.rs::claw_memory_validations()`:
+  `controller/src/crd_validations.rs::kars_memory_validations()`:
   DNS-label `storeName` (1-63 chars, `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`),
   `sandboxRef.name` 1-253 chars, `scope` 1-256 chars, `retentionDays
   > 0` when present. Injected via existing `inject_spec_validations`
   helper. 5 unit tests.
-- **Helm CRD** — `deploy/helm/azureclaw/templates/crd-clawmemory.yaml`
+- **Helm CRD** — `deploy/helm/kars/templates/crd-karsmemory.yaml`
   (184 lines) generated via the existing
-  `helm_drift::dump_clawmemory_crd_yaml` dumper test (env-gated by
+  `helm_drift::dump_karsmemory_crd_yaml` dumper test (env-gated by
   `DUMP_CLAWMEMORY_CRD_YAML=1`). New drift-detection test pins
   helm-side YAML to Rust-derived schema; both round-trip.
-- **`main.rs` wiring** — `claw_memory_reconciler::run` spawned in
+- **`main.rs` wiring** — `kars_memory_reconciler::run` spawned in
   `tokio::select!` alongside the four prior reconcilers. CRD-missing
   exit is non-fatal (matches S1–S4 pattern).
-- **Audit doc** — `docs/internal/security-audits/2026-04-27-phase2-clawmemory-reconciler.md`
+- **Audit doc** — `docs/internal/security-audits/2026-04-27-phase2-karsmemory-reconciler.md`
   with two sign-offs, full STRIDE coverage, AGT boundary verification
   (AGT 3.3.0 carries no Memory Store module — confirmed against
   on-disk source), reuse map, out-of-scope set with explicit S7
@@ -5766,7 +5766,7 @@ the sandbox-side informer that consumes it is deferred to S7.
 - **Foundry-side delete on CR delete** — finalizer cleans the binding
   ConfigMap only; `deleteOnSandboxDelete` is preserved in the
   compiled binding for the runtime path to act on.
-- **Conflict detection** across multiple `ClawMemory` CRs targeting
+- **Conflict detection** across multiple `KarsMemory` CRs targeting
   the same sandbox+scope pair — router-side dedupe at S7.
 - **Retention enforcement** — spec carries `retentionDays`; runtime
   enforcement (Foundry TTL or scheduled `delete_scope` sweeps) wired
@@ -5784,7 +5784,7 @@ the sandbox-side informer that consumes it is deferred to S7.
 Strengthens column 7 (Foundry / M365 integration) — the fifth full
 CRD reconciler in the family lands. Phase 2 §14.6 column 12
 (Governance as K8s primitives) at 4/5 differentiator CRDs; only
-`ClawEval` (S6) outstanding.
+`KarsEval` (S6) outstanding.
 
 
 ## [Unreleased] — PR #44 `dev → main` uplift
@@ -5806,13 +5806,13 @@ see that directory for the full evidence trail).
   file.
 - **Outage-mode dispatch** (`providers/outage.rs`) — `Strict` (prod default,
   fail-closed), `CachedRead` (allow if cached decision < TTL), `DegradedDev`
-  (fail-open with warning label, dev only). Configurable per-`ClawSandbox`
+  (fail-open with warning label, dev only). Configurable per-`KarsSandbox`
   via `spec.agt.outageMode`.
 - **Six blocking CI gates** under `ci/`: `check-loc.sh` (LOC budget),
   `no-stubs.sh` (no `TODO/FIXME/unimplemented!`), `no-custom-crypto.sh`
   (forbids hand-rolled crypto outside provider seams + vendored SDK),
   `no-null-provider-prod.sh` (Null* providers blocked unless
-  `azureclaw.azure.com/dev-only` label set), `security-audit-required.sh`
+  `kars.azure.com/dev-only` label set), `security-audit-required.sh`
   (per-PR audit-doc enforcement, 2 sign-offs), `vendored-patch-audit.sh`
   (forces re-audit on AGT SDK bump), plus `a2a-module-isolation.sh`. Budget
   in `ci/loc-budget.yaml`.
@@ -5851,14 +5851,14 @@ see that directory for the full evidence trail).
   LOC, 4th `tokio::select!` arm in the controller event loop) — periodically
   GCs orphan federated credentials against the 20-fedcred-per-MI Azure cap;
   default 600 s, env override `FEDCRED_REAPER_INTERVAL_SECS`. 5 unit tests.
-- **KEP-1623 status subresource on `ClawSandbox`** — `Conditions[]` +
+- **KEP-1623 status subresource on `KarsSandbox`** — `Conditions[]` +
   `observedGeneration`; controller stamps `Degraded=True` / `Ready=False`
   on the three validation-failure exits.
 - **VAP / MAP set** in the controller Helm chart — `pods/exec|attach|portforward`
   ban on sandbox namespaces; deny posture-downgrades (isolation step-down,
   seccomp removal, `readOnlyRootFilesystem: false`); deny removal of
-  `azureclaw.azure.com/dev-only` label once applied; mutating policy auto-
-  injects router sidecar + sets seccomp to `azureclaw-strict`.
+  `kars.azure.com/dev-only` label once applied; mutating policy auto-
+  injects router sidecar + sets seccomp to `kars-strict`.
 
 ### Phase 1 — protocol freshness + minimal schema
 
@@ -5880,7 +5880,7 @@ see that directory for the full evidence trail).
   (`message/send`, `tasks/get`, `tasks/cancel`); hot-reloading
   trust-store snapshot for `kid → VerifyingKey`. Schema source:
   <https://a2a-protocol.org/v1.0.0/specification>. Ingress posture is
-  gateway-only, surgical opt-in via `ClawSandbox.spec.a2a.expose: true` —
+  gateway-only, surgical opt-in via `KarsSandbox.spec.a2a.expose: true` —
   see [ADR-0001](docs/adr/0001-a2a-ingress-front-edge.md).
 - **AP2 commerce mandates** (`a2a/{ap2,mandate_signing,mandate_trust_store,
   message_send_ap2}.rs`) — IntentMandate detached-JWS sign/verify; per-tool
@@ -5891,9 +5891,9 @@ see that directory for the full evidence trail).
   post-processed via `controller/src/crd_validations.rs` because kube-rs
   `CustomResource` derive does not emit the field (kube-rs#1557). Reconciliation
   ships in Phase 2.
-- **`ClawPairing` CRD** + reconciler — operator-assisted pairing as a
+- **`KarsPairing` CRD** + reconciler — operator-assisted pairing as a
   K8s-native operation (`controller/src/{pairing,pairing_reconciler}.rs`);
-  `azureclaw pair <a> <b>`.
+  `kars pair <a> <b>`.
 - **Identity provider seam — Microsoft Graph agent identity** — production
   Graph client at `controller/src/providers/identity_*.rs` calling
   `POST /beta/servicePrincipals/microsoft.graph.agentIdentity`,
@@ -5907,9 +5907,9 @@ see that directory for the full evidence trail).
 - **Gateway token via `secretKeyRef`** — `OPENCLAW_GATEWAY_TOKEN` is mounted
   from a K8s `Secret` instead of plain env, with a one-shot warning when
   legacy plain-env paths are exercised.
-- **Three new CLI commands** — `azureclaw a2a` (Phase 1 scaffold:
-  `list-exposed`, `schema`), `azureclaw convert` (Phase 0 skeleton),
-  `azureclaw pair`.
+- **Three new CLI commands** — `kars a2a` (Phase 1 scaffold:
+  `list-exposed`, `schema`), `kars convert` (Phase 0 skeleton),
+  `kars pair`.
 - **`docs/use-cases.md`** + **`docs/phase-0-1-capabilities.md`** + ADR-0001
   + OWASP MCP Top-10 controls matrix.
 
@@ -5920,7 +5920,7 @@ see that directory for the full evidence trail).
 - **Vendor patch #21 (SDK)** — `SessionManager.initiateSession` returns
   `{reused: true}` when an incoming KNOCK already established a crypto-layer
   session (was throwing "Active session already exists").
-- **`azureclaw connect` port-forward error surfacing** — kubectl stderr is
+- **`kars connect` port-forward error surfacing** — kubectl stderr is
   now displayed in the human-readable "address already in use" form.
 - **Deduplicated chat replay** — long-standing duplicate-message UI bug
   triaged across plugin + sandbox image; investigation captured in session
@@ -5934,7 +5934,7 @@ see that directory for the full evidence trail).
 - **8 conformance specs**, **1 compat spec**, **5 fuzz targets**.
 - **205 Rust tests** (74 controller + 105 router + 26 integration); **207 CLI
   tests**.
-- **4 CRDs total** — `ClawSandbox` + `ClawPairing` reconciled; `McpServer` +
+- **4 CRDs total** — `KarsSandbox` + `KarsPairing` reconciled; `McpServer` +
   `ToolPolicy` schema-only.
 - **21 CLI commands**, **10 skills** (8 Foundry + 2 internal), **5 Docker
   images**.
@@ -5942,9 +5942,9 @@ see that directory for the full evidence trail).
 ## [pre-PR-44 baseline]
 
 ### Added
-- **Preflight RBAC checks for `azureclaw up`** — new `cli/src/preflight.ts` queries effective permissions at subscription scope (`Microsoft.Authorization/permissions`), resource-provider registration, and preview-feature flags BEFORE Bicep runs, so operators fail in ≤30s instead of 20 minutes in. Prints copy-pasteable `az role assignment create` remediation commands with the exact missing actions. Escape hatch: `--skip-preflight`. See `docs/permissions.md` for the full role matrix + custom-role JSON.
-- **`docs/permissions.md`** — canonical required-roles reference for `azureclaw up`: Contributor + User Access Administrator (or Owner), per-action justification, least-privilege custom role, preview feature registration, and Entra `api://agentmesh` tenant-admin caveat.
-- **Bidirectional Agent Handoff** — live-migrate agents between local Docker and AKS cloud with `azureclaw handoff <name> --to cloud|local`. Supports both CLI-driven (operator) and LLM-driven (webchat) orchestration paths
+- **Preflight RBAC checks for `kars up`** — new `cli/src/preflight.ts` queries effective permissions at subscription scope (`Microsoft.Authorization/permissions`), resource-provider registration, and preview-feature flags BEFORE Bicep runs, so operators fail in ≤30s instead of 20 minutes in. Prints copy-pasteable `az role assignment create` remediation commands with the exact missing actions. Escape hatch: `--skip-preflight`. See `docs/permissions.md` for the full role matrix + custom-role JSON.
+- **`docs/permissions.md`** — canonical required-roles reference for `kars up`: Contributor + User Access Administrator (or Owner), per-action justification, least-privilege custom role, preview feature registration, and Entra `api://agentmesh` tenant-admin caveat.
+- **Bidirectional Agent Handoff** — live-migrate agents between local Docker and AKS cloud with `kars handoff <name> --to cloud|local`. Supports both CLI-driven (operator) and LLM-driven (webchat) orchestration paths
 - **Sub-Agent Handoff** — sub-agents are snapshotted (workspace + task state), destroyed on source, re-spawned on target, and injected with workspace + resume signal via E2E encrypted mesh
 - **Stale AMID Cache Poisoning Fix** — three-layer defense: identity-based AMID rejection, prekey readiness gate, workspace inject retry with ack verification
 - **Workspace Injection Pipeline** — tarball extraction with path traversal validation, `incoming/` file promotion to workspace root, `HANDOFF_FILES.md` manifest for agent discoverability
@@ -5964,14 +5964,14 @@ see that directory for the full evidence trail).
 - **GitHub Templates** — issue templates (bug, feature, security), PR template, CODEOWNERS
 - **Trace-ID correlation** — every inbound router request is assigned an opaque `x-trace-id` (or honors a client-supplied one), propagated to upstream Azure calls, tagged on all tracing spans, and stamped onto every AGT audit-chain entry. Unblocks multi-hop "why did this prompt fail" debugging without a rebuild loop.
 - **Bounded-retry middleware for idempotent upstream calls** — `proxy::forward` now retries up to 3× with exponential backoff on transient Azure upstream failures (connection-reset, 502, 503, 504) for GET and `/embeddings` only. `/chat/completions`, `/completions`, `/responses` are never retried (non-idempotent). Configurable via `UPSTREAM_RETRY_MAX_ATTEMPTS` / `UPSTREAM_RETRY_INITIAL_MS`.
-- **Handoff lifecycle metrics** — new Prometheus counters `azureclaw_handoff_pending_events_total{result}` and `azureclaw_handoff_phase_transitions_total{from,to,result}` so operators can see rate-limit cooldowns, token expirations, and phase-machine progress without tail-searching logs.
+- **Handoff lifecycle metrics** — new Prometheus counters `kars_handoff_pending_events_total{result}` and `kars_handoff_phase_transitions_total{from,to,result}` so operators can see rate-limit cooldowns, token expirations, and phase-machine progress without tail-searching logs.
 - **Route-level threat model** (`docs/threat-model/routes.md`) — walks every router group (inference, foundry, agt, mesh, handoff, egress, admin, health) with auth posture, input validation, and blast-radius analysis.
 - **Repo tooling for behavioral-equivalence proofs** — `tools/item-manifest/` (syn-based fn-body hasher) + `tools/drift/drift.py` (comparator with allowlist) gates large mechanical refactors. Baselines and allowlists under `tools/drift/baselines/` and `tools/drift/allowlist-*.txt`.
 - **Local dev stack** — `docker-compose.dev.yml` + YAML scenario runner (`cli/src/testing/scenario.ts`) so plugin/router behavior can be exercised against a zero-dep fake router without any Docker image builds. Drives the `rebuild → push → wait → debug` loop from >15min down to sub-second for protocol changes.
 - **Test fixtures** — 8 sanitized Azure Foundry JSON fixtures + 3 axum-based fake servers (IMDS, AAD, Azure upstream) with a request recorder, all shared between Rust integration tests and the CLI fake-router runner.
 
 ### Fixed
-- **`azureclaw up` stepper numbering** — declared `totalSteps: 7` never matched the 9 runtime phases (10 with `--expose-registry`), and step 4 (`kubectl` configure) was missing its `stepper.done()` call so it appeared to silently disappear from the progress log. Total now tracks the actual branch count, and every step has an explicit completion.
+- **`kars up` stepper numbering** — declared `totalSteps: 7` never matched the 9 runtime phases (10 with `--expose-registry`), and step 4 (`kubectl` configure) was missing its `stepper.done()` call so it appeared to silently disappear from the progress log. Total now tracks the actual branch count, and every step has an explicit completion.
 - Router bind address fix for K8s probe accessibility
 - K8s probe host field removal (kubelet defaults to pod IP)
 - Missing transitive Python dependencies (typing_inspection, cryptography) via PyPI fallback
@@ -5982,7 +5982,7 @@ see that directory for the full evidence trail).
 - AGT inference rate limit bumped from 120 → 500 calls/60s (policy) and router token bucket from 100 → 500 global req/s (needed for multi-agent handoff traffic)
 - Controller reconcile error requeue is now split by error kind: transient `kube::Error` keeps the 30s requeue, but `serde_json::Error` (malformed CR fields) now requeues at 300s instead of 30s. Malformed CRs won't heal on retry, so the longer back-off avoids log-spamming every 30s while a human edits the resource. Operators debugging a failed reconcile should expect a ~5-minute gap, not 30s. An `error!` log line is always emitted so the delay is never silent. See `controller/src/reconciler.rs::error_requeue_duration`.
 - **`POST /sandbox/spawn` canonical field is now `agent_id` (was `name`).** The Rust `SpawnRequest` / `SpawnResponse` / `SubAgentEntry` / `SubAgentSnapshot` structs use `agent_id` as the field name, and responses serialise `agent_id` on the wire. For backward compatibility with in-flight plugins, `name` is accepted as a deserialise-only serde alias on `SpawnRequest` and `SubAgentSnapshot`; a payload that sets both `agent_id` and `name` is rejected with a 422 (duplicate field) to catch inconsistent clients. The bundled plugin has been migrated to send and read `agent_id`. Operators who call `/sandbox/spawn` directly (e.g. via curl or a custom client) should switch to `agent_id` — the `name` alias will be removed in a future release.
-- **Canonical admin auth is now `Authorization: Bearer <token>`.** The legacy `x-azureclaw-admin` header is still accepted but emits a one-shot `warn!` log on first use per process. It will be removed in a future release. No action required for operators using the bundled CLI; custom scripts should switch to `Authorization: Bearer`.
+- **Canonical admin auth is now `Authorization: Bearer <token>`.** The legacy `x-kars-admin` header is still accepted but emits a one-shot `warn!` log on first use per process. It will be removed in a future release. No action required for operators using the bundled CLI; custom scripts should switch to `Authorization: Bearer`.
 - **Router bounded graceful-shutdown.** `axum::serve().with_graceful_shutdown(...)` is now wrapped in `tokio::time::timeout`. Default timeout is `max(TERMINATION_GRACE_PERIOD_SECS − 5s, 10s)` (typically 25s). Override with `SHUTDOWN_TIMEOUT_SECS`. Long-running SSE streams past the budget are log-and-dropped instead of blocking pod termination indefinitely.
 - **Router error-response format unified.** All router handlers now emit one of two documented shapes: a flat `{code, message, trace_id}` for internal endpoints, or the OpenAI-compatible `{error: {type, code, message}}` for inference/foundry endpoints. The constructors (`errors::flat`, `errors::openai`) are pinned by byte-exact unit tests. See `inference-router/src/errors.rs` and `docs/threat-model/routes.md`.
 - **Internal: `inference-router/src/routes.rs` (4890 LOC) split into 6 files** under `routes/` (`inference`, `handoff`, `governance`, `mesh`, `egress`, `mod`). Byte-level equivalence proven by `tools/drift/drift.py` against the pre-split baseline; exactly 1 allowlisted namespace-resolution fix. No behavior change.

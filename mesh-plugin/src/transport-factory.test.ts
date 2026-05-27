@@ -15,10 +15,10 @@ const agtUnifiedIdentity = {
 describe("resolveMeshProvider", () => {
   it("returns 'agt' regardless of env (vendored provider removed in Phase 5.2)", () => {
     expect(resolveMeshProvider({})).toBe("agt");
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "agt" })).toBe("agt");
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "vendored" })).toBe("agt");
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "fancy" })).toBe("agt");
-    expect(resolveMeshProvider({ AZURECLAW_MESH_PROVIDER: "" })).toBe("agt");
+    expect(resolveMeshProvider({ KARS_MESH_PROVIDER: "agt" })).toBe("agt");
+    expect(resolveMeshProvider({ KARS_MESH_PROVIDER: "vendored" })).toBe("agt");
+    expect(resolveMeshProvider({ KARS_MESH_PROVIDER: "fancy" })).toBe("agt");
+    expect(resolveMeshProvider({ KARS_MESH_PROVIDER: "" })).toBe("agt");
   });
 });
 
@@ -54,7 +54,7 @@ describe("createMeshTransport", () => {
         registryUrl: "http://reg",
         identity: agtUnifiedIdentity,
       },
-      { AZURECLAW_MESH_PROVIDER: "agt" },
+      { KARS_MESH_PROVIDER: "agt" },
     );
     expect(t.constructor.name).toBe("AgtTransport");
     expect(t.agentId).toBe("did:agentmesh:factory-test");
@@ -67,7 +67,7 @@ describe("createMeshTransport", () => {
         registryUrl: "http://reg",
         identity: agtUnifiedIdentity,
       },
-      { AZURECLAW_MESH_PROVIDER: "vendored" },
+      { KARS_MESH_PROVIDER: "vendored" },
     );
     expect(t.constructor.name).toBe("AgtTransport");
   });

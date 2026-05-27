@@ -4,13 +4,13 @@
 //! Shared I/O helpers for the principles.md §3 "Ready ⇔ router echo"
 //! loop, factored out of [`crate::tool_policy_reconciler`] so that
 //! every CRD whose `spec` is loaded by the per-sandbox inference
-//! router (ToolPolicy → AGT profile, InferencePolicy, ClawMemory,
+//! router (ToolPolicy → AGT profile, InferencePolicy, KarsMemory,
 //! McpServer egress, …) shares one implementation of:
 //!
-//! 1. Discovery — enumerate the `ClawSandbox`es that reference *this*
+//! 1. Discovery — enumerate the `KarsSandbox`es that reference *this*
 //!    policy CR via a caller-supplied filter predicate.
 //! 2. Auth bootstrap — read each sandbox's
-//!    `Secret azureclaw-<sandbox>/router-admin-token` (key `token`).
+//!    `Secret kars-<sandbox>/router-admin-token` (key `token`).
 //! 3. Confirmation poll — `GET /internal/policy-status` on the
 //!    per-sandbox router service and aggregate the per-sandbox
 //!    outcomes for [`crate::status::router_confirmation`]'s pure
@@ -24,21 +24,21 @@
 //!
 //! ## Generic over filter, not over CRD type
 //!
-//! `list_sandboxes_matching` takes a `FnMut(&ClawSandbox) -> bool`
+//! `list_sandboxes_matching` takes a `FnMut(&KarsSandbox) -> bool`
 //! filter rather than a hard-coded `tool_policy_name: &str` because
 //! every reconciler binds to a different field on
-//! `ClawSandbox.spec`:
+//! `KarsSandbox.spec`:
 //!
 //! * ToolPolicy → `spec.governance.toolPolicyRef.name`
 //! * InferencePolicy → `spec.inferenceRef`
-//! * ClawMemory → `spec.memoryRef` (future)
+//! * KarsMemory → `spec.memoryRef` (future)
 //! * McpServer fleet → `spec.mcpServerRefs[*].name` (future)
 //!
 //! Keeping the predicate on the caller side preserves the
 //! "single-responsibility" principle for the helper without baking in
 //! a CRD-kind enum that would need to grow with every new consumer.
 
-use crate::crd::ClawSandbox;
+use crate::crd::KarsSandbox;
 use crate::status::router_confirmation::{
     self, ConfirmError, fetch_router_policy_status, router_admin_url,
 };
@@ -48,20 +48,20 @@ use kube::{
     api::{Api, ListParams},
 };
 
-/// Enumerate `ClawSandbox`es in `ns` that satisfy `matches`.
+/// Enumerate `KarsSandbox`es in `ns` that satisfy `matches`.
 ///
 /// Returns the bare sandbox `metadata.name` values. The controller
 /// convention is one router-service per sandbox at
-/// `{name}.azureclaw-{name}.svc.cluster.local:8443`, so the
-/// *router's* namespace is `azureclaw-<name>`, distinct from `ns`
-/// (which is typically `azureclaw-system`, where the policy CRs
+/// `{name}.kars-{name}.svc.cluster.local:8443`, so the
+/// *router's* namespace is `kars-<name>`, distinct from `ns`
+/// (which is typically `kars-system`, where the policy CRs
 /// live).
 ///
-/// `matches` runs against each candidate `ClawSandbox`. Typical
+/// `matches` runs against each candidate `KarsSandbox`. Typical
 /// shape from a reconciler:
 ///
 /// ```ignore
-/// list_sandboxes_matching(client, "azureclaw-system", |cs| {
+/// list_sandboxes_matching(client, "kars-system", |cs| {
 ///     cs.spec
 ///         .governance
 ///         .as_ref()
@@ -75,9 +75,9 @@ pub async fn list_sandboxes_matching<F>(
     mut matches: F,
 ) -> Result<Vec<String>, kube::Error>
 where
-    F: FnMut(&ClawSandbox) -> bool,
+    F: FnMut(&KarsSandbox) -> bool,
 {
-    let api: Api<ClawSandbox> = Api::namespaced(client.clone(), ns);
+    let api: Api<KarsSandbox> = Api::namespaced(client.clone(), ns);
     let list = api.list(&ListParams::default()).await?;
     Ok(list
         .items
@@ -88,7 +88,7 @@ where
 }
 
 /// Read the per-sandbox admin token from
-/// `Secret azureclaw-<sandbox>/router-admin-token` (key `token`).
+/// `Secret kars-<sandbox>/router-admin-token` (key `token`).
 ///
 /// `Ok(None)` is returned when the Secret or the `token` key is not
 /// yet present — the reconciler treats that as a transient
@@ -100,7 +100,7 @@ pub async fn read_admin_token(
     client: &Client,
     sandbox: &str,
 ) -> Result<Option<String>, kube::Error> {
-    let secret_ns = format!("azureclaw-{sandbox}");
+    let secret_ns = format!("kars-{sandbox}");
     let api: Api<Secret> = Api::namespaced(client.clone(), &secret_ns);
     let secret = match api.get_opt("router-admin-token").await? {
         Some(s) => s,
@@ -163,16 +163,16 @@ pub async fn poll_referencing_sandboxes(
 
 #[cfg(test)]
 mod tests {
-    use crate::crd::{ClawSandbox, ClawSandboxSpec};
+    use crate::crd::{KarsSandbox, KarsSandboxSpec};
     use kube::core::ObjectMeta;
 
-    fn mk_sandbox(name: &str, tp_ref: Option<&str>) -> ClawSandbox {
-        let mut cs = ClawSandbox {
+    fn mk_sandbox(name: &str, tp_ref: Option<&str>) -> KarsSandbox {
+        let mut cs = KarsSandbox {
             metadata: ObjectMeta {
                 name: Some(name.into()),
                 ..Default::default()
             },
-            spec: ClawSandboxSpec::default(),
+            spec: KarsSandboxSpec::default(),
             status: None,
         };
         if let Some(tp) = tp_ref {
@@ -194,7 +194,7 @@ mod tests {
         let cs_b = mk_sandbox("b", Some("dev-tools"));
         let cs_c = mk_sandbox("c", None);
 
-        let pred = |cs: &ClawSandbox| {
+        let pred = |cs: &KarsSandbox| {
             cs.spec
                 .governance
                 .as_ref()

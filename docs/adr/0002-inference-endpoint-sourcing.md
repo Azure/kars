@@ -18,14 +18,14 @@ project endpoint URL.
 Historically the CLI had a code path in `cli/src/refs.ts:buildInferencePolicy`
 that injected an `endpoint` field under
 `InferencePolicy.spec.modelPreference.primary.endpoint`, sourcing the
-URL from the `--openai-endpoint` flag of `azureclaw up`. The field was
+URL from the `--openai-endpoint` flag of `kars up`. The field was
 **not** present in the InferencePolicy CRD schema and **was not read**
 by either the controller or the router — it was anticipatory scaffolding
 for a per-sandbox endpoint override that was never wired through.
 
 When the InferencePolicy CRD was put into strict-decoding mode, this
 spurious field became a hard `kubectl apply` reject, breaking
-`azureclaw up` at sandbox bring-up:
+`kars up` at sandbox bring-up:
 
 ```
 strict decoding error: unknown field "spec.modelPreference.primary.endpoint"

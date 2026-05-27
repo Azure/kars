@@ -36,7 +36,7 @@ NC='\033[0m'
 export MANUAL_E2E_PASS MANUAL_E2E_FAIL MANUAL_E2E_SKIP
 
 # ── Defaults (overridable via env) ──────────────────────────────────────
-: "${MANUAL_E2E_NAMESPACE_PREFIX:=azureclaw-e2e-manual}"
+: "${MANUAL_E2E_NAMESPACE_PREFIX:=kars-e2e-manual}"
 : "${MANUAL_E2E_TIMEOUT:=300}"     # default per-resource readiness wait, seconds
 : "${MANUAL_E2E_KEEP_NS:=0}"       # 1 → leave namespaces in place after a scenario
 : "${MANUAL_E2E_VERBOSE:=0}"       # 1 → dump kubectl describe on failure
@@ -73,14 +73,14 @@ require_cluster() {
     log_info "using kubeconfig context: ${ctx}"
 }
 
-require_azureclaw_installed() {
-    if ! kubectl get crd clawsandboxes.azureclaw.azure.com >/dev/null 2>&1; then
-        log_fail "AzureClaw CRDs not installed in this cluster (no clawsandboxes.azureclaw.azure.com)"
-        log_info "install with: helm upgrade --install azureclaw deploy/helm/azureclaw -n azureclaw-system --create-namespace"
+require_kars_installed() {
+    if ! kubectl get crd karssandboxes.kars.azure.com >/dev/null 2>&1; then
+        log_fail "Kars CRDs not installed in this cluster (no karssandboxes.kars.azure.com)"
+        log_info "install with: helm upgrade --install kars deploy/helm/kars -n kars-system --create-namespace"
         exit 2
     fi
-    if ! kubectl -n azureclaw-system get deploy azureclaw-controller >/dev/null 2>&1; then
-        log_warn "controller deployment not found in azureclaw-system; some scenarios may fail"
+    if ! kubectl -n kars-system get deploy kars-controller >/dev/null 2>&1; then
+        log_warn "controller deployment not found in kars-system; some scenarios may fail"
     fi
 }
 
@@ -103,14 +103,14 @@ cleanup_ns() {
 }
 
 # Return the controller-managed pod namespace for a given sandbox name.
-# The controller always provisions sandbox pods in `azureclaw-<name>`,
-# regardless of where the ClawSandbox CR itself lives.
+# The controller always provisions sandbox pods in `kars-<name>`,
+# regardless of where the KarsSandbox CR itself lives.
 pod_ns_for() {
-    echo "azureclaw-$1"
+    echo "kars-$1"
 }
 
 # Best-effort cleanup of both the test scenario namespace and the
-# matching `azureclaw-<name>` pod namespace the controller created.
+# matching `kars-<name>` pod namespace the controller created.
 # Honours MANUAL_E2E_KEEP_NS exactly like `cleanup_ns`.
 cleanup_sandbox() {
     local cr_ns="$1" name="$2"
@@ -120,19 +120,19 @@ cleanup_sandbox() {
 
 # Toggle the audited break-glass label on a sandbox pod namespace so
 # tests can `kubectl exec` into the openclaw container. Production-grade
-# admission policy (azureclaw-sandbox-exec-ban) blocks exec/attach into
+# admission policy (kars-sandbox-exec-ban) blocks exec/attach into
 # the agent runtime container by default; the label is the documented
 # emergency-override path. Bypasses are audited at the apiserver layer.
 enable_break_glass() {
     local pod_ns="$1"
     kubectl label namespace "$pod_ns" \
-        azureclaw.azure.com/break-glass=true --overwrite >/dev/null 2>&1 || true
+        kars.azure.com/break-glass=true --overwrite >/dev/null 2>&1 || true
 }
 
 disable_break_glass() {
     local pod_ns="$1"
     kubectl label namespace "$pod_ns" \
-        azureclaw.azure.com/break-glass- >/dev/null 2>&1 || true
+        kars.azure.com/break-glass- >/dev/null 2>&1 || true
 }
 
 # ── Wait helpers ────────────────────────────────────────────────────────
@@ -167,21 +167,21 @@ wait_for_condition() {
     return 1
 }
 
-wait_for_clawsandbox_ready() {
-    # ClawSandbox doesn't ship a stock .status.conditions Ready type until
+wait_for_karssandbox_ready() {
+    # KarsSandbox doesn't ship a stock .status.conditions Ready type until
     # phase 2; we check for the .status.phase == Running OR the Ready condition.
     local ns="$1" name="$2" timeout="${3:-$MANUAL_E2E_TIMEOUT}"
-    log_step "waiting for ClawSandbox/${name} to become Ready (≤${timeout}s)…"
+    log_step "waiting for KarsSandbox/${name} to become Ready (≤${timeout}s)…"
     local deadline=$((SECONDS + timeout))
     local started_ms now_ms
     started_ms=$(_metrics_now_ms)
     while (( SECONDS < deadline )); do
         local phase ready
-        phase=$(kubectl -n "$ns" get clawsandbox "$name" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
-        ready=$(kubectl -n "$ns" get clawsandbox "$name" \
+        phase=$(kubectl -n "$ns" get karssandbox "$name" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+        ready=$(kubectl -n "$ns" get karssandbox "$name" \
             -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
         if [[ "$ready" == "True" || "$phase" == "Running" ]]; then
-            log_pass "ClawSandbox/${name} is Ready"
+            log_pass "KarsSandbox/${name} is Ready"
             now_ms=$(_metrics_now_ms)
             metric_emit "${MANUAL_E2E_SCENARIO:-?}" ttiSandbox ms $((now_ms - started_ms)) \
                 "sandbox=${name}" "ns=${ns}" "phase=${phase:-Ready}"
@@ -189,11 +189,11 @@ wait_for_clawsandbox_ready() {
         fi
         sleep 3
     done
-    log_fail "ClawSandbox/${name} did not become Ready within ${timeout}s"
+    log_fail "KarsSandbox/${name} did not become Ready within ${timeout}s"
     metric_emit "${MANUAL_E2E_SCENARIO:-?}" ttiSandboxTimeout ms "$((timeout * 1000))" \
         "sandbox=${name}" "ns=${ns}"
     if [[ "${MANUAL_E2E_VERBOSE:-0}" == "1" ]]; then
-        kubectl -n "$ns" describe clawsandbox "$name" | sed 's/^/    /'
+        kubectl -n "$ns" describe karssandbox "$name" | sed 's/^/    /'
         kubectl -n "$ns" get pods -o wide | sed 's/^/    /'
     fi
     return 1

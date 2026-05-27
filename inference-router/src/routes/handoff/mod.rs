@@ -57,7 +57,7 @@ async fn sandbox_spawn(
 /// GET /sandbox/list — list sub-agents spawned by this sandbox.
 async fn sandbox_list(State(_state): State<AppState>) -> impl IntoResponse {
     let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
-    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
+    let is_dev = std::env::var("KARS_DEV_MODE").unwrap_or_default() == "true";
 
     let result = if is_dev {
         spawn::list_sandboxes_docker(&parent_name).await
@@ -94,7 +94,7 @@ async fn sandbox_delete(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
-    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
+    let is_dev = std::env::var("KARS_DEV_MODE").unwrap_or_default() == "true";
 
     let result = if is_dev {
         spawn::delete_sandbox_docker(&parent_name, &name).await
@@ -160,7 +160,7 @@ async fn handoff_init_handler(
             Json(serde_json::json!({
                 "error": "Handoff requires a global registry. Start with --global-registry <url> to enable handoff.",
                 "registry_mode": "local",
-                "hint": "Run `azureclaw dev --global-registry <url>` or `azureclaw up --global-registry <url>`"
+                "hint": "Run `kars dev --global-registry <url>` or `kars up --global-registry <url>`"
             })),
         )
             .into_response();
@@ -190,7 +190,7 @@ async fn handoff_init_handler(
     };
 
     // Validate direction vs environment (warn-only, don't block)
-    let is_dev = std::env::var("AZURECLAW_DEV_MODE").unwrap_or_default() == "true";
+    let is_dev = std::env::var("KARS_DEV_MODE").unwrap_or_default() == "true";
     let expected = if is_dev {
         handoff::HandoffDirection::AksToLocal
     } else {
@@ -398,7 +398,7 @@ async fn handoff_resume(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /agt/handoff/status — read-only handoff status.
 /// POST /agt/handoff/pending — create a pending handoff request (§9.9.9 Stage 1).
-/// Called by `azureclaw_handoff_request`; mints a confirmation token the user
+/// Called by `kars_handoff_request`; mints a confirmation token the user
 /// must echo back. Rate limited: max 1 request / 5 min.
 async fn handoff_pending(
     State(state): State<AppState>,

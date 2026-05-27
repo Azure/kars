@@ -1,10 +1,10 @@
 # Blueprint 04 — Cross-org federation
 
-> "We're two organisations who want our agents to collaborate. Each side runs their own AzureClaw cluster. Neither side trusts the other's network, the other's Foundry quota, or the other's audit destination. We want E2E-encrypted, mutually-policy-evaluated agent-to-agent collaboration without merging trust domains."
+> "We're two organisations who want our agents to collaborate. Each side runs their own Kars cluster. Neither side trusts the other's network, the other's Foundry quota, or the other's audit destination. We want E2E-encrypted, mutually-policy-evaluated agent-to-agent collaboration without merging trust domains."
 
 ## Persona & intent
 
-- **You are:** the platform team in *one* of two collaborating organisations. The other org also runs their own AzureClaw — Blueprint 02 in their tenant.
+- **You are:** the platform team in *one* of two collaborating organisations. The other org also runs their own Kars — Blueprint 02 in their tenant.
 - **You want:** named agents on either side to exchange messages, hand off tasks, and run sub-agents on each other's substrate, with both sides' AGT policies enforced on every hop.
 - **You do not want:** to share kubeconfigs. To share Foundry quotas. To share Entra tenants. To trust the other side's audit chain to alibi misbehaviour from your own agents.
 
@@ -19,7 +19,7 @@ flowchart TB
     A2AGwA["a2a-gateway A<br/>(Rust axum, :8443/:8445)"]
     RegA["registry A"]
     RlyA["relay A"]
-    AgentA["ClawSandbox 'planner'"]
+    AgentA["KarsSandbox 'planner'"]
     AuditA[("Log Analytics A")]
   end
 
@@ -29,11 +29,11 @@ flowchart TB
     A2AGwB["a2a-gateway B<br/>(Rust axum, :8443/:8445)"]
     RegB["registry B"]
     RlyB["relay B"]
-    AgentB["ClawSandbox 'worker'"]
+    AgentB["KarsSandbox 'worker'"]
     AuditB[("Log Analytics B")]
   end
 
-  ForeignCaller["Foreign A2A 1.0.0 caller<br/>(non-AzureClaw)"]
+  ForeignCaller["Foreign A2A 1.0.0 caller<br/>(non-Kars)"]
 
   AgentA -->|"mesh send (E2E)"| RlyA
   RlyA -->|"federation peering<br/>over public/peered VNet"| AGwB
@@ -115,11 +115,11 @@ sequenceDiagram
     participant Worker as worker@OrgB
 
     Note over OpsA,OpsB: Pairing phase (one-time)
-    OpsA->>CtrlA: azureclaw mesh promote (publish AGw A)
-    OpsB->>CtrlB: azureclaw mesh promote (publish AGw B)
-    OpsA->>OpsA: azureclaw pair generate \<br/>--name orgB-cluster --slots 100 \<br/>--capabilities mesh,handoff
+    OpsA->>CtrlA: kars mesh promote (publish AGw A)
+    OpsB->>CtrlB: kars mesh promote (publish AGw B)
+    OpsA->>OpsA: kars pair generate \<br/>--name orgB-cluster --slots 100 \<br/>--capabilities mesh,handoff
     OpsA-->>OpsB: secure-share token (out-of-band)
-    OpsB->>CtrlB: azureclaw mesh peer add \<br/>--token azc_pair_v1_… --as orgB-cluster
+    OpsB->>CtrlB: kars mesh peer add \<br/>--token azc_pair_v1_… --as orgB-cluster
     CtrlB->>RlyA: register OrgB AMID prefix as peer
     Note over CtrlA,CtrlB: KNOCK + X3DH between cluster identities
 
@@ -140,12 +140,12 @@ sequenceDiagram
 
 ```bash
 # Once per cluster (both sides do this):
-azureclaw up
-azureclaw mesh promote                            # exposes registry+relay through AGw
+kars up
+kars mesh promote                            # exposes registry+relay through AGw
 
 # Pairing (one side mints, one side accepts):
 # Org A:
-azureclaw pair generate \
+kars pair generate \
   --name peer-orgB-cluster \
   --slots 100 \
   --token-budget 50000000 \
@@ -153,7 +153,7 @@ azureclaw pair generate \
   --expires 365d
 # … secure-share to Org B …
 # Org B:
-azureclaw mesh peer add \
+kars mesh peer add \
   --token "azc_pair_v1_…" \
   --as peer-orgA
 
@@ -163,7 +163,7 @@ azureclaw mesh peer add \
 
 ## A2A gateway — cross-org public A2A path
 
-The AgentMesh relay handles authenticated cross-org traffic between AzureClaw clusters. For interoperability with non-AzureClaw agents that speak only **A2A 1.0.0 HTTP**, the `azureclaw-a2a-gateway` is a Rust axum binary (distroless static image) that sits in front of your sandboxes.
+The AgentMesh relay handles authenticated cross-org traffic between Kars clusters. For interoperability with non-Kars agents that speak only **A2A 1.0.0 HTTP**, the `kars-a2a-gateway` is a Rust axum binary (distroless static image) that sits in front of your sandboxes.
 
 ### Architecture
 
@@ -176,8 +176,8 @@ Foreign A2A 1.0.0 caller
   App Gateway + WAF  (public, L7 WAF)
          │
          ▼
-  azureclaw-a2a-gateway  (ClusterIP :8443)
-         │   JWS Ed25519 verify (EdDSA, azureclaw_a2a_core::card_verifier)
+  kars-a2a-gateway  (ClusterIP :8443)
+         │   JWS Ed25519 verify (EdDSA, kars_a2a_core::card_verifier)
          │   Replay cache (5-min TTL, 100k cap, oldest-expiry eviction)
          │   Per-subject rate limit (60 burst / 5 rps token bucket)
          │   VAP: denies Ingress/LoadBalancer exposure of inference router
@@ -187,7 +187,7 @@ Foreign A2A 1.0.0 caller
   inference-router (per-sandbox, :8443)
          │
          ▼
-  ClawSandbox pod  (sandboxed agent process)
+  KarsSandbox pod  (sandboxed agent process)
 ```
 
 ### Enable the gateway (Helm)
@@ -195,12 +195,12 @@ Foreign A2A 1.0.0 caller
 Both values must be set — `a2aGateway.enabled` deploys the gateway; `inferenceRouter.a2aMtls.enabled` opens the mTLS port on the router:
 
 ```yaml
-# deploy/helm/azureclaw/values.yaml overrides:
+# deploy/helm/kars/values.yaml overrides:
 a2aGateway:
   enabled: true
   replicas: 2
   image:
-    repository: mcr.microsoft.com/azureclaw/a2a-gateway
+    repository: mcr.microsoft.com/kars/a2a-gateway
     tag: latest
 
 inferenceRouter:
@@ -208,16 +208,16 @@ inferenceRouter:
     enabled: true   # opens :8445 on inference-router pods
 ```
 
-### Declare the A2A agent card (ClawSandbox opt-in)
+### Declare the A2A agent card (KarsSandbox opt-in)
 
 Per-sandbox opt-in is required; sandboxes without `spec.a2a.enabled: true` are invisible to the gateway:
 
 ```yaml
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: A2AAgent
 metadata:
   name: planner-a2a
-  namespace: azureclaw-planner
+  namespace: kars-planner
 spec:
   sandboxRef:
     name: planner
@@ -230,11 +230,11 @@ spec:
     description: "Breaks down user goals into executable sub-tasks."
     version: "1.0.0"
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: planner
-  namespace: azureclaw-planner
+  namespace: kars-planner
 spec:
   inferenceRef:
     name: planner-policy
@@ -245,9 +245,9 @@ spec:
   networkPolicy:
     allowlistRef:
       registry: myacr.azurecr.io
-      repository: azureclaw-policy/planner-egress
+      repository: kars-policy/planner-egress
       digest: sha256:…
-      artifactType: application/vnd.azureclaw.egress-allowlist.v1+yaml
+      artifactType: application/vnd.kars.egress-allowlist.v1+yaml
 ```
 
 ### Signed OCI allowlist for A2A-reachable sandboxes
@@ -256,14 +256,14 @@ A2A-reachable sandboxes have a higher attack surface (foreign callers can influe
 
 ```bash
 # Build + sign the egress allowlist for this sandbox (CI step):
-azureclaw egress sign \
+kars egress sign \
   --allowlist planner-egress.yaml \
-  --push myacr.azurecr.io/azureclaw-policy/planner-egress \
+  --push myacr.azurecr.io/kars-policy/planner-egress \
   --mode keyless
 # → pushes OCI artifact + cosign signature; update spec.networkPolicy.allowlistRef.digest
 ```
 
-The controller verifies against the `azureclaw-signer-policy` ConfigMap in `azureclaw-system` and sets `AllowlistVerified=True` or `AllowlistVerified=False/SignerPolicyMissing` accordingly. The gateway admission VAP (`phase1/a2a-vap-no-public-router-exposure`) blocks any Ingress or LoadBalancer resource in sandbox namespaces, keeping the inference-router off the public internet.
+The controller verifies against the `kars-signer-policy` ConfigMap in `kars-system` and sets `AllowlistVerified=True` or `AllowlistVerified=False/SignerPolicyMissing` accordingly. The gateway admission VAP (`phase1/a2a-vap-no-public-router-exposure`) blocks any Ingress or LoadBalancer resource in sandbox namespaces, keeping the inference-router off the public internet.
 
 ## What's unique to this blueprint
 
@@ -271,7 +271,7 @@ The controller verifies against the `azureclaw-signer-policy` ConfigMap in `azur
 - **Two audit chains.** Both sides have a verifiable, hash-chained record of what their agents said and what was said to them. Disputes are decidable from each org's own logs.
 - **Mesh peering is *cluster-scoped*, not agent-scoped.** Once Org A and Org B are peered, any number of agents on either side can address each other (subject to per-agent AGT policy). This is fundamentally different from Blueprint 03 where each customer is a Pairing slot.
 - **No shared identity provider.** No need for cross-tenant Entra B2B, no need to share Workload Identity audiences. Each side authenticates the other through Ed25519 mesh identities + the federation pairing.
-- **A2A 1.0.0 gateway for non-AzureClaw callers.** The `azureclaw-a2a-gateway` (Rust axum + rustls, distroless static image) accepts A2A 1.0.0 HTTP from foreign agents, verifies JWS Ed25519 signatures, enforces replay-cache and per-subject rate limits, and forwards to sandboxes over mTLS `:8445`. Per-sandbox opt-in; VAP blocks inference-router exposure to the internet.
+- **A2A 1.0.0 gateway for non-Kars callers.** The `kars-a2a-gateway` (Rust axum + rustls, distroless static image) accepts A2A 1.0.0 HTTP from foreign agents, verifies JWS Ed25519 signatures, enforces replay-cache and per-subject rate limits, and forwards to sandboxes over mTLS `:8445`. Per-sandbox opt-in; VAP blocks inference-router exposure to the internet.
 
 ## Hardening checklist (cross-org reality)
 
@@ -283,9 +283,9 @@ The controller verifies against the `azureclaw-signer-policy` ConfigMap in `azur
 
 ## What this blueprint is NOT
 
-- Not a single-cluster pattern — a single cluster's agents-talking-to-agents is just regular `azureclaw pair` between two `ClawSandbox`es (Use Case 3).
+- Not a single-cluster pattern — a single cluster's agents-talking-to-agents is just regular `kars pair` between two `KarsSandbox`es (Use Case 3).
 - Not a SaaS pattern — federation assumes both sides have ops teams. If one side is a self-service customer, you want Blueprint 03.
-- Not a substitute for a contract / DPA. AzureClaw enforces *what's technically possible*; what's *commercially permitted* is still legal-team work.
+- Not a substitute for a contract / DPA. Kars enforces *what's technically possible*; what's *commercially permitted* is still legal-team work.
 
 ## References
 
@@ -293,7 +293,7 @@ The controller verifies against the `azureclaw-signer-policy` ConfigMap in `azur
 - `cli/src/commands/mesh.ts` (`peer`, `promote`, `unpair`, `security`, `status`)
 - `inference-router/src/governance.rs` (ingress policy evaluation)
 - `inference-router/src/a2a_gateway/` (A2A gateway binary — tls, mtls, verify, proxy, rate_limit, metrics, health modules)
-- `azureclaw_a2a_core::card_verifier` (JWS Ed25519 verifier, EdDSA hard-coded)
-- `deploy/helm/azureclaw/values.yaml` lines ~263–300 (`a2aGateway.*` + `inferenceRouter.a2aMtls.enabled`)
-- `docs/api/crd-reference.md` (`A2AAgent` CRD spec, `ClawSandbox.spec.a2a.*`)
+- `kars_a2a_core::card_verifier` (JWS Ed25519 verifier, EdDSA hard-coded)
+- `deploy/helm/kars/values.yaml` lines ~263–300 (`a2aGateway.*` + `inferenceRouter.a2aMtls.enabled`)
+- `docs/api/crd-reference.md` (`A2AAgent` CRD spec, `KarsSandbox.spec.a2a.*`)
 - ADR-0001 (front-edge architecture for non-mesh ingress; relevant for A2A 1.0.0 cross-org path)

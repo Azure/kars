@@ -16,7 +16,7 @@ const router = await FakeRouter.start({
   ],
 });
 try {
-  process.env.AZURECLAW_ROUTER_URL = router.baseUrl;
+  process.env.KARS_ROUTER_URL = router.baseUrl;
   // ... exercise code under test ...
   expect(router.log).toHaveLength(1);
 } finally {
@@ -83,12 +83,12 @@ fixtures volume-mounted read-only. Azure Linux is the repo-wide base
 image family; Node 24 is chosen because the Azure Linux image registry
 only publishes 20 and 24 tags (no 22). The fake-router is stdlib-only
 so the version bump is a no-op for behavior. Use this to point any
-AzureClaw client at a local router without building the sandbox image:
+Kars client at a local router without building the sandbox image:
 
 ```bash
 cd cli && npm ci                      # one-time, for tsx resolution
 make dev-compose-up                    # start
-AZURECLAW_ROUTER_URL=http://127.0.0.1:8443 azureclaw …
+KARS_ROUTER_URL=http://127.0.0.1:8443 kars …
 make dev-compose-down                  # stop
 ```
 
@@ -101,7 +101,7 @@ spin everything up in-process.
 
 `cli/src/plugin.ts` has ~33 hardcoded `http://127.0.0.1:8443/...` call
 sites; only two places (lines 3340 + 4698) honour
-`AZURECLAW_ROUTER_URL`. Plugin-level in-process testing against an
+`KARS_ROUTER_URL`. Plugin-level in-process testing against an
 ephemeral-port fake router therefore requires either:
 
 - running the standalone CLI on port 8443 (conflicts with a real router);
@@ -109,4 +109,4 @@ ephemeral-port fake router therefore requires either:
 
 The standalone mode is the intended path for the compose/scenario work
 (T4/T5); the library mode already unlocks any future code that uses
-`AZURECLAW_ROUTER_URL` correctly.
+`KARS_ROUTER_URL` correctly.

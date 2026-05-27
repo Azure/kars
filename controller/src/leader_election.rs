@@ -5,7 +5,7 @@
 //!
 //! ## Why a controller-wide gate?
 //!
-//! Phase 2 ships AzureClaw with `replicas: 2` for the controller
+//! Phase 2 ships Kars with `replicas: 2` for the controller
 //! Deployment so a node drain / OOM doesn't take down the operator.
 //! Without leader election, both replicas would run their reconciler
 //! loops in parallel and race on Server-Side Apply — the SSA
@@ -67,7 +67,7 @@ pub const DEFAULT_RENEW_PERIOD_SECS: u64 = 5;
 /// Default name of the controller-wide leader Lease in the controller's
 /// own namespace. Keeping this stable across deployments avoids leader
 /// flap during rolling upgrades.
-pub const DEFAULT_LEASE_NAME: &str = "azureclaw-controller-leader";
+pub const DEFAULT_LEASE_NAME: &str = "kars-controller-leader";
 
 /// Configuration for [`acquire_and_hold`]. Most callers want
 /// [`LeaderElectionConfig::from_env`].
@@ -84,22 +84,22 @@ impl LeaderElectionConfig {
     /// Build a config from environment variables.
     ///
     /// `POD_NAMESPACE` (downward API) — namespace where the Lease lives.
-    /// Falls back to `azureclaw-system` so the machinery works in dev /
+    /// Falls back to `kars-system` so the machinery works in dev /
     /// kind clusters where the downward API may not be wired into the
     /// deployment.
     /// `POD_NAME` — holder identity. Falls back to `HOSTNAME` then to
-    /// `azureclaw-controller-<pid>`.
+    /// `kars-controller-<pid>`.
     /// `LEADER_ELECTION_LEASE_NAME` — override lease name.
     pub fn from_env() -> Self {
         let namespace = std::env::var("POD_NAMESPACE")
             .ok()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "azureclaw-system".to_string());
+            .unwrap_or_else(|| "kars-system".to_string());
         let identity = std::env::var("POD_NAME")
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
-            .unwrap_or_else(|| format!("azureclaw-controller-{}", std::process::id()));
+            .unwrap_or_else(|| format!("kars-controller-{}", std::process::id()));
         let lease_name = std::env::var("LEADER_ELECTION_LEASE_NAME")
             .ok()
             .filter(|s| !s.is_empty())

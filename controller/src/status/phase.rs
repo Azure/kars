@@ -17,7 +17,7 @@
 //!
 //! Three reconcilers historically stamped `Ready` while the data plane
 //! ignored the body (`InferencePolicy`'s `tokenBudget` /
-//! `contentSafety` / `modelPreference`, `ClawMemory`'s binding) or
+//! `contentSafety` / `modelPreference`, `KarsMemory`'s binding) or
 //! stamped `Pending` forever with an unfinished-marker comment. Each was a lie to the
 //! user: `kubectl wait --for=condition=Ready` returned green for a
 //! policy that was doing nothing.
@@ -67,7 +67,7 @@ pub const PHASE_PENDING: &str = "Pending";
 ///
 /// Introduced in Slice 0 of `crd-well-oiled-machine`. Replaces the
 /// historical practice of stamping `Ready` for unwired CRDs and the
-/// `Pending`-forever apology in `ClawMemory`.
+/// `Pending`-forever apology in `KarsMemory`.
 pub const PHASE_COMPILED: &str = "Compiled";
 
 /// `.status.phase = "Ready"` — the data plane has confirmed it is
@@ -76,10 +76,10 @@ pub const PHASE_COMPILED: &str = "Compiled";
 /// reconcilers stamp `Compiled` until their slice lands.
 pub const PHASE_READY: &str = "Ready";
 
-/// `.status.phase = "Running"` — `ClawSandbox`-specific terminal
+/// `.status.phase = "Running"` — `KarsSandbox`-specific terminal
 /// phase indicating the sandbox Deployment is rolled out and the
 /// pod is serving. Distinct from [`PHASE_READY`] because
-/// `ClawSandbox` predates the canonical lifecycle vocabulary and
+/// `KarsSandbox` predates the canonical lifecycle vocabulary and
 /// its phase string is part of the public contract (consumed by
 /// the CLI, Headlamp plugin, and `kubectl wait` invocations in
 /// `cli/src/commands/up/sandbox_bringup.ts`). Gate-lane CRDs that
@@ -118,7 +118,7 @@ pub const PHASE_EXPIRED: &str = "Expired";
 
 /// Kubernetes `Pod.status.phase` values — distinct domain from
 /// CRD `.status.phase`. Defined here so reconcilers that read pod
-/// phase (e.g. ClawEval reading runner pod logs) can avoid hard-
+/// phase (e.g. KarsEval reading runner pod logs) can avoid hard-
 /// coding the literals (`"Succeeded"` / `"Failed"`) which would
 /// collide with the phase-taxonomy guard.
 pub const POD_PHASE_SUCCEEDED: &str = "Succeeded";
@@ -141,7 +141,7 @@ pub const REASON_LIMITED_SUPPORT: &str = "LimitedSupport";
 /// `CONTROLLER_POD_NAME` (set in the controller Deployment) when
 /// available; otherwise we fall back to a static identifier so events
 /// still publish during local `cargo test` runs.
-const REPORTER_CONTROLLER: &str = "azureclaw-controller";
+const REPORTER_CONTROLLER: &str = "kars-controller";
 
 /// Thin wrapper around [`kube::runtime::events::Recorder`].
 ///
@@ -262,8 +262,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claw_memory::ClawMemory;
     use crate::inference_policy::InferencePolicy;
+    use crate::kars_memory::KarsMemory;
     use crate::mcp_server::McpServer;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
@@ -318,11 +318,11 @@ mod tests {
         }
     }
 
-    fn cm_fixture() -> ClawMemory {
-        ClawMemory {
+    fn cm_fixture() -> KarsMemory {
+        KarsMemory {
             metadata: ObjectMeta {
                 name: Some("mem-1".into()),
-                namespace: Some("azureclaw-test".into()),
+                namespace: Some("kars-test".into()),
                 uid: Some("00000000-0000-0000-0000-000000000001".into()),
                 resource_version: Some("42".into()),
                 ..Default::default()
@@ -333,18 +333,18 @@ mod tests {
     }
 
     #[test]
-    fn object_ref_for_clawmemory_carries_identifiers() {
+    fn object_ref_for_karsmemory_carries_identifiers() {
         let r = object_ref_for(&cm_fixture());
-        assert_eq!(r.kind.as_deref(), Some("ClawMemory"));
+        assert_eq!(r.kind.as_deref(), Some("KarsMemory"));
         assert_eq!(r.name.as_deref(), Some("mem-1"));
-        assert_eq!(r.namespace.as_deref(), Some("azureclaw-test"));
+        assert_eq!(r.namespace.as_deref(), Some("kars-test"));
         assert_eq!(
             r.uid.as_deref(),
             Some("00000000-0000-0000-0000-000000000001")
         );
         assert_eq!(r.resource_version.as_deref(), Some("42"));
         let av = r.api_version.unwrap();
-        assert!(av.starts_with("azureclaw.azure.com/"), "got {av}");
+        assert!(av.starts_with("kars.azure.com/"), "got {av}");
     }
 
     #[test]

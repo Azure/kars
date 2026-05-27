@@ -9,12 +9,12 @@
 //! ## Two layers of validation
 //!
 //! 1. **CR-level** (this module). Enforces what is checkable from the
-//!    `ClawSandbox.spec.runtime.byo` fields without registry I/O:
+//!    `KarsSandbox.spec.runtime.byo` fields without registry I/O:
 //!    - `contract_version` is non-empty AND in the supported set.
 //!    - `image` is non-empty AND shape-valid (contains a tag or digest).
 //!
 //! 2. **Registry-level** (out of scope for this slice). The image's
-//!    `org.azureclaw.runtime.contract` label must equal the declared
+//!    `org.kars.runtime.contract` label must equal the declared
 //!    `contract_version`. That requires an authenticated registry pull
 //!    in the controller's hot path, which is a substantial new
 //!    dependency surface (rate limits, auth flow, image-cache); left

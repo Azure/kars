@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! AzureClaw Controller — Kubernetes operator for sandboxed OpenClaw agents.
+//! Kars Controller — Kubernetes operator for sandboxed OpenClaw agents.
 //!
-//! Watches `ClawSandbox` and `ClawPairing` custom resources and reconciles:
+//! Watches `KarsSandbox` and `KarsPairing` custom resources and reconciles:
 //! - Isolated namespace per sandbox
 //! - OpenClaw agent pod with security constraints (seccomp, SELinux, read-only rootfs)
 //! - NetworkPolicy (default-deny + allowlist from CRD spec)
@@ -18,11 +18,6 @@ mod a2a_agent;
 mod a2a_agent_compile;
 mod a2a_agent_reconciler;
 mod backoff;
-mod claw_eval;
-mod claw_eval_reconciler;
-mod claw_memory;
-mod claw_memory_compile;
-mod claw_memory_reconciler;
 mod config_hash;
 mod crd;
 #[allow(dead_code)]
@@ -39,6 +34,11 @@ mod helm_drift;
 mod inference_policy;
 mod inference_policy_compile;
 mod inference_policy_reconciler;
+mod kars_eval;
+mod kars_eval_reconciler;
+mod kars_memory;
+mod kars_memory_compile;
+mod kars_memory_reconciler;
 mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
@@ -83,12 +83,12 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "azureclaw_controller=info".into()),
+                .unwrap_or_else(|_| "kars_controller=info".into()),
         )
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    tracing::info!("AzureClaw Controller starting");
+    tracing::info!("Kars Controller starting");
 
     // P2 #12: stamp the controller config hash early so it appears
     // in the very first log line operators look at and is exposed
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
     config_hash::record_config_hash(&config_hash);
     tracing::info!(
         controller_config_hash = %config_hash,
-        "controller config hash computed; surfaced as azureclaw_controller_config_info"
+        "controller config hash computed; surfaced as kars_controller_config_info"
     );
 
     let client = Client::try_default().await?;
@@ -194,13 +194,13 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { inference_policy_reconciler::run(client).await })
     };
-    let claw_memory_handle = {
+    let kars_memory_handle = {
         let client = client.clone();
-        tokio::spawn(async move { claw_memory_reconciler::run(client).await })
+        tokio::spawn(async move { kars_memory_reconciler::run(client).await })
     };
-    let claw_eval_handle = {
+    let kars_eval_handle = {
         let client = client.clone();
-        tokio::spawn(async move { claw_eval_reconciler::run(client).await })
+        tokio::spawn(async move { kars_eval_reconciler::run(client).await })
     };
     let trust_graph_handle = {
         let client = client.clone();
@@ -214,7 +214,7 @@ async fn main() -> Result<()> {
     // S12.d: SignerPolicy ConfigMap watcher. Installs a process-global
     // handle so `policy_fetcher::maybe_verify_allowlist` resolves
     // identity-pinning policy from the live cluster ConfigMap. Falls
-    // back to env vars (`AZURECLAW_SIGNER_*`) when the ConfigMap is
+    // back to env vars (`KARS_SIGNER_*`) when the ConfigMap is
     // absent — that's the emergency-override path. Malformed
     // ConfigMaps surface as `SignerPolicyMalformed` and **do not**
     // silently fall back to env (operator must fix the cluster
@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
         let ns = std::env::var("POD_NAMESPACE")
             .ok()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "azureclaw-system".to_string());
+            .unwrap_or_else(|| "kars-system".to_string());
         tokio::spawn(async move { signer_policy::run(client, ns, shared).await })
     };
 
@@ -243,14 +243,14 @@ async fn main() -> Result<()> {
                 "false" | "0" | "no" | "off"
             );
             if enabled {
-                // The peer reads AZURECLAW_MESH_PROVIDER internally and uses
+                // The peer reads KARS_MESH_PROVIDER internally and uses
                 // the AGT wire envelope for federation features.
                 tracing::info!("Mesh peer enabled — starting relay connection");
                 mesh_peer::run(client).await
             } else {
                 tracing::warn!(
                     "Mesh peer disabled (MESH_PEER_ENABLED={}). External agent pairing will NOT work. \
-                     Re-run `azureclaw up` (without --no-mesh-peer) to enable federation.",
+                     Re-run `kars up` (without --no-mesh-peer) to enable federation.",
                     raw
                 );
                 // Park forever — don't exit so select! doesn't trigger
@@ -343,10 +343,10 @@ async fn main() -> Result<()> {
         res = inference_policy_handle => {
             res??;
         }
-        res = claw_memory_handle => {
+        res = kars_memory_handle => {
             res??;
         }
-        res = claw_eval_handle => {
+        res = kars_eval_handle => {
             res??;
         }
         res = trust_graph_handle => {

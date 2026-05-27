@@ -1,8 +1,8 @@
 {
-  "name": "@azureclaw/tests-conformance",
+  "name": "@kars/tests-conformance",
   "version": "0.0.0",
   "private": true,
-  "description": "AzureClaw behavioral conformance corpus — protocol invariants beyond happy-path, per docs/implementation-plan.md §5.4.",
+  "description": "Kars behavioral conformance corpus — protocol invariants beyond happy-path, per docs/implementation-plan.md §5.4.",
   "type": "module",
   "scripts": {
     "test": "vitest run",

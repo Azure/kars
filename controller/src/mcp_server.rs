@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 /// with different sandbox selectors.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
-    group = "azureclaw.azure.com",
+    group = "kars.azure.com",
     version = "v1alpha1",
     kind = "McpServer",
     namespaced,
@@ -172,7 +172,7 @@ fn default_pkce() -> String {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxSelector {
-    /// Match labels on `ClawSandbox` resources. Standard label selector
+    /// Match labels on `KarsSandbox` resources. Standard label selector
     /// semantics; AND across keys.
     #[serde(default)]
     pub match_labels: std::collections::BTreeMap<String, String>,
@@ -199,17 +199,17 @@ pub struct McpServerStatus {
 
     /// Reference to the Secret holding the Ed25519 signing keypair this
     /// reconciler emits. The Secret has type
-    /// `azureclaw.azure.com/mcp-signing-key` with two keys:
+    /// `kars.azure.com/mcp-signing-key` with two keys:
     /// `signing-key.private` (raw 32-byte Ed25519 seed) and
     /// `signing-key.public` (raw 32-byte verifying key). Field-managed
-    /// by `azureclaw-controller/mcp`.
+    /// by `kars-controller/mcp`.
     #[serde(default)]
     pub signing_key_ref: Option<LocalObjectRef>,
 
     /// Reference to the ConfigMap caching the issuer's JWKS. Present
     /// only when `spec.productionMode == true`. Single key `jwks.json`
     /// holds the raw RFC 7517 JWKSet bytes. Field-managed by
-    /// `azureclaw-controller/mcp`.
+    /// `kars-controller/mcp`.
     #[serde(default)]
     pub jwks_config_map_ref: Option<LocalObjectRef>,
 

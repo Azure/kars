@@ -12,7 +12,7 @@
 #
 # Consequences for scenarios:
 #   * Scenarios that REQUIRE CRDs (InferencePolicy, ToolPolicy,
-#     ClawMemory, McpServer, ClawSandbox, EgressApproval) cannot run
+#     KarsMemory, McpServer, KarsSandbox, EgressApproval) cannot run
 #     unmodified on docker. The scenario must either ship a
 #     `docker-overlay/` directory that maps the same intent into
 #     pre-rendered policy bundles + CLI flags, or skip the scenario
@@ -20,7 +20,7 @@
 #   * Sub-agent spawn works on docker (the parent container has the
 #     docker socket mounted; spawned children are sibling containers
 #     on the same docker network). The AGT relay + registry run as
-#     compose-friendly sibling containers when `azureclaw dev` is
+#     compose-friendly sibling containers when `kars dev` is
 #     used to bring the stack up.
 #   * NetworkPolicy enforcement does not exist on docker; the iptables
 #     egress-guard and the router L7 allow-list ARE active (the
@@ -30,7 +30,7 @@
 # Inputs (env):
 #   DOCKER_CONTAINER_NAME — name of the parent sandbox container.
 #                           Default: ${SCENARIO_SANDBOX}.
-#   SKIP_DEV_BRINGUP      — set to 1 to skip the `azureclaw dev
+#   SKIP_DEV_BRINGUP      — set to 1 to skip the `kars dev
 #                           --target docker` step if the container is
 #                           already up.
 
@@ -40,7 +40,7 @@ DOCKER_CONTAINER_NAME="${DOCKER_CONTAINER_NAME:-${SCENARIO_SANDBOX}}"
 
 platform_preflight() {
     command -v docker >/dev/null || { log "ERR docker not on PATH"; exit 1; }
-    command -v azureclaw >/dev/null || { log "ERR azureclaw CLI not on PATH"; exit 1; }
+    command -v kars >/dev/null || { log "ERR kars CLI not on PATH"; exit 1; }
     docker info >/dev/null 2>&1 || {
         log "ERR docker daemon not reachable — start Docker Desktop / dockerd"
         exit 1
@@ -51,16 +51,16 @@ platform_preflight() {
     elif docker ps --format '{{.Names}}' | grep -qx "${DOCKER_CONTAINER_NAME}"; then
         log "docker container '${DOCKER_CONTAINER_NAME}' already running — skipping bring-up"
     else
-        log "bringing up docker sandbox via 'azureclaw dev --target docker --once'"
+        log "bringing up docker sandbox via 'kars dev --target docker --once'"
         # Note: `--once` so the CLI doesn't take over our terminal. The
         # scenario's policies / channels / mcp servers are NOT auto-
         # applied — docker mode requires the scenario to either preload
         # the bundles into the image or provide a docker-overlay/ dir
         # the helper sources. We do not pretend otherwise.
-        azureclaw dev --target docker --once \
+        kars dev --target docker --once \
             --name "${DOCKER_CONTAINER_NAME}" \
             >>"${OUT_DIR}/dev-bringup.log" 2>&1 || {
-                log "ERR azureclaw dev bring-up failed; tail of dev-bringup.log:"
+                log "ERR kars dev bring-up failed; tail of dev-bringup.log:"
                 tail -n 80 "${OUT_DIR}/dev-bringup.log" >&2 || true
                 exit 1
             }
@@ -72,7 +72,7 @@ platform_preflight() {
         echo "caveats:"
         echo "  - CRD-based scenarios (InferencePolicy, ToolPolicy, etc.)"
         echo "    do NOT apply on docker — policies are loaded from disk"
-        echo "    bundles set up by 'azureclaw dev'."
+        echo "    bundles set up by 'kars dev'."
         echo "  - NetworkPolicy enforcement: not applicable. Egress is"
         echo "    enforced by the iptables egress-guard inside the"
         echo "    container and the router L7 allow-list, same as AKS."
@@ -106,10 +106,10 @@ platform_apply() {
 
 platform_credentials() {
     # For docker, channel secrets are passed as env vars to the
-    # container via `azureclaw dev` flags rather than as a K8s Secret.
+    # container via `kars dev` flags rather than as a K8s Secret.
     # The bring-up step has already wired them; nothing to do here.
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-        log "TELEGRAM_BOT_TOKEN present — assumed already passed to 'azureclaw dev' at bring-up"
+        log "TELEGRAM_BOT_TOKEN present — assumed already passed to 'kars dev' at bring-up"
     fi
 }
 
@@ -135,7 +135,7 @@ platform_post_prompt() {
     log "posting ${SCENARIO} prompt to docker sandbox on localhost:18789"
 
     # Read the gateway-token from inside the container (matches what
-    # `azureclaw connect` does — the token lives at /tmp/gateway-token
+    # `kars connect` does — the token lives at /tmp/gateway-token
     # inside the openclaw container, written by entrypoint.sh).
     local gateway_token
     gateway_token=$(docker exec "${DOCKER_CONTAINER_NAME}" \

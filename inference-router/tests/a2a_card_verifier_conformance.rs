@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde_json::Value;
 
-use azureclaw_inference_router::a2a::{
+use kars_inference_router::a2a::{
     AgentCard, AgentCardConfig, AgentSkill, CardVerifierConfig, CardVerifyError, build_card,
     sign_card, verify_inbound_card,
 };
@@ -277,7 +277,7 @@ fn empty_trust_anchors() {
 fn url_prefix_mismatch() {
     let (sk, vk) = keypair(7);
     let mut config = base_config("agent-f", "k1", "https://orig.test/a2a");
-    config.provider = Some(azureclaw_inference_router::a2a::AgentProvider {
+    config.provider = Some(kars_inference_router::a2a::AgentProvider {
         url: "https://orig.test/a2a".into(),
         organization: "test-org".into(),
     });
@@ -299,7 +299,7 @@ fn url_prefix_mismatch() {
 fn url_prefix_match() {
     let (sk, vk) = keypair(8);
     let mut config = base_config("agent-g", "k1", "https://example.test/a2a");
-    config.provider = Some(azureclaw_inference_router::a2a::AgentProvider {
+    config.provider = Some(kars_inference_router::a2a::AgentProvider {
         url: "https://example.test/a2a".into(),
         organization: "test-org".into(),
     });

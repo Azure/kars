@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! The conformance run report — the wire contract between this binary
-//! and the slice-6.3 `ClawEval` reconciler.
+//! and the slice-6.3 `KarsEval` reconciler.
 //!
 //! The runner writes one [`RunReport`] per invocation to both
 //! `--output <path>` and stdout (one-shot JSON, no trailing newline).
@@ -17,12 +17,12 @@
 //! - `corpusDigest`: `sha256:<hex>` over the raw signed bytes.
 //! - `startedAt` / `completedAt`: RFC3339 UTC strings.
 //! - `total` / `passed` / `failed`: case counts.
-//! - `results[].verdict`: tagged enum mirroring [`azureclaw_eval_corpus::Verdict`].
+//! - `results[].verdict`: tagged enum mirroring [`kars_eval_corpus::Verdict`].
 //!
 //! Adding a field: append with `#[serde(skip_serializing_if = "Option::is_none")]`.
 //! Removing one: bump `REPORT_SCHEMA_VERSION` and update the reconciler in lockstep.
 
-use azureclaw_eval_corpus::{
+use kars_eval_corpus::{
     ActualDecision, Case, Expect, ObservedSample, Scenario, Verdict, VerdictFailure,
 };
 use serde::Serialize;
@@ -261,7 +261,7 @@ pub fn build_case_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azureclaw_eval_corpus::{Burst, ChatMessage, Decision, PolicyKindRef};
+    use kars_eval_corpus::{Burst, ChatMessage, Decision, PolicyKindRef};
     use serde_json::Value;
 
     fn dec(d: Decision) -> &'static str {

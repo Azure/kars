@@ -57,7 +57,7 @@ export async function recordMeshSession(
   // (see mesh-plugin agt-transport.ts) — this session-counter call is a
   // vendored-only artifact. Skipping avoids the 404 spam (once per mesh
   // reply, ~2/sec under load) in registry logs.
-  const provider = (process.env.AZURECLAW_MESH_PROVIDER ?? "agt")
+  const provider = (process.env.KARS_MESH_PROVIDER ?? "agt")
     .trim()
     .toLowerCase();
   if (provider === "agt") return;
@@ -90,10 +90,10 @@ export async function recordMeshSession(
       req.write(body);
       req.end();
     });
-    console.log(`[azureclaw] recordMeshSession: ${outcome} for ${sessionId}`);
+    console.log(`[kars] recordMeshSession: ${outcome} for ${sessionId}`);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (e: any) {
-    console.error(`[azureclaw] recordMeshSession failed: ${e.message}`);
+    console.error(`[kars] recordMeshSession failed: ${e.message}`);
   }
 }
 
@@ -115,7 +115,7 @@ export async function agtReconnect(
     try { await meshClient.disconnect(); } catch { /* ignore */ }
     await meshClient.connect({
       displayName: sandboxName,
-      capabilities: ["azureclaw-agent", "task-execution", sandboxName],
+      capabilities: ["kars-agent", "task-execution", sandboxName],
     });
     setConnected(true);
     log.info("AGT mesh reconnected successfully");
@@ -224,7 +224,7 @@ export async function notifyInboxToMemory(
       "",
       `## 📬 Unread Mesh Messages (${inbox.length})`,
       "",
-      `> You have ${inbox.length} unread message(s) from sub-agents. Call \`azureclaw_mesh_inbox\` to read and respond.`,
+      `> You have ${inbox.length} unread message(s) from sub-agents. Call \`kars_mesh_inbox\` to read and respond.`,
       "",
       preview,
       "",

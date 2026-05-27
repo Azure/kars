@@ -1,0 +1,148 @@
+---
+# Controller ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kars-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: controller
+  annotations:
+    azure.workload.identity/client-id: {{ .Values.azure.workloadIdentity.clientId | quote }}
+---
+# Controller ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-controller
+  labels:
+    app.kubernetes.io/name: kars
+rules:
+  # Manage KarsSandbox CRDs
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssandboxes", "karssandboxes/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Manage KarsPairing CRDs (federation)
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karspairings", "karspairings/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Manage governance/runtime CRDs (Phase 2/3)
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - "toolpolicies"
+      - "toolpolicies/status"
+      - "inferencepolicies"
+      - "inferencepolicies/status"
+      - "mcpservers"
+      - "mcpservers/status"
+      - "a2aagents"
+      - "a2aagents/status"
+      - "karsmemories"
+      - "karsmemories/status"
+      - "karsevals"
+      - "karsevals/status"
+      - "karsevals/finalizers"
+      - "trustgraphs"
+      - "trustgraphs/status"
+      - "signerpolicies"
+      - "signerpolicies/status"
+      - "egressapprovals"
+      - "egressapprovals/status"
+      - "egressapprovals/finalizers"
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Create and manage sandbox namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Manage pods, services, configmaps in sandbox namespaces
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read pod logs (for offload result relay)
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Manage deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # KarsEval runs jobs and cronjobs to invoke the conformance runner
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Manage network policies
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Manage spawner role bindings for sandbox sub-agent creation
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Leader election for mesh peer (only one replica connects to relay)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+---
+# Bind controller role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kars-controller
+subjects:
+  - kind: ServiceAccount
+    name: kars-controller
+    namespace: {{ .Release.Namespace }}
+---
+# Sandbox spawner ClusterRole — allows sub-agent creation from within sandboxes
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sandbox-spawner
+  labels:
+    app.kubernetes.io/name: kars
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssandboxes"]
+    verbs: ["get", "list", "create", "delete"]
+---
+# Egress approver ClusterRole — authority lane for Slice 5e-thin
+# EgressApproval CRDs. Binding this role (or an aggregating role that
+# selects on its label) IS the authority decision: any subject with
+# `create` on `egressapprovals.kars.azure.com` can widen a
+# sandbox's baseline egress allowlist for the TTL declared in
+# `spec.ttl`. The k8s audit log records who used it; the controller
+# enforces TTL, host caps, and the sibling-sandbox-Ready invariant.
+#
+# Not bound by default — operators bind explicitly per cluster
+# convention (e.g. to an on-call group, an SRE rotation, or a break-
+# glass account). The aggregation label allows higher-level roles
+# (admin, edit) to inherit it cleanly.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars:egress-approver
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: rbac
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+rules:
+  # Sibling sandbox must be readable so an approver can verify the
+  # target before creating the approval.
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssandboxes"]
+    verbs: ["get", "list"]
+  # Full lifecycle on EgressApproval. Update is intentionally
+  # excluded — approvals are immutable; revocation is delete.
+  - apiGroups: ["kars.azure.com"]
+    resources: ["egressapprovals"]
+    verbs: ["get", "list", "watch", "create", "delete"]

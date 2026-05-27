@@ -4,11 +4,11 @@
 
 ## Persona & intent
 
-- **You are:** an agent author or AzureClaw maintainer.
+- **You are:** an agent author or Kars maintainer.
 - **You want:** seconds of feedback. Real router code. Real policy decisions. Real audit format. Real frontier-model output (Claude Opus, GPT-5, Gemini) with a single `gh auth login`. No Azure subscription, no Foundry resource, no Kubernetes.
 - **You do not want:** to operate a kind cluster for every PR; to stand up Workload Identity locally; to maintain a parallel "dev mock" that drifts from production.
 
-> **Need real Kubernetes locally?** If you're changing the controller, the Helm chart, the CRDs, or the inference router sidecar wiring, see [Blueprint 02 — Local Kubernetes dev loop](02-local-k8s-dev-loop.md). It runs the same controller + router images on a kind cluster, with a Headlamp dashboard. Pick `azureclaw dev --target local-k8s` (or pick "Local Kubernetes" at the first-run prompt). For prompt-iteration and tool-policy work, this Docker loop is faster — start here.
+> **Need real Kubernetes locally?** If you're changing the controller, the Helm chart, the CRDs, or the inference router sidecar wiring, see [Blueprint 02 — Local Kubernetes dev loop](02-local-k8s-dev-loop.md). It runs the same controller + router images on a kind cluster, with a Headlamp dashboard. Pick `kars dev --target local-k8s` (or pick "Local Kubernetes" at the first-run prompt). For prompt-iteration and tool-policy work, this Docker loop is faster — start here.
 
 ## Topology
 
@@ -17,7 +17,7 @@ One Docker container. Same image as the sandbox, just with the router co-located
 ```mermaid
 flowchart LR
   subgraph Laptop["💻 Your laptop"]
-    CLI["azureclaw CLI"]
+    CLI["kars CLI"]
     subgraph Container["one Docker container"]
       Agent["agent runtime"]
       Router["inference-router (Rust)"]
@@ -25,7 +25,7 @@ flowchart LR
     end
     Secret["mounted secret<br/>(GitHub OAuth · Foundry key · GH PAT)"]
     Secret -.-> Router
-    CLI -->|azureclaw dev / connect| Container
+    CLI -->|kars dev / connect| Container
   end
   Copilot["🤖 GitHub Copilot<br/>(default)"]
   Foundry["☁️ Azure AI Foundry<br/>(optional)"]
@@ -59,18 +59,18 @@ Everything yes/yes is the same code path in both modes. That is what makes a gre
 sequenceDiagram
   autonumber
   participant Dev as You
-  participant CLI as azureclaw CLI
+  participant CLI as kars CLI
   participant Docker as Docker
   participant Img as Sandbox image
   participant Router as Router (in-image)
 
-  Dev->>CLI: azureclaw dev
+  Dev->>CLI: kars dev
   CLI->>Docker: build image (cached)
   CLI->>Docker: run container
   Docker->>Img: ENTRYPOINT
   Img->>Router: start on 127.0.0.1:8443
   Img->>Img: start agent runtime
-  Dev->>CLI: azureclaw connect dev-agent
+  Dev->>CLI: kars connect dev-agent
   CLI->>Img: TUI / WebSocket
   Note over Dev,Router: every prompt goes through<br/>the same policy / audit / safety<br/>code path as in production
 ```
@@ -79,25 +79,25 @@ sequenceDiagram
 
 ```bash
 # clone + build (Node 22+, Rust 1.88+)
-git clone https://github.com/Azure/azureclaw.git
-cd azureclaw/cli && npm ci && npm run build && npm link
+git clone https://github.com/Azure/kars.git
+cd kars/cli && npm ci && npm run build && npm link
 
 # run a sandbox locally — Docker only, no Azure, no Kubernetes
 # (prompts for provider on first run, then for an agent name; default is `dev-agent`)
-azureclaw dev
+kars dev
 
 # talk to it
-azureclaw connect dev-agent
+kars connect dev-agent
 
 # tail logs (router + agent)
-azureclaw logs dev-agent -f
+kars logs dev-agent -f
 
 # inspect / change policy
-azureclaw policy show dev-agent
-azureclaw policy apply ./my-tool-policy.yaml --sandbox dev-agent
+kars policy show dev-agent
+kars policy apply ./my-tool-policy.yaml --sandbox dev-agent
 
 # tear down
-azureclaw destroy dev-agent
+kars destroy dev-agent
 ```
 
 On the first run you are prompted to pick an inference provider — **GitHub Copilot** (default), Azure AI Foundry, or GitHub Models — and the matching credential. For Copilot the CLI runs an interactive **device-code OAuth flow** (`https://github.com/login/device`) using the public Copilot client id; the router exchanges your OAuth token for a short-lived Copilot JWT at runtime, so you never see or manage the JWT yourself. **The credential you pick is the only one dev mode ever sees, and it never leaves your laptop.** If you skip the prompt, the sandbox starts with a stub model — useful for offline plugin / policy work.
@@ -118,7 +118,7 @@ On the first run you are prompted to pick an inference provider — **GitHub Cop
 
 ## References
 
-- [`cli/src/commands/dev.ts`](../../cli/src/commands/dev.ts) — the implementation of `azureclaw dev`.
+- [`cli/src/commands/dev.ts`](../../cli/src/commands/dev.ts) — the implementation of `kars dev`.
 - [`sandbox-images/`](../../sandbox-images/) — the per-runtime images dev mode uses.
 - [Architecture — Two modes](../architecture.md#two-modes) — the canonical write-up of dev vs prod.
 - [Getting started — Step 1](../getting-started.md#step-1--local-five-minutes) — the user-facing walkthrough.

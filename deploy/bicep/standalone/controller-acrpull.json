@@ -11,14 +11,14 @@
   "parameters": {
     "acrName": {
       "type": "string",
-      "defaultValue": "azureclawacr",
+      "defaultValue": "karsacr",
       "metadata": {
         "description": "ACR (registry) name in this resource group."
       }
     },
     "controllerIdentityName": {
       "type": "string",
-      "defaultValue": "azureclaw-aks-sandbox-wi",
+      "defaultValue": "kars-aks-sandbox-wi",
       "metadata": {
         "description": "User-assigned managed identity used by the AKS sandbox / controller workload identity."
       }

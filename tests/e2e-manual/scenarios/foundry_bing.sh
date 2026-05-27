@@ -8,7 +8,7 @@
 # call with `tool: bing_grounding` through to Foundry's auto-discovered
 # Bing connection and that the response includes web search results.
 #
-# Per `azureclaw-deployment` lore: Bing Grounding is auto-discovered
+# Per `kars-deployment` lore: Bing Grounding is auto-discovered
 # from the Foundry project's /connections API. No manual config is
 # needed when a Bing Grounding resource is connected.
 #
@@ -30,7 +30,7 @@ source "$LIB_DIR/foundry_call.sh"
 scenario_header "Foundry tools — Bing grounding"
 
 require_cluster
-require_azureclaw_installed
+require_kars_installed
 
 name="foundry-bing"
 ns=$(new_ns "foundry-bing")
@@ -39,16 +39,16 @@ export MANUAL_E2E_SCENARIO=foundry_bing
 
 metric_start "admit_${name}"
 cr_dispatch openclaw "$name" "$ns" | kubectl apply -f - >/dev/null
-metric_finish "admit_${name}" foundry_bing admitClawSandbox
+metric_finish "admit_${name}" foundry_bing admitKarsSandbox
 
-if ! wait_for_clawsandbox_ready "$ns" "$name"; then
+if ! wait_for_karssandbox_ready "$ns" "$name"; then
     log_fail "sandbox never reached Ready — cannot probe Bing"
     cleanup_sandbox "$ns" "$name"
     scenario_summary "Foundry tools — Bing grounding"
     exit 1
 fi
 
-pod=$(kubectl -n "$pod_ns" get pod -l "azureclaw.azure.com/sandbox=${name}" \
+pod=$(kubectl -n "$pod_ns" get pod -l "kars.azure.com/sandbox=${name}" \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [[ -z "$pod" ]]; then
     log_fail "no pod for sandbox ${name}"

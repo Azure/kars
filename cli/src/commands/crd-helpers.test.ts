@@ -102,7 +102,7 @@ describe("crd-helpers — parseSpecFile", () => {
 describe("crd-helpers — buildCR / toYaml", () => {
   it("produces apiVersion + kind + metadata + spec", () => {
     const cr = buildCR("ToolPolicy", "x", "ns1", { appliesTo: { tool: "*" } });
-    expect(cr.apiVersion).toBe("azureclaw.azure.com/v1alpha1");
+    expect(cr.apiVersion).toBe("kars.azure.com/v1alpha1");
     expect(cr.kind).toBe("ToolPolicy");
     expect(cr.metadata).toEqual({ name: "x", namespace: "ns1" });
     expect(cr.spec).toEqual({ appliesTo: { tool: "*" } });

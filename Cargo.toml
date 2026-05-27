@@ -5,7 +5,7 @@ members = [
     "controller",
     "eval-corpus",
     "conformance-runner",
-    "azureclaw-a2a-core",
+    "kars-a2a-core",
     "a2a-gateway",
     "tests/chaos",
     "tests/cncf-conformance",
@@ -24,7 +24,7 @@ exclude = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/Azure/azureclaw"
+repository = "https://github.com/Azure/kars"
 rust-version = "1.88"
 
 [workspace.dependencies]
@@ -80,6 +80,7 @@ futures-util = "0.3"
 
 # AGT governance (native — replaces former Python sidecar)
 agentmesh = "3.7.0"
+agentmesh-mcp = "3.7.0"
 
 # Benchmarking (S16 — chaos tier perf baselines). Used by `controller/benches/`
 # and `inference-router/benches/`. Kept out of the binary builds via dev-deps.

@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AzureClaw E2E Test Suite
+# Kars E2E Test Suite
 #
 # Prerequisites:
 #   - kind (Kubernetes in Docker)
@@ -20,12 +20,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-CLUSTER_NAME="azureclaw-e2e"
+CLUSTER_NAME="kars-e2e"
 # Phase 3 S4: runtime-parameterised harness. Defaults to OpenClaw;
-# CI matrices set AZURECLAW_E2E_RUNTIME to exercise oai-agents /
+# CI matrices set KARS_E2E_RUNTIME to exercise oai-agents /
 # maf-python / byo. Each runtime owns a named function below
 # (`test_runtime_<name>`) and the runner dispatches there.
-RUNTIME="${AZURECLAW_E2E_RUNTIME:-openclaw}"
+RUNTIME="${KARS_E2E_RUNTIME:-openclaw}"
 PASS=0
 FAIL=0
 
@@ -54,20 +54,20 @@ setup_cluster() {
 }
 
 build_images() {
-    # CI optimisation: if `AZURECLAW_E2E_SKIP_IMAGE_BUILD=1` and the
+    # CI optimisation: if `KARS_E2E_SKIP_IMAGE_BUILD=1` and the
     # required tags are already present in the local docker daemon
     # (a previous CI step did the buildx-cached build), skip the build
     # entirely and only do the `kind load` step. Saves ~5-8 min/run.
-    local skip="${AZURECLAW_E2E_SKIP_IMAGE_BUILD:-0}"
+    local skip="${KARS_E2E_SKIP_IMAGE_BUILD:-0}"
     if [ "$skip" = "1" ] || [ "$skip" = "true" ]; then
-        info "AZURECLAW_E2E_SKIP_IMAGE_BUILD=1 — using pre-loaded images"
-        if ! docker image inspect azureclaw-controller:e2e >/dev/null 2>&1; then
-            warn "azureclaw-controller:e2e not present; falling back to building"
-        elif ! docker image inspect azureclaw-inference-router:e2e >/dev/null 2>&1; then
-            warn "azureclaw-inference-router:e2e not present; falling back to building"
+        info "KARS_E2E_SKIP_IMAGE_BUILD=1 — using pre-loaded images"
+        if ! docker image inspect kars-controller:e2e >/dev/null 2>&1; then
+            warn "kars-controller:e2e not present; falling back to building"
+        elif ! docker image inspect kars-inference-router:e2e >/dev/null 2>&1; then
+            warn "kars-inference-router:e2e not present; falling back to building"
         else
-            kind load docker-image azureclaw-controller:e2e --name "$CLUSTER_NAME"
-            kind load docker-image azureclaw-inference-router:e2e --name "$CLUSTER_NAME"
+            kind load docker-image kars-controller:e2e --name "$CLUSTER_NAME"
+            kind load docker-image kars-inference-router:e2e --name "$CLUSTER_NAME"
             return 0
         fi
     fi
@@ -86,12 +86,12 @@ build_images() {
         return 1
     }
     info "Building controller image"
-    docker_build_retry azureclaw-controller:e2e "$ROOT_DIR/controller/Dockerfile" "$ROOT_DIR"
-    kind load docker-image azureclaw-controller:e2e --name "$CLUSTER_NAME"
+    docker_build_retry kars-controller:e2e "$ROOT_DIR/controller/Dockerfile" "$ROOT_DIR"
+    kind load docker-image kars-controller:e2e --name "$CLUSTER_NAME"
 
     info "Building inference router image"
-    docker_build_retry azureclaw-inference-router:e2e "$ROOT_DIR/inference-router/Dockerfile" "$ROOT_DIR"
-    kind load docker-image azureclaw-inference-router:e2e --name "$CLUSTER_NAME"
+    docker_build_retry kars-inference-router:e2e "$ROOT_DIR/inference-router/Dockerfile" "$ROOT_DIR"
+    kind load docker-image kars-inference-router:e2e --name "$CLUSTER_NAME"
 }
 
 install_crds() {
@@ -102,13 +102,13 @@ install_crds() {
     # benefits it provides in production. Force single-replica + no
     # leader-election lease so each E2E run starts from a clean,
     # deterministic state. CI may set the same vars explicitly via
-    # AZURECLAW_E2E_* env vars; the defaults here cover local runs.
-    local replicas="${AZURECLAW_E2E_CONTROLLER_REPLICAS:-1}"
-    local disable_le="${AZURECLAW_E2E_DISABLE_LEADER_ELECTION:-1}"
+    # KARS_E2E_* env vars; the defaults here cover local runs.
+    local replicas="${KARS_E2E_CONTROLLER_REPLICAS:-1}"
+    local disable_le="${KARS_E2E_DISABLE_LEADER_ELECTION:-1}"
     local extra_set_args=(
         --set "controller.replicas=${replicas}"
         --set "inferenceRouter.replicas=${replicas}"
-        # Without a fake Foundry endpoint, the ClawSandbox reconciler
+        # Without a fake Foundry endpoint, the KarsSandbox reconciler
         # degrades with "No inference endpoint configured" before it
         # ever creates the namespace. Use an .invalid TLD so anything
         # that *did* try to dial out fails closed.
@@ -125,21 +125,21 @@ install_crds() {
             --set-string "controller.extraEnv[0].value=false"
         )
     fi
-    if ! helm upgrade --install azureclaw "$ROOT_DIR/deploy/helm/azureclaw" \
-        --namespace azureclaw-system \
+    if ! helm upgrade --install kars "$ROOT_DIR/deploy/helm/kars" \
+        --namespace kars-system \
         --create-namespace \
-        --set controller.image.repository=azureclaw-controller \
+        --set controller.image.repository=kars-controller \
         --set controller.image.tag=e2e \
         --set controller.image.pullPolicy=Never \
-        --set inferenceRouter.image.repository=azureclaw-inference-router \
+        --set inferenceRouter.image.repository=kars-inference-router \
         --set inferenceRouter.image.tag=e2e \
         --set inferenceRouter.image.pullPolicy=Never \
         "${extra_set_args[@]}" \
         --wait --timeout 5m; then
         warn "Helm install did not converge within 5m — dumping diagnostics"
-        kubectl get all -n azureclaw-system || true
-        kubectl describe pod -n azureclaw-system -l app.kubernetes.io/component=controller || true
-        kubectl logs -n azureclaw-system -l app.kubernetes.io/component=controller --tail=200 || true
+        kubectl get all -n kars-system || true
+        kubectl describe pod -n kars-system -l app.kubernetes.io/component=controller || true
+        kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=200 || true
     fi
 }
 
@@ -151,16 +151,16 @@ teardown() {
 # ─── Tests ────────────────────────────────────────────────────────────────────
 
 test_crd_installed() {
-    if kubectl get crd clawsandboxes.azureclaw.azure.com &>/dev/null; then
-        pass "ClawSandbox CRD is installed"
+    if kubectl get crd karssandboxes.kars.azure.com &>/dev/null; then
+        pass "KarsSandbox CRD is installed"
     else
-        fail "ClawSandbox CRD not found"
+        fail "KarsSandbox CRD not found"
     fi
 }
 
 test_controller_running() {
     local pods
-    pods=$(kubectl get pods -n azureclaw-system -l app.kubernetes.io/component=controller --no-headers 2>/dev/null | wc -l)
+    pods=$(kubectl get pods -n kars-system -l app.kubernetes.io/component=controller --no-headers 2>/dev/null | wc -l)
     if [ "$pods" -gt 0 ]; then
         pass "Controller pod is running"
     else
@@ -171,13 +171,13 @@ test_controller_running() {
 test_create_sandbox() {
     cat <<EOF | kubectl apply -f -
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: e2e-test-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: e2e-test
+    kars.azure.com/sandbox: e2e-test
 spec:
   appliesTo:
     sandboxName: e2e-test
@@ -186,11 +186,11 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-test
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: OpenClaw
@@ -206,13 +206,13 @@ EOF
     # Image pull + reconcile in Kind on the GH runner can take 20-30s
     # cold; the previous 5s sleep was racy and we'd pipefail-die before
     # the resource showed up.
-    info "Waiting for sandbox namespace azureclaw-e2e-test to appear (up to 60s)..."
+    info "Waiting for sandbox namespace kars-e2e-test to appear (up to 60s)..."
     local deadline=$(($(date +%s) + 60))
     local seen=0
     while [ "$(date +%s)" -lt "$deadline" ]; do
         # `|| true` shields against `set -e`/pipefail when the
         # namespace isn't there yet (kubectl returns 1).
-        if kubectl get namespace azureclaw-e2e-test --no-headers 2>/dev/null | grep -q azureclaw-e2e-test; then
+        if kubectl get namespace kars-e2e-test --no-headers 2>/dev/null | grep -q kars-e2e-test; then
             seen=1
             break
         fi
@@ -220,29 +220,29 @@ EOF
     done
 
     if [ "$seen" -eq 1 ]; then
-        pass "Sandbox namespace created (azureclaw-e2e-test)"
+        pass "Sandbox namespace created (kars-e2e-test)"
     else
         warn "Namespace did not appear within 60s — dumping diagnostics"
-        kubectl get clawsandboxes -A -o wide || true
-        kubectl describe clawsandbox e2e-test -n azureclaw-system || true
-        kubectl get events -n azureclaw-system --sort-by=.lastTimestamp | tail -30 || true
-        kubectl get pods -n azureclaw-system -o wide || true
-        kubectl get lease -n azureclaw-system -o yaml || true
+        kubectl get karssandboxes -A -o wide || true
+        kubectl describe karssandbox e2e-test -n kars-system || true
+        kubectl get events -n kars-system --sort-by=.lastTimestamp | tail -30 || true
+        kubectl get pods -n kars-system -o wide || true
+        kubectl get lease -n kars-system -o yaml || true
         # Per-pod logs: with multiple replicas, `kubectl logs -l ...`
         # may not include all pods or may truncate. Iterate explicitly
         # so the leader's log is always captured.
-        for pod in $(kubectl get pods -n azureclaw-system -l app.kubernetes.io/component=controller -o name 2>/dev/null); do
+        for pod in $(kubectl get pods -n kars-system -l app.kubernetes.io/component=controller -o name 2>/dev/null); do
             echo "── logs from $pod ───────────────────────────"
-            kubectl logs -n azureclaw-system "$pod" --tail=300 || true
+            kubectl logs -n kars-system "$pod" --tail=300 || true
             echo "── previous (if any) ────────────────────────"
-            kubectl logs -n azureclaw-system "$pod" --tail=100 --previous 2>/dev/null || true
+            kubectl logs -n kars-system "$pod" --tail=100 --previous 2>/dev/null || true
         done
         fail "Sandbox namespace not created"
     fi
 }
 
 test_networkpolicy_created() {
-    if kubectl get networkpolicy -n azureclaw-e2e-test sandbox-policy --no-headers 2>/dev/null | grep -q sandbox-policy; then
+    if kubectl get networkpolicy -n kars-e2e-test sandbox-policy --no-headers 2>/dev/null | grep -q sandbox-policy; then
         pass "NetworkPolicy created in sandbox namespace"
     else
         fail "NetworkPolicy not found"
@@ -250,7 +250,7 @@ test_networkpolicy_created() {
 }
 
 test_serviceaccount_created() {
-    if kubectl get serviceaccount -n azureclaw-e2e-test sandbox --no-headers 2>/dev/null | grep -q sandbox; then
+    if kubectl get serviceaccount -n kars-e2e-test sandbox --no-headers 2>/dev/null | grep -q sandbox; then
         pass "ServiceAccount created in sandbox namespace"
     else
         fail "ServiceAccount not found"
@@ -258,14 +258,14 @@ test_serviceaccount_created() {
 }
 
 test_cleanup_sandbox() {
-    kubectl delete clawsandbox e2e-test -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-test -n kars-system 2>/dev/null || true
     sleep 3
 
     # Cleanup is best-effort: the controller may not have a
     # finalizer, so namespace teardown can be async. Either we see
     # the namespace gone, or we accept the CRD-deleted state and
     # move on. Both states are healthy.
-    if kubectl get namespace azureclaw-e2e-test --no-headers 2>/dev/null | grep -q azureclaw-e2e-test; then
+    if kubectl get namespace kars-e2e-test --no-headers 2>/dev/null | grep -q kars-e2e-test; then
         pass "Sandbox CRD deleted (namespace cleanup is async)"
     else
         pass "Sandbox namespace cleaned up after CRD deletion"
@@ -333,44 +333,44 @@ dump_cr_diagnostics() {
 test_crd_tool_policy() {
     cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ToolPolicy apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: e2e-toolpolicy
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   appliesTo:
     tool: "*"
     sandboxMatchLabels:
-      azureclaw.azure.com/e2e: "true"
+      kars.azure.com/e2e: "true"
   rateLimit:
     rps: 10
     burst: 20
 EOF
-    if wait_for_resource configmap toolpolicy-e2e-toolpolicy-profile azureclaw-system 45; then
+    if wait_for_resource configmap toolpolicy-e2e-toolpolicy-profile kars-system 45; then
         pass "ToolPolicy → profile ConfigMap created"
     else
-        dump_cr_diagnostics toolpolicy e2e-toolpolicy azureclaw-system
+        dump_cr_diagnostics toolpolicy e2e-toolpolicy kars-system
         fail "ToolPolicy: profile ConfigMap not created"
     fi
-    if wait_for_ready toolpolicy e2e-toolpolicy azureclaw-system 30; then
+    if wait_for_ready toolpolicy e2e-toolpolicy kars-system 30; then
         pass "ToolPolicy: status.conditions Ready=True"
     else
-        dump_cr_diagnostics toolpolicy e2e-toolpolicy azureclaw-system
+        dump_cr_diagnostics toolpolicy e2e-toolpolicy kars-system
         fail "ToolPolicy: Ready=True not observed"
     fi
-    kubectl delete toolpolicy e2e-toolpolicy -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete toolpolicy e2e-toolpolicy -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
 # InferencePolicy → inferencepolicy-{name}-profile ConfigMap
 test_crd_inference_policy() {
     cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "InferencePolicy apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: e2e-inferencepolicy
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   appliesTo:
     sandboxName: e2e-test
@@ -379,10 +379,10 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
 EOF
-    if wait_for_resource configmap inferencepolicy-e2e-inferencepolicy-profile azureclaw-system 45; then
+    if wait_for_resource configmap inferencepolicy-e2e-inferencepolicy-profile kars-system 45; then
         pass "InferencePolicy → profile ConfigMap created"
     else
-        dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
+        dump_cr_diagnostics inferencepolicy e2e-inferencepolicy kars-system
         fail "InferencePolicy: profile ConfigMap not created"
     fi
     # InferencePolicy uses the §3 echo loop (Slice 2a): without a
@@ -395,19 +395,19 @@ EOF
     # ConfigMap check above is the controller's complete output;
     # router enforcement is exercised in unit + integration tests.
     local ip_phase ip_ready ip_reason
-    ip_phase=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    ip_ready=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-    ip_reason=$(kubectl get inferencepolicy e2e-inferencepolicy -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    ip_phase=$(kubectl get inferencepolicy e2e-inferencepolicy -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    ip_ready=$(kubectl get inferencepolicy e2e-inferencepolicy -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    ip_reason=$(kubectl get inferencepolicy e2e-inferencepolicy -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
     case "$ip_phase|$ip_ready|$ip_reason" in
         Compiled\|False\|AwaitingRouterEnforcement|Compiled\|False\|NoSandboxesReferencing|Ready\|True\|RouterEnforcing|Ready\|True\|*)
             pass "InferencePolicy: phase=$ip_phase ready=$ip_ready reason=$ip_reason (§3 honest state)"
             ;;
         *)
-            dump_cr_diagnostics inferencepolicy e2e-inferencepolicy azureclaw-system
+            dump_cr_diagnostics inferencepolicy e2e-inferencepolicy kars-system
             fail "InferencePolicy: unexpected honest-state — phase=$ip_phase ready=$ip_ready reason=$ip_reason"
             ;;
     esac
-    kubectl delete inferencepolicy e2e-inferencepolicy -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete inferencepolicy e2e-inferencepolicy -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
 # A2AAgent → a2aagent-{name}-card ConfigMap
@@ -422,11 +422,11 @@ test_crd_a2a_agent() {
     pk=$(printf 'A%.0s' {1..32} | base64 | tr '/+' '_-' | tr -d '=')
     cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || { fail "A2AAgent apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: A2AAgent
 metadata:
   name: e2e-a2aagent
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   endpointUrl: "https://e2e-a2aagent.invalid/"
   signingKeys:
@@ -437,98 +437,98 @@ spec:
     - "tasks/send"
     - "tasks/get"
 EOF
-    if wait_for_resource configmap a2aagent-e2e-a2aagent-card azureclaw-system 45; then
+    if wait_for_resource configmap a2aagent-e2e-a2aagent-card kars-system 45; then
         pass "A2AAgent → AgentCard ConfigMap created"
     else
-        dump_cr_diagnostics a2aagent e2e-a2aagent azureclaw-system
+        dump_cr_diagnostics a2aagent e2e-a2aagent kars-system
         fail "A2AAgent: AgentCard ConfigMap not created"
     fi
-    if wait_for_ready a2aagent e2e-a2aagent azureclaw-system 30; then
+    if wait_for_ready a2aagent e2e-a2aagent kars-system 30; then
         pass "A2AAgent: status.conditions Ready=True"
     else
-        dump_cr_diagnostics a2aagent e2e-a2aagent azureclaw-system
+        dump_cr_diagnostics a2aagent e2e-a2aagent kars-system
         fail "A2AAgent: Ready=True not observed"
     fi
-    kubectl delete a2aagent e2e-a2aagent -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete a2aagent e2e-a2aagent -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
-# ClawMemory → clawmemory-{name}-binding ConfigMap. No Foundry call
+# KarsMemory → karsmemory-{name}-binding ConfigMap. No Foundry call
 # happens during reconcile (the runtime path creates the store
 # lazily); the CR's job is to publish the binding ConfigMap.
-test_crd_claw_memory() {
-    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawMemory apply rejected"; return; }
+test_crd_kars_memory() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "KarsMemory apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawMemory
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsMemory
 metadata:
-  name: e2e-clawmemory
-  namespace: azureclaw-system
+  name: e2e-karsmemory
+  namespace: kars-system
 spec:
   storeName: e2e-store
   sandboxRef:
     name: e2e-test
   scope: "agent:e2e-test"
 EOF
-    if wait_for_resource configmap clawmemory-e2e-clawmemory-binding azureclaw-system 45; then
-        pass "ClawMemory → binding ConfigMap created"
+    if wait_for_resource configmap karsmemory-e2e-karsmemory-binding kars-system 45; then
+        pass "KarsMemory → binding ConfigMap created"
     else
-        dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
-        fail "ClawMemory: binding ConfigMap not created"
+        dump_cr_diagnostics karsmemory e2e-karsmemory kars-system
+        fail "KarsMemory: binding ConfigMap not created"
     fi
-    # ClawMemory uses the §3 echo loop (Slice 3a). Without a router
+    # KarsMemory uses the §3 echo loop (Slice 3a). Without a router
     # pod actually loading the binding and echoing the digest back
     # to /internal/policy-status, the CR stays in phase=Compiled
     # with Ready=False / reason=NoSandboxesReferencing or
     # AwaitingRouterEnforcement. Asserting the legacy
     # Pending/AwaitingFoundryProvisioning is incorrect after Slice 3a.
     local mem_phase mem_ready mem_reason
-    mem_phase=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    mem_ready=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-    mem_reason=$(kubectl get clawmemory e2e-clawmemory -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    mem_phase=$(kubectl get karsmemory e2e-karsmemory -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    mem_ready=$(kubectl get karsmemory e2e-karsmemory -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    mem_reason=$(kubectl get karsmemory e2e-karsmemory -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
     case "$mem_phase|$mem_ready|$mem_reason" in
         Compiled\|False\|NoSandboxesReferencing|Compiled\|False\|AwaitingRouterEnforcement|Ready\|True\|RouterEnforcing)
-            pass "ClawMemory: phase=$mem_phase ready=$mem_ready reason=$mem_reason (§3 honest state, Slice 3a)"
+            pass "KarsMemory: phase=$mem_phase ready=$mem_ready reason=$mem_reason (§3 honest state, Slice 3a)"
             ;;
         *)
-            dump_cr_diagnostics clawmemory e2e-clawmemory azureclaw-system
-            fail "ClawMemory: unexpected honest-state — phase=$mem_phase ready=$mem_ready reason=$mem_reason"
+            dump_cr_diagnostics karsmemory e2e-karsmemory kars-system
+            fail "KarsMemory: unexpected honest-state — phase=$mem_phase ready=$mem_ready reason=$mem_reason"
             ;;
     esac
-    kubectl delete clawmemory e2e-clawmemory -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete karsmemory e2e-karsmemory -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
-# ClawEval (slice 6.3) → claweval-{name}-corpus ConfigMap. With no
+# KarsEval (slice 6.3) → karseval-{name}-corpus ConfigMap. With no
 # schedule and no run-now annotation, the CR sits in phase=Pending
 # Ready=False (§3 honest state — no run has completed yet).
-test_crd_claw_eval() {
-    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawEval apply rejected"; return; }
+test_crd_kars_eval() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "KarsEval apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawEval
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsEval
 metadata:
-  name: e2e-claweval
-  namespace: azureclaw-system
+  name: e2e-karseval
+  namespace: kars-system
 spec:
   targetSandboxRef:
     name: e2e-test
   corpus:
     builtin: jailbreak-baseline
 EOF
-    if wait_for_resource configmap claweval-e2e-claweval-corpus azureclaw-system 45; then
-        pass "ClawEval → corpus ConfigMap created"
+    if wait_for_resource configmap karseval-e2e-karseval-corpus kars-system 45; then
+        pass "KarsEval → corpus ConfigMap created"
     else
-        dump_cr_diagnostics claweval e2e-claweval azureclaw-system
-        fail "ClawEval: corpus ConfigMap not created"
+        dump_cr_diagnostics karseval e2e-karseval kars-system
+        fail "KarsEval: corpus ConfigMap not created"
     fi
     # Wait for the controller to stamp status (phase=Pending Ready=False
     # is the honest state until a Job/CronJob run completes).
     local phase ready reason
     for _ in $(seq 1 15); do
-        phase=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+        phase=$(kubectl get karseval e2e-karseval -n kars-system \
             -o jsonpath='{.status.phase}' 2>/dev/null || true)
-        ready=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+        ready=$(kubectl get karseval e2e-karseval -n kars-system \
             -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-        reason=$(kubectl get claweval e2e-claweval -n azureclaw-system \
+        reason=$(kubectl get karseval e2e-karseval -n kars-system \
             -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
         if [[ "$phase" == "Pending" && "$ready" == "False" ]]; then
             break
@@ -536,32 +536,32 @@ EOF
         sleep 2
     done
     if [[ "$phase" == "Pending" && "$ready" == "False" ]]; then
-        pass "ClawEval: phase=Pending ready=False reason=$reason (§3 honest state, slice 6.3)"
+        pass "KarsEval: phase=Pending ready=False reason=$reason (§3 honest state, slice 6.3)"
     else
-        dump_cr_diagnostics claweval e2e-claweval azureclaw-system
-        fail "ClawEval: expected phase=Pending ready=False (got phase=$phase ready=$ready)"
+        dump_cr_diagnostics karseval e2e-karseval kars-system
+        fail "KarsEval: expected phase=Pending ready=False (got phase=$phase ready=$ready)"
     fi
-    kubectl delete claweval e2e-claweval -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete karseval e2e-karseval -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
-# ClawEval lifecycle (slice 6.5): run-now annotation spawns a Job;
+# KarsEval lifecycle (slice 6.5): run-now annotation spawns a Job;
 # `spec.schedule` ensures a controller-owned CronJob; clearing the
 # schedule deletes it. We do NOT wait for Job *completion* — the
 # runner image is published out-of-band and the Job pod will pull-
 # fail in Kind. The reconciler's contract is "create the K8s objects
 # with the right shape"; runner success belongs to runner-level
 # tests (conformance-runner/tests/end_to_end.rs).
-test_crd_claw_eval_lifecycle() {
+test_crd_kars_eval_lifecycle() {
     # ---- run-now spawns a Job ----------------------------------
-    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "ClawEval lifecycle apply rejected"; return; }
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "KarsEval lifecycle apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawEval
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsEval
 metadata:
-  name: e2e-claweval-lc
-  namespace: azureclaw-system
+  name: e2e-karseval-lc
+  namespace: kars-system
   annotations:
-    azureclaw.azure.com/run-now: "true"
+    kars.azure.com/run-now: "true"
 spec:
   targetSandboxRef:
     name: e2e-test
@@ -573,8 +573,8 @@ EOF
     # so we discover it by label rather than by deterministic name.
     local job_name
     for _ in $(seq 1 30); do
-        job_name=$(kubectl get jobs -n azureclaw-system \
-            -l azureclaw.azure.com/claweval=e2e-claweval-lc \
+        job_name=$(kubectl get jobs -n kars-system \
+            -l kars.azure.com/karseval=e2e-karseval-lc \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
         if [ -n "$job_name" ]; then
             break
@@ -582,11 +582,11 @@ EOF
         sleep 1
     done
     if [ -n "$job_name" ]; then
-        pass "ClawEval lifecycle: run-now spawned Job ($job_name)"
+        pass "KarsEval lifecycle: run-now spawned Job ($job_name)"
     else
-        dump_cr_diagnostics claweval e2e-claweval-lc azureclaw-system
-        fail "ClawEval lifecycle: run-now did not spawn a Job within 30s"
-        kubectl delete claweval e2e-claweval-lc -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        dump_cr_diagnostics karseval e2e-karseval-lc kars-system
+        fail "KarsEval lifecycle: run-now did not spawn a Job within 30s"
+        kubectl delete karseval e2e-karseval-lc -n kars-system --wait=false >/dev/null 2>&1 || true
         return
     fi
 
@@ -594,8 +594,8 @@ EOF
     # the Job, otherwise every reconcile would re-spawn.
     local cleared=""
     for _ in $(seq 1 15); do
-        if ! kubectl get claweval e2e-claweval-lc -n azureclaw-system \
-            -o jsonpath='{.metadata.annotations.azureclaw\.azure\.com/run-now}' 2>/dev/null \
+        if ! kubectl get karseval e2e-karseval-lc -n kars-system \
+            -o jsonpath='{.metadata.annotations.kars\.azure\.com/run-now}' 2>/dev/null \
             | grep -q "true"; then
             cleared=1
             break
@@ -603,23 +603,23 @@ EOF
         sleep 1
     done
     if [ -n "$cleared" ]; then
-        pass "ClawEval lifecycle: run-now annotation cleared after Job spawn"
+        pass "KarsEval lifecycle: run-now annotation cleared after Job spawn"
     else
-        fail "ClawEval lifecycle: run-now annotation still 'true' (would re-spawn on every reconcile)"
+        fail "KarsEval lifecycle: run-now annotation still 'true' (would re-spawn on every reconcile)"
     fi
 
-    # The Job must be owned by the ClawEval CR for cascade cleanup.
+    # The Job must be owned by the KarsEval CR for cascade cleanup.
     local owner_kind owner_controller owner_block
-    owner_kind=$(kubectl get job "$job_name" -n azureclaw-system \
+    owner_kind=$(kubectl get job "$job_name" -n kars-system \
         -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
-    owner_controller=$(kubectl get job "$job_name" -n azureclaw-system \
+    owner_controller=$(kubectl get job "$job_name" -n kars-system \
         -o jsonpath='{.metadata.ownerReferences[0].controller}' 2>/dev/null || true)
-    owner_block=$(kubectl get job "$job_name" -n azureclaw-system \
+    owner_block=$(kubectl get job "$job_name" -n kars-system \
         -o jsonpath='{.metadata.ownerReferences[0].blockOwnerDeletion}' 2>/dev/null || true)
-    if [ "$owner_kind" = "ClawEval" ] && [ "$owner_controller" = "true" ] && [ "$owner_block" = "true" ]; then
-        pass "ClawEval lifecycle: Job has ownerReference → ClawEval (controller=true, blockOwnerDeletion=true)"
+    if [ "$owner_kind" = "KarsEval" ] && [ "$owner_controller" = "true" ] && [ "$owner_block" = "true" ]; then
+        pass "KarsEval lifecycle: Job has ownerReference → KarsEval (controller=true, blockOwnerDeletion=true)"
     else
-        fail "ClawEval lifecycle: Job ownerReference mismatch (kind='$owner_kind' controller='$owner_controller' block='$owner_block')"
+        fail "KarsEval lifecycle: Job ownerReference mismatch (kind='$owner_kind' controller='$owner_controller' block='$owner_block')"
     fi
 
     # The corpus ConfigMap must also carry the same ownerReference so it
@@ -627,61 +627,61 @@ EOF
     # also has an explicit finalizer-driven cleanup path; ownerRef is
     # defence-in-depth.)
     local cm_owner_kind
-    cm_owner_kind=$(kubectl get configmap claweval-e2e-claweval-lc-corpus -n azureclaw-system \
+    cm_owner_kind=$(kubectl get configmap karseval-e2e-karseval-lc-corpus -n kars-system \
         -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
-    if [ "$cm_owner_kind" = "ClawEval" ]; then
-        pass "ClawEval lifecycle: corpus ConfigMap has ownerReference → ClawEval"
+    if [ "$cm_owner_kind" = "KarsEval" ]; then
+        pass "KarsEval lifecycle: corpus ConfigMap has ownerReference → KarsEval"
     else
-        fail "ClawEval lifecycle: corpus ConfigMap missing ClawEval ownerReference (got '$cm_owner_kind')"
+        fail "KarsEval lifecycle: corpus ConfigMap missing KarsEval ownerReference (got '$cm_owner_kind')"
     fi
 
     # ---- schedule ensures a CronJob ----------------------------
-    kubectl patch claweval e2e-claweval-lc -n azureclaw-system --type=merge \
+    kubectl patch karseval e2e-karseval-lc -n kars-system --type=merge \
         -p '{"spec":{"schedule":"*/15 * * * *"}}' >/dev/null 2>&1 \
-        || { fail "ClawEval lifecycle: schedule patch rejected"; return; }
-    if wait_for_resource cronjob claweval-e2e-claweval-lc azureclaw-system 30; then
+        || { fail "KarsEval lifecycle: schedule patch rejected"; return; }
+    if wait_for_resource cronjob karseval-e2e-karseval-lc kars-system 30; then
         local cron_sched
-        cron_sched=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+        cron_sched=$(kubectl get cronjob karseval-e2e-karseval-lc -n kars-system \
             -o jsonpath='{.spec.schedule}' 2>/dev/null || true)
         if [ "$cron_sched" = "*/15 * * * *" ]; then
-            pass "ClawEval lifecycle: schedule → CronJob created with correct schedule"
+            pass "KarsEval lifecycle: schedule → CronJob created with correct schedule"
         else
-            fail "ClawEval lifecycle: CronJob schedule mismatch (got '$cron_sched')"
+            fail "KarsEval lifecycle: CronJob schedule mismatch (got '$cron_sched')"
         fi
         local cj_owner_kind cj_owner_controller
-        cj_owner_kind=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+        cj_owner_kind=$(kubectl get cronjob karseval-e2e-karseval-lc -n kars-system \
             -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)
-        cj_owner_controller=$(kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system \
+        cj_owner_controller=$(kubectl get cronjob karseval-e2e-karseval-lc -n kars-system \
             -o jsonpath='{.metadata.ownerReferences[0].controller}' 2>/dev/null || true)
-        if [ "$cj_owner_kind" = "ClawEval" ] && [ "$cj_owner_controller" = "true" ]; then
-            pass "ClawEval lifecycle: CronJob has ownerReference → ClawEval (controller=true)"
+        if [ "$cj_owner_kind" = "KarsEval" ] && [ "$cj_owner_controller" = "true" ]; then
+            pass "KarsEval lifecycle: CronJob has ownerReference → KarsEval (controller=true)"
         else
-            fail "ClawEval lifecycle: CronJob ownerReference mismatch (kind='$cj_owner_kind' controller='$cj_owner_controller')"
+            fail "KarsEval lifecycle: CronJob ownerReference mismatch (kind='$cj_owner_kind' controller='$cj_owner_controller')"
         fi
     else
-        dump_cr_diagnostics claweval e2e-claweval-lc azureclaw-system
-        fail "ClawEval lifecycle: CronJob not created within 30s"
+        dump_cr_diagnostics karseval e2e-karseval-lc kars-system
+        fail "KarsEval lifecycle: CronJob not created within 30s"
     fi
 
     # ---- clearing the schedule deletes the CronJob -------------
-    kubectl patch claweval e2e-claweval-lc -n azureclaw-system --type=json \
+    kubectl patch karseval e2e-karseval-lc -n kars-system --type=json \
         -p '[{"op":"remove","path":"/spec/schedule"}]' >/dev/null 2>&1 \
-        || { fail "ClawEval lifecycle: schedule removal rejected"; return; }
+        || { fail "KarsEval lifecycle: schedule removal rejected"; return; }
     local gone=""
     for _ in $(seq 1 30); do
-        if ! kubectl get cronjob claweval-e2e-claweval-lc -n azureclaw-system &>/dev/null; then
+        if ! kubectl get cronjob karseval-e2e-karseval-lc -n kars-system &>/dev/null; then
             gone=1
             break
         fi
         sleep 1
     done
     if [ -n "$gone" ]; then
-        pass "ClawEval lifecycle: clearing schedule deleted the CronJob"
+        pass "KarsEval lifecycle: clearing schedule deleted the CronJob"
     else
-        fail "ClawEval lifecycle: CronJob still present after schedule removal"
+        fail "KarsEval lifecycle: CronJob still present after schedule removal"
     fi
 
-    kubectl delete claweval e2e-claweval-lc -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete karseval e2e-karseval-lc -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
 # McpServer (dev-mode, no OAuth). The reconciler can't fetch JWKS in
@@ -692,11 +692,11 @@ EOF
 test_crd_mcp_server() {
     cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "McpServer apply rejected (dev-mode)"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: McpServer
 metadata:
   name: e2e-mcpserver
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   url: "http://e2e-mcpserver.invalid/"
   productionMode: false
@@ -705,15 +705,15 @@ spec:
 EOF
     # In dev-mode the reconciler should reach Ready=True without
     # contacting any external system.
-    if wait_for_ready mcpserver e2e-mcpserver azureclaw-system 45; then
+    if wait_for_ready mcpserver e2e-mcpserver kars-system 45; then
         pass "McpServer (dev-mode): status.conditions Ready=True"
     else
         # Dev-mode reconcile shouldn't need network access. Treat
         # any non-Ready terminal as a failure and dump diagnostics.
-        dump_cr_diagnostics mcpserver e2e-mcpserver azureclaw-system
+        dump_cr_diagnostics mcpserver e2e-mcpserver kars-system
         fail "McpServer: Ready=True not observed in dev-mode"
     fi
-    kubectl delete mcpserver e2e-mcpserver -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete mcpserver e2e-mcpserver -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
 # CEL admission gate: a ToolPolicy with a malformed rateLimit (rps=0,
@@ -722,11 +722,11 @@ EOF
 test_crd_admission_rejects_invalid() {
     if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: A2AAgent
 metadata:
   name: e2e-bad-a2a
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   endpointUrl: "http://insecure.invalid/"
   productionMode: true
@@ -734,7 +734,7 @@ spec:
 EOF
     then
         # If the API server accepted this, the CEL gate is broken.
-        kubectl delete a2aagent e2e-bad-a2a -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        kubectl delete a2aagent e2e-bad-a2a -n kars-system --wait=false >/dev/null 2>&1 || true
         fail "Admission accepted invalid A2AAgent (productionMode + http + empty keys)"
     else
         pass "Admission CEL rejects invalid A2AAgent (productionMode + http + empty keys)"
@@ -754,11 +754,11 @@ EOF
 test_crd_egress_approval() {
     cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "EgressApproval apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: EgressApproval
 metadata:
   name: e2e-egress-approval
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   sandbox: e2e-test
   hosts:
@@ -775,21 +775,21 @@ EOF
     local deadline ea_phase ea_ready ea_reason ea_hosts ea_observed
     deadline=$(($(date +%s) + 45))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        ea_observed=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+        ea_observed=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
         if [ -n "$ea_observed" ] && [ "$ea_observed" != "0" ]; then
             break
         fi
         sleep 2
     done
-    ea_phase=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    ea_ready=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-    ea_reason=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
-    ea_hosts=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.status.hostCount}' 2>/dev/null || true)
+    ea_phase=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    ea_ready=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    ea_reason=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    ea_hosts=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.hostCount}' 2>/dev/null || true)
 
     if [ "$ea_hosts" = "2" ]; then
         pass "EgressApproval: status.hostCount=2 (reconciler ran)"
     else
-        dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+        dump_cr_diagnostics egressapproval e2e-egress-approval kars-system
         fail "EgressApproval: hostCount expected '2', got '$ea_hosts'"
     fi
 
@@ -798,7 +798,7 @@ EOF
             pass "EgressApproval: phase=$ea_phase ready=$ea_ready reason=$ea_reason (§3 honest state)"
             ;;
         *)
-            dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+            dump_cr_diagnostics egressapproval e2e-egress-approval kars-system
             fail "EgressApproval: unexpected honest-state — phase=$ea_phase ready=$ea_ready reason=$ea_reason"
             ;;
     esac
@@ -806,13 +806,13 @@ EOF
     # Finalizer must be set so the reconciler can tear down the
     # merged-allowlist CM key on delete.
     local fin
-    fin=$(kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+    fin=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
     case "$fin" in
-        *azureclaw.azure.com/egress-approval-cleanup*)
+        *kars.azure.com/egress-approval-cleanup*)
             pass "EgressApproval: finalizer present"
             ;;
         *)
-            dump_cr_diagnostics egressapproval e2e-egress-approval azureclaw-system
+            dump_cr_diagnostics egressapproval e2e-egress-approval kars-system
             fail "EgressApproval: finalizer missing (got '$fin')"
             ;;
     esac
@@ -820,12 +820,12 @@ EOF
     # Delete must complete (finalizer cleanup runs even if the
     # merged-allowlist CM was never created — controller no-ops on
     # missing CM during cleanup).
-    if kubectl delete egressapproval e2e-egress-approval -n azureclaw-system --timeout=30s >/dev/null 2>&1; then
+    if kubectl delete egressapproval e2e-egress-approval -n kars-system --timeout=30s >/dev/null 2>&1; then
         pass "EgressApproval: delete completes (finalizer cleanup)"
     else
-        kubectl get egressapproval e2e-egress-approval -n azureclaw-system -o yaml 2>&1 | tail -30 || true
+        kubectl get egressapproval e2e-egress-approval -n kars-system -o yaml 2>&1 | tail -30 || true
         # Force-remove finalizer for cleanup so we don't leak into next test
-        kubectl patch egressapproval e2e-egress-approval -n azureclaw-system --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+        kubectl patch egressapproval e2e-egress-approval -n kars-system --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
         fail "EgressApproval: delete did not complete within 30s"
     fi
 }
@@ -838,11 +838,11 @@ test_crd_egress_approval_cel_rejects() {
     # Empty hosts (size >= 1)
     if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: EgressApproval
 metadata:
   name: e2e-bad-ea-empty-hosts
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   sandbox: e2e-test
   hosts: []
@@ -850,7 +850,7 @@ spec:
   ttl: PT5M
 EOF
     then
-        kubectl delete egressapproval e2e-bad-ea-empty-hosts -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        kubectl delete egressapproval e2e-bad-ea-empty-hosts -n kars-system --wait=false >/dev/null 2>&1 || true
         fail "Admission accepted EgressApproval with empty hosts (CEL broken)"
     else
         pass "Admission CEL rejects EgressApproval with empty hosts"
@@ -862,11 +862,11 @@ EOF
     # the CEL pattern DOES catch: zero-valued PT0S.
     if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: EgressApproval
 metadata:
   name: e2e-bad-ea-zero-ttl
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   sandbox: e2e-test
   hosts:
@@ -875,7 +875,7 @@ spec:
   ttl: PT0S
 EOF
     then
-        kubectl delete egressapproval e2e-bad-ea-zero-ttl -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        kubectl delete egressapproval e2e-bad-ea-zero-ttl -n kars-system --wait=false >/dev/null 2>&1 || true
         fail "Admission accepted EgressApproval with ttl=PT0S (CEL broken)"
     else
         pass "Admission CEL rejects EgressApproval with ttl=PT0S"
@@ -884,11 +884,11 @@ EOF
     # Reason with ASCII control byte (NUL) — should be rejected.
     if kubectl apply -f - >/dev/null 2>&1 <<EOF
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: EgressApproval
 metadata:
   name: e2e-bad-ea-ctrl-byte
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   sandbox: e2e-test
   hosts:
@@ -897,7 +897,7 @@ spec:
   ttl: PT15M
 EOF
     then
-        kubectl delete egressapproval e2e-bad-ea-ctrl-byte -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        kubectl delete egressapproval e2e-bad-ea-ctrl-byte -n kars-system --wait=false >/dev/null 2>&1 || true
         fail "Admission accepted EgressApproval with control-byte reason (CEL broken)"
     else
         pass "Admission CEL rejects EgressApproval with control-byte reason"
@@ -906,11 +906,11 @@ EOF
     # Malformed TTL string — should be rejected by pattern rule.
     if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: EgressApproval
 metadata:
   name: e2e-bad-ea-bad-ttl
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   sandbox: e2e-test
   hosts:
@@ -919,7 +919,7 @@ spec:
   ttl: "not-a-duration"
 EOF
     then
-        kubectl delete egressapproval e2e-bad-ea-bad-ttl -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        kubectl delete egressapproval e2e-bad-ea-bad-ttl -n kars-system --wait=false >/dev/null 2>&1 || true
         fail "Admission accepted EgressApproval with malformed ttl (CEL broken)"
     else
         pass "Admission CEL rejects EgressApproval with malformed ttl"
@@ -927,16 +927,16 @@ EOF
 }
 
 test_runtime_oai_agents() {
-    # Render a multi-runtime ClawSandbox of kind OpenAIAgents and assert
+    # Render a multi-runtime KarsSandbox of kind OpenAIAgents and assert
     # the controller produces a namespace (Phase 2 schema parses; adapter
     # deploy lands in S10.A3 — namespace creation is the observable).
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-oai
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -951,25 +951,25 @@ spec:
     isolation: standard
 EOF
     sleep 5
-    if kubectl get ns azureclaw-e2e-oai &>/dev/null; then
+    if kubectl get ns kars-e2e-oai &>/dev/null; then
         pass "OpenAIAgents runtime processed (namespace present)"
     else
         echo "  [diag] CR status:"
-        kubectl get clawsandbox e2e-oai -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        kubectl get karssandbox e2e-oai -n kars-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
         echo ""
         fail "OpenAIAgents runtime: no namespace"
     fi
-    kubectl delete clawsandbox e2e-oai -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-oai -n kars-system 2>/dev/null || true
 }
 
 test_runtime_maf_python() {
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-maf
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -984,28 +984,28 @@ spec:
     isolation: standard
 EOF
     sleep 5
-    if kubectl get ns azureclaw-e2e-maf &>/dev/null; then
+    if kubectl get ns kars-e2e-maf &>/dev/null; then
         pass "MAF-Python runtime processed (namespace present)"
     else
         echo "  [diag] CR status:"
-        kubectl get clawsandbox e2e-maf -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        kubectl get karssandbox e2e-maf -n kars-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
         echo ""
         fail "MAF-Python runtime: namespace missing"
     fi
-    kubectl delete clawsandbox e2e-maf -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-maf -n kars-system 2>/dev/null || true
 }
 
 test_runtime_anthropic() {
-    # Phase H#1: ClawSandbox of kind Anthropic should be processed by
+    # Phase H#1: KarsSandbox of kind Anthropic should be processed by
     # the controller — namespace creation is the observable signal that
     # plan_anthropic dispatched (vs the legacy AdapterMissing path).
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-anthropic
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -1020,11 +1020,11 @@ spec:
     isolation: standard
 EOF
     sleep 5
-    if kubectl get ns azureclaw-e2e-anthropic &>/dev/null; then
+    if kubectl get ns kars-e2e-anthropic &>/dev/null; then
         pass "Anthropic runtime processed (namespace present)"
     else
         echo "  [diag] CR status:"
-        kubectl get clawsandbox e2e-anthropic -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        kubectl get karssandbox e2e-anthropic -n kars-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
         echo ""
         fail "Anthropic runtime: no namespace"
     fi
@@ -1034,7 +1034,7 @@ EOF
     # InferencePolicy provider in this E2E lane), surface a diag-only
     # signal rather than failing the lane.
     local image
-    image=$(kubectl get deploy -n azureclaw-e2e-anthropic e2e-anthropic -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
+    image=$(kubectl get deploy -n kars-e2e-anthropic e2e-anthropic -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
     if [ -n "$image" ]; then
         if echo "$image" | grep -q "anthropic"; then
             pass "Anthropic Deployment uses anthropic runtime image ($image)"
@@ -1045,20 +1045,20 @@ EOF
     else
         echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
     fi
-    kubectl delete clawsandbox e2e-anthropic -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-anthropic -n kars-system 2>/dev/null || true
 }
 
 test_runtime_langgraph() {
-    # Phase H#2: ClawSandbox of kind LangGraph should be processed by
+    # Phase H#2: KarsSandbox of kind LangGraph should be processed by
     # the controller. Like other runtime tests, namespace creation is
     # the primary observable; the Deployment image check is best-effort.
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-langgraph
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -1073,16 +1073,16 @@ spec:
     isolation: standard
 EOF
     sleep 5
-    if kubectl get ns azureclaw-e2e-langgraph &>/dev/null; then
+    if kubectl get ns kars-e2e-langgraph &>/dev/null; then
         pass "LangGraph runtime processed (namespace present)"
     else
         echo "  [diag] CR status:"
-        kubectl get clawsandbox e2e-langgraph -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        kubectl get karssandbox e2e-langgraph -n kars-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
         echo ""
         fail "LangGraph runtime: no namespace"
     fi
     local image
-    image=$(kubectl get deploy -n azureclaw-e2e-langgraph e2e-langgraph -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
+    image=$(kubectl get deploy -n kars-e2e-langgraph e2e-langgraph -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
     if [ -n "$image" ]; then
         if echo "$image" | grep -q "langgraph"; then
             pass "LangGraph Deployment uses langgraph runtime image ($image)"
@@ -1093,7 +1093,7 @@ EOF
     else
         echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
     fi
-    kubectl delete clawsandbox e2e-langgraph -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-langgraph -n kars-system 2>/dev/null || true
 }
 
 # LangGraph TypeScript flavour ships as a first-class adapter in
@@ -1104,11 +1104,11 @@ EOF
 test_runtime_langgraph_typescript() {
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-langgraph-ts
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -1128,27 +1128,27 @@ EOF
     # because operators may override via LANGGRAPH_TS_RUNTIME_IMAGE; we
     # only assert that ShapeInvalid is NOT in the Conditions chain.
     local conds
-    conds=$(kubectl get clawsandbox e2e-langgraph-ts -n azureclaw-system -o jsonpath='{.status.conditions[*].reason}' 2>/dev/null || true)
+    conds=$(kubectl get karssandbox e2e-langgraph-ts -n kars-system -o jsonpath='{.status.conditions[*].reason}' 2>/dev/null || true)
     if echo "$conds" | grep -qi "ShapeInvalid\|SpecInvalid"; then
         echo "  [diag] conditions: $conds"
         fail "LangGraph typescript should NOT be ShapeInvalid in v1.0"
     else
         pass "LangGraph typescript dispatched (no ShapeInvalid)"
     fi
-    kubectl delete clawsandbox e2e-langgraph-ts -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-langgraph-ts -n kars-system 2>/dev/null || true
 }
 
 test_runtime_pydantic_ai() {
-    # Phase H#3: ClawSandbox of kind PydanticAi should be processed by
+    # Phase H#3: KarsSandbox of kind PydanticAi should be processed by
     # the controller. Like other runtime tests, namespace creation is
     # the primary observable; the Deployment image check is best-effort.
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-pydantic-ai
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -1163,16 +1163,16 @@ spec:
     isolation: standard
 EOF
     sleep 5
-    if kubectl get ns azureclaw-e2e-pydantic-ai &>/dev/null; then
+    if kubectl get ns kars-e2e-pydantic-ai &>/dev/null; then
         pass "PydanticAi runtime processed (namespace present)"
     else
         echo "  [diag] CR status:"
-        kubectl get clawsandbox e2e-pydantic-ai -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        kubectl get karssandbox e2e-pydantic-ai -n kars-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
         echo ""
         fail "PydanticAi runtime: no namespace"
     fi
     local image
-    image=$(kubectl get deploy -n azureclaw-e2e-pydantic-ai e2e-pydantic-ai -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
+    image=$(kubectl get deploy -n kars-e2e-pydantic-ai e2e-pydantic-ai -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
     if [ -n "$image" ]; then
         if echo "$image" | grep -q "pydantic-ai"; then
             pass "PydanticAi Deployment uses pydantic-ai runtime image ($image)"
@@ -1183,17 +1183,17 @@ EOF
     else
         echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
     fi
-    kubectl delete clawsandbox e2e-pydantic-ai -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-pydantic-ai -n kars-system 2>/dev/null || true
 }
 
 test_runtime_byo() {
     cat <<EOF | kubectl apply -f - 2>&1 | head -3
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-byo
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -1206,33 +1206,33 @@ spec:
     isolation: standard
 EOF
     sleep 5
-    if kubectl get ns azureclaw-e2e-byo &>/dev/null; then
+    if kubectl get ns kars-e2e-byo &>/dev/null; then
         pass "BYO runtime processed (namespace present)"
     else
         echo "  [diag] CR status:"
-        kubectl get clawsandbox e2e-byo -n azureclaw-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        kubectl get karssandbox e2e-byo -n kars-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
         echo ""
         fail "BYO runtime: namespace missing"
     fi
-    kubectl delete clawsandbox e2e-byo -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-byo -n kars-system 2>/dev/null || true
 }
 
 # ─── Admission policy enforcement tests ─────────────────────────────────────
 #
 # These exercise the ValidatingAdmissionPolicy / MutatingAdmissionPolicy
-# objects shipped in deploy/helm/azureclaw/templates/admission-*.yaml.
+# objects shipped in deploy/helm/kars/templates/admission-*.yaml.
 # Each policy is a hard guard — a regression here means a sandbox
 # could be deployed without the platform's safety invariants.
 
 test_admission_policies_installed() {
     # Phase 0/1/2 admission policies that MUST be installed by Helm.
     local expected=(
-        "azureclaw-null-provider-block"
-        "azureclaw-no-public-router-exposure"
-        "azureclaw-sandbox-exec-ban"
-        "azureclaw-dev-only-label-immutable"
-        "azureclaw-sandbox-posture-lock"
-        "azureclaw-content-safety-floor"
+        "kars-null-provider-block"
+        "kars-no-public-router-exposure"
+        "kars-sandbox-exec-ban"
+        "kars-dev-only-label-immutable"
+        "kars-sandbox-posture-lock"
+        "kars-content-safety-floor"
     )
     local missing=()
     for p in "${expected[@]}"; do
@@ -1256,11 +1256,11 @@ test_admission_mcpserver_productionmode_requires_https() {
     local out
     out=$(cat <<'EOF' | kubectl apply -f - 2>&1 || true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: McpServer
 metadata:
   name: e2e-mcp-bad-prod
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   url: http://insecure.example.com
   productionMode: true
@@ -1272,7 +1272,7 @@ EOF
         pass "McpServer productionMode CEL rejects http:// url"
     else
         fail "McpServer productionMode CEL did NOT reject http://. Got: $out"
-        kubectl delete mcpserver e2e-mcp-bad-prod -n azureclaw-system 2>/dev/null || true
+        kubectl delete mcpserver e2e-mcp-bad-prod -n kars-system 2>/dev/null || true
     fi
 }
 
@@ -1281,11 +1281,11 @@ test_admission_mcpserver_productionmode_requires_oauth() {
     local out
     out=$(cat <<'EOF' | kubectl apply -f - 2>&1 || true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: McpServer
 metadata:
   name: e2e-mcp-no-oauth
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   url: https://server.example.com
   productionMode: true
@@ -1295,18 +1295,18 @@ EOF
         pass "McpServer productionMode CEL rejects missing oauth.issuer"
     else
         fail "McpServer productionMode CEL did NOT reject missing oauth. Got: $out"
-        kubectl delete mcpserver e2e-mcp-no-oauth -n azureclaw-system 2>/dev/null || true
+        kubectl delete mcpserver e2e-mcp-no-oauth -n kars-system 2>/dev/null || true
     fi
 }
 
 test_admission_no_public_router_exposure() {
     # Create a sandbox-isolation namespace, then try to create a
     # LoadBalancer Service in it. Must be rejected by
-    # `azureclaw-no-public-router-exposure`.
-    kubectl create namespace azureclaw-e2e-pub --dry-run=client -o yaml \
+    # `kars-no-public-router-exposure`.
+    kubectl create namespace kars-e2e-pub --dry-run=client -o yaml \
         | kubectl apply -f - >/dev/null 2>&1 || true
-    kubectl label namespace azureclaw-e2e-pub \
-        azureclaw.azure.com/isolated=strict --overwrite >/dev/null 2>&1 || true
+    kubectl label namespace kars-e2e-pub \
+        kars.azure.com/isolated=strict --overwrite >/dev/null 2>&1 || true
     local out
     out=$(cat <<'EOF' | kubectl apply -f - 2>&1 || true
 ---
@@ -1314,7 +1314,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: leak
-  namespace: azureclaw-e2e-pub
+  namespace: kars-e2e-pub
 spec:
   type: LoadBalancer
   ports:
@@ -1327,30 +1327,30 @@ EOF
         pass "no-public-router-exposure rejects LoadBalancer Service in strict NS"
     else
         fail "no-public-router-exposure did NOT reject LoadBalancer. Got: $out"
-        kubectl delete svc leak -n azureclaw-e2e-pub 2>/dev/null || true
+        kubectl delete svc leak -n kars-e2e-pub 2>/dev/null || true
     fi
-    kubectl delete namespace azureclaw-e2e-pub 2>/dev/null || true
+    kubectl delete namespace kars-e2e-pub 2>/dev/null || true
 }
 
 test_admission_pod_exec_ban() {
-    # `azureclaw-sandbox-exec-ban` denies kubectl exec/attach on
+    # `kars-sandbox-exec-ban` denies kubectl exec/attach on
     # `openclaw` containers (or default container) in namespaces
-    # labeled azureclaw.azure.com/isolated=strict (and not
-    # azureclaw.azure.com/break-glass=true).
+    # labeled kars.azure.com/isolated=strict (and not
+    # kars.azure.com/break-glass=true).
     #
     # Approach: spin a single-container pod called `openclaw` in a
     # strict-labeled NS, wait for Running, then `kubectl exec` into
     # it. The exec request is a CONNECT subresource which the policy
     # intercepts before the kubelet ever sees it.
-    kubectl create namespace azureclaw-e2e-exec --dry-run=client -o yaml | kubectl apply -f - >/dev/null || true
-    kubectl label namespace azureclaw-e2e-exec azureclaw.azure.com/isolated=strict --overwrite >/dev/null
+    kubectl create namespace kars-e2e-exec --dry-run=client -o yaml | kubectl apply -f - >/dev/null || true
+    kubectl label namespace kars-e2e-exec kars.azure.com/isolated=strict --overwrite >/dev/null
     cat <<'EOF' | kubectl apply -f - >/dev/null || true
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: openclaw-probe
-  namespace: azureclaw-e2e-exec
+  namespace: kars-e2e-exec
   labels:
     app: openclaw-probe
 spec:
@@ -1360,35 +1360,35 @@ spec:
       image: busybox:1.36
       command: ["sh", "-c", "sleep 600"]
 EOF
-    if ! kubectl wait --for=condition=Ready pod/openclaw-probe -n azureclaw-e2e-exec --timeout=60s >/dev/null 2>&1; then
+    if ! kubectl wait --for=condition=Ready pod/openclaw-probe -n kars-e2e-exec --timeout=60s >/dev/null 2>&1; then
         warn "exec-ban probe pod never became Ready — skipping"
-        kubectl describe pod openclaw-probe -n azureclaw-e2e-exec 2>/dev/null | tail -20 || true
-        kubectl delete namespace azureclaw-e2e-exec 2>/dev/null || true
+        kubectl describe pod openclaw-probe -n kars-e2e-exec 2>/dev/null | tail -20 || true
+        kubectl delete namespace kars-e2e-exec 2>/dev/null || true
         return
     fi
     local out
-    out=$(kubectl exec -n azureclaw-e2e-exec openclaw-probe -c openclaw -- echo hello 2>&1 || true)
+    out=$(kubectl exec -n kars-e2e-exec openclaw-probe -c openclaw -- echo hello 2>&1 || true)
     if echo "$out" | grep -qiE "(exec.*denied|exec-ban|Forbidden|sandbox-exec-ban)"; then
         pass "pod-exec-ban rejects kubectl exec into 'openclaw' container in strict NS"
     else
         fail "pod-exec-ban did NOT reject exec. Got: $out"
     fi
-    kubectl delete namespace azureclaw-e2e-exec 2>/dev/null || true
+    kubectl delete namespace kars-e2e-exec 2>/dev/null || true
 }
 
 test_admission_dev_only_label_immutable() {
-    # `azureclaw-dev-only-label-immutable` blocks UPDATEs that REMOVE
+    # `kars-dev-only-label-immutable` blocks UPDATEs that REMOVE
     # the dev-only label once it was set. Apply → mutate the label
     # away → expect rejection.
     cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: e2e-immutable-dev
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/dev-only: "true"
+    kars.azure.com/dev-only: "true"
 spec:
   appliesTo:
     tool: "*"
@@ -1398,32 +1398,32 @@ spec:
     rps: 10
     burst: 20
 EOF
-    if ! wait_for_resource toolpolicy e2e-immutable-dev azureclaw-system 10; then
+    if ! wait_for_resource toolpolicy e2e-immutable-dev kars-system 10; then
         warn "dev-only-immutable: ToolPolicy didn't apply — skipping"
         return
     fi
     local out
-    out=$(kubectl label toolpolicy e2e-immutable-dev -n azureclaw-system \
-        azureclaw.azure.com/dev-only- --overwrite 2>&1 || true)
+    out=$(kubectl label toolpolicy e2e-immutable-dev -n kars-system \
+        kars.azure.com/dev-only- --overwrite 2>&1 || true)
     if echo "$out" | grep -qiE "(immutable|denied|Forbidden|dev-only|removal-reason)"; then
         pass "dev-only-label-immutable rejects removing dev-only label"
     else
         fail "dev-only-label-immutable did NOT reject label removal. Got: $out"
     fi
-    kubectl delete toolpolicy e2e-immutable-dev -n azureclaw-system 2>/dev/null || true
+    kubectl delete toolpolicy e2e-immutable-dev -n kars-system 2>/dev/null || true
 }
 
 # ─── Sandbox runtime artifacts ──────────────────────────────────────────────
 
 test_sandbox_namespace_labels() {
-    # Controller must stamp `azureclaw.azure.com/isolated=strict` on
+    # Controller must stamp `kars.azure.com/isolated=strict` on
     # every sandbox namespace. This label is the load-bearing trigger
     # for every other policy in the platform — if it's missing, the
     # whole admission stack disengages silently.
     local val
-    val=$(kubectl get namespace azureclaw-e2e-test -o jsonpath='{.metadata.labels.azureclaw\.azure\.com/isolated}' 2>/dev/null)
+    val=$(kubectl get namespace kars-e2e-test -o jsonpath='{.metadata.labels.kars\.azure\.com/isolated}' 2>/dev/null)
     if [ "$val" = "strict" ]; then
-        pass "Sandbox namespace stamped azureclaw.azure.com/isolated=strict"
+        pass "Sandbox namespace stamped kars.azure.com/isolated=strict"
     else
         fail "Sandbox namespace missing strict label (got: '$val')"
     fi
@@ -1433,21 +1433,21 @@ test_sandbox_deployment_exists() {
     # Reconciler must produce a Deployment in the sandbox namespace.
     # We don't assert pods are Ready (sandbox image not in kind), only
     # that the reconciler shaped the workload correctly.
-    if kubectl get deploy -n azureclaw-e2e-test --no-headers 2>/dev/null | grep -q .; then
+    if kubectl get deploy -n kars-e2e-test --no-headers 2>/dev/null | grep -q .; then
         pass "Sandbox Deployment created in sandbox namespace"
     else
-        fail "No Deployment in sandbox namespace azureclaw-e2e-test"
+        fail "No Deployment in sandbox namespace kars-e2e-test"
     fi
 }
 
 test_operator_default_deny_np() {
     # operator-default-deny-networkpolicy.yaml ships a default-deny
-    # NetworkPolicy in azureclaw-system itself. Required so the
+    # NetworkPolicy in kars-system itself. Required so the
     # controller never accidentally exposes anything.
-    if kubectl get networkpolicy -n azureclaw-system azureclaw-system-default-deny &>/dev/null; then
-        pass "Operator default-deny NetworkPolicy installed in azureclaw-system"
+    if kubectl get networkpolicy -n kars-system kars-system-default-deny &>/dev/null; then
+        pass "Operator default-deny NetworkPolicy installed in kars-system"
     else
-        fail "azureclaw-system-default-deny NetworkPolicy missing"
+        fail "kars-system-default-deny NetworkPolicy missing"
     fi
 }
 
@@ -1456,7 +1456,7 @@ test_sandbox_networkpolicy_denies_ingress() {
     # policyTypes (deny-by-default ingress is the foundational
     # invariant — sandboxes only receive traffic via the router).
     local types
-    types=$(kubectl get networkpolicy -n azureclaw-e2e-test sandbox-policy \
+    types=$(kubectl get networkpolicy -n kars-e2e-test sandbox-policy \
         -o jsonpath='{.spec.policyTypes}' 2>/dev/null)
     if echo "$types" | grep -q Ingress; then
         pass "Sandbox NetworkPolicy enforces Ingress policy"
@@ -1474,13 +1474,13 @@ test_sandbox_suspended_lifecycle() {
     local sandbox=suspend-test
     cat <<EOF | kubectl apply -f - >/dev/null
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: ${sandbox}-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: ${sandbox}
+    kars.azure.com/sandbox: ${sandbox}
 spec:
   appliesTo:
     sandboxName: ${sandbox}
@@ -1489,11 +1489,11 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: ${sandbox}
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: OpenClaw
@@ -1509,7 +1509,7 @@ EOF
     local replicas=""
     local i
     for i in $(seq 1 30); do
-        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+        replicas=$(kubectl get deploy -n "kars-${sandbox}" "${sandbox}" \
             -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
         if [[ "$replicas" == "0" ]]; then
             break
@@ -1520,8 +1520,8 @@ EOF
         pass "Suspended sandbox Deployment scaled to replicas=0"
     else
         fail "Suspended Deployment replicas=$replicas (expected 0)"
-        kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
-        kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+        kubectl delete karssandbox "${sandbox}" -n kars-system --ignore-not-found >/dev/null 2>&1
+        kubectl delete inferencepolicy "${sandbox}-inference" -n kars-system --ignore-not-found >/dev/null 2>&1
         return
     fi
 
@@ -1532,9 +1532,9 @@ EOF
     local converged_susp=0
     local cond_status="" cond_reason=""
     for i in $(seq 1 30); do
-        cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+        cond_status=$(kubectl get karssandbox "${sandbox}" -n kars-system \
             -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
-        cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+        cond_reason=$(kubectl get karssandbox "${sandbox}" -n kars-system \
             -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
         if [[ "$cond_status" == "True" && "$cond_reason" == "SuspendedBySpec" ]]; then
             converged_susp=1
@@ -1547,14 +1547,14 @@ EOF
     else
         fail "Suspended condition wrong (status=$cond_status reason=$cond_reason)"
         echo "[DEBUG] full CR (-o yaml):"
-        kubectl get clawsandbox "${sandbox}" -n azureclaw-system -o yaml 2>/dev/null | tail -60
+        kubectl get karssandbox "${sandbox}" -n kars-system -o yaml 2>/dev/null | tail -60
     fi
 
     # Un-suspend → replicas=1, Suspended=False/Active.
-    kubectl patch clawsandbox "${sandbox}" -n azureclaw-system --type merge \
+    kubectl patch karssandbox "${sandbox}" -n kars-system --type merge \
         -p '{"spec":{"suspended":false}}' >/dev/null
     for i in $(seq 1 30); do
-        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+        replicas=$(kubectl get deploy -n "kars-${sandbox}" "${sandbox}" \
             -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
         if [[ "$replicas" == "1" ]]; then
             break
@@ -1576,9 +1576,9 @@ EOF
     # watch is still in-flight).
     local converged=0
     for i in $(seq 1 30); do
-        cond_status=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+        cond_status=$(kubectl get karssandbox "${sandbox}" -n kars-system \
             -o jsonpath='{.status.conditions[?(@.type=="Suspended")].status}' 2>/dev/null)
-        cond_reason=$(kubectl get clawsandbox "${sandbox}" -n azureclaw-system \
+        cond_reason=$(kubectl get karssandbox "${sandbox}" -n kars-system \
             -o jsonpath='{.status.conditions[?(@.type=="Suspended")].reason}' 2>/dev/null)
         if [[ "$cond_status" == "False" && "$cond_reason" == "Active" ]]; then
             converged=1
@@ -1591,14 +1591,14 @@ EOF
     else
         fail "Suspended condition after un-suspend wrong (status=$cond_status reason=$cond_reason)"
         echo "[DEBUG] full CR (-o yaml):"
-        kubectl get clawsandbox "${sandbox}" -n azureclaw-system -o yaml 2>/dev/null | tail -80
+        kubectl get karssandbox "${sandbox}" -n kars-system -o yaml 2>/dev/null | tail -80
         echo "[DEBUG] controller logs (last 200 lines, suspend-related):"
-        kubectl logs -n azureclaw-system -l app.kubernetes.io/name=azureclaw-controller \
+        kubectl logs -n kars-system -l app.kubernetes.io/name=kars-controller \
             --tail=200 --all-containers 2>/dev/null | grep -iE "suspend|reconcile|patch_status|${sandbox}" | tail -50 || true
     fi
 
-    kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
-    kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+    kubectl delete karssandbox "${sandbox}" -n kars-system --ignore-not-found >/dev/null 2>&1
+    kubectl delete inferencepolicy "${sandbox}-inference" -n kars-system --ignore-not-found >/dev/null 2>&1
 }
 
 test_secondary_resource_watch() {
@@ -1609,13 +1609,13 @@ test_secondary_resource_watch() {
     local sandbox=watch-test
     cat <<EOF | kubectl apply -f - >/dev/null
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: ${sandbox}-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: ${sandbox}
+    kars.azure.com/sandbox: ${sandbox}
 spec:
   appliesTo:
     sandboxName: ${sandbox}
@@ -1624,11 +1624,11 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: ${sandbox}
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: OpenClaw
@@ -1644,7 +1644,7 @@ EOF
     local replicas=""
     local i
     for i in $(seq 1 30); do
-        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+        replicas=$(kubectl get deploy -n "kars-${sandbox}" "${sandbox}" \
             -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
         if [[ "$replicas" == "1" ]]; then
             break
@@ -1653,26 +1653,26 @@ EOF
     done
     if [[ "$replicas" != "1" ]]; then
         fail "Initial Deployment never reached replicas=1 (got $replicas)"
-        kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
-        kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+        kubectl delete karssandbox "${sandbox}" -n kars-system --ignore-not-found >/dev/null 2>&1
+        kubectl delete inferencepolicy "${sandbox}-inference" -n kars-system --ignore-not-found >/dev/null 2>&1
         return
     fi
 
     # Verify the parent-namespace label is stamped (the mapper depends on it).
     local parent_ns_label
-    parent_ns_label=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
-        -o jsonpath='{.metadata.labels.azureclaw\.azure\.com/parent-namespace}' 2>/dev/null)
-    if [[ "$parent_ns_label" == "azureclaw-system" ]]; then
-        pass "Deployment carries azureclaw.azure.com/parent-namespace label"
+    parent_ns_label=$(kubectl get deploy -n "kars-${sandbox}" "${sandbox}" \
+        -o jsonpath='{.metadata.labels.kars\.azure\.com/parent-namespace}' 2>/dev/null)
+    if [[ "$parent_ns_label" == "kars-system" ]]; then
+        pass "Deployment carries kars.azure.com/parent-namespace label"
     else
         fail "parent-namespace label missing or wrong (got '$parent_ns_label')"
     fi
 
     # Mutate replicas out-of-band → controller must restore quickly.
-    kubectl scale deploy -n "azureclaw-${sandbox}" "${sandbox}" --replicas=5 >/dev/null
+    kubectl scale deploy -n "kars-${sandbox}" "${sandbox}" --replicas=5 >/dev/null
     local restored=0
     for i in $(seq 1 20); do
-        replicas=$(kubectl get deploy -n "azureclaw-${sandbox}" "${sandbox}" \
+        replicas=$(kubectl get deploy -n "kars-${sandbox}" "${sandbox}" \
             -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
         if [[ "$replicas" == "1" ]]; then
             restored=1
@@ -1686,21 +1686,21 @@ EOF
         fail "Secondary watch did NOT restore replicas (still $replicas after 40s)"
     fi
 
-    kubectl delete clawsandbox "${sandbox}" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
-    kubectl delete inferencepolicy "${sandbox}-inference" -n azureclaw-system --ignore-not-found >/dev/null 2>&1
+    kubectl delete karssandbox "${sandbox}" -n kars-system --ignore-not-found >/dev/null 2>&1
+    kubectl delete inferencepolicy "${sandbox}-inference" -n kars-system --ignore-not-found >/dev/null 2>&1
 }
 
-test_clawsandbox_cel_rejects_byo_with_agent() {
+test_karssandbox_cel_rejects_byo_with_agent() {
     # P2 #13: spec-level CEL must reject BYO runtime + Foundry agent
     # combination — they are architecturally incompatible (BYO
     # containers own their own inference + agent loop).
     if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-cel-byo-with-agent
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -1715,24 +1715,24 @@ spec:
     isolation: standard
 EOF
     then
-        kubectl delete clawsandbox e2e-cel-byo-with-agent -n azureclaw-system --wait=false >/dev/null 2>&1 || true
-        fail "CEL did NOT reject ClawSandbox with runtime.kind=BYO + spec.agent set"
+        kubectl delete karssandbox e2e-cel-byo-with-agent -n kars-system --wait=false >/dev/null 2>&1 || true
+        fail "CEL did NOT reject KarsSandbox with runtime.kind=BYO + spec.agent set"
     else
-        pass "CEL rejects ClawSandbox with runtime.kind=BYO + spec.agent set"
+        pass "CEL rejects KarsSandbox with runtime.kind=BYO + spec.agent set"
     fi
 }
 
-test_clawsandbox_cel_rejects_trust_threshold_out_of_range() {
+test_karssandbox_cel_rejects_trust_threshold_out_of_range() {
     # P2 #13: governance.trustThreshold must be in [0, 1000]. The
     # docstring says so; this CEL guards the operator's first-apply
     # against a typo (e.g. 9999 → silently clamped before this rule).
     if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-cel-trust-overflow
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -1748,14 +1748,14 @@ spec:
     isolation: standard
 EOF
     then
-        kubectl delete clawsandbox e2e-cel-trust-overflow -n azureclaw-system --wait=false >/dev/null 2>&1 || true
-        fail "CEL did NOT reject ClawSandbox with governance.trustThreshold=9999"
+        kubectl delete karssandbox e2e-cel-trust-overflow -n kars-system --wait=false >/dev/null 2>&1 || true
+        fail "CEL did NOT reject KarsSandbox with governance.trustThreshold=9999"
     else
-        pass "CEL rejects ClawSandbox with governance.trustThreshold out of [0,1000]"
+        pass "CEL rejects KarsSandbox with governance.trustThreshold out of [0,1000]"
     fi
 }
 
-test_clawsandbox_cel_rejects_cross_namespace_toolpolicy_ref() {
+test_karssandbox_cel_rejects_cross_namespace_toolpolicy_ref() {
     # P2 #13: cross-namespace refs are forbidden by
     # docs/crd-precedence.md. The CRD-side pattern already guards
     # the regex but would silently accept "ns/name" (no slash) by
@@ -1764,11 +1764,11 @@ test_clawsandbox_cel_rejects_cross_namespace_toolpolicy_ref() {
     # so the operator gets a precise error message.
     if kubectl apply -f - >/dev/null 2>&1 <<'EOF'
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: e2e-cel-xns-ref
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   inferenceRef:
     name: e2e-test-inference
@@ -1784,7 +1784,7 @@ spec:
     isolation: standard
 EOF
     then
-        kubectl delete clawsandbox e2e-cel-xns-ref -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+        kubectl delete karssandbox e2e-cel-xns-ref -n kars-system --wait=false >/dev/null 2>&1 || true
         fail "CEL did NOT reject cross-namespace toolPolicyRef.name"
     else
         pass "CEL rejects cross-namespace toolPolicyRef.name"
@@ -1797,11 +1797,11 @@ test_tool_policy_update_flow() {
     # reconciler's "diff & re-apply" path, not just first-apply.
     cat <<'EOF' | kubectl apply -f - >/dev/null || true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: e2e-update-flow
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   appliesTo:
     tool: "*"
@@ -1811,21 +1811,21 @@ spec:
     rps: 10
     burst: 20
 EOF
-    if ! wait_for_resource configmap toolpolicy-e2e-update-flow-profile azureclaw-system 30; then
+    if ! wait_for_resource configmap toolpolicy-e2e-update-flow-profile kars-system 30; then
         fail "update-flow: initial ConfigMap not produced"
-        kubectl delete toolpolicy e2e-update-flow -n azureclaw-system 2>/dev/null || true
+        kubectl delete toolpolicy e2e-update-flow -n kars-system 2>/dev/null || true
         return
     fi
     local v1
-    v1=$(kubectl get cm -n azureclaw-system toolpolicy-e2e-update-flow-profile -o jsonpath='{.data}' 2>/dev/null)
+    v1=$(kubectl get cm -n kars-system toolpolicy-e2e-update-flow-profile -o jsonpath='{.data}' 2>/dev/null)
     # Now patch the rate limit.
-    kubectl patch toolpolicy e2e-update-flow -n azureclaw-system --type=merge \
+    kubectl patch toolpolicy e2e-update-flow -n kars-system --type=merge \
         -p '{"spec":{"rateLimit":{"rps":99,"burst":200}}}' >/dev/null
     # Wait for the ConfigMap to reflect the change.
     local deadline=$(($(date +%s) + 20))
     local v2=""
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        v2=$(kubectl get cm -n azureclaw-system toolpolicy-e2e-update-flow-profile -o jsonpath='{.data}' 2>/dev/null)
+        v2=$(kubectl get cm -n kars-system toolpolicy-e2e-update-flow-profile -o jsonpath='{.data}' 2>/dev/null)
         [ "$v1" != "$v2" ] && break
         sleep 1
     done
@@ -1834,7 +1834,7 @@ EOF
     else
         fail "ToolPolicy update did NOT propagate to ConfigMap"
     fi
-    kubectl delete toolpolicy e2e-update-flow -n azureclaw-system 2>/dev/null || true
+    kubectl delete toolpolicy e2e-update-flow -n kars-system 2>/dev/null || true
 }
 
 test_tool_policy_delete_cleanup() {
@@ -1842,11 +1842,11 @@ test_tool_policy_delete_cleanup() {
     # assert ConfigMap removed. Exercises the finalizer path.
     cat <<'EOF' | kubectl apply -f - >/dev/null || true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: e2e-delete-flow
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   appliesTo:
     tool: "*"
@@ -1856,23 +1856,23 @@ spec:
     rps: 1
     burst: 2
 EOF
-    if ! wait_for_resource configmap toolpolicy-e2e-delete-flow-profile azureclaw-system 30; then
+    if ! wait_for_resource configmap toolpolicy-e2e-delete-flow-profile kars-system 30; then
         fail "delete-flow: initial ConfigMap not produced"
-        kubectl delete toolpolicy e2e-delete-flow -n azureclaw-system 2>/dev/null || true
+        kubectl delete toolpolicy e2e-delete-flow -n kars-system 2>/dev/null || true
         return
     fi
-    kubectl delete toolpolicy e2e-delete-flow -n azureclaw-system >/dev/null 2>&1 || true
+    kubectl delete toolpolicy e2e-delete-flow -n kars-system >/dev/null 2>&1 || true
     # Wait up to 20s for the ConfigMap to disappear.
     local deadline=$(($(date +%s) + 20))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        if ! kubectl get cm -n azureclaw-system toolpolicy-e2e-delete-flow-profile &>/dev/null; then
+        if ! kubectl get cm -n kars-system toolpolicy-e2e-delete-flow-profile &>/dev/null; then
             pass "ToolPolicy finalizer removes downstream ConfigMap on delete"
             return
         fi
         sleep 1
     done
     fail "ToolPolicy delete did NOT remove ConfigMap (finalizer regression)"
-    kubectl delete cm -n azureclaw-system toolpolicy-e2e-delete-flow-profile 2>/dev/null || true
+    kubectl delete cm -n kars-system toolpolicy-e2e-delete-flow-profile 2>/dev/null || true
 }
 
 # ─── Multi-sandbox isolation ────────────────────────────────────────────────
@@ -1884,13 +1884,13 @@ test_multi_sandbox_isolation() {
     # would be caught here.
     cat <<'EOF' | kubectl apply -f - >/dev/null || true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: e2e-multi-1
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: e2e-multi-1
+    kars.azure.com/sandbox: e2e-multi-1
 spec:
   appliesTo:
     sandboxName: e2e-multi-1
@@ -1899,13 +1899,13 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: e2e-multi-2
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: e2e-multi-2
+    kars.azure.com/sandbox: e2e-multi-2
 spec:
   appliesTo:
     sandboxName: e2e-multi-2
@@ -1914,46 +1914,46 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
-metadata: { name: e2e-multi-1, namespace: azureclaw-system }
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata: { name: e2e-multi-1, namespace: kars-system }
 spec:
   runtime: { kind: OpenClaw, openclaw: { version: "2026.3.13" } }
   sandbox: { isolation: standard }
   inferenceRef: { name: e2e-multi-1 }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
-metadata: { name: e2e-multi-2, namespace: azureclaw-system }
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata: { name: e2e-multi-2, namespace: kars-system }
 spec:
   runtime: { kind: OpenClaw, openclaw: { version: "2026.3.13" } }
   sandbox: { isolation: standard }
   inferenceRef: { name: e2e-multi-2 }
 EOF
-    if wait_for_resource namespace azureclaw-e2e-multi-1 "" 60 && \
-       wait_for_resource namespace azureclaw-e2e-multi-2 "" 60; then
-        pass "Two ClawSandboxes coexist with isolated namespaces"
+    if wait_for_resource namespace kars-e2e-multi-1 "" 60 && \
+       wait_for_resource namespace kars-e2e-multi-2 "" 60; then
+        pass "Two KarsSandboxes coexist with isolated namespaces"
     else
         fail "Multi-sandbox: not all sandbox namespaces appeared"
     fi
     # Cleanup so subsequent tests have a clean slate.
-    kubectl delete clawsandbox e2e-multi-1 e2e-multi-2 -n azureclaw-system 2>/dev/null || true
-    kubectl delete inferencepolicy e2e-multi-1 e2e-multi-2 -n azureclaw-system 2>/dev/null || true
+    kubectl delete karssandbox e2e-multi-1 e2e-multi-2 -n kars-system 2>/dev/null || true
+    kubectl delete inferencepolicy e2e-multi-1 e2e-multi-2 -n kars-system 2>/dev/null || true
 }
 
-# ─── ClawPairing CRD ───────────────────────────────────────────────────────
+# ─── KarsPairing CRD ───────────────────────────────────────────────────────
 
-test_crd_clawpairing_lifecycle() {
-    # ClawPairing is the federation-trust CRD. We assert basic CR
+test_crd_karspairing_lifecycle() {
+    # KarsPairing is the federation-trust CRD. We assert basic CR
     # lifecycle: schema admits, controller reachable, CR can be
     # deleted cleanly.
     cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawPairing
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsPairing
 metadata:
   name: e2e-pairing
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   tokenHash: "0000000000000000000000000000000000000000000000000000000000000000"
   expiresAt: "2099-01-01T00:00:00Z"
@@ -1962,13 +1962,13 @@ spec:
   capabilities: ["offload"]
   isolation: standard
 EOF
-    if kubectl get clawpairing e2e-pairing -n azureclaw-system &>/dev/null; then
-        pass "ClawPairing CR admitted and stored"
+    if kubectl get karspairing e2e-pairing -n kars-system &>/dev/null; then
+        pass "KarsPairing CR admitted and stored"
     else
-        warn "ClawPairing CR not admitted (schema may have evolved)"
-        pass "ClawPairing CRD reachable (schema evolution noted)"
+        warn "KarsPairing CR not admitted (schema may have evolved)"
+        pass "KarsPairing CRD reachable (schema evolution noted)"
     fi
-    kubectl delete clawpairing e2e-pairing -n azureclaw-system 2>/dev/null || true
+    kubectl delete karspairing e2e-pairing -n kars-system 2>/dev/null || true
 }
 
 # ─── Controller observability ───────────────────────────────────────────────
@@ -1981,7 +1981,7 @@ test_controller_metrics_endpoint() {
     # image is distroless, we use a debug ephemeral container —
     # falling back to checking that the pod is Ready as a baseline.
     local pod
-    pod=$(kubectl get pod -n azureclaw-system -l app.kubernetes.io/component=controller \
+    pod=$(kubectl get pod -n kars-system -l app.kubernetes.io/component=controller \
         -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
     if [ -z "$pod" ]; then
         fail "metrics: controller pod not found"
@@ -1990,7 +1990,7 @@ test_controller_metrics_endpoint() {
     # Ready condition is a strong proxy for liveness/readiness probes
     # (which hit /healthz or equivalent on the pod's HTTP server).
     local cond
-    cond=$(kubectl get pod "$pod" -n azureclaw-system \
+    cond=$(kubectl get pod "$pod" -n kars-system \
         -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
     if [ "$cond" = "True" ]; then
         pass "Controller pod Ready (liveness/readiness probes pass)"
@@ -2015,10 +2015,10 @@ test_controller_metrics_endpoint() {
 #
 # No Foundry / no Azure credentials. Runs entirely on Kind.
 test_ap2_commerce_required_route_gate() {
-    local ns="azureclaw-e2e-ap2"
+    local ns="kars-e2e-ap2"
     local pod="ap2-route-probe"
 
-    # Dedicated namespace — `azureclaw-system` enforces PodSecurity
+    # Dedicated namespace — `kars-system` enforces PodSecurity
     # `restricted` and would reject our probe Pod. Our own namespace
     # gets `baseline` so the probe Pod (which already complies with
     # `restricted` via securityContext below, but ConfigMap-only
@@ -2060,11 +2060,11 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: router
-      image: azureclaw-inference-router:e2e
+      image: kars-inference-router:e2e
       imagePullPolicy: Never
       env:
         - {name: ROUTER_PORT, value: "8443"}
-        - {name: A2A_CARD_DIR, value: "/etc/azureclaw/a2a-card"}
+        - {name: A2A_CARD_DIR, value: "/etc/kars/a2a-card"}
         - {name: AP2_COMMERCE_REQUIRED, value: "1"}
         - {name: CONTENT_SAFETY_ENABLED, value: "false"}
         - {name: PROMPT_SHIELDS_ENABLED, value: "false"}
@@ -2075,7 +2075,7 @@ spec:
         capabilities: {drop: ["ALL"]}
         runAsUser: 1000
       volumeMounts:
-        - {name: card, mountPath: /etc/azureclaw/a2a-card, readOnly: true}
+        - {name: card, mountPath: /etc/kars/a2a-card, readOnly: true}
     - name: probe
       image: curlimages/curl:8.10.1
       imagePullPolicy: IfNotPresent
@@ -2160,7 +2160,7 @@ EOF
 }
 
 test_mcp_initialize_version_negotiation() {
-    local ns="azureclaw-e2e-mcp"
+    local ns="kars-e2e-mcp"
     local pod="mcp-init-probe"
 
     kubectl create namespace "${ns}" >/dev/null 2>&1 || true
@@ -2182,7 +2182,7 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: router
-      image: azureclaw-inference-router:e2e
+      image: kars-inference-router:e2e
       imagePullPolicy: Never
       env:
         - {name: ROUTER_PORT, value: "8443"}
@@ -2288,7 +2288,7 @@ test_a2a_v1_message_send_route() {
     # the response carries an A2A 1.0-shaped Task object (taskId,
     # contextId, status.state in {submitted,working,...}). This
     # locks in the v1.0 GA wire shape against accidental drift.
-    local ns="azureclaw-e2e-a2a"
+    local ns="kars-e2e-a2a"
     local pod="a2a-route-probe"
 
     kubectl create namespace "${ns}" >/dev/null 2>&1 || true
@@ -2322,11 +2322,11 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: router
-      image: azureclaw-inference-router:e2e
+      image: kars-inference-router:e2e
       imagePullPolicy: Never
       env:
         - {name: ROUTER_PORT, value: "8443"}
-        - {name: A2A_CARD_DIR, value: "/etc/azureclaw/a2a-card"}
+        - {name: A2A_CARD_DIR, value: "/etc/kars/a2a-card"}
         - {name: CONTENT_SAFETY_ENABLED, value: "false"}
         - {name: PROMPT_SHIELDS_ENABLED, value: "false"}
       ports:
@@ -2336,7 +2336,7 @@ spec:
         capabilities: {drop: ["ALL"]}
         runAsUser: 1000
       volumeMounts:
-        - {name: card, mountPath: /etc/azureclaw/a2a-card, readOnly: true}
+        - {name: card, mountPath: /etc/kars/a2a-card, readOnly: true}
     - name: probe
       image: curlimages/curl:8.10.1
       imagePullPolicy: IfNotPresent
@@ -2433,7 +2433,7 @@ test_controller_emits_events() {
     # in prod. We assert at least one Event was recorded for the
     # e2e-test sandbox CR (which already ran through full reconcile).
     local count
-    count=$(kubectl get events -n azureclaw-system \
+    count=$(kubectl get events -n kars-system \
         --field-selector involvedObject.name=e2e-test 2>/dev/null \
         | grep -c "^e2e-" || true)
     if [ "${count:-0}" -ge 0 ]; then
@@ -2448,7 +2448,7 @@ test_controller_emits_events() {
 
 test_crd_trustgraph_reconcile() {
     # Phase F1: TrustGraph CR (cluster-scoped) → projection ConfigMap
-    # in azureclaw-system. Asserts:
+    # in kars-system. Asserts:
     #   1. Valid signed edge appears in the projection (validEdges=1).
     #   2. Tampered-signature edge is rejected (invalidEdges=1).
     #   3. Status is Ready=True with the expected counts.
@@ -2469,7 +2469,7 @@ test_crd_trustgraph_reconcile() {
 
     cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || { fail "TrustGraph apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: TrustGraph
 metadata:
   name: e2e-trustgraph
@@ -2496,7 +2496,7 @@ spec:
       signature: "${sig_bad}"
 EOF
 
-    if wait_for_resource configmap trustgraph-e2e-trustgraph-projection azureclaw-system 45; then
+    if wait_for_resource configmap trustgraph-e2e-trustgraph-projection kars-system 45; then
         pass "TrustGraph → projection ConfigMap created"
     else
         kubectl describe trustgraph e2e-trustgraph 2>&1 | tail -40 || true
@@ -2534,7 +2534,7 @@ EOF
         fail "TrustGraph: invalidEdges='$invalid_e' (want 1)"
     fi
 
-    if wait_for_ready trustgraph e2e-trustgraph azureclaw-system 30; then
+    if wait_for_ready trustgraph e2e-trustgraph kars-system 30; then
         pass "TrustGraph: status.conditions Ready=True"
     else
         kubectl describe trustgraph e2e-trustgraph 2>&1 | tail -20 || true
@@ -2543,8 +2543,8 @@ EOF
 
     # Projection ConfigMap must carry the version-hash annotation.
     local vhash
-    vhash=$(kubectl get configmap trustgraph-e2e-trustgraph-projection -n azureclaw-system \
-        -o jsonpath='{.metadata.annotations.azureclaw\.azure\.com/trustgraph-version-hash}' 2>/dev/null || echo "")
+    vhash=$(kubectl get configmap trustgraph-e2e-trustgraph-projection -n kars-system \
+        -o jsonpath='{.metadata.annotations.kars\.azure\.com/trustgraph-version-hash}' 2>/dev/null || echo "")
     if [ -n "$vhash" ] && [ "${#vhash}" = "16" ]; then
         pass "TrustGraph: projection carries version-hash annotation (${vhash})"
     else
@@ -2553,7 +2553,7 @@ EOF
 
     # Projection JSON must contain the valid edge but not the tampered one.
     local proj
-    proj=$(kubectl get configmap trustgraph-e2e-trustgraph-projection -n azureclaw-system \
+    proj=$(kubectl get configmap trustgraph-e2e-trustgraph-projection -n kars-system \
         -o jsonpath='{.data.graph\.json}' 2>/dev/null || echo "")
     if echo "$proj" | grep -q "\"score\": 750"; then
         pass "TrustGraph: projection contains accepted edge (score=750)"
@@ -2572,7 +2572,7 @@ EOF
     local cel_err
     cel_err=$(cat <<EOF | kubectl apply -f - 2>&1 || true
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: TrustGraph
 metadata:
   name: e2e-trustgraph-empty
@@ -2595,13 +2595,13 @@ EOF
     # a per-sandbox ConfigMap containing only outbound edges.
     cat <<EOF | kubectl apply -f - >/dev/null 2>&1 || { fail "alpha sandbox apply rejected"; return; }
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
+apiVersion: kars.azure.com/v1alpha1
 kind: InferencePolicy
 metadata:
   name: alpha-inference
-  namespace: azureclaw-system
+  namespace: kars-system
   labels:
-    azureclaw.azure.com/sandbox: alpha
+    kars.azure.com/sandbox: alpha
 spec:
   appliesTo:
     sandboxName: alpha
@@ -2610,11 +2610,11 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
 ---
-apiVersion: azureclaw.azure.com/v1alpha1
-kind: ClawSandbox
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
 metadata:
   name: alpha
-  namespace: azureclaw-system
+  namespace: kars-system
 spec:
   runtime:
     kind: OpenClaw
@@ -2628,17 +2628,17 @@ EOF
 
     # Wait for the per-sandbox projection ConfigMap to appear (controller
     # writes it during the same reconcile that creates the Deployment).
-    if wait_for_resource configmap alpha-trustgraph-projection azureclaw-alpha 60; then
+    if wait_for_resource configmap alpha-trustgraph-projection kars-alpha 60; then
         pass "F2b: per-sandbox projection ConfigMap created"
     else
-        kubectl get configmaps -n azureclaw-alpha 2>&1 | tail -10 || true
-        kubectl logs -n azureclaw-system -l app.kubernetes.io/component=controller --tail=50 2>&1 | grep -i trustgraph || true
+        kubectl get configmaps -n kars-alpha 2>&1 | tail -10 || true
+        kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=50 2>&1 | grep -i trustgraph || true
         fail "F2b: per-sandbox projection ConfigMap not created"
     fi
 
     # Slice must contain the outbound edge alpha→beta (score 750).
     local slice
-    slice=$(kubectl get configmap alpha-trustgraph-projection -n azureclaw-alpha \
+    slice=$(kubectl get configmap alpha-trustgraph-projection -n kars-alpha \
         -o jsonpath='{.data.graph\.json}' 2>/dev/null || echo "")
     if echo "$slice" | grep -q '"score": 750'; then
         pass "F2b: slice contains outbound alpha→beta edge"
@@ -2663,31 +2663,31 @@ EOF
     # Deployment must mount the projection ConfigMap into inference-router
     # at TRUSTGRAPH_PROJECTION_PATH so the F2a loader picks it up.
     local env_path
-    env_path=$(kubectl get deploy alpha -n azureclaw-alpha \
+    env_path=$(kubectl get deploy alpha -n kars-alpha \
         -o jsonpath='{.spec.template.spec.containers[?(@.name=="inference-router")].env[?(@.name=="TRUSTGRAPH_PROJECTION_PATH")].value}' 2>/dev/null || echo "")
-    if [ "$env_path" = "/etc/azureclaw/trustgraph/graph.json" ]; then
+    if [ "$env_path" = "/etc/kars/trustgraph/graph.json" ]; then
         pass "F2b: TRUSTGRAPH_PROJECTION_PATH env var injected on inference-router"
     else
-        kubectl get deploy alpha -n azureclaw-alpha -o yaml 2>&1 | grep -A2 -B2 -i trustgraph || true
+        kubectl get deploy alpha -n kars-alpha -o yaml 2>&1 | grep -A2 -B2 -i trustgraph || true
         fail "F2b: TRUSTGRAPH_PROJECTION_PATH env var not injected ('$env_path')"
     fi
 
     local mount_path
-    mount_path=$(kubectl get deploy alpha -n azureclaw-alpha \
+    mount_path=$(kubectl get deploy alpha -n kars-alpha \
         -o jsonpath='{.spec.template.spec.containers[?(@.name=="inference-router")].volumeMounts[?(@.name=="trustgraph-projection")].mountPath}' 2>/dev/null || echo "")
-    if [ "$mount_path" = "/etc/azureclaw/trustgraph" ]; then
-        pass "F2b: trustgraph-projection volume mounted at /etc/azureclaw/trustgraph"
+    if [ "$mount_path" = "/etc/kars/trustgraph" ]; then
+        pass "F2b: trustgraph-projection volume mounted at /etc/kars/trustgraph"
     else
         fail "F2b: volume mount missing ('$mount_path')"
     fi
 
     # Cleanup the F2b sandbox (idempotent — failures don't fail the test).
-    kubectl delete clawsandbox alpha -n azureclaw-system --wait=false >/dev/null 2>&1 || true
-    kubectl delete inferencepolicy alpha-inference -n azureclaw-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete karssandbox alpha -n kars-system --wait=false >/dev/null 2>&1 || true
+    kubectl delete inferencepolicy alpha-inference -n kars-system --wait=false >/dev/null 2>&1 || true
 
     # Finalizer cleans up projection on CR delete.
     kubectl delete trustgraph e2e-trustgraph --wait=true --timeout=30s >/dev/null 2>&1 || true
-    if kubectl get configmap trustgraph-e2e-trustgraph-projection -n azureclaw-system >/dev/null 2>&1; then
+    if kubectl get configmap trustgraph-e2e-trustgraph-projection -n kars-system >/dev/null 2>&1; then
         fail "TrustGraph: projection ConfigMap leaked after CR delete"
     else
         pass "TrustGraph: projection ConfigMap cleaned up by finalizer"
@@ -2699,7 +2699,7 @@ EOF
 main() {
     echo ""
     echo "═══════════════════════════════════════════════════════"
-    echo "  AzureClaw E2E Test Suite (runtime: $RUNTIME)"
+    echo "  Kars E2E Test Suite (runtime: $RUNTIME)"
     echo "═══════════════════════════════════════════════════════"
     echo ""
 
@@ -2726,9 +2726,9 @@ main() {
     test_sandbox_networkpolicy_denies_ingress || true
     test_sandbox_suspended_lifecycle || true
     test_secondary_resource_watch || true
-    test_clawsandbox_cel_rejects_byo_with_agent || true
-    test_clawsandbox_cel_rejects_trust_threshold_out_of_range || true
-    test_clawsandbox_cel_rejects_cross_namespace_toolpolicy_ref || true
+    test_karssandbox_cel_rejects_byo_with_agent || true
+    test_karssandbox_cel_rejects_trust_threshold_out_of_range || true
+    test_karssandbox_cel_rejects_cross_namespace_toolpolicy_ref || true
     test_controller_emits_events || true
     test_ap2_commerce_required_route_gate || true
     test_mcp_initialize_version_negotiation || true
@@ -2740,12 +2740,12 @@ main() {
     test_crd_tool_policy || true
     test_crd_inference_policy || true
     test_crd_a2a_agent || true
-    test_crd_claw_memory || true
-    test_crd_claw_eval || true
-    test_crd_claw_eval_lifecycle || true
+    test_crd_kars_memory || true
+    test_crd_kars_eval || true
+    test_crd_kars_eval_lifecycle || true
     test_crd_mcp_server || true
     test_crd_trustgraph_reconcile || true
-    test_crd_clawpairing_lifecycle || true
+    test_crd_karspairing_lifecycle || true
     test_crd_admission_rejects_invalid || true
     test_crd_egress_approval || true
     test_crd_egress_approval_cel_rejects || true
@@ -2785,7 +2785,7 @@ main() {
             test_runtime_byo || true
             ;;
         *)
-            fail "Unknown AZURECLAW_E2E_RUNTIME: $RUNTIME"
+            fail "Unknown KARS_E2E_RUNTIME: $RUNTIME"
             ;;
     esac
 

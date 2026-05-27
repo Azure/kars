@@ -1,18 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `azureclaw audit tail <sandbox>` — stream the durable JSONL audit
+//! `kars audit tail <sandbox>` — stream the durable JSONL audit
 //! log produced by the router's `audit_jsonl::JsonlAuditWriter`
 //! (Slice 4 DoD #4 + #7).
 //!
 //! The router writes one JSON line per `agentmesh::AuditEntry` to
-//! `/var/log/azureclaw/audit/{YYYY-MM-DD}.jsonl` inside the
+//! `/var/log/kars/audit/{YYYY-MM-DD}.jsonl` inside the
 //! `inference-router` container. This command shells into the pod
 //! and runs `cat`/`tail` against today's file, optionally filtering
 //! and pretty-printing the rows.
 //!
 //! No port-forward, no host process — matches the operational
-//! pattern established by `azureclaw inspect`. The router's local
+//! pattern established by `kars inspect`. The router's local
 //! file is the authoritative source; remote sinks (Slice 4c) will
 //! mirror the same lines.
 
@@ -21,8 +21,8 @@ import chalk from "chalk";
 import { execa } from "execa";
 
 /// Default audit-log directory inside the sandbox pod. Matches
-/// `AZURECLAW_AUDIT_DIR` default in `inference-router/src/governance/mod.rs::open_jsonl_writer`.
-export const DEFAULT_AUDIT_DIR = "/var/log/azureclaw/audit";
+/// `KARS_AUDIT_DIR` default in `inference-router/src/governance/mod.rs::open_jsonl_writer`.
+export const DEFAULT_AUDIT_DIR = "/var/log/kars/audit";
 
 /// Shape of one row written by `JsonlAuditWriter::write`.
 /// Mirrors `audit_jsonl::AuditRow` byte-for-byte (additive: tests
@@ -62,7 +62,7 @@ export function auditCommand(): Command {
     )
     .option(
       "-n, --namespace <ns>",
-      "Sandbox pod namespace (default: 'azureclaw-<sandbox>')"
+      "Sandbox pod namespace (default: 'kars-<sandbox>')"
     )
     .option(
       "-l, --lines <n>",
@@ -105,7 +105,7 @@ export async function runAuditTail(
   sandbox: string,
   opts: AuditTailOptions
 ): Promise<void> {
-  const ns = opts.namespace ?? `azureclaw-${sandbox}`;
+  const ns = opts.namespace ?? `kars-${sandbox}`;
   const dir = opts.dir ?? DEFAULT_AUDIT_DIR;
   const lines = parseLines(opts.lines);
   const dateKey = opts.date ?? todayUtcKey();
@@ -199,7 +199,7 @@ export async function runAuditTail(
       throw new Error(
         `No audit log file at ${file} in pod 'deploy/${sandbox}' (ns '${ns}').\n` +
           `  Either nothing has been audited yet on that date or the router\n` +
-          `  is running with AZURECLAW_AUDIT_DIR=disabled.`
+          `  is running with KARS_AUDIT_DIR=disabled.`
       );
     }
     throw new Error(msg);
@@ -312,7 +312,7 @@ function truncate(s: string, n: number): string {
 }
 
 /// Single-quote-shell-quote a path that may contain spaces. The
-/// caller controls the input (a path under /var/log/azureclaw/audit)
+/// caller controls the input (a path under /var/log/kars/audit)
 /// but we still defend against the user passing --dir with a quote.
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;

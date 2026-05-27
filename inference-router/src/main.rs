@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! AzureClaw Inference Router
+//! Kars Inference Router
 #![allow(
     clippy::collapsible_if,
     clippy::redundant_guards,
@@ -17,7 +17,7 @@
 //!
 //! - **Authentication:** Workload Identity → Managed Identity token exchange.
 //!   No API keys in the sandbox. Ever.
-//! - **Model routing:** Declarative model selection per sandbox via ClawSandbox CRD.
+//! - **Model routing:** Declarative model selection per sandbox via KarsSandbox CRD.
 //!   Instant switching, no restart.
 //! - **Content safety:** Azure AI Content Safety + Prompt Shields enforcement
 //!   (on by default, configurable per sandbox).
@@ -25,9 +25,7 @@
 //! - **Audit logging:** Every inference call logged with sandbox ID, model,
 //!   token counts, latency, and content safety results.
 
-use azureclaw_inference_router::{
-    a2a, a2a_mtls, config, forward_proxy, governance, handoff, routes,
-};
+use kars_inference_router::{a2a, a2a_mtls, config, forward_proxy, governance, handoff, routes};
 
 use anyhow::Result;
 use axum::{
@@ -44,7 +42,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 /// Header used for end-to-end correlation across CLI, router, and upstream
 /// logs. Accepted on inbound (propagated when present), otherwise generated.
 /// Also emitted on every response so clients can correlate their side.
-const TRACE_ID_HEADER: &str = "x-azureclaw-trace-id";
+const TRACE_ID_HEADER: &str = "x-kars-trace-id";
 
 /// Maximum accepted length for an incoming trace id. Longer values are
 /// rejected — we don't want a caller burying 2MB into every log line.
@@ -56,18 +54,18 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "azureclaw_inference_router=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "kars_inference_router=info,tower_http=info".into()),
         )
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    tracing::info!("AzureClaw Inference Router starting");
+    tracing::info!("Kars Inference Router starting");
 
     // Slice 4d.2: surface per-server McpServer JWKS mounts at startup
     // so operators can verify that all `mcpServerRefs` on the sandbox
     // landed correctly inside the pod. Discovery is read-only and
     // pre-config — it cannot fail startup.
-    let _mcp_registry = azureclaw_inference_router::mcp::registry::discover_from_env();
+    let _mcp_registry = kars_inference_router::mcp::registry::discover_from_env();
 
     let config = config::Config::from_env()?;
 
@@ -117,7 +115,7 @@ async fn main() -> Result<()> {
     governance::Governance::spawn_policy_watcher(state.governance.clone());
 
     // Slice 2 / Slice 3 hot-reload: poll the InferencePolicy and
-    // ClawMemory mount directories for mtime changes and re-invoke
+    // KarsMemory mount directories for mtime changes and re-invoke
     // each loader's `load_and_install`. Without this the router
     // would happily echo a stale digest for the lifetime of the
     // pod whenever an operator `kubectl edit`s the CR — the
@@ -126,18 +124,18 @@ async fn main() -> Result<()> {
     // directory is fine (the mount may appear later when the
     // operator adds `spec.inferenceRef` / `spec.memoryRef`).
     {
-        let inference_dir = std::env::var("INFERENCE_POLICY_DIR")
-            .unwrap_or_else(|_| "/etc/azureclaw/inference".into());
-        azureclaw_inference_router::inference_policy_loader::spawn_inference_policy_watcher(
+        let inference_dir =
+            std::env::var("INFERENCE_POLICY_DIR").unwrap_or_else(|_| "/etc/kars/inference".into());
+        kars_inference_router::inference_policy_loader::spawn_inference_policy_watcher(
             inference_dir,
             state.policy_status.clone(),
             state.inference_policy.clone(),
         );
 
         let memory_dir = std::env::var("MEMORY_BINDING_DIR").unwrap_or_else(|_| {
-            azureclaw_inference_router::memory_binding_loader::MEMORY_BINDING_DIR_DEFAULT.into()
+            kars_inference_router::memory_binding_loader::MEMORY_BINDING_DIR_DEFAULT.into()
         });
-        azureclaw_inference_router::memory_binding_loader::spawn_memory_binding_watcher(
+        kars_inference_router::memory_binding_loader::spawn_memory_binding_watcher(
             memory_dir,
             state.policy_status.clone(),
             state.memory_binding.clone(),
@@ -150,29 +148,28 @@ async fn main() -> Result<()> {
         // every hot-reload (kubectl edit → ConfigMap mtime bump →
         // atomic `Blocklist::replace_allowlist`).
         let egress_dir = std::env::var("EGRESS_ALLOWLIST_DIR").unwrap_or_else(|_| {
-            azureclaw_inference_router::egress_allowlist_loader::EGRESS_ALLOWLIST_DIR_DEFAULT.into()
+            kars_inference_router::egress_allowlist_loader::EGRESS_ALLOWLIST_DIR_DEFAULT.into()
         });
         // Slice 5e: per-sandbox `EgressApproval` files (one
         // `approval-{name}.json` per CR pointing at this sandbox) live
         // in a sibling ConfigMap mounted at `EGRESS_APPROVAL_DIR`. The
         // loader UNIONs them with the baseline allowlist and registers
         // the merged-set digest under `PolicyKind::EgressApproval`.
-        let approvals_dir = std::env::var(
-            azureclaw_inference_router::egress_allowlist_loader::EGRESS_APPROVAL_DIR_ENV,
+        let approvals_dir =
+            std::env::var(kars_inference_router::egress_allowlist_loader::EGRESS_APPROVAL_DIR_ENV)
+                .unwrap_or_else(|_| {
+                    kars_inference_router::egress_allowlist_loader::EGRESS_APPROVAL_DIR_DEFAULT
+                        .into()
+                });
+        let _ = kars_inference_router::egress_allowlist_loader::load_and_install_with_approvals(
+            &egress_dir,
+            Some(approvals_dir.as_str()),
+            &state.policy_status,
+            &state.egress_allowlist,
+            &state.blocklist,
         )
-        .unwrap_or_else(|_| {
-            azureclaw_inference_router::egress_allowlist_loader::EGRESS_APPROVAL_DIR_DEFAULT.into()
-        });
-        let _ =
-            azureclaw_inference_router::egress_allowlist_loader::load_and_install_with_approvals(
-                &egress_dir,
-                Some(approvals_dir.as_str()),
-                &state.policy_status,
-                &state.egress_allowlist,
-                &state.blocklist,
-            )
-            .await;
-        azureclaw_inference_router::egress_allowlist_loader::spawn_egress_allowlist_watcher_with_approvals(
+        .await;
+        kars_inference_router::egress_allowlist_loader::spawn_egress_allowlist_watcher_with_approvals(
             egress_dir,
             Some(approvals_dir),
             state.policy_status.clone(),
@@ -190,32 +187,31 @@ async fn main() -> Result<()> {
     // If set, /admin/*, /egress/*, /sandbox/*, and sensitive /agt/* endpoints
     // require Authorization: Bearer <token>. If unset, these endpoints are unrestricted
     // (backwards-compatible for local dev).
-    let admin_token: Option<Arc<String>> =
-        std::fs::read_to_string("/etc/azureclaw/secrets/admin-token")
-            .ok()
-            .or_else(|| std::fs::read_to_string("/run/secrets/admin-token").ok())
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .or_else(|| std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()))
-            .or_else(|| {
-                // Auto-generate a random admin token when none is configured.
-                // This ensures admin endpoints are always protected.
-                let mut buf = [0u8; 32];
-                if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-                    use std::io::Read;
-                    if f.read_exact(&mut buf).is_ok() {
-                        let token: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
-                        tracing::warn!(
-                            "ADMIN_TOKEN not configured — auto-generated a random token. \
+    let admin_token: Option<Arc<String>> = std::fs::read_to_string("/etc/kars/secrets/admin-token")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/run/secrets/admin-token").ok())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()))
+        .or_else(|| {
+            // Auto-generate a random admin token when none is configured.
+            // This ensures admin endpoints are always protected.
+            let mut buf = [0u8; 32];
+            if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+                use std::io::Read;
+                if f.read_exact(&mut buf).is_ok() {
+                    let token: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+                    tracing::warn!(
+                        "ADMIN_TOKEN not configured — auto-generated a random token. \
                              Set ADMIN_TOKEN explicitly in production."
-                        );
-                        return Some(token);
-                    }
+                    );
+                    return Some(token);
                 }
-                tracing::error!("Failed to generate random admin token from /dev/urandom");
-                None
-            })
-            .map(Arc::new);
+            }
+            tracing::error!("Failed to generate random admin token from /dev/urandom");
+            None
+        })
+        .map(Arc::new);
 
     // s3 — optional origin allowlist for the admin API. Comma-separated
     // IPv4/IPv6 literals. Empty/unset = token-only legacy behaviour.
@@ -300,7 +296,7 @@ async fn main() -> Result<()> {
 
         // S2 wiring (Phase 3 audit closure): when the controller has
         // mirrored an `A2AAgent` card ConfigMap into this sandbox at
-        // `/etc/azureclaw/a2a-card/agent.json` (or wherever
+        // `/etc/kars/a2a-card/agent.json` (or wherever
         // `A2A_CARD_DIR` points), mount the A2A route module so
         // `/.well-known/agent.json` and `POST /a2a` become live.
         // Absent → routes are not registered (404), preserving the
@@ -406,7 +402,7 @@ async fn main() -> Result<()> {
     //
     // Why 0.0.0.0 and not 127.0.0.1: the K8s controller reaches this listener
     // via the per-sandbox Service DNS
-    // `{name}.azureclaw-{name}.svc.cluster.local:8443` for status-confirmation
+    // `{name}.kars-{name}.svc.cluster.local:8443` for status-confirmation
     // probes (see controller/src/status/router_confirmation.rs). The Service
     // forwards to the pod IP, which only works if the listener is bound on
     // a non-loopback interface inside the pod.
@@ -439,7 +435,7 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    // Phase 2 S3.5 (ADR-0001 #4): the public-edge `azureclaw-a2a-gateway`
+    // Phase 2 S3.5 (ADR-0001 #4): the public-edge `kars-a2a-gateway`
     // forwards to the router on a dedicated mTLS-mandatory port (default
     // 8445). When `A2A_MTLS_ENABLED=1` and the cert/key/CA files are
     // present, log the configuration so operators can see at boot that
@@ -545,9 +541,9 @@ async fn main() -> Result<()> {
 /// startup-time error instead of a route that quietly serves
 /// unauthenticated MCP traffic.
 async fn build_mcp_router() -> Router {
-    use azureclaw_inference_router::mcp::forwarder::RouterToolDispatcher;
-    use azureclaw_inference_router::mcp::oauth::OAuthVerifierConfig;
-    use azureclaw_inference_router::mcp::registry;
+    use kars_inference_router::mcp::forwarder::RouterToolDispatcher;
+    use kars_inference_router::mcp::oauth::OAuthVerifierConfig;
+    use kars_inference_router::mcp::registry;
     use std::time::Duration;
 
     let production = std::env::var("MCP_PRODUCTION_MODE")
@@ -565,36 +561,35 @@ async fn build_mcp_router() -> Router {
     // starts. If *catalog construction* itself fails (duplicate
     // namespaced tool names across servers) we honor §3 and refuse
     // to mount /mcp.
-    let dispatcher_arc: Option<
-        Arc<dyn azureclaw_inference_router::mcp::tools::AsyncToolDispatcher>,
-    > = if !registry_arc.is_empty() {
-        let timeout = std::env::var("MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(5);
-        match RouterToolDispatcher::discover(registry_arc.clone(), Duration::from_secs(timeout))
-            .await
-        {
-            Ok(dispatcher) => {
-                tracing::info!(
-                    servers = registry_arc.len(),
-                    tools = dispatcher.len(),
-                    skipped = dispatcher.skipped().len(),
-                    "Mounted /mcp upstream forwarder (Slice 4d.4)"
-                );
-                for (server, reason) in dispatcher.skipped() {
-                    tracing::warn!(server = %server, reason = %reason, "McpServer skipped by forwarder");
+    let dispatcher_arc: Option<Arc<dyn kars_inference_router::mcp::tools::AsyncToolDispatcher>> =
+        if !registry_arc.is_empty() {
+            let timeout = std::env::var("MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(5);
+            match RouterToolDispatcher::discover(registry_arc.clone(), Duration::from_secs(timeout))
+                .await
+            {
+                Ok(dispatcher) => {
+                    tracing::info!(
+                        servers = registry_arc.len(),
+                        tools = dispatcher.len(),
+                        skipped = dispatcher.skipped().len(),
+                        "Mounted /mcp upstream forwarder (Slice 4d.4)"
+                    );
+                    for (server, reason) in dispatcher.skipped() {
+                        tracing::warn!(server = %server, reason = %reason, "McpServer skipped by forwarder");
+                    }
+                    Some(Arc::new(dispatcher))
                 }
-                Some(Arc::new(dispatcher))
+                Err(e) => {
+                    tracing::error!(error = %e, "Forwarder catalog construction failed; refusing to mount /mcp");
+                    return Router::new();
+                }
             }
-            Err(e) => {
-                tracing::error!(error = %e, "Forwarder catalog construction failed; refusing to mount /mcp");
-                return Router::new();
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let mut state = routes::McpRouteState::standard();
     if let Some(d) = dispatcher_arc {
@@ -696,11 +691,9 @@ async fn build_mcp_router() -> Router {
 ///
 /// See `mcp/platform.rs` and `plan.md` S10.B for the full rationale.
 fn build_platform_mcp_router(
-    memory_binding: Option<
-        azureclaw_inference_router::memory_binding_loader::LoadedMemoryBindingHandle,
-    >,
+    memory_binding: Option<kars_inference_router::memory_binding_loader::LoadedMemoryBindingHandle>,
     policy_status: Option<
-        std::sync::Arc<azureclaw_inference_router::policy_status::PolicyStatusRegistry>,
+        std::sync::Arc<kars_inference_router::policy_status::PolicyStatusRegistry>,
     >,
 ) -> Router {
     let state = routes::McpRouteState::platform(memory_binding, policy_status);

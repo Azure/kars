@@ -1,6 +1,6 @@
-# OWASP MCP Top 10 (2025) — AzureClaw controls matrix
+# OWASP MCP Top 10 (2025) — Kars controls matrix
 
-Internal mapping. Each row answers: what AzureClaw surface takes the hit,
+Internal mapping. Each row answers: what Kars surface takes the hit,
 what control applies today, what lands per the implementation plan, and
 the code/config reference. Written against the OWASP MCP Top 10 2025
 listing (<https://owasp.org/www-project-mcp-top-10/>), re-verified on
@@ -51,7 +51,7 @@ token reject / expired token reject / audience mismatch reject
 .
 
 **Refs.** `sandbox-images/openclaw/entrypoint.sh` (credential mount),
-`deploy/helm/azureclaw/templates/` (secret shape),
+`deploy/helm/kars/templates/` (secret shape),
 tracked on the roadmap.
 
 ### MCP02 — Privilege escalation via scope creep
@@ -77,7 +77,7 @@ precedence. Policy evaluation is an AGT call
 **Threat.** Image replaced between publish and pull; malicious layer
 injected; tool binary swapped post-deploy.
 
-**Today.** Images pushed to the per-deployment ACR via `azureclaw up`;
+**Today.** Images pushed to the per-deployment ACR via `kars up`;
 `imagePullPolicy: Always` used across controller-managed deployments;
 ACR content-trust available but not enforced at admission.
 
@@ -90,7 +90,7 @@ admission deny. Distinct from CR-spec signing.
 **Threat.** Compromised npm/crate dependency; tampered mesh SDK or
 relay/registry image; dropped patch integrity.
 
-**Today.** AzureClaw uses Microsoft AGT AgentMesh only. The historical
+**Today.** Kars uses Microsoft AGT AgentMesh only. The historical
 vendored AgentMesh fork was removed after the gap-closing patches landed
 upstream, so dependency review focuses on the AGT SDK
 version, AGT relay/registry images, and regular SCA gates rather than local
@@ -140,7 +140,7 @@ assumed trusted.
 `oauth.issuer` set (enforced by CEL `x-kubernetes-validations`).
 Router refuses unauthenticated traffic on any
 production-mode `McpServer`. Dev-mode anonymous requires
-`azureclaw.azure.com/dev-only=true` label (admission-enforced,
+`kars.azure.com/dev-only=true` label (admission-enforced,
 `ci/no-null-provider-prod.sh` is the static mirror).
 
 ### MCP08 — Lack of audit and telemetry
@@ -174,8 +174,8 @@ admission block so detection → enforcement is one loop.
 **Threat.** State from one sandbox, session, or tenant bleeds into
 another; context merges across boundaries.
 
-**Today.** Each sandbox gets its own K8s namespace (`azureclaw-<name>`)
-with NetworkPolicy + seccomp + Landlock. `ClawMemory` is a **binding
+**Today.** Each sandbox gets its own K8s namespace (`kars-<name>`)
+with NetworkPolicy + seccomp + Landlock. `KarsMemory` is a **binding
 resource** over Foundry Memory Store; no
 in-cluster memory backend shipped, so no cross-sandbox leak surface
 to defend.
@@ -192,7 +192,7 @@ confusion attacks fail closed.
  MCP05 / MCP07 controls.
 * AGT AgentMesh replaces vendored mesh for a tenant → MCP08 telemetry
  path changes; re-check span emission coverage.
-* `ClawMemory` backend ever gains in-cluster storage → MCP10 must
+* `KarsMemory` backend ever gains in-cluster storage → MCP10 must
  add cross-tenant isolation controls.
 
 ## Related docs

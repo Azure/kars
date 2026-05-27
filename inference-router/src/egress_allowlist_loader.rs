@@ -5,7 +5,7 @@
 //! Egress allowlist loader (Slice 5c.1).
 //!
 //! Reads the single `allowlist.json` file the controller publishes
-//! into the sandbox namespace as the `clawsandbox-<name>-egress-allowlist`
+//! into the sandbox namespace as the `karssandbox-<name>-egress-allowlist`
 //! ConfigMap, registers its sha256 digest with the shared
 //! `PolicyStatusRegistry` under `PolicyKind::EgressAllowlist`, and
 //! atomically installs the host set on the live `Blocklist` so the
@@ -54,7 +54,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Canonical filename the controller writes to the
-/// `clawsandbox-<name>-egress-allowlist` ConfigMap. Kept in lockstep
+/// `karssandbox-<name>-egress-allowlist` ConfigMap. Kept in lockstep
 /// with `controller::egress_allowlist_compile::EGRESS_ALLOWLIST_FILENAME`.
 pub const EGRESS_ALLOWLIST_FILENAME: &str = "allowlist.json";
 
@@ -62,7 +62,7 @@ pub const EGRESS_ALLOWLIST_FILENAME: &str = "allowlist.json";
 /// `EGRESS_ALLOWLIST_DIR` env var (which the sandbox reconciler also
 /// pushes onto the inference-router container whenever the sandbox
 /// references a signed bundle or inline endpoint list).
-pub const EGRESS_ALLOWLIST_DIR_DEFAULT: &str = "/etc/azureclaw/egress";
+pub const EGRESS_ALLOWLIST_DIR_DEFAULT: &str = "/etc/kars/egress";
 
 /// Domain separator used in the length-prefixed canonical bytes when
 /// hashing the merged-allowlist (`baseline ∪ approvals`) digest. Not
@@ -73,10 +73,10 @@ pub const EGRESS_APPROVAL_MERGED_FILENAME: &str = "merged-allowlist.json";
 
 /// Default mount directory for the per-sandbox `EgressApproval`
 /// ConfigMap (Slice 5e). The sandbox reconciler mounts
-/// `clawsandbox-<name>-egress-approvals` here when at least one
+/// `karssandbox-<name>-egress-approvals` here when at least one
 /// approval CR targets the sandbox; the mount is `optional: true`
 /// so the directory may simply be absent when there are no grants.
-pub const EGRESS_APPROVAL_DIR_DEFAULT: &str = "/etc/azureclaw/egress-approvals";
+pub const EGRESS_APPROVAL_DIR_DEFAULT: &str = "/etc/kars/egress-approvals";
 
 /// Env-var override for the approval mount directory.
 pub const EGRESS_APPROVAL_DIR_ENV: &str = "EGRESS_APPROVAL_DIR";
@@ -92,7 +92,7 @@ pub type LoadedEgressAllowlistHandle = Arc<RwLock<Option<LoadedEgressAllowlist>>
 pub struct LoadedEgressAllowlist {
     /// `sha256:<hex>` digest the router echoes via
     /// `GET /internal/policy-status`. Equal to the controller's
-    /// `metadata.annotations["azureclaw.azure.com/egress-allowlist-digest"]`
+    /// `metadata.annotations["kars.azure.com/egress-allowlist-digest"]`
     /// once the §3 echo loop is closed.
     pub digest: String,
     /// Filesystem path the bytes came from.
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn missing_dir_returns_no_binding_and_leaves_registry_empty() {
         let reg = PolicyStatusRegistry::new();
-        let outcome = load_egress_allowlist_from_dir("/nonexistent/azureclaw/egress", &reg);
+        let outcome = load_egress_allowlist_from_dir("/nonexistent/kars/egress", &reg);
         assert!(matches!(outcome, LoadOutcome::NoBinding));
         assert!(reg.get(PolicyKind::EgressAllowlist).is_none());
     }

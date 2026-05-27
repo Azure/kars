@@ -4,7 +4,7 @@
 //! Azure authentication — supports both Workload Identity (AKS) and API key (local dev).
 //!
 //! In AKS: uses Workload Identity token exchange (federated OIDC → Azure AD token)
-//! In dev: reads API key from /run/secrets/azure-openai-key (mounted by azureclaw dev)
+//! In dev: reads API key from /run/secrets/azure-openai-key (mounted by kars dev)
 //!
 //! No API keys in the sandbox. The router handles all auth.
 

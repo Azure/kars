@@ -39,7 +39,7 @@ export async function fetchSandboxes(kubeContext?: string): Promise<SandboxInfo[
 export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxInfo[]> {
   try {
     const [sandboxResult, ipResult] = await Promise.allSettled([
-      execa("kubectl", kctl(["get", "clawsandbox", "-A", "-o", "json"], kubeContext), { stdio: "pipe", timeout: 8000 }),
+      execa("kubectl", kctl(["get", "karssandbox", "-A", "-o", "json"], kubeContext), { stdio: "pipe", timeout: 8000 }),
       execa("kubectl", kctl(["get", "inferencepolicy", "-A", "-o", "json"], kubeContext), { stdio: "pipe", timeout: 8000 }),
     ]);
     if (sandboxResult.status !== "fulfilled") return [];
@@ -47,9 +47,9 @@ export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxIn
     const items: any[] = data.items || [];
 
     // Build a `<namespace>/<name>` → primary deployment map so we can resolve
-    // the model used by each ClawSandbox via spec.inferenceRef.name without
+    // the model used by each KarsSandbox via spec.inferenceRef.name without
     // making N additional kubectl calls. Post-S10/S13 the model lives on the
-    // referenced InferencePolicy, NOT on the ClawSandbox spec.
+    // referenced InferencePolicy, NOT on the KarsSandbox spec.
     const ipModel = new Map<string, string>();
     if (ipResult.status === "fulfilled") {
       try {
@@ -69,7 +69,7 @@ export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxIn
     const enriched = await Promise.allSettled(items.map(async (item) => {
       const name: string = item.metadata?.name || "";
       if (!name) return null;
-      const ns: string = item.metadata?.namespace || "azureclaw-system";
+      const ns: string = item.metadata?.namespace || "kars-system";
       const phase: string = item.status?.phase || "Unknown";
       // Resolution order, post-S10/S13:
       //   1. spec.inferenceRef.name → InferencePolicy.modelPreference.primary.deployment
@@ -83,7 +83,7 @@ export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxIn
       const isolation: string = item.spec?.sandbox?.isolation || "enhanced";
       const created: string = item.metadata?.creationTimestamp || "";
       const labels: Record<string, string> = item.metadata?.labels || {};
-      const parentLabel = labels["azureclaw.azure.com/parent"] || "";
+      const parentLabel = labels["kars.azure.com/parent"] || "";
       const role: "controller" | "sub-agent" = parentLabel ? "sub-agent" : "controller";
 
       // Detect handoff successor (CRD has spec.handoff.mode = "restore")
@@ -92,7 +92,7 @@ export async function fetchSandboxesAKS(kubeContext?: string): Promise<SandboxIn
         handoffState = "active-successor";
       }
 
-      const sandboxNs = `azureclaw-${name}`;
+      const sandboxNs = `kars-${name}`;
       let podStatus = phase;
       let podName = "";
       let podCreated = "";
@@ -210,18 +210,18 @@ export async function fetchSandboxesDocker(): Promise<SandboxInfo[]> {
   try {
     const { stdout } = await execa("docker", [
       "ps", "-a", "--format",
-      "{{.Names}}|{{.Status}}|{{.Label \"azureclaw.parent\"}}|{{.Label \"azureclaw.spawned-by\"}}|{{.CreatedAt}}",
-      "--filter", "name=azureclaw-",
+      "{{.Names}}|{{.Status}}|{{.Label \"kars.parent\"}}|{{.Label \"kars.spawned-by\"}}|{{.CreatedAt}}",
+      "--filter", "name=kars-",
     ], { stdio: "pipe" });
 
     const results: SandboxInfo[] = [];
     for (const line of stdout.split("\n").filter(Boolean)) {
       const [containerName, status, parent, , createdAt] = line.split("|");
-      if (!containerName?.startsWith("azureclaw-")) continue;
+      if (!containerName?.startsWith("kars-")) continue;
       // Skip AGT infrastructure containers
       if (containerName.includes("agt-postgres") || containerName.includes("agt-relay") || containerName.includes("agt-registry")) continue;
 
-      const name = containerName.replace(/^azureclaw-/, "");
+      const name = containerName.replace(/^kars-/, "");
       const isUp = status?.startsWith("Up") ?? false;
       const health: HealthState = isUp ? "healthy" : "down";
       const podStatus = isUp ? "Running" : "Exited";

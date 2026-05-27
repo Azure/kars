@@ -7,7 +7,7 @@
 //! [`inference_router::egress_allowlist_loader`] (Slice 5e):
 //!
 //! 1. **Per-approval file** — the JSON the reconciler writes into the
-//!    per-sandbox `clawsandbox-{sandbox}-egress-approvals` ConfigMap
+//!    per-sandbox `karssandbox-{sandbox}-egress-approvals` ConfigMap
 //!    under key `approval-{approvalName}.json`. This is what the
 //!    router scans, parses, and merges with the baseline. See
 //!    [`compile_approval_file`].
@@ -73,7 +73,7 @@ pub const APPROVAL_FILE_SCHEMA_VERSION: u32 = 1;
 /// One CM per sandbox; one key per approval (`approval-{name}.json`).
 #[must_use]
 pub fn approvals_configmap_name(sandbox: &str) -> String {
-    format!("clawsandbox-{sandbox}-egress-approvals")
+    format!("karssandbox-{sandbox}-egress-approvals")
 }
 
 /// ConfigMap key template for a single approval's file.
@@ -188,7 +188,7 @@ mod tests {
     fn approvals_cm_name_includes_sandbox() {
         assert_eq!(
             approvals_configmap_name("demo"),
-            "clawsandbox-demo-egress-approvals"
+            "karssandbox-demo-egress-approvals"
         );
     }
 

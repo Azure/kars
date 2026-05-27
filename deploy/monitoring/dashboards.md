@@ -1,9 +1,9 @@
-# AzureClaw Azure Monitor Dashboards
+# Kars Azure Monitor Dashboards
 
 ## Token Usage per Sandbox (KQL)
 ```kql
 InsightsMetrics
-| where Name == "azureclaw_tokens_total"
+| where Name == "kars_tokens_total"
 | extend sandbox = tostring(parse_json(Tags).sandbox),
          model = tostring(parse_json(Tags).model),
          direction = tostring(parse_json(Tags).direction)
@@ -14,7 +14,7 @@ InsightsMetrics
 ## Inference Latency (KQL)
 ```kql
 InsightsMetrics
-| where Name == "azureclaw_inference_latency_seconds"
+| where Name == "kars_inference_latency_seconds"
 | extend sandbox = tostring(parse_json(Tags).sandbox),
          model = tostring(parse_json(Tags).model)
 | summarize AvgLatency = avg(Val), P95 = percentile(Val, 95), P99 = percentile(Val, 99) by sandbox, model, bin(TimeGenerated, 5m)
@@ -24,7 +24,7 @@ InsightsMetrics
 ## Request Counts by Status (KQL)
 ```kql
 InsightsMetrics
-| where Name == "azureclaw_inference_requests_total"
+| where Name == "kars_inference_requests_total"
 | extend sandbox = tostring(parse_json(Tags).sandbox),
          model = tostring(parse_json(Tags).model),
          status = tostring(parse_json(Tags).status)
@@ -36,7 +36,7 @@ InsightsMetrics
 ```kql
 // Alert when any sandbox exceeds 80% of daily budget
 InsightsMetrics
-| where Name == "azureclaw_tokens_total"
+| where Name == "kars_tokens_total"
 | extend sandbox = tostring(parse_json(Tags).sandbox)
 | summarize DailyTokens = sum(Val) by sandbox, bin(TimeGenerated, 1d)
 | where DailyTokens > 80000  // 80% of 100k default budget
@@ -45,7 +45,7 @@ InsightsMetrics
 ## Cost Estimation
 ```kql
 InsightsMetrics
-| where Name == "azureclaw_tokens_total"
+| where Name == "kars_tokens_total"
 | extend sandbox = tostring(parse_json(Tags).sandbox),
          model = tostring(parse_json(Tags).model),
          direction = tostring(parse_json(Tags).direction)
@@ -61,13 +61,13 @@ InsightsMetrics
 ## Mesh message counters
 
 The router exports two `IntCounter` metrics, scraped by the
-`azureclaw-sandbox-router` PodMonitor:
+`kars-sandbox-router` PodMonitor:
 
-- `azureclaw_mesh_messages_sent_total`
-- `azureclaw_mesh_messages_received_total`
+- `kars_mesh_messages_sent_total`
+- `kars_mesh_messages_received_total`
 
 The `sandbox=<name>` label is injected at scrape time (relabel from
-`__meta_kubernetes_pod_label_azureclaw_azure_com_sandbox`). Each
+`__meta_kubernetes_pod_label_kars_azure_com_sandbox`). Each
 counter ticks **once per WebSocket frame proxied through the relay**
 (KNOCK, X3DH bundle, encrypted `mesh_send`, and the explicit
 30 s `sendHeartbeat()` tick). WebSocket Ping/Pong keepalives and
@@ -80,14 +80,14 @@ just the relay's KNOCK-ack until a real conversation starts.
 
 ```promql
 # Per-sandbox sent rate (PromQL)
-sum by (sandbox) (rate(azureclaw_mesh_messages_sent_total[5m]))
+sum by (sandbox) (rate(kars_mesh_messages_sent_total[5m]))
 
 # Per-sandbox received rate
-sum by (sandbox) (rate(azureclaw_mesh_messages_received_total[5m]))
+sum by (sandbox) (rate(kars_mesh_messages_received_total[5m]))
 
 # Fleet totals over 24 h
-sum(increase(azureclaw_mesh_messages_sent_total[24h]))
-sum(increase(azureclaw_mesh_messages_received_total[24h]))
+sum(increase(kars_mesh_messages_sent_total[24h]))
+sum(increase(kars_mesh_messages_received_total[24h]))
 ```
 
 For per-peer message attribution (sender→receiver pairs) the Rust
@@ -96,7 +96,7 @@ counters reported on `/agt/status` (`trust_states[].interactions`)
 — there is no Prometheus per-pair metric yet. The Headlamp Mesh
 Topology and operator CLI both fall back to:
 
-1. **Children count** from the `azureclaw.azure.com/parent=<name>`
+1. **Children count** from the `kars.azure.com/parent=<name>`
    label on sub-agent CRs (deterministic, derived from the K8s API).
-2. **Trust-graph size** = `azureclaw_agt_known_agents` (populates
+2. **Trust-graph size** = `kars_agt_known_agents` (populates
    only after live traffic; resets on pod restart).

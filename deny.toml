@@ -57,7 +57,7 @@ ignore = [
 ]
 
 # ─── Licenses ───────────────────────────────────────────────────────────
-# AzureClaw is MIT-licensed. The allow-list here is the standard
+# Kars is MIT-licensed. The allow-list here is the standard
 # permissive set compatible with shipping a binary; copyleft and
 # unknown licenses are denied so we never silently pick up GPL/AGPL
 # code into the controller or router image.

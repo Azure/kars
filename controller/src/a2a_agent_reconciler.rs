@@ -5,7 +5,7 @@
 //!
 //! Watches `A2AAgent` CRs and, for each:
 //!
-//! 1. Ensures finalizer (`azureclaw.azure.com/a2aagent-cleanup`) so the
+//! 1. Ensures finalizer (`kars.azure.com/a2aagent-cleanup`) so the
 //!    published AgentCard ConfigMap is cleaned up synchronously on
 //!    delete.
 //! 2. Runs the pure compile step
@@ -63,7 +63,7 @@ use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
 const FIELD_MANAGER: &str = crate::field_managers::A2A_AGENT;
 
 /// Finalizer name (DNS subdomain).
-const FINALIZER: &str = "azureclaw.azure.com/a2aagent-cleanup";
+const FINALIZER: &str = "kars.azure.com/a2aagent-cleanup";
 
 /// Requeue cadence on success.
 const REQUEUE_OK: Duration = Duration::from_secs(300);
@@ -115,7 +115,7 @@ async fn reconcile(agent: Arc<A2AAgent>, ctx: Arc<Ctx>) -> Result<Action, Reconc
         .map(|f| f.iter().any(|s| s == FINALIZER))
         .unwrap_or(false)
     {
-        let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"A2AAgent","metadata":{"finalizers":[FINALIZER]}});
+        let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"A2AAgent","metadata":{"finalizers":[FINALIZER]}});
         api.patch(
             &name,
             &PatchParams::apply(FIELD_MANAGER).force(),
@@ -182,7 +182,7 @@ async fn reconcile(agent: Arc<A2AAgent>, ctx: Arc<Ctx>) -> Result<Action, Reconc
     // SSA requires apiVersion + kind in the patch body — without
     // them, the API server returns "invalid object type: /, Kind=".
     let status_patch = json!({
-        "apiVersion": "azureclaw.azure.com/v1alpha1",
+        "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "A2AAgent",
         "status": A2AAgentStatus {
             phase: Some(phase.into()),
@@ -292,10 +292,7 @@ async fn ensure_card_configmap(
     let mut data: BTreeMap<String, String> = BTreeMap::new();
     data.insert("agent.json".into(), json_str);
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
-    annotations.insert(
-        "azureclaw.azure.com/a2aagent-version-hash".into(),
-        v_hash.into(),
-    );
+    annotations.insert("kars.azure.com/a2aagent-version-hash".into(), v_hash.into());
     let cm = ConfigMap {
         metadata: ObjectMeta {
             name: Some(cm_name.into()),
@@ -303,10 +300,10 @@ async fn ensure_card_configmap(
             labels: Some(BTreeMap::from([
                 (
                     "app.kubernetes.io/managed-by".into(),
-                    "azureclaw-controller".into(),
+                    "kars-controller".into(),
                 ),
-                ("azureclaw.azure.com/a2aagent".into(), owner.into()),
-                ("azureclaw.azure.com/artifact".into(), "agent-card".into()),
+                ("kars.azure.com/a2aagent".into(), owner.into()),
+                ("kars.azure.com/artifact".into(), "agent-card".into()),
             ])),
             ..Default::default()
         },
@@ -347,7 +344,7 @@ async fn finalize(
         .as_ref()
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
-    let patch = json!({"apiVersion":"azureclaw.azure.com/v1alpha1","kind":"A2AAgent","metadata":{"finalizers": finalizers}});
+    let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"A2AAgent","metadata":{"finalizers": finalizers}});
     api.patch(
         name,
         &PatchParams::apply(FIELD_MANAGER).force(),
@@ -492,15 +489,15 @@ mod tests {
     fn finalizer_constant_is_dns_subdomain() {
         assert!(FINALIZER.contains('/'));
         let (domain, key) = FINALIZER.split_once('/').unwrap();
-        assert_eq!(domain, "azureclaw.azure.com");
+        assert_eq!(domain, "kars.azure.com");
         assert!(!key.is_empty());
     }
 
     #[test]
     fn field_manager_is_per_reconciler() {
         // Distinct from S1 / S2 — required by §10.4 #1.
-        assert_eq!(FIELD_MANAGER, "azureclaw-controller/a2aagent");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/mcp");
-        assert_ne!(FIELD_MANAGER, "azureclaw-controller/toolpolicy");
+        assert_eq!(FIELD_MANAGER, "kars-controller/a2aagent");
+        assert_ne!(FIELD_MANAGER, "kars-controller/mcp");
+        assert_ne!(FIELD_MANAGER, "kars-controller/toolpolicy");
     }
 }

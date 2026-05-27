@@ -5,13 +5,13 @@
 // Plan item s7. Derived from the production incident on 2026-04-22 where
 // a stale sandbox image lacked the `cp ... 2>/dev/null || true` wrapping
 // and crash-looped on `cp: setting permissions ... Operation not permitted`
-// under the image-level `chmod -R a-w` of `/opt/azureclaw-plugin`.
+// under the image-level `chmod -R a-w` of `/opt/kars-plugin`.
 //
 // The tests run in two layers:
 //   LAYER 1 — static: grep the entrypoint.sh / Dockerfile source for the
 //     exact patterns that made the incident unrecoverable under `set -e`.
 //   LAYER 2 — behavioural: spawn bash against a controlled tmpdir that
-//     mimics `/opt/azureclaw-plugin` (read-only source via `chmod -R a-w`)
+//     mimics `/opt/kars-plugin` (read-only source via `chmod -R a-w`)
 //     and a writable destination; assert the real cp pattern exits 0.
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -47,25 +47,25 @@ describe("sandbox entrypoint.sh hardening — static invariants (s7)", () => {
     // (stale read-only files) must not abort the script.
     const block = extractBlock(
       entrypoint,
-      /if \[ -d \/opt\/azureclaw-plugin \]; then/,
+      /if \[ -d \/opt\/kars-plugin \]; then/,
       /^fi$/m,
     );
-    expect(block).toMatch(/rm -rf "\$OPENCLAW_DIR\/extensions\/azureclaw"[^\n]*\|\| true/);
+    expect(block).toMatch(/rm -rf "\$OPENCLAW_DIR\/extensions\/kars"[^\n]*\|\| true/);
   });
 
-  it("every `cp` from /opt/azureclaw-plugin/ tolerates EPERM (|| true)", () => {
+  it("every `cp` from /opt/kars-plugin/ tolerates EPERM (|| true)", () => {
     // The regression class: `cp` emits "Operation not permitted" when the
     // source is chmod -R a-w (Dockerfile hardening) on some kernels; cp
     // returns non-zero, and without `|| true` the script aborts under set -e.
     const block = extractBlock(
       entrypoint,
-      /if \[ -d \/opt\/azureclaw-plugin \]; then/,
+      /if \[ -d \/opt\/kars-plugin \]; then/,
       /^fi$/m,
     );
     // Every line containing a cp from the hardened source dirs.
     const cpLines = block.split("\n").filter((l) =>
       /^\s*cp\b/.test(l) &&
-      (l.includes("/opt/azureclaw-plugin") ||
+      (l.includes("/opt/kars-plugin") ||
         l.includes("/opt/clawhub-skills") ||
         l.includes('"$POLICY_SRC"')),
     );
@@ -75,16 +75,16 @@ describe("sandbox entrypoint.sh hardening — static invariants (s7)", () => {
     }
   });
 
-  it("every `cp` from /opt/azureclaw-plugin/ uses --no-preserve=mode", () => {
+  it("every `cp` from /opt/kars-plugin/ uses --no-preserve=mode", () => {
     // Without --no-preserve=mode, cp copies the 444 source mode onto the
     // destination, so the NEXT restart's cp-over-existing-file fails.
     const block = extractBlock(
       entrypoint,
-      /if \[ -d \/opt\/azureclaw-plugin \]; then/,
+      /if \[ -d \/opt\/kars-plugin \]; then/,
       /^fi$/m,
     );
     const cpLines = block.split("\n").filter((l) =>
-      /^\s*cp\b/.test(l) && l.includes("/opt/azureclaw-plugin"),
+      /^\s*cp\b/.test(l) && l.includes("/opt/kars-plugin"),
     );
     for (const line of cpLines) {
       expect(line, `cp without --no-preserve=mode bakes in read-only mode: ${line.trim()}`)
@@ -97,7 +97,7 @@ describe("sandbox entrypoint.sh hardening — static invariants (s7)", () => {
     // stderr noise ("Operation not permitted") breaks log-scraping alerts.
     const block = extractBlock(
       entrypoint,
-      /if \[ -d \/opt\/azureclaw-plugin \]; then/,
+      /if \[ -d \/opt\/kars-plugin \]; then/,
       /^fi$/m,
     );
     const cpLines = block.split("\n").filter((l) => /^\s*cp\b/.test(l));
@@ -137,14 +137,14 @@ describe("sandbox entrypoint.sh hardening — static invariants (s7)", () => {
 describe("sandbox Dockerfile — image-level hardening (s7)", () => {
   const dockerfile = readFileSync(DOCKERFILE, "utf8");
 
-  it("makes /opt/azureclaw-plugin read-only at image build time", () => {
-    expect(dockerfile).toMatch(/chmod -R a-w [^\n]*\/opt\/azureclaw-plugin/);
+  it("makes /opt/kars-plugin read-only at image build time", () => {
+    expect(dockerfile).toMatch(/chmod -R a-w [^\n]*\/opt\/kars-plugin/);
   });
 
   it("restores read/traverse bits after the a-w lockdown", () => {
     // Without a+rX, a subsequent `cp -r` from the source fails with "Permission denied"
     // because sandbox (UID 1000) cannot even enter the directory.
-    expect(dockerfile).toMatch(/chmod -R a\+rX [^\n]*\/opt\/azureclaw-plugin/);
+    expect(dockerfile).toMatch(/chmod -R a\+rX [^\n]*\/opt\/kars-plugin/);
   });
 });
 
@@ -162,14 +162,14 @@ const describeIfBash = BEHAVIOURAL_AVAILABLE ? describe : describe.skip;
 describeIfBash("sandbox entrypoint.sh — behavioural regression (s7)", () => {
   it("reproduces today's incident: cp under set -e against chmod -R a-w source exits 0", () => {
     // This is the exact scenario from 2026-04-22:
-    //   * /opt/azureclaw-plugin is chmod -R a-w (Dockerfile line 66)
+    //   * /opt/kars-plugin is chmod -R a-w (Dockerfile line 66)
     //   * entrypoint cps files out of it into the sandbox volume
     //   * Some hosts return EPERM on the implicit fchmod() after the write
     //   * Without `2>/dev/null || true`, set -e kills the container
-    const dir = mkdtempSync(join(tmpdir(), "azureclaw-s7-"));
+    const dir = mkdtempSync(join(tmpdir(), "kars-s7-"));
     try {
       const src = join(dir, "opt-plugin");
-      const dst = join(dir, "dst-extensions", "azureclaw");
+      const dst = join(dir, "dst-extensions", "kars");
       execFileSync("mkdir", ["-p", src, dst]);
       writeFileSync(join(src, "package.json"), '{"name":"test"}\n');
       writeFileSync(join(src, "plugin.js"), "// test\n");
@@ -204,7 +204,7 @@ echo OK
     // Note: we cannot force an EPERM deterministically across kernels, so we
     // force a failure via a definitely-missing source file — which is the
     // same exit-code path cp takes on EPERM.
-    const dir = mkdtempSync(join(tmpdir(), "azureclaw-s7-neg-"));
+    const dir = mkdtempSync(join(tmpdir(), "kars-s7-neg-"));
     try {
       const dst = join(dir, "dst");
       execFileSync("mkdir", ["-p", dst]);

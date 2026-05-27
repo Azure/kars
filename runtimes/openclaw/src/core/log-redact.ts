@@ -13,7 +13,7 @@
 //     user-influenced strings cannot break log structure.
 
 // Redact values that look like secrets (tokens, bearer headers, API keys,
-// PEM blocks, AzureClaw pairing tokens) before they reach console.* sinks.
+// PEM blocks, Kars pairing tokens) before they reach console.* sinks.
 // Applied in plugin.ts `_log.info/warn` and at other logging sinks that
 // accept interpolated strings. Exported for unit-testing.
 export function redactSecrets(m: string): string {
@@ -22,7 +22,7 @@ export function redactSecrets(m: string): string {
     // classes + length limits so this regex cannot exhibit catastrophic
     // backtracking (CWE-1333 ReDoS).
     .replace(/-----BEGIN [A-Z ]{1,40}-----[\s\S]{0,8192}?-----END [A-Z ]{1,40}-----/g, "-----BEGIN ***REDACTED***-----")
-    // AzureClaw one-time pairing tokens (azcp_<version>_<base64>)
+    // Kars one-time pairing tokens (azcp_<version>_<base64>)
     .replace(/\bazcp_\d+_[A-Za-z0-9_\-=]+/g, "azcp_***")
     // HTTP Bearer / Basic auth headers
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._\-+/=]+/gi, "$1 ***")

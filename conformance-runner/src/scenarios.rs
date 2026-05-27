@@ -4,7 +4,7 @@
 //! Per-scenario replay logic.
 //!
 //! One entry point: [`replay`] takes a [`Scenario`] + [`Transport`] and
-//! returns a fully-built [`ActualDecision`] ready for [`azureclaw_eval_corpus::judge`].
+//! returns a fully-built [`ActualDecision`] ready for [`kars_eval_corpus::judge`].
 //!
 //! Endpoint conventions (matches `inference-router` routes — verified
 //! against `inference-router/src/routes/{inference,mcp}.rs` and
@@ -15,7 +15,7 @@
 //! | `EgressConnect`   | HTTP `CONNECT host:port` through the forward proxy on `:8444`     | `EgressAllowlist`       |
 //! | `ChatCompletion`  | `POST /v1/chat/completions`                                       | `InferencePolicy`       |
 //! | `ToolCall`        | `POST /mcp` JSON-RPC `tools/call` (name = scenario.tool, args)    | `ToolPolicy`            |
-//! | `MemoryRead`      | `POST /platform/mcp` JSON-RPC `tools/call` `foundry.memory:search`| `ClawMemory`            |
+//! | `MemoryRead`      | `POST /platform/mcp` JSON-RPC `tools/call` `foundry.memory:search`| `KarsMemory`            |
 //!
 //! `ToolCall` with a `burst` repeats the call up to `count` times within
 //! `window_ms`, recording each attempt's status/decision as an
@@ -28,7 +28,7 @@
 //! can correlate without polluting bodies).
 
 use anyhow::{Context, Result};
-use azureclaw_eval_corpus::{
+use kars_eval_corpus::{
     ActualDecision, Burst, ChatMessage, Decision, ObservedSample, PolicyKindRef, Scenario,
 };
 use serde_json::{Value, json};
@@ -145,7 +145,7 @@ pub async fn replay(
                 transport,
                 "/platform/mcp",
                 body,
-                PolicyKindRef::ClawMemory,
+                PolicyKindRef::KarsMemory,
                 case_id,
                 auth_header,
                 CallStyle::McpJsonRpc,
@@ -286,7 +286,7 @@ async fn burst_call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use azureclaw_eval_corpus::{Burst, Decision, PolicyKindRef, Scenario};
+    use kars_eval_corpus::{Burst, Decision, PolicyKindRef, Scenario};
     use std::time::Duration;
     use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -346,8 +346,7 @@ mod tests {
     #[tokio::test]
     async fn egress_connect_403_maps_to_blocked_egress_kind() {
         let addr =
-            spawn_fake_forward_proxy(b"HTTP/1.1 403 Blocked by AzureClaw egress policy\r\n\r\n")
-                .await;
+            spawn_fake_forward_proxy(b"HTTP/1.1 403 Blocked by Kars egress policy\r\n\r\n").await;
         let t = Transport::new("http://router.invalid:8443", Duration::from_secs(2))
             .unwrap()
             .with_forward_proxy(addr);
@@ -363,7 +362,7 @@ mod tests {
                 .reason
                 .as_deref()
                 .unwrap_or("")
-                .contains("Blocked by AzureClaw")
+                .contains("Blocked by Kars")
         );
     }
 
@@ -555,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_read_blocked_carries_clawmemory_kind() {
+    async fn memory_read_blocked_carries_karsmemory_kind() {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/platform/mcp"))
@@ -571,7 +570,7 @@ mod tests {
         };
         let actual = replay(&t, &scen, "case-mem-deny", None).await.unwrap();
         assert_eq!(actual.decision, Decision::Blocked);
-        assert_eq!(actual.by_policy_kind, Some(PolicyKindRef::ClawMemory));
+        assert_eq!(actual.by_policy_kind, Some(PolicyKindRef::KarsMemory));
         assert!(
             actual
                 .reason

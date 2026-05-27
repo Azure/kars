@@ -5,7 +5,7 @@
 //!
 //! The cluster-scoped [`crate::trust_graph_reconciler`] publishes
 //! **one** ConfigMap per `TrustGraph` CR into the
-//! `azureclaw-system` namespace, containing the entire signed trust
+//! `kars-system` namespace, containing the entire signed trust
 //! topology: every operator-attested edge across every agent identity.
 //!
 //! Mounting that cluster-wide blob into every sandbox would leak the
@@ -13,7 +13,7 @@
 //! Disclosure). This module narrows the surface by:
 //!
 //! 1. Listing every TrustGraph projection ConfigMap in
-//!    `azureclaw-system` (label-selected to the controller's own
+//!    `kars-system` (label-selected to the controller's own
 //!    artifact label so we don't accidentally consume an arbitrary
 //!    operator-authored CM).
 //! 2. Filtering each projection to **outbound edges only** — i.e.
@@ -54,10 +54,10 @@ use super::governance_mounts;
 /// Mount paths exposed inside the inference-router container.
 pub mod paths {
     /// Volume mount directory.
-    pub const TRUSTGRAPH_DIR: &str = "/etc/azureclaw/trustgraph";
+    pub const TRUSTGRAPH_DIR: &str = "/etc/kars/trustgraph";
     /// File the router-side loader reads (matches F2a's
     /// `TRUSTGRAPH_PROJECTION_PATH` semantics).
-    pub const TRUSTGRAPH_FILE: &str = "/etc/azureclaw/trustgraph/graph.json";
+    pub const TRUSTGRAPH_FILE: &str = "/etc/kars/trustgraph/graph.json";
     /// Volume name used inside the pod spec.
     pub const TRUSTGRAPH_VOLUME: &str = "trustgraph-projection";
     /// Env var name consumed by the router loader.
@@ -69,10 +69,10 @@ pub mod paths {
 
 /// Source-of-truth namespace for cluster-wide projections (matches
 /// [`crate::trust_graph_reconciler::PROJECTION_NAMESPACE`]).
-pub const SOURCE_NAMESPACE: &str = "azureclaw-system";
+pub const SOURCE_NAMESPACE: &str = "kars-system";
 
 /// Label used by the TrustGraph reconciler to mark its own ConfigMaps.
-pub const ARTIFACT_LABEL: &str = "azureclaw.azure.com/artifact";
+pub const ARTIFACT_LABEL: &str = "kars.azure.com/artifact";
 pub const ARTIFACT_LABEL_VALUE: &str = "trustgraph-projection";
 
 /// Wire shape mirrored from
@@ -248,18 +248,18 @@ pub async fn ensure_trustgraph_mount(
     let mut labels: BTreeMap<String, String> = BTreeMap::new();
     labels.insert(
         "app.kubernetes.io/managed-by".into(),
-        "azureclaw-controller".into(),
+        "kars-controller".into(),
     );
-    labels.insert("azureclaw.azure.com/sandbox".into(), sandbox_name.into());
+    labels.insert("kars.azure.com/sandbox".into(), sandbox_name.into());
     labels.insert(ARTIFACT_LABEL.into(), "trustgraph-per-sandbox".into());
 
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(
-        "azureclaw.azure.com/trustgraph-version-hash".into(),
+        "kars.azure.com/trustgraph-version-hash".into(),
         version_hash.clone(),
     );
     annotations.insert(
-        "azureclaw.azure.com/trustgraph-edge-count".into(),
+        "kars.azure.com/trustgraph-edge-count".into(),
         edge_count.to_string(),
     );
 
@@ -396,10 +396,7 @@ mod tests {
         // Pin: F2a's TrustGraphProjection loader reads
         // TRUSTGRAPH_PROJECTION_PATH; F2b sets the env var to the
         // same path it mounts. Drift here = silent breakage.
-        assert_eq!(
-            paths::TRUSTGRAPH_FILE,
-            "/etc/azureclaw/trustgraph/graph.json"
-        );
+        assert_eq!(paths::TRUSTGRAPH_FILE, "/etc/kars/trustgraph/graph.json");
         assert_eq!(paths::TRUSTGRAPH_ENV, "TRUSTGRAPH_PROJECTION_PATH");
         assert_eq!(paths::TRUSTGRAPH_DATA_KEY, "graph.json");
     }

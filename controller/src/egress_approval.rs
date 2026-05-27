@@ -10,7 +10,7 @@
 //!
 //! A short-TTL, scoped, attributable, **ephemeral** widening of the
 //! baseline egress allowlist for a single sandbox. The baseline lives
-//! in `ClawSandbox.spec.networkPolicy.allowlistRef` (a cosign-signed
+//! in `KarsSandbox.spec.networkPolicy.allowlistRef` (a cosign-signed
 //! OCI artifact, Slice 1c.1). An `EgressApproval` adds a small list of
 //! hosts on top of that baseline for the duration declared in
 //! `spec.ttl`, then auto-expires. Approvals **never** migrate into the
@@ -20,7 +20,7 @@
 //! ## Authority model (thin)
 //!
 //! K8s RBAC is the authority. Binding the
-//! `azureclaw:egress-approver` ClusterRole grants `create / get /
+//! `kars:egress-approver` ClusterRole grants `create / get /
 //! list / delete` on this CRD; the k8s audit log records who used it.
 //!
 //! Slice 5e+ (deferred, demand-gated) layers an optional cryptographic
@@ -32,7 +32,7 @@
 //!
 //! ## Resolution invariants
 //!
-//! 1. `spec.sandbox` is a `ClawSandbox` in the **same namespace** as
+//! 1. `spec.sandbox` is a `KarsSandbox` in the **same namespace** as
 //!    the approval. Cross-namespace approvals are explicitly out of
 //!    scope; one approval = one sandbox.
 //! 2. `spec.hosts.length in 1..=16` — small, scoped grants only.
@@ -63,11 +63,11 @@ use crate::crd::EndpointConfig;
 /// `EgressApproval.spec` — declares a temporary, scoped widening of a
 /// sandbox's baseline egress allowlist.
 ///
-/// The CR is namespaced; `spec.sandbox` MUST refer to a `ClawSandbox`
+/// The CR is namespaced; `spec.sandbox` MUST refer to a `KarsSandbox`
 /// in the same namespace.
 #[derive(CustomResource, Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[kube(
-    group = "azureclaw.azure.com",
+    group = "kars.azure.com",
     version = "v1alpha1",
     kind = "EgressApproval",
     namespaced,
@@ -82,13 +82,13 @@ use crate::crd::EndpointConfig;
 #[serde(rename_all = "camelCase")]
 pub struct EgressApprovalSpec {
     /// Sandbox name (within the same namespace as this CR). The
-    /// reconciler resolves the `ClawSandbox`, fails admission if
+    /// reconciler resolves the `KarsSandbox`, fails admission if
     /// absent, and waits for `phase=Ready` before promoting the
     /// approval to `Active`.
     pub sandbox: String,
 
     /// Hosts to grant on top of the baseline. Same canonical form as
-    /// `ClawSandbox.spec.networkPolicy.allowedEndpoints`. CEL bound:
+    /// `KarsSandbox.spec.networkPolicy.allowedEndpoints`. CEL bound:
     /// 1..=16 entries per approval. Per-entry CEL is delegated to the
     /// `EndpointConfig` schema (host non-empty, port 1..=65535).
     pub hosts: Vec<EndpointConfig>,
@@ -172,7 +172,7 @@ pub struct EgressApprovalStatus {
 /// new reasons is fine; renaming an existing one is a breaking change
 /// (treat as CRD migration).
 pub mod condition_reasons {
-    /// The sibling `ClawSandbox` named by `spec.sandbox` does not
+    /// The sibling `KarsSandbox` named by `spec.sandbox` does not
     /// exist or is not yet `phase=Ready`. The approval stays in
     /// `Pending`; the reconciler retries.
     pub const BLOCKED_ON_SANDBOX: &str = "BlockedOnSandbox";
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn crd_shape_pinned() {
         let crd = EgressApproval::crd();
-        assert_eq!(crd.spec.group, "azureclaw.azure.com");
+        assert_eq!(crd.spec.group, "kars.azure.com");
         assert_eq!(crd.spec.names.kind, "EgressApproval");
         assert_eq!(crd.spec.names.plural, "egressapprovals");
         assert_eq!(

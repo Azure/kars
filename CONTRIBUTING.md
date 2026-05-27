@@ -1,17 +1,17 @@
-# Contributing to AzureClaw
+# Contributing to Kars
 
 This project welcomes contributions and suggestions.
 
 ## External Contributions — Scope & Goals
 
-AzureClaw is a **community-supported, best-effort** project. We are grateful for contributions from the Azure / AKS operator community, OpenClaw / OpenAI Agents SDK adopters, security researchers, and MCP/plugin vendors.
+Kars is a **community-supported, best-effort** project. We are grateful for contributions from the Azure / AKS operator community, OpenClaw / OpenAI Agents SDK adopters, security researchers, and MCP/plugin vendors.
 
 ### Audience
 
 We expect external contributions from:
 
-- **Azure / AKS operators** running AzureClaw in production, troubleshooting edge cases or adding new observability/governance features
-- **OpenClaw / OpenAI Agents SDK / Microsoft Agent Framework users** adopting AzureClaw for AI governance, security, or sandboxing
+- **Azure / AKS operators** running Kars in production, troubleshooting edge cases or adding new observability/governance features
+- **OpenClaw / OpenAI Agents SDK / Microsoft Agent Framework users** adopting Kars for AI governance, security, or sandboxing
 - **Security researchers** reviewing the runtime, auditing isolation guarantees, or reporting vulnerabilities
 - **MCP server vendors** and plugin authors (Brave, Tavily, Firecrawl, Perplexity, OpenAI, custom web-search providers) adding new providers or channels (Telegram, Slack, Discord, WhatsApp)
 
@@ -28,7 +28,7 @@ We expect external contributions from:
 
 ### Out of Scope — We Will Not Merge
 
-- **New cross-cluster transports** — Microsoft AGT AgentMesh is the only sanctioned transport. Changes to inter-cluster communication require an ADR and CELA review; AzureClaw no longer carries a vendored AgentMesh transport fork.
+- **New cross-cluster transports** — Microsoft AGT AgentMesh is the only sanctioned transport. Changes to inter-cluster communication require an ADR and CELA review; Kars no longer carries a vendored AgentMesh transport fork.
 - **Changes to sandbox isolation** — modifications to UID/GID, Landlock rules, seccomp profiles, or NetworkPolicy that weaken pod isolation or increase privilege
 - **Inference router / governance bypass** — any change that routes agent traffic outside the router, skips the governance chain, or adds unauthenticated API endpoints
 - **Direct cloud-side telemetry** — telemetry must remain opt-in via OpenTelemetry (see Data Collection notice in README). Direct Azure Monitor / Application Insights SDKs are not accepted.
@@ -36,7 +36,7 @@ We expect external contributions from:
 
 ### Triage Cadence & Response Time
 
-- The maintainer team (`@AzureClawTeam`) reviews open PRs **at least weekly**
+- The maintainer team (`@KarsTeam`) reviews open PRs **at least weekly**
 - PRs without CLA signature, missing security-audit documentation, or failing CI gates will not be reviewed until those issues are resolved
 - Support is **community-driven, best-effort** — no SLAs or guaranteed response times. For critical security issues, follow the SECURITY.md vulnerability reporting process instead of opening a PR.
 
@@ -57,8 +57,8 @@ The maintainer team will not review implementation PRs for architecture changes 
 ## Quick Start
 
 ```bash
-git clone https://github.com/<your-user>/azureclaw.git
-cd azureclaw
+git clone https://github.com/<your-user>/kars.git
+cd kars
 make build    # Rust (controller + router) + TypeScript CLI
 make test     # 205 unit tests (Rust) + 207 CLI tests (vitest)
 make lint     # clippy + oxlint
@@ -68,14 +68,14 @@ make lint     # clippy + oxlint
 
 | Directory | Language | What It Is |
 |-----------|----------|------------|
-| `controller/` | Rust (kube-rs) | K8s operator — reconciles ClawSandbox CRDs into sandboxes |
+| `controller/` | Rust (kube-rs) | K8s operator — reconciles KarsSandbox CRDs into sandboxes |
 | `inference-router/` | Rust (axum) | Per-sandbox router — auth, safety, budgets, 18 Foundry APIs, native AGT governance |
 | `cli/` | TypeScript | 18 CLI commands + OpenClaw plugin + 10 Foundry skills |
-| `runtimes/openclaw/skills/` | Markdown | 10 SKILL.md files teaching the OpenClaw agent to use AzureClaw + Foundry services |
+| `runtimes/openclaw/skills/` | Markdown | 10 SKILL.md files teaching the OpenClaw agent to use Kars + Foundry services |
 | `cli/profiles/agt/` | YAML | AGT policy profiles (default/offload) inlined by the CLI into `ToolPolicy.spec.agtProfile.inline` |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
 | `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp, NetworkPolicy) |
-| `deploy/seccomp/` | JSON | seccomp profile (`azureclaw-strict.json`) |
+| `deploy/seccomp/` | JSON | seccomp profile (`kars-strict.json`) |
 | `sandbox-images/` | Dockerfile | Azure Linux 3 sandbox image + entrypoint |
 | `tests/e2e/` | Bash | E2E tests: Kind-based + live AKS infra tests |
 
@@ -85,7 +85,7 @@ make lint     # clippy + oxlint
 
 ```bash
 cd cli
-npm ci && npm run build && npm link   # compile + link global `azureclaw` command
+npm ci && npm run build && npm link   # compile + link global `kars` command
 npm test                                    # vitest
 npm run lint                                # oxlint
 npm run typecheck                           # tsc --noEmit
@@ -103,14 +103,14 @@ cargo fmt --all           # format
 ### Docker Sandbox Image
 
 ```bash
-azureclaw dev --build                      # build + run locally via Docker
+kars dev --build                      # build + run locally via Docker
 ```
 
 ### Push to ACR
 
 ```bash
-azureclaw push --only sandbox --apply      # build sandbox image, push to ACR, restart pods
-azureclaw push                             # build + push all AzureClaw images (controller, router, sandbox)
+kars push --only sandbox --apply      # build sandbox image, push to ACR, restart pods
+kars push                             # build + push all Kars images (controller, router, sandbox)
 ```
 
 ### Docker Images (Makefile)
@@ -123,15 +123,15 @@ make push                 # pushes to configured ACR
 ### Local E2E
 
 ```bash
-azureclaw credentials     # configure Azure OpenAI (or just run `dev`/`up` — prompts inline)
-azureclaw dev             # start local sandbox
-azureclaw connect dev-agent
-azureclaw destroy dev-agent
+kars credentials     # configure Azure OpenAI (or just run `dev`/`up` — prompts inline)
+kars dev             # start local sandbox
+kars connect dev-agent
+kars destroy dev-agent
 ```
 
 ## Adding Channels and Plugins
 
-AzureClaw uses a consistent pattern for channels (Telegram, Slack, Discord, WhatsApp) and third-party plugins (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI):
+Kars uses a consistent pattern for channels (Telegram, Slack, Discord, WhatsApp) and third-party plugins (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI):
 
 ```
 CLI flag → Docker env var → entrypoint auto-config → plugins.allow + plugins.entries
@@ -152,13 +152,13 @@ CLI flag → Docker env var → entrypoint auto-config → plugins.allow + plugi
 
 ### Credentials Secret Convention
 
-Credentials are stored in a K8s secret named `<sandbox-name>-credentials` in the sandbox namespace (`azureclaw-<name>`). The controller mounts it via `envFrom` with `optional: true` so pods start even if no credentials secret exists. Use `azureclaw credentials update <name> --telegram-token <token>` to create/update the secret.
+Credentials are stored in a K8s secret named `<sandbox-name>-credentials` in the sandbox namespace (`kars-<name>`). The controller mounts it via `envFrom` with `optional: true` so pods start even if no credentials secret exists. Use `kars credentials update <name> --telegram-token <token>` to create/update the secret.
 
 ## AgentMesh provider changes
 
-AzureClaw runs exclusively on Microsoft AGT AgentMesh (`@microsoft/agent-governance-sdk` plus the AGT relay/registry deployed by `deploy/agentmesh-agt.yaml`). The historical AgentMesh npm SDK dependency and vendored relay/registry/SDK forks were removed in Phase 5.2 after the gap-closing patches landed upstream.
+Kars runs exclusively on Microsoft AGT AgentMesh (`@microsoft/agent-governance-sdk` plus the AGT relay/registry deployed by `deploy/agentmesh-agt.yaml`). The historical AgentMesh npm SDK dependency and vendored relay/registry/SDK forks were removed in Phase 5.2 after the gap-closing patches landed upstream.
 
-Changes to mesh transport, identity, signing, or relay/registry behavior must be proposed upstream first when they belong in AGT, and must include an ADR plus security-audit notes when they affect AzureClaw's trust boundary.
+Changes to mesh transport, identity, signing, or relay/registry behavior must be proposed upstream first when they belong in AGT, and must include an ADR plus security-audit notes when they affect Kars's trust boundary.
 
 ## Pull Requests
 
@@ -200,7 +200,7 @@ same rule applies to new TS files.
 
 ### Copyright Headers
 
-Every AzureClaw-authored source file (`.rs`, `.ts`, `.tsx`, `.js`, `.sh`) **must** begin with the two-line Microsoft + MIT copyright header:
+Every Kars-authored source file (`.rs`, `.ts`, `.tsx`, `.js`, `.sh`) **must** begin with the two-line Microsoft + MIT copyright header:
 
 ```
 // Copyright (c) Microsoft Corporation.

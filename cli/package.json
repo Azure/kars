@@ -1,14 +1,14 @@
 {
-  "name": "@azureclaw/cli",
+  "name": "@kars/cli",
   "version": "0.1.0",
   "description": "Enterprise-grade runtime for running OpenClaw AI assistants safely on Azure",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Azure/azureclaw.git"
+    "url": "https://github.com/Azure/kars.git"
   },
   "bin": {
-    "azureclaw": "./dist/index.js"
+    "kars": "./dist/index.js"
   },
   "files": [
     "dist"

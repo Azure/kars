@@ -1,7 +1,7 @@
-# `@azureclaw/runtime-langgraph-ts`
+# `@kars/runtime-langgraph-ts`
 
 In-pod adapter for **LangGraph (TypeScript / Node.js 22)** running on
-AzureClaw. Mirrors the Python adapter at
+Kars. Mirrors the Python adapter at
 [`runtimes/langgraph/`](../langgraph) with the same v1 contract:
 
 - pins each LLM provider base URL (`OPENAI_BASE_URL`,
@@ -28,7 +28,7 @@ The sandbox image's `entrypoint.sh` calls `bootstrap()` automatically;
 user agent code does not normally import this package.
 
 ```ts
-import { bootstrap } from '@azureclaw/runtime-langgraph-ts';
+import { bootstrap } from '@kars/runtime-langgraph-ts';
 await bootstrap();
 // ... user graph code ...
 ```

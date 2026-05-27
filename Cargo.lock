@@ -64,6 +64,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentmesh-mcp"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3c96f7b1e4734e84b59fc545a708ec9d06927432235c22c71051a3767459a68"
+dependencies = [
+ "base64 0.22.1",
+ "hmac",
+ "rand 0.8.6",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -397,176 +413,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "azureclaw-a2a-core"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "ed25519-dalek",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "azureclaw-a2a-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "azureclaw-a2a-core",
- "base64 0.22.1",
- "ed25519-dalek",
- "hyper",
- "hyper-util",
- "notify",
- "prometheus",
- "rand 0.9.4",
- "reqwest 0.12.28",
- "rustls",
- "rustls-pemfile",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "azureclaw-chaos-tests"
-version = "0.1.0"
-dependencies = [
- "axum",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "azureclaw-cncf-conformance"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_yaml",
- "walkdir",
-]
-
-[[package]]
-name = "azureclaw-conformance-runner"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "azureclaw-eval-corpus",
- "chrono",
- "clap",
- "hex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "wiremock",
-]
-
-[[package]]
-name = "azureclaw-controller"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "azureclaw-eval-corpus",
- "base64 0.22.1",
- "bs58",
- "chrono",
- "criterion",
- "ed25519-dalek",
- "futures",
- "futures-util",
- "hex",
- "k8s-openapi",
- "kube",
- "oci-client 0.16.1",
- "prometheus",
- "rand 0.9.4",
- "regex",
- "reqwest 0.12.28",
- "rustls",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "sigstore",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.28.0",
- "tracing",
- "tracing-subscriber",
- "wiremock",
-]
-
-[[package]]
-name = "azureclaw-eval-corpus"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "azureclaw-inference-router"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "agentmesh",
- "anyhow",
- "async-trait",
- "axum",
- "azureclaw-a2a-core",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "criterion",
- "ed25519-dalek",
- "flate2",
- "futures",
- "hkdf",
- "jsonwebtoken",
- "k8s-openapi",
- "kube",
- "prometheus",
- "proptest",
- "rand 0.9.4",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "socket2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite 0.26.2",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-subscriber",
- "wiremock",
 ]
 
 [[package]]
@@ -2558,6 +2404,177 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "kars-a2a-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kars-a2a-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "hyper",
+ "hyper-util",
+ "kars-a2a-core",
+ "notify",
+ "prometheus",
+ "rand 0.9.4",
+ "reqwest 0.12.28",
+ "rustls",
+ "rustls-pemfile",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kars-chaos-tests"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "kars-cncf-conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_yaml",
+ "walkdir",
+]
+
+[[package]]
+name = "kars-conformance-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "hex",
+ "kars-eval-corpus",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "kars-controller"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bs58",
+ "chrono",
+ "criterion",
+ "ed25519-dalek",
+ "futures",
+ "futures-util",
+ "hex",
+ "k8s-openapi",
+ "kars-eval-corpus",
+ "kube",
+ "oci-client 0.16.1",
+ "prometheus",
+ "rand 0.9.4",
+ "regex",
+ "reqwest 0.12.28",
+ "rustls",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "sigstore",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "kars-eval-corpus"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kars-inference-router"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "agentmesh",
+ "agentmesh-mcp",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "criterion",
+ "ed25519-dalek",
+ "flate2",
+ "futures",
+ "hkdf",
+ "jsonwebtoken",
+ "k8s-openapi",
+ "kars-a2a-core",
+ "kube",
+ "prometheus",
+ "proptest",
+ "rand 0.9.4",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "socket2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.26.2",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

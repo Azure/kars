@@ -24,7 +24,7 @@ export function upCommand(): Command {
     )
     // ── Cluster / region ───────────────────────────────────────────────
     .option("--region <region>", "Azure region", "eastus2")
-    .option("--cluster-name <name>", "AKS cluster name", "azureclaw")
+    .option("--cluster-name <name>", "AKS cluster name", "kars")
     .option(
       "--isolation <level>",
       "Pod isolation level: standard (runc) | enhanced (runc + strict seccomp) | confidential (Kata VM)",
@@ -36,7 +36,7 @@ export function upCommand(): Command {
     .option("--force-infra", "Force Bicep deployment even if AKS cluster exists", false)
     .option("--skip-preflight", "Skip upfront RBAC & provider checks (advanced; you know what you're doing)", false)
     // ── Images ─────────────────────────────────────────────────────────
-    .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "azureclawacr.azurecr.io")
+    .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "karsacr.azurecr.io")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
     .option("--skip-runtime-images", "Skip building/importing the 6 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable)", false)
     // ── Foundry / Azure OpenAI ────────────────────────────────────────
@@ -62,17 +62,17 @@ Flag groups:
   Output / lifecycle: --dry-run, --upgrade, --from-scratch
 
 Examples:
-  azureclaw up                                       # Full provision with defaults
-  azureclaw up --name myagent --region westus3       # Pick a name + region
-  azureclaw up --skip-infra                          # Reuse existing AKS cluster
-  azureclaw up --upgrade                             # Fast Helm-only redeploy
-  azureclaw up --from-scratch                        # Discard any partial state from a previous failed run
+  kars up                                       # Full provision with defaults
+  kars up --name myagent --region westus3       # Pick a name + region
+  kars up --skip-infra                          # Reuse existing AKS cluster
+  kars up --upgrade                             # Fast Helm-only redeploy
+  kars up --from-scratch                        # Discard any partial state from a previous failed run
 
 Auto-resume:
-  If a previous \`azureclaw up\` failed mid-flight, the next invocation
+  If a previous \`kars up\` failed mid-flight, the next invocation
   automatically resumes by skipping phases that already completed
   (network firewall config, image push). State lives in
-  ~/.azureclaw/context.json and is invalidated on topology change
+  ~/.kars/context.json and is invalidated on topology change
   (region / resource-group / cluster / sandbox name) or after 7 days.
   Use --from-scratch to discard it explicitly.
 `)
@@ -114,14 +114,14 @@ Auto-resume:
       const { rg } = preflightResult;
 
 
-      banner("AzureClaw · Production Deploy", "Secure AI Agent Runtime on Azure");
+      banner("Kars · Production Deploy", "Secure AI Agent Runtime on Azure");
 
-      const clusterName = options.clusterName ?? "azureclaw";
+      const clusterName = options.clusterName ?? "kars";
       const baseName = clusterName.replace(/-aks$/, "");
       let acrName = ""; // resolved from Bicep output after deployment
 
       // ── Auto-resume from prior partial run ──────────────────────────
-      // Inspects ~/.azureclaw/context.json. Returns null when there's no
+      // Inspects ~/.kars/context.json. Returns null when there's no
       // partial state, when topology (region / RG / cluster / sandbox /
       // source-acr) changed, when the saved state is stale, or when the
       // user passed --from-scratch.
@@ -158,7 +158,7 @@ Auto-resume:
       //   6. Helm install (CRD + controller + seccomp DS)
       //   7. AgentMesh infrastructure (relay + registry)
       //   8. (optional) AgentMesh Ingress — only with --expose-registry
-      //   9. Create ClawSandbox CR
+      //   9. Create KarsSandbox CR
       //  10. Wait for sandbox Running
       const totalSteps = 9 + (options.exposeRegistry ? 1 : 0);
       const stepper = new Stepper({ totalSteps });
@@ -181,12 +181,12 @@ Auto-resume:
         }
 
         const bicepPath = path.join(repoRoot, "deploy/bicep/main.bicep");
-        const helmPath = path.join(repoRoot, "deploy/helm/azureclaw");
+        const helmPath = path.join(repoRoot, "deploy/helm/kars");
 
         if (!existsSync(bicepPath)) {
           stepper.fail("Bicep template not found");
           console.log(chalk.yellow(`  Expected at: ${bicepPath}`));
-          console.log(chalk.yellow(`  Run from the AzureClaw repo root.\n`));
+          console.log(chalk.yellow(`  Run from the Kars repo root.\n`));
           process.exit(1);
         }
 
@@ -280,7 +280,7 @@ Auto-resume:
           stepper.step(`Provisioning Azure resources in ${options.region}...`);
           const isolationDesc: Record<string, string> = {
             standard: "runc + RuntimeDefault seccomp",
-            enhanced: "runc + azureclaw-strict seccomp + read-only rootfs",
+            enhanced: "runc + kars-strict seccomp + read-only rootfs",
             confidential: "Kata VM isolation (hardware TEE)",
           };
           stepper.detail("info", `Isolation: ${isolationDesc[options.isolation] || options.isolation}`);
@@ -535,19 +535,19 @@ Auto-resume:
             }
           };
 
-          await buildPush("controller/Dockerfile", "azureclaw-controller:latest");
-          await buildPush("inference-router/Dockerfile", "azureclaw-inference-router:latest");
+          await buildPush("controller/Dockerfile", "kars-controller:latest");
+          await buildPush("inference-router/Dockerfile", "kars-inference-router:latest");
 
           // Build sandbox base if not already in ACR
           let baseExists = false;
           try {
-            await execa("docker", ["image", "inspect", `${acrLoginServer}/azureclaw-sandbox-base:latest`], { stdio: "pipe" });
+            await execa("docker", ["image", "inspect", `${acrLoginServer}/kars-sandbox-base:latest`], { stdio: "pipe" });
             baseExists = true;
           } catch { /* not cached locally — need to build */ }
           if (!baseExists) {
             await buildPush(
               "sandbox-images/openclaw/Dockerfile.base",
-              "azureclaw-sandbox-base:latest",
+              "kars-sandbox-base:latest",
               ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`]
             );
           }
@@ -555,14 +555,14 @@ Auto-resume:
           await buildPush(
             "sandbox-images/openclaw/Dockerfile",
             "openclaw-sandbox:latest",
-            ["--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/azureclaw-sandbox-base:latest`,
-             "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/azureclaw-inference-router:latest`]
+            ["--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/kars-sandbox-base:latest`,
+             "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/kars-inference-router:latest`]
           );
 
-          // AgentMesh relay+registry images are no longer built by `azureclaw up`.
+          // AgentMesh relay+registry images are no longer built by `kars up`.
           // After Phase 5.2 the vendored Rust forks were removed; the AGT
           // mesh manifest pulls upstream Microsoft AGT images, or rebuild
-          // locally via `azureclaw push --only relay --apply` (requires an
+          // locally via `kars push --only relay --apply` (requires an
           // AGT repo checkout passed via --agt-repo).
 
           // Multi-runtime adapter images. Tags must match the controller's
@@ -570,12 +570,12 @@ Auto-resume:
           // when --skip-runtime-images is passed (faster first deploy).
           if (!options.skipRuntimeImages) {
             for (const rt of [
-              { dir: "openai-agents", tag: "azureclaw-runtime-openai-agents:latest" },
-              { dir: "maf-python", tag: "azureclaw-runtime-maf-python:latest" },
-              { dir: "anthropic", tag: "azureclaw-runtime-anthropic:latest" },
-              { dir: "langgraph", tag: "azureclaw-runtime-langgraph:latest" },
-              { dir: "langgraph-ts", tag: "azureclaw-runtime-langgraph-ts:latest" },
-              { dir: "pydantic-ai", tag: "azureclaw-runtime-pydantic-ai:latest" },
+              { dir: "openai-agents", tag: "kars-runtime-openai-agents:latest" },
+              { dir: "maf-python", tag: "kars-runtime-maf-python:latest" },
+              { dir: "anthropic", tag: "kars-runtime-anthropic:latest" },
+              { dir: "langgraph", tag: "kars-runtime-langgraph:latest" },
+              { dir: "langgraph-ts", tag: "kars-runtime-langgraph-ts:latest" },
+              { dir: "pydantic-ai", tag: "kars-runtime-pydantic-ai:latest" },
             ]) {
               await buildPush(`sandbox-images/${rt.dir}/Dockerfile`, rt.tag);
             }
@@ -587,19 +587,19 @@ Auto-resume:
           stepper.step("Importing images from source ACR...");
           const sourceAcr = options.sourceAcr;
           const images = [
-            { source: `${sourceAcr}/azureclaw-controller:latest`, target: "azureclaw-controller:latest" },
-            { source: `${sourceAcr}/azureclaw-inference-router:latest`, target: "azureclaw-inference-router:latest" },
+            { source: `${sourceAcr}/kars-controller:latest`, target: "kars-controller:latest" },
+            { source: `${sourceAcr}/kars-inference-router:latest`, target: "kars-inference-router:latest" },
             { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
             { source: `${sourceAcr}/agentmesh-relay:latest`, target: "agentmesh-relay:latest" },
             { source: `${sourceAcr}/agentmesh-registry:latest`, target: "agentmesh-registry:latest" },
             // Multi-runtime adapter images. Failures here are non-fatal —
             // some source ACRs may not host every runtime.
-            { source: `${sourceAcr}/azureclaw-runtime-openai-agents:latest`, target: "azureclaw-runtime-openai-agents:latest" },
-            { source: `${sourceAcr}/azureclaw-runtime-maf-python:latest`, target: "azureclaw-runtime-maf-python:latest" },
-            { source: `${sourceAcr}/azureclaw-runtime-anthropic:latest`, target: "azureclaw-runtime-anthropic:latest" },
-            { source: `${sourceAcr}/azureclaw-runtime-langgraph:latest`, target: "azureclaw-runtime-langgraph:latest" },
-            { source: `${sourceAcr}/azureclaw-runtime-langgraph-ts:latest`, target: "azureclaw-runtime-langgraph-ts:latest" },
-            { source: `${sourceAcr}/azureclaw-runtime-pydantic-ai:latest`, target: "azureclaw-runtime-pydantic-ai:latest" },
+            { source: `${sourceAcr}/kars-runtime-openai-agents:latest`, target: "kars-runtime-openai-agents:latest" },
+            { source: `${sourceAcr}/kars-runtime-maf-python:latest`, target: "kars-runtime-maf-python:latest" },
+            { source: `${sourceAcr}/kars-runtime-anthropic:latest`, target: "kars-runtime-anthropic:latest" },
+            { source: `${sourceAcr}/kars-runtime-langgraph:latest`, target: "kars-runtime-langgraph:latest" },
+            { source: `${sourceAcr}/kars-runtime-langgraph-ts:latest`, target: "kars-runtime-langgraph-ts:latest" },
+            { source: `${sourceAcr}/kars-runtime-pydantic-ai:latest`, target: "kars-runtime-pydantic-ai:latest" },
           ];
 
           for (const img of images) {
@@ -628,7 +628,7 @@ Auto-resume:
         let helmExists = false;
         try {
           const { stdout: helmStatus } = await execa("helm", [
-            "status", "azureclaw", "-n", "azureclaw-system", "-o", "json",
+            "status", "kars", "-n", "kars-system", "-o", "json",
           ], { stdio: "pipe" });
           const status = JSON.parse(helmStatus);
           if (status.info?.status === "deployed") helmExists = true;
@@ -651,14 +651,14 @@ Auto-resume:
         // Fix orphaned namespace: label it for Helm adoption if it exists but isn't Helm-managed
         try {
           await execa("kubectl", [
-            "label", "namespace", "azureclaw-system",
+            "label", "namespace", "kars-system",
             "app.kubernetes.io/managed-by=Helm",
             "--overwrite",
           ], { stdio: "pipe" }).catch(() => {});
           await execa("kubectl", [
-            "annotate", "namespace", "azureclaw-system",
-            "meta.helm.sh/release-name=azureclaw",
-            "meta.helm.sh/release-namespace=azureclaw-system",
+            "annotate", "namespace", "kars-system",
+            "meta.helm.sh/release-name=kars",
+            "meta.helm.sh/release-namespace=kars-system",
             "--overwrite",
           ], { stdio: "pipe" }).catch(() => {});
         } catch {
@@ -668,14 +668,14 @@ Auto-resume:
         // Clean up stale Helm releases (pending-install from failed previous attempts)
         try {
           const { stdout: helmSecrets } = await execa("kubectl", [
-            "get", "secrets", "-n", "azureclaw-system",
+            "get", "secrets", "-n", "kars-system",
             "-l", "owner=helm,status=pending-install",
             "-o", "jsonpath={.items[*].metadata.name}",
           ], { stdio: "pipe" });
           if (helmSecrets.trim()) {
             for (const secret of helmSecrets.trim().split(" ")) {
               stepper.update("Cleaning stale Helm release...");
-              await execa("kubectl", ["delete", "secret", secret, "-n", "azureclaw-system"], { stdio: "pipe" }).catch(() => {});
+              await execa("kubectl", ["delete", "secret", secret, "-n", "kars-system"], { stdio: "pipe" }).catch(() => {});
             }
           }
         } catch {
@@ -747,24 +747,24 @@ Auto-resume:
         }
 
         const helmArgs = [
-          "upgrade", "--install", "azureclaw", helmPath,
-          "--namespace", "azureclaw-system",
+          "upgrade", "--install", "kars", helmPath,
+          "--namespace", "kars-system",
           "--create-namespace",
-          "--set", `controller.image.repository=${acrLoginServer}/azureclaw-controller`,
+          "--set", `controller.image.repository=${acrLoginServer}/kars-controller`,
           "--set", `controller.image.tag=latest`,
-          "--set", `inferenceRouter.image.repository=${acrLoginServer}/azureclaw-inference-router`,
+          "--set", `inferenceRouter.image.repository=${acrLoginServer}/kars-inference-router`,
           "--set", `inferenceRouter.image.tag=latest`,
           "--set", `inferenceRouter.azure.openai.endpoint=${openAiEndpoint}`,
           "--set", `sandbox.image.repository=${acrLoginServer}/openclaw-sandbox`,
           "--set", `sandbox.image.tag=latest`,
           // Multi-runtime adapter image overrides (consumed by controller via
           // *_RUNTIME_IMAGE env vars; see helm controller-deployment.yaml).
-          "--set", `runtimes.openaiAgents.image=${acrLoginServer}/azureclaw-runtime-openai-agents:latest`,
-          "--set", `runtimes.mafPython.image=${acrLoginServer}/azureclaw-runtime-maf-python:latest`,
-          "--set", `runtimes.anthropic.image=${acrLoginServer}/azureclaw-runtime-anthropic:latest`,
-          "--set", `runtimes.langgraph.image=${acrLoginServer}/azureclaw-runtime-langgraph:latest`,
-          "--set", `runtimes.langgraphTs.image=${acrLoginServer}/azureclaw-runtime-langgraph-ts:latest`,
-          "--set", `runtimes.pydanticAi.image=${acrLoginServer}/azureclaw-runtime-pydantic-ai:latest`,
+          "--set", `runtimes.openaiAgents.image=${acrLoginServer}/kars-runtime-openai-agents:latest`,
+          "--set", `runtimes.mafPython.image=${acrLoginServer}/kars-runtime-maf-python:latest`,
+          "--set", `runtimes.anthropic.image=${acrLoginServer}/kars-runtime-anthropic:latest`,
+          "--set", `runtimes.langgraph.image=${acrLoginServer}/kars-runtime-langgraph:latest`,
+          "--set", `runtimes.langgraphTs.image=${acrLoginServer}/kars-runtime-langgraph-ts:latest`,
+          "--set", `runtimes.pydanticAi.image=${acrLoginServer}/kars-runtime-pydantic-ai:latest`,
           "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
           "--set", `mesh.provider=${(options.meshProvider as string | undefined) ?? "agt"}`,
@@ -774,7 +774,7 @@ Auto-resume:
           // or `kubectl patch` (e.g. CRDs / ClusterRoles touched out-of-band
           // during prior debugging). Without this, Helm's server-side apply
           // refuses with "conflict with kubectl-client-side-apply" and the
-          // whole `azureclaw up` flow fails after the 18-min image build.
+          // whole `kars up` flow fails after the 18-min image build.
           "--force-conflicts",
         ];
         if (foundryEndpoint) {
@@ -843,19 +843,19 @@ Auto-resume:
           }
         } catch { /* non-critical — controller will log warning */ }
 
-        stepper.update(`${helmExists ? "Upgrading" : "Installing"} AzureClaw Helm chart (controller + CRD + RBAC + seccomp)...`);
+        stepper.update(`${helmExists ? "Upgrading" : "Installing"} Kars Helm chart (controller + CRD + RBAC + seccomp)...`);
         await execa("helm", helmArgs, { stdio: "pipe" });
         stepper.detail(helmExists ? "ok" : "new", `Helm release — ${helmExists ? "upgraded" : "installed"}`);
 
         // Force rollout when using :latest tags (Helm won't restart pods if spec hash is unchanged)
         stepper.update("Rolling out updated controller...");
         await execa("kubectl", [
-          "rollout", "restart", "deployment/azureclaw-controller",
-          "-n", "azureclaw-system",
+          "rollout", "restart", "deployment/kars-controller",
+          "-n", "kars-system",
         ], { stdio: "pipe" }).catch(() => {});
         await execa("kubectl", [
-          "rollout", "status", "deployment/azureclaw-controller",
-          "-n", "azureclaw-system",
+          "rollout", "status", "deployment/kars-controller",
+          "-n", "kars-system",
           "--timeout=120s",
         ], { stdio: "pipe" }).catch(() => {});
 
@@ -879,7 +879,7 @@ Auto-resume:
         markPhaseDone("mesh", { registryMode, globalRegistryUrl, globalRelayUrl }, resumeTopology);
 
         // ── Step 7+8: Sandbox bring-up (S15.d.4: extracted to ./up/sandbox_bringup.ts) ──
-        // Federated credentials, MI Contributor, Foundry RBAC, ClawSandbox CR,
+        // Federated credentials, MI Contributor, Foundry RBAC, KarsSandbox CR,
         // wait for Running, WebUI port-forward, summary, saveContext().
         const { bringUpSandbox } = await import("./up/sandbox_bringup.js");
         await bringUpSandbox({
@@ -906,7 +906,7 @@ Auto-resume:
         }
         if (message.includes("quota") || message.includes("Quota")) {
           console.log(chalk.yellow("  Tip: Insufficient quota. Try a different region or VM size:"));
-          console.log(chalk.cyan(`  azureclaw up --region westus3\n`));
+          console.log(chalk.cyan(`  kars up --region westus3\n`));
         }
         process.exit(1);
       }

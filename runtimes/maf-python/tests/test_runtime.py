@@ -3,7 +3,7 @@
 
 import os
 
-from azureclaw_runtime_maf_python import runtime
+from kars_runtime_maf_python import runtime
 
 
 def test_bootstrap_sets_initialized_env(monkeypatch):

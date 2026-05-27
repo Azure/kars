@@ -13,15 +13,15 @@
 //! * [`OutageMode::CachedRead`]  — allow if a cached decision is under TTL,
 //!   otherwise fail-closed.
 //! * [`OutageMode::DegradedDev`] — fail-open with a warning label on the
-//!   response. Rejected in prod by admission unless the `ClawSandbox`
-//!   carries `azureclaw.azure.com/dev-only: "true"`.
+//!   response. Rejected in prod by admission unless the `KarsSandbox`
+//!   carries `kars.azure.com/dev-only: "true"`.
 //!
 //! This module is **pure data + pure logic**. It does not make any provider
 //! call — it is the deterministic decision function the call-site reaches
 //! for once a provider call has returned an error.
 //!
 //! Wire format (serde): `camelCase` — `"strict" | "cachedRead" | "degradedDev"`.
-//! Must match `ClawSandbox.spec.agt.outageMode` enum (CRD CEL validation
+//! Must match `KarsSandbox.spec.agt.outageMode` enum (CRD CEL validation
 //! lands with the CRD itself in Phase 1 minimal-CRDs scope).
 
 use std::fmt;
@@ -136,7 +136,7 @@ impl fmt::Display for OutageConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DegradedDevInProd => f.write_str(
-                "outageMode=degradedDev is only valid on dev-only sandboxes (label azureclaw.azure.com/dev-only=true)",
+                "outageMode=degradedDev is only valid on dev-only sandboxes (label kars.azure.com/dev-only=true)",
             ),
             Self::CachedTtlTooLarge { requested, max } => write!(
                 f,
@@ -152,7 +152,7 @@ impl fmt::Display for OutageConfigError {
 impl std::error::Error for OutageConfigError {}
 
 /// Per-tenant outage configuration, typically read from
-/// `ClawSandbox.spec.agt.{outageMode,cachedTtlSeconds}`.
+/// `KarsSandbox.spec.agt.{outageMode,cachedTtlSeconds}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutageConfig {
