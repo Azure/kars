@@ -109,10 +109,15 @@ resource blueprintSp 'Microsoft.Graph/servicePrincipals@v1.0' = {
 // path proven during the POC — IMDS tokens from this MI are NOT
 // FIC-derived, so presenting them as the blueprint's MI-as-FIC
 // assertion does not trigger AADSTS700231.
+//
+// `environment().authentication.loginEndpoint` keeps this template
+// portable across Azure Public / Gov / China clouds; the Bicep
+// `no-hardcoded-env-urls` linter rule requires it.
+var loginEndpoint = environment().authentication.loginEndpoint
 resource blueprintFic 'Microsoft.Graph/applications/federatedIdentityCredentials@v1.0' = {
   name: '${blueprintApp.uniqueName}/kars-controller-mi'
   audiences: [ 'api://AzureADTokenExchange' ]
-  issuer: 'https://login.microsoftonline.com/${tenantId}/v2.0'
+  issuer: '${loginEndpoint}${tenantId}/v2.0'
   subject: controllerMi.outputs.principalId
   description: 'kars controller MI — trust hop into the blueprint (kars cluster ${clusterName})'
 }

@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "1461121448839003591"
+      "templateHash": "14938929986226517930"
     }
   },
   "parameters": {
@@ -52,6 +52,9 @@
         "description": "Tenant ID. Defaults to the deployment tenant. Override only for cross-tenant scenarios."
       }
     }
+  },
+  "variables": {
+    "loginEndpoint": "[environment().authentication.loginEndpoint]"
   },
   "imports": {
     "microsoftGraphV1": {
@@ -104,7 +107,7 @@
         "audiences": [
           "api://AzureADTokenExchange"
         ],
-        "issuer": "[format('https://login.microsoftonline.com/{0}/v2.0', parameters('tenantId'))]",
+        "issuer": "[format('{0}{1}/v2.0', variables('loginEndpoint'), parameters('tenantId'))]",
         "subject": "[reference('controllerMi').outputs.principalId.value]",
         "description": "[format('kars controller MI — trust hop into the blueprint (kars cluster {0})', parameters('clusterName'))]"
       },

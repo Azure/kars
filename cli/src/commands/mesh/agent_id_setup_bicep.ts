@@ -183,17 +183,39 @@ export async function ensureAgentIdTrustViaBicep(
   console.log(chalk.dim("  Running `az deployment sub create` — typical duration 30-90s..."));
   let deploymentResp: DeploymentResult;
   try {
+    // Capture both streams: az emits linter warnings to stderr but
+    // we don't want those misclassified as fatal. Also use `all: true`
+    // so any actual deployment error from stdout makes it into the
+    // error path. Timeout: 5 min for the Microsoft.Graph extension.
     const res = await execa("az", [...args, "-o", "json"], {
       stdio: ["ignore", "pipe", "pipe"],
-      // Bicep + Graph extension provisioning can take a while; give
-      // it 5 minutes before failing.
+      all: true,
       timeout: 5 * 60 * 1000,
     });
+    if (!res.stdout || res.stdout.trim() === "") {
+      throw new Error(
+        `az returned no JSON output — stderr was: ${(res.stderr ?? "").slice(0, 400)}`,
+      );
+    }
     deploymentResp = JSON.parse(res.stdout) as DeploymentResult;
   } catch (e) {
-    const err = e as { stderr?: string; message?: string };
-    const detail = err.stderr?.trim() ?? err.message ?? "deployment failed";
-    throw new Error(`Bicep deployment failed: ${detail.split("\n")[0]}`);
+    const err = e as {
+      stderr?: string;
+      stdout?: string;
+      all?: string;
+      message?: string;
+    };
+    // Prefer the merged stream `all` (captures the real error), then
+    // stdout, then stderr. Strip the noisy Bicep linter `WARNING:`
+    // prefix lines so the actual ARM error is what the user sees.
+    const raw = err.all ?? err.stdout ?? err.stderr ?? err.message ?? "deployment failed";
+    const cleaned = raw
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("WARNING:"))
+      .join("\n")
+      .trim();
+    const summary = cleaned.split("\n")[0] || raw.split("\n")[0] || "deployment failed";
+    throw new Error(`Bicep deployment failed: ${summary.slice(0, 400)}`);
   }
 
   const outputs = deploymentResp.properties.outputs;
@@ -247,24 +269,44 @@ export async function ensureAgentIdTrustViaBicep(
   try {
     await execa("kubectl", ["apply", "-f", "-"], {
       input: JSON.stringify(cr),
-      stdio: ["pipe", "inherit", "inherit"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    console.log();
+    console.log(chalk.green("  ✓ KarsAuthConfig/default written"));
   } catch (e) {
-    const msg = (e as Error).message;
-    if (msg.includes("no matches for kind")) {
+    // The kubectl apply is the LAST step and a soft failure here
+    // should NOT mask the successful Bicep deployment that already
+    // produced all the Entra resources. Check the execa error's
+    // stderr (not just .message — execa.message is just "Command
+    // failed…") to detect the CRD-missing case and surface a
+    // helpful workaround instead of a generic "deployment failed".
+    const err = e as { stderr?: string; stdout?: string; message?: string };
+    const detail = (err.stderr ?? err.stdout ?? err.message ?? "").toString();
+    if (detail.includes("no matches for kind")) {
+      console.log();
       console.log(
         chalk.yellow(
-          "\n  ⚠ KarsAuthConfig CRD not installed in the current kubectl context.",
+          "  ⚠ Bicep deployment succeeded, but KarsAuthConfig CRD is not installed in the current kubectl context.",
         ),
       );
       console.log(
         chalk.dim(
-          "    Run `helm upgrade kars deploy/helm/kars -n kars-system --reuse-values` and retry.",
+          "    All Entra resources are already created — just install the CRD and re-run:",
         ),
       );
-    } else {
-      throw e;
+      console.log(chalk.cyan("      helm upgrade kars deploy/helm/kars -n kars-system --reuse-values"));
+      console.log(chalk.cyan("      kars mesh setup-trust --mode bicep"));
+      console.log();
+      console.log(chalk.dim("    Bicep outputs (apply manually if you prefer):"));
+      console.log(chalk.dim(`      blueprint:    ${result.blueprintClientId}`));
+      console.log(chalk.dim(`      controller MI: ${result.controllerMiClientId}`));
+      // Return the result so callers know the Bicep half succeeded.
+      return result;
     }
+    // Any other kubectl error IS a real problem — surface it but
+    // still tagged as the kubectl step so the user knows the
+    // Bicep half succeeded.
+    throw new Error(`Bicep succeeded but kubectl apply KarsAuthConfig failed: ${detail.split("\n")[0].slice(0, 300)}`);
   }
 
   return result;
