@@ -401,6 +401,136 @@ async function printPortalVisibilityHint(blueprintObjectId: string): Promise<voi
     );
   }
   console.log();
+  console.log(
+    chalk.dim(
+      "  ── If the PATCH is rejected (delete + recreate path) ──",
+    ),
+  );
+  console.log(
+    chalk.dim(
+      "  Some tenants reject in-place @odata.type upgrades. In that case",
+    ),
+  );
+  console.log(
+    chalk.dim(
+      "  delete the existing app and recreate it typed — but remember a",
+    ),
+  );
+  console.log(
+    chalk.dim(
+      "  fresh Graph Explorer POST /applications creates ONLY the app:",
+    ),
+  );
+  console.log(
+    chalk.dim(
+      "  the SP and FIC have to be recreated too. Bicep did all three;",
+    ),
+  );
+  console.log(
+    chalk.dim(
+      "  the Graph Explorer fallback only does step 1. Full sequence:",
+    ),
+  );
+  console.log();
+  console.log(
+    chalk.cyan(
+      "    # 1. Create typed app (note the new objectId — call it $NEW_OID)",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "    POST https://graph.microsoft.com/beta/applications",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "    Body: { \"@odata.type\": \"Microsoft.Graph.AgentIdentityBlueprint\",",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "            \"displayName\": \"kars-blueprint\",",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      `            "sponsors@odata.bind": ["https://graph.microsoft.com/v1.0/users/${oid}"],`,
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      `            "owners@odata.bind":   ["https://graph.microsoft.com/v1.0/users/${oid}"] }`,
+    ),
+  );
+  console.log();
+  console.log(
+    chalk.cyan(
+      "    # 2. Create SP for the new app",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "    POST https://graph.microsoft.com/v1.0/servicePrincipals",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "    Body: { \"appId\": \"<NEW_APP_ID_FROM_STEP_1>\" }",
+    ),
+  );
+  console.log();
+  console.log(
+    chalk.cyan(
+      "    # 3. Recreate the MI-as-FIC on the new app",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "    POST https://graph.microsoft.com/v1.0/applications/$NEW_OID/federatedIdentityCredentials",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "    Body: { \"name\": \"kars-controller-mi-fic\",",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "            \"issuer\": \"https://login.microsoftonline.com/<TENANT>/v2.0\",",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "            \"subject\": \"<MI_PRINCIPAL_FROM_KarsAuthConfig>\",",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "            \"audiences\": [\"api://AzureADTokenExchange\"] }",
+    ),
+  );
+  console.log();
+  console.log(
+    chalk.cyan(
+      "    # 4. Re-point the cluster CR + delete the old orphan app",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "    kubectl patch karsauthconfig default --type=merge \\",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      "      -p '{\"spec\":{\"agentId\":{\"blueprintClientId\":\"<NEW>\",\"blueprintObjectId\":\"<NEW>\"}}}'",
+    ),
+  );
+  console.log(
+    chalk.cyan(
+      `    DELETE https://graph.microsoft.com/v1.0/applications/${blueprintObjectId}`,
+    ),
+  );
+  console.log();
 }
 
 /// Best-effort: try to read the signed-in user's Entra objectId via

@@ -315,9 +315,62 @@ workaround is:
    body (with your OID auto-filled when discoverable) at the end of
    the Bicep flow — copy-paste it directly from the CLI output.
 
-   If Graph rejects the in-place PATCH, delete + recreate with the
-   typed body — the kars controller will pick up the new `appId`
-   on next reconcile.
+   If Graph rejects the in-place PATCH, you must delete + recreate the
+   blueprint as typed. **Important:** a fresh Graph Explorer
+   `POST /applications` creates **only the app** — neither the SP
+   nor the FIC are auto-created (Bicep does all three; the Graph
+   Explorer fallback does step 1 only). Full recovery sequence:
+
+   ```http
+   # 1. Create the typed blueprint app
+   POST https://graph.microsoft.com/beta/applications
+   Content-Type: application/json
+
+   {
+     "@odata.type": "Microsoft.Graph.AgentIdentityBlueprint",
+     "displayName": "kars-blueprint",
+     "sponsors@odata.bind": [
+       "https://graph.microsoft.com/v1.0/users/<YOUR_USER_OID>"
+     ],
+     "owners@odata.bind": [
+       "https://graph.microsoft.com/v1.0/users/<YOUR_USER_OID>"
+     ]
+   }
+   # Response includes `id` (the new objectId) and `appId` — save both.
+   ```
+
+   ```http
+   # 2. Create the SP for the new app (required for RBAC + portal listing)
+   POST https://graph.microsoft.com/v1.0/servicePrincipals
+   Content-Type: application/json
+
+   { "appId": "<NEW_APP_ID_FROM_STEP_1>" }
+   ```
+
+   ```http
+   # 3. Recreate the MI-as-FIC on the new app
+   POST https://graph.microsoft.com/v1.0/applications/<NEW_OBJECT_ID>/federatedIdentityCredentials
+   Content-Type: application/json
+
+   {
+     "name": "kars-controller-mi-fic",
+     "issuer": "https://login.microsoftonline.com/<TENANT_ID>/v2.0",
+     "subject": "<MI_PRINCIPAL_ID>",
+     "audiences": ["api://AzureADTokenExchange"]
+   }
+   ```
+
+   Tenant ID + MI principalId come from `kubectl get karsauthconfig
+   default -o jsonpath='{.spec.tenant.tenantId}{"\n"}{.spec.controller.managedIdentityPrincipalId}{"\n"}'`.
+
+   ```bash
+   # 4. Re-point the cluster CR at the new blueprint
+   kubectl patch karsauthconfig default --type=merge \
+     -p '{"spec":{"agentId":{"blueprintClientId":"<NEW>","blueprintObjectId":"<NEW>"}}}'
+
+   # 5. Optional: delete the old orphan app (cascades to its SP)
+   #    DELETE https://graph.microsoft.com/v1.0/applications/<OLD_OBJECT_ID>
+   ```
 
 4. Long-term: get the workstation Intune-enrolled (`aka.ms/intune`).
    After enrollment the `AADSTS530033` block clears and the
