@@ -5,7 +5,7 @@
 ## Persona & intent
 
 - **You are:** the platform / infra / SRE team inside one company. You own an Azure subscription, an Entra tenant, and a security-approved Azure AI Foundry project.
-- **You want:** to run Kars as a single-tenant cluster for *your own* employees and *your own* services. Anyone consuming agents is inside the same Entra tenant or paired in via your operator-managed pairing tokens.
+- **You want:** to run kars as a single-tenant cluster for *your own* employees and *your own* services. Anyone consuming agents is inside the same Entra tenant or paired in via your operator-managed pairing tokens.
 - **You do not want:** any agent traffic to leave your VNet. Any provider you can't audit in the data path. Any plaintext in the relay.
 
 ## Topology
@@ -79,7 +79,7 @@ flowchart LR
   subgraph TB1["🏢 Corp Entra tenant + VNet"]
     direction TB
     Eng["employee laptop"]
-    AKS["Kars AKS"]
+    AKS["kars AKS"]
     FND["Foundry"]
     LAW["Log Analytics"]
   end
@@ -121,7 +121,7 @@ sequenceDiagram
     Rly-->>Plg: session established
     Note over Eng,Plg: Pairing complete.<br/>Token is single-use, auto-zeroized.
 
-    Eng->>Plg: "offload analyze_repo to Kars"
+    Eng->>Plg: "offload analyze_repo to kars"
     Plg->>Rly: encrypted offload request
     Rly->>Ctrl: deliver to controller AMID
     Ctrl->>Ctrl: spawn KarsSandbox offload-N (token budget enforced)
@@ -149,7 +149,7 @@ Enterprise teams often have existing agent code in Python or .NET. `spec.runtime
 
 | `kind` | Use case | Status |
 |---|---|---|
-| `OpenClaw` | Default. Kars plugin + OpenClaw framework. | ✅ |
+| `OpenClaw` | Default. kars plugin + OpenClaw framework. | ✅ |
 | `OpenAIAgents` | Python teams on the OpenAI Agents SDK. | ✅ |
 | `MicrosoftAgentFramework` | Microsoft Agent Framework (Python). `.NET` is `ShapeInvalid` until the .NET AgentMesh SDK ships. | ✅ Python |
 | `LangGraph` | LangChain's stateful agent framework — Python or TypeScript via `language`. | ✅ |
@@ -266,7 +266,7 @@ kars egress sign \
   --push myacr.azurecr.io/kars-policy/research-bot-egress \
   --mode keyless
 
-# Onboard a NemoClaw / OpenClaw user (no Kars CLI on their laptop)
+# Onboard a NemoClaw / OpenClaw user (no kars CLI on their laptop)
 kars mesh promote --allow-ip 10.0.0.0/8      # one-time, exposes registry+relay over private App Gateway
 kars pair generate --name alice-laptop --slots 3 --capabilities offload,handoff
 
@@ -281,7 +281,7 @@ kars trace research-bot --network
 
 - **Single tenant, single audit destination.** Everything an employee or a CI job does flows into your Log Analytics + audit chain. No third party.
 - **Workload Identity instead of API keys.** The router binds to a federated K8s ServiceAccount → Entra workload identity. Foundry sees the request as your tenant.
-- **Pairing replaces VPN-for-agents.** Employees don't need a VPN tunnel to Kars — they get a one-time token that scopes them to one slot of one capability set with one budget cap. Lost laptop = revoke one Pairing CR.
+- **Pairing replaces VPN-for-agents.** Employees don't need a VPN tunnel to kars — they get a one-time token that scopes them to one slot of one capability set with one budget cap. Lost laptop = revoke one Pairing CR.
 - **Multi-runtime, single governance plane.** Teams can run `OpenClaw`, `OpenAIAgents`, or `MicrosoftAgentFramework` agents side-by-side on the same cluster with identical `InferencePolicy` + `ToolPolicy` governance and the same audit chain. Switch runtimes by changing `spec.runtime.kind`.
 - **Signed OCI egress allowlist as the production network policy path.** Inline `allowedEndpoints` are fine for day-0; sign and pin allowlist artifacts in CI for auditable, GitOps-managed network policy. The `SignerPolicy` ConfigMap in `kars-system` pins the authoritative signer identity; the controller fails closed if the policy is absent or the signature doesn't match.
 - **You can scale Confidential Containers in.** AKS supports kata + AMD SEV-SNP node pools today. Set `KarsSandbox.spec.sandbox.isolation: confidential` per-agent for sensitive workloads; sub-agents inherit and cannot downgrade.
@@ -298,7 +298,7 @@ The controller ships production-grade operator hygiene relevant to enterprise de
 ## What this blueprint is NOT
 
 - Not a multi-tenant SaaS. If you serve external customers, see Blueprint 03.
-- Not a federation pattern. If you collaborate with another org's Kars, see Blueprint 04.
+- Not a federation pattern. If you collaborate with another org's kars, see Blueprint 04.
 - Not air-gapped. If your network can't reach Foundry, see Blueprint 05.
 
 ## References

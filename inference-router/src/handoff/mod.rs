@@ -3,7 +3,7 @@
 
 //! Agent handoff — live migration (local ↔ cloud).
 //!
-//! Implements the handoff protocol per the Kars inter-agent handoff design.
+//! Implements the handoff protocol per the kars inter-agent handoff design.
 //!
 //! **Security model** (three-layer auth for handoff endpoints):
 //! 1. Handoff token — one-time, TTL-based, in-memory only

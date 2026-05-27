@@ -10,7 +10,7 @@
  *
  * Sole mesh transport implementation. Wire compatibility: speaks
  * AgentMesh Wire Protocol v1.0. Upstream MeshClient includes the
- * Kars compatibility features (plaintextPeers, wsFactory hook,
+ * kars compatibility features (plaintextPeers, wsFactory hook,
  * KNOCK pending queue). See agent-governance-typescript/src/encryption/mesh-client.ts.
  */
 

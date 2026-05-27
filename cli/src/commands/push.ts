@@ -78,11 +78,11 @@ export function pushCommand(): Command {
         repoRoot = path.dirname(repoRoot);
       }
       if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
-        console.error(chalk.red("\n  Not in an Kars repo. Run from the repo root.\n"));
+        console.error(chalk.red("\n  Not in an kars repo. Run from the repo root.\n"));
         process.exit(1);
       }
 
-      console.log(blue(`\n  Kars · Push Images → ${acrLoginServer}\n`));
+      console.log(blue(`\n  kars · Push Images → ${acrLoginServer}\n`));
 
       // Login to ACR
       const spinner = ora("Logging into ACR...").start();

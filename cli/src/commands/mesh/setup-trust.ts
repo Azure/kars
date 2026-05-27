@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // `kars mesh setup-trust` — provisions the Entra ID app registration
-// and service principal that Kars sandboxes use to acquire access
+// and service principal that kars sandboxes use to acquire access
 // tokens with audience `api://agentmesh/.default`. Without this, sandbox
 // pods fall back to the AGT anonymous tier (trust score 0) and every
 // peer KNOCK is gated against that floor.
@@ -110,10 +110,10 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
     .description(
       `Provision the tenant-wide Entra app registration (${AGENTMESH_IDENTIFIER_URI}) so sandboxes register as the AGT verified tier`,
     )
-    .option("--display-name <name>", "Display name for the Entra app registration", "Kars AgentMesh")
+    .option("--display-name <name>", "Display name for the Entra app registration", "kars AgentMesh")
     .option("--dry-run", "Print what would be created without making changes", false)
     .action(async (opts: { displayName: string; dryRun: boolean }) => {
-      banner("Kars · Mesh Setup Trust", "Entra App Registration for api://agentmesh");
+      banner("kars · Mesh Setup Trust", "Entra App Registration for api://agentmesh");
 
       // Step 1: confirm az is signed in and which tenant we're targeting
       section("Tenant");

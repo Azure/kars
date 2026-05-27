@@ -2,16 +2,16 @@
 // Licensed under the MIT License.
 
 /**
- * Kars — OpenClaw Plugin
+ * kars — OpenClaw Plugin
  *
- * Registers Kars commands, Azure OpenAI as a model provider,
+ * Registers kars commands, Azure OpenAI as a model provider,
  * and agent tools (spawn, mesh, inbox, destroy) within the OpenClaw
  * plugin system using the native definePluginEntry SDK.
  *
  * AGT Integration: identity, signing, and verification use Node's
  * native `crypto` (via `@kars/mesh`). Mesh transport delegates
  * to the Microsoft Agent Governance Toolkit SDK. Tool-level policy
- * evaluation runs inline against a small allow/deny table. Kars's
+ * evaluation runs inline against a small allow/deny table. kars's
  * Rust router handles infrastructure-level controls (mesh routing,
  * content safety, token budgets).
  *
@@ -1960,7 +1960,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 const escapeMd2 = (s: string) => s.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
 
                 const lines: string[] = [
-                  "☁️ *Kars — Cloud Handoff Complete*",
+                  "☁️ *kars — Cloud Handoff Complete*",
                   "",
                   `I've been migrated to the cloud \\(AKS\\) and I'm ready to continue\\.`,
                   `Model: \`${escapeMd2(process.env.DEFAULT_MODEL || "gpt-5.4")}\` · Sandbox: \`${escapeMd2(agentName)}\``,
@@ -2556,7 +2556,7 @@ function getPluginConfig(api: OpenClawPluginApi): KarsConfig {
 
 const azureClawPlugin = definePluginEntry({
   id: "kars",
-  name: "Kars",
+  name: "kars",
   description: "Secure AI agent runtime on Azure — Azure OpenAI provider, agent tools, and sandbox CLI",
   configSchema: {
     type: "object" as const,
@@ -2626,7 +2626,7 @@ const azureClawPlugin = definePluginEntry({
       log.info([
         "",
         "  ╔══════════════════════════════════════════════════════════╗",
-        "  ║  🔒 Kars — Secure AI Agent Runtime                 ║",
+        "  ║  🔒 kars — Secure AI Agent Runtime                 ║",
         "  ╠══════════════════════════════════════════════════════════╣",
         `  ║  Sandbox:  ${(sandbox).padEnd(43)}║`,
         `  ║  Model:    ${(config.model).padEnd(43)}║`,
@@ -2759,7 +2759,7 @@ const azureClawPlugin = definePluginEntry({
     registerMemorySyncShutdownHook(log);
     registerRevokeShutdownHook(log);
 
-    // ── Register Kars agent tools (spawn, mesh, status, destroy) ────
+    // ── Register kars agent tools (spawn, mesh, status, destroy) ────
     // These are first-class tools the LLM can call directly.
     // Registered as required tools (always available, no tools.allow needed).
     // API: execute(_id, params) → { content: [{ type: "text", text }] }
@@ -2806,7 +2806,7 @@ const azureClawPlugin = definePluginEntry({
       });
     }
 
-    // ── Kars AGT tool registrations (S15.f.9) ────────────────────
+    // ── kars AGT tool registrations (S15.f.9) ────────────────────
     // Extracted to core/agt-tools/agt.ts. Tool bodies are byte-identical;
     // the helper threads (log, mesh client, identity, sandbox name, mesh
     // send, inbox, handoff state holder, runHandoffOrchestration, and

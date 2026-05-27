@@ -1,9 +1,9 @@
 # Getting started
 
-This guide takes you from a clean machine to a working Kars agent in two steps:
+This guide takes you from a clean machine to a working kars agent in two steps:
 
 1. **[Local — five minutes](#step-1--local-five-minutes)** — `kars dev` runs a sandbox in one Docker container on your laptop. No Azure subscription, no AKS, no Kubernetes.
-2. **[AKS — half an hour](#step-2--deploy-to-aks)** — `kars up` provisions AKS + ACR + Foundry + the Kars control plane in your subscription, and runs the same sandbox under Workload Identity, NetworkPolicies, and the egress guard.
+2. **[AKS — half an hour](#step-2--deploy-to-aks)** — `kars up` provisions AKS + ACR + Foundry + the kars control plane in your subscription, and runs the same sandbox under Workload Identity, NetworkPolicies, and the egress guard.
 
 The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole point.
 
@@ -25,7 +25,7 @@ The CLI bootstraps everything else (Helm chart install, Foundry resource creatio
 If you have a GitHub Copilot seat — Individual, Business, or Enterprise — `kars dev` is a one-step setup:
 
 1. Run `kars dev`. The CLI prints a **device code** and a URL.
-2. Open <https://github.com/login/device> in your browser, paste the code, approve the Kars client.
+2. Open <https://github.com/login/device> in your browser, paste the code, approve the kars client.
 3. Pick a model from the catalogue the CLI shows you — current Claude, GPT, Gemini, and reasoning-class models are exposed; run `kars models` to see today's list. The router will use the selected model for every chat completion the agent makes.
 
 That's it. No PAT to rotate, no API key on disk, no subscription to provision. The OAuth token is stored in `~/.kars/` and refreshed automatically.
@@ -33,7 +33,7 @@ That's it. No PAT to rotate, no API key on disk, no subscription to provision. T
 **Why we recommend Copilot for the inner loop:**
 
 - **Frontier models, large contexts.** Current Claude, GPT, and Gemini frontier tiers through one auth surface — exactly the catalogue you'd compose by hand against three vendors.
-- **Native Anthropic shape for Claude.** Kars routes Claude requests to Copilot's `/v1/messages` endpoint with no shape translation, preserving full tool-calling fidelity (no lossy OpenAI-to-Anthropic rewrites).
+- **Native Anthropic shape for Claude.** kars routes Claude requests to Copilot's `/v1/messages` endpoint with no shape translation, preserving full tool-calling fidelity (no lossy OpenAI-to-Anthropic rewrites).
 - **One credential, no key sprawl.** The same OAuth token works for the parent agent and every sub-agent it spawns; the router refreshes it on its own.
 - **Sub-agent inheritance.** Spawned sub-agents automatically inherit the parent's provider, model, and credentials — no per-agent wiring.
 
@@ -78,7 +78,7 @@ az cognitiveservices account show     -n my-foundry -g my-rg --query properties.
 az cognitiveservices account keys list -n my-foundry -g my-rg --query key1            -o tsv
 ```
 
-Use `--kind AIServices` (not `--kind OpenAI`) — Foundry is what Kars integrates with end-to-end (Content Safety, Memory Store, the full Foundry data-plane API surface the router proxies). Standalone `--kind OpenAI` accounts work for `dev` mode's model calls too, but you lose the rest of the surface. Full reference: [Azure AI Foundry quickstart](https://learn.microsoft.com/azure/ai-foundry/).
+Use `--kind AIServices` (not `--kind OpenAI`) — Foundry is what kars integrates with end-to-end (Content Safety, Memory Store, the full Foundry data-plane API surface the router proxies). Standalone `--kind OpenAI` accounts work for `dev` mode's model calls too, but you lose the rest of the surface. Full reference: [Azure AI Foundry quickstart](https://learn.microsoft.com/azure/ai-foundry/).
 
 If you'd rather skip provisioning by hand, jump to **[Step 2 — Deploy to AKS](#step-2--deploy-to-aks)** — `kars up` provisions the Foundry resource, project, Content Safety binding, and a model deployment for you.
 
@@ -109,7 +109,7 @@ On the first run you are shown a **3-way provider picker**:
 $ kars dev
 
   ╭────────────────────────────────────────────────╮
-  │  Kars · Local Sandbox                     │
+  │  kars · Local Sandbox                     │
   │  Secure AI Agent Runtime on Azure              │
   ╰────────────────────────────────────────────────╯
 
@@ -194,7 +194,7 @@ What this does, in order:
 2. Creates an ACR (your private registry) and an AKS cluster with Workload Identity and OIDC issuer enabled.
 3. Creates an Azure AI Foundry project, Content Safety binding, and a model deployment.
 4. Builds and pushes the controller, inference-router, A2A gateway, and sandbox images to the new ACR.
-5. Installs the Kars Helm chart (controller + AgentMesh relay/registry + A2A gateway + CRDs).
+5. Installs the kars Helm chart (controller + AgentMesh relay/registry + A2A gateway + CRDs).
 6. Creates the federated credentials so each sandbox's pod identity can call Foundry without keys.
 7. Submits your first `KarsSandbox` and waits until it is `Ready`.
 
@@ -238,7 +238,7 @@ kars destroy --all                # everything, including the resource group
 
 ## Bring your own AKS / Foundry / ACR
 
-If you already have an AKS cluster and a Foundry project, you can install Kars into them directly with the Helm chart:
+If you already have an AKS cluster and a Foundry project, you can install kars into them directly with the Helm chart:
 
 ```bash
 helm install kars deploy/helm/kars \

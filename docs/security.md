@@ -1,6 +1,6 @@
 # Security model
 
-Kars is a layered control plane. Each layer enforces a specific property; together they bound the blast radius of a compromised agent. This page documents what each layer does, what it does not do, and where the relevant code lives.
+kars is a layered control plane. Each layer enforces a specific property; together they bound the blast radius of a compromised agent. This page documents what each layer does, what it does not do, and where the relevant code lives.
 
 For threat-model walkthroughs, see **[STRIDE](security/stride.md)** and the **[Red-team playbook](security/red-team.md)**. For the OWASP MCP Top 10 mapping, see **[`security-mcp-top10.md`](security-mcp-top10.md)**.
 
@@ -35,7 +35,7 @@ Everything below explains how those four guarantees are enforced and where the s
 - Azure DDoS Protection (platform).
 - ACR Premium with content trust and network rules.
 
-These are properties of the AKS deployment, not Kars — but `kars up` provisions them this way.
+These are properties of the AKS deployment, not kars — but `kars up` provisions them this way.
 
 ### Layer 1 — Node OS
 
@@ -46,7 +46,7 @@ These are properties of the AKS deployment, not Kars — but `kars up` provision
 
 ### Layer 2 — Pod isolation (optional VM)
 
-For workloads that must withstand a compromised cluster operator, Kars supports Kata + AMD SEV-SNP confidential containers. A `KarsSandbox` with `spec.isolation: confidential` is scheduled onto a `kata-vm-isolation` runtime class on a dedicated `katapool` node pool. Each pod runs in a lightweight VM with its own kernel; container escapes are trapped inside the VM boundary. **Sub-agents inherit isolation** — a confidential parent cannot spawn a non-confidential child.
+For workloads that must withstand a compromised cluster operator, kars supports Kata + AMD SEV-SNP confidential containers. A `KarsSandbox` with `spec.isolation: confidential` is scheduled onto a `kata-vm-isolation` runtime class on a dedicated `katapool` node pool. Each pod runs in a lightweight VM with its own kernel; container escapes are trapped inside the VM boundary. **Sub-agents inherit isolation** — a confidential parent cannot spawn a non-confidential child.
 
 The default isolation level is `enhanced` (no Kata; standard runc with seccomp + UID separation + egress-guard). `confidential` is opt-in.
 
@@ -143,9 +143,9 @@ flowchart LR
 
 ### Layer 8 — End-to-end encrypted mesh
 
-Inter-agent communication uses [Signal Protocol](https://signal.org/docs/) (X3DH + Double Ratchet) over a small relay/registry that Kars operates. **The Signal session is owned by the agent process** (the AGT SDK runs plugin-side, inside the sandbox container under UID 1000); the inference router is a transparent WebSocket bridge to the relay and holds no session keys, and the relay sees only ciphertext and routing metadata. KNOCK-gated session establishment evaluates per-peer trust score against `AGT_TRUST_THRESHOLD`.
+Inter-agent communication uses [Signal Protocol](https://signal.org/docs/) (X3DH + Double Ratchet) over a small relay/registry that kars operates. **The Signal session is owned by the agent process** (the AGT SDK runs plugin-side, inside the sandbox container under UID 1000); the inference router is a transparent WebSocket bridge to the relay and holds no session keys, and the relay sees only ciphertext and routing metadata. KNOCK-gated session establishment evaluates per-peer trust score against `AGT_TRUST_THRESHOLD`.
 
-Failed decrypt is a `security_event`, not a downgrade — there is no plaintext fallback. The cryptographic primitives are provided by the AGT mesh stack; Kars no longer carries a forked AgentMesh SDK.
+Failed decrypt is a `security_event`, not a downgrade — there is no plaintext fallback. The cryptographic primitives are provided by the AGT mesh stack; kars no longer carries a forked AgentMesh SDK.
 
 #### Trust tiers and the `api://agentmesh` prerequisite
 
@@ -156,7 +156,7 @@ Failed decrypt is a `security_event`, not a downgrade — there is no plaintext 
 | **Anonymous** | `0` | Default. No Entra token presented. Sandbox boots, registers, and operates normally — but every peer KNOCK is evaluated against score `0`. |
 | **Verified** | `600` | Agent's pod identity exchanges its federated Workload Identity token for an Entra access token with audience `api://agentmesh/.default`. Registry verifies and tags the agent as Tier 1. |
 
-To unlock the verified tier, a tenant administrator provisions an Entra app registration with `api://agentmesh` as an identifier URI and grants the Kars managed identities the right to acquire tokens for it. This is a one-time, per-tenant operation. The fastest way is the Kars CLI helper:
+To unlock the verified tier, a tenant administrator provisions an Entra app registration with `api://agentmesh` as an identifier URI and grants the kars managed identities the right to acquire tokens for it. This is a one-time, per-tenant operation. The fastest way is the kars CLI helper:
 
 ```bash
 # Tenant admin runs once per tenant
@@ -236,7 +236,7 @@ The init container runs as root with `NET_ADMIN` to install iptables rules, then
 
 ## What we do *not* defend against
 
-Honesty matters. Kars does not — and cannot — protect against:
+Honesty matters. kars does not — and cannot — protect against:
 
 - **A compromised model provider.** If Azure AI Foundry is compromised, an attacker can change model output. Content Safety on the way out limits the damage but does not eliminate it. Use the confidential isolation level for workloads where this matters.
 - **A compromised cluster operator who controls Kata-less nodes.** Without Kata + AMD SEV-SNP, a cluster operator can read pod memory. Move to confidential isolation if your threat model includes the cluster operator.

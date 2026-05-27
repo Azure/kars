@@ -1,6 +1,6 @@
 # Image versioning & release tagging
 
-Kars produces eight container images: the controller, the
+kars produces eight container images: the controller, the
 inference router, the sandbox base + slim overlay, the AgentMesh relay
 + registry, and the five runtime adapter images
 (`kars-runtime-{anthropic,langgraph,langgraph-ts,maf-python,openai-agents,pydantic-ai}`).

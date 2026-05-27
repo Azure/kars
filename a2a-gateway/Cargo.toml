@@ -1,6 +1,6 @@
 [package]
 name = "kars-a2a-gateway"
-description = "Public-ingress A2A 1.0.0 edge for Kars — TLS termination, JWS verification, mTLS to inference-router. Phase 2 S3.5 (ADR-0001 #4)."
+description = "Public-ingress A2A 1.0.0 edge for kars — TLS termination, JWS verification, mTLS to inference-router. Phase 2 S3.5 (ADR-0001 #4)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

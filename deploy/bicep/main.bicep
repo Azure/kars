@@ -1,4 +1,4 @@
-// Kars Infrastructure - Main Bicep Template
+// kars Infrastructure - Main Bicep Template
 // Deploys: AKS (Azure Linux) + ACR + Key Vault + Azure OpenAI + Monitor
 
 targetScope = 'resourceGroup'

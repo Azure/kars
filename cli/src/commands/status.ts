@@ -57,7 +57,7 @@ export function statusCommand(): Command {
 
         console.log(blue(`
   ╔══════════════════════════════════════════════════╗
-  ║           Kars · Sandbox Status             ║
+  ║           kars · Sandbox Status             ║
   ╚══════════════════════════════════════════════════╝
 `));
         console.log(`  Sandbox:       ${chalk.bold(name)}`);
@@ -126,7 +126,7 @@ export function statusCommand(): Command {
 
         console.log(blue(`
   ╔══════════════════════════════════════════════════╗
-  ║           Kars · Sandbox Status             ║
+  ║           kars · Sandbox Status             ║
   ╚══════════════════════════════════════════════════╝
 `));
         console.log(`  Sandbox:       ${chalk.bold(name)}`);

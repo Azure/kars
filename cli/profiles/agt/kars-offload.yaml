@@ -1,7 +1,7 @@
-# Kars AGT Governance Policy — OFFLOAD profile
+# kars AGT Governance Policy — OFFLOAD profile
 #
 # Applied only to cloud-offload sandboxes created via federation from an
-# external NemoClaw/Kars parent. Denies child-sandbox spawn and handoff
+# external NemoClaw/kars parent. Denies child-sandbox spawn and handoff
 # to keep offloads as leaf workers — no recursion, no forwarding.
 #
 # Shell + inference + mesh allowances mirror the default profile so research

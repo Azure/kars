@@ -1,5 +1,5 @@
 """
-Kars default agent for the Pydantic-AI runtime.
+kars default agent for the Pydantic-AI runtime.
 
 Replace this file by mounting agent code via `agentCode`.
 """
@@ -16,7 +16,7 @@ import time
 from kars_runtime_pydantic_ai.runtime import bootstrap
 bootstrap()
 
-BANNER = "🔒 Kars — Pydantic-AI (default agent)"
+BANNER = "🔒 kars — Pydantic-AI (default agent)"
 
 
 def _env(name: str, default: str = "(unset)") -> str:
@@ -51,11 +51,11 @@ def _smoke_test() -> None:
         agent = Agent(
             OpenAIModel(model_name),
             system_prompt=(
-                "You are a default smoke-test agent embedded in an Kars sandbox. "
+                "You are a default smoke-test agent embedded in an kars sandbox. "
                 "Reply with exactly one short sentence confirming you are alive."
             ),
         )
-        result = agent.run_sync("Say hello and confirm you are running inside Kars.")
+        result = agent.run_sync("Say hello and confirm you are running inside kars.")
         print(f"[default-agent] ✓ inference reply: {result.output}", flush=True)
         print("[default-agent] ✓ Foundry inference proven via inference-router", flush=True)
     except Exception as exc:  # noqa: BLE001

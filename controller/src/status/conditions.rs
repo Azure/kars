@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Standardised K8s Condition helpers for Kars CRD status subresources.
+//! Standardised K8s Condition helpers for kars CRD status subresources.
 //!
 //! **Why a helper module, not inline `json!({...})` in the reconciler.**
 //! K8s Conditions have strict semantics:
@@ -139,7 +139,7 @@ pub mod reason {
     pub const DEPENDENCY_MISSING: &str = "DependencyMissing";
     pub const TIMED_OUT: &str = "TimedOut";
     /// Phase 2 S8 — `OverlayMode`: operator's upstream `Sandbox` CR
-    /// owns the Pod; Kars provides the governance overlay only.
+    /// owns the Pod; kars provides the governance overlay only.
     pub const OVERLAY_MODE: &str = "OverlayMode";
     /// Phase 2 S10 — `AdapterMissing`: the runtime declared in
     /// `spec.runtime.kind` is recognised by the CRD but the controller

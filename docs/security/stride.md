@@ -1,6 +1,6 @@
-# STRIDE Threat Model — Kars
+# STRIDE Threat Model — kars
 
-> Companion to [`docs/security.md`](../security.md) (defense-in-depth layers). This document classifies the threats Kars mitigates using STRIDE (Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege) across the four primary trust boundaries.
+> Companion to [`docs/security.md`](../security.md) (defense-in-depth layers). This document classifies the threats kars mitigates using STRIDE (Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege) across the four primary trust boundaries.
 
 ## Trust boundaries
 

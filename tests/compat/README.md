@@ -1,4 +1,4 @@
-# Kars Compatibility Suite (`tests/compat/`)
+# kars Compatibility Suite (`tests/compat/`)
 
 **Status:** Phase 0 skeleton. Grows with every Phase-0→Phase-4 decomposition.
 **Charter:** `internal Phase 1 plan` §5.4.
@@ -21,7 +21,7 @@ same spec must still pass against the refactored code.
 4. **`kars handoff`** — warm handoff between sibling agents.
 5. **`kars offload`** — cloud offload from local to AKS.
 6. **`kars operator`** — headless operator TUI (blessed dashboard).
-7. **OpenClaw → Kars inter-agent** — E2E Signal protocol via router.
+7. **OpenClaw → kars inter-agent** — E2E Signal protocol via router.
 8. **Plugin lifecycle** — OpenClaw plugin load + tool registration.
 
 Each flow gets a spec file under `specs/<flow>.spec.ts`.

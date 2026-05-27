@@ -576,7 +576,7 @@ and recomputing the digest.
 
 ### Headlamp panel
 
-The Kars Headlamp plugin registers `EgressApproval` in the sidebar
+The kars Headlamp plugin registers `EgressApproval` in the sidebar
 (list view, CR detail page). Every `KarsSandbox` detail page also renders
 an **Egress Approvals** card listing all approvals scoped to that sandbox
 with columns: NAME, PHASE, HOSTS, TTL, EXPIRES, REASON, MERGED-DIGEST.

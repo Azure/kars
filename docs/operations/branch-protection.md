@@ -1,7 +1,7 @@
 # Branch Protection — `dev` and `main`
 
 This is the canonical list of CI jobs that must be set as **required
-status checks** on `dev` and `main` for Kars. Setting these as
+status checks** on `dev` and `main` for kars. Setting these as
 required is the source of truth for what blocks a merge.
 
 ## Required checks

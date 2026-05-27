@@ -357,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn egress_connect_403_maps_to_blocked_egress_kind() {
         let addr =
-            spawn_fake_forward_proxy(b"HTTP/1.1 403 Blocked by Kars egress policy\r\n\r\n").await;
+            spawn_fake_forward_proxy(b"HTTP/1.1 403 Blocked by kars egress policy\r\n\r\n").await;
         let t = Transport::new("http://router.invalid:8443", Duration::from_secs(2))
             .unwrap()
             .with_forward_proxy(addr);
@@ -373,7 +373,7 @@ mod tests {
                 .reason
                 .as_deref()
                 .unwrap_or("")
-                .contains("Blocked by Kars")
+                .contains("Blocked by kars")
         );
     }
 

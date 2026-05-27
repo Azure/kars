@@ -1,6 +1,6 @@
 [package]
 name = "kars-inference-router"
-description = "High-performance inference router for Kars — routes LLM calls to Azure OpenAI / AI Foundry with Managed Identity auth, content safety, and token budgets"
+description = "High-performance inference router for kars — routes LLM calls to Azure OpenAI / AI Foundry with Managed Identity auth, content safety, and token budgets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

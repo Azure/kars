@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! CEL admission validations for Kars CRDs.
+//! CEL admission validations for kars CRDs.
 //!
 //! Phase 1 deliverable §7 entry 12: every new CRD must ship with
 //! `x-kubernetes-validations` (CEL) rules that catch malformed specs at

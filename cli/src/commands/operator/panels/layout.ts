@@ -475,7 +475,7 @@ function renderHeader(state: ClusterState, triageCount: number): string {
   const agentWord = agents === 1 ? "agent" : "agents";
   const issueWord = triageCount === 1 ? "issue" : "issues";
   const issueColor = triageCount === 0 ? "green" : (triageCount > 3 ? "red" : "yellow");
-  return `{bold}Kars Operator{/}  —  ${agents} ${agentWord}, ` +
+  return `{bold}kars Operator{/}  —  ${agents} ${agentWord}, ` +
          `{${issueColor}-fg}${triageCount} ${issueWord}{/}\n${PANEL_RULE}`;
 }
 

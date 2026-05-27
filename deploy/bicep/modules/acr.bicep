@@ -1,4 +1,4 @@
-// Kars - ACR Module
+// kars - ACR Module
 
 @description('ACR name (must be globally unique, alphanumeric)')
 param name string

@@ -18,7 +18,7 @@
 #   curl -sX POST http://127.0.0.1:8443/v1/chat/completions \
 #        -H 'content-type: application/json' -d '{"model":"gpt-4o"}' | jq .
 #
-# Point any Kars client at the fake:
+# Point any kars client at the fake:
 #   KARS_ROUTER_URL=http://127.0.0.1:8443 <your command>
 #
 # Stop:

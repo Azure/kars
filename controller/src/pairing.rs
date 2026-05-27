@@ -4,7 +4,7 @@
 //! KarsPairing Custom Resource Definition.
 //!
 //! Represents a trust relationship between an external OpenClaw agent and this
-//! Kars cluster. Admin generates a one-time pairing token; the external
+//! kars cluster. Admin generates a one-time pairing token; the external
 //! agent presents it to bind their mesh identity (AMID) to the cluster.
 //!
 //! Two offload modes are supported:

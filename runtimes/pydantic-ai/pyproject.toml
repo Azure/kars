@@ -8,7 +8,7 @@ build-backend = "hatchling.build"
 [project]
 name = "kars_runtime_pydantic_ai"
 version = "0.1.0"
-description = "Kars in-pod adapter for Pydantic-AI (Python) — AAD shim, OTel auto-init, AgentMesh bridge, and router-managed LLM credentials out of the box."
+description = "kars in-pod adapter for Pydantic-AI (Python) — AAD shim, OTel auto-init, AgentMesh bridge, and router-managed LLM credentials out of the box."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"

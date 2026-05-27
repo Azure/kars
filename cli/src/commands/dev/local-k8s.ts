@@ -14,7 +14,7 @@
  *   - Prints a `kubectl exec` recipe.
  *
  * Later phases add: values-local-dev overlay, fake-router, Headlamp,
- * Kars Headlamp plugin, hot-reload, and lifecycle commands.
+ * kars Headlamp plugin, hot-reload, and lifecycle commands.
  */
 
 import { execa } from "execa";
@@ -309,14 +309,14 @@ async function ensureKindVersion(kindBin: string): Promise<void> {
   } catch (err) {
     throw new Error(
       `Failed to run \`${kindBin} --version\`: ${(err as Error).message}. ` +
-        `Kars needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
+        `kars needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
     );
   }
   const m = raw.match(/v?(\d+)\.(\d+)\.(\d+)/);
   if (!m) {
     throw new Error(
       `Could not parse kind version from output: "${raw}". ` +
-        `Kars needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
+        `kars needs kind v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+.`,
     );
   }
   const major = Number(m[1]);
@@ -326,7 +326,7 @@ async function ensureKindVersion(kindBin: string): Promise<void> {
     (major === MIN_KIND_MAJOR && minor < MIN_KIND_MINOR);
   if (tooOld) {
     throw new Error(
-      `kind v${major}.${minor}.${m[3]} is too old. Kars needs ` +
+      `kind v${major}.${minor}.${m[3]} is too old. kars needs ` +
         `v${MIN_KIND_MAJOR}.${MIN_KIND_MINOR}+ (the post-init untaint ` +
         `step for single-node control-plane clusters was introduced in ` +
         `v0.20). Upgrade with \`brew upgrade kind\` or ` +
@@ -1120,7 +1120,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // the chart references — sandbox, controller, inference-router.
   // Missing any of them turns the helm install into an ErrImageNeverPull
   // loop with no useful diagnostics.
-  stepper.step("Loading Kars images into the kind cluster…");
+  stepper.step("Loading kars images into the kind cluster…");
   if (opts.noBuild) {
     stepper.done("skipped image load (--no-build)");
   } else {
@@ -1202,11 +1202,11 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     // Best-effort: if the node naming differs the user can fix manually.
   }
 
-  stepper.step("Helm-installing the Kars chart (with local-dev overlay)…");
+  stepper.step("Helm-installing the kars chart (with local-dev overlay)…");
   const repoRoot = findRepoRoot(process.cwd());
   const chartDir = path.join(repoRoot, "deploy", "helm", "kars");
   if (!existsSync(chartDir)) {
-    throw new Error(`Kars helm chart not found at ${chartDir}`);
+    throw new Error(`kars helm chart not found at ${chartDir}`);
   }
   const valuesOverlay = path.join(chartDir, "values-local-dev.yaml");
   if (!existsSync(valuesOverlay)) {
@@ -1334,12 +1334,12 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   await installHeadlamp(tools, opts.clusterName);
   stepper.done("Headlamp installed");
 
-  // Phase 5: side-load the Kars Headlamp plugin (CRD views).
+  // Phase 5: side-load the kars Headlamp plugin (CRD views).
   // Built into a ConfigMap and volume-mounted at /headlamp/plugins/kars
   // so it survives pod restarts.
-  stepper.step("Installing Kars Headlamp plugin…");
+  stepper.step("Installing kars Headlamp plugin…");
   await installAzureclawPlugin(tools, opts.clusterName);
-  stepper.done("Kars plugin installed");
+  stepper.done("kars plugin installed");
 
   // Phase 5b: Prometheus + Grafana stack so the Headlamp plugin's
   // metric panels (mesh topology msg counts, token budgets, AGT decisions,
@@ -1379,8 +1379,8 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   console.log(`    Prometheus: ${chalk.cyan(prometheusUrl)}`);
   console.log(
     chalk.dim(
-      `    Default dashboards: 'Kars — Sandbox Fleet Overview' (uid kars-fleet)\n` +
-        `                        'Kars — Agent Fleet Operations' (uid kars-ops)`,
+      `    Default dashboards: 'kars — Sandbox Fleet Overview' (uid kars-fleet)\n` +
+        `                        'kars — Agent Fleet Operations' (uid kars-ops)`,
     ),
   );
   console.log("");
@@ -1489,7 +1489,7 @@ async function installHeadlamp(tools: Tooling, clusterName: string): Promise<voi
 
   // Render-and-apply (consistent with how we apply the kars chart).
   //
-  // NOTE: the chart version is pinned. The Kars Headlamp plugin
+  // NOTE: the chart version is pinned. The kars Headlamp plugin
   // (tools/headlamp-plugin) is built against @kinvolk/headlamp-plugin
   // ^0.13.0 and depends on a specific `pluginLib` API surface
   // (K8s.cluster.KubeObject, CommonComponents.SimpleTable/SectionBox/Link).
@@ -1744,7 +1744,7 @@ kubeProxy:
     );
   }
 
-  // Apply our Kars-specific monitoring manifests: PodMonitor for
+  // Apply our kars-specific monitoring manifests: PodMonitor for
   // every sandbox router, prometheus-json-exporter for the AGT relay
   // /health endpoint, and the two Grafana dashboards (fleet + ops).
   const repoRoot = findRepoRoot(process.cwd());
@@ -1830,7 +1830,7 @@ async function startMonitoringPortForwards(
 }
 
 /**
- * Side-load the Kars Headlamp plugin.
+ * Side-load the kars Headlamp plugin.
  *
  * Strategy: package `tools/headlamp-plugin/dist/main.js` + `package.json`
  * into a ConfigMap, then patch the Headlamp deployment to mount the

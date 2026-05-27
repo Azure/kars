@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Kars mesh CLI: identity/auth and registry management.
+// kars mesh CLI: identity/auth and registry management.
 //
 // S15.b decomposition: identity/crypto + OAuth callback + port-health
 // helpers + the `mesh promote` subcommand body now live in ./mesh/*
@@ -59,7 +59,7 @@ export function meshCommand(): Command {
     .command("status")
     .description("Show current mesh identity")
     .action(async () => {
-      banner("Kars · Mesh Identity", "AgentMesh Identity Status");
+      banner("kars · Mesh Identity", "AgentMesh Identity Status");
 
       const identity = loadIdentity();
       if (!identity) {
@@ -101,7 +101,7 @@ export function meshCommand(): Command {
     .command("list")
     .description("List mesh pairings and offload sandboxes on the cluster")
     .action(async () => {
-      banner("Kars · Mesh List", "Pairings & Offload Sandboxes");
+      banner("kars · Mesh List", "Pairings & Offload Sandboxes");
 
       const ns = "kars-system";
 
@@ -235,7 +235,7 @@ export function meshCommand(): Command {
     .option("-n, --namespace <ns>", "AgentMesh namespace", "agentmesh")
     .option("--deployment <name>", "Relay deployment name", "relay")
     .action(async (mode: string, opts: { namespace: string; deployment: string }) => {
-      banner("Kars · Mesh Security", "Relay registration enforcement");
+      banner("kars · Mesh Security", "Relay registration enforcement");
 
       const normalized = mode.toLowerCase();
       if (!["open", "strict", "status"].includes(normalized)) {
@@ -375,7 +375,7 @@ export function meshCommand(): Command {
     .option("-n, --namespace <ns>", "Controller namespace", "kars-system")
     .option("--deployment <name>", "Controller deployment name", "kars-controller")
     .action(async (mode: string, opts: { namespace: string; deployment: string }) => {
-      banner("Kars · Mesh Peer", "Controller federation (pair_request handler)");
+      banner("kars · Mesh Peer", "Controller federation (pair_request handler)");
 
       const normalized = mode.toLowerCase();
       if (!["enable", "disable", "status", "on", "off"].includes(normalized)) {
@@ -499,7 +499,7 @@ export function meshCommand(): Command {
     .option("--all", "Delete all pairings without prompting")
     .option("--name <name>", "Delete a specific pairing by name")
     .action(async (opts: { all?: boolean; name?: string }) => {
-      banner("Kars · Mesh Unpair", "Remove Pairings");
+      banner("kars · Mesh Unpair", "Remove Pairings");
 
       const ns = "kars-system";
       try {
@@ -583,7 +583,7 @@ export function meshCommand(): Command {
     .command("demote")
     .description("Demote the registry back to cluster-local (remove public endpoints)")
     .action(async () => {
-      banner("Kars · Mesh Demote", "Demote Registry to Local");
+      banner("kars · Mesh Demote", "Demote Registry to Local");
 
       const ctx = loadContext();
       if (!ctx?.aksCluster || !ctx?.resourceGroup) {

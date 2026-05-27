@@ -4,7 +4,7 @@
 #
 # Manual E2E scenario: CRD admission lane (T0 — schema gate).
 #
-# Kars ships 9 CRDs. The runtime/governance/mesh/failure scenarios
+# kars ships 9 CRDs. The runtime/governance/mesh/failure scenarios
 # only exercise KarsSandbox + InferencePolicy. This scenario applies
 # minimum-valid CRs for the remaining 7 and asserts:
 #

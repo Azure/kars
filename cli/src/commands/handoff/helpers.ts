@@ -421,7 +421,7 @@ export async function runStatus(name: string, h: HandoffHelpers): Promise<void> 
     const resp = await h.routerExec("GET", "/agt/handoff/status", undefined, headers);
     const s = resp.body;
 
-    banner("Kars · Handoff Status", name);
+    banner("kars · Handoff Status", name);
 
     kvLine("Phase", s.phase || "idle");
     kvLine("Direction", s.direction || "—");

@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars OpenAI Agents Python runtime entrypoint.
+# kars OpenAI Agents Python runtime entrypoint.
 #
 # Pins the LLM endpoint to the router sidecar, points MCP-aware tools
 # at the platform MCP server, then invokes the in-pod adapter's

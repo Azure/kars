@@ -114,7 +114,7 @@ Auto-resume:
       const { rg } = preflightResult;
 
 
-      banner("Kars · Production Deploy", "Secure AI Agent Runtime on Azure");
+      banner("kars · Production Deploy", "Secure AI Agent Runtime on Azure");
 
       const clusterName = options.clusterName ?? "kars";
       const baseName = clusterName.replace(/-aks$/, "");
@@ -186,7 +186,7 @@ Auto-resume:
         if (!existsSync(bicepPath)) {
           stepper.fail("Bicep template not found");
           console.log(chalk.yellow(`  Expected at: ${bicepPath}`));
-          console.log(chalk.yellow(`  Run from the Kars repo root.\n`));
+          console.log(chalk.yellow(`  Run from the kars repo root.\n`));
           process.exit(1);
         }
 
@@ -843,7 +843,7 @@ Auto-resume:
           }
         } catch { /* non-critical — controller will log warning */ }
 
-        stepper.update(`${helmExists ? "Upgrading" : "Installing"} Kars Helm chart (controller + CRD + RBAC + seccomp)...`);
+        stepper.update(`${helmExists ? "Upgrading" : "Installing"} kars Helm chart (controller + CRD + RBAC + seccomp)...`);
         await execa("helm", helmArgs, { stdio: "pipe" });
         stepper.detail(helmExists ? "ok" : "new", `Helm release — ${helmExists ? "upgraded" : "installed"}`);
 

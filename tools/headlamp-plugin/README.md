@@ -1,7 +1,7 @@
-# Kars Headlamp Plugin
+# kars Headlamp Plugin
 
-Adds an **Kars** sidebar to the [Headlamp](https://headlamp.dev/) Kubernetes
-dashboard with list + detail views for the 9 Kars custom resources:
+Adds an **kars** sidebar to the [Headlamp](https://headlamp.dev/) Kubernetes
+dashboard with list + detail views for the 9 kars custom resources:
 
 - KarsSandbox
 - InferencePolicy

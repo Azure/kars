@@ -5,8 +5,8 @@
 > nasty security hole."* — Simon Willison, [The Lethal Trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
 
 This demo reproduces a **real, very recent** agentic-AI attack against two
-identical agents on the same AKS cluster — one wrapped by Kars, one
-not — and shows exactly which Kars layer catches the attack at every
+identical agents on the same AKS cluster — one wrapped by kars, one
+not — and shows exactly which kars layer catches the attack at every
 step.
 
 ## The attack we reproduce
@@ -32,7 +32,7 @@ and it's the lesson this demo delivers.
 
 ## What the demo proves
 
-| | Naked OpenClaw | OpenClaw on Kars |
+| | Naked OpenClaw | OpenClaw on kars |
 |---|---|---|
 | Inline Content Safety prompt-shield | ❌ none | ✅ Foundry DefaultV2 → 403 |
 | URL-method allowlist (not just domain) | ❌ domain-only | ✅ ToolPolicy: `GET` only on that host |
@@ -54,7 +54,7 @@ examples/lethal-trifecta-demo/
 │   └── poisoned-skill.md              # the injection payload (1pt-font equivalent)
 ├── scenarios/
 │   ├── 00-namespaces.yaml             # the two namespaces
-│   ├── 01-naked-claw.yaml             # vanilla OpenClaw agent (no Kars)
+│   ├── 01-naked-claw.yaml             # vanilla OpenClaw agent (no kars)
 │   ├── 02-kars-sandbox.yaml      # KarsSandbox + InferencePolicy + ToolPolicy
 │   └── 03-bait-server.yaml            # serves the poisoned skill on cluster-internal HTTP
 └── scripts/
@@ -66,7 +66,7 @@ examples/lethal-trifecta-demo/
 
 ## Prereqs
 
-- An Kars deployment via `kars up` ([Getting Started](../../docs/getting-started.md))
+- An kars deployment via `kars up` ([Getting Started](../../docs/getting-started.md))
 - `kubectl` context pointing at that cluster
 - One Foundry / Azure OpenAI deployment (the demo uses it for the `gpt-4.1` model;
   GitHub-Models mode also works but Layer 1 — inline Content Safety — won't fire,
@@ -85,7 +85,7 @@ cd examples/lethal-trifecta-demo
 ```
 
 > **What works out of the box** — `deploy.sh` and `teardown.sh` run end-to-end on
-> local-k8s and AKS; both Deployments reach `Ready` and the Kars sandbox
+> local-k8s and AKS; both Deployments reach `Ready` and the kars sandbox
 > stack (egress-guard, inference-router, NetworkPolicy, InferencePolicy) all
 > reconcile.
 >
@@ -113,7 +113,7 @@ say at each second mark for a recorded or live demo.
 - **The naked-claw failure is not theatrical.** A standard OpenClaw deploy
   with a normal egress allowlist *will* fall to this exact attack. We aren't
   setting up a strawman.
-- **No layer is hidden.** Every defense in the Kars column is a YAML in
+- **No layer is hidden.** Every defense in the kars column is a YAML in
   `scenarios/` you can read, copy, and audit. There's no magic; it's policy.
 
 ## Credits

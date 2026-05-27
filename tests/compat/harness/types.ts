@@ -28,6 +28,6 @@ export const PROTECTED_FLOWS: ProtectedFlow[] = [
   { id: "kars-handoff", summary: "kars handoff warm handoff between sibling agents" },
   { id: "kars-offload", summary: "kars offload local → AKS cloud offload" },
   { id: "kars-operator", summary: "kars operator headless TUI dashboard" },
-  { id: "agt-interop", summary: "OpenClaw → Kars inter-agent E2E Signal via router" },
+  { id: "agt-interop", summary: "OpenClaw → kars inter-agent E2E Signal via router" },
   { id: "plugin-lifecycle", summary: "OpenClaw plugin load + tool registration singleton" },
 ];

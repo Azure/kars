@@ -1,9 +1,9 @@
 # Upstream Alignment
 
-**TL;DR** — Kars does **not** fork OpenClaw. It uses only first-class extension
+**TL;DR** — kars does **not** fork OpenClaw. It uses only first-class extension
 points (`tools.deny` config, `api.registerTool()` plugin API, `~/.openclaw-data/extensions/`
 discovery) to substitute governance-aware sub-agent tools. Every OpenClaw release
-stays drop-in compatible with Kars.
+stays drop-in compatible with kars.
 
 ---
 
@@ -14,7 +14,7 @@ stays drop-in compatible with Kars.
 
 ## The answer
 
-Policy ≠ fork. Kars alters **which capabilities are permitted**, not **what
+Policy ≠ fork. kars alters **which capabilities are permitted**, not **what
 the capabilities do.** Every alteration goes through upstream-documented
 extension points.
 
@@ -42,7 +42,7 @@ capability surface.
 
 ### 2. Register alternative tools via the plugin API
 
-The Kars plugin registers ~20 governance-aware tools through the
+The kars plugin registers ~20 governance-aware tools through the
 upstream `api.registerTool()` contract:
 
 - `cloud_offload` — ship a task to a fresh AKS sandbox
@@ -70,7 +70,7 @@ No monkey-patching. No runtime injection. No modified gateway binary.
 
 ## Why this pattern is correct, not a workaround
 
-| Property | Fork | Kars (this pattern) |
+| Property | Fork | kars (this pattern) |
 |---|---|---|
 | Tracks upstream releases | Manual merge on every bump | Drop-in |
 | Visible to operators | Hidden in diffs | One config line + one plugin dir |
@@ -115,7 +115,7 @@ re-examined — but today, both are supported, documented extension points.
 
 ## Summary for reviewers
 
-> Kars uses OpenClaw's own `tools.deny` configuration and plugin API
+> kars uses OpenClaw's own `tools.deny` configuration and plugin API
 > to substitute governance-aware sub-agent tools for the native ones. No
 > OpenClaw source is modified, forked, or patched. The pattern is the
 > intended use of OpenClaw's extension contract and stays compatible with

@@ -1,4 +1,4 @@
-# Kars Azure Monitor Dashboards
+# kars Azure Monitor Dashboards
 
 ## Token Usage per Sandbox (KQL)
 ```kql

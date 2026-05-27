@@ -1,7 +1,7 @@
 # OpenAI Agents Python — Quickstart
 
 This blueprint hosts an [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) (Python)
-agent inside an Kars sandbox. The agent runs unmodified — Kars
+agent inside an kars sandbox. The agent runs unmodified — kars
 provides isolation, governance, and egress control without touching SDK code.
 
 ## What you get

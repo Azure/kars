@@ -713,7 +713,7 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
           log.info(`Creating memory store '${store}' (chat=${chatModel}, embedding=${embeddingModel})`);
           await routerCall("POST", `/memory_stores?${apiVer}`, {
             name: store,
-            description: "Kars agent persistent memory",
+            description: "kars agent persistent memory",
             definition: {
               kind: "default",
               chat_model: chatModel,
@@ -1033,7 +1033,7 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
     description:
       "List and query Azure AI Foundry hosted agents. Discover available agents, " +
       "their capabilities, and configurations. These are server-side Foundry agents " +
-      "(different from Kars sub-agent sandboxes).",
+      "(different from kars sub-agent sandboxes).",
     parameters: {
       type: "object",
       properties: {

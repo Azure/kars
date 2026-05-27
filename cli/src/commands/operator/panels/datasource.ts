@@ -305,7 +305,7 @@ export class KubectlDataSource implements ClusterDataSource {
       // Sandbox deployments are named after the sandbox itself; address the
       // pod via `deploy/<sandbox>` so we don't depend on a label selector
       // (the legacy `app.kubernetes.io/name=openclaw` label doesn't exist
-      // on Kars sandbox pods — they use `kars.azure.com/sandbox`).
+      // on kars sandbox pods — they use `kars.azure.com/sandbox`).
       const { stdout } = await execa(
         "kubectl",
         kctl(

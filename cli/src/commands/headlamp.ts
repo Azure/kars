@@ -24,7 +24,7 @@ export function headlampCommand(): Command {
     .option("--context <name>", "Kubernetes context to use (defaults to current-context)")
     .option("--port <port>", "Local port to bind", "4466")
     .option("--namespace <ns>", "Namespace where Headlamp is deployed", "headlamp")
-    .option("--install", "Install Headlamp + Kars plugin into the cluster first", false)
+    .option("--install", "Install Headlamp + kars plugin into the cluster first", false)
     .option("--no-browser", "Skip opening the browser; just port-forward + print URL")
     .option("--token-duration <dur>", "Token TTL passed to `kubectl create token`", "24h")
     .action(
@@ -131,7 +131,7 @@ export function headlampCommand(): Command {
         // Best-effort: if the cluster also has kube-prometheus-stack
         // installed (which `kars dev` ships out of the box), forward
         // Prometheus on :19091 and Grafana on :3000 so the Headlamp
-        // Kars plugin's metric panels (Mesh Topology, Token
+        // kars plugin's metric panels (Mesh Topology, Token
         // Budget, AGT decisions) light up without manual setup. The
         // plugin reads `window.KARS_PROMETHEUS_URL` which defaults
         // to http://127.0.0.1:19091.
@@ -263,7 +263,7 @@ async function openBrowser(execa: typeof import("execa").execa, url: string): Pr
 }
 
 /**
- * Install Headlamp + the Kars plugin into the active cluster.
+ * Install Headlamp + the kars plugin into the active cluster.
  * Pinned to the same Headlamp chart version that `kars dev`
  * installs locally so the bundled plugin remains compatible.
  *

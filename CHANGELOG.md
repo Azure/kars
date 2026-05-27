@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Kars will be documented in this file.
+All notable changes to kars will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -2482,7 +2482,7 @@ ToolPolicy: the controller now polls every referencing
 the one the controller published (Slice 1b), and only promotes
 `phase=Compiled → Ready` when every referencing router echoes
 the exact bytes. This is the first complete end-to-end closure
-of "Ready ⇔ router echo" for any Kars CRD.
+of "Ready ⇔ router echo" for any kars CRD.
 
 - New `controller/src/status/router_confirmation.rs` module:
   `PolicyStatusResponse` / `PolicyStatusEntry` mirror the
@@ -2672,10 +2672,10 @@ together with its first real producer (AGT).
 
 ### Changed
 
-- **Phase 5.2 completed the AGT-only mesh migration.** Kars now runs
+- **Phase 5.2 completed the AGT-only mesh migration.** kars now runs
   Microsoft AGT AgentMesh exclusively: the historical vendored AgentMesh SDK
   and relay/registry forks were removed after upstream AGT PR #2090 merged
-  all 18 Kars gap-closing patches.
+  all 18 kars gap-closing patches.
 - The OpenClaw runtime and `mesh-plugin` no longer depend on `@agentmesh/sdk`;
   identity, signing, and verification use Node.js native `crypto` helpers
   re-exported by `@kars/mesh`, while transport uses
@@ -2716,7 +2716,7 @@ First release candidate cut for the v1.0.0 line. No new feature surface beyond w
 - Makefile targets: per-runtime image build/push (`image-langgraph`, `image-anthropic`, `image-maf-python`, `image-pydantic-ai`, `image-langgraph-ts`) plus aggregators (`image-runtimes`, `push-runtimes`).
 - `docs/operations/image-versioning.md` — tag policy, runtime image overrides, dual-tag immutability rule.
 - `docs/architecture/crd-versioning.md` — `v1alpha1` freeze policy + `v1alpha2` + conversion-webhook plan.
-- `docs/architecture/agt-boundary.md` — responsibility split between AGT and Kars, four provider contracts, outage modes.
+- `docs/architecture/agt-boundary.md` — responsibility split between AGT and kars, four provider contracts, outage modes.
 - `docs/operations/secret-rotation.md` — runbook for sandbox credentials, TLS, AgentMesh identities, Azure creds, cosign keys.
 - `docs/security/stride.md` — STRIDE × trust-boundary matrix (T1–T4).
 - `docs/security/red-team.md` — internal red-team findings log.
@@ -5057,7 +5057,7 @@ floor compare-and-block, model-preference selection).
 ### S9.3 `phase2-migrate-from-kagent` — `kars migrate from-kagent` translator
 
 Operator-facing one-shot translator from a kagent.dev/v1alpha2 `Agent` CR
-into an Kars resource bundle:
+into an kars resource bundle:
 
 - **KarsSandbox** (always) — name + namespace + labels + provenance
   annotations preserved; `spec.openclaw.image` from `spec.byo.deployment.image`
@@ -5068,7 +5068,7 @@ into an Kars resource bundle:
 - **InferencePolicy** — emitted only when `spec.declarative.modelConfig`
   is set; carries the kagent ModelConfig name as a provenance annotation
   (`kars.azure.com/kagent-model-config`). Inference *enforcement* is
-  not migrated — that needs an equivalent Kars `InferencePolicy`
+  not migrated — that needs an equivalent kars `InferencePolicy`
   hand-authored separately.
 - **ToolPolicy** — one per `(McpServer, toolName)` pair. `requireApproval`
   list maps to `spec.approval.mode = "always"`. Empty `toolNames` emits
@@ -5090,7 +5090,7 @@ Lossy fields explicitly catalogued and warned:
 - `spec.{byo,declarative}.deployment.{tolerations,affinity,nodeSelector,
   volumes,volumeMounts,imagePullSecrets,imagePullPolicy,securityContext,
   podSecurityContext,serviceAccountName,serviceAccountConfig,replicas}` —
-  controller-managed in Kars.
+  controller-managed in kars.
 - `spec.allowedNamespaces` — Gateway-API cross-namespace pattern not modeled.
 - `spec.sandbox.network.allowedDomains` wildcards — passed through
   verbatim with a warning (KarsSandbox `EndpointConfig.host` wildcard
@@ -5109,7 +5109,7 @@ critique:
   from a kagent `TypedReference`; ToolPolicies carry the original
   reference as a provenance annotation
   (`kars.azure.com/kagent-tool-ref`) and operators are warned that
-  an equivalent Kars `McpServer` must already exist.
+  an equivalent kars `McpServer` must already exist.
 - `InferencePolicy` enforcement from `modelConfig` — kagent ModelConfig
   is a separate CRD; we preserve only provenance, not behaviour.
 
@@ -5157,18 +5157,18 @@ GitHub MCP. Target CRD shapes verified directly against
 `controller/src/{crd.rs, inference_policy.rs, tool_policy.rs}`.
 
 Closes §15.2 #8 ("kagent migration tool"). Day-1 use case: an operator
-running kagent declarative agents adopts Kars governance by running
+running kagent declarative agents adopts kars governance by running
 `kars migrate from-kagent agent.yaml --image my/runtime:v1
 --allow-lossy | kubectl apply -f -`, then hand-edits the emitted
 KarsSandbox to set `spec.inference.{provider,endpoint,model}` per their
-ModelConfig and creates an Kars `McpServer` for each kagent
+ModelConfig and creates an kars `McpServer` for each kagent
 McpServer reference.
 
 ### S9.2 `phase2-convert-translator` — real `kars convert` translator
 
 Phase 0 shipped `kars convert` as an exit-3 skeleton to lock in the CLI
 surface; this slice ships the translator. Operators can now move manifests
-between Kars's `KarsSandbox` and upstream
+between kars's `KarsSandbox` and upstream
 `agents.x-k8s.io/v1alpha1 Sandbox` (kubernetes-sigs/agent-sandbox) without
 hand-editing YAML, and bootstrap a fresh `KarsSandbox` overlay against an
 existing upstream Sandbox.
@@ -5227,7 +5227,7 @@ existing upstream Sandbox.
   on convert would be a footgun.
 - **48 new vitest cases** in `cli/src/commands/convert.test.ts` covering
   parser, target dispatch, forward/inverse happy path, every
-  Kars-only and upstream-only lossy field, multi-doc rejection,
+  kars-only and upstream-only lossy field, multi-doc rejection,
   malformed input, env collisions and `valueFrom` edge cases, all four
   seccomp canonicalisation paths, kata isolation round-trip, overlay
   namespace pin, multi-container, missing image, and a forward→inverse
@@ -5253,7 +5253,7 @@ existing upstream Sandbox.
   have a fundamentally different shape (Agent / ToolServer / Identity rather
   than a single Sandbox primitive) and warrant their own translator path.
 - **Round-trip lossless mode** — there is no canonical lossless round-trip
-  because Kars and upstream are deliberately different governance
+  because kars and upstream are deliberately different governance
   scopes. The forward `lossy-by-default` posture is the right safety
   contract; future work can add `--strict` for CI lint use cases.
 - **Live-cluster import** — `convert` reads YAML from `--file`. Pulling a
@@ -5266,19 +5266,19 @@ existing upstream Sandbox.
 Operator-facing tool to flip a KarsSandbox between the four
 upstream-compatibility modes that S8 (#57) shipped on the controller
 side. The CLI surface that drives day-zero adoption: take an existing
-upstream `sigs.k8s.io/agent-sandbox` Sandbox and bolt Kars
+upstream `sigs.k8s.io/agent-sandbox` Sandbox and bolt kars
 governance on without rewriting the YAML.
 
 **Real workflow this unlocks:**
 
 ```bash
 # operator already has an upstream Sandbox CR called 'legacy-agent';
-# wraps it with Kars governance:
+# wraps it with kars governance:
 $ kars migrate to-overlay legacy --upstream-ref legacy-agent
   legacy: native → overlay (upstream sandbox 'legacy-agent')
   ✓ patched
 
-# later: drop the upstream, return to native Kars
+# later: drop the upstream, return to native kars
 $ kars migrate from-overlay legacy
   legacy: overlay → native
   ✓ patched
@@ -5288,7 +5288,7 @@ $ kars migrate from-overlay legacy
 
 - `kars migrate to-overlay <name> --upstream-ref <upstream>` —
   flip to OverlayMode (governance overlay only; upstream owns the Pod).
-- `kars migrate from-overlay <name>` — revert to native Kars
+- `kars migrate from-overlay <name>` — revert to native kars
   (controller resumes Pod / Service / NetworkPolicy ownership).
 - `kars migrate to-translate <name>` — SandboxClaim translate mode.
 - `kars migrate to-observe <name>` — status-mirror mode.
@@ -5510,7 +5510,7 @@ namespace and `KarsSandbox.spec.upstreamCompatibility.upstreamSandboxRef.name`
 points at it. The controller still creates the *governance overlay*
 (namespace, sandbox ServiceAccount with Workload-Identity binding,
 egress + ingress NetworkPolicy, governance ConfigMap, Azure RBAC SA
-annotations) but **skips** the Kars Pod Deployment and the
+annotations) but **skips** the kars Pod Deployment and the
 blocklist seed-ConfigMap + 6h refresh CronJob — those would have nothing
 to mount into.
 

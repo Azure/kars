@@ -4,7 +4,7 @@
 
 ## Persona & intent
 
-- **You are:** an agent author or Kars maintainer.
+- **You are:** an agent author or kars maintainer.
 - **You want:** seconds of feedback. Real router code. Real policy decisions. Real audit format. Real frontier-model output (Claude Opus, GPT-5, Gemini) with a single `gh auth login`. No Azure subscription, no Foundry resource, no Kubernetes.
 - **You do not want:** to operate a kind cluster for every PR; to stand up Workload Identity locally; to maintain a parallel "dev mock" that drifts from production.
 

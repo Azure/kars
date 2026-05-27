@@ -320,7 +320,7 @@ describe("karssandboxToUpstreamSandbox (forward)", () => {
     }
   });
 
-  it("warns once per Kars-only field", () => {
+  it("warns once per kars-only field", () => {
     const parsed = parseManifest(
       clawSandboxFixture({
         inference: { provider: "azure-openai", model: "gpt-4o" },

@@ -83,7 +83,7 @@ export function handoffCommand(): Command {
       const direction = options.to === "local" ? "aks_to_local" : "local_to_aks";
       const directionLabel = direction === "local_to_aks" ? "Local → Cloud" : "Cloud → Local";
 
-      banner("Kars · Agent Handoff", directionLabel);
+      banner("kars · Agent Handoff", directionLabel);
 
       const stepper = new Stepper({ totalSteps: direction === "aks_to_local" ? 13 : 7 });
 

@@ -29,7 +29,7 @@ export function attachAuthSubcommand(cmd: Command): void {
     .option("--provider <provider>", "OAuth provider (github, entra)", "github")
     .option("--no-browser", "Print URL instead of opening browser")
     .action(async (opts: { registry: string; provider: string; browser: boolean }) => {
-      banner("Kars · Mesh Auth", "AgentMesh Identity & Registration");
+      banner("kars · Mesh Auth", "AgentMesh Identity & Registration");
 
       const registryUrl = opts.registry.replace(/\/+$/, "");
       const provider = opts.provider.toLowerCase();

@@ -15,13 +15,13 @@
 // in S11.1):
 //
 //   # operator already has an upstream sigs.k8s.io/agent-sandbox
-//   # `Sandbox` CR called `legacy-agent`; wants to bolt Kars
+//   # `Sandbox` CR called `legacy-agent`; wants to bolt kars
 //   # governance on without rewriting it:
 //   $ kubectl apply -f legacy-karssandbox.yaml      # native by default
 //   $ kars migrate to-overlay legacy --upstream-ref legacy-agent
 //   ✓ legacy: native → overlay (upstream sandbox 'legacy-agent')
 //
-//   # later: customer wants pure Kars, drop the upstream
+//   # later: customer wants pure kars, drop the upstream
 //   $ kars migrate from-overlay legacy
 //   ✓ legacy: overlay → native
 //
@@ -313,7 +313,7 @@ export function migrateCommand(): Command {
     cmd
       .command("to-overlay <name>")
       .description(
-        "Flip to overlay mode: Kars provides governance overlay " +
+        "Flip to overlay mode: kars provides governance overlay " +
           "(namespace, NetworkPolicy, ConfigMaps); upstream sigs.k8s.io/" +
           "agent-sandbox CR owns the Pod. Requires --upstream-ref.",
       )
@@ -347,7 +347,7 @@ export function migrateCommand(): Command {
     cmd
       .command("from-overlay <name>")
       .description(
-        "Leave overlay mode and revert to native Kars " +
+        "Leave overlay mode and revert to native kars " +
           "(controller resumes Pod / Service / NetworkPolicy ownership).",
       ),
   ).action(
@@ -377,7 +377,7 @@ export function migrateCommand(): Command {
             ? "Accept upstream SandboxClaim semantics on inbound (P1 schema-only)."
             : m === "observe"
               ? "Mirror status of an upstream Sandbox CR; no overlay."
-              : "Reset to default native mode (Kars owns the workload).",
+              : "Reset to default native mode (kars owns the workload).",
         ),
     ).action(
       async (
@@ -400,7 +400,7 @@ export function migrateCommand(): Command {
   cmd
     .command("from-kagent <input>")
     .description(
-      "Translate a kagent.dev/v1alpha2 Agent YAML into an Kars " +
+      "Translate a kagent.dev/v1alpha2 Agent YAML into an kars " +
         "resource bundle (KarsSandbox + InferencePolicy + ToolPolicies). " +
         "Use '-' to read from stdin. Hard-fails on lossy translation " +
         "by default; pass --allow-lossy to waive.",

@@ -1,17 +1,17 @@
-# Contributing to Kars
+# Contributing to kars
 
 This project welcomes contributions and suggestions.
 
 ## External Contributions — Scope & Goals
 
-Kars is a **community-supported, best-effort** project. We are grateful for contributions from the Azure / AKS operator community, OpenClaw / OpenAI Agents SDK adopters, security researchers, and MCP/plugin vendors.
+kars is a **community-supported, best-effort** project. We are grateful for contributions from the Azure / AKS operator community, OpenClaw / OpenAI Agents SDK adopters, security researchers, and MCP/plugin vendors.
 
 ### Audience
 
 We expect external contributions from:
 
-- **Azure / AKS operators** running Kars in production, troubleshooting edge cases or adding new observability/governance features
-- **OpenClaw / OpenAI Agents SDK / Microsoft Agent Framework users** adopting Kars for AI governance, security, or sandboxing
+- **Azure / AKS operators** running kars in production, troubleshooting edge cases or adding new observability/governance features
+- **OpenClaw / OpenAI Agents SDK / Microsoft Agent Framework users** adopting kars for AI governance, security, or sandboxing
 - **Security researchers** reviewing the runtime, auditing isolation guarantees, or reporting vulnerabilities
 - **MCP server vendors** and plugin authors (Brave, Tavily, Firecrawl, Perplexity, OpenAI, custom web-search providers) adding new providers or channels (Telegram, Slack, Discord, WhatsApp)
 
@@ -28,7 +28,7 @@ We expect external contributions from:
 
 ### Out of Scope — We Will Not Merge
 
-- **New cross-cluster transports** — Microsoft AGT AgentMesh is the only sanctioned transport. Changes to inter-cluster communication require an ADR and CELA review; Kars no longer carries a vendored AgentMesh transport fork.
+- **New cross-cluster transports** — Microsoft AGT AgentMesh is the only sanctioned transport. Changes to inter-cluster communication require an ADR and CELA review; kars no longer carries a vendored AgentMesh transport fork.
 - **Changes to sandbox isolation** — modifications to UID/GID, Landlock rules, seccomp profiles, or NetworkPolicy that weaken pod isolation or increase privilege
 - **Inference router / governance bypass** — any change that routes agent traffic outside the router, skips the governance chain, or adds unauthenticated API endpoints
 - **Direct cloud-side telemetry** — telemetry must remain opt-in via OpenTelemetry (see Data Collection notice in README). Direct Azure Monitor / Application Insights SDKs are not accepted.
@@ -71,7 +71,7 @@ make lint     # clippy + oxlint
 | `controller/` | Rust (kube-rs) | K8s operator — reconciles KarsSandbox CRDs into sandboxes |
 | `inference-router/` | Rust (axum) | Per-sandbox router — auth, safety, budgets, 18 Foundry APIs, native AGT governance |
 | `cli/` | TypeScript | 18 CLI commands + OpenClaw plugin + 10 Foundry skills |
-| `runtimes/openclaw/skills/` | Markdown | 10 SKILL.md files teaching the OpenClaw agent to use Kars + Foundry services |
+| `runtimes/openclaw/skills/` | Markdown | 10 SKILL.md files teaching the OpenClaw agent to use kars + Foundry services |
 | `cli/profiles/agt/` | YAML | AGT policy profiles (default/offload) inlined by the CLI into `ToolPolicy.spec.agtProfile.inline` |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
 | `deploy/helm/` | YAML | Helm chart (CRD, controller, RBAC, seccomp, NetworkPolicy) |
@@ -110,7 +110,7 @@ kars dev --build                      # build + run locally via Docker
 
 ```bash
 kars push --only sandbox --apply      # build sandbox image, push to ACR, restart pods
-kars push                             # build + push all Kars images (controller, router, sandbox)
+kars push                             # build + push all kars images (controller, router, sandbox)
 ```
 
 ### Docker Images (Makefile)
@@ -131,7 +131,7 @@ kars destroy dev-agent
 
 ## Adding Channels and Plugins
 
-Kars uses a consistent pattern for channels (Telegram, Slack, Discord, WhatsApp) and third-party plugins (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI):
+kars uses a consistent pattern for channels (Telegram, Slack, Discord, WhatsApp) and third-party plugins (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI):
 
 ```
 CLI flag → Docker env var → entrypoint auto-config → plugins.allow + plugins.entries
@@ -156,9 +156,9 @@ Credentials are stored in a K8s secret named `<sandbox-name>-credentials` in the
 
 ## AgentMesh provider changes
 
-Kars runs exclusively on Microsoft AGT AgentMesh (`@microsoft/agent-governance-sdk` plus the AGT relay/registry deployed by `deploy/agentmesh-agt.yaml`). The historical AgentMesh npm SDK dependency and vendored relay/registry/SDK forks were removed in Phase 5.2 after the gap-closing patches landed upstream.
+kars runs exclusively on Microsoft AGT AgentMesh (`@microsoft/agent-governance-sdk` plus the AGT relay/registry deployed by `deploy/agentmesh-agt.yaml`). The historical AgentMesh npm SDK dependency and vendored relay/registry/SDK forks were removed in Phase 5.2 after the gap-closing patches landed upstream.
 
-Changes to mesh transport, identity, signing, or relay/registry behavior must be proposed upstream first when they belong in AGT, and must include an ADR plus security-audit notes when they affect Kars's trust boundary.
+Changes to mesh transport, identity, signing, or relay/registry behavior must be proposed upstream first when they belong in AGT, and must include an ADR plus security-audit notes when they affect kars's trust boundary.
 
 ## Pull Requests
 
@@ -200,7 +200,7 @@ same rule applies to new TS files.
 
 ### Copyright Headers
 
-Every Kars-authored source file (`.rs`, `.ts`, `.tsx`, `.js`, `.sh`) **must** begin with the two-line Microsoft + MIT copyright header:
+Every kars-authored source file (`.rs`, `.ts`, `.tsx`, `.js`, `.sh`) **must** begin with the two-line Microsoft + MIT copyright header:
 
 ```
 // Copyright (c) Microsoft Corporation.

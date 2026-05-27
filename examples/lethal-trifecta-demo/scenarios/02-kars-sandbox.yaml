@@ -1,4 +1,4 @@
-# ── Kars-managed agent: full nine-layer stack.
+# ── kars-managed agent: full nine-layer stack.
 # The controller reconciles the KarsSandbox below into:
 #   - dedicated namespace (already created)
 #   - Deployment with init: egress-guard + openclaw + inference-router

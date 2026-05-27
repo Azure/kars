@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars Pydantic-AI runtime entrypoint.
+# kars Pydantic-AI runtime entrypoint.
 #
 # Pins each known LLM provider base URL to the router sidecar, points
 # MCP-aware tools at the platform MCP server, then invokes the in-pod

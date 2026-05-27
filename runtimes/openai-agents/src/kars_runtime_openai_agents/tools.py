@@ -129,7 +129,7 @@ def _make_tool(name: str):
     from agents import function_tool  # type: ignore
 
     short_name = name.replace(".", "_")
-    description = f"Invoke the Kars platform Foundry tool {name!r} via MCP."
+    description = f"Invoke the kars platform Foundry tool {name!r} via MCP."
 
     @function_tool(name_override=short_name, description_override=description)
     async def _tool(arguments_json: str = "{}") -> str:

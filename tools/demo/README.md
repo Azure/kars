@@ -1,6 +1,6 @@
 # `tools/demo/` — scripted end-to-end walkthrough
 
-A single shell script that exercises the full Kars stack across the
+A single shell script that exercises the full kars stack across the
 three substrates we support: local Docker (`kars dev`), local Kind
 (`kars up` flow exercised through the E2E infra helpers), and a
 real AKS cluster (`kars up`).

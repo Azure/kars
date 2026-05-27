@@ -31,7 +31,7 @@ export function attachPromoteSubcommand(cmd: Command): void {
     .option("--registry-port <port>", "Local port for registry (port-forward mode)", "18080")
     .option("--relay-port <port>", "Local port for relay (port-forward mode)", "18765")
     .action(async (opts: { allowIp?: string; portForward?: boolean; registryPort?: string; relayPort?: string }) => {
-      banner("Kars · Mesh Promote", "Promote Registry to Global");
+      banner("kars · Mesh Promote", "Promote Registry to Global");
 
       // Load deployment context
       const ctx = loadContext();

@@ -78,7 +78,7 @@ here so you can build a **custom role** if you need tighter least-privilege.
 
 ```jsonc
 {
-  "Name": "Kars Deployer",
+  "Name": "kars Deployer",
   "Description": "Minimal role to run 'kars up' end-to-end",
   "IsCustom": true,
   "Actions": [
@@ -112,7 +112,7 @@ Assign with:
 
 ```bash
 az role definition create --role-definition ./kars-deployer.json
-az role assignment create --assignee "$USER" --role "Kars Deployer" --scope "/subscriptions/$SUB"
+az role assignment create --assignee "$USER" --role "kars Deployer" --scope "/subscriptions/$SUB"
 ```
 
 > **Note:** When `a2aGateway.enabled: true` in Helm values, cert-manager (≥ 1.14)
@@ -181,10 +181,10 @@ az provider register -n Microsoft.ContainerService
 
 ## Tenant-level (Entra ID) considerations
 
-Kars's inter-agent mesh (AGT) authenticates agents to the AgentMesh
+kars's inter-agent mesh (AGT) authenticates agents to the AgentMesh
 relay using an Entra-issued token for the scope `api://agentmesh/.default`.
 **Registering that scope requires a tenant administrator** (Global
-Administrator or Application Administrator). Kars does **not** create
+Administrator or Application Administrator). kars does **not** create
 the app registration automatically.
 
 If nobody has provisioned the `api://agentmesh` Entra application in your
@@ -192,7 +192,7 @@ tenant, sandboxes still come up — they fall back to the **AGT anonymous
 tier**, which works for dev/test but not for production tenant-isolated
 workloads.
 
-The fastest fix is the Kars CLI helper, which is idempotent and
+The fastest fix is the kars CLI helper, which is idempotent and
 prints the tenant/client IDs when it's done:
 
 ```bash

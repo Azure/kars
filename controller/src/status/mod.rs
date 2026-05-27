@@ -237,7 +237,7 @@ pub fn running_status_matches_with_extras(
 
 /// Build the `status` patch for a `KarsSandbox` running in
 /// **`OverlayMode`** (Phase 2 S8). In this mode the operator's upstream
-/// `Sandbox` CR owns the Pod lifecycle; Kars skipped Deployment +
+/// `Sandbox` CR owns the Pod lifecycle; kars skipped Deployment +
 /// Service creation and only laid down the overlay (namespace, SA with
 /// Workload-Identity binding, NetworkPolicy, governance ConfigMaps).
 ///
@@ -245,9 +245,9 @@ pub fn running_status_matches_with_extras(
 /// - `phase: "Overlay"` — distinct from `Running` so dashboards can
 ///   surface "this CR is intentionally not driving a Pod".
 /// - `Ready=True, Reason=OverlayMode` — overlay reconciled cleanly
-///   from Kars's perspective; `kubectl wait --for=condition=Ready`
+///   from kars's perspective; `kubectl wait --for=condition=Ready`
 ///   still works.
-/// - `Progressing=False, Reason=OverlayMode` — no further Kars work
+/// - `Progressing=False, Reason=OverlayMode` — no further kars work
 ///   pending.
 /// - `Suspended=True, Reason=OverlayMode` — explicit signal that we are
 ///   not driving a Pod here (operators querying `Suspended` see why).
@@ -291,7 +291,7 @@ pub fn build_overlay_status_patch(
         &format!("Pod owned by upstream Sandbox CR `{upstream_ref}`"),
         generation,
     );
-    // In overlay mode, Kars doesn't drive the Pod; the runtime
+    // In overlay mode, kars doesn't drive the Pod; the runtime
     // adapter is therefore not stamped True (we have not deployed it),
     // but we still record `runtimeKind` so the printer column matches the
     // user's intent and we surface a `RuntimeReady=False/OverlayMode`
@@ -302,7 +302,7 @@ pub fn build_overlay_status_patch(
         conditions::TYPE_RUNTIME_READY,
         conditions::status::FALSE,
         conditions::reason::OVERLAY_MODE,
-        &format!("runtime `{runtime_kind}` not driven by Kars in overlay mode"),
+        &format!("runtime `{runtime_kind}` not driven by kars in overlay mode"),
         generation,
     );
     json!({

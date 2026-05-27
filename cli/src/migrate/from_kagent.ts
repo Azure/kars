@@ -4,7 +4,7 @@
 // Phase 2 S9.3 — `kars migrate from-kagent` translator.
 //
 // Pure translator (no I/O). Reads a kagent.dev/v1alpha2 `Agent` YAML
-// document and emits a deterministic Kars resource bundle:
+// document and emits a deterministic kars resource bundle:
 //
 //   1. KarsSandbox            (always)
 //   2. InferencePolicy        (only if spec.declarative.modelConfig set)
@@ -331,7 +331,7 @@ export function translate(
 
   // ---- KarsSandbox ---------------------------------------------------------
   const sandboxLabels: Record<string, string> = { ...meta.labels };
-  // Inject deterministic Kars-owned label so emitted ToolPolicies
+  // Inject deterministic kars-owned label so emitted ToolPolicies
   // can match the sandbox via spec.appliesTo.sandboxMatchLabels. Refuse
   // a conflicting pre-existing value.
   if (
@@ -380,7 +380,7 @@ export function translate(
       warnings.push(
         warn(
           "spec.declarative",
-          "Declarative agents use the kagent ADK runtime image; Kars does not bundle that runtime. Pass --image to override; the emitted KarsSandbox is NOT runnable as-is",
+          "Declarative agents use the kagent ADK runtime image; kars does not bundle that runtime. Pass --image to override; the emitted KarsSandbox is NOT runnable as-is",
         ),
       );
     }
@@ -476,7 +476,7 @@ export function translate(
     warnings.push(
       warn(
         "spec.skills",
-        "kagent skills (OCI/git refs) are not installed by Kars S9.3; migrated agent may not function without manual remediation",
+        "kagent skills (OCI/git refs) are not installed by kars S9.3; migrated agent may not function without manual remediation",
       ),
     );
   }
@@ -484,7 +484,7 @@ export function translate(
     warnings.push(
       warn(
         "spec.allowedNamespaces",
-        "Gateway-API cross-namespace pattern not modeled by Kars (dropped)",
+        "Gateway-API cross-namespace pattern not modeled by kars (dropped)",
       ),
     );
   }
@@ -528,7 +528,7 @@ export function translate(
         );
       }
       warnings.push(
-        warn(path, "agent-as-tool not supported by Kars ToolPolicy (dropped)"),
+        warn(path, "agent-as-tool not supported by kars ToolPolicy (dropped)"),
       );
       continue;
     }
@@ -575,7 +575,7 @@ export function translate(
     warnings.push(
       warn(
         `${path}.mcpServer`,
-        `Tool references kagent McpServer '${mcpName}'; Kars will not auto-create it — ensure an equivalent Kars McpServer CR exists`,
+        `Tool references kagent McpServer '${mcpName}'; kars will not auto-create it — ensure an equivalent kars McpServer CR exists`,
       ),
     );
 
@@ -692,7 +692,7 @@ export function translate(
         warnings.push(
           warn(
             "spec.declarative.modelConfig",
-            `kagent ModelConfig '${modelConfig}' is preserved only as an InferencePolicy annotation; Kars inference provider/model are not configured from it`,
+            `kagent ModelConfig '${modelConfig}' is preserved only as an InferencePolicy annotation; kars inference provider/model are not configured from it`,
           ),
         );
         ipAnnotations[KAGENT_MODEL_CONFIG_KEY] = modelConfig;

@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars MAF Python runtime entrypoint.
+# kars MAF Python runtime entrypoint.
 #
 # Pins the LLM endpoints to the router sidecar, points MCP-aware tools
 # at the platform MCP server, then invokes the in-pod adapter's

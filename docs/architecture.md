@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains *what Kars is made of* and *why each part exists*. For diagrams, see **[Architecture diagrams](architecture-diagrams.md)**. For a faster on-ramp, see **[Getting started](getting-started.md)**.
+This document explains *what kars is made of* and *why each part exists*. For diagrams, see **[Architecture diagrams](architecture-diagrams.md)**. For a faster on-ramp, see **[Getting started](getting-started.md)**.
 
 ## Design goals (in priority order)
 
@@ -8,7 +8,7 @@ This document explains *what Kars is made of* and *why each part exists*. For di
 2. **Every external call must pass a policy decision point.** No invisible side effects, no silent network egress.
 3. **Inter-agent communication must be confidential, authenticated, and forward-secret.** No plaintext fallback.
 4. **The same data-path code runs in dev and in prod.** A small number of code paths branch on `KARS_DEV_MODE` to swap auth source (static key vs. Workload Identity) and spawn driver (Docker vs. Kubernetes). The router's policy decision points, content-safety parsing, audit format, and governance hooks do not change between modes — local mode is *easier*, not *different*.
-5. **Operability over cleverness.** Standard Kubernetes primitives (CRDs, NetworkPolicies, RBAC, Helm) so platform teams can operate Kars the way they operate the rest of the cluster.
+5. **Operability over cleverness.** Standard Kubernetes primitives (CRDs, NetworkPolicies, RBAC, Helm) so platform teams can operate kars the way they operate the rest of the cluster.
 
 Everything below follows from those five.
 
@@ -16,7 +16,7 @@ Everything below follows from those five.
 
 ## Components
 
-Kars has four code components, two languages, and one rule that ties them together.
+kars has four code components, two languages, and one rule that ties them together.
 
 | Component | Language | Crate / package | Responsibility |
 |---|---|---|---|
@@ -25,7 +25,7 @@ Kars has four code components, two languages, and one rule that ties them togeth
 | **A2A gateway** | Rust (axum) | `kars-a2a-gateway` + `kars-a2a-core` | Public-ingress entry point for A2A 1.0.0 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
 | **CLI** | TypeScript | `@kars/cli` | Lifecycle of clusters, sandboxes, policies. 30+ commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
 
-The rule that ties them together: **the agent has no network of its own**. The router is the only process in the sandbox pod that can talk to the outside. Every other property of Kars is a downstream consequence of holding that line.
+The rule that ties them together: **the agent has no network of its own**. The router is the only process in the sandbox pod that can talk to the outside. Every other property of kars is a downstream consequence of holding that line.
 
 ---
 
@@ -156,11 +156,11 @@ Inter-agent communication is **end-to-end encrypted**. Two agents that want to t
 4. On accept, both sides advance the **Double Ratchet**. Every subsequent message is encrypted with a fresh key (forward secrecy) and authenticated.
 5. The relay sees only opaque ciphertext blobs and addressing metadata. It cannot read messages and cannot impersonate either party.
 
-The relay and registry are operated by Kars (`agentmesh` namespace, two small services). They are not trusted with content. The cryptographic primitives are libsodium / Signal Protocol. **The Signal session is owned by the agent process** — the OpenClaw plugin layer (and every other supported runtime) installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time and runs X3DH / Double Ratchet / KNOCK inside the sandbox container (UID 1000). The inference router links the [`agentmesh`](https://crates.io/crates/agentmesh) crate from crates.io only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — it holds **no** Signal session keys, performs **no** encryption or decryption, and merely WebSocket-bridges opaque ciphertext between the agent and the relay. There is no in-tree fork of either SDK.
+The relay and registry are operated by kars (`agentmesh` namespace, two small services). They are not trusted with content. The cryptographic primitives are libsodium / Signal Protocol. **The Signal session is owned by the agent process** — the OpenClaw plugin layer (and every other supported runtime) installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time and runs X3DH / Double Ratchet / KNOCK inside the sandbox container (UID 1000). The inference router links the [`agentmesh`](https://crates.io/crates/agentmesh) crate from crates.io only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — it holds **no** Signal session keys, performs **no** encryption or decryption, and merely WebSocket-bridges opaque ciphertext between the agent and the relay. There is no in-tree fork of either SDK.
 
 > **Multi-agent peer roster.** When an agent spawns more than one sub-agent (each with a `role` — e.g. `data analyst`, `visualization engineer`, `technical writer`), the OpenClaw runtime maintains a **peer roster** of canonical names + roles and **automatically prepends a `Peer roster:` block** to every outbound `mesh_send` / `mesh_transfer_file` once two or more siblings exist. Sub-agents that need to hand work to each other ("send the chart to viz", "deliver the brief to the writer") resolve role references against this roster instead of guessing names — eliminating misroute bugs in pipelines like `analyst → viz → writer`. The roster is built deterministically from spawn metadata; `kars_spawn` rejects sub-agents without a `role` parameter when more than one sibling will exist. Implementation: `runtimes/openclaw/src/core/agt-tools/agt.ts` (roster maintenance + auto-prepend), `runtimes/openclaw/skills/kars-spawn/SKILL.md` (agent-facing contract).
 
-See **[`docs/architecture/agt-boundary.md`](architecture/agt-boundary.md)** for what AGT enforces vs what Kars enforces.
+See **[`docs/architecture/agt-boundary.md`](architecture/agt-boundary.md)** for what AGT enforces vs what kars enforces.
 
 ---
 
@@ -179,7 +179,7 @@ Two separate channels for two separate trust models. See **[`docs/architecture/a
 
 ## CRDs as the API
 
-You operate Kars by writing CRDs, not by clicking through a dashboard or
+You operate kars by writing CRDs, not by clicking through a dashboard or
 editing a private config store. The full schema lives in
 **[`docs/api/crd-reference.md`](api/crd-reference.md)**. This section answers
 the question we get every time: *why nine CRDs and not one?*
@@ -238,7 +238,7 @@ Three properties fall out of treating these as separate CRDs:
 
 ### When this design would be wrong
 
-If Kars only ever ran one agent per cluster, with one model, no policy,
+If kars only ever ran one agent per cluster, with one model, no policy,
 no peers, no memory, and no eval — nine CRDs would be cargo-culting. We
 believe a single CRD with nine optional sub-objects would be worse for
 real-world deployments because you'd lose the rate-of-change separation

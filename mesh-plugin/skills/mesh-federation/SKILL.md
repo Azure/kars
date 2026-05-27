@@ -1,15 +1,15 @@
 ---
 name: mesh-federation
-description: Pair with an Kars cluster and offload heavy tasks to governed cloud sandboxes with GPU / foundation-model inference / Azure AI services, or communicate with other agents over end-to-end encrypted AgentMesh. Triggers on natural-language intents like "offload to the cloud", "run this on Azure", "ask my cluster to…", "send a message to agent X", "who is on the mesh", "check my inbox", "is my offload done".
+description: Pair with an kars cluster and offload heavy tasks to governed cloud sandboxes with GPU / foundation-model inference / Azure AI services, or communicate with other agents over end-to-end encrypted AgentMesh. Triggers on natural-language intents like "offload to the cloud", "run this on Azure", "ask my cluster to…", "send a message to agent X", "who is on the mesh", "check my inbox", "is my offload done".
 metadata: {"openclaw": {"always": true}}
 ---
 
-# Kars Mesh Federation — Cloud Offload & Inter-Agent Messaging
+# kars Mesh Federation — Cloud Offload & Inter-Agent Messaging
 
-You have the **Kars Mesh** plugin installed. It federates this OpenClaw agent with an Kars cluster and other agents via end-to-end encrypted AgentMesh (Signal Protocol). You can:
+You have the **kars Mesh** plugin installed. It federates this OpenClaw agent with an kars cluster and other agents via end-to-end encrypted AgentMesh (Signal Protocol). You can:
 
 1. Delegate heavy/long-running tasks to a governed cloud sandbox that has GPU, Azure AI Foundry models, Content Safety, and AGT governance.
-2. Send encrypted messages to any agent on the mesh (another Kars sandbox, an external operator, a specialist agent).
+2. Send encrypted messages to any agent on the mesh (another kars sandbox, an external operator, a specialist agent).
 3. Discover agents by capability or name.
 4. Read your encrypted inbox.
 
@@ -21,7 +21,7 @@ Use this skill when the user's intent matches any of:
 
 - **"offload this to the cloud"**, "run this on Azure", "run it on my cluster", "do it in the cloud sandbox", "delegate to the cluster"
 - "too heavy for local" / "I need GPU" / "this will take too long here" / "use the big model"
-- "pair with the cluster", "connect to Kars", "set up federation"
+- "pair with the cluster", "connect to kars", "set up federation"
 - "send a message to <agent>", "tell <agent> to …", "notify <agent>"
 - "check my inbox", "any new messages?", "did <agent> reply?"
 - "who's on the mesh?", "find agents that can <X>", "discover <capability>"
@@ -155,7 +155,7 @@ User: tell the cluster sandbox I'm done
 ## Important operational notes
 
 - **Pairing is pre-req for everything except `mesh_pair` itself.** If a tool returns "Not paired", stop and ask the user for a pairing token.
-- **Proactive offload:** Modern Kars sandboxes *self-announce* the moment they're ready and begin work immediately. You'll see phase `acknowledged` (👋) within ~20 s of `ready`. If you don't, the cluster may be running an older sandbox image and will fall back to the ping/upload/dispatch flow (still works, just slower).
+- **Proactive offload:** Modern kars sandboxes *self-announce* the moment they're ready and begin work immediately. You'll see phase `acknowledged` (👋) within ~20 s of `ready`. If you don't, the cluster may be running an older sandbox image and will fall back to the ping/upload/dispatch flow (still works, just slower).
 - **Tokens are metered.** `offload_status` surfaces budget consumption. If an offload fails with "budget exceeded", ask the admin for a new pairing token with a larger budget.
 - **No secrets in tasks.** Never put API keys or passwords in `cloud_offload` task text or files. The sandbox has its own managed identity for Azure access.
 - **One offload at a time** per pairing. Cancel (or let it finish) before starting another.
@@ -167,7 +167,7 @@ User: tell the cluster sandbox I'm done
 | Message | Cause | Fix |
 |---|---|---|
 | `❌ cloud_offload requires a task parameter…` | No recognizable task field passed | Re-issue with `task: "..."` |
-| `❌ Not paired with any Kars cluster` | No pairing persisted | Call `mesh_pair` with a valid token |
+| `❌ Not paired with any kars cluster` | No pairing persisted | Call `mesh_pair` with a valid token |
 | `❌ Mesh connection is not live` | WebSocket to relay dropped | Wait a few seconds — plugin auto-reconnects; retry |
 | `❌ Offload already in progress` | Prior offload still running | `offload_status` to check / wait for `done` |
 | `❌ Sandbox '...' is registered but not responding to mesh pings` | Legacy flow, sandbox came up but E2E not ready | Usually self-heals on retry; modern sandboxes skip this via `offload_hello` |

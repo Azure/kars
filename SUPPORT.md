@@ -26,9 +26,9 @@ For questions and usage guidance:
 
 ### Scope of support
 
-Bug reports and feature requests **for Kars itself** are in scope:
+Bug reports and feature requests **for kars itself** are in scope:
 
-- Core Kars controller and inference router
+- Core kars controller and inference router
 - CLI commands and behavior
 - Integration with Azure AI Foundry and AKS
 - E2E encryption and governance features

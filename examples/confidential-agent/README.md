@@ -6,7 +6,7 @@ inside a lightweight VM, not on the host kernel.
 
 Use this when the agent processes sensitive data (regulated industries,
 multi-tenant clusters, code-execution agents) and you want kernel-level
-blast-radius containment on top of Kars's seccomp/RO-rootfs/UID
+blast-radius containment on top of kars's seccomp/RO-rootfs/UID
 controls.
 
 ## How it differs from `basic-agent`
@@ -28,7 +28,7 @@ class), giving the sandbox:
   Leaky Vessels (CVE-2024-21626 runc breakout), Probllama
   (CVE-2024-37032), and similar container-escape classes terminate
   inside the VM
-- The full Kars layer stack on top: seccomp, RO rootfs, non-root,
+- The full kars layer stack on top: seccomp, RO rootfs, non-root,
   egress-guard, NetworkPolicy, InferencePolicy enforcement
 
 Token budget is bumped to 1M/day vs basic-agent's 500k — confidential

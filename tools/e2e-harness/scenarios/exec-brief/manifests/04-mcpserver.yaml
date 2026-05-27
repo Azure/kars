@@ -5,7 +5,7 @@
 # Streamable HTTP. It is public, no-auth, and lets the analyst pull
 # structured docs for any indexed GitHub repo — perfect complement to
 # foundry_web_search for the platform deep-dives the prompt requires
-# (Kars, OpenAI Sandboxes, AKS Confidential Containers, …).
+# (kars, OpenAI Sandboxes, AKS Confidential Containers, …).
 #
 # Auth: this MCP is public and unauthenticated. For production, switch
 # `oauth.issuer` to your IDP and the controller will wire JWKS rotation

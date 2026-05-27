@@ -30,20 +30,20 @@ spec:
       kars.azure.com/sandbox: execbrief
   agtProfile:
     inline: |
-      # Kars AGT Governance Policy — agentmesh PolicyEngine format
+      # kars AGT Governance Policy — agentmesh PolicyEngine format
       #
       # Uses agentmesh PolicyEngine action-pattern matching (glob: shell:*, inference:*).
       # Rules are evaluated by priority (higher = first); first match wins.
       # Type: capability (allow/deny lists), approval, rate_limit.
       #
-      # Action format used by Kars router:
+      # Action format used by kars router:
       #   inference:chat_completions:<model>   inference:responses:<model>
       #   image_generation:<deployment>        spawn:create:<name>
       #   shell:<command>                      tool:<tool_name>
       #   mesh:send:<peer>   mesh:receive      admin:<operation>
       #
       # Infrastructure controls (network, filesystem, IMDS, content safety, tokens)
-      # are handled by Kars at kernel/router level — not duplicated here.
+      # are handled by kars at kernel/router level — not duplicated here.
 
       version: "1.0"
       agent: kars-default
@@ -167,7 +167,7 @@ spec:
           window: "60s"
           priority: 40
 
-      # NOT included — Kars handles these at infrastructure level:
+      # NOT included — kars handles these at infrastructure level:
       # ✗ network-policy (iptables + NetworkPolicy — kernel-level enforcement)
       # ✗ filesystem-scope (read-only rootfs — OS-level enforcement)
       # ✗ content-safety (Azure AI Content Safety — router-level enforcement)

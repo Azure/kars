@@ -1,6 +1,6 @@
-# Kars OpenClaw Sandbox Image
+# kars OpenClaw Sandbox Image
 # Slim overlay on top of kars-sandbox-base — adds only the router binary,
-# Kars plugin, vendored SDK, and entrypoint.
+# kars plugin, vendored SDK, and entrypoint.
 #
 # Base image (Dockerfile.base) contains: OS, Node.js, Python, Go tools, OpenClaw.
 # This image adds: router binary, plugin code, SDK patches, entrypoint.
@@ -20,7 +20,7 @@ ARG INFERENCE_ROUTER_IMAGE=karsacr.azurecr.io/kars-inference-router:latest
 FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 
 # ─── Runtime Adapter Builder (TypeScript → JavaScript) ───────────────────────
-# Builds runtimes/openclaw/ — the Kars runtime adapter for OpenClaw,
+# Builds runtimes/openclaw/ — the kars runtime adapter for OpenClaw,
 # loaded as a non-bundled OpenClaw plugin inside the sandbox pod.
 # Uses the base image (has Node.js) to avoid a separate Node.js download.
 
@@ -55,7 +55,7 @@ COPY sandbox-images/openclaw/proxy-bootstrap.js /usr/local/lib/proxy-bootstrap.j
 # Copy inference router from pre-built image
 COPY --from=router-bin /usr/local/bin/kars-inference-router /usr/local/bin/kars-inference-router
 
-# Copy Kars OpenClaw runtime adapter (built from source in cli-builder stage)
+# Copy kars OpenClaw runtime adapter (built from source in cli-builder stage)
 COPY --from=cli-builder /build/runtimes/openclaw/dist/ /opt/kars-plugin/
 COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/openclaw.plugin.json /opt/kars-plugin/
 COPY runtimes/openclaw/skills/ /opt/kars-plugin/skills/
@@ -140,7 +140,7 @@ RUN chmod -R a-w /opt/kars-plugin && \
 # mode, xai, mistral, groq, deepseek, ollama, bedrock, openrouter,
 # litellm, codex, copilot-proxy, github-copilot, vercel-ai-gateway, etc.)
 # because each one re-enables a slice of the pi-ai catalog enumeration
-# that wedges models.list for ~50s on first WebUI connect; Kars
+# that wedges models.list for ~50s on first WebUI connect; kars
 # routes all model traffic through the inference router instead.
 RUN OC=/usr/local/lib/node_modules/openclaw && \
     if [ -d "$OC/dist" ] && [ ! -d "$OC/dist-runtime" ]; then \
@@ -170,7 +170,7 @@ COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Labels
-LABEL org.opencontainers.image.title="Kars OpenClaw Sandbox" \
+LABEL org.opencontainers.image.title="kars OpenClaw Sandbox" \
       org.opencontainers.image.description="Hardened OpenClaw sandbox on Azure Linux 3" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.licenses="MIT" \

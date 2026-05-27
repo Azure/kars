@@ -1,10 +1,10 @@
 # Operations
 
-How to operate Kars in production. Each page is one operational concern, with the full runbook for that concern.
+How to operate kars in production. Each page is one operational concern, with the full runbook for that concern.
 
 | Topic | Read |
 |---|---|
-| **GitOps** — managing Kars with Flux / Argo CD instead of the CLI. | [`gitops.md`](gitops.md) |
+| **GitOps** — managing kars with Flux / Argo CD instead of the CLI. | [`gitops.md`](gitops.md) |
 | **Secret rotation** — rotating Foundry keys, ACR credentials, federated identities. | [`secret-rotation.md`](secret-rotation.md) |
 | **Image versioning** — `:latest` tag policy, pinning by digest, supply-chain considerations. | [`image-versioning.md`](image-versioning.md) |
 | **Helm packaging** — packaging the chart for offline / sovereign deployments. | [`helm-packaging.md`](helm-packaging.md) |

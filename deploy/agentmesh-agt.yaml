@@ -8,7 +8,7 @@
 # in the same namespace (agentmesh), so the inference router and the
 # sandbox plugin connect identically. The wire protocol (AgentMesh Wire
 # v1.0) is shared between vendored and upstream — confirmed in upstream
-# MeshClient header which calls out Kars compatibility features.
+# MeshClient header which calls out kars compatibility features.
 #
 # Image source: build from the AGT clone at
 #   /agent-governance-toolkit/agent-governance-python/agent-mesh/docker/Dockerfile

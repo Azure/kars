@@ -69,7 +69,7 @@ export function tierLabel(tier?: string): "free" | "paid" | "embed" | "unknown" 
 }
 
 /**
- * Returns true when the catalog model can be used by an Kars agent
+ * Returns true when the catalog model can be used by an kars agent
  * (must support tool/function calling).
  */
 export function isToolCapable(m: CatalogModel): boolean {
@@ -335,7 +335,7 @@ export function normalizeSecretValue(key: string, value: string): string {
  * keep the classic link as the simpler default.
  */
 export const PAT_CREATE_URL =
-  "https://github.com/settings/tokens/new?description=Kars%20CLI&scopes=read:user";
+  "https://github.com/settings/tokens/new?description=kars%20CLI&scopes=read:user";
 
 /**
  * Format a "rate-limit hit" hint for the user when chat fails on a tier

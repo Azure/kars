@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars Anthropic Claude Agent SDK runtime entrypoint.
+# kars Anthropic Claude Agent SDK runtime entrypoint.
 #
 # Pins the LLM endpoint to the router sidecar, points MCP-aware tools
 # at the platform MCP server, then invokes the in-pod adapter's

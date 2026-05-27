@@ -443,7 +443,7 @@ export async function loadBaseline(path: string): Promise<AttestationReport | nu
     typeof parsed.sandbox.specHash !== "string"
   ) {
     throw new Error(
-      `baseline ${path} is not a valid Kars attestation ` +
+      `baseline ${path} is not a valid kars attestation ` +
         `(expected apiVersion=kars.azure.com/v1alpha1-attest, kind=Attestation)`,
     );
   }
@@ -486,7 +486,7 @@ export function formatHuman(report: AttestationReport): string {
       ? chalk.red
       : chalk.yellow;
   const lines: string[] = [];
-  lines.push(blue(`\n  Kars · Attestation\n`));
+  lines.push(blue(`\n  kars · Attestation\n`));
   lines.push(`  ${chalk.bold("Sandbox:")}             ${report.sandbox.name}`);
   lines.push(`  ${chalk.bold("Namespace:")}           ${report.sandbox.namespace}`);
   lines.push(

@@ -4,7 +4,7 @@
 
 
 /**
- * Kars CLI — Enterprise-grade runtime for OpenClaw on Azure.
+ * kars CLI — Enterprise-grade runtime for OpenClaw on Azure.
  *
  * This is the primary entrypoint for the kars command.
  */

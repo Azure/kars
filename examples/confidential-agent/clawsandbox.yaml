@@ -1,4 +1,4 @@
-# Kars Example: Confidential Agent
+# kars Example: Confidential Agent
 # Uses Kata VM isolation for per-pod dedicated kernel.
 # Container escape attacks are trapped inside the VM, not the host.
 

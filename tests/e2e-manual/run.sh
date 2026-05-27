@@ -6,7 +6,7 @@
 # tests/e2e-manual/scenarios/.
 #
 # This is *not* part of CI. It is run by hand against a real cluster
-# with Kars already installed (Kind, AKS, or any conformant K8s).
+# with kars already installed (Kind, AKS, or any conformant K8s).
 #
 # Usage:
 #   bash tests/e2e-manual/run.sh                       # run every scenario
@@ -29,7 +29,7 @@ source "${LIB_DIR}/common.sh"
 # id           script                                 description
 declare -a SCENARIOS=(
     "runtime|runtime_matrix.sh|Bring up every supported runtime and assert Ready"
-    "crds|crd_admission.sh|Admission + status for the 7 untested Kars CRDs"
+    "crds|crd_admission.sh|Admission + status for the 7 untested kars CRDs"
     "inference|inference_smoke.sh|Agent → router → Foundry round-trip (per runtime)"
     "foundry-bing|foundry_bing.sh|Foundry Bing grounding tool through the router"
     "agt-mesh|agt_mesh.sh|AGT mesh: 1sub, 2sub-parallel, sibling, multiturn"
@@ -51,7 +51,7 @@ list_scenarios() {
 
 usage() {
     cat <<EOF
-Kars manual E2E runner.
+kars manual E2E runner.
 
 Usage: bash tests/e2e-manual/run.sh [options]
 
@@ -71,7 +71,7 @@ Environment overrides:
   KARS_E2E_RUNTIMES   Same as --runtime, env-var form.
 
 This runner does NOT create or destroy clusters; it assumes a working
-kubeconfig context with Kars already installed in the
+kubeconfig context with kars already installed in the
 'kars-system' namespace.
 EOF
 }

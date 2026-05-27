@@ -5,7 +5,7 @@
 //!
 //! When the controller reconciles a new KarsSandbox, it creates a federated
 //! credential mapping `system:serviceaccount:{namespace}:sandbox` → the
-//! Kars managed identity. This allows sub-agent pods to use Workload
+//! kars managed identity. This allows sub-agent pods to use Workload
 //! Identity for Foundry API access without manual `az` CLI intervention.
 
 use serde::Deserialize;

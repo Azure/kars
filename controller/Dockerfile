@@ -1,4 +1,4 @@
-# Kars Controller — multi-stage Rust build (Azure Linux)
+# kars Controller — multi-stage Rust build (Azure Linux)
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:35149ae8dd179684f969944f54a337c665a64e702486154eb44253fb39c2505b
 ARG VERSION=0.1.0
@@ -41,8 +41,8 @@ COPY --from=builder /build/target/release/kars-controller /usr/local/bin/kars-co
 
 USER controller
 
-LABEL org.opencontainers.image.title="Kars Controller" \
-      org.opencontainers.image.description="Kubernetes operator for Kars sandbox lifecycle" \
+LABEL org.opencontainers.image.title="kars Controller" \
+      org.opencontainers.image.description="Kubernetes operator for kars sandbox lifecycle" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT"

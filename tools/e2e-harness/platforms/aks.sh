@@ -4,7 +4,7 @@
 # platforms/aks.sh — AKS-targeting platform helper for the e2e-harness.
 #
 # Assumes the caller is already kubectl-logged into a cluster with the
-# Kars helm chart installed (i.e. CRDs present, controller running).
+# kars helm chart installed (i.e. CRDs present, controller running).
 # Use `kars up` to provision that cluster ahead of time; this file
 # does NOT touch the Azure subscription.
 #

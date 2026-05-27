@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Minimal BYO image meeting the Kars BYO contract:
+# Minimal BYO image meeting the kars BYO contract:
 #   - declares org.kars.runtime.contract = v1
 #   - runs as UID 1000
 #   - read-only root filesystem (writes in /sandbox + /tmp only)
@@ -11,7 +11,7 @@ FROM python:3.12-slim
 
 LABEL org.kars.runtime.contract="v1"
 LABEL org.opencontainers.image.title="byo-quickstart"
-LABEL org.opencontainers.image.description="Kars BYO runtime quickstart example"
+LABEL org.opencontainers.image.description="kars BYO runtime quickstart example"
 
 # Create the sandbox user that the controller will run as.
 RUN groupadd -g 1000 sandbox && \

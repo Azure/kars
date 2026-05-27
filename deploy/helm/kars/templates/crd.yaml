@@ -1,4 +1,4 @@
-# Kars KarsSandbox CRD
+# kars KarsSandbox CRD
 # This CRD defines the custom resource for managing OpenClaw sandboxes
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -56,7 +56,7 @@ spec:
                     / `pydanticAi` / `byo`)
                     is required; the others must be absent.
                     Replaces the legacy `spec.openclaw` field — the
-                    Kars v1alpha1 schema is in-place edited (no
+                    kars v1alpha1 schema is in-place edited (no
                     conversion webhook; pre-release simplification).
                     Declared placeholders (`semanticKernel`) parse but the
                     controller stamps

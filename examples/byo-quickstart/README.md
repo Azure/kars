@@ -1,9 +1,9 @@
 # BYO Runtime Quickstart
 
-A minimal **Bring-Your-Own** runtime for Kars. Demonstrates the
+A minimal **Bring-Your-Own** runtime for kars. Demonstrates the
 full round-trip:
 
-1. Author a small FastAPI app that calls the Kars inference
+1. Author a small FastAPI app that calls the kars inference
    router at `http://127.0.0.1:8443/openai/v1`.
 2. Package it into an OCI image that meets the
    [BYO contract](../../docs/byo-runtime-contract.md):
@@ -12,7 +12,7 @@ full round-trip:
    - Emits the `org.kars.runtime.contract` label.
    - All network I/O goes via the inference router on `127.0.0.1:8443`.
 3. Roll it out as a `KarsSandbox` of `runtime.kind=BYO`.
-4. Verify that Kars's policy / safety / token-budget pipeline
+4. Verify that kars's policy / safety / token-budget pipeline
    applies to the agent's LLM calls.
 
 > **Strict-mode admission** — when the controller is deployed with
@@ -24,7 +24,7 @@ full round-trip:
 
 ## Prerequisites
 
-- An Kars cluster (helm upgrade from `deploy/helm/kars`).
+- An kars cluster (helm upgrade from `deploy/helm/kars`).
 - An OCI registry the cluster can pull from (ACR, GHCR, …).
 - `docker` to build the image.
 
@@ -67,7 +67,7 @@ kubectl get karssandbox byo-quickstart -o jsonpath='{.status.conditions}'
 
 ```bash
 kubectl port-forward svc/byo-quickstart 8080:8080 -n kars-byo-quickstart
-curl localhost:8080/chat -d '{"prompt":"What does Kars do?"}' \
+curl localhost:8080/chat -d '{"prompt":"What does kars do?"}' \
   -H content-type:application/json
 ```
 

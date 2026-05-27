@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 """
-Kars in-pod adapter for Pydantic-AI.
+kars in-pod adapter for Pydantic-AI.
 
 Public API:
     bootstrap()                  — idempotent runtime init (called from entrypoint.sh)

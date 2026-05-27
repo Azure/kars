@@ -1,4 +1,4 @@
-# Kars Security Validation Report — 2026-03-23 snapshot
+# kars Security Validation Report — 2026-03-23 snapshot
 
 > **What this is.** A frozen-in-time evidence dump from one specific validation
 > run against an AKS cluster on 2026-03-23. The cluster, pod, and IP ranges
@@ -371,7 +371,7 @@ Auth mode: Workload Identity (AKS mode)
 
 ## Reproduction
 
-All evidence can be regenerated on any Kars cluster:
+All evidence can be regenerated on any kars cluster:
 
 ```bash
 # Layer 0: API server IP restrictions

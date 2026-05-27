@@ -1,8 +1,8 @@
-# Kars runtime adapter — Anthropic Claude Agent SDK
+# kars runtime adapter — Anthropic Claude Agent SDK
 
 `kars_runtime_anthropic` is the in-pod adapter that wires the
 [Anthropic Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python)
-into the Kars sandbox. It ships inside the
+into the kars sandbox. It ships inside the
 `sandbox-images/anthropic` container image and is invoked from
 `entrypoint.sh` before the user's agent code runs.
 

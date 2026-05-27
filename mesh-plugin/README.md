@@ -1,8 +1,8 @@
 # @kars/mesh — OpenClaw Federation Plugin
 
-Connect any OpenClaw agent to an Kars cluster for secure cloud offload and inter-agent communication via E2E encrypted AgentMesh.
+Connect any OpenClaw agent to an kars cluster for secure cloud offload and inter-agent communication via E2E encrypted AgentMesh.
 
-**No Docker, no Rust, no Kars CLI required on the client side.**
+**No Docker, no Rust, no kars CLI required on the client side.**
 
 ## What it does
 
@@ -17,7 +17,7 @@ Connect any OpenClaw agent to an Kars cluster for secure cloud offload and inter
 
 - **Node.js 20+** (22 recommended)
 - **OpenClaw** installed and working locally
-- An Kars cluster admin who can generate a pairing token for you
+- An kars cluster admin who can generate a pairing token for you
 
 ## Install
 
@@ -26,7 +26,7 @@ Connect any OpenClaw agent to an Kars cluster for secure cloud offload and inter
 npm install -g @kars/mesh
 
 # From source
-git clone https://github.com/Kars/kars.git
+git clone https://github.com/kars/kars.git
 cd kars/mesh-plugin
 npm install && npm run build
 ```
@@ -71,10 +71,10 @@ Or if installed globally via npm:
 
 ### 1. Get a pairing token
 
-Ask your Kars cluster admin to generate one:
+Ask your kars cluster admin to generate one:
 
 ```bash
-# On the Kars cluster (admin runs this)
+# On the kars cluster (admin runs this)
 kars pair generate --name alice-laptop --budget 500000 --expires 30d
 ```
 
@@ -84,7 +84,7 @@ They'll give you a token like: `azcp_1_eyJjb250cm9sbGVyX2FtaWQiOi...`
 
 In your OpenClaw agent session, say:
 
-> "Pair with Kars using this token: azcp_1_eyJ..."
+> "Pair with kars using this token: azcp_1_eyJ..."
 
 Or directly invoke the tool:
 
@@ -114,7 +114,7 @@ The plugin automatically receives status updates and the final result via the me
 
 | Tool | Description |
 |------|-------------|
-| `mesh_pair` | One-time pairing with an Kars cluster |
+| `mesh_pair` | One-time pairing with an kars cluster |
 | `cloud_offload` | Delegate a task to a governed cloud sandbox |
 | `offload_status` | Check progress of an active offload |
 | `mesh_send` | Send an E2E encrypted message to another agent |
@@ -125,7 +125,7 @@ The plugin automatically receives status updates and the final result via the me
 
 ```
 ┌─────────────────┐     WebSocket      ┌──────────────┐     K8s API     ┌──────────────────┐
-│  Your OpenClaw   │◄──── AgentMesh ───►│  Kars   │───────────────►│  Offload Sandbox │
+│  Your OpenClaw   │◄──── AgentMesh ───►│  kars   │───────────────►│  Offload Sandbox │
 │  + mesh plugin   │     Relay (E2E)    │  Controller  │                │  (AKS pod)       │
 └─────────────────┘                     └──────────────┘                └──────────────────┘
    ~/.kars/                          K8s Secret                     OFFLOAD_MODE=true
@@ -137,7 +137,7 @@ The plugin automatically receives status updates and the final result via the me
 
 2. **Offload**: You send an `offload_request`. The controller validates your pairing/budget, creates a KarsSandbox CRD → pod runs your task → controller watches pod completion → reads result from pod logs → sends `offload_done` back to you via the relay.
 
-3. **Security**: All relay messages are opaque base64 payloads. The pairing token is never stored (only its SHA-256 hash). Your Ed25519 identity provides authentication. The sandbox runs with full Kars security (seccomp, NetworkPolicy, read-only rootfs, Content Safety).
+3. **Security**: All relay messages are opaque base64 payloads. The pairing token is never stored (only its SHA-256 hash). Your Ed25519 identity provides authentication. The sandbox runs with full kars security (seccomp, NetworkPolicy, read-only rootfs, Content Safety).
 
 ## Files created
 
@@ -149,7 +149,7 @@ The plugin automatically receives status updates and the final result via the me
 ## NemoClaw / OpenShell sandbox setup
 
 NemoClaw sandboxes enforce deny-by-default networking. The plugin needs
-an egress policy preset to reach the Kars relay (WebSocket) and
+an egress policy preset to reach the kars relay (WebSocket) and
 registry (REST). A ready-made preset is included in `nemoclaw/policies/presets/`.
 
 ### 1. Copy the preset into your NemoClaw blueprint
@@ -209,7 +209,7 @@ approval.
 
 Inside the sandbox agent session:
 
-> "Pair with Kars using this token: azcp_1_eyJ..."
+> "Pair with kars using this token: azcp_1_eyJ..."
 
 ### How the proxy tunnel works
 
@@ -256,12 +256,12 @@ Public hostnames don't need `allowed_ips` (no SSRF override required).
 2. Install this plugin (see [Install](#install))
 3. Register the plugin in your OpenClaw config
 4. Start your agent: `openclaw agent --local`
-5. Pair with your Kars cluster (get token from admin)
+5. Pair with your kars cluster (get token from admin)
 6. Try: "Offload a task to analyze a simple math problem"
 
 ## Cluster admin setup
 
-To enable federation on your Kars cluster:
+To enable federation on your kars cluster:
 
 ```yaml
 # In your Helm values (deploy/helm/kars/values.yaml)

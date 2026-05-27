@@ -1,8 +1,8 @@
-# Kars runtime adapter — OpenAI Agents (Python)
+# kars runtime adapter — OpenAI Agents (Python)
 
 `kars_runtime_openai_agents` is the in-pod adapter that wires the
 [OpenAI Agents Python SDK](https://github.com/openai/openai-agents-python)
-into the Kars sandbox. It ships inside the
+into the kars sandbox. It ships inside the
 `sandbox-images/openai-agents` container image and is invoked from
 `entrypoint.sh` before the user's agent code runs.
 
@@ -31,7 +31,7 @@ into the Kars sandbox. It ships inside the
    streamable-HTTP MCP.
 6. **Router base URL** — sets `OPENAI_BASE_URL` to the local router so
    the vanilla `openai` SDK (used by `openai-agents`) routes everything
-   through the Kars governance gate.
+   through the kars governance gate.
 
 `bootstrap()` is idempotent: if `__KARS_RUNTIME_INITIALIZED__` is
 already set in the environment it is a no-op.

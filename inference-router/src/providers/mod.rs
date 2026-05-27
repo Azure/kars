@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Provider contracts for Kars.
+//! Provider contracts for kars.
 //!
 //! ## Router-side seams (three real ones)
 //!

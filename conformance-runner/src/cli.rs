@@ -10,7 +10,7 @@ use std::time::Duration;
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "kars-conformance-runner",
-    about = "Replay an EvalCorpus against a live Kars inference router and emit a RunReport.",
+    about = "Replay an EvalCorpus against a live kars inference router and emit a RunReport.",
     long_about = None,
 )]
 pub struct Cli {

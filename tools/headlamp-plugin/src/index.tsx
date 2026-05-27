@@ -2,20 +2,20 @@
 // Licensed under the MIT License.
 
 /**
- * Kars plugin for the Headlamp dashboard.
+ * kars plugin for the Headlamp dashboard.
  *
- * Targets the operator/SRE managing an Kars cluster. Provides:
+ * Targets the operator/SRE managing an kars cluster. Provides:
  *
  *   1. An **Overview** dashboard with sandbox phase counts, channel
  *      footprint, egress posture summary, and a live recent-sandbox
  *      table — the single page a new shift looks at to triage health.
- *   2. List + detail views for each of the 9 Kars CRDs. The
+ *   2. List + detail views for each of the 9 kars CRDs. The
  *      KarsSandbox detail screen is enhanced with cross-resource links
  *      (inference policy, tool policy, memory) plus a typed Network
  *      Policy card so an operator can see egress posture without
  *      hunting through YAML.
  *
- * Why this matters for Kars specifically: agents have a wide blast
+ * Why this matters for kars specifically: agents have a wide blast
  * radius (sandbox pod, mesh DID, channels, egress, token budget, tool
  * policy). Surfacing those facets in one place reduces the
  * mean-time-to-triage when a customer reports "the agent isn't
@@ -94,7 +94,7 @@ const KarsSandboxClass = CRD_CLASSES.karssandboxes!;
 registerSidebarEntry({
   parent: null,
   name: "kars",
-  label: "Kars",
+  label: "kars",
   icon: "mdi:robot-outline",
   url: "/kars",
 });
@@ -502,7 +502,7 @@ interface OverviewMetrics {
   totalRuntime: Record<string, number>;
 }
 
-// Map a credentials-secret data key to a channel name. Kars stores
+// Map a credentials-secret data key to a channel name. kars stores
 // channel tokens in <sandbox>-credentials with conventional keys like
 // TELEGRAM_BOT_TOKEN / SLACK_BOT_TOKEN. Detecting from secrets is the
 // most reliable signal — the openclaw runtime spec itself doesn't
@@ -637,7 +637,7 @@ function Overview() {
   };
   return (
     <>
-      <SectionBox title="Kars — Operator Overview">
+      <SectionBox title="kars — Operator Overview">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "1rem", padding: "1rem 0" }}>
           <Stat label="Total Sandboxes" value={total} />
           <Stat label="Ready" value={metrics.sandboxesByPhase.Ready ?? 0} tone="success" />
@@ -858,12 +858,12 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
   });
 
   return (
-    <SectionBox title={`Kars — ${crd.label}`}>
+    <SectionBox title={`kars — ${crd.label}`}>
       {items === null ? (
         <p style={{ padding: "1rem" }}>Loading…</p>
       ) : items.length === 0 ? (
         <p style={{ padding: "1rem" }}>
-          No {crd.label.toLowerCase()} found. Create one with the Kars CLI
+          No {crd.label.toLowerCase()} found. Create one with the kars CLI
           or by applying a CRD manifest.
         </p>
       ) : (

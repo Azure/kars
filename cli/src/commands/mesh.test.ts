@@ -287,7 +287,7 @@ describe("meshCommand", () => {
     expect(setup).toBeDefined();
     const displayName = setup.options.find((o) => o.long === "--display-name");
     expect(displayName).toBeDefined();
-    expect(displayName!.defaultValue).toBe("Kars AgentMesh");
+    expect(displayName!.defaultValue).toBe("kars AgentMesh");
     const dryRun = setup.options.find((o) => o.long === "--dry-run");
     expect(dryRun).toBeDefined();
   });

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Kars Inference Router — library crate.
+//! kars Inference Router — library crate.
 //!
 //! Re-exports modules for integration tests. The binary entry point is `main.rs`.
 #![allow(

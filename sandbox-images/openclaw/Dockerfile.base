@@ -1,4 +1,4 @@
-# Kars OpenClaw Sandbox — Base Image
+# kars OpenClaw Sandbox — Base Image
 # Contains all heavy, rarely-changing dependencies: OS packages, Node.js,
 # Python, Go CLI tools, OpenClaw framework, extension symlinks, and user setup.
 #
@@ -66,7 +66,7 @@ RUN TOPMOD="/usr/local/lib/node_modules/openclaw/node_modules" && \
 RUN cd /usr/local/lib/node_modules && npm audit fix --force 2>/dev/null || true
 
 # Pre-install popular ClawHub skills at build time (VirusTotal-scanned).
-# Kars's runtime security (egress guard, Content Safety, read-only rootfs)
+# kars's runtime security (egress guard, Content Safety, read-only rootfs)
 # provides defense-in-depth even if a skill is compromised.
 RUN openclaw skills install summarize 2>/dev/null || true && \
     openclaw skills install browser 2>/dev/null || true && \
@@ -262,8 +262,8 @@ RUN mkdir -p /sandbox /tmp && \
     chown -R sandbox:sandbox /sandbox /tmp
 
 # Labels
-LABEL org.opencontainers.image.title="Kars OpenClaw Sandbox Base" \
-      org.opencontainers.image.description="Heavy base layer for Kars sandbox — OS, runtimes, tools, OpenClaw" \
+LABEL org.opencontainers.image.title="kars OpenClaw Sandbox Base" \
+      org.opencontainers.image.description="Heavy base layer for kars sandbox — OS, runtimes, tools, OpenClaw" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/Azure/kars" \

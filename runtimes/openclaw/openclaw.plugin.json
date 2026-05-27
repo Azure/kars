@@ -1,6 +1,6 @@
 {
   "id": "kars",
-  "name": "Kars",
+  "name": "kars",
   "version": "0.2.0",
   "description": "Secure AI agent runtime on Azure — sandboxed OpenClaw with Azure AI Foundry and Rust inference router",
   "activation": {

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // ci:loc-ok — Phase 2 multi-CRD reconciler / generated module; intentional. Tracked in plan.md §S15 follow-up.
-// Kars AGT tool registrations — extracted from plugin.ts in S15.f.9.
+// kars AGT tool registrations — extracted from plugin.ts in S15.f.9.
 //
 // Stateful tools that interact with the AGT mesh (Signal Protocol session
 // over WebSocket relay), sandbox lifecycle (spawn/destroy/list/status), and
@@ -175,7 +175,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   }
   void probeSubAgentAlive;
 
-  // ── Register Kars agent tools (spawn, mesh, status, destroy) ────
+  // ── Register kars agent tools (spawn, mesh, status, destroy) ────
   // These are first-class tools the LLM can call directly.
   // Registered as required tools (always available, no tools.allow needed).
   // API: execute(_id, params) → { content: [{ type: "text", text }] }
@@ -1974,9 +1974,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     },
   });
 
-  if (!bannerAlreadyPrinted) log.info(`Kars handoff tools registered (registry_mode=${registryMode}): kars_handoff_request, kars_handoff_confirm`);
+  if (!bannerAlreadyPrinted) log.info(`kars handoff tools registered (registry_mode=${registryMode}): kars_handoff_request, kars_handoff_confirm`);
 
   } else {
-    if (!bannerAlreadyPrinted) log.info(`Kars handoff mutation tools skipped (registry_mode=${registryMode}) — only kars_handoff_status available`);
+    if (!bannerAlreadyPrinted) log.info(`kars handoff mutation tools skipped (registry_mode=${registryMode}) — only kars_handoff_status available`);
   }
 }

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * Tests for Kars OpenClaw Plugin (plugin.ts)
+ * Tests for kars OpenClaw Plugin (plugin.ts)
  *
  * Strategy: Since most functions are module-private, we test through:
  * 1. The plugin's `register()` method — captures registered tools and tests their execute()
@@ -25,7 +25,7 @@ function createMockApi(pluginConfig: Record<string, unknown> = {}) {
 
   const api = {
     id: "kars",
-    name: "Kars",
+    name: "kars",
     version: "0.1.0",
     config: {},
     pluginConfig,
@@ -72,7 +72,7 @@ describe("azureClawPlugin object", () => {
 
   it("has correct id and name", () => {
     expect(plugin.id).toBe("kars");
-    expect(plugin.name).toBe("Kars");
+    expect(plugin.name).toBe("kars");
   });
 
   it("has a description", () => {
@@ -183,7 +183,7 @@ describe("plugin.register() — tool definitions", () => {
   });
 
   it("logs a startup banner", () => {
-    const hasBanner = logMessages.some((m) => m.includes("Kars") && m.includes("Secure"));
+    const hasBanner = logMessages.some((m) => m.includes("kars") && m.includes("Secure"));
     expect(hasBanner).toBe(true);
   });
 });

@@ -286,7 +286,7 @@ async fn handle_connect(
         send_response(
             &mut stream,
             403,
-            "host not in allowlist (Kars egress policy)",
+            "host not in allowlist (kars egress policy)",
         )
         .await?;
         return Ok(());
@@ -373,7 +373,7 @@ async fn handle_http(
         send_response(
             &mut stream,
             403,
-            "host not in allowlist (Kars egress policy)",
+            "host not in allowlist (kars egress policy)",
         )
         .await?;
         return Ok(());

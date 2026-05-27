@@ -1,7 +1,7 @@
 {
   "name": "@kars/runtime-langgraph-ts",
   "version": "0.1.0",
-  "description": "Kars in-pod adapter for LangGraph (TypeScript / Node.js) — AAD shim, OTel auto-init, AgentMesh bridge, and router-managed LLM credentials out of the box.",
+  "description": "kars in-pod adapter for LangGraph (TypeScript / Node.js) — AAD shim, OTel auto-init, AgentMesh bridge, and router-managed LLM credentials out of the box.",
   "license": "MIT",
   "author": "Microsoft Corporation <kars@microsoft.com>",
   "type": "commonjs",

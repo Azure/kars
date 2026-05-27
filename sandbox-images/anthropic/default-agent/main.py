@@ -1,5 +1,5 @@
 """
-Kars default agent for the Anthropic Claude runtime.
+kars default agent for the Anthropic Claude runtime.
 
 The router exposes `/anthropic/v1/messages` — a translation route that
 accepts native Anthropic Messages-API requests and forwards them to
@@ -23,7 +23,7 @@ import time
 from kars_runtime_anthropic.runtime import bootstrap
 bootstrap()
 
-BANNER = "🔒 Kars — Anthropic Claude (default agent)"
+BANNER = "🔒 kars — Anthropic Claude (default agent)"
 
 
 def _env(name: str, default: str = "(unset)") -> str:
@@ -65,7 +65,7 @@ def _smoke_test() -> None:
         msg = client.messages.create(
             model=model,
             max_tokens=128,
-            system="You are a default smoke-test agent embedded in an Kars sandbox.",
+            system="You are a default smoke-test agent embedded in an kars sandbox.",
             messages=[
                 {"role": "user", "content": "Reply with exactly one short sentence confirming you are alive."}
             ],

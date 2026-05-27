@@ -1,6 +1,6 @@
 # CRD trust model
 
-This page is the threat model and proof for Kars's signed-CRD surface. The schema and per-CRD details are in **[CRD reference → Signing and verification](../api/crd-reference.md#signing-and-verification)**. This page answers three questions an SRE or security reviewer will ask:
+This page is the threat model and proof for kars's signed-CRD surface. The schema and per-CRD details are in **[CRD reference → Signing and verification](../api/crd-reference.md#signing-and-verification)**. This page answers three questions an SRE or security reviewer will ask:
 
 1. **What does the signing actually defend against?**
 2. **How do I prove, on a live cluster, that the runtime is enforcing what the YAML says?**

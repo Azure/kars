@@ -82,7 +82,7 @@ describe("S14 panels — empty cluster (no panic, no false data)", () => {
 
   it("renderDashboard --panels=triage on empty cluster shows header + 'no alerts' only", () => {
     const out = renderDashboard(empty, { panels: "triage" });
-    expect(out).toContain("Kars Operator");
+    expect(out).toContain("kars Operator");
     expect(out).toContain("0 agents, ");
     expect(out).toContain("✓ No alerts");
     expect(out).not.toContain("KarsSandbox");

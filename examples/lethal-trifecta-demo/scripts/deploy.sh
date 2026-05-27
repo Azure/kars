@@ -4,7 +4,7 @@
 set -euo pipefail
 
 # Deploy both scenarios side-by-side.
-# Prereq: an Kars cluster (kars up) with kubectl context
+# Prereq: an kars cluster (kars up) with kubectl context
 # pointing at it, and a Foundry deployment configured.
 
 cd "$(dirname "$0")/.."
@@ -31,7 +31,7 @@ kubectl apply -f scenarios/03-bait-server.yaml
 
 echo "▸ waiting for pods..."
 kubectl -n naked-claw                wait --for=condition=available --timeout=120s deploy/realestate-agent deploy/bait-server
-# The KarsSandbox CR is created in `kars-claw`, but the Kars
+# The KarsSandbox CR is created in `kars-claw`, but the kars
 # controller materialises the sandbox deployment in its own per-sandbox
 # namespace `kars-<sandbox-name>` (here: `kars-realestate-agent`).
 # The bait server is a plain Deployment that stays in `kars-claw`.

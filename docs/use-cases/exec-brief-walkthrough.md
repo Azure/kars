@@ -1,6 +1,6 @@
 # Exec-brief walkthrough — a four-agent showcase
 
-This page walks a real, reproducible end-to-end scenario: **one parent agent orchestrates three sub-agents to produce a two-page executive brief on the 2026 state of agentic AI runtimes.** It exists for one reason: when somebody asks "what does Kars actually do, and what is it enforcing for me?", this is the answer you can point at, run, and observe.
+This page walks a real, reproducible end-to-end scenario: **one parent agent orchestrates three sub-agents to produce a two-page executive brief on the 2026 state of agentic AI runtimes.** It exists for one reason: when somebody asks "what does kars actually do, and what is it enforcing for me?", this is the answer you can point at, run, and observe.
 
 The scenario lives at [`tools/e2e-harness/scenarios/exec-brief/`](https://github.com/Azure/kars/tree/main/tools/e2e-harness/scenarios/exec-brief). It currently runs on AKS. The platform matrix below is honest about what works where today.
 
@@ -86,7 +86,7 @@ Each `mesh_send` and `mesh_transfer_file` is an X3DH KNOCK + Double-Ratchet mess
 
 ## Per-layer proof
 
-The point of the showcase is not "look, the agents talked to each other". The point is: **every claim Kars makes about defence in depth shows up as an artefact you can read.** For each enforcement layer below, the proof is a concrete command you run and what you see.
+The point of the showcase is not "look, the agents talked to each other". The point is: **every claim kars makes about defence in depth shows up as an artefact you can read.** For each enforcement layer below, the proof is a concrete command you run and what you see.
 
 ### 1. Signed CRDs — what's enforced is what's signed
 
@@ -419,15 +419,15 @@ The reproducible end-to-end harness now runs on **AKS** and **local-k8s** (kind 
 
 ## What you can see while it runs (Headlamp + Grafana)
 
-The four sub-agents and their inter-agent traffic are observable end-to-end without any extra setup on local-k8s — `kars dev` installs Prometheus + Grafana + the Kars Headlamp plugin on first run.
+The four sub-agents and their inter-agent traffic are observable end-to-end without any extra setup on local-k8s — `kars dev` installs Prometheus + Grafana + the kars Headlamp plugin on first run.
 
 | View | URL (after `kars dev`) | Shows |
 |---|---|---|
-| Headlamp → Kars → **Overview** | `http://localhost:4466/` | Cluster-wide rollup: sandbox count, aggregate token budget vs spend, AGT decisions over time. |
-| Headlamp → Kars → **Mesh Topology** | same | Parent → sub-agent hierarchy as a live SVG. Edge thickness ∝ mesh-message rate; two-direction animated pulses (yellow=sent, light-blue=received) show real KNOCK + X3DH + `mesh_send` + heartbeat traffic; node labels show lifetime `↑sent ↓recv` counts. Controllers are decorated with `N children · M trust` from the AGT trust graph. |
+| Headlamp → kars → **Overview** | `http://localhost:4466/` | Cluster-wide rollup: sandbox count, aggregate token budget vs spend, AGT decisions over time. |
+| Headlamp → kars → **Mesh Topology** | same | Parent → sub-agent hierarchy as a live SVG. Edge thickness ∝ mesh-message rate; two-direction animated pulses (yellow=sent, light-blue=received) show real KNOCK + X3DH + `mesh_send` + heartbeat traffic; node labels show lifetime `↑sent ↓recv` counts. Controllers are decorated with `N children · M trust` from the AGT trust graph. |
 | Headlamp → any **KarsSandbox** | same | Per-sandbox detail page with the embedded Grafana ops dashboard filtered to that sandbox, plus a Token Budget card backed by `kars_tokens_total` and `TOKEN_BUDGET_DAILY`. Dark-mode aware. |
-| Grafana — "Kars — Agent Fleet Operations" | `http://localhost:3000/d/kars-ops` | Enterprise NOC layout: fleet health (req/sec, error rate, P95, 24h tokens, est. cost), token & cost economy, latency SLO heatmap, AGT decisions over time with color-coded allow/deny/approval/rate-limit, bundle health matrix. |
-| Grafana — "Kars — Sandbox Fleet Overview" | `http://localhost:3000/d/kars-fleet` | Simpler 10-panel quick fleet view. |
+| Grafana — "kars — Agent Fleet Operations" | `http://localhost:3000/d/kars-ops` | Enterprise NOC layout: fleet health (req/sec, error rate, P95, 24h tokens, est. cost), token & cost economy, latency SLO heatmap, AGT decisions over time with color-coded allow/deny/approval/rate-limit, bundle health matrix. |
+| Grafana — "kars — Sandbox Fleet Overview" | `http://localhost:3000/d/kars-fleet` | Simpler 10-panel quick fleet view. |
 | Prometheus | `http://localhost:19091/` | Ad-hoc PromQL — `kars_tokens_total`, `kars_mesh_messages_{sent,received}_total`, `kars_agt_policy_evaluations_total{decision}`, `agentmesh_relay_*`. |
 
 The mesh traffic counters (`kars_mesh_messages_sent_total` / `kars_mesh_messages_received_total`) are emitted by the router and count KNOCK + X3DH + `mesh_send` + 30s heartbeats. They exclude WS Ping/Pong by design — see [`.github/skills/agt-e2e-encryption/SKILL.md`](../../.github/skills/agt-e2e-encryption/SKILL.md) for the full counter semantics. On AKS the same metrics flow via Azure Monitor managed Prometheus (wiring pending).
@@ -445,7 +445,7 @@ cd tools/e2e-harness
 SCENARIO=exec-brief PLATFORM=local-k8s ./run.sh
 ```
 
-For **AKS**, prerequisites: an AKS cluster with Kars installed (`make install`), a Telegram bot token, and an Azure AI Foundry project with web-search + code-execute + image-generation enabled. Then:
+For **AKS**, prerequisites: an AKS cluster with kars installed (`make install`), a Telegram bot token, and an Azure AI Foundry project with web-search + code-execute + image-generation enabled. Then:
 
 ```bash
 cd tools/e2e-harness
@@ -460,5 +460,5 @@ A passing run looks like `9/9 PASS` on stdout and `verify.json` with each check'
 * **[CRD reference](../api/crd-reference.md)** — the schema for every CRD this scenario uses.
 * **[CRD trust model](../security/crd-trust-model.md)** — the threat model and verification proof for the signed CRDs above.
 * **[Architecture](../architecture.md)** — the prose explanation of how the controller, router, and runtime fit together.
-* **[AGT boundary](../architecture/agt-boundary.md)** — what the runtime delegates to the Agent Governance Toolkit and what stays in Kars.
+* **[AGT boundary](../architecture/agt-boundary.md)** — what the runtime delegates to the Agent Governance Toolkit and what stays in kars.
 * **[Security overview](../security.md)** — the catalog of layered controls this scenario exercises.

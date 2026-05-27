@@ -11,7 +11,7 @@ build the graph.
 |---|---|
 | **LLM provider routing** | Pins `OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, `ANTHROPIC_BASE_URL` to the inference-router sidecar at bootstrap so LangChain model factories cannot reach the public endpoints directly. |
 | **API keys** | Each provider API-key env (`OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) is set to the literal `router-managed`. The router strips this header on egress and substitutes the real AAD-attested credential. **No real provider key ever lives in the sandbox pod.** |
-| **AAD broker** | `aad.py` re-exposes the IMDS / Workload Identity broker used by every other Kars runtime. |
+| **AAD broker** | `aad.py` re-exposes the IMDS / Workload Identity broker used by every other kars runtime. |
 | **AgentMesh** | `mesh.py` wires the `a2a_agentmesh` SDK to the in-cluster relay so LangGraph nodes can `spawn` / `handoff` to peer agents under AGT trust gating. |
 | **OTel** | `otel.py` auto-initialises tracing/metrics with `service.name=kars-runtime-langgraph`. |
 

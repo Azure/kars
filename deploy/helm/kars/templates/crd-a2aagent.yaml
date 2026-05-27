@@ -1,4 +1,4 @@
-# Kars A2AAgent CRD
+# kars A2AAgent CRD
 #
 # DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
 # schema in `controller/src/a2a_agent.rs` plus the CEL rules in
