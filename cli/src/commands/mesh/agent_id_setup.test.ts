@@ -166,6 +166,29 @@ describe("checkAgentIdRole", () => {
     expect(r.inconclusive).toBe(true);
     expect(r.message).toContain("Could not enumerate");
   });
+
+  it("emits the az-login workaround when AADSTS530084 (CA block) is detected", async () => {
+    mockedExeca.mockRejectedValueOnce(
+      new Error(
+        "ERROR: AADSTS530084: Access has been blocked by conditional access token protection policy configured by this organization.",
+      ),
+    );
+    const r = await checkAgentIdRole();
+    expect(r.hasRole).toBe(false);
+    expect(r.inconclusive).toBe(true);
+    expect(r.message).toContain("AADSTS530084");
+    expect(r.message).toContain("az login --scope https://graph.microsoft.com//.default");
+  });
+
+  it("emits the az-login workaround when AADSTS65001/65002 (missing consent) is detected", async () => {
+    mockedExeca.mockRejectedValueOnce(
+      new Error("ERROR: AADSTS65001: The user or administrator has not consented..."),
+    );
+    const r = await checkAgentIdRole();
+    expect(r.hasRole).toBe(false);
+    expect(r.inconclusive).toBe(true);
+    expect(r.message).toContain("az login --scope https://graph.microsoft.com//.default");
+  });
 });
 
 describe("detectExistingBlueprint", () => {

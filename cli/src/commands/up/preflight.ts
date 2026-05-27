@@ -49,6 +49,9 @@ export interface UpOptionsForPreflight {
   dryRun: boolean;
   skipInfra: boolean;
   skipPreflight: boolean;
+  /** When `true`, ignore any cached deployment context so the user is
+   * re-prompted for every choice. Same flag that disables resume-state. */
+  fromScratch?: boolean;
   [key: string]: unknown;
 }
 
@@ -78,7 +81,14 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   // ── Pre-fill from cached deployment context ────────────────────
   // If a previous `kars up` saved context, use those values as
   // defaults so the user isn't re-prompted for everything.
-  const cachedCtx = loadContext();
+  //
+  // `--from-scratch` explicitly opts out: the user wants every choice
+  // re-prompted (cluster name, region, RG, Foundry endpoint, ...) as
+  // if this were a brand-new tenant. Without this gate, the cached
+  // values silently leak through and surprise the user when (e.g.)
+  // their "fresh" deployment lands in the same region/RG as the old
+  // one.
+  const cachedCtx = options.fromScratch ? null : loadContext();
   if (cachedCtx && cachedCtx.region) {
     console.log(chalk.dim(`\n  Using cached deployment context (${cachedCtx.region}/${cachedCtx.resourceGroup || "default"}). Pass explicit flags to override.\n`));
     const hasFlag = (f: string) => process.argv.includes(f);
@@ -90,6 +100,8 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
       options.openaiEndpoint = options.openaiEndpoint || cachedCtx.foundryEndpoint;
     if (cachedCtx.foundryProjectEndpoint && !hasFlag("--foundry-endpoint"))
       options.foundryEndpoint = options.foundryEndpoint || cachedCtx.foundryProjectEndpoint;
+  } else if (options.fromScratch) {
+    console.log(chalk.dim(`\n  --from-scratch: ignoring any cached deployment context — all choices will be re-prompted.\n`));
   }
 
   // ══════════════════════════════════════════════════════════════

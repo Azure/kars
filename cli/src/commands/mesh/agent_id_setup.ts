@@ -579,6 +579,34 @@ export async function checkAgentIdRole(): Promise<AgentIdRoleCheckResult> {
     );
   } catch (e) {
     const msg = (e as Error).message;
+    // AADSTS530084 = Conditional Access token-binding block. Common in
+    // Microsoft-corporate tenants where the Azure CLI's first-party
+    // token cache hasn't been refreshed for Microsoft Graph. The
+    // mitigation is documented; surface it concretely instead of
+    // generic "could not enumerate".
+    if (msg.includes("AADSTS530084")) {
+      return {
+        hasRole: false,
+        inconclusive: true,
+        message:
+          "Azure CLI token is Conditional-Access-blocked for Microsoft Graph (AADSTS530084). " +
+          "Run: az login --scope https://graph.microsoft.com//.default — then retry. " +
+          "See docs/agent-identity.md#az-cli-ca-block.",
+        detectedRoles: [],
+      };
+    }
+    // AADSTS65001 / AADSTS65002 = missing first-party app consent for
+    // Graph. Mitigation is the same `az login --scope` retry.
+    if (msg.includes("AADSTS65001") || msg.includes("AADSTS65002")) {
+      return {
+        hasRole: false,
+        inconclusive: true,
+        message:
+          "Azure CLI lacks Microsoft Graph consent for this session. " +
+          "Run: az login --scope https://graph.microsoft.com//.default — then retry.",
+        detectedRoles: [],
+      };
+    }
     return {
       hasRole: false,
       inconclusive: true,

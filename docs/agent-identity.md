@@ -243,6 +243,28 @@ continues in anonymous tier. Activate the role through PIM and re-run
 `kars up` — the auth provisioning step is idempotent and only runs if
 `KarsAuthConfig/default` does not already exist.
 
+### `az cli ca block` — "Could not enumerate directory roles (AADSTS530084)" {#az-cli-ca-block}
+
+The Azure CLI token cache is being blocked by Conditional Access
+token-binding policy when calling Microsoft Graph. This is the most
+common failure mode in Microsoft-corporate (and similarly-policed
+enterprise) tenants — the CLI's first-party app needs explicit
+Graph-scope consent for each session.
+
+**Mitigation** (one-liner, refreshes the token cache):
+
+```bash
+az login --scope https://graph.microsoft.com//.default
+```
+
+Then re-run `kars up`. The preflight check surfaces the workaround
+inline when it detects this specific error code.
+
+If the `az login --scope` call itself fails with the same error, your
+account's Graph access is blocked at the tenant level — see
+[`docs/permissions.md`](permissions.md#tenant-level-entra-id-considerations)
+for the IDAdmin ticket procedure.
+
 ### Foundry call returns 401 with the agent identity in the error
 
 The role assignment hasn't propagated yet. Wait 30 seconds and retry.
