@@ -40,7 +40,7 @@
 //!    (delegated user auth), provisions the controller MI, and writes
 //!    this CR.
 //! 2. The reconciler materialises a sibling **ConfigMap** in the
-//!    `azureclaw-system` namespace (`kars-auth-sidecar-env`) with the
+//!    `kars-system` namespace (`kars-auth-sidecar-env`) with the
 //!    flat environment variables the Entra SDK sidecar consumes. Pods
 //!    `envFrom` that ConfigMap rather than reading the CR directly.
 //! 3. Sandbox reconciler reads this CR (or the materialised ConfigMap)

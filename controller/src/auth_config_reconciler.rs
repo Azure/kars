@@ -58,7 +58,7 @@ pub const SIDECAR_ENV_CONFIGMAP: &str = "kars-auth-sidecar-env";
 /// the controller mirrors it into every sandbox namespace at
 /// sandbox-reconcile time. We use the canonical system namespace as
 /// the source-of-truth copy.
-pub const AUTH_SYSTEM_NAMESPACE: &str = "azureclaw-system";
+pub const AUTH_SYSTEM_NAMESPACE: &str = "kars-system";
 
 /// Annotation key on the ConfigMap recording the spec hash used to
 /// generate it. Lets downstream reconcilers detect drift without
