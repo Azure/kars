@@ -42,6 +42,11 @@ export function upCommand(): Command {
     // ── Foundry / Azure OpenAI ────────────────────────────────────────
     .option("--foundry-endpoint <url>", "Existing Azure AI Foundry project endpoint (services.ai.azure.com)")
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
+    // ── Entra Agent ID (auto-provisioned by `kars up`) ────────────────
+    .option(
+      "--service-tree <guid>",
+      "ServiceTree / service-management-reference GUID. Required only in Microsoft-style enterprise tenants when creating Entra blueprints. Falls back to KARS_SERVICE_TREE env var.",
+    )
     // ── Mesh federation ───────────────────────────────────────────────
     .option("--mesh-peer", "Enable mesh federation peer (default: on; use --no-mesh-peer to disable)", true)
     .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
@@ -877,6 +882,64 @@ Auto-resume:
         const globalRegistryUrl = meshResult.globalRegistryUrl;
         const globalRelayUrl = meshResult.globalRelayUrl;
         markPhaseDone("mesh", { registryMode, globalRegistryUrl, globalRelayUrl }, resumeTopology);
+
+        // ── Step 6d: Entra Agent ID trust anchor (idempotent) ────────
+        // Provisions the tenant-wide blueprint + controller MI +
+        // MI-as-FIC + KarsAuthConfig CR. Skipped automatically when
+        // KarsAuthConfig/default already exists (e.g. a previous
+        // `kars up` ran). The user only needs `Agent ID Developer`
+        // role at Entra scope — no Application Administrator required.
+        //
+        // When the user does NOT have the role, this step surfaces a
+        // clear error but does NOT abort `kars up`: the cluster
+        // continues into anonymous-tier mode and the operator can
+        // re-run `kars mesh setup-trust` once the role is granted.
+        try {
+          const { karsAuthConfigExists, ensureAgentIdTrust } = await import(
+            "./mesh/agent_id_setup.js"
+          );
+          const already = await karsAuthConfigExists();
+          if (already) {
+            stepper.detail("ok", "KarsAuthConfig/default already present — skipping Entra Agent ID setup");
+          } else {
+            stepper.step("Provisioning Entra Agent ID trust anchor...");
+            const result = await ensureAgentIdTrust({
+              clusterName: baseName,
+              resourceGroup: rg,
+              region: options.region,
+              // serviceTree comes from --service-tree flag or
+              // KARS_SERVICE_TREE env var; both surface from the
+              // setup function itself.
+              serviceTree: (options as { serviceTree?: string }).serviceTree,
+            });
+            stepper.done(
+              result.freshlyCreated
+                ? `Entra Agent ID trust created (blueprint=${result.blueprintClientId})`
+                : `Entra Agent ID trust reused (blueprint=${result.blueprintClientId})`,
+            );
+          }
+        } catch (e) {
+          // Non-fatal: cluster continues to anonymous tier. The user
+          // can re-run `kars mesh setup-trust` after granting the
+          // missing role.
+          const msg = (e as Error).message;
+          stepper.detail(
+            "info",
+            `Entra Agent ID setup skipped — ${msg.split("\n")[0].slice(0, 160)}`,
+          );
+          console.log(
+            chalk.yellow(
+              "  ⚠ Cluster will run in anonymous tier until `kars mesh setup-trust` succeeds.",
+            ),
+          );
+          if (msg.includes("Agent ID Developer")) {
+            console.log(
+              chalk.dim(
+                "    Grant the 'Agent ID Developer' Entra role to your account and retry.",
+              ),
+            );
+          }
+        }
 
         // ── Step 7+8: Sandbox bring-up (S15.d.4: extracted to ./up/sandbox_bringup.ts) ──
         // Federated credentials, MI Contributor, Foundry RBAC, KarsSandbox CR,
