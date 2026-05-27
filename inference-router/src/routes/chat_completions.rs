@@ -23,7 +23,7 @@ use crate::errors;
 use crate::proxy;
 use crate::safety;
 
-/// Inject the canonical `x-azureclaw-decision*` triplet onto a response
+/// Inject the canonical `x-kars-decision*` triplet onto a response
 /// so downstream tooling (conformance-runner, observability pipelines,
 /// HTTP clients) can read the policy decision without parsing the
 /// upstream-specific body wording. CR/LF are sanitized from the reason
@@ -38,13 +38,13 @@ fn insert_decision_headers(
     if let Ok(rh) = axum::http::HeaderValue::from_str(&safe) {
         response
             .headers_mut()
-            .insert("x-azureclaw-decision-reason", rh);
+            .insert("x-kars-decision-reason", rh);
     }
     if let Ok(dh) = axum::http::HeaderValue::from_str(decision) {
-        response.headers_mut().insert("x-azureclaw-decision", dh);
+        response.headers_mut().insert("x-kars-decision", dh);
     }
     if let Ok(bh) = axum::http::HeaderValue::from_str(by_kind) {
-        response.headers_mut().insert("x-azureclaw-decision-by", bh);
+        response.headers_mut().insert("x-kars-decision-by", bh);
     }
 }
 
@@ -879,7 +879,7 @@ pub(super) async fn chat_completions(
                     response.headers_mut().insert("content-type", ct.clone());
                 }
 
-                // Inject normalized `x-azureclaw-decision*` headers for
+                // Inject normalized `x-kars-decision*` headers for
                 // non-success responses carrying an Azure OpenAI
                 // content_filter / responsible-AI block. Downstream
                 // conformance tooling and observability pipelines read
