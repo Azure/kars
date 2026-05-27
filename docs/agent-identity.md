@@ -251,19 +251,62 @@ common failure mode in Microsoft-corporate (and similarly-policed
 enterprise) tenants — the CLI's first-party app needs explicit
 Graph-scope consent for each session.
 
-**Mitigation** (one-liner, refreshes the token cache):
+**The kars CLI auto-handles two common variants:**
 
-```bash
-az login --scope https://graph.microsoft.com//.default
-```
+| Code | Meaning | What kars CLI does |
+|---|---|---|
+| `AADSTS530084` | Token-binding policy on the az CLI's Graph token | Auto-runs `az login --use-device-code --scope https://graph.microsoft.com//.default` and retries |
+| `AADSTS65001` / `AADSTS65002` | Missing first-party Graph consent | Same auto-retry |
 
-Then re-run `kars up`. The preflight check surfaces the workaround
-inline when it detects this specific error code.
+If both the interactive and device-code flows fail (typically with
+`AADSTS530033` — "device must be Intune-managed"), kars falls back
+to the **Bicep ARM path** which uses a different auth surface
+(`Microsoft.Graph` extension via the ARM deployment principal).
+The Bicep path produces a functional but **untyped** blueprint
+(tag-based detection only — visible under "App registrations" but
+not under the "Agents" portal page).
 
-If the `az login --scope` call itself fails with the same error, your
-account's Graph access is blocked at the tenant level — see
-[`docs/permissions.md`](permissions.md#tenant-level-entra-id-considerations)
-for the IDAdmin ticket procedure.
+### When even Bicep cannot produce the typed blueprint
+
+If you need the blueprint to appear under
+**Entra portal → Identity → Agents → Agent identity blueprints**
+(and your terminal cannot reach Microsoft Graph at all), the
+workaround is:
+
+1. Let `kars up` / `kars mesh setup-trust` provision via Bicep —
+   you get a working blueprint + controller MI + KarsAuthConfig CR.
+2. Open https://developer.microsoft.com/en-us/graph/graph-explorer
+   in a browser (Graph Explorer uses a different first-party app
+   `de8bc8b5-...` which is typically not subject to the same CA
+   token-binding policy as the Azure CLI).
+3. Convert the existing untyped App to a typed `AgentIdentityBlueprint`
+   in place:
+
+   ```http
+   PATCH https://graph.microsoft.com/beta/applications/<blueprintObjectId>
+   Content-Type: application/json
+   OData-Version: 4.0
+
+   {
+     "@odata.type": "Microsoft.Graph.AgentIdentityBlueprint"
+   }
+   ```
+
+   (`blueprintObjectId` is the value from `kubectl get karsauthconfig
+   default -o jsonpath='{.spec.agentId.blueprintObjectId}'`.)
+
+   If Graph rejects the in-place PATCH, delete + recreate with the
+   typed body — the kars controller will pick up the new `appId`
+   on next reconcile.
+
+4. Long-term: get the workstation Intune-enrolled (`aka.ms/intune`).
+   After enrollment the `AADSTS530033` block clears and the
+   imperative kars CLI path Just Works without browser hops.
+
+The kars **runtime** does not depend on the typed-vs-untyped
+distinction — controller, sidecar, RBAC chain all key off `appId`.
+The typed form is purely for portal categorisation (and for tenant
+admins who scope blueprint governance via the Agents page).
 
 ### Foundry call returns 401 with the agent identity in the error
 
