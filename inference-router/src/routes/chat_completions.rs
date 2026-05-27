@@ -36,9 +36,7 @@ fn insert_decision_headers(
 ) {
     let safe = reason.replace(['\r', '\n'], " ");
     if let Ok(rh) = axum::http::HeaderValue::from_str(&safe) {
-        response
-            .headers_mut()
-            .insert("x-kars-decision-reason", rh);
+        response.headers_mut().insert("x-kars-decision-reason", rh);
     }
     if let Ok(dh) = axum::http::HeaderValue::from_str(decision) {
         response.headers_mut().insert("x-kars-decision", dh);
