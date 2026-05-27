@@ -1831,6 +1831,17 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     "pod_spec.containers is missing or not an array — cannot inject auth-sidecar"
                 );
             }
+            // Append the sidecar's writable scratch volume for ASP.NET
+            // Data Protection keys. Without this, the .NET sidecar
+            // crashes at startup with `Access to /app/keys is denied`
+            // because the distroless image has /app owned by root and
+            // the sidecar runs as UID 1002.
+            if let Some(volumes) = pod_spec
+                .get_mut("volumes")
+                .and_then(|v| v.as_array_mut())
+            {
+                volumes.push(crate::sidecar_injection::build_sidecar_keys_volume());
+            }
         }
 
         // S7 wiring — mirror governance CRD ConfigMaps/Secrets from the

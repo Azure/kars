@@ -50,6 +50,8 @@ rules:
       - "egressapprovals"
       - "egressapprovals/status"
       - "egressapprovals/finalizers"
+      - "karsauthconfigs"
+      - "karsauthconfigs/status"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Create and manage sandbox namespaces
   - apiGroups: [""]

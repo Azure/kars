@@ -159,6 +159,26 @@ pub struct AgentIdConfig {
     /// Blueprint Application `id` (object ID). Required for Graph
     /// `PATCH /applications/{id}` operations and FIC management.
     pub blueprint_object_id: String,
+
+    /// Entra user object IDs that are designated sponsors on every
+    /// per-sandbox agent identity created from this blueprint.
+    ///
+    /// Tenants with stricter governance require at least one sponsor
+    /// on agent identities — Graph rejects creation otherwise with
+    /// `Request_BadRequest: No sponsor specified.` In Microsoft's
+    /// production tenant this is enforced unconditionally. The
+    /// sponsor list is propagated into the `sponsors@odata.bind`
+    /// field on the Graph `POST /servicePrincipals/Microsoft.Graph.
+    /// AgentIdentity` call.
+    ///
+    /// Conventionally seeded with the blueprint's own owner OIDs (so
+    /// the human who set up the trust is also the human responsible
+    /// for governance of the agents it produces). Operators can edit
+    /// this list to add or rotate sponsors without rebuilding any
+    /// runtime artefacts — the next sandbox reconcile uses the new
+    /// list immediately.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sponsor_user_object_ids: Vec<String>,
 }
 
 /// Per-cluster controller managed identity.

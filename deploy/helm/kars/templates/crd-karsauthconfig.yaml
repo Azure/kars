@@ -83,6 +83,11 @@ spec:
                     type: string
                   blueprintObjectId:
                     type: string
+                  sponsorUserObjectIds:
+                    type: array
+                    items:
+                      type: string
+                    description: "Entra user objectIds applied as sponsors on every per-sandbox agent identity. Required in tenants where Graph rejects identities lacking a sponsor."
               controller:
                 type: object
                 required: [managedIdentityClientId, managedIdentityResourceId]

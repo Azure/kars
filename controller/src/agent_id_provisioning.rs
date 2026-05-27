@@ -285,54 +285,45 @@ pub async fn ensure_agent_identity_for_sandbox(
         .unwrap_or_else(|| sandbox_name.clone());
     let cluster_name = std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "kars".to_string());
 
-    // Step 2: if status already records an identity, verify it still
-    // exists in Graph. If yes, reuse. If 404, fall through to reprovision.
+    // Step 2: if status already records an identity, trust it.
+    //
+    // We deliberately do NOT GET-verify the recorded identity here:
+    // Graph's `GET /servicePrincipals/{id}` has eventual-consistency
+    // delays on the order of seconds after creation, which can return
+    // 404 for a freshly-recorded identity. Treating that 404 as
+    // "stale, reprovision" creates a runaway-creation loop (observed
+    // live on kars-aks producing 70+ duplicate SPs per minute).
+    //
+    // The orphan reaper (separate module / follow-up PR) handles the
+    // out-of-band-delete case by scrubbing tagged SPs whose owning
+    // sandbox no longer exists. The reaper doesn't need this GET
+    // because it operates on `list_cluster_agent_identities` results.
     let recorded = sandbox
         .status
         .as_ref()
         .and_then(|s| s.agent_identity.as_ref());
     if let Some(recorded) = recorded {
-        match graph.get_agent_identity(&recorded.object_id).await {
-            Ok(Some(existing)) => {
-                tracing::debug!(
-                    sandbox = %sandbox_name,
-                    app_id = %existing.app_id,
-                    "reusing recorded agent identity"
-                );
-                let status = AgentIdentityStatus {
-                    app_id: existing.app_id.clone(),
-                    object_id: existing.id.clone(),
-                    display_name: existing.display_name.clone(),
-                    created_at: existing.created_date_time.clone(),
-                };
-                if let Err(e) =
-                    materialise_sidecar_configmap(client, sandbox, &spec, &status).await
-                {
-                    return ProvisioningOutcome::Failed {
-                        reason: format!("materialise sidecar ConfigMap: {e}"),
-                        retry_after_secs: 30,
-                    };
-                }
-                return ProvisioningOutcome::Ready {
-                    agent_identity: status,
-                    auth_spec: spec,
-                };
-            }
-            Ok(None) => {
-                tracing::warn!(
-                    sandbox = %sandbox_name,
-                    stale_object_id = %recorded.object_id,
-                    "recorded agent identity no longer exists in Graph; re-provisioning"
-                );
-                // Fall through to step 3.
-            }
-            Err(e) => {
-                return ProvisioningOutcome::Failed {
-                    reason: format!("Graph GET recorded SP: {e}"),
-                    retry_after_secs: 30,
-                };
-            }
+        tracing::debug!(
+            sandbox = %sandbox_name,
+            app_id = %recorded.app_id,
+            "trusting recorded agent identity (no GET-verify; reaper handles orphans)"
+        );
+        let status = AgentIdentityStatus {
+            app_id: recorded.app_id.clone(),
+            object_id: recorded.object_id.clone(),
+            display_name: recorded.display_name.clone(),
+            created_at: recorded.created_at.clone(),
+        };
+        if let Err(e) = materialise_sidecar_configmap(client, sandbox, &spec, &status).await {
+            return ProvisioningOutcome::Failed {
+                reason: format!("materialise sidecar ConfigMap: {e}"),
+                retry_after_secs: 30,
+            };
         }
+        return ProvisioningOutcome::Ready {
+            agent_identity: status,
+            auth_spec: spec,
+        };
     }
 
     // Step 3: tag lookup before create — catches the crash-between-
@@ -373,7 +364,7 @@ pub async fn ensure_agent_identity_for_sandbox(
                 &sandbox_name,
                 &sandbox_uid,
                 &spec.agent_id.blueprint_client_id,
-                &[], // sponsor IDs — sourced from KarsAuthConfig in follow-up
+                &spec.agent_id.sponsor_user_object_ids,
             )
             .await
         {
@@ -426,9 +417,17 @@ pub async fn ensure_agent_identity_for_sandbox(
 /// the source of truth; we replicate it per-sandbox so the sidecar
 /// container's `envFrom` works.
 ///
-/// The replicated ConfigMap is owned by the KarsSandbox (via
-/// `ownerReferences`) so K8s garbage-collects it when the sandbox
-/// is deleted. No extra reaper logic required.
+/// We deliberately do NOT set `ownerReferences` here: KarsSandbox is
+/// a namespace-scoped CR living in `kars-system`, while the sidecar
+/// CM lives in `kars-<sandbox>`. K8s OwnerReferences must be in the
+/// same namespace as the owned object (or cluster-scoped); a
+/// cross-namespace ref triggers `OwnerRefInvalidNamespace` and the
+/// kube-controller-manager garbage-collects the CM seconds after
+/// creation. Cleanup of the CM happens implicitly via namespace
+/// deletion: when the KarsSandbox is removed, the per-sandbox
+/// namespace `kars-<sandbox>` is deleted, and the CM goes with it.
+/// This matches the pattern used by the existing per-sandbox CMs
+/// (`*-blocklist`, `*-egress-allowlist`, `toolpolicy-*`).
 async fn materialise_sidecar_configmap(
     client: &Client,
     sandbox: &KarsSandbox,
@@ -438,10 +437,7 @@ async fn materialise_sidecar_configmap(
     let name = sandbox.name_any();
     let sandbox_ns = format!("kars-{name}");
     let env = render_sidecar_env(spec);
-
-    let owner = sandbox_owner_ref(sandbox).ok_or_else(|| {
-        "KarsSandbox missing uid; cannot set ownerReference on sidecar ConfigMap".to_string()
-    })?;
+    let env_count = env.len();
 
     let mut labels: BTreeMap<String, String> = BTreeMap::new();
     labels.insert("app.kubernetes.io/managed-by".into(), "kars".into());
@@ -463,7 +459,6 @@ async fn materialise_sidecar_configmap(
             namespace: Some(sandbox_ns.clone()),
             labels: Some(labels),
             annotations: Some(annotations),
-            owner_references: Some(vec![owner]),
             ..Default::default()
         },
         data: Some(env),
@@ -479,20 +474,20 @@ async fn materialise_sidecar_configmap(
     .await
     .map_err(|e| format!("apply ConfigMap {sandbox_ns}/{SIDECAR_ENV_CONFIGMAP_NAME}: {e}"))?;
 
+    tracing::debug!(
+        sandbox = %name,
+        ns = %sandbox_ns,
+        env_keys = env_count,
+        "materialised auth-sidecar env ConfigMap"
+    );
     Ok(())
 }
 
-fn sandbox_owner_ref(sandbox: &KarsSandbox) -> Option<OwnerReference> {
-    let uid = sandbox.metadata.uid.clone()?;
-    let name = sandbox.name_any();
-    Some(OwnerReference {
-        api_version: "kars.azure.com/v1alpha1".into(),
-        kind: "KarsSandbox".into(),
-        name,
-        uid,
-        controller: Some(true),
-        block_owner_deletion: Some(true),
-    })
+fn sandbox_owner_ref(_sandbox: &KarsSandbox) -> Option<OwnerReference> {
+    // Retained for future use; intentionally returns None for the
+    // sidecar-env ConfigMap path (see `materialise_sidecar_configmap`
+    // doc for why cross-namespace owner refs cannot be used).
+    None
 }
 
 async fn patch_sandbox_status(
@@ -500,10 +495,35 @@ async fn patch_sandbox_status(
     sandbox: &KarsSandbox,
     identity: &AgentIdentityStatus,
 ) -> Result<(), String> {
+    // Idempotency guard: skip the patch if the recorded status
+    // already matches. Without this guard the SSA patch with
+    // `.force()` rewrites the field every reconcile, bumping
+    // resourceVersion and triggering another watch event — an
+    // infinite reconcile loop. (Same bug class as the auth-config
+    // status loop fixed earlier on this branch.)
+    if let Some(current) = sandbox
+        .status
+        .as_ref()
+        .and_then(|s| s.agent_identity.as_ref())
+    {
+        if current.app_id == identity.app_id
+            && current.object_id == identity.object_id
+            && current.display_name == identity.display_name
+            && current.created_at == identity.created_at
+        {
+            return Ok(());
+        }
+    }
     let name = sandbox.name_any();
     let ns = sandbox.namespace().unwrap_or_default();
     let api: Api<KarsSandbox> = Api::namespaced(client.clone(), &ns);
+    // SSA patches MUST include `apiVersion` and `kind` at the top
+    // level — without them the API server returns
+    // `BadRequest: invalid object type: /, Kind=`. Embedding them
+    // is the kube-rs convention for raw-JSON Apply patches.
     let patch = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsSandbox",
         "status": {
             "agentIdentity": {
                 "appId": identity.app_id,
@@ -598,6 +618,7 @@ mod tests {
             agent_id: crate::auth_config::AgentIdConfig {
                 blueprint_client_id: "blueprint-1".into(),
                 blueprint_object_id: "obj-1".into(),
+                sponsor_user_object_ids: vec![],
             },
             controller: crate::auth_config::ControllerIdentityConfig {
                 managed_identity_client_id: "mi-c".into(),

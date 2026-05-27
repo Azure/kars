@@ -145,16 +145,30 @@ async fn reconcile(
     // failed status patch is logged but doesn't fail the reconcile —
     // the ConfigMap is already correct and the next reconcile retries
     // the patch.
+    //
+    // No-op guard: SSA patches with `.force()` overwrite our
+    // managed fields including `lastTransitionTime`, which bumps the
+    // resourceVersion on every reconcile and triggers another watch
+    // event. That creates an infinite reconcile loop. Only patch
+    // when the observed status doesn't already reflect what we'd
+    // write (per the patch-only-when-different pattern documented
+    // in kube-rs's controller docs §"status writers").
     let observed_generation = obj.metadata.generation.unwrap_or(0);
-    if let Err(e) = patch_ready_status(
-        &ctx.client,
-        &name,
-        observed_generation,
-        &format!("ConfigMap kars-system/{SIDECAR_ENV_CONFIGMAP} materialised (hash {spec_hash})"),
-    )
-    .await
-    {
-        tracing::warn!(error = %e, "patch KarsAuthConfig status failed; will retry next reconcile");
+    let current_phase = obj.status.as_ref().and_then(|s| s.phase.as_deref());
+    let current_observed_gen = obj.status.as_ref().and_then(|s| s.observed_generation);
+    let already_ready = current_phase == Some(crate::status::phase::PHASE_READY)
+        && current_observed_gen == Some(observed_generation);
+    if !already_ready {
+        if let Err(e) = patch_ready_status(
+            &ctx.client,
+            &name,
+            observed_generation,
+            &format!("ConfigMap kars-system/{SIDECAR_ENV_CONFIGMAP} materialised (hash {spec_hash})"),
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "patch KarsAuthConfig status failed; will retry next reconcile");
+        }
     }
 
     // Re-reconcile on a slow cadence as a defensive measure against
@@ -375,6 +389,7 @@ mod tests {
             agent_id: AgentIdConfig {
                 blueprint_client_id: "9010cbe3-ee13-4cb6-aa5f-f892910804a0".into(),
                 blueprint_object_id: "5a9587be-cd7f-4c58-999f-b93d22757004".into(),
+                sponsor_user_object_ids: vec![],
             },
             controller: ControllerIdentityConfig {
                 managed_identity_client_id: "a5cc7e08-ee03-4eee-b034-5302b6b54547".into(),

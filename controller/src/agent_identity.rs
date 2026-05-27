@@ -188,8 +188,8 @@ impl AgentIdentityClient {
             }
         }
 
-        // Step 1: IMDS for MI assertion.
-        let mi_assertion = self.imds_mi_token("api://AzureADTokenExchange").await?;
+        // Step 1: WI (preferred) or IMDS for MI assertion.
+        let mi_assertion = self.mi_token("api://AzureADTokenExchange").await?;
 
         // Step 2: Exchange MI assertion for blueprint Graph token.
         let url = format!(
@@ -249,12 +249,132 @@ impl AgentIdentityClient {
         Ok(parsed.access_token)
     }
 
+    /// Fetch a managed-identity token, preferring IMDS over Workload
+    /// Identity to avoid the FIC-as-FIC anti-loop check.
+    ///
+    /// Why IMDS first (not WI): tokens minted by the WI exchange are
+    /// themselves derived from federated credentials. Using such a
+    /// token as a `client_assertion` against the blueprint triggers
+    /// Entra's anti-loop check with `AADSTS700231: Token obtained
+    /// using a federated identity credential may not be used as a
+    /// federated identity credential.` IMDS-minted tokens are NOT
+    /// FIC-derived (the MI is assigned to the node-pool VMSS at the
+    /// Azure RBAC layer) so the FIC assertion succeeds.
+    ///
+    /// Pre-requisites:
+    ///   1. `kars-controller-mi` assigned to the AKS node-pool VMSS
+    ///      (`az vmss identity assign --identities <mi-id>`).
+    ///      `kars up` automates this; verified by
+    ///      `kars mesh setup-trust verify`.
+    ///   2. Controller namespace's NetworkPolicy allows egress to
+    ///      169.254.169.254:80 (added to the default-deny template
+    ///      on this branch).
+    ///
+    /// WI fallback exists for environments where IMDS truly is
+    /// unreachable (e.g. local development against an AAD-backed
+    /// MI exposed via a static credential rather than VMSS). The
+    /// fallback will hit AADSTS700231 in production if reached;
+    /// the error surfaces clearly to the operator.
+    ///
+    /// `audience` is propagated as the `resource` parameter; the
+    /// resulting token's `aud` claim equals this value. For the
+    /// blueprint exchange we use `api://AzureADTokenExchange`.
+    async fn mi_token(&self, audience: &str) -> Result<String, String> {
+        match self.imds_mi_token(audience).await {
+            Ok(t) => Ok(t),
+            Err(imds_err) => {
+                let wi_path = std::env::var("AZURE_FEDERATED_TOKEN_FILE")
+                    .unwrap_or_else(|_| "/var/run/secrets/azure/tokens/azure-identity-token".into());
+                if tokio::fs::try_exists(&wi_path).await.unwrap_or(false) {
+                    tracing::warn!(
+                        imds_error = %imds_err,
+                        "IMDS unavailable; falling back to WI (will fail FIC step with AADSTS700231 in AKS)"
+                    );
+                    self.wi_mi_token(audience, &wi_path).await
+                } else {
+                    Err(imds_err)
+                }
+            }
+        }
+    }
+
+    /// Acquire a token for `mi_client_id` via Workload Identity.
+    ///
+    /// The flow is:
+    ///   1. Read the projected SA token (a JWT signed by the AKS
+    ///      OIDC issuer).
+    ///   2. POST to Entra `/oauth2/v2.0/token` with `grant_type=
+    ///      client_credentials`, `client_id=<controller_mi_client_id>`,
+    ///      `client_assertion=<SA token>`, scope=`<audience>/.default`.
+    ///   3. Entra checks the FIC on `<controller_mi_client_id>` for
+    ///      `iss=<aks-oidc>, sub=system:serviceaccount:...`; if it
+    ///      matches, mints a token for that MI.
+    ///
+    /// The `audience` parameter is the desired token audience (e.g.
+    /// `api://AzureADTokenExchange`). We append `/.default` to form
+    /// the scope.
+    async fn wi_mi_token(&self, audience: &str, wi_token_path: &str) -> Result<String, String> {
+        let sa_token = tokio::fs::read_to_string(wi_token_path)
+            .await
+            .map_err(|e| format!("read SA token at {wi_token_path}: {e}"))?;
+
+        let url = format!(
+            "{}/{}/oauth2/v2.0/token",
+            self.config.authority_host.trim_end_matches('/'),
+            self.config.tenant_id,
+        );
+        // The audience-to-scope mapping for client-credentials is the
+        // audience plus `/.default`. For api:// audiences this means
+        // `api://AzureADTokenExchange/.default`.
+        let scope = if audience.ends_with("/.default") {
+            audience.to_string()
+        } else {
+            format!("{}/.default", audience.trim_end_matches('/'))
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .form(&[
+                ("client_id", self.config.controller_mi_client_id.as_str()),
+                ("scope", scope.as_str()),
+                (
+                    "client_assertion_type",
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                ),
+                ("client_assertion", sa_token.trim()),
+                ("grant_type", "client_credentials"),
+            ])
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| format!("WI MI token request failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "WI MI token exchange failed ({status}): {}",
+                &body[..body.len().min(400)]
+            ));
+        }
+
+        let parsed: OAuthTokenResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("WI MI token parse failed: {e}"))?;
+        Ok(parsed.access_token)
+    }
+
     /// Fetch a managed-identity token from IMDS.
+    ///
+    /// Used in environments where Workload Identity is unavailable
+    /// (e.g. local development against a kind cluster running on a
+    /// VM with an MSI attached). In AKS WI clusters this path will
+    /// fail because WI blocks IMDS — see `mi_token` above for
+    /// rationale and the wrapper that tries WI first.
     ///
     /// The `audience` argument is propagated to IMDS as the `resource`
     /// parameter; the resulting token's `aud` claim equals this value.
-    /// For the blueprint exchange we use `api://AzureADTokenExchange`,
-    /// the standard audience for federated-identity assertions.
     async fn imds_mi_token(&self, audience: &str) -> Result<String, String> {
         // IMDS accepts query parameters via reqwest's structured form
         // builder — no manual encoding required. This avoids pulling
@@ -482,15 +602,87 @@ impl AgentIdentityClient {
             ));
         }
 
+        // Capture the raw body so we can give a useful error message
+        // (the typed `AgentIdentity` deserialiser is strict — a single
+        // unexpected field shape in the response means we lose the
+        // entire list). Try the strict shape first; on failure, fall
+        // back to a permissive walk that picks out only the fields we
+        // actually need (id, appId, tags) from each item.
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Graph list body read failed: {e}"))?;
+
         #[derive(Deserialize)]
         struct ListResp {
             value: Vec<AgentIdentity>,
         }
-        let parsed: ListResp = resp
-            .json()
-            .await
-            .map_err(|e| format!("Graph list parse failed: {e}"))?;
-        Ok(parsed.value)
+        if let Ok(parsed) = serde_json::from_str::<ListResp>(&body) {
+            return Ok(parsed.value);
+        }
+
+        // Permissive fallback: walk the JSON, extract only the fields
+        // the orchestrator needs. Graph occasionally returns variant
+        // service-principal shapes (e.g. when the agent identity
+        // inherits an extension type) that don't fit the strict
+        // schema. Losing optional metadata is acceptable; losing the
+        // recovery path is not (would cause an unbounded duplicate-
+        // SP creation loop as observed live on kars-aks).
+        let raw: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("Graph list parse failed: {e}; body starts with: {}", &body[..body.len().min(200)]))?;
+        let items = raw
+            .get("value")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let parsed: Vec<AgentIdentity> = items
+            .into_iter()
+            .filter_map(|item| {
+                let id = item.get("id")?.as_str()?.to_string();
+                // List responses use `agentAppId` (the AgentIdentity-typed
+                // field); regular SP responses use `appId`. Accept both
+                // so the same parser handles `GET /spn/{id}` and
+                // `GET /spn/Microsoft.Graph.AgentIdentity?...` shapes.
+                let app_id = item
+                    .get("agentAppId")
+                    .or_else(|| item.get("appId"))
+                    .and_then(|v| v.as_str())?
+                    .to_string();
+                let display_name = item
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tags = item
+                    .get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(AgentIdentity {
+                    id,
+                    app_id,
+                    display_name,
+                    agent_identity_blueprint_id: item
+                        .get("agentIdentityBlueprintId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    created_date_time: item
+                        .get("createdDateTime")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    service_principal_type: item
+                        .get("servicePrincipalType")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    tags,
+                })
+            })
+            .collect();
+        Ok(parsed)
     }
 
     /// Compose the `tags` slice for a freshly-created agent identity.

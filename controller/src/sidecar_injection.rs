@@ -118,7 +118,7 @@ pub fn build_sidecar_container(image_override: Option<&str>, image_pull_policy: 
             "runAsUser": SIDECAR_UID,
             "runAsNonRoot": true,
             "allowPrivilegeEscalation": false,
-            "readOnlyRootFilesystem": false,  // .NET keys + token caches live in /app/keys
+            "readOnlyRootFilesystem": false,
             "capabilities": {"drop": ["ALL"]},
             "seccompProfile": {"type": "RuntimeDefault"}
         },
@@ -126,21 +126,63 @@ pub fn build_sidecar_container(image_override: Option<&str>, image_pull_policy: 
             "requests": {"cpu": "50m", "memory": "96Mi"},
             "limits":   {"cpu": "500m", "memory": "256Mi"}
         },
+        // ASP.NET Data Protection writes encryption keys to
+        // `/app/keys` (see Microsoft.Identity.Web.Sidecar.Program::
+        // ConfigureDataProtection). The image's distroless filesystem
+        // has /app owned by root with 0755, so UID 1002 cannot mkdir
+        // there. Mount a per-pod emptyDir so the sidecar can write
+        // its DataProtection keys without needing root or a writable
+        // root filesystem.
+        "volumeMounts": [
+            {"name": "auth-sidecar-keys", "mountPath": "/app/keys"}
+        ],
         "readinessProbe": {
-            "httpGet": {"path": "/healthz", "port": "auth-sdk"},
+            // Use httpHeaders to override Host so Kestrel's
+            // HostFiltering middleware (which only allows
+            // `Host: localhost`) accepts the kubelet's probe. Without
+            // this override the kubelet sends the pod IP as Host and
+            // the sidecar returns 400 Bad Request, leaving the
+            // container ready=false forever even though the auth
+            // surface is fully functional.
+            "httpGet": {
+                "path": "/healthz",
+                "port": "auth-sdk",
+                "httpHeaders": [
+                    {"name": "Host", "value": format!("localhost:{SIDECAR_PORT}")}
+                ]
+            },
             "initialDelaySeconds": 1,
             "periodSeconds": 5,
             "timeoutSeconds": 2,
             "failureThreshold": 3
         },
         "livenessProbe": {
-            "httpGet": {"path": "/healthz", "port": "auth-sdk"},
+            "httpGet": {
+                "path": "/healthz",
+                "port": "auth-sdk",
+                "httpHeaders": [
+                    {"name": "Host", "value": format!("localhost:{SIDECAR_PORT}")}
+                ]
+            },
             "initialDelaySeconds": 15,
             "periodSeconds": 30,
             "timeoutSeconds": 3,
             "failureThreshold": 5
         }
     })
+}
+
+/// Name of the emptyDir volume that backs the sidecar's `/app/keys`
+/// DataProtection scratch space. Must be added to the pod spec's
+/// `volumes` array when the sidecar is injected — see the call site
+/// in `reconciler/mod.rs`.
+pub const SIDECAR_KEYS_VOLUME: &str = "auth-sidecar-keys";
+
+/// Build the emptyDir volume entry for the sidecar's keys mount.
+/// Returns the JSON pod-spec volume; the caller appends to the pod's
+/// `volumes` array right after pushing the sidecar container.
+pub fn build_sidecar_keys_volume() -> Value {
+    json!({"name": SIDECAR_KEYS_VOLUME, "emptyDir": {"medium": "Memory", "sizeLimit": "16Mi"}})
 }
 
 /// Build the env-var entry pinning the agent identity app id into the
@@ -156,10 +198,16 @@ pub fn build_router_pinned_identity_env(agent_app_id: &str) -> Value {
 }
 
 /// Build the env-var entry that points the router at the sidecar URL.
-/// Constant for now — operators don't get to override the loopback
-/// port without recompiling, since the egress-guard rules pin it too.
+///
+/// We use `localhost:8080` rather than `127.0.0.1:8080` because the
+/// Microsoft Entra SDK sidecar's built-in `HostFiltering` middleware
+/// allows ONLY `Host: localhost` (see Microsoft.Identity.Web.Sidecar
+/// `Program.ConfigureHostFiltering`). Calls with `Host: 127.0.0.1`
+/// are rejected with `400 Bad Request - Invalid Hostname`. K8s
+/// always wires `localhost` → 127.0.0.1 in each pod's /etc/hosts so
+/// the loopback semantics are identical.
 pub fn build_router_sidecar_url_env() -> Value {
-    json!({"name": "AUTH_SIDECAR_URL", "value": format!("http://127.0.0.1:{SIDECAR_PORT}")})
+    json!({"name": "AUTH_SIDECAR_URL", "value": format!("http://localhost:{SIDECAR_PORT}")})
 }
 
 /// Egress-guard iptables rule fragments emitted as part of the
@@ -326,7 +374,7 @@ mod tests {
     fn router_sidecar_url_env_points_at_loopback() {
         let env = build_router_sidecar_url_env();
         assert_eq!(env["name"], "AUTH_SIDECAR_URL");
-        assert_eq!(env["value"], "http://127.0.0.1:8080");
+        assert_eq!(env["value"], "http://localhost:8080");
     }
 
     #[test]
