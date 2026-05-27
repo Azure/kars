@@ -108,12 +108,72 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
   cmd
     .command("setup-trust")
     .description(
-      `Provision the tenant-wide Entra app registration (${AGENTMESH_IDENTIFIER_URI}) so sandboxes register as the AGT verified tier`,
+      `Provision the tenant Entra trust for kars sandboxes. Default (--mode agent-id) creates the Entra Agent ID blueprint + controller MI; --mode legacy provisions the deprecated ${AGENTMESH_IDENTIFIER_URI} app registration.`,
     )
-    .option("--display-name <name>", "Display name for the Entra app registration", "kars AgentMesh")
+    .option(
+      "--mode <mode>",
+      "Trust mode: 'agent-id' (recommended, GA Entra Agent ID) or 'legacy' (deprecated api://agentmesh)",
+      "agent-id",
+    )
+    .option("--display-name <name>", "Display name for the Entra app registration (legacy mode only)", "kars AgentMesh")
+    .option("--service-tree <guid>", "ServiceTree / service-management-reference GUID (agent-id mode in Microsoft-style tenants)")
+    .option("--cluster-name <name>", "Cluster name suffix for the controller MI (agent-id mode)", "kars")
+    .option("--resource-group <name>", "Resource group for the controller MI (agent-id mode)")
+    .option("--region <region>", "Azure region for the controller MI (agent-id mode)", "eastus")
     .option("--dry-run", "Print what would be created without making changes", false)
-    .action(async (opts: { displayName: string; dryRun: boolean }) => {
-      banner("kars · Mesh Setup Trust", "Entra App Registration for api://agentmesh");
+    .action(async (opts: {
+      mode: string;
+      displayName: string;
+      serviceTree?: string;
+      clusterName?: string;
+      resourceGroup?: string;
+      region?: string;
+      dryRun: boolean;
+    }) => {
+      // ── Agent ID mode (recommended) ────────────────────────────
+      // Forwards to the same idempotent helper that `kars up` invokes
+      // automatically. Use this command to re-run the Entra trust
+      // provisioning standalone — e.g. after refreshing `az login`
+      // following an AADSTS530084 Conditional Access block during
+      // `kars up`.
+      if (opts.mode === "agent-id") {
+        banner("kars · Mesh Setup Trust", "Entra Agent ID blueprint + controller MI");
+        const { ensureAgentIdTrust } = await import("./agent_id_setup.js");
+        try {
+          const result = await ensureAgentIdTrust({
+            clusterName: opts.clusterName,
+            resourceGroup: opts.resourceGroup,
+            region: opts.region,
+            serviceTree: opts.serviceTree,
+            dryRun: opts.dryRun,
+          });
+          console.log();
+          console.log(chalk.green("  ✓ Entra Agent ID trust ready"));
+          console.log(chalk.dim(`    blueprint client ID: ${result.blueprintClientId}`));
+          console.log(chalk.dim(`    controller MI:       ${result.controllerMiClientId}`));
+          console.log(chalk.dim(`    KarsAuthConfig:      kubectl get karsauthconfig default`));
+        } catch (e) {
+          const msg = (e as Error).message;
+          console.error(chalk.red(`\n  ✘ ${msg.split("\n")[0]}`));
+          if (msg.includes("AADSTS530084")) {
+            console.error(chalk.dim("\n    Conditional-access policy is blocking the Graph token this session has."));
+            console.error(chalk.dim("    Refresh Microsoft Graph consent and retry:"));
+            console.error(chalk.cyan("      az login --scope https://graph.microsoft.com//.default"));
+            console.error(chalk.cyan("      kars mesh setup-trust --mode agent-id"));
+          } else if (msg.includes("Agent ID Developer") || msg.includes("Insufficient privileges")) {
+            console.error(chalk.dim("\n    The signed-in identity needs the 'Agent ID Developer' Entra directory role."));
+            console.error(chalk.dim("    Activate via PIM at https://portal.azure.com and retry."));
+          }
+          process.exit(1);
+        }
+        return;
+      }
+
+      // ── Legacy mode ────────────────────────────────────────────
+      // Preserves the original api://agentmesh flow for installations
+      // that haven't migrated to Entra Agent ID yet. Slated for
+      // removal once all consumers have switched.
+      banner("kars · Mesh Setup Trust (legacy)", "Entra App Registration for api://agentmesh");
 
       // Step 1: confirm az is signed in and which tenant we're targeting
       section("Tenant");

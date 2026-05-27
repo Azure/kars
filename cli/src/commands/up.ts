@@ -586,6 +586,27 @@ Auto-resume:
             }
           }
 
+          // AgentMesh relay+registry images: kars does not build these
+          // (vendored forks were removed in Phase 5.2). Always import
+          // the pre-built AGT-compatible images from the public source
+          // ACR — both --build mode (this branch) and import mode
+          // (the else branch below) need them, since the deploy/
+          // agentmesh-agt.yaml manifest references them by tag.
+          for (const tag of ["agentmesh-relay-agt:latest", "agentmesh-registry-agt:latest"]) {
+            stepper.update(`Importing ${tag} from ${options.sourceAcr}...`);
+            await execa("az", [
+              "acr", "import",
+              "--name", acr,
+              "--source", `${options.sourceAcr}/${tag}`,
+              "--image", tag,
+              "--force",
+            ], { stdio: "pipe" }).then(() => {
+              stepper.detail("ok", tag);
+            }).catch((e: { message?: string }) => {
+              stepper.detail("skip", `${tag} — import failed (${(e.message ?? "").split("\n")[0].slice(0, 80)})`);
+            });
+          }
+
           stepper.done("Images built and pushed to ACR");
         } else {
           // Customer mode: import pre-built images from source ACR
