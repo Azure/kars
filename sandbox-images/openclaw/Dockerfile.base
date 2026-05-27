@@ -16,7 +16,7 @@ FROM ${AZURELINUX_BASE} AS builder
 ARG TARGETARCH
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
     tdnf install -y tar gzip ca-certificates curl git && tdnf clean all && \
-    curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
+    curl -fsSL "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
 
@@ -186,7 +186,7 @@ RUN pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
 
 # Node.js (vendored binary) + update npm to fix tar/minimatch/glob CVEs
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    curl -fsSL "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
+    curl -fsSL "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz && \
     npm install -g npm@latest
