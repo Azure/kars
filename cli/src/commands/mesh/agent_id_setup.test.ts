@@ -3,8 +3,6 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// All external side effects (`execa`, `kubectl`, `az`) are mocked.
-// We assert call shapes rather than running anything.
 vi.mock("execa", () => ({
   execa: vi.fn(),
 }));
@@ -14,6 +12,8 @@ import { execa } from "execa";
 import {
   ensureAgentIdTrust,
   karsAuthConfigExists,
+  checkAgentIdRole,
+  detectExistingBlueprint,
 } from "./agent_id_setup.js";
 
 type Execa = typeof execa;
@@ -106,5 +106,89 @@ describe("ensureAgentIdTrust dry-run", () => {
     await expect(ensureAgentIdTrust({})).rejects.toThrow(
       /Azure CLI is not signed in/,
     );
+  });
+});
+
+describe("checkAgentIdRole", () => {
+  it("detects Agent ID Developer by display name", async () => {
+    // az rest /me/transitiveMemberOf — returns one Agent ID Developer
+    mockedExeca.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          value: [
+            { id: "x1", displayName: "Agent ID Developer", roleTemplateId: "8424c6f0-a189-499e-bbd0-26c1753c96d4" },
+          ],
+        }),
+      ) as any,
+    );
+    const r = await checkAgentIdRole();
+    expect(r.hasRole).toBe(true);
+    expect(r.inconclusive).toBe(false);
+    expect(r.detectedRoles).toHaveLength(1);
+    expect(r.detectedRoles[0].displayName).toBe("Agent ID Developer");
+  });
+
+  it("detects Global Administrator by template id even with custom display name", async () => {
+    mockedExeca.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          value: [
+            { id: "x1", displayName: "Custom Label", roleTemplateId: "62e90394-69f5-4237-9190-012177145e10" },
+          ],
+        }),
+      ) as any,
+    );
+    const r = await checkAgentIdRole();
+    expect(r.hasRole).toBe(true);
+    expect(r.detectedRoles[0].id).toBe("x1");
+  });
+
+  it("returns hasRole=false when no matching role is found", async () => {
+    mockedExeca.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          value: [
+            { id: "x1", displayName: "Reader", roleTemplateId: "acdd72a7-3385-48ef-bd42-f606fba81ae7" },
+          ],
+        }),
+      ) as any,
+    );
+    const r = await checkAgentIdRole();
+    expect(r.hasRole).toBe(false);
+    expect(r.inconclusive).toBe(false);
+    expect(r.message).toContain("Agent ID Developer");
+  });
+
+  it("returns inconclusive on Graph errors so preflight only warns", async () => {
+    mockedExeca.mockRejectedValueOnce(new Error("Forbidden: missing User.Read"));
+    const r = await checkAgentIdRole();
+    expect(r.hasRole).toBe(false);
+    expect(r.inconclusive).toBe(true);
+    expect(r.message).toContain("Could not enumerate");
+  });
+});
+
+describe("detectExistingBlueprint", () => {
+  it("returns present=false when no blueprint matches", async () => {
+    mockedExeca.mockResolvedValueOnce(ok(JSON.stringify({ value: [] })) as any);
+    const r = await detectExistingBlueprint("kars-blueprint");
+    expect(r.present).toBe(false);
+    expect(r.appId).toBeUndefined();
+    expect(r.message).toContain("will be created");
+  });
+
+  it("returns present=true with appId when blueprint exists", async () => {
+    mockedExeca.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          value: [
+            { id: "obj-1", appId: "app-1", displayName: "kars-blueprint" },
+          ],
+        }),
+      ) as any,
+    );
+    const r = await detectExistingBlueprint("kars-blueprint");
+    expect(r.present).toBe(true);
+    expect(r.appId).toBe("app-1");
   });
 });

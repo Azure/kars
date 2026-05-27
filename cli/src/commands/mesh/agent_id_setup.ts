@@ -45,9 +45,15 @@ import { kvLine, section } from "../../stepper.js";
 /// sensible defaults are derived from the current `az account show`
 /// when omitted.
 export interface AgentIdSetupOptions {
-  /// Cluster name (used to suffix the blueprint and controller MI).
-  /// Defaults to "kars" — most users have one cluster per tenant.
+  /// Cluster name (used to suffix the controller managed identity).
+  /// Defaults to "kars". Multiple kars clusters in the same tenant
+  /// share the same blueprint but each have their own controller MI.
   clusterName?: string;
+  /// Tenant-wide blueprint display name. Defaults to "kars-blueprint".
+  /// Override only when you want isolated blueprints per environment
+  /// (e.g. one for prod, one for dev). All clusters using the same
+  /// blueprint name will share governance (sponsors, owners).
+  blueprintName?: string;
   /// Subscription ID. Defaults to the currently-selected subscription
   /// from `az account show`.
   subscriptionId?: string;
@@ -511,5 +517,136 @@ export async function karsAuthConfigExists(): Promise<boolean> {
     return res.stdout.includes("karsauthconfig/default");
   } catch {
     return false;
+  }
+}
+
+/// Check that the signed-in user has the Entra `Agent ID Developer`
+/// directory role (or one of the stronger roles that supersede it:
+/// `Agent ID Administrator`, `Privileged Role Administrator`,
+/// `Global Administrator`). Required to provision agent identity
+/// blueprints via Graph.
+///
+/// Returns the result rather than throwing so callers (notably
+/// `cli/src/preflight.ts`) can include it in their aggregated
+/// preflight summary. We deliberately treat "Graph lookup failed"
+/// as a soft pass with a warning, mirroring the behaviour of other
+/// preflight checks that can't fully evaluate due to permission
+/// transients.
+export interface AgentIdRoleCheckResult {
+  /// `true` when at least one supporting role assignment was
+  /// detected. `false` when the user is definitively missing the
+  /// role.
+  hasRole: boolean;
+  /// `true` when the check could not run conclusively (e.g. the
+  /// /me/memberOf call was rate-limited). Callers should surface
+  /// as a warning rather than blocking.
+  inconclusive: boolean;
+  /// Human-readable diagnostic. Always populated.
+  message: string;
+  /// Object IDs of the role assignments detected, for diagnostics.
+  detectedRoles: { id: string; displayName: string }[];
+}
+
+interface MeMemberOfResp {
+  value: Array<{
+    "@odata.type"?: string;
+    id: string;
+    displayName?: string;
+    roleTemplateId?: string;
+  }>;
+}
+
+const AGENT_ID_ROLE_TEMPLATE_IDS: Record<string, string> = {
+  // Pinned from Entra ID documentation. If Microsoft renames, the
+  // displayName fallback below catches it.
+  "Agent ID Developer": "8424c6f0-a189-499e-bbd0-26c1753c96d4",
+  "Agent ID Administrator": "82e2c3d5-19d8-486a-a3f5-d70e000ed05f",
+  "Privileged Role Administrator": "e8611ab8-c189-46e8-94e1-60213ab1f814",
+  "Global Administrator": "62e90394-69f5-4237-9190-012177145e10",
+};
+
+/// Check whether the signed-in user holds at least one of the roles
+/// that permit blueprint creation. Calls Microsoft Graph
+/// `/me/transitiveMemberOf`. Soft-fails on permission errors —
+/// returning `inconclusive: true` so preflight surfaces a warning,
+/// not a block.
+export async function checkAgentIdRole(): Promise<AgentIdRoleCheckResult> {
+  let resp: MeMemberOfResp | null;
+  try {
+    resp = await azGraphRest<MeMemberOfResp>(
+      "GET",
+      "/v1.0/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=id,displayName,roleTemplateId&$top=100",
+    );
+  } catch (e) {
+    const msg = (e as Error).message;
+    return {
+      hasRole: false,
+      inconclusive: true,
+      message: `Could not enumerate directory roles (${msg.split("\n")[0].slice(0, 120)})`,
+      detectedRoles: [],
+    };
+  }
+
+  const assignments = resp?.value ?? [];
+  const supportedTemplateIds = new Set(Object.values(AGENT_ID_ROLE_TEMPLATE_IDS));
+  const supportedNames = new Set(Object.keys(AGENT_ID_ROLE_TEMPLATE_IDS));
+
+  const detected = assignments
+    .filter((r) =>
+      // Match by either the role template id (stable) or display
+      // name (handy if Microsoft adds new role variants).
+      (r.roleTemplateId && supportedTemplateIds.has(r.roleTemplateId)) ||
+      (r.displayName && supportedNames.has(r.displayName)),
+    )
+    .map((r) => ({ id: r.id, displayName: r.displayName ?? "<unknown>" }));
+
+  if (detected.length === 0) {
+    return {
+      hasRole: false,
+      inconclusive: false,
+      message:
+        "Signed-in user has no Agent ID-capable Entra role. Required: 'Agent ID Developer' (or stronger).",
+      detectedRoles: [],
+    };
+  }
+
+  return {
+    hasRole: true,
+    inconclusive: false,
+    message: `Detected ${detected.length} matching role assignment(s): ${detected
+      .map((d) => d.displayName)
+      .join(", ")}`,
+    detectedRoles: detected,
+  };
+}
+
+/// Best-effort check that the tenant has any agent-identity
+/// blueprints already provisioned. Used by preflight to detect
+/// whether a previous `kars` run wired up the blueprint — informs
+/// the "skip vs run setup-trust" decision without actually
+/// calling `karsAuthConfigExists` (which depends on a working
+/// kubeconfig that may not be ready yet during preflight).
+export async function detectExistingBlueprint(
+  displayName: string,
+): Promise<{ present: boolean; appId?: string; message: string }> {
+  try {
+    const blueprint = await findExistingBlueprint(displayName);
+    if (blueprint) {
+      return {
+        present: true,
+        appId: blueprint.appId,
+        message: `Blueprint '${displayName}' already exists (appId=${blueprint.appId})`,
+      };
+    }
+    return {
+      present: false,
+      message: `No existing '${displayName}' blueprint — will be created by kars up`,
+    };
+  } catch (e) {
+    const msg = (e as Error).message;
+    return {
+      present: false,
+      message: `Graph lookup inconclusive (${msg.split("\n")[0].slice(0, 100)})`,
+    };
   }
 }
