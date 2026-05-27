@@ -18,6 +18,7 @@ mod a2a_agent;
 mod a2a_agent_compile;
 mod a2a_agent_reconciler;
 mod agent_identity;
+mod agent_id_provisioning;
 mod auth_config;
 mod auth_config_reconciler;
 mod backoff;

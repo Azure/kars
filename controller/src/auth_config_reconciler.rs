@@ -39,6 +39,7 @@ use kube::{
     api::{Api, Patch, PatchParams},
     runtime::controller::{Action, Controller},
 };
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -136,6 +137,25 @@ async fn reconcile(
         .map_err(ReconcilerError::Apply)?;
 
     tracing::debug!(spec_hash = %spec_hash, "auth-config sidecar ConfigMap reconciled");
+
+    // Patch status.Ready=True so the sandbox reconciler can gate
+    // agent-id provisioning on a real readiness signal (rubber-duck
+    // critique #7). The condition reason `Reconciled` matches the
+    // helper in `build_condition_blueprint_ready`. Best-effort: a
+    // failed status patch is logged but doesn't fail the reconcile —
+    // the ConfigMap is already correct and the next reconcile retries
+    // the patch.
+    let observed_generation = obj.metadata.generation.unwrap_or(0);
+    if let Err(e) = patch_ready_status(
+        &ctx.client,
+        &name,
+        observed_generation,
+        &format!("ConfigMap kars-system/{SIDECAR_ENV_CONFIGMAP} materialised (hash {spec_hash})"),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "patch KarsAuthConfig status failed; will retry next reconcile");
+    }
 
     // Re-reconcile on a slow cadence as a defensive measure against
     // ConfigMap drift, mirroring the pattern in mcp_server_reconciler.
@@ -265,19 +285,57 @@ async fn apply_configmap(
 }
 
 /// Build the well-known condition entries from a recent reconcile
-/// result. Surfaced on the CR's `status.conditions[]` by the
-/// reconciler in a future patch — for now this is a helper exposed so
-/// `kars doctor` and CLI commands can render the same vocabulary.
-#[allow(dead_code)]
+/// result. Surfaced on the CR's `status.conditions[]` by
+/// `patch_ready_status` below, and re-exported so `kars doctor`
+/// and CLI commands can render the same vocabulary.
 pub fn build_condition_blueprint_ready(observed_generation: i64, message: &str) -> Condition {
     Condition {
-        type_: "BlueprintReady".into(),
+        type_: "SidecarConfigMaterialized".into(),
         status: "True".into(),
         reason: "Reconciled".into(),
         message: message.into(),
         last_transition_time: Time(Timestamp::now()),
         observed_generation: Some(observed_generation),
     }
+}
+
+/// Patch `KarsAuthConfig/<name>.status` with `phase=Ready` plus the
+/// matching `SidecarConfigMaterialized=True` condition.
+///
+/// Server-side-apply with a dedicated field manager so the sandbox
+/// reconciler's status patches don't clobber these condition entries.
+async fn patch_ready_status(
+    client: &Client,
+    name: &str,
+    observed_generation: i64,
+    message: &str,
+) -> Result<(), String> {
+    let api: Api<KarsAuthConfig> = Api::all(client.clone());
+    let condition = build_condition_blueprint_ready(observed_generation, message);
+    // Status conditions on K8s status subresources are serialised as
+    // an array of objects with the standard ten fields. We construct
+    // the JSON directly so we don't have to depend on a TypeMeta
+    // sub-tree just to emit a patch.
+    let patch = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsAuthConfig",
+        "status": {
+            "phase": crate::status::phase::PHASE_READY,
+            "observedGeneration": observed_generation,
+            "conditions": [{
+                "type": condition.type_,
+                "status": condition.status,
+                "reason": condition.reason,
+                "message": condition.message,
+                "lastTransitionTime": condition.last_transition_time.0.to_string(),
+                "observedGeneration": observed_generation,
+            }],
+        }
+    });
+    api.patch_status(name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(&patch))
+        .await
+        .map_err(|e| format!("patch_status {name}: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
