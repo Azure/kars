@@ -348,10 +348,16 @@ pub fn judge(expect: &Expect, actual: &ActualDecision) -> Verdict {
     }
 
     if let Some(needle) = &expect.reason_contains {
+        // Case-insensitive substring match — corpora describe
+        // policy reasons in natural language; provider responses
+        // vary in casing ("Azure AI Content Safety" vs "content
+        // safety" vs "Content Safety"). Lowercasing both sides
+        // keeps corpus authors and router authors decoupled.
+        let needle_lc = needle.to_ascii_lowercase();
         let hit = actual
             .reason
             .as_deref()
-            .map(|r| r.contains(needle.as_str()))
+            .map(|r| r.to_ascii_lowercase().contains(&needle_lc))
             .unwrap_or(false);
         if !hit {
             return Verdict::Fail(VerdictFailure::ReasonContainsMissing {

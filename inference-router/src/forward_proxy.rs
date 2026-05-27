@@ -283,7 +283,12 @@ async fn handle_connect(
     if let Err(reason) = blocklist.check_egress(&domain, sandbox).await {
         tracing::warn!(domain = %log_dom, reason = %reason, "CONNECT blocked");
         blocked_egress.record(sandbox, &domain, port);
-        send_response(&mut stream, 403, "Blocked by Kars egress policy").await?;
+        send_response(
+            &mut stream,
+            403,
+            "host not in allowlist (Kars egress policy)",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -365,7 +370,12 @@ async fn handle_http(
         tracing::warn!(domain = %log_dom, reason = %reason, "HTTP blocked");
         let (_h, p) = parse_host_port(&domain, 80);
         blocked_egress.record(sandbox, &domain, p);
-        send_response(&mut stream, 403, "Blocked by Kars egress policy").await?;
+        send_response(
+            &mut stream,
+            403,
+            "host not in allowlist (Kars egress policy)",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -670,16 +680,27 @@ fn extract_domain_from_url(url: &str) -> Option<&str> {
 }
 
 async fn send_response(stream: &mut TcpStream, status: u16, body: &str) -> anyhow::Result<()> {
+    let default_reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        502 => "Bad Gateway",
+        _ => "Error",
+    };
+    // Embed the body summary into the HTTP reason-phrase so HTTP CONNECT
+    // clients (which discard the body) and conformance-runner replays can
+    // surface the policy reason without parsing the body.
+    let reason_line = if body.is_empty() {
+        default_reason.to_string()
+    } else {
+        // Sanitize: HTTP reason-phrase cannot contain CR/LF.
+        let safe_body = body.replace(['\r', '\n'], " ");
+        format!("{default_reason} — {safe_body}")
+    };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason_line}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
         status = status,
-        reason = match status {
-            200 => "OK",
-            400 => "Bad Request",
-            403 => "Forbidden",
-            502 => "Bad Gateway",
-            _ => "Error",
-        },
+        reason_line = reason_line,
         len = body.len(),
         body = body,
     );

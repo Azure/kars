@@ -23,6 +23,29 @@ use crate::errors;
 use crate::proxy;
 use crate::safety;
 
+/// Inject the canonical `x-kars-decision*` triplet onto a response
+/// so downstream tooling (conformance-runner, observability pipelines,
+/// HTTP clients) can read the policy decision without parsing the
+/// upstream-specific body wording. CR/LF are sanitized from the reason
+/// per HTTP/1.1 header rules.
+fn insert_decision_headers(
+    response: &mut axum::response::Response,
+    decision: &'static str,
+    by_kind: &'static str,
+    reason: &str,
+) {
+    let safe = reason.replace(['\r', '\n'], " ");
+    if let Ok(rh) = axum::http::HeaderValue::from_str(&safe) {
+        response.headers_mut().insert("x-kars-decision-reason", rh);
+    }
+    if let Ok(dh) = axum::http::HeaderValue::from_str(decision) {
+        response.headers_mut().insert("x-kars-decision", dh);
+    }
+    if let Ok(bh) = axum::http::HeaderValue::from_str(by_kind) {
+        response.headers_mut().insert("x-kars-decision-by", bh);
+    }
+}
+
 /// POST /v1/chat/completions — the primary inference endpoint.
 pub(super) async fn chat_completions(
     State(state): State<AppState>,
@@ -736,7 +759,7 @@ pub(super) async fn chat_completions(
                                 "InferencePolicy contentSafety floor: {}",
                                 violation.message()
                             );
-                            return (
+                            let mut resp = (
                                 axum::http::StatusCode::FORBIDDEN,
                                 Body::from(
                                     serde_json::json!({
@@ -750,6 +773,25 @@ pub(super) async fn chat_completions(
                                 ),
                             )
                                 .into_response();
+                            let normalized_reason = match violation.code() {
+                                "inference_policy_prompt_shields_required" => {
+                                    "InferencePolicy blocked: Prompt Shields required but \
+                                     upstream had no prompt_filter_results (content safety)"
+                                        .to_string()
+                                }
+                                "inference_policy_content_safety_exceeded" => format!(
+                                    "InferencePolicy content safety floor exceeded: {}",
+                                    violation.message()
+                                ),
+                                _ => violation.message(),
+                            };
+                            insert_decision_headers(
+                                &mut resp,
+                                "blocked",
+                                "InferencePolicy",
+                                &normalized_reason,
+                            );
+                            return resp;
                         }
 
                         // AGT output pipeline: redact → scan → policy check (blocking)
@@ -784,7 +826,7 @@ pub(super) async fn chat_completions(
                                     gate = "output_policy",
                                     "AGT: model response blocked by output policy"
                                 );
-                                return (
+                                let mut resp = (
                                     axum::http::StatusCode::FORBIDDEN,
                                     Body::from(
                                         serde_json::json!({
@@ -798,6 +840,13 @@ pub(super) async fn chat_completions(
                                     ),
                                 )
                                     .into_response();
+                                insert_decision_headers(
+                                    &mut resp,
+                                    "blocked",
+                                    "InferencePolicy",
+                                    &format!("Response blocked by output policy: {reason}"),
+                                );
+                                return resp;
                             }
 
                             // 4. Rewrite body if redaction/scanning modified the text
@@ -822,10 +871,70 @@ pub(super) async fn chat_completions(
                     }
                 }
 
-                let mut response = (status, Body::from(resp_body)).into_response();
+                let mut response = (status, Body::from(resp_body.clone())).into_response();
                 // Forward content-type from upstream
                 if let Some(ct) = resp_headers.get("content-type") {
                     response.headers_mut().insert("content-type", ct.clone());
+                }
+
+                // Inject normalized `x-kars-decision*` headers for
+                // non-success responses carrying an Azure OpenAI
+                // content_filter / responsible-AI block. Downstream
+                // conformance tooling and observability pipelines read
+                // the headers rather than parsing upstream-specific
+                // body wording. Provider-portable: any upstream that
+                // uses `{"error":{"code":"content_filter", ...}}`
+                // (OpenAI, Azure OpenAI, AOAI-compatible) works.
+                if !status.is_success()
+                    && let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
+                    && let Some(err) = body_json.get("error").and_then(|e| e.as_object())
+                {
+                    let code = err.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                    let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                    // Probe the innererror for specific Responsible-AI
+                    // signals (jailbreak vs category-severity). This
+                    // surfaces *what* tripped the filter into the
+                    // decision-reason header, which is what
+                    // conformance-runner needles match against.
+                    let inner = err.get("innererror").and_then(|i| i.as_object());
+                    let jailbreak_detected = inner
+                        .and_then(|i| i.get("content_filter_result"))
+                        .and_then(|cfr| cfr.get("jailbreak"))
+                        .and_then(|j| j.get("detected"))
+                        .and_then(|d| d.as_bool())
+                        .unwrap_or(false);
+                    let is_content_filter = code == "content_filter"
+                        || code == "responsible_ai_policy_violation"
+                        || msg.contains("content management policy")
+                        || msg.contains("Responsible AI");
+                    let normalized: Option<String> = if jailbreak_detected {
+                        Some(
+                            "Azure AI Content Safety blocked: prompt jailbreak detected (content_filter)"
+                                .to_string(),
+                        )
+                    } else if is_content_filter {
+                        Some(
+                            "Azure AI Content Safety blocked: prompt content filter triggered (content_filter)"
+                                .to_string(),
+                        )
+                    } else if code == "inference_policy_content_safety_exceeded" {
+                        Some("InferencePolicy content safety floor exceeded".to_string())
+                    } else if code == "inference_policy_prompt_shields_required" {
+                        Some(
+                            "InferencePolicy requires Prompt Shields annotations (content safety)"
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = normalized {
+                        insert_decision_headers(
+                            &mut response,
+                            "blocked",
+                            "InferencePolicy",
+                            &reason,
+                        );
+                    }
                 }
                 response
             }
