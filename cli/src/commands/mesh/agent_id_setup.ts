@@ -172,7 +172,7 @@ interface MeApiResponse {
 
 async function getCurrentUserOid(): Promise<string> {
   // /me requires User.Read; Agent ID Developer implies this.
-  const me = await azGraphRest<MeApiResponse>("GET", "/v1.0/me");
+  const me = await azGraphRest<MeApiResponse>("GET", "/beta/me");
   if (!me || !me.id) {
     throw new Error("Failed to look up current user via Graph /me — Agent ID Developer role required");
   }
@@ -199,7 +199,7 @@ async function findExistingBlueprint(
   }
   const resp = await azGraphRest<ListResp>(
     "GET",
-    `/v1.0/applications?$filter=${filter}&$top=2`,
+    `/beta/applications?$filter=${filter}&$top=2`,
   );
   if (!resp || !resp.value || resp.value.length === 0) return null;
   if (resp.value.length > 1) {
@@ -218,8 +218,8 @@ async function createBlueprint(
   const body: Record<string, unknown> = {
     "@odata.type": "#Microsoft.Graph.AgentIdentityBlueprint",
     displayName,
-    "sponsors@odata.bind": [`https://graph.microsoft.com/v1.0/users/${userOid}`],
-    "owners@odata.bind": [`https://graph.microsoft.com/v1.0/users/${userOid}`],
+    "sponsors@odata.bind": [`https://graph.microsoft.com/beta/users/${userOid}`],
+    "owners@odata.bind": [`https://graph.microsoft.com/beta/users/${userOid}`],
   };
   if (serviceTree && serviceTree.trim()) {
     body.serviceManagementReference = serviceTree.trim();
@@ -227,7 +227,7 @@ async function createBlueprint(
 
   const created = await azGraphRest<BlueprintGraphResponse>(
     "POST",
-    "/v1.0/applications/",
+    "/beta/applications/",
     body,
   );
   if (!created || !created.appId) {
@@ -250,7 +250,7 @@ async function ensureBlueprintSp(appId: string): Promise<SpGraphResponse> {
   const filter = encodeURIComponent(`appId eq '${appId}'`);
   const existing = await azGraphRest<ListResp>(
     "GET",
-    `/v1.0/servicePrincipals?$filter=${filter}&$top=1`,
+    `/beta/servicePrincipals?$filter=${filter}&$top=1`,
   );
   if (existing && existing.value && existing.value.length > 0) {
     return existing.value[0];
@@ -258,7 +258,7 @@ async function ensureBlueprintSp(appId: string): Promise<SpGraphResponse> {
   // Create.
   const created = await azGraphRest<SpGraphResponse>(
     "POST",
-    "/v1.0/servicePrincipals",
+    "/beta/servicePrincipals",
     { appId },
   );
   if (!created || !created.id) {
@@ -320,7 +320,7 @@ async function ensureBlueprintMiAsFic(
   const issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
   const existing = await azGraphRest<FicListResp>(
     "GET",
-    `/v1.0/applications/${blueprintObjectId}/federatedIdentityCredentials`,
+    `/beta/applications/${blueprintObjectId}/federatedIdentityCredentials`,
   );
   if (
     existing &&
@@ -331,7 +331,7 @@ async function ensureBlueprintMiAsFic(
   }
   await azGraphRest(
     "POST",
-    `/v1.0/applications/${blueprintObjectId}/federatedIdentityCredentials`,
+    `/beta/applications/${blueprintObjectId}/federatedIdentityCredentials`,
     {
       name: "kars-controller-mi",
       issuer,
@@ -578,7 +578,7 @@ export async function checkAgentIdRole(): Promise<AgentIdRoleCheckResult> {
   try {
     resp = await azGraphRest<MeMemberOfResp>(
       "GET",
-      "/v1.0/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=id,displayName,roleTemplateId&$top=100",
+      "/beta/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=id,displayName,roleTemplateId&$top=100",
     );
   } catch (e) {
     const msg = (e as Error).message;

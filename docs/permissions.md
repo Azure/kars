@@ -269,18 +269,18 @@ for the full chain:
 ```bash
 # Requires Agent ID Developer (or stronger)
 az rest --method POST \
-  --url "https://graph.microsoft.com/v1.0/applications/" \
+  --url "https://graph.microsoft.com/beta/applications/" \
   --headers OData-Version=4.0 \
   --body '{
     "@odata.type": "#Microsoft.Graph.AgentIdentityBlueprint",
     "displayName": "kars-blueprint",
-    "sponsors@odata.bind": ["https://graph.microsoft.com/v1.0/users/<your-oid>"],
-    "owners@odata.bind":   ["https://graph.microsoft.com/v1.0/users/<your-oid>"]
+    "sponsors@odata.bind": ["https://graph.microsoft.com/beta/users/<your-oid>"],
+    "owners@odata.bind":   ["https://graph.microsoft.com/beta/users/<your-oid>"]
   }'
 # Then create the SP so it shows up in the Entra Agents portal:
 APP_ID=...  # appId from the previous response
 az rest --method POST \
-  --url "https://graph.microsoft.com/v1.0/servicePrincipals" \
+  --url "https://graph.microsoft.com/beta/servicePrincipals" \
   --body "{\"appId\": \"$APP_ID\"}"
 ```
 
