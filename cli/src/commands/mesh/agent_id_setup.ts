@@ -112,6 +112,17 @@ async function azGraphRest<T>(
   graphPath: string,
   body?: unknown,
 ): Promise<T | null> {
+  return azGraphRestWithRetry<T>(method, graphPath, body, false);
+}
+
+/// Internal: shared implementation. `alreadyRetried` prevents an
+/// infinite loop if device-code re-login also returns AADSTS530084.
+async function azGraphRestWithRetry<T>(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  graphPath: string,
+  body: unknown,
+  alreadyRetried: boolean,
+): Promise<T | null> {
   // Microsoft Graph requires the OData-Version header for derived
   // types like agentIdentityBlueprint. `az rest` does not let us set
   // headers directly via flag, but it forwards Authorization and
@@ -139,7 +150,69 @@ async function azGraphRest<T>(
     return JSON.parse(res.stdout) as T;
   } catch (e: unknown) {
     const err = e as { stderr?: string; message?: string };
-    throw new Error(err.stderr?.trim() ?? err.message ?? `az rest ${graphPath} failed`);
+    const msg = (err.stderr ?? err.message ?? "").toString();
+
+    // AADSTS530084 = Conditional Access token-binding policy block on
+    // the az CLI's first-party app token for Microsoft Graph. Trying
+    // a device-code re-login refreshes the Graph token via a
+    // different OAuth flow that some tenant CA policies treat
+    // differently (the device-code app may not be subject to the
+    // same token-binding rule). One-shot: if it fails again, give
+    // up and propagate so the caller can fall back to Bicep.
+    if (!alreadyRetried && msg.includes("AADSTS530084")) {
+      const tenantArgs = await deviceCodeReloginForGraph();
+      if (tenantArgs) {
+        return azGraphRestWithRetry<T>(method, graphPath, body, true);
+      }
+    }
+
+    throw new Error(msg.trim() || `az rest ${graphPath} failed`);
+  }
+}
+
+/// Attempt a one-shot `az login --use-device-code --scope graph`
+/// refresh of the Graph token cache. Returns true on success so the
+/// caller can retry the failing Graph call.
+///
+/// Device code flow uses a different OAuth path than the default
+/// interactive flow — the user authenticates on a SECOND device by
+/// visiting microsoft.com/devicelogin and entering the code. Some
+/// Conditional Access policies that block token-binding on the
+/// primary device's az CLI session do not apply to this flow.
+async function deviceCodeReloginForGraph(): Promise<boolean> {
+  console.log();
+  console.log(
+    "  ↻ AADSTS530084: az CLI token is CA-blocked for Microsoft Graph.",
+  );
+  console.log(
+    "    Attempting device-code re-login for the Graph scope...",
+  );
+  console.log(
+    "    You will be prompted to visit https://microsoft.com/devicelogin in a browser.",
+  );
+
+  try {
+    await execa(
+      "az",
+      [
+        "login",
+        "--use-device-code",
+        "--scope",
+        "https://graph.microsoft.com//.default",
+        "--allow-no-subscriptions",
+      ],
+      // Use inherit so the device-code prompt is visible to the user.
+      { stdio: ["inherit", "inherit", "inherit"] },
+    );
+    console.log("  ✓ Graph token cache refreshed via device-code flow.");
+    return true;
+  } catch (e) {
+    const msg = (e as { stderr?: string; message?: string }).stderr ?? (e as Error).message ?? "";
+    console.log(
+      `  ✘ Device-code re-login also failed (${msg.split("\n")[0].slice(0, 120)}).`,
+    );
+    console.log("    Will fall back to Bicep ARM deployment.");
+    return false;
   }
 }
 
@@ -215,11 +288,19 @@ async function createBlueprint(
   userOid: string,
   serviceTree: string | undefined,
 ): Promise<BlueprintGraphResponse> {
+  // Body shape matches the user-verified working request in Graph
+  // Explorer:
+  //   - @odata.type WITHOUT the `#` prefix (Graph accepts both, but
+  //     this form is what the Entra Agents portal docs publish).
+  //   - sponsors/owners @odata.bind URLs use /v1.0/users/ specifically
+  //     (Graph rejects /beta/ in odata.bind refs from the Application
+  //     namespace — the resource URL must be the v1.0 entity, even
+  //     when the parent POST URL is /beta).
   const body: Record<string, unknown> = {
-    "@odata.type": "#Microsoft.Graph.AgentIdentityBlueprint",
+    "@odata.type": "Microsoft.Graph.AgentIdentityBlueprint",
     displayName,
-    "sponsors@odata.bind": [`https://graph.microsoft.com/beta/users/${userOid}`],
-    "owners@odata.bind": [`https://graph.microsoft.com/beta/users/${userOid}`],
+    "sponsors@odata.bind": [`https://graph.microsoft.com/v1.0/users/${userOid}`],
+    "owners@odata.bind": [`https://graph.microsoft.com/v1.0/users/${userOid}`],
   };
   if (serviceTree && serviceTree.trim()) {
     body.serviceManagementReference = serviceTree.trim();

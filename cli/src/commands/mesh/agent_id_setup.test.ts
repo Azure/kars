@@ -168,6 +168,19 @@ describe("checkAgentIdRole", () => {
   });
 
   it("emits the az-login workaround when AADSTS530084 (CA block) is detected", async () => {
+    // First call (graph /me/transitiveMemberOf) returns AADSTS530084
+    mockedExeca.mockRejectedValueOnce(
+      new Error(
+        "ERROR: AADSTS530084: Access has been blocked by conditional access token protection policy configured by this organization.",
+      ),
+    );
+    // Second call (device-code re-login attempt) also fails — exercises
+    // the fallback path. We don't want to actually prompt the user in
+    // tests, so the rejection here keeps things hermetic.
+    mockedExeca.mockRejectedValueOnce(new Error("device-code login cancelled"));
+    // Third call (retry of /me/transitiveMemberOf) — if the device-code
+    // succeeded we'd retry. Mock it to return AADSTS530084 again so the
+    // final message preserves the original error code for the user.
     mockedExeca.mockRejectedValueOnce(
       new Error(
         "ERROR: AADSTS530084: Access has been blocked by conditional access token protection policy configured by this organization.",
