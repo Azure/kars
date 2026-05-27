@@ -1,0 +1,105 @@
+# kars KarsAuthConfig CRD
+#
+# DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
+# schema in `controller/src/auth_config.rs`.
+#
+# Cluster-scoped singleton (`metadata.name == "default"`). Holds the
+# tenant-wide Entra Agent ID blueprint anchors + per-cluster controller
+# managed identity reference. Materialised into a sibling ConfigMap by
+# `controller/src/auth_config_reconciler.rs`.
+#
+# See docs/architecture/entra-agent-id/01-runtime-token-flow.md for the
+# runtime contract.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karsauthconfigs.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: KarsAuthConfig
+    plural: karsauthconfigs
+    shortNames:
+    - kac
+    singular: karsauthconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.tenant.tenantId
+      name: Tenant
+      type: string
+    - jsonPath: .spec.agentId.blueprintClientId
+      name: Blueprint
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |
+          KarsAuthConfig — cluster-singleton holding the Entra Agent ID
+          provisioning anchors. Schema preserved as unknown-fields here
+          for forward-compatibility; the canonical type definitions live
+          in `controller/src/auth_config.rs`. The CLI (`kars mesh
+          setup-trust`) writes this CR; the controller validates spec
+          shape at reconcile time.
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+            required: [tenant, agentId, controller]
+            properties:
+              tenant:
+                type: object
+                required: [tenantId]
+                properties:
+                  tenantId:
+                    type: string
+                    description: Microsoft Entra tenant GUID.
+                  authorityHost:
+                    type: string
+                    description: Authority host (default login.microsoftonline.com).
+                    default: "https://login.microsoftonline.com/"
+                  serviceManagementReference:
+                    type: string
+                    description: |
+                      ServiceTree GUID required by Microsoft-style enterprise
+                      tenants when registering new Entra applications. Audit
+                      lineage only; not used at runtime.
+              agentId:
+                type: object
+                required: [blueprintClientId, blueprintObjectId]
+                properties:
+                  blueprintClientId:
+                    type: string
+                  blueprintObjectId:
+                    type: string
+              controller:
+                type: object
+                required: [managedIdentityClientId, managedIdentityResourceId]
+                properties:
+                  managedIdentityClientId:
+                    type: string
+                  managedIdentityResourceId:
+                    type: string
+                  managedIdentityPrincipalId:
+                    type: string
+              downstreamApis:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+    served: true
+    storage: true
+    subresources:
+      status: {}
