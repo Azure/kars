@@ -112,7 +112,7 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
     )
     .option(
       "--mode <mode>",
-      "Trust mode: 'agent-id' (recommended, GA Entra Agent ID) or 'legacy' (deprecated api://agentmesh)",
+      "Trust mode: 'agent-id' (CLI/Graph), 'bicep' (ARM/Graph extension, bypasses az CLI Graph CA blocks), or 'legacy' (deprecated api://agentmesh)",
       "agent-id",
     )
     .option("--display-name <name>", "Display name for the Entra app registration (legacy mode only)", "kars AgentMesh")
@@ -132,15 +132,16 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
     }) => {
       // ── Agent ID mode (recommended) ────────────────────────────
       // Forwards to the same idempotent helper that `kars up` invokes
-      // automatically. Use this command to re-run the Entra trust
-      // provisioning standalone — e.g. after refreshing `az login`
-      // following an AADSTS530084 Conditional Access block during
-      // `kars up`.
+      // automatically. Auto-fallback wrapper: tries the fast Graph
+      // REST path first, transparently switches to Bicep when
+      // Microsoft tenant Conditional Access blocks the az CLI's
+      // Graph token (AADSTS530084). Use --mode bicep explicitly to
+      // skip the CLI attempt entirely.
       if (opts.mode === "agent-id") {
         banner("kars · Mesh Setup Trust", "Entra Agent ID blueprint + controller MI");
-        const { ensureAgentIdTrust } = await import("./agent_id_setup.js");
+        const { ensureAgentIdTrustAutoFallback } = await import("./agent_id_setup.js");
         try {
-          const result = await ensureAgentIdTrust({
+          const result = await ensureAgentIdTrustAutoFallback({
             clusterName: opts.clusterName,
             resourceGroup: opts.resourceGroup,
             region: opts.region,
@@ -155,15 +156,41 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
         } catch (e) {
           const msg = (e as Error).message;
           console.error(chalk.red(`\n  ✘ ${msg.split("\n")[0]}`));
-          if (msg.includes("AADSTS530084")) {
-            console.error(chalk.dim("\n    Conditional-access policy is blocking the Graph token this session has."));
-            console.error(chalk.dim("    Refresh Microsoft Graph consent and retry:"));
-            console.error(chalk.cyan("      az login --scope https://graph.microsoft.com//.default"));
-            console.error(chalk.cyan("      kars mesh setup-trust --mode agent-id"));
-          } else if (msg.includes("Agent ID Developer") || msg.includes("Insufficient privileges")) {
+          if (msg.includes("Agent ID Developer") || msg.includes("Insufficient privileges")) {
             console.error(chalk.dim("\n    The signed-in identity needs the 'Agent ID Developer' Entra directory role."));
             console.error(chalk.dim("    Activate via PIM at https://portal.azure.com and retry."));
           }
+          process.exit(1);
+        }
+        return;
+      }
+
+      // ── Bicep mode (CA-policy-tolerant) ────────────────────────
+      // Runs the same provisioning as agent-id mode but via the
+      // Microsoft.Graph Bicep extension. ARM's deployment principal
+      // gets a fresh Graph token through its own auth path — bypasses
+      // Conditional Access token-binding policy on the az CLI's
+      // first-party app. Use this when `kars mesh setup-trust --mode
+      // agent-id` fails with AADSTS530084.
+      if (opts.mode === "bicep") {
+        banner("kars · Mesh Setup Trust (bicep)", "Entra Agent ID via ARM deployment");
+        const { ensureAgentIdTrustViaBicep } = await import("./agent_id_setup_bicep.js");
+        try {
+          const result = await ensureAgentIdTrustViaBicep({
+            clusterName: opts.clusterName,
+            resourceGroup: opts.resourceGroup,
+            region: opts.region ?? "eastus",
+            serviceTree: opts.serviceTree,
+            dryRun: opts.dryRun,
+          });
+          console.log();
+          console.log(chalk.green("  ✓ Entra Agent ID trust ready (via Bicep)"));
+          console.log(chalk.dim(`    blueprint client ID: ${result.blueprintClientId}`));
+          console.log(chalk.dim(`    controller MI:       ${result.controllerMiClientId}`));
+          console.log(chalk.dim(`    KarsAuthConfig:      kubectl get karsauthconfig default`));
+        } catch (e) {
+          const msg = (e as Error).message;
+          console.error(chalk.red(`\n  ✘ ${msg.split("\n")[0]}`));
           process.exit(1);
         }
         return;

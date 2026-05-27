@@ -417,7 +417,10 @@ export async function ensureAgentIdTrust(
     opts.serviceTree && opts.serviceTree.trim()
       ? opts.serviceTree.trim()
       : (process.env.KARS_SERVICE_TREE ?? "").trim() || undefined;
-  const blueprintDisplayName = `kars-${clusterName}-blueprint`;
+  const blueprintDisplayName =
+    opts.blueprintName && opts.blueprintName.trim()
+      ? opts.blueprintName.trim()
+      : "kars-blueprint";
   const miName = `${clusterName}-controller-mi`;
 
   section("Entra Agent ID — auto-provision");
@@ -675,6 +678,61 @@ export async function detectExistingBlueprint(
     return {
       present: false,
       message: `Graph lookup inconclusive (${msg.split("\n")[0].slice(0, 100)})`,
+    };
+  }
+}
+
+/// Smart auto-provision: try the fast Graph REST path first, and
+/// transparently fall back to the Bicep ARM path when the Microsoft
+/// corporate tenant Conditional Access policy blocks the Azure CLI's
+/// Graph token (AADSTS530084) — common in policed enterprise tenants.
+///
+/// `kars up` calls this wrapper. The CLI flag
+/// `kars mesh setup-trust --mode agent-id` also uses it. Operators
+/// who want to skip the CLI attempt entirely (e.g. they know their
+/// tenant always blocks CLI Graph) can run
+/// `kars mesh setup-trust --mode bicep` directly.
+///
+/// Returns the same shape as `ensureAgentIdTrust`. The `freshlyCreated`
+/// field is preserved across modes.
+export async function ensureAgentIdTrustAutoFallback(
+  opts: AgentIdSetupOptions,
+): Promise<AgentIdSetupResult> {
+  try {
+    return await ensureAgentIdTrust(opts);
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (!msg.includes("AADSTS530084")) {
+      // Not the CA-block error — propagate unchanged. Avoids surprising
+      // users with a Bicep attempt for genuine permission or config
+      // errors that Bicep would also fail on.
+      throw e;
+    }
+
+    console.log();
+    console.log(
+      `  ↻ Graph REST blocked by tenant Conditional Access policy (AADSTS530084).`,
+    );
+    console.log(
+      `    Falling back to Bicep ARM deployment — bypasses az CLI Graph CA.`,
+    );
+
+    const { ensureAgentIdTrustViaBicep } = await import("./agent_id_setup_bicep.js");
+    const bicepResult = await ensureAgentIdTrustViaBicep({
+      clusterName: opts.clusterName,
+      resourceGroup: opts.resourceGroup,
+      region: opts.region ?? "eastus",
+      serviceTree: opts.serviceTree,
+      dryRun: opts.dryRun,
+    });
+
+    // Map BicepSetupResult → AgentIdSetupResult. The bicep path
+    // always upserts (idempotent) so we conservatively claim
+    // freshlyCreated=true when we go through this fallback — operators
+    // who care about the distinction can inspect az deployment history.
+    return {
+      ...bicepResult,
+      freshlyCreated: true,
     };
   }
 }

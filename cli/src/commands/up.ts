@@ -916,7 +916,7 @@ Auto-resume:
         // continues into anonymous-tier mode and the operator can
         // re-run `kars mesh setup-trust` once the role is granted.
         try {
-          const { karsAuthConfigExists, ensureAgentIdTrust } = await import(
+          const { karsAuthConfigExists, ensureAgentIdTrustAutoFallback } = await import(
             "./mesh/agent_id_setup.js"
           );
           const already = await karsAuthConfigExists();
@@ -924,7 +924,12 @@ Auto-resume:
             stepper.detail("ok", "KarsAuthConfig/default already present — skipping Entra Agent ID setup");
           } else {
             stepper.step("Provisioning Entra Agent ID trust anchor...");
-            const result = await ensureAgentIdTrust({
+            // Auto-fallback wrapper: tries the fast Graph REST path
+            // first, transparently switches to Bicep ARM deployment
+            // when Microsoft tenant Conditional Access blocks the az
+            // CLI's Graph token (AADSTS530084). End result is the same
+            // KarsAuthConfig CR either way.
+            const result = await ensureAgentIdTrustAutoFallback({
               clusterName: baseName,
               resourceGroup: rg,
               region: options.region,
