@@ -109,10 +109,25 @@ pub fn build_sidecar_container(image_override: Option<&str>, image_pull_policy: 
                 }
             }
         ],
-        // ASP.NET Core wiring. Pinned identical to the documented
-        // sidecar contract; never expose to non-localhost callers.
+        // ASP.NET Core wiring. We bind on **all interfaces** rather
+        // than `127.0.0.1` only so the kubelet's readiness/liveness
+        // probes can reach the sidecar — kubelet HTTP probes connect
+        // to the pod IP, not loopback, and a 127.0.0.1-only bind
+        // produces "connection refused" before any HTTP exchange
+        // (so the Host-header override on the probe is moot).
+        //
+        // Defence-in-depth against cross-pod traffic to the sidecar:
+        //   1. The sidecar's built-in HostFiltering middleware only
+        //      accepts `Host: localhost`; any caller using the pod IP
+        //      as Host gets 400 Bad Request.
+        //   2. The sandbox has NO ingress NetworkPolicy rule allowing
+        //      port 8080 from any source — cross-pod packets are
+        //      dropped at the NP layer before reaching the sidecar.
+        //   3. The egress-guard iptables rule REJECTs UID 1000
+        //      (openclaw) → 127.0.0.1:8080, preventing in-pod
+        //      privilege escalation.
         "env": [
-            {"name": "ASPNETCORE_URLS", "value": format!("http://127.0.0.1:{SIDECAR_PORT}")}
+            {"name": "ASPNETCORE_URLS", "value": format!("http://+:{SIDECAR_PORT}")}
         ],
         "securityContext": {
             "runAsUser": SIDECAR_UID,
