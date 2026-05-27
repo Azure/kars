@@ -1,0 +1,129 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "609873457816118198"
+    }
+  },
+  "parameters": {
+    "displayName": {
+      "type": "string",
+      "defaultValue": "kars-entra-agentid-poc",
+      "metadata": {
+        "description": "Display name for the new Entra Agent ID. Stays human-readable in the portal."
+      }
+    },
+    "runId": {
+      "type": "string",
+      "defaultValue": "[utcNow('yyyyMMddHHmmss')]",
+      "metadata": {
+        "description": "Unique tag so re-runs cohabit. Defaults to a deployment-time UTC stamp."
+      }
+    },
+    "fedCredIssuer": {
+      "type": "string",
+      "defaultValue": "[format('https://oidc.example.test/poc-{0}', parameters('runId'))]",
+      "metadata": {
+        "description": "OIDC issuer to federate from. The default is a stand-in URL; real kars uses the AKS cluster OIDC issuer."
+      }
+    },
+    "fedCredSubject": {
+      "type": "string",
+      "defaultValue": "[format('system:serviceaccount:kars-poc-{0}:sandbox', parameters('runId'))]",
+      "metadata": {
+        "description": "Subject the federated credential will accept (K8s SA JWT sub claim)."
+      }
+    },
+    "serviceManagementReference": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Microsoft ServiceTree GUID for app-registration ownership. Required in corporate Microsoft tenants (the AAD app registration policy rejects creates without it). Find yours at https://aka.ms/servicetree or `az servicemanagement-reference list`. For non-Microsoft tenants, leave empty."
+      }
+    }
+  },
+  "imports": {
+    "microsoftGraphV1": {
+      "provider": "MicrosoftGraph",
+      "version": "0.2.0-preview"
+    }
+  },
+  "resources": {
+    "agentApp": {
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/applications@v1.0",
+      "properties": {
+        "uniqueName": "[format('{0}-{1}', parameters('displayName'), parameters('runId'))]",
+        "displayName": "[format('{0} ({1})', parameters('displayName'), parameters('runId'))]",
+        "signInAudience": "AzureADMyOrg",
+        "tags": [
+          "EntraAgentId",
+          "kars-poc"
+        ],
+        "serviceManagementReference": "[parameters('serviceManagementReference')]",
+        "requiredResourceAccess": []
+      }
+    },
+    "agentSp": {
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/servicePrincipals@v1.0",
+      "properties": {
+        "appId": "[reference('agentApp').appId]",
+        "displayName": "[format('{0} ({1})', parameters('displayName'), parameters('runId'))]",
+        "tags": [
+          "EntraAgentId",
+          "kars-poc"
+        ]
+      },
+      "dependsOn": [
+        "agentApp"
+      ]
+    },
+    "agentFedCred": {
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/applications/federatedIdentityCredentials@v1.0",
+      "properties": {
+        "name": "[format('{0}/poc-fedcred-{1}', reference('agentApp').uniqueName, parameters('runId'))]",
+        "audiences": [
+          "api://AzureADTokenExchange"
+        ],
+        "issuer": "[parameters('fedCredIssuer')]",
+        "subject": "[parameters('fedCredSubject')]",
+        "description": "[format('kars POC — synthetic K8s SA mapping (runId={0})', parameters('runId'))]"
+      },
+      "dependsOn": [
+        "agentApp"
+      ]
+    }
+  },
+  "outputs": {
+    "appId": {
+      "type": "string",
+      "value": "[reference('agentApp').appId]"
+    },
+    "appObjectId": {
+      "type": "string",
+      "value": "[reference('agentApp').id]"
+    },
+    "spObjectId": {
+      "type": "string",
+      "value": "[reference('agentSp').id]"
+    },
+    "uniqueName": {
+      "type": "string",
+      "value": "[reference('agentApp').uniqueName]"
+    },
+    "displayName": {
+      "type": "string",
+      "value": "[reference('agentApp').displayName]"
+    },
+    "fedCredName": {
+      "type": "string",
+      "value": "[reference('agentFedCred').name]"
+    }
+  }
+}
