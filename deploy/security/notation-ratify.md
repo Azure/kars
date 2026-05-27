@@ -1,7 +1,7 @@
 # Image Supply Chain Security — Notation + Ratify
 
 ## Overview
-Kars uses Notation for image signing and Ratify for admission verification.
+kars uses Notation for image signing and Ratify for admission verification.
 Only signed images from the trusted ACR can be deployed as sandbox containers.
 
 ## Setup

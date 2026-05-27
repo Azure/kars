@@ -233,7 +233,7 @@ impl Governance {
             rate_limiter: RateLimiter::new(500.0, 1000.0, 50.0, 100.0),
             behavior: BehaviorMonitor::new(
                 // Behavior-monitor thresholds. Defaults tuned for interactive
-                // Kars sandboxes; offload workers (research loops with
+                // kars sandboxes; offload workers (research loops with
                 // many tool/inference calls in short bursts) get higher
                 // limits injected via env vars by the controller reconciler.
                 std::env::var("AGT_BEHAVIOR_BURST_THRESHOLD")

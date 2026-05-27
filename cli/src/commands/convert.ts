@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * `kars convert` — translate between Kars and upstream
+ * `kars convert` — translate between kars and upstream
  * `agents.x-k8s.io/v1alpha1` Sandbox manifests (YAML in / YAML out).
  *
  * Phase 2 S9.2: real translator. Phase 0 emitted exit 3.
@@ -120,7 +120,7 @@ function cleanMetadata(
 /**
  * Forward translation: `KarsSandbox` → upstream `Sandbox`.
  *
- * Lossy on Kars-only fields (governance, inference, a2a, agent,
+ * Lossy on kars-only fields (governance, inference, a2a, agent,
  * azureServices, networkPolicy, upstreamCompatibility). Each emits a warning.
  *
  * Mirrors controller seccomp/runtimeClass logic
@@ -369,9 +369,9 @@ function upstreamSandboxToClawsandbox(parsed: ParsedManifest): TranslateResult {
   if (podSpec.volumes !== undefined) warnings.push("dropped podTemplate.spec.volumes");
   if (podSpec.initContainers !== undefined) warnings.push("dropped podTemplate.spec.initContainers");
   if (podSpec.serviceAccountName !== undefined) warnings.push("dropped podTemplate.spec.serviceAccountName (controller manages SA)");
-  if (podSpec.hostNetwork === true) warnings.push("dropped podTemplate.spec.hostNetwork=true (forbidden by Kars posture)");
-  if (podSpec.hostPID === true) warnings.push("dropped podTemplate.spec.hostPID=true (forbidden by Kars posture)");
-  if (podSpec.hostIPC === true) warnings.push("dropped podTemplate.spec.hostIPC=true (forbidden by Kars posture)");
+  if (podSpec.hostNetwork === true) warnings.push("dropped podTemplate.spec.hostNetwork=true (forbidden by kars posture)");
+  if (podSpec.hostPID === true) warnings.push("dropped podTemplate.spec.hostPID=true (forbidden by kars posture)");
+  if (podSpec.hostIPC === true) warnings.push("dropped podTemplate.spec.hostIPC=true (forbidden by kars posture)");
   if (podSpec.nodeSelector !== undefined) warnings.push("dropped podTemplate.spec.nodeSelector (controller picks pool from isolation)");
   if (podSpec.affinity !== undefined) warnings.push("dropped podTemplate.spec.affinity");
   if (podSpec.tolerations !== undefined) warnings.push("dropped podTemplate.spec.tolerations");

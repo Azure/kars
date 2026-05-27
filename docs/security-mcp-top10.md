@@ -1,6 +1,6 @@
-# OWASP MCP Top 10 (2025) — Kars controls matrix
+# OWASP MCP Top 10 (2025) — kars controls matrix
 
-Internal mapping. Each row answers: what Kars surface takes the hit,
+Internal mapping. Each row answers: what kars surface takes the hit,
 what control applies today, what lands per the implementation plan, and
 the code/config reference. Written against the OWASP MCP Top 10 2025
 listing (<https://owasp.org/www-project-mcp-top-10/>), re-verified on
@@ -90,7 +90,7 @@ admission deny. Distinct from CR-spec signing.
 **Threat.** Compromised npm/crate dependency; tampered mesh SDK or
 relay/registry image; dropped patch integrity.
 
-**Today.** Kars uses Microsoft AGT AgentMesh only. The historical
+**Today.** kars uses Microsoft AGT AgentMesh only. The historical
 vendored AgentMesh fork was removed after the gap-closing patches landed
 upstream, so dependency review focuses on the AGT SDK
 version, AGT relay/registry images, and regular SCA gates rather than local

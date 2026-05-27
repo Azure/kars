@@ -1,4 +1,4 @@
-# Kars Inference Router — multi-stage Rust build (Azure Linux)
+# kars Inference Router — multi-stage Rust build (Azure Linux)
 # Produces a minimal distroless binary (~15MB)
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:35149ae8dd179684f969944f54a337c665a64e702486154eb44253fb39c2505b
@@ -51,8 +51,8 @@ EXPOSE 8443
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD curl -fsS --max-time 2 http://127.0.0.1:8443/healthz || exit 1
 
-LABEL org.opencontainers.image.title="Kars Inference Router" \
-      org.opencontainers.image.description="High-performance inference proxy for Kars" \
+LABEL org.opencontainers.image.title="kars Inference Router" \
+      org.opencontainers.image.description="High-performance inference proxy for kars" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT"

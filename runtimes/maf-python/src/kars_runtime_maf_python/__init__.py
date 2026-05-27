@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 """
-Kars in-pod adapter for the Microsoft Agent Framework Python SDK.
+kars in-pod adapter for the Microsoft Agent Framework Python SDK.
 
 Public API mirrors `kars_runtime_openai_agents` so cross-runtime
 helpers can call either adapter the same way.

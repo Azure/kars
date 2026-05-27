@@ -5,12 +5,12 @@
  * @kars/mesh — OpenClaw plugin for mesh federation.
  *
  * Enables any OpenClaw agent to:
- * 1. Pair with a trusted Kars cluster (one-time)
+ * 1. Pair with a trusted kars cluster (one-time)
  * 2. Offload tasks to governed cloud sandboxes
  * 3. Communicate with other mesh agents (send/inbox/discover)
  *
  * Dependencies: ws (WebSocket client)
- * No Docker, no Rust, no Kars CLI required.
+ * No Docker, no Rust, no kars CLI required.
  */
 
 import { loadOrCreateIdentity, getIdentityPath, type MeshIdentity } from "./identity.js";
@@ -261,13 +261,13 @@ const INCOMING_DIR = path.join(
 export function definePluginEntry() {
   return {
     id: "kars-mesh",
-    name: "Kars Mesh",
+    name: "kars Mesh",
     register(api: any) {
       // ── mesh_pair ──
       api.registerTool({
         name: "mesh_pair",
         description:
-          "One-time pairing with an Kars cluster using an admin-provided token. " +
+          "One-time pairing with an kars cluster using an admin-provided token. " +
           "After pairing, you can use cloud_offload to delegate tasks to governed cloud sandboxes.",
         parameters: {
           type: "object",
@@ -287,7 +287,7 @@ export function definePluginEntry() {
       api.registerTool({
         name: "cloud_offload",
         description:
-          "Delegate a task to a governed Kars cloud sandbox. " +
+          "Delegate a task to a governed kars cloud sandbox. " +
           "Optionally send workspace files — they are transferred directly to the sandbox via E2E encrypted mesh (up to 30MB each). " +
           "The sandbox runs with full GPU/inference capabilities and AGT governance. " +
           "Results and output files are returned directly via mesh. Requires prior pairing.",
@@ -740,7 +740,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
       // Differentiate common failure modes so the user can act.
       const msg = String(err?.message || err);
       if (msg.includes("ECONNREFUSED") || msg.includes("EHOSTUNREACH")) {
-        return `❌ Cannot reach relay at ${payload.relay_url}. The Kars cluster may be offline or the relay address is wrong.`;
+        return `❌ Cannot reach relay at ${payload.relay_url}. The kars cluster may be offline or the relay address is wrong.`;
       }
       if (msg.includes("timed out")) {
         return `❌ Relay connection timed out (${TIMEOUTS.RELAY_CONNECT / 1000}s). Check your network/proxy to ${payload.relay_url}.`;
@@ -832,7 +832,7 @@ async function meshPairHandler(...args: any[]): Promise<string> {
 
   const budgetStr = (response.token_budget || 500000).toLocaleString();
   return [
-    `✅ Paired successfully with Kars cluster "${clusterName}"`,
+    `✅ Paired successfully with kars cluster "${clusterName}"`,
     "",
     `  Your AMID:     ${meshIdentity.amid}`,
     `  Identity:      ${identityPath}`,
@@ -1224,7 +1224,7 @@ async function cloudOffloadHandler(...args: any[]): Promise<string> {
 
   const err = await ensureInitialized();
   if (err) return `❌ ${err}`;
-  if (!activePairing) return "❌ Not paired with any Kars cluster. Use mesh_pair first.";
+  if (!activePairing) return "❌ Not paired with any kars cluster. Use mesh_pair first.";
   if (!connection?.isConnected) {
     // Attempt a one-shot reconnect before failing — avoids hard failure on
     // transient WebSocket flaps. If the connection is still broken, bail with

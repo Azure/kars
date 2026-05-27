@@ -1,7 +1,7 @@
 # Walkthrough: The Lethal Trifecta, Defused
 
 A timed, ~7-minute live or recorded demo. Two AKS namespaces, one
-poisoned skill, six Kars layers — each one alone catches the
+poisoned skill, six kars layers — each one alone catches the
 attack.
 
 > **Premise.** The user uploads a `.docx` "real-estate appraisals"
@@ -29,7 +29,7 @@ kubectl get pods -n naked-claw && kubectl get pods -n kars-realestate-agent
 | `kars-claw` | `KarsSandbox` CR | Full nine-layer stack — InferencePolicy, ToolPolicy with method allowlist, ClawIdentity, egress-guard, Content Safety, audit chain. |
 
 **Talking point:** *"Same agent. Same model. Same task. Same allowlist
-contains the same exfil host. The only difference is whether Kars
+contains the same exfil host. The only difference is whether kars
 is enforcing policy."*
 
 ---
@@ -72,7 +72,7 @@ firing in production."*
 
 ---
 
-## Act 4 — Kars defeats it, six different ways (3:00–6:00)
+## Act 4 — kars defeats it, six different ways (3:00–6:00)
 
 ```bash
 ./scripts/run-attack.sh kars
@@ -111,7 +111,7 @@ networkPolicy:
 ```
 
 **Talking point:** *"This is the Claude Cowork lesson. Domains are not
-enough — methods and paths matter. Kars enforces that natively."*
+enough — methods and paths matter. kars enforces that natively."*
 
 ### Layer 3 · ClawIdentity strips attacker-controlled bearer (4:00–4:25)
 
@@ -214,7 +214,7 @@ when, and why."*
 
 **Why `api.openai.com` and not `api.anthropic.com`?**
 The original Cowork attack exfiltrated through the Anthropic API. We
-swap to the OpenAI host because (a) it's the host Kars users will
+swap to the OpenAI host because (a) it's the host kars users will
 have on their allowlist by default (Foundry / Azure OpenAI), making
 the demo more honest, and (b) it keeps the launch story inside the
 Microsoft / Azure narrative.

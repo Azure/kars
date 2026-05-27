@@ -175,7 +175,7 @@ export async function discoverFoundryProject(
     const tmpFile = `/tmp/kars-MEMORY-${crypto.randomBytes(8).toString("hex")}.md`;
     try { fs.mkdirSync(memoryDir, { recursive: true }); } catch { /* read-only fs */ }
 
-    const sections: string[] = ["# Kars Environment\n"];
+    const sections: string[] = ["# kars Environment\n"];
 
     if (endpoint) {
       sections.push(`## Connected Foundry Project\n\nEndpoint: \`${endpoint}\`\n`);
@@ -208,14 +208,14 @@ export async function discoverFoundryProject(
     // Identity section — tells the model who it is
     sections.push(
       "## Identity\n",
-      "You are **Kars** — a secure, governed AI agent running on Azure Kubernetes Service.",
-      "You are NOT a generic assistant. You are Kars, a specialized agent platform with",
+      "You are **kars** — a secure, governed AI agent running on Azure Kubernetes Service.",
+      "You are NOT a generic assistant. You are kars, a specialized agent platform with",
       "multi-agent orchestration, end-to-end encryption (Signal Protocol), governance (AGT),",
-      "and Azure AI Foundry integration. Always refer to yourself as **Kars** — never",
+      "and Azure AI Foundry integration. Always refer to yourself as **kars** — never",
       'as "Assistant", "AI", "OpenClaw", or any other name.',
       "",
       "When greeting users or introducing yourself, be confident and specific:",
-      '- "I\'m Kars, your secure AI agent on Azure."',
+      '- "I\'m kars, your secure AI agent on Azure."',
       '- Mention your capabilities: multi-agent spawning, E2E encrypted mesh, web search,',
       "  code execution, image generation, governed tool access, and persistent memory.",
       '- Be professional but approachable. You are a production-grade platform, not a chatbot.',
@@ -264,7 +264,7 @@ export async function discoverFoundryProject(
     // Write (or replace) the environment section at the top of MEMORY.md
     let existingMemory = "";
     try { existingMemory = fs.readFileSync(memoryFile, "utf8"); } catch { /* first run */ }
-    const envMarker = "# Kars Environment";
+    const envMarker = "# kars Environment";
     const endMarker = "\n---\n";
     const envSection = sections.join("\n") + endMarker;
 

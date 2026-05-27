@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Kars runtime image: Anthropic Claude Agent SDK (Python).
+# kars runtime image: Anthropic Claude Agent SDK (Python).
 #
 # Ships the in-pod adapter package `kars_runtime_anthropic`,
 # which is invoked from `entrypoint.sh::bootstrap` before the user
@@ -35,7 +35,7 @@ LABEL org.kars.runtime.contract="v1"
 LABEL org.kars.runtime.kind="Anthropic"
 LABEL org.kars.runtime.language="python"
 
-# ---- Install AGT-Python wheels and the Kars adapter ----------------
+# ---- Install AGT-Python wheels and the kars adapter ----------------
 COPY runtimes/wheels/ /tmp/agt-wheels/
 RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
         pip install --no-cache-dir /tmp/agt-wheels/*.whl ; \

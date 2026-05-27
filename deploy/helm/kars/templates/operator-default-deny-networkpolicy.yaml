@@ -1,7 +1,7 @@
 # Default-deny NetworkPolicy for the operator namespace.
 #
 # Pinned by the CNCF K8s AI conformance suite (criterion C8). The
-# Kars controller reaches the K8s API server via the
+# kars controller reaches the K8s API server via the
 # in-cluster service (egress on TCP/443 to kube-apiserver) and
 # scrapes /metrics over TCP/9091 from a co-located Prometheus or
 # `kubectl port-forward`. Everything else is denied unless an

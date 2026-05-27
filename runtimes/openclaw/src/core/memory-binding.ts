@@ -6,7 +6,7 @@
  * default scope) for this sandbox from the mounted ConfigMap at
  *   /etc/kars/memory/binding.json
  *
- * The ConfigMap is projected by the Kars controller when a KarsSandbox
+ * The ConfigMap is projected by the kars controller when a KarsSandbox
  * has `spec.memoryRef.name` set. Its shape mirrors `LoadedMemoryBinding` on
  * the router side (see inference-router/src/mcp/platform.rs):
  *   {

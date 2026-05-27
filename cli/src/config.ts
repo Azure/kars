@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * Shared credential management for Kars CLI.
+ * Shared credential management for kars CLI.
  * Used by `dev` (auto-prompts if missing) and `credentials` (explicit reconfigure).
  */
 
@@ -387,7 +387,7 @@ async function promptGithubCopilot(
       {
         type: "confirm",
         name: "confirm",
-        message: "Open a browser to authorize Kars with your Copilot account?",
+        message: "Open a browser to authorize kars with your Copilot account?",
         default: true,
       },
     ]);

@@ -1,4 +1,4 @@
-# Kars Makefile
+# kars Makefile
 # Usage: make build | make test | make lint | make images | make clean
 
 VERSION ?= $(shell cat cli/package.json | grep '"version"' | head -1 | sed 's/.*"\([0-9].*\)".*/\1/')
@@ -36,7 +36,7 @@ test-e2e: ## Run E2E tests (requires Docker + Kind)
 test-e2e-manual: ## Run the manual E2E matrix against an existing cluster (see tests/e2e-manual/README.md)
 	bash tests/e2e-manual/run.sh
 
-helm-package: ## Lint + package the Kars Helm chart into ./dist/charts/
+helm-package: ## Lint + package the kars Helm chart into ./dist/charts/
 	bash deploy/helm/package.sh
 
 docs-site: ## Build the mdbook documentation site into target/book/ (requires mdbook)
@@ -188,7 +188,7 @@ dev-compose-up: cli ## Start the local fake-router dev stack (plan T4)
 	docker compose -f docker-compose.dev.yml up -d
 	@echo
 	@echo "Fake router live at http://127.0.0.1:8443"
-	@echo "  Point KARS_ROUTER_URL=http://127.0.0.1:8443 at any Kars client."
+	@echo "  Point KARS_ROUTER_URL=http://127.0.0.1:8443 at any kars client."
 	@echo "  Tear down with: make dev-compose-down"
 
 dev-compose-down: ## Stop the local fake-router dev stack

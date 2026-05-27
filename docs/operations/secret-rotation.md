@@ -1,8 +1,8 @@
 # Secret Rotation Runbook
 
-This runbook covers rotation of every secret Kars materialises: per-sandbox credentials, TLS certs, AgentMesh identities, and Azure-side credentials. Rotation never requires recompiling the controller or router.
+This runbook covers rotation of every secret kars materialises: per-sandbox credentials, TLS certs, AgentMesh identities, and Azure-side credentials. Rotation never requires recompiling the controller or router.
 
-> **Scope.** Production AKS clusters running Kars `v1alpha1`. Local `kars dev` stacks rotate by deleting the ephemeral cluster.
+> **Scope.** Production AKS clusters running kars `v1alpha1`. Local `kars dev` stacks rotate by deleting the ephemeral cluster.
 
 ---
 

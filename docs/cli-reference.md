@@ -1,6 +1,6 @@
-# Kars CLI Reference
+# kars CLI Reference
 
-Kars ships **dozens of top-level commands** organised by purpose: **Lifecycle**,
+kars ships **dozens of top-level commands** organised by purpose: **Lifecycle**,
 **Operations**, **Configuration**, **Observability**, and the
 **Multi-Agent / Federation** family (Agent mobility, Interop, Governance).
 Everything you need to go from zero to a production-hardened, E2E-encrypted
@@ -89,7 +89,7 @@ All commands also inherit Commander.js built-in `--help`.
 ### `kars up`
 
 One-command bootstrap: provisions Azure resources (AKS cluster, ACR, Key
-Vault, Workload Identity), deploys the Kars Helm chart, and creates a
+Vault, Workload Identity), deploys the kars Helm chart, and creates a
 first sandbox — all from a single invocation. Ideal for new deployments and
 for CI pipelines. Use `--upgrade` to skip infra-provisioning and just re-run
 Helm + RBAC against an existing cluster.
@@ -256,7 +256,7 @@ kars dev down
 
 ### `kars add`
 
-Adds a new sandboxed agent to an **existing** Kars cluster. Creates a
+Adds a new sandboxed agent to an **existing** kars cluster. Creates a
 `KarsSandbox` CR which the controller reconciles into an isolated namespace,
 NetworkPolicy, and inference-router deployment. Supports all 7 wired runtime
 kinds (openclaw, openai-agents, microsoft-agent-framework, langgraph,
@@ -326,7 +326,7 @@ kars add reviewer --dry-run
 
 ### `kars destroy`
 
-Tears down sandbox(es) or the entire Kars deployment. Without `--all`
+Tears down sandbox(es) or the entire kars deployment. Without `--all`
 it removes just the named sandbox (or all sandboxes if `<name>` is omitted).
 With `--all` it deletes the entire resource group including AKS, ACR, and Key
 Vault — use with care.
@@ -370,7 +370,7 @@ kars destroy --all -y -g my-rg
 
 ### `kars push`
 
-Builds and pushes Kars images (controller, inference router, sandbox,
+Builds and pushes kars images (controller, inference router, sandbox,
 relay, registry) to ACR using the cached context from the last `kars up`
 run. Use `--apply` to restart deployments so pods immediately pick up new
 images. Use `--only sandbox` + `--apply` after modifying `entrypoint.sh`,
@@ -449,7 +449,7 @@ Switches a `KarsSandbox` between upstream-compatibility modes (`native`,
 `overlay`, `translate`, `observe`) by wrapping a `kubectl patch` with
 validation, before/after summary, and dry-run support. Also provides
 `from-kagent` to translate a `kagent.dev/v1alpha2` Agent YAML into an
-Kars resource bundle.
+kars resource bundle.
 
 **Usage:**
 ```
@@ -459,12 +459,12 @@ kars migrate <subcommand> [arguments] [options]
 **Subcommands:**
 | Subcommand | Description |
 |---|---|
-| `to-overlay <name>` | Flip to overlay mode; Kars provides governance overlay; upstream CR owns the Pod. Requires `--upstream-ref`. |
-| `from-overlay <name>` | Leave overlay mode; revert to native Kars (controller resumes ownership). |
+| `to-overlay <name>` | Flip to overlay mode; kars provides governance overlay; upstream CR owns the Pod. Requires `--upstream-ref`. |
+| `from-overlay <name>` | Leave overlay mode; revert to native kars (controller resumes ownership). |
 | `to-translate <name>` | Accept upstream SandboxClaim semantics on inbound (schema-only translation). |
 | `to-observe <name>` | Mirror status of an upstream Sandbox CR without overlay. |
-| `to-native <name>` | Reset to default native mode (Kars owns the workload). |
-| `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into an Kars resource bundle. Use `-` to read from stdin. |
+| `to-native <name>` | Reset to default native mode (kars owns the workload). |
+| `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into an kars resource bundle. Use `-` to read from stdin. |
 
 **Common options (all subcommands except `from-kagent`):**
 | Flag | Default | Description |
@@ -664,7 +664,7 @@ kars status my-agent
 
 ### `kars list`
 
-Lists all Kars sandboxes across both Docker (local) and AKS (cloud)
+Lists all kars sandboxes across both Docker (local) and AKS (cloud)
 environments. Shows name, runtime, status, and model for each sandbox.
 
 **Usage:**
@@ -841,7 +841,7 @@ echo $?  # 0=match 2=drift 3=missing baseline
 
 ### `kars credentials`
 
-Manages Kars credentials (inference provider, channel tokens,
+Manages kars credentials (inference provider, channel tokens,
 third-party API keys). Invoking without a subcommand opens an interactive
 guided prompt that lets you pick between **GitHub Copilot** *(default,
 recommended)*, **Azure AI Foundry / Azure OpenAI**, and **GitHub Models**
@@ -1271,7 +1271,7 @@ kars mesh <subcommand> [arguments] [options]
 **Options for `setup-trust`:**
 | Flag | Default | Description |
 |---|---|---|
-| `--display-name <name>` | `Kars AgentMesh` | Display name for the Entra app registration |
+| `--display-name <name>` | `kars AgentMesh` | Display name for the Entra app registration |
 | `--dry-run` | `false` | Print what would be created without making changes |
 
 > Tenant-wide one-time operation. Requires Application Administrator (or higher) at tenant scope. Idempotent — re-running on a tenant where the app reg already exists is safe (just prints the existing IDs and exits).

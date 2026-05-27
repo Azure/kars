@@ -9,7 +9,7 @@ export function destroyCommand(): Command {
   const cmd = new Command("destroy");
 
   cmd
-    .description("Teardown sandbox(es) or the entire Kars deployment")
+    .description("Teardown sandbox(es) or the entire kars deployment")
     .argument("[name]", "Sandbox name (omit to destroy all sandboxes)")
     .option("-y, --yes", "Skip confirmation prompt", false)
     .option("--local", "Destroy local Docker sandbox only (skip AKS)", false)

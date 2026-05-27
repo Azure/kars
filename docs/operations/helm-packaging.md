@@ -1,6 +1,6 @@
 # Helm chart packaging
 
-The Kars Helm chart lives under [`deploy/helm/kars/`](../../deploy/helm/kars). This page documents how the chart is **versioned** and how a maintainer **packages** it for a release.
+The kars Helm chart lives under [`deploy/helm/kars/`](../../deploy/helm/kars). This page documents how the chart is **versioned** and how a maintainer **packages** it for a release.
 
 > **Publishing the chart to a registry is a separate, deliberate step performed by a release manager with the appropriate credentials. This document covers only versioning and local packaging.**
 
@@ -11,7 +11,7 @@ The chart follows [SemVer](https://semver.org). Two fields in `Chart.yaml` track
 | Field        | Meaning                                                                 | Bump on …                                              |
 |--------------|-------------------------------------------------------------------------|--------------------------------------------------------|
 | `version`    | Helm chart packaging version (templates, values schema, defaults).      | Any change to chart templates, values, or defaults.    |
-| `appVersion` | The bundled Kars application version (controller + router image). | Whenever the controller or inference-router is rebuilt with a new release tag. |
+| `appVersion` | The bundled kars application version (controller + router image). | Whenever the controller or inference-router is rebuilt with a new release tag. |
 
 Pre-release suffixes use SemVer dot-separated identifiers — e.g. `1.0.0-rc.1`, `1.0.0-rc.2`, `1.0.0` — never `1.0.0rc1` or `1.0.0_rc.1`.
 

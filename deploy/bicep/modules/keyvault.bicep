@@ -1,4 +1,4 @@
-// Kars - Key Vault Module
+// kars - Key Vault Module
 
 @description('Key Vault name')
 param name string

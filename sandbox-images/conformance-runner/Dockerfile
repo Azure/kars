@@ -1,4 +1,4 @@
-# Kars Conformance Runner — multi-stage Rust build (Azure Linux)
+# kars Conformance Runner — multi-stage Rust build (Azure Linux)
 #
 # Produces a small image whose single entrypoint is the
 # `kars-conformance-runner` binary (Slice 6.2). A `KarsEval` run
@@ -50,8 +50,8 @@ RUN mkdir -p /var/run/conformance && chown runner:runner /var/run/conformance
 
 USER runner
 
-LABEL org.opencontainers.image.title="Kars Conformance Runner" \
-      org.opencontainers.image.description="Replays an EvalCorpus against the Kars inference router and emits a RunReport JSON document" \
+LABEL org.opencontainers.image.title="kars Conformance Runner" \
+      org.opencontainers.image.description="Replays an EvalCorpus against the kars inference router and emits a RunReport JSON document" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="MIT"

@@ -105,7 +105,7 @@ enforces this invariant.
 
 ## A2A public ingress
 
-Kars can expose a sandboxed agent to external A2A (Agent-to-Agent) traffic
+kars can expose a sandboxed agent to external A2A (Agent-to-Agent) traffic
 via a Kubernetes `LoadBalancer` service fronted by an ingress-layer TLS
 termination. This is opt-in at the Helm level.
 

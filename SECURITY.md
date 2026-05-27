@@ -13,7 +13,7 @@ please review the latest guidance for Microsoft repositories at
 
 <!-- END MICROSOFT SECURITY.MD BLOCK -->
 
-## Kars-Specific Security Information
+## kars-Specific Security Information
 
 ### Reporting a Vulnerability
 

@@ -14,12 +14,12 @@ export function credentialsCommand(): Command {
 
   cmd
     .description(
-      "Manage Kars credentials (inference provider, channel tokens, API keys)"
+      "Manage kars credentials (inference provider, channel tokens, API keys)"
     )
     .action(async () => {
       const { default: inquirer } = await import("inquirer");
 
-      banner("Kars · Credentials", "Secure AI Agent Runtime on Azure");
+      banner("kars · Credentials", "Secure AI Agent Runtime on Azure");
 
       // Show current state
       const secrets = loadSecrets();

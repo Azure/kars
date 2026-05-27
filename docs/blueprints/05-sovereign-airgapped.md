@@ -1,13 +1,13 @@
 # Blueprint 05 — Sovereign / air-gapped
 
-> "We run regulated, classified, sovereign-cloud, or fully air-gapped workloads. There is no public internet. There is no commercial Foundry endpoint. There is no Microsoft-hosted MCP catalogue. We still want Kars's isolation + governance + audit guarantees, on locally-hosted models, with everything reproducible from a signed bundle."
+> "We run regulated, classified, sovereign-cloud, or fully air-gapped workloads. There is no public internet. There is no commercial Foundry endpoint. There is no Microsoft-hosted MCP catalogue. We still want kars's isolation + governance + audit guarantees, on locally-hosted models, with everything reproducible from a signed bundle."
 
 > **Status: 🚧 Patterns documented; reproducible-bundle tooling on roadmap.** Today this blueprint is achievable by hand using the standard CRDs + a private model endpoint; the goal is a one-command `kars bundle` that emits a signed, reproducible offline kit.
 
 ## Persona & intent
 
 - **You are:** a defence, intelligence, regulator, financial-services, or sovereign-cloud operator. Or an enterprise that has chosen to self-host LLMs.
-- **You want:** Kars's threat model, but with the model running on private hardware (e.g. Foundry-Edge, vLLM, llama.cpp, ONNX Runtime, an on-prem Triton) and zero traffic crossing the network island.
+- **You want:** kars's threat model, but with the model running on private hardware (e.g. Foundry-Edge, vLLM, llama.cpp, ONNX Runtime, an on-prem Triton) and zero traffic crossing the network island.
 - **You do not want:** any default outbound destination — every domain in the blocklist, the Foundry SDK, Application Insights, and the audit sink — to be assumed reachable.
 - **Runtime:** choose `spec.runtime.kind: OpenClaw` (default) for zero agent-code changes, or `BYO` for a custom container that satisfies the [BYO contract](../runtimes.md#the-contract-your-image-must-satisfy). Python teams using the OpenAI Agents SDK, Microsoft Agent Framework (Python), LangGraph (Python or TypeScript), Anthropic Claude SDK, or Pydantic-AI can use the matching first-class adapter — same isolation and governance apply. `SemanticKernel` is reserved in the CRD enum but the adapter image is not yet built (emits `AdapterMissing`).
 
@@ -244,7 +244,7 @@ kars add analyst --model llama-3.1-70b --governance \
 
 ## What this blueprint is NOT
 
-- Not "regular Kars with no internet." Foundry, the blocklist refresh, and several telemetry paths assume reachability and must be deliberately disabled or replaced.
+- Not "regular kars with no internet." Foundry, the blocklist refresh, and several telemetry paths assume reachability and must be deliberately disabled or replaced.
 - Not a substitute for cross-domain solutions (CDS) — this blueprint covers the runtime; data ingestion / sanitisation across the boundary is your CDS team's problem.
 - Not a fast onramp. Building a verified bundle, transferring it, and standing up a local cluster is multi-step. The reward is reproducibility.
 

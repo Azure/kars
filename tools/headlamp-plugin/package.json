@@ -2,7 +2,7 @@
   "name": "kars",
   "version": "0.5.1",
   "private": true,
-  "description": "Kars sidebar + CRD views for the Headlamp dashboard.",
+  "description": "kars sidebar + CRD views for the Headlamp dashboard.",
   "license": "MIT",
   "scripts": {
     "build": "headlamp-plugin build",
@@ -12,7 +12,7 @@
     "format": "headlamp-plugin format"
   },
   "headlampPlugin": {
-    "displayName": "Kars"
+    "displayName": "kars"
   },
   "devDependencies": {
     "@kinvolk/headlamp-plugin": "^0.13.0"

@@ -1,4 +1,4 @@
-# Kars Roadmap
+# kars Roadmap
 
 > Living document. The project is at **`v0.1.0`** — see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped. This roadmap lists the themes we are evolving the platform towards. Versions and ordering may change as we learn from production deployments.
 

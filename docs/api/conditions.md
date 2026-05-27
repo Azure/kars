@@ -1,6 +1,6 @@
-# Conditions Taxonomy — Kars CRDs
+# Conditions Taxonomy — kars CRDs
 
-Every Kars CRD exposes a `status.conditions[]` array following the
+Every kars CRD exposes a `status.conditions[]` array following the
 [Kubernetes condition convention](https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions).
 Each condition carries `type`, `status` (`True`/`False`/`Unknown`),
 `lastTransitionTime`, `reason`, `message`, and `observedGeneration`.

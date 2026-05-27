@@ -1,6 +1,6 @@
-# Kars — Supply-Chain Hardening
+# kars — Supply-Chain Hardening
 
-This document describes the Kars build, sign, and verify pipeline
+This document describes the kars build, sign, and verify pipeline
 for container images and Rust dependencies. It is the operator's
 reference for what `cargo deny`, `cosign verify`, and the CI rows
 actually check, and how to extend them.
@@ -44,7 +44,7 @@ actually check, and how to extend them.
 
 ## Image signing
 
-Kars images are signed in two flows:
+kars images are signed in two flows:
 
 - **Tag releases (`v*`)** — signed with Notation against an Azure
   Key Vault key (`.github/workflows/image-sign-sbom.yml`). SBOMs are
@@ -73,7 +73,7 @@ specific digest.
 
 ## Image-tag convention
 
-The Kars repo convention is `:latest` as the *default*
+The kars repo convention is `:latest` as the *default*
 operator-image tag (controller, inference-router, sandbox base). This
 is intentional: the controller's image-tag drift across v11–v25
 caused hard-to-debug incidents, and `:latest` plus

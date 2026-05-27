@@ -1,7 +1,7 @@
 # Manual E2E suite
 
 This directory holds the **manually-runnable** end-to-end test matrix
-for Kars. It is **separate from CI**:
+for kars. It is **separate from CI**:
 
 | Suite | Runs in | Path | Touches a real cluster? |
 |---|---|---|---|
@@ -22,7 +22,7 @@ isolation. Run it before each release tag.
 
 1. A reachable Kubernetes cluster (Kind, AKS, or any conformant K8s)
    with your kubeconfig context pointing at it.
-2. Kars installed in `kars-system`:
+2. kars installed in `kars-system`:
    ```bash
    helm upgrade --install kars deploy/helm/kars \
      -n kars-system --create-namespace
@@ -31,7 +31,7 @@ isolation. Run it before each release tag.
 4. `kubectl`, `bash`, and (for the cross-runtime mesh scenario) `yq`.
 5. AgentMesh relay + registry deployed in the `agentmesh` namespace if
    you want the mesh + governance scenarios. They are auto-installed by
-   the Kars helm chart with `agentmesh.enabled=true`.
+   the kars helm chart with `agentmesh.enabled=true`.
 
 The runner refuses to start if any of these are missing.
 
@@ -151,7 +151,7 @@ The runner expects every scenario to clean up its own namespaces unless
 Install the chart (see prerequisites).
 
 **`mesh` scenario says “agentmesh-relay/registry not installed”** — install
-Kars with mesh enabled (`agentmesh.enabled=true` in helm values).
+kars with mesh enabled (`agentmesh.enabled=true` in helm values).
 
 **`failures` scenario hangs at relay scale-up** — the kubeconfig user
 needs permission to scale deployments in the `agentmesh` namespace.
@@ -175,5 +175,5 @@ time) so resource needs match a single sandbox plus the platform.
   cluster.
 - It does **not** require Azure credentials for the smoke probes; the
   governance scenario only exercises the inference-router policy chain
-  via loopback HTTP. Live model calls require the Kars helm chart
+  via loopback HTTP. Live model calls require the kars helm chart
   to be configured with Foundry credentials separately.

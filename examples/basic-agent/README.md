@@ -1,6 +1,6 @@
-# Basic Agent — minimal Kars example
+# Basic Agent — minimal kars example
 
-The smallest possible end-to-end Kars deployment: one OpenClaw
+The smallest possible end-to-end kars deployment: one OpenClaw
 agent in a `KarsSandbox` with the default isolation posture.
 
 Use this as the **template you copy-paste from** when standing up a new
@@ -41,7 +41,7 @@ The `KarsSandbox` references the `InferencePolicy` by name via
 ## Deploy
 
 ```bash
-# Prereq: an Kars cluster (kars up) with kubectl context set
+# Prereq: an kars cluster (kars up) with kubectl context set
 kubectl apply -f examples/basic-agent/karssandbox.yaml
 
 # Watch the controller reconcile the sandbox

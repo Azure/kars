@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars LangGraph (LangChain) runtime entrypoint.
+# kars LangGraph (LangChain) runtime entrypoint.
 #
 # Pins each known LLM provider base URL to the router sidecar, points
 # MCP-aware tools at the platform MCP server, then invokes the in-pod

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Phase 2 S9.3 — vitest cases for the kagent → Kars translator.
+// Phase 2 S9.3 — vitest cases for the kagent → kars translator.
 //
 // Pure-helper coverage. CLI runner I/O is exercised separately via
 // the existing migrate command e2e tests.

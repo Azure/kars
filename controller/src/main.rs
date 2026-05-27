@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Kars Controller — Kubernetes operator for sandboxed OpenClaw agents.
+//! kars Controller — Kubernetes operator for sandboxed OpenClaw agents.
 //!
 //! Watches `KarsSandbox` and `KarsPairing` custom resources and reconciles:
 //! - Isolated namespace per sandbox
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    tracing::info!("Kars Controller starting");
+    tracing::info!("kars Controller starting");
 
     // P2 #12: stamp the controller config hash early so it appears
     // in the very first log line operators look at and is exposed

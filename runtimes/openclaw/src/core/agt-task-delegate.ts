@@ -17,7 +17,7 @@ interface TaskLogger {
 /**
  * Delegate a task to the native OpenClaw agent loop running in the Gateway.
  * This gives the sub-agent access to ALL OpenClaw tools (exec, process, web_search,
- * web_fetch, browser, cron, read/write, etc.) plus all Kars plugin skills
+ * web_fetch, browser, cron, read/write, etc.) plus all kars plugin skills
  * (foundry_memory, foundry_web_search, foundry_code, etc.).
  *
  * The task is sent via `openclaw agent --message` which goes through the Gateway's

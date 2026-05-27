@@ -76,14 +76,14 @@ describe("compat: harness sanity", () => {
 
   it("snapshot() captures kind/label/content/children tree", () => {
     const screen = blessedMock.screen();
-    blessedMock.box({ parent: screen, label: "Header", content: "Kars Operator" });
+    blessedMock.box({ parent: screen, label: "Header", content: "kars Operator" });
     blessedMock.log({ parent: screen, label: "Log", content: "ready" });
     const snap = screen.snapshot();
     expect(snap.kind).toBe("screen");
     const children = snap.children as Array<{ kind: string; label: string | null; content: string }>;
     expect(children).toHaveLength(2);
     expect(children[0].label).toBe("Header");
-    expect(children[0].content).toBe("Kars Operator");
+    expect(children[0].content).toBe("kars Operator");
     expect(children[1].kind).toBe("log");
   });
 

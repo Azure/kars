@@ -2,7 +2,7 @@
 
 A 30-minute scripted demo showing **three tenants on one cluster**
 (Contoso Bank, Fabrikam Legal, Northwind Traders), one of which gets
-compromised via a poisoned legal document, and Kars's nine
+compromised via a poisoned legal document, and kars's nine
 security layers containing the attack while the other two tenants
 keep working.
 
@@ -46,7 +46,7 @@ lives in [`docs/internal/DEMO.md`](../../docs/internal/DEMO.md).
 ## Quick run
 
 ```bash
-# Prereq: Kars cluster with the Kata Confidential Containers add-on
+# Prereq: kars cluster with the Kata Confidential Containers add-on
 # (Fabrikam uses `isolation: confidential`)
 kubectl apply -f examples/demo-clawshield/
 

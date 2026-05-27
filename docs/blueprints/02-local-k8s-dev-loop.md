@@ -4,7 +4,7 @@
 
 ## Persona & intent
 
-- **You are:** an Kars maintainer working on the controller, the inference router, the CRD schema, or the Headlamp plugin. Or an agent author who wants to see exactly what AKS will do to your `KarsSandbox` before you push to AKS.
+- **You are:** an kars maintainer working on the controller, the inference router, the CRD schema, or the Headlamp plugin. Or an agent author who wants to see exactly what AKS will do to your `KarsSandbox` before you push to AKS.
 - **You want:** the same Helm chart, the same CRDs, the same controller image, the same router image — running locally on a kind cluster — with a dashboard that shows you everything in one place.
 - **You do not want:** to maintain a separate "Docker dev" code path that drifts from the K8s code path.
 
@@ -27,7 +27,7 @@ flowchart TB
         Pod["sandbox pod<br/>┌───────────────┐<br/>│ openclaw      │<br/>│ inference-router │<br/>└───────────────┘"]
       end
       subgraph HeadlampNs["headlamp ns"]
-        Headlamp["headlamp<br/>+ Kars plugin"]
+        Headlamp["headlamp<br/>+ kars plugin"]
       end
       Controller -->|reconciles KarsSandbox CRDs| Pod
       DevSecret -.->|envFrom| Pod
@@ -71,7 +71,7 @@ sequenceDiagram
   CLI->>Dev: prints Headlamp URL + 24h SA token
   Dev->>Kind: kubectl apply -f examples/basic-agent/karssandbox.yaml
   Ctrl->>Kind: reconciles → namespace, NetworkPolicy, Deployment
-  Dev->>HL: opens browser → Kars sidebar → KarsSandbox detail
+  Dev->>HL: opens browser → kars sidebar → KarsSandbox detail
   Dev->>CLI: kars dev down
   CLI->>Kind: kind delete cluster
 ```
@@ -89,7 +89,7 @@ kars dev --target local-k8s
 # 3. Apply a sandbox CR.
 kubectl apply -f examples/basic-agent/karssandbox.yaml -n kars-system
 
-# 4. Watch reconciliation in Headlamp's Kars → Sandboxes view.
+# 4. Watch reconciliation in Headlamp's kars → Sandboxes view.
 
 # 5. When done.
 kars dev down                      # delete cluster + kill port-forward
@@ -104,7 +104,7 @@ The CLI handles:
 - Node label `kars.azure.com/pool=sandbox` so sandboxes schedule on the single node.
 - Helm chart render with a per-run overlay containing the dev secret name.
 - Headlamp install via official chart.
-- Build + ConfigMap-mount the Kars Headlamp plugin.
+- Build + ConfigMap-mount the kars Headlamp plugin.
 - Detached `kubectl port-forward` for Headlamp on `:4466` (survives CLI exit).
 - Browser open + 24h ServiceAccount token print.
 
@@ -117,7 +117,7 @@ The CLI handles:
 | NetworkPolicy / RBAC | ✅ Real | ❌ One process, one netns | ✅ Real |
 | Inference router | Sidecar pod | Co-located in same container | Sidecar pod |
 | Auth mode | API key from dev secret | API key from dev secret | Workload Identity (IMDS) |
-| Dashboard | Headlamp + Kars plugin | `kars connect` (gateway port-forward) | Azure Portal + Headlamp |
+| Dashboard | Headlamp + kars plugin | `kars connect` (gateway port-forward) | Azure Portal + Headlamp |
 | Teardown | `kars dev down` | `kars destroy <name>` | `kars destroy <name>` |
 
 The point is: this blueprint validates **the K8s glue** (controller reconciliation, CRD admission, helm chart, NetworkPolicy) before you ever touch AKS. If `kars dev --target local-k8s` is green, the AKS bring-up is almost guaranteed to be green too.

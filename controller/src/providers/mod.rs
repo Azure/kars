@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Provider contracts for the Kars controller.
+//! Provider contracts for the kars controller.
 //!
 //! Mirrors `inference-router/src/providers/` but scoped to controller-side
 //! concerns: the controller chooses and wires providers based on

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Kars runtime image: Microsoft Agent Framework Python.
+# kars runtime image: Microsoft Agent Framework Python.
 #
 # Ships the in-pod adapter package `kars_runtime_maf_python`,
 # which is invoked from `entrypoint.sh::bootstrap` before the user
@@ -29,7 +29,7 @@ LABEL org.kars.runtime.contract="v1"
 LABEL org.kars.runtime.kind="MicrosoftAgentFramework"
 LABEL org.kars.runtime.language="python"
 
-# ---- Install AGT-Python wheels and the Kars adapter ----------------
+# ---- Install AGT-Python wheels and the kars adapter ----------------
 # AGT-Python wheels (`a2a_agentmesh`, `agent_sandbox`) are built from
 # the upstream `agent-governance-toolkit` repo by
 # `runtimes/build-agt-wheels.sh` and copied into the build context as

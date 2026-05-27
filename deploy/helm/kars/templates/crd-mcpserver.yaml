@@ -1,4 +1,4 @@
-# Kars McpServer CRD
+# kars McpServer CRD
 #
 # DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
 # schema in `controller/src/mcp_server.rs` plus the CEL rules in

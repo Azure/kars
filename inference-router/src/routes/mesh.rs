@@ -322,7 +322,7 @@ async fn agt_registry_proxy(
     }
 
     // ── Identity-claim enforcement ──────────────────────────────────────
-    // Trust in Kars's mesh is keyed by sandbox display_name (which is
+    // Trust in kars's mesh is keyed by sandbox display_name (which is
     // K8s admission-unique within a cluster). The receiver-side KNOCK
     // handler resolves a peer AMID → display_name via the registry and
     // checks it against `parentTrustedNames`. That trust is only sound if
@@ -483,7 +483,7 @@ async fn agt_registry_proxy(
 
 /// Identity-claim enforcement for AGT registry mutations.
 ///
-/// Kars mesh trust is name-based: receivers verify peers by resolving
+/// kars mesh trust is name-based: receivers verify peers by resolving
 /// `display_name` through the registry and matching against a parent-seeded
 /// trust set. That guarantee only holds if a sandbox cannot register another
 /// sandbox's name. This function vets `POST /v1/agents` bodies, allowing only:
@@ -555,7 +555,7 @@ pub(super) fn enforce_identity_claim(path: &str, body: &Bytes) -> Result<(), (St
                     format!(
                         "capability '{}' is not permitted — sandboxes may \
                          only assert capabilities matching SANDBOX_NAME or \
-                         the Kars default set ({{kars-agent, \
+                         the kars default set ({{kars-agent, \
                          task-execution, kars:*}})",
                         s
                     ),

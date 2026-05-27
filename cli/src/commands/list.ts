@@ -22,7 +22,7 @@ export function listCommand(): Command {
   const cmd = new Command("list");
 
   cmd
-    .description("List all Kars sandboxes (Docker + every reachable kube context)")
+    .description("List all kars sandboxes (Docker + every reachable kube context)")
     .option("--aks-only", "Only show AKS sandboxes")
     .option("--docker-only", "Only show local Docker sandboxes")
     .option("--context <name>", "Limit kube query to a single context")
@@ -31,7 +31,7 @@ export function listCommand(): Command {
       const blue = chalk.hex("#0078D4");
       let found = false;
 
-      console.log(blue(`\n  Kars · Sandbox Inventory\n`));
+      console.log(blue(`\n  kars · Sandbox Inventory\n`));
 
       // ── Local Docker sandboxes ──
       if (!options.aksOnly) {

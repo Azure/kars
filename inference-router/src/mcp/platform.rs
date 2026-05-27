@@ -102,7 +102,7 @@ const SYNC_PATH_NOT_SUPPORTED: &str = "PlatformDispatcher does not support synch
 /// relearn the tool surface.
 ///
 /// Tools are namespaced as `foundry.<name>` so future Class B (mesh /
-/// spawn / handoff) and Kars-platform tools sit cleanly alongside.
+/// spawn / handoff) and kars-platform tools sit cleanly alongside.
 pub fn foundry_tool_catalog() -> ToolCatalog {
     let tools = vec![
         ToolDefinition {
@@ -661,7 +661,7 @@ impl PlatformDispatcher {
         let chat_model = std::env::var("OPENCLAW_MODEL").unwrap_or_else(|_| "gpt-4.1".to_string());
         let body = json!({
             "name": store_id,
-            "description": "Kars agent persistent memory",
+            "description": "kars agent persistent memory",
             "definition": {
                 "kind": "default",
                 "chat_model": chat_model,

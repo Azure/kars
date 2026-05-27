@@ -17,7 +17,7 @@ export function addCommand(): Command {
   const cmd = new Command("add");
 
   cmd
-    .description("Add a new sandboxed agent to an existing Kars cluster")
+    .description("Add a new sandboxed agent to an existing kars cluster")
     .argument("<name>", "Name for the new sandbox agent")
 
     // ── Core (all runtimes) ────────────────────────────────────────────
@@ -530,7 +530,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         spinner.fail("Failed to create sandbox");
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("karssandboxes.kars.azure.com")) { // lgtm[js/incomplete-url-substring-sanitization] — error message check, not URL validation
-          console.error(chalk.red("\n  Kars is not installed on this cluster."));
+          console.error(chalk.red("\n  kars is not installed on this cluster."));
           console.error(chalk.red("  Run 'kars up' first to deploy the infrastructure.\n"));
         } else {
           console.error(chalk.red(`\n  Error: ${message}\n`));

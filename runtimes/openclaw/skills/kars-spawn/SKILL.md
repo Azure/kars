@@ -4,9 +4,9 @@ description: Spawn secure isolated sub-agent sandboxes, delegate tasks via AGT m
 metadata: {"openclaw": {"always": true}}
 ---
 
-# Kars Sub-Agent Spawn
+# kars Sub-Agent Spawn
 
-Spawn secure isolated sub-agent sandboxes on AKS. Each sub-agent runs in its own K8s namespace with full security controls (NetworkPolicy, seccomp, read-only rootfs). Use the Kars tools for ALL operations — do NOT use curl.
+Spawn secure isolated sub-agent sandboxes on AKS. Each sub-agent runs in its own K8s namespace with full security controls (NetworkPolicy, seccomp, read-only rootfs). Use the kars tools for ALL operations — do NOT use curl.
 
 ## Available tools
 

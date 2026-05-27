@@ -362,7 +362,7 @@ describe("attestCommand — loadBaseline", () => {
     try {
       const path = join(dir, "bad.json");
       writeFileSync(path, JSON.stringify({ kind: "Attestation" }));
-      await expect(__test.loadBaseline(path)).rejects.toThrow(/not a valid Kars attestation/);
+      await expect(__test.loadBaseline(path)).rejects.toThrow(/not a valid kars attestation/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

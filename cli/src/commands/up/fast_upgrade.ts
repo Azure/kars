@@ -29,7 +29,7 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           process.exit(1);
         }
 
-        console.log(blue("\n  Kars · Fast Upgrade\n"));
+        console.log(blue("\n  kars · Fast Upgrade\n"));
 
         // Connect to AKS
         let spin = ora("Connecting to AKS...").start();
@@ -52,7 +52,7 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           }
         }
         if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
-          console.error(chalk.red("\n  Helm chart not found. Run from the Kars repo directory.\n"));
+          console.error(chalk.red("\n  Helm chart not found. Run from the kars repo directory.\n"));
           process.exit(1);
         }
         const helmPath = path.join(repoRoot, "deploy", "helm", "kars");

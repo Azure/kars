@@ -4,7 +4,7 @@
 //! `kars-conformance-runner` binary — Slice 6.2.
 //!
 //! Replays an [`kars_eval_corpus::Corpus`] of policy-conformance
-//! cases against a live Kars inference router and emits a
+//! cases against a live kars inference router and emits a
 //! [`crate::report::RunReport`] JSON document describing every
 //! verdict.
 //!

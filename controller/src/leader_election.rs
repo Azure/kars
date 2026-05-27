@@ -5,7 +5,7 @@
 //!
 //! ## Why a controller-wide gate?
 //!
-//! Phase 2 ships Kars with `replicas: 2` for the controller
+//! Phase 2 ships kars with `replicas: 2` for the controller
 //! Deployment so a node drain / OOM doesn't take down the operator.
 //! Without leader election, both replicas would run their reconciler
 //! loops in parallel and race on Server-Side Apply — the SSA

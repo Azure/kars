@@ -1,7 +1,7 @@
-# Kars mesh federation — relay (WebSocket) and registry (REST)
+# kars mesh federation — relay (WebSocket) and registry (REST)
 #
 # This preset enables NemoClaw/OpenShell sandbox agents to connect to an
-# Kars cluster via AgentMesh federation.
+# kars cluster via AgentMesh federation.
 #
 # The relay endpoint uses a CONNECT tunnel (access: full) for WebSocket.
 # The registry endpoint uses L7 REST inspection.
@@ -16,7 +16,7 @@
 
 preset:
   name: kars-mesh
-  description: "Kars mesh federation relay and registry access"
+  description: "kars mesh federation relay and registry access"
 
 network_policies:
   kars_mesh:

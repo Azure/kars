@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars LangGraph (LangChain.js, TypeScript / Node.js 22) runtime entrypoint.
+# kars LangGraph (LangChain.js, TypeScript / Node.js 22) runtime entrypoint.
 #
 # Pins each known LLM provider base URL to the router sidecar, points
 # MCP-aware tools at the platform MCP server, then invokes the in-pod

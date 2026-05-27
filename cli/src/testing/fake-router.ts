@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * In-process fake Kars inference router.
+ * In-process fake kars inference router.
  *
  * Groundwork for the local compose stack (plan item T4) and the scenario
  * runner (T5). Bind this on any loopback port and point the plugin at it via

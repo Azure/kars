@@ -76,7 +76,7 @@ p = pathlib.Path(sys.argv[1])
 src = p.read_text()
 anchor_re = re.compile(r'(.*openclaw plugins install /opt/nemoclaw[^\n]*\n)')
 insert = """
-# Install Kars Mesh plugin (federation + cloud offload)
+# Install kars Mesh plugin (federation + cloud offload)
 COPY --chown=sandbox:sandbox scripts/kars-mesh/ /sandbox/.openclaw-data/extensions/kars-mesh/
 """
 new = anchor_re.sub(lambda m: m.group(1) + insert, src, count=1)
@@ -99,7 +99,7 @@ src = p.read_text()
 anchor_re = re.compile(
     r'(fs\.copyFileSync\(path\.join\(rootDir, "scripts", "nemoclaw-start\.sh"\),[^\n]*\n)'
 )
-insert = '''    // Kars mesh plugin (if present in scripts/)
+insert = '''    // kars mesh plugin (if present in scripts/)
     const meshPluginSrc = path.join(rootDir, "scripts", "kars-mesh");
     if (fs.existsSync(meshPluginSrc)) {
         fs.cpSync(meshPluginSrc, path.join(stagedScriptsDir, "kars-mesh"), { recursive: true });
@@ -120,7 +120,7 @@ PRESET_SRC="$PLUGIN_ROOT/nemoclaw/setup.sh"
 
 if [ ! -d "$PRESETS_DIR" ]; then
     log "NemoClaw presets dir not found ($PRESETS_DIR) — skipping preset install"
-elif [ -f "$PRESET_DST" ] && grep -qF 'Kars mesh federation' "$PRESET_DST"; then
+elif [ -f "$PRESET_DST" ] && grep -qF 'kars mesh federation' "$PRESET_DST"; then
     log "kars-mesh preset already installed — skipping"
 else
     log "Installing kars-mesh preset into NemoClaw blueprint"

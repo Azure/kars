@@ -54,7 +54,7 @@ use std::time::Duration;
 /// These are not associated with any `KarsSandbox` CR.
 const SYSTEM_KEEPLIST: &[&str] = &["kars-controller-sa", "kars-sandbox"];
 
-/// Prefix of fedcred ARM resource names managed by Kars.
+/// Prefix of fedcred ARM resource names managed by kars.
 const NAME_PREFIX: &str = "kars-";
 
 /// Required prefix and suffix for the subject claim, so we never delete

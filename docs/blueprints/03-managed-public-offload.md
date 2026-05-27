@@ -1,16 +1,16 @@
 # Blueprint 03 — Managed public offload service
 
-> "I run a managed Kars offering. Maybe I'm a hyperscale SaaS, maybe I'm a 3-person MSP, maybe I'm a community co-op renting capacity to hobbyists. My customers want to offload heavier or sensitive agent tasks — bigger models, longer runs, parallel fan-out — that don't fit on their laptops. I want to host them all on one cluster, in different Entra tenants, none with kubectl access, all onboarded by token, all isolated from each other and from me at every layer including the host kernel."
+> "I run a managed kars offering. Maybe I'm a hyperscale SaaS, maybe I'm a 3-person MSP, maybe I'm a community co-op renting capacity to hobbyists. My customers want to offload heavier or sensitive agent tasks — bigger models, longer runs, parallel fan-out — that don't fit on their laptops. I want to host them all on one cluster, in different Entra tenants, none with kubectl access, all onboarded by token, all isolated from each other and from me at every layer including the host kernel."
 
 > **Status: ✅ Runtime shipping. 🚧 SaaS productization in progress.** The hardware-isolated sandbox runtime, the pairing protocol, the per-tenant namespace + Workload Identity scoping, the confidential-mode Kata VM + AMD SEV-SNP nodepool, the audit chain, and the Foundry-side Content Safety are all validated end-to-end on live AKS today (see [`docs/security-validation.md`](../security-validation.md)). What's "🚧" is the *SaaS wrapper* around it: portal + billing + automated onboarding + per-tenant Foundry-quota sharding. The scary parts (isolation + crypto) are not the parts that need productizing.
 
 ## Why this blueprint matters
 
-This is the use case where Kars's threat model earns its complexity. In every other blueprint, you (the operator) and the agent user are in the same trust domain — you'd both lose if a sandbox escaped. Here, **the provider is one of the parties the customer is defending against**: a malicious or compromised provider operator could otherwise tail a customer's prompts, exfiltrate their files, or impersonate them to upstream services.
+This is the use case where kars's threat model earns its complexity. In every other blueprint, you (the operator) and the agent user are in the same trust domain — you'd both lose if a sandbox escaped. Here, **the provider is one of the parties the customer is defending against**: a malicious or compromised provider operator could otherwise tail a customer's prompts, exfiltrate their files, or impersonate them to upstream services.
 
 The customers don't have to be enterprises either. The same primitives that let a Fortune-500 trust a hyperscaler also let a hobbyist trust a 3-person MSP, or a researcher trust a community co-op renting GPU time. The economic shape changes (one tenant per customer, not one tenant per business unit); the security shape doesn't.
 
-Kars makes that attack mathematically infeasible by stacking three independent isolation primitives:
+kars makes that attack mathematically infeasible by stacking three independent isolation primitives:
 
 1. **Signal-Protocol mesh** — the relay sees only ciphertext (X3DH + Double Ratchet). The provider can't read what the customer sent over the wire even with a `tcpdump` on the cluster ingress.
 2. **Confidential Containers (Kata + AMD SEV-SNP)** — the sandbox pod runs in a hardware-isolated lightweight VM with its own kernel. Pod memory is encrypted by the CPU with a key the host doesn't have. The provider's cluster-admin cannot `kubectl exec` into the pod (VAP blocks it) and cannot read the pod's RAM from the host (SEV-SNP enforces it).
@@ -20,7 +20,7 @@ Net effect: the customer's cleartext exists for ~milliseconds, only inside an SE
 
 ## Persona & intent
 
-- **You are:** a managed-Kars provider — at any scale. A hyperscaler running a public offering. A regional MSP white-labelling agentic compute. A 3-person team renting GPU minutes. A community co-op pooling capacity for hobbyists. Your customers run OpenClaw / NemoClaw / any-OpenClaw on their laptops, in their offices, in their own clusters — anywhere — and offload tasks they can't (or don't want to) run locally to your AKS.
+- **You are:** a managed-kars provider — at any scale. A hyperscaler running a public offering. A regional MSP white-labelling agentic compute. A 3-person team renting GPU minutes. A community co-op pooling capacity for hobbyists. Your customers run OpenClaw / NemoClaw / any-OpenClaw on their laptops, in their offices, in their own clusters — anywhere — and offload tasks they can't (or don't want to) run locally to your AKS.
 - **Who your customers are:** anyone whose home setup doesn't fit the job. Indie devs who need a 70B model their MacBook can't host. Researchers parallelising 1,000 prompts overnight. Field engineers offloading a long-running agent so their laptop can sleep. Privacy-sensitive users who'd rather rent a confidential sandbox than send prompts to an LLM proxy that logs everything. Enterprises picking a smaller specialist provider over a hyperscaler for compliance or cost reasons.
 - **You want:** a single AKS cluster (or a few regional clusters) hosting many tenants. Self-service onboarding via your portal (or a Telegram bot, or a CLI sub-command — pairing is just a one-time token). Per-tenant token budgets, slot caps, capability scopes. Provider-side observability without ever decrypting customer mesh traffic.
 - **You do not want:** to ever hold customer-side LLM context in cleartext on a host you control. To require customers to install your CLI. To leak one tenant's audit chain to another. To have a cluster-admin compromise read customer prompts in flight.
@@ -30,7 +30,7 @@ Net effect: the customer's cleartext exists for ~milliseconds, only inside an SE
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#f1f5f9','primaryBorderColor':'#475569','primaryTextColor':'#0f172a','lineColor':'#475569','clusterBkg':'#f8fafc','clusterBorder':'#94a3b8','fontFamily':'-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'}}}%%
 flowchart LR
-  subgraph Customers["Customers (no Kars CLI required)"]
+  subgraph Customers["Customers (no kars CLI required)"]
     direction TB
     subgraph Cust1["🏢 'Acme'"]
       A1["NemoClaw on laptop"]
@@ -232,7 +232,7 @@ sequenceDiagram
     Plugin->>Rly: KNOCK + X3DH
     Rly-->>Plugin: session established
 
-    Cust->>Plugin: "offload <task> to Kars"
+    Cust->>Plugin: "offload <task> to kars"
     Plugin->>Rly: encrypted request
     Rly->>Ctrl: route to controller AMID
     Ctrl->>Encl: spawn pod onto Kata pool<br/>(isolation: confidential)
@@ -319,7 +319,7 @@ kars operator --tenant tenant-acme        # operator TUI scoped to one tenant
 
 - **Customers don't install your CLI.** Customer-side install is the OpenClaw plugin, which is upstreamed. Your portal hands them a token; that's the entire onboarding UX.
 - **Confidential by default for offload sandboxes.** Pairing CRs can carry `spec.requiredIsolation: confidential` so the controller refuses to spawn anything weaker than a Kata + SEV-SNP pod for that tenant's offloads. Customers shopping for a SaaS that won't read their prompts have a one-bit answer.
-- **Per-tenant namespace + per-tenant audit destination.** Kars already namespaces every sandbox by name; the SaaS pattern just stamps a tenant prefix. Audit chains land in per-tenant Log Analytics workspaces (one workspace per Pairing CR's `tenantId` annotation).
+- **Per-tenant namespace + per-tenant audit destination.** kars already namespaces every sandbox by name; the SaaS pattern just stamps a tenant prefix. Audit chains land in per-tenant Log Analytics workspaces (one workspace per Pairing CR's `tenantId` annotation).
 - **Pairing tokens are commerce-aware.** `--token-budget`, `--slots`, `--expires`, `--capabilities`, `--required-isolation` map directly to your billing plan. Plan upgrade = new Pairing CR with bigger limits; old token revoked.
 - **Provider observability without decryption.** You can see *that* tenant `acme` exchanged 142 mesh frames in the last hour and consumed 1.2M Foundry tokens. You cannot see *what was in those frames* — neither in flight (Signal Protocol) nor at rest in the sandbox (SEV-SNP).
 - **Operator HA out of the box.** Two controller replicas with leader election and jittered requeue are the cluster-level defaults. `kars_controller_reconcile_errors_total` and `_retries_total` on `:9091` give you per-tenant incident signals.
@@ -345,7 +345,7 @@ None of these change the trust model. They change the customer-facing UX around 
 - Not a deployment customers run themselves. For that, see Blueprint 02 — they get the same controller and CRDs in their own subscription.
 - Not a substitute for tenant-level WAF / DDoS controls — App Gateway + Front Door are still your job.
 - Not a model marketplace. The Foundry project remains provider-side; if a customer wants their own model, route to a tenant-bound Foundry connection (`kars model set --tenant`).
-- Not a guarantee against AMD platform-level vulnerabilities. Kars inherits the SEV-SNP threat model; if AMD ships a TCB update, you patch your nodes.
+- Not a guarantee against AMD platform-level vulnerabilities. kars inherits the SEV-SNP threat model; if AMD ships a TCB update, you patch your nodes.
 
 ## Operational guardrails
 

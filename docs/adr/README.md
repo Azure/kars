@@ -1,6 +1,6 @@
 # ADR Index
 
-Architecture Decision Records for Kars. Each ADR is immutable
+Architecture Decision Records for kars. Each ADR is immutable
 once accepted; supersession is recorded via `Supersedes` / `Superseded
 by` headers.
 

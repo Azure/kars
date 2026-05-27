@@ -1,6 +1,6 @@
-# Kars e2e-harness
+# kars e2e-harness
 
-A scenario- and platform-pluggable end-to-end test harness for Kars.
+A scenario- and platform-pluggable end-to-end test harness for kars.
 
 This was previously the `tools/exec-brief-e2e/` directory; it has been
 refactored so the orchestration logic is independent of any one

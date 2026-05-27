@@ -68,7 +68,7 @@ export function pairCommand(): Command {
     .option("--relay-url <url>", "AgentMesh relay URL", "ws://host.docker.internal:18765")
     .option("--registry-url <url>", "AgentMesh registry URL", "http://host.docker.internal:18080")
     .action(async (options) => {
-      banner("Kars · Pair", "Federation Pairing Token");
+      banner("kars · Pair", "Federation Pairing Token");
 
       // Parse expiry duration
       const expiresAt = parseDuration(options.expires);
@@ -191,7 +191,7 @@ export function pairCommand(): Command {
     .command("list")
     .description("List all federation pairings")
     .action(async () => {
-      banner("Kars · Pairings", "Federation Status");
+      banner("kars · Pairings", "Federation Status");
 
       try {
         const { stdout } = await execa("kubectl", [
@@ -252,7 +252,7 @@ export function pairCommand(): Command {
     .description("Revoke a pairing (blocks future offloads)")
     .argument("<name>", "Name of the pairing to revoke")
     .action(async (name: string) => {
-      banner("Kars · Revoke Pairing", "");
+      banner("kars · Revoke Pairing", "");
 
       const safeName = sanitizeName(name);
 
@@ -282,7 +282,7 @@ export function pairCommand(): Command {
     .description("Show detailed info about a pairing")
     .argument("<name>", "Name of the pairing to inspect")
     .action(async (name: string) => {
-      banner("Kars · Pairing Details", "");
+      banner("kars · Pairing Details", "");
 
       const safeName = sanitizeName(name);
 

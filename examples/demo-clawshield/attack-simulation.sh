@@ -3,13 +3,13 @@
 # Licensed under the MIT License.
 
 # ═══════════════════════════════════════════════════════════════════
-# Kars Demo: Operation Claw Shield — Attack Simulation
+# kars Demo: Operation Claw Shield — Attack Simulation
 # ═══════════════════════════════════════════════════════════════════
 #
 # Run this INSIDE the fabrikam-legal-agent sandbox to simulate
 # a compromised agent attempting a full attack chain.
 #
-# Every attack is expected to FAIL — this demonstrates Kars's
+# Every attack is expected to FAIL — this demonstrates kars's
 # defense-in-depth security model.
 #
 # Usage:
@@ -285,7 +285,7 @@ echo ""
 
 if [ "$FAIL" -eq 0 ]; then
     echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}${BOLD}║  ALL ATTACKS BLOCKED — Kars defense-in-depth holds!  ║${NC}"
+    echo -e "${GREEN}${BOLD}║  ALL ATTACKS BLOCKED — kars defense-in-depth holds!  ║${NC}"
     echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo "Security layers that activated:"

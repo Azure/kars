@@ -125,7 +125,7 @@ def _make_tool(name: str):
     from agent_framework import tool  # type: ignore
 
     short_name = name.replace(".", "_")
-    description = f"Invoke the Kars platform Foundry tool {name!r} via MCP."
+    description = f"Invoke the kars platform Foundry tool {name!r} via MCP."
 
     @tool(name=short_name, description=description)
     async def _tool_fn(arguments_json: str = "{}") -> str:

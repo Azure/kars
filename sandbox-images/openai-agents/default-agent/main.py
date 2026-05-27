@@ -1,12 +1,12 @@
 """
-Kars default agent for the OpenAI Agents Python SDK runtime.
+kars default agent for the OpenAI Agents Python SDK runtime.
 
 Runs when the operator spawned an OpenAIAgents sandbox WITHOUT supplying
 their own `agentCode` (no OCI image / no git ref). The point is to prove
 end-to-end wiring:
 
   1. The framework SDK loads.
-  2. Inference flows through the Kars inference router (governance,
+  2. Inference flows through the kars inference router (governance,
      Content Safety, token budget, audit log all in the path).
   3. The pod stays Running so the operator can connect / inspect.
 
@@ -27,7 +27,7 @@ import time
 from kars_runtime_openai_agents.runtime import bootstrap
 bootstrap()
 
-BANNER = "🔒 Kars — OpenAI Agents (default agent)"
+BANNER = "🔒 kars — OpenAI Agents (default agent)"
 
 
 def _env(name: str, default: str = "(unset)") -> str:
@@ -63,12 +63,12 @@ async def _smoke_test() -> None:
         agent = Agent(
             name="kars-default",
             instructions=(
-                "You are a default smoke-test agent embedded in an Kars sandbox. "
+                "You are a default smoke-test agent embedded in an kars sandbox. "
                 "Reply with exactly one short sentence confirming you are alive."
             ),
             model=model,
         )
-        result = await Runner.run(agent, "Say hello and confirm you are running inside Kars.")
+        result = await Runner.run(agent, "Say hello and confirm you are running inside kars.")
         print(f"[default-agent] ✓ inference reply: {result.final_output}", flush=True)
         print("[default-agent] ✓ Foundry inference proven via inference-router", flush=True)
     except Exception as exc:  # noqa: BLE001

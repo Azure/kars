@@ -4,7 +4,7 @@
 # platforms/local-k8s.sh — local kind-based platform helper for the e2e-harness.
 #
 # Inherits the AKS helper for everything past cluster bring-up — once a
-# kind cluster has the Kars chart installed, the K8s API surface
+# kind cluster has the kars chart installed, the K8s API surface
 # is identical to AKS (same CRDs, same controller, same router image).
 # The only differences this helper adds:
 #

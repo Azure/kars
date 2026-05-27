@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars sandbox entrypoint
+# kars sandbox entrypoint
 # Configures OpenClaw automatically from mounted secrets and env vars.
 # The user never needs to manually configure anything.
 #
@@ -244,9 +244,9 @@ MODEL="${OPENCLAW_MODEL:-gpt-4.1}"
 # the router (127.0.0.1:8443) regardless of model kind, so a single unified
 # provider is all we need.
 case "${KARS_PROVIDER:-}" in
-  github-copilot) _PROVIDER_LABEL="Copilot via Kars" ;;
-  github-models)  _PROVIDER_LABEL="GH Models via Kars" ;;
-  *)              _PROVIDER_LABEL="Azure via Kars" ;;
+  github-copilot) _PROVIDER_LABEL="Copilot via kars" ;;
+  github-models)  _PROVIDER_LABEL="GH Models via kars" ;;
+  *)              _PROVIDER_LABEL="Azure via kars" ;;
 esac
 MODELS_JSON="[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (${_PROVIDER_LABEL})\"}]"
 if [ -n "${FOUNDRY_DEPLOYMENTS:-}" ]; then
@@ -259,12 +259,12 @@ try:
     for d in deps:
         name = d.get('name') or d.get('id') or ''
         if name:
-            models.append({'id': name, 'name': f'{name} (Azure via Kars)'})
+            models.append({'id': name, 'name': f'{name} (Azure via kars)'})
     if not models:
-        models = [{'id': '${MODEL}', 'name': '${MODEL} (Azure via Kars)'}]
+        models = [{'id': '${MODEL}', 'name': '${MODEL} (Azure via kars)'}]
     print(json.dumps(models))
 except:
-    print('[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (Azure via Kars)\"}]')
+    print('[{\"id\":\"${MODEL}\",\"name\":\"${MODEL} (Azure via kars)\"}]')
 " 2>/dev/null)
   [ -n "$_PARSED" ] && MODELS_JSON="$_PARSED"
 fi
@@ -291,7 +291,7 @@ export OPENCLAW_QA_ALLOW_LOCAL_IMAGE_PROVIDER=1
 
 # Skip OpenClaw's bundled-extension discovery for performance. OpenClaw 2026.4.x
 # loads pi-ai's full provider catalog via models.list every time the gateway
-# starts cold (xAI/Anthropic/Mistral/etc. — providers Kars never uses
+# starts cold (xAI/Anthropic/Mistral/etc. — providers kars never uses
 # because all model traffic flows through the inference router to Foundry /
 # GitHub Models). Without this flag, models.list takes ~50s and blocks the
 # event loop on every first WebUI connect. With this flag, OpenClaw points at
@@ -328,7 +328,7 @@ fi
 # but on AKS `/sandbox` is a persistent volume and OpenClaw's runtime workspace
 # bootstrap silently rewrites AGENTS.md / SOUL.md with its default scaffold ~minutes
 # after first chat. After a pod restart the guard would skip our write block, leaving
-# the OpenClaw stock scaffold in place — losing the Kars welcome policy and
+# the OpenClaw stock scaffold in place — losing the kars welcome policy and
 # producing the "just says hey" symptom.
 #
 # The config is fully env-driven and deterministic, so regenerating every boot is
@@ -339,7 +339,7 @@ if true; then
   mkdir -p "$OPENCLAW_DIR" "$WORKSPACE_DIR"
   [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox "$OPENCLAW_DIR"
 
-  # Build the Kars system-prompt override. This is the AUTHORITATIVE source
+  # Build the kars system-prompt override. This is the AUTHORITATIVE source
   # of agent identity + welcome policy: openclaw config takes precedence over
   # workspace AGENTS.md, so even when OpenClaw's runtime workspace bootstrap
   # rewrites AGENTS.md/SOUL.md with its default scaffold, this prompt remains.
@@ -356,9 +356,9 @@ if true; then
     # passthrough through the router. Same trim-down as github-models for
     # the Foundry-only feature claims, but no 16k-cap warning.
     cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
-You are **Kars** — a sandboxed AI assistant powered by **GitHub Copilot**,
+You are **kars** — a sandboxed AI assistant powered by **GitHub Copilot**,
 running inside an isolated container. Your inference is proxied through the
-Kars inference router which enforces egress policy and AGT governance.
+kars inference router which enforces egress policy and AGT governance.
 
 Provider: GitHub Copilot (\`${ENDPOINT}\`)
 Model: ${MODEL}
@@ -369,7 +369,7 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 When a user starts a new conversation, include the following in your greeting
 for security transparency:
 
-1. Header: "🔒 Kars Sandbox — Local Dev (GitHub Copilot)"
+1. Header: "🔒 kars Sandbox — Local Dev (GitHub Copilot)"
 2. Provider: \`GitHub Copilot\`
 3. Model: \`${MODEL}\`
 4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
@@ -393,7 +393,7 @@ Skip filler like "Great question!" — just help.
 
 ## Tool Posture
 
-Copilot mode runs with a focused tool set: HTTP fetch, Kars mesh
+Copilot mode runs with a focused tool set: HTTP fetch, kars mesh
 tools (spawn / send / await / inbox), and AGT governance hooks. The
 Foundry tool catalog is intentionally NOT loaded here because there's no
 Foundry project bound to this provider. If a user asks for Foundry-style
@@ -443,9 +443,9 @@ PROMPTEOF
     # no Azure-specific safety stack, and a 16k input-token cap upstream.
     # Keep the welcome policy + AGT mesh guidance; drop everything Foundry.
     cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
-You are **Kars** — a sandboxed AI assistant powered by **GitHub Models**,
+You are **kars** — a sandboxed AI assistant powered by **GitHub Models**,
 running inside an isolated container. Your inference is proxied through the
-Kars inference router which enforces egress policy and AGT governance.
+kars inference router which enforces egress policy and AGT governance.
 
 Provider: GitHub Models (\`${ENDPOINT}\`)
 Model: ${MODEL}
@@ -456,7 +456,7 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 When a user starts a new conversation, include the following in your greeting
 for security transparency:
 
-1. Header: "🔒 Kars Sandbox — Local Dev (GitHub Models)"
+1. Header: "🔒 kars Sandbox — Local Dev (GitHub Models)"
 2. Provider: \`GitHub Models\`
 3. Model: \`${MODEL}\`
 4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
@@ -480,7 +480,7 @@ Skip filler like "Great question!" — just help.
 
 ## Tool Posture
 
-GitHub Models mode runs with a minimal tool set: HTTP fetch, Kars mesh
+GitHub Models mode runs with a minimal tool set: HTTP fetch, kars mesh
 tools (spawn / send / await / inbox), and AGT governance hooks. The full
 Foundry tool catalog is intentionally NOT loaded here because GitHub Models
 caps every request at 16,000 input tokens. If a user asks for Foundry-style
@@ -541,7 +541,7 @@ ${TELEGRAM_PROMPT_BLOCK}
 ## Security Context
 
 - Non-root user (sandbox:1000), read-only rootfs, seccomp filtered
-- Inference proxied through Kars router: AGT policy gating on tool
+- Inference proxied through kars router: AGT policy gating on tool
   calls, per-sandbox token budgets, request audit logging
 - Egress: blocklist (51K+ domains) + allowlist; learn mode → enforce
 - Content Safety / Prompt Shields are NOT active in this mode (require an
@@ -549,9 +549,9 @@ ${TELEGRAM_PROMPT_BLOCK}
 PROMPTEOF
   else
     cat > "$SYSTEM_PROMPT_FILE" << PROMPTEOF
-You are **Kars** — a secure, sandboxed AI assistant powered by Azure AI Foundry,
+You are **kars** — a secure, sandboxed AI assistant powered by Azure AI Foundry,
 running inside an isolated container on Azure Kubernetes Service (AKS). Your inference
-is routed through the Kars inference router which provides Content Safety,
+is routed through the kars inference router which provides Content Safety,
 Prompt Shields, token budgets, and egress control.
 
 Connected Foundry project: ${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}
@@ -563,7 +563,7 @@ Sandbox ID: ${HOSTNAME:-dev-agent}
 When a user starts a new conversation, include the following in your greeting
 for security transparency:
 
-1. Header: "🔒 Kars Sandbox — Secure AI Runtime on Azure"
+1. Header: "🔒 kars Sandbox — Secure AI Runtime on Azure"
 2. Foundry Project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
 3. Model: \`${MODEL}\`
 4. Sandbox ID: \`${HOSTNAME:-dev-agent}\`
@@ -753,7 +753,7 @@ ANTHEOF
   },
   "ui": {
     "assistant": {
-      "name": "${KARS_DISPLAY_NAME:-Kars}",
+      "name": "${KARS_DISPLAY_NAME:-kars}",
       "avatar": "🐾"
     }
   },
@@ -928,7 +928,7 @@ AUTHPROFEOF
   AZURE_OPENAI_API_KEY="$(cat /run/secrets/azure-openai-key 2>/dev/null || cat /tmp/azure-openai-key 2>/dev/null || :)"
   export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
 
-  # AGT governance is always active in Kars sandboxes (enables agt-governance skill)
+  # AGT governance is always active in kars sandboxes (enables agt-governance skill)
   export AGT_GOVERNANCE_ENABLED=true
 
   # Foundry project endpoint (for standalone APIs: Memory Store, Foundry IQ, etc.)
@@ -940,7 +940,7 @@ AUTHPROFEOF
   # accumulation across pod restarts on persistent /sandbox volumes). Then ensure
   # .bashrc sources it exactly once.
   cat > /sandbox/.kars-env.sh << RCEOF
-# Kars: Azure OpenAI credentials (loaded from /run/secrets/)
+# kars: Azure OpenAI credentials (loaded from /run/secrets/)
 # Auto-generated every container boot — do not edit by hand.
 export AZURE_OPENAI_API_KEY="\$(cat /run/secrets/azure-openai-key 2>/dev/null)"
 export AZURE_OPENAI_ENDPOINT="${ENDPOINT}"
@@ -949,14 +949,14 @@ export FOUNDRY_PROJECT_ENDPOINT="${FOUNDRY_PROJECT_ENDPOINT}"
 export FOUNDRY_AGENT_ID="${FOUNDRY_AGENT_ID}"
 RCEOF
   if ! grep -q "kars-env.sh" /sandbox/.bashrc 2>/dev/null; then
-    printf '\n# Kars env (managed by entrypoint)\n[ -f /sandbox/.kars-env.sh ] && . /sandbox/.kars-env.sh\n' >> /sandbox/.bashrc
+    printf '\n# kars env (managed by entrypoint)\n[ -f /sandbox/.kars-env.sh ] && . /sandbox/.kars-env.sh\n' >> /sandbox/.bashrc
   fi
 
   # Write minimal workspace files so OpenClaw doesn't need onboarding
   cat > "$WORKSPACE_DIR/AGENTS.md" << AGENTSEOF
-# Kars Agent
+# kars Agent
 
-You are a helpful AI assistant running inside an **Kars** sandbox — a secure,
+You are a helpful AI assistant running inside an **kars** sandbox — a secure,
 open-source runtime for AI agents on Azure Kubernetes Service (AKS).
 
 ## On First Message (Welcome)
@@ -964,7 +964,7 @@ open-source runtime for AI agents on Azure Kubernetes Service (AKS).
 When a user starts a new conversation, include the following in your greeting
 for security transparency:
 
-1. **Header**: "🔒 Kars Sandbox — Secure AI Runtime on Azure"
+1. **Header**: "🔒 kars Sandbox — Secure AI Runtime on Azure"
 2. **Foundry Project**: Show the connected project: \`${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}\`
 3. **Model**: Show the active model: \`${MODEL}\`
 4. **Sandbox ID**: Show the sandbox name: \`\${HOSTNAME:-dev}\`
@@ -1069,7 +1069,7 @@ AGENTSEOF
 
   # Write TOOLS.md describing available Foundry endpoints
   cat > "$WORKSPACE_DIR/TOOLS.md" << 'TOOLSEOF'
-# Kars Tools
+# kars Tools
 
 All tools are accessed via the inference router at http://localhost:8443.
 Authentication is handled automatically — no API keys needed.
@@ -1137,17 +1137,17 @@ TOOLSEOF
   cat > "$WORKSPACE_DIR/SOUL.md" << SOULEOF
 # Soul
 
-You are **Kars Agent** — a secure, sandboxed AI assistant powered by Azure AI Foundry.
+You are **kars Agent** — a secure, sandboxed AI assistant powered by Azure AI Foundry.
 
 You run inside an isolated, hardened container on Azure Linux. Your inference is routed
-through the Kars inference router which provides Content Safety, Prompt Shields,
+through the kars inference router which provides Content Safety, Prompt Shields,
 token budgets, and egress control.
 
 **Connected project**: ${FOUNDRY_PROJECT_ENDPOINT:-${ENDPOINT}}
 **Primary model**: ${MODEL}
 
 When greeting users for the first time, be warm and welcoming. Briefly mention you're
-running in Kars, what model you're using, and what you can help with. Don't be
+running in kars, what model you're using, and what you can help with. Don't be
 robotic — be genuinely helpful and excited to assist.
 
 You are friendly, concise, and technically excellent. You get things done efficiently.
@@ -1171,7 +1171,7 @@ else
   echo "[kars] OpenClaw already configured"
 fi
 
-# Always re-install Kars plugin from the image (plugin code may have changed
+# Always re-install kars plugin from the image (plugin code may have changed
 # even though config persists on the volume). This is safe because the plugin
 # directory is small and cp is idempotent.
 #
@@ -1329,7 +1329,7 @@ if [ "$IS_ROOT" = "true" ]; then
   fi
 fi
 
-# Start Kars inference router as UID 1001 (router user) — only in dev mode.
+# Start kars inference router as UID 1001 (router user) — only in dev mode.
 # UID 1001 is exempt from iptables egress guard, matching the AKS pod model
 # where the router runs in a separate container with internet access.
 # In AKS, the controller deploys the router as a separate container.
@@ -1484,7 +1484,7 @@ for i in $(seq 1 10); do
 done
 
 # Start the node host — provides shell/exec/filesystem tools to the agent.
-# Without this, the agent only has plugin tools (Kars) and no local execution.
+# Without this, the agent only has plugin tools (kars) and no local execution.
 # Give the node host its own HOME so it generates a separate device fingerprint.
 # Without this, it shares the TUI's device ID and blocks TUI pairing (role conflict).
 NODE_HOSTNAME=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "sandbox")

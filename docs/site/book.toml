@@ -1,7 +1,7 @@
 [book]
-title = "Kars — Documentation"
-description = "Kars: a secure runtime for AI agents on Azure Kubernetes Service. Per-agent sandbox isolation, declarative governance via CRDs, end-to-end encrypted inter-agent messaging, and a Rust router that enforces every external call."
-authors = ["Kars contributors"]
+title = "kars — Documentation"
+description = "kars: a secure runtime for AI agents on Azure Kubernetes Service. Per-agent sandbox isolation, declarative governance via CRDs, end-to-end encrypted inter-agent messaging, and a Rust router that enforces every external call."
+authors = ["kars contributors"]
 language = "en"
 
 # The book sources live one level up — the existing docs/ tree is the

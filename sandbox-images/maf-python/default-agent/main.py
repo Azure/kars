@@ -1,5 +1,5 @@
 """
-Kars default agent for the Microsoft Agent Framework Python runtime.
+kars default agent for the Microsoft Agent Framework Python runtime.
 
 See the openai-agents default agent for the rationale; replace this
 file by mounting agent code via the `agentCode` fields on KarsSandbox.
@@ -18,7 +18,7 @@ import time
 from kars_runtime_maf_python.runtime import bootstrap
 bootstrap()
 
-BANNER = "🔒 Kars — Microsoft Agent Framework (default agent)"
+BANNER = "🔒 kars — Microsoft Agent Framework (default agent)"
 
 
 def _env(name: str, default: str = "(unset)") -> str:
@@ -53,12 +53,12 @@ async def _smoke_test() -> None:
         client = OpenAIChatClient(model_id=model)
         agent = client.as_agent(
             instructions=(
-                "You are a default smoke-test agent embedded in an Kars sandbox. "
+                "You are a default smoke-test agent embedded in an kars sandbox. "
                 "Reply with exactly one short sentence confirming you are alive."
             ),
             name="kars-default",
         )
-        result = await agent.run("Say hello and confirm you are running inside Kars.")
+        result = await agent.run("Say hello and confirm you are running inside kars.")
         print(f"[default-agent] ✓ inference reply: {result}", flush=True)
         print("[default-agent] ✓ Foundry inference proven via inference-router", flush=True)
     except Exception as exc:  # noqa: BLE001

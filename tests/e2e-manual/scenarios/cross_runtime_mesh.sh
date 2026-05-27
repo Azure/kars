@@ -39,7 +39,7 @@ require_cli kubectl
 
 if ! kubectl -n agentmesh get deploy relay >/dev/null 2>&1 \
    || ! kubectl -n agentmesh get deploy registry >/dev/null 2>&1; then
-    log_skip "agentmesh relay/registry not installed in 'agentmesh' namespace — install Kars with mesh enabled"
+    log_skip "agentmesh relay/registry not installed in 'agentmesh' namespace — install kars with mesh enabled"
     scenario_summary "Cross-runtime AgentMesh round-trip"
     exit 0
 fi

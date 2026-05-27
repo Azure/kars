@@ -2,7 +2,7 @@ You orchestrate three sub-agents to produce a 2-page executive brief on the stat
 
 Step 1. Call kars_discover('*') as your first action.
 
-Step 1a. Call the DeepWiki MCP tool via the execbrief-deepwiki MCP server: invoke `ask_question` (or the equivalent MCP tool exposed by execbrief-deepwiki) with question="How does Kars enforce isolation, egress, attestation, and governance for sandboxed agents? Cite the relevant docs." and repository="microsoft/agent-governance-toolkit". Capture the answer into a short variable you can paste into the analyst dispatch. This step is mandatory — the run is verified to require ≥1 real MCP tools/call on the parent router.
+Step 1a. Call the DeepWiki MCP tool via the execbrief-deepwiki MCP server: invoke `ask_question` (or the equivalent MCP tool exposed by execbrief-deepwiki) with question="How does kars enforce isolation, egress, attestation, and governance for sandboxed agents? Cite the relevant docs." and repository="microsoft/agent-governance-toolkit". Capture the answer into a short variable you can paste into the analyst dispatch. This step is mandatory — the run is verified to require ≥1 real MCP tools/call on the parent router.
 
 Step 2. For each of analyst, viz, writer that is missing, call kars_spawn with role text ('research analyst', 'data visualisation engineer', 'technical writer') and governance=true.
 
@@ -11,7 +11,7 @@ Step 3. Dispatch task briefs to each sub-agent with kars_mesh_send (back to back
 to_agent='analyst' message=
 "Research brief: state of agentic AI runtime environments in 2026. Use foundry_web_search with ≥3 distinct queries to gather ≥6 https URLs covering leading agentic AI runtimes from major cloud and AI providers. Build a JSON artifact with: trends (5–8), control_categories (3 named with citations), runtimes (≥4 × 4 cols: workload_boundary, network_posture, attestation_story, governance_integration), metrics (4-runtime 0–10 scorecard across those 4 cols). Cite each claim with URL + date.
 
-Grounding context from the parent's DeepWiki query about Kars's own posture (use to calibrate the 'control_categories' framing, not as a citation):
+Grounding context from the parent's DeepWiki query about kars's own posture (use to calibrate the 'control_categories' framing, not as a citation):
 <<DEEPWIKI_ANSWER>>
 
 CRITICAL — file persistence: foundry_code_execute runs in an EPHEMERAL Foundry container — files at /mnt/data/* are NOT visible to your sandbox FS and CANNOT be mesh-transferred. To produce analyst.json:
@@ -49,7 +49,7 @@ The brief MUST include (in this order):
 - ≤80-word hook
 - 3 numbered sections (Trends / Control Domains / Runtime Landscape ~180-200 words each)
 - chart markdown in Runtime Landscape: ![scorecard](/sandbox/.openclaw/workspace/incoming/scorecard.png)
-- closing 'So what for Kars?' (~130 words)
+- closing 'So what for kars?' (~130 words)
 - numbered footnotes with each analyst citation as a verbatim https URL (no placeholders). Include one footnote citing https://github.com/microsoft/agent-governance-toolkit and explicitly use the word DeepWiki in that footnote line so the governance posture is visible.
 - The four control-domain terms MUST appear verbatim in the body at least once each: `isolation`, `egress`, `attestation`, `governance` — the Runtime Landscape section is the natural place when describing the scorecard columns.
 - The hero and scorecard PNGs are real attachments at /sandbox/.openclaw/workspace/incoming/{hero.png,scorecard.png} — assume they are present and reference them; do NOT add caveats like 'missing image' to the body.

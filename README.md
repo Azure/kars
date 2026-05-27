@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🔱 Kars
+# 🔱 Agent Reference Stack for Kubernetes
 
-**Agent Reference Stack for Kubernetes — a secure runtime for AI agents on Azure.**
+**A secure runtime for AI agents on Azure. Short name: `kars`.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](LICENSE)
 [![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg)](https://github.com/Azure/kars/actions/workflows/ci.yml)
@@ -20,7 +20,7 @@ Hardened sandbox per agent. Zero credentials in the agent. Every external call g
 
 Giving an AI agent real tools today means giving it real credentials and a real network. That blast radius is unacceptable for any production workload — one prompt-injected agent and your Azure subscription, your GitHub org, your customer data are reachable.
 
-Kars is the runtime that lets you ship agents with the same operational discipline you ship the rest of your services: namespace isolation, NetworkPolicies, signed admission, audit, RBAC. In production (AKS) the agent process runs under a different UID than the router and never sees an Azure key — the router holds the credential and brokers every call. (In `kars dev` the agent and router are co-located in one container; see [Two modes, one mental model](#two-modes-one-mental-model) for the security boundary in each.) Every model call, every web fetch, every peer message passes through a control plane you can reason about, version, and roll back.
+The Agent Reference Stack for Kubernetes (`kars`) is the runtime that lets you ship agents with the same operational discipline you ship the rest of your services: namespace isolation, NetworkPolicies, signed admission, audit, RBAC. In production (AKS) the agent process runs under a different UID than the router and never sees an Azure key — the router holds the credential and brokers every call. (In `kars dev` the agent and router are co-located in one container; see [Two modes, one mental model](#two-modes-one-mental-model) for the security boundary in each.) Every model call, every web fetch, every peer message passes through a control plane you can reason about, version, and roll back.
 
 It is built for three audiences:
 
@@ -28,7 +28,7 @@ It is built for three audiences:
 - **Security teams** — one opinionated, layered control plane for identity, egress, content safety, governance, mesh trust.
 - **Agent builders** — build the agent, not the boring-but-load-bearing infrastructure underneath it.
 
-> **Status — pre-launch (v0.1.0).** Kars is an open-source project from Microsoft. We don't yet have public reference customers to list — if your team is running governed agents on AKS and wants to be one, we'd love to hear from you ([SUPPORT.md](SUPPORT.md)). The design assumes platform teams operating roughly ten or more agents on AKS with an Azure-AI-Foundry-or-Copilot model backend; below that, `kars dev` on a laptop is probably the right shape.
+> **Status — pre-launch (v0.1.0).** The Agent Reference Stack for Kubernetes is an open-source project from Microsoft. We don't yet have public reference customers to list — if your team is running governed agents on AKS and wants to be one, we'd love to hear from you ([SUPPORT.md](SUPPORT.md)). The design assumes platform teams operating roughly ten or more agents on AKS with an Azure-AI-Foundry-or-Copilot model backend; below that, `kars dev` on a laptop is probably the right shape.
 
 ### What makes it different
 
@@ -136,7 +136,7 @@ On first run `kars dev` shows a 3-way provider picker:
 $ kars dev
 
   ╭────────────────────────────────────────────────╮
-  │  Kars · Local Sandbox                     │
+  │  kars · Local Sandbox                     │
   │  Secure AI Agent Runtime on Azure              │
   ╰────────────────────────────────────────────────╯
 
@@ -225,9 +225,9 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 ## What it is *not*
 
-- **Not a fork of OpenClaw.** Kars extends [OpenClaw](https://openclaw.ai) through its native plugin API and `tools.deny` config. No OpenClaw source is modified, patched, or vendored. Any upstream OpenClaw release is drop-in compatible. See **[`docs/upstream-alignment.md`](docs/upstream-alignment.md)**.
+- **Not a fork of OpenClaw.** kars extends [OpenClaw](https://openclaw.ai) through its native plugin API and `tools.deny` config. No OpenClaw source is modified, patched, or vendored. Any upstream OpenClaw release is drop-in compatible. See **[`docs/upstream-alignment.md`](docs/upstream-alignment.md)**.
 - **Not a managed service.** It is a runtime you operate yourself, in your subscription, in your AKS cluster.
-- **Not a model provider.** Models come from Azure AI Foundry (or any compatible provider through the BYO contract). Kars governs the data path; it does not host the model.
+- **Not a model provider.** Models come from Azure AI Foundry (or any compatible provider through the BYO contract). kars governs the data path; it does not host the model.
 
 ---
 
@@ -277,7 +277,7 @@ MIT. See **[`LICENSE`](LICENSE)** and **[`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_
 
 ## Data collection
 
-Kars does not collect telemetry, usage data, or crash reports. Nothing
+kars does not collect telemetry, usage data, or crash reports. Nothing
 in this repository — the CLI, controller, inference router, or sandbox
 images — sends data to Microsoft or any third party.
 
@@ -286,10 +286,10 @@ visible only to whatever log/metrics pipeline you have wired up (Container
 Insights, Loki, your own OTLP collector, etc.). No exporter endpoint is
 configured by default.
 
-When Kars forwards a model call to Azure AI Foundry on your behalf,
+When kars forwards a model call to Azure AI Foundry on your behalf,
 that call is governed by your Azure agreement with Microsoft — not by this
 project.
 
 ---
 
-> *Kars, the Kars logo, and the trident mark are project marks. See **[`TRADEMARKS.md`](TRADEMARKS.md)** for usage guidance.*
+> *kars, the kars logo, and the trident mark are project marks. See **[`TRADEMARKS.md`](TRADEMARKS.md)** for usage guidance.*

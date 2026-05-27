@@ -83,7 +83,7 @@ fixtures volume-mounted read-only. Azure Linux is the repo-wide base
 image family; Node 24 is chosen because the Azure Linux image registry
 only publishes 20 and 24 tags (no 22). The fake-router is stdlib-only
 so the version bump is a no-op for behavior. Use this to point any
-Kars client at a local router without building the sandbox image:
+kars client at a local router without building the sandbox image:
 
 ```bash
 cd cli && npm ci                      # one-time, for tsx resolution

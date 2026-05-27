@@ -1338,7 +1338,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "The live mesh-topology view (agents \u2194 relay, with per-agent \u2191sent / \u2193received counts, animated pulses, and parent\u2192sub-agent hierarchy) lives in the **Kars Headlamp plugin** (*sidebar \u2192 Kars \u2192 Mesh Topology*).\n\nUnderlying Prometheus metrics (still queryable here): `kars_mesh_messages_sent_total`, `kars_mesh_messages_received_total`, `kars_agt_known_agents`, `agentmesh_relay_{connected_agents,messages_routed_total,messages_stored_total,messages_delivered_total}`."
+        "content": "The live mesh-topology view (agents \u2194 relay, with per-agent \u2191sent / \u2193received counts, animated pulses, and parent\u2192sub-agent hierarchy) lives in the **kars Headlamp plugin** (*sidebar \u2192 kars \u2192 Mesh Topology*).\n\nUnderlying Prometheus metrics (still queryable here): `kars_mesh_messages_sent_total`, `kars_mesh_messages_received_total`, `kars_agt_known_agents`, `agentmesh_relay_{connected_agents,messages_routed_total,messages_stored_total,messages_delivered_total}`."
       }
     }
   ],
@@ -1415,7 +1415,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "Kars \u2014 Agent Fleet Operations",
+  "title": "kars \u2014 Agent Fleet Operations",
   "uid": "kars-ops",
   "version": 2
 }

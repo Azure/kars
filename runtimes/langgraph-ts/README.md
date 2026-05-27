@@ -1,7 +1,7 @@
 # `@kars/runtime-langgraph-ts`
 
 In-pod adapter for **LangGraph (TypeScript / Node.js 22)** running on
-Kars. Mirrors the Python adapter at
+kars. Mirrors the Python adapter at
 [`runtimes/langgraph/`](../langgraph) with the same v1 contract:
 
 - pins each LLM provider base URL (`OPENAI_BASE_URL`,

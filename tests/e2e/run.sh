@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars E2E Test Suite
+# kars E2E Test Suite
 #
 # Prerequisites:
 #   - kind (Kubernetes in Docker)
@@ -2699,7 +2699,7 @@ EOF
 main() {
     echo ""
     echo "═══════════════════════════════════════════════════════"
-    echo "  Kars E2E Test Suite (runtime: $RUNTIME)"
+    echo "  kars E2E Test Suite (runtime: $RUNTIME)"
     echo "═══════════════════════════════════════════════════════"
     echo ""
 

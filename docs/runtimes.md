@@ -1,6 +1,6 @@
 # Runtime catalog
 
-Kars is a host for *agent runtimes*. The runtime is the framework your agent code is written against (OpenClaw, OpenAI Agents SDK, LangGraph, …) plus the small adapter that wires it to the Kars sandbox shape.
+kars is a host for *agent runtimes*. The runtime is the framework your agent code is written against (OpenClaw, OpenAI Agents SDK, LangGraph, …) plus the small adapter that wires it to the kars sandbox shape.
 
 This page documents the first-class adapters that ship today and the **BYO** contract for bringing your own. The table below is the authoritative count — when a runtime is added or deferred, this table changes.
 
@@ -94,7 +94,7 @@ Pydantic-AI is provider-agnostic; the adapter pins multiple LLM provider base UR
 
 ## Bring your own (BYO) runtime
 
-If your runtime is not in the list above, or you want to ship a custom container, use `kind: BYO`. You provide a container image; Kars provides the same sandbox shape, the same router, and the same policy enforcement as for the first-class runtimes.
+If your runtime is not in the list above, or you want to ship a custom container, use `kind: BYO`. You provide a container image; kars provides the same sandbox shape, the same router, and the same policy enforcement as for the first-class runtimes.
 
 ```yaml
 apiVersion: kars.azure.com/v1alpha1
@@ -148,7 +148,7 @@ Eight end-to-end examples ship under [`examples/`](../examples/README.md) — on
 | [`maf-quickstart`](../examples/maf-quickstart/) | MicrosoftAgentFramework | Unmodified MAF Python app |
 | [`byo-quickstart`](../examples/byo-quickstart/) | BYO | Any container image under the BYO contract |
 | [`demo-clawshield`](../examples/demo-clawshield/) | OpenClaw ×3 | Multi-tenant isolation proof (poisoned doc, two victim tenants) |
-| [`lethal-trifecta-demo`](../examples/lethal-trifecta-demo/) | OpenClaw ×2 | Reproduces the Jan-2026 Claude Cowork file-exfiltration attack against vanilla OpenClaw vs. an Kars-managed agent — six independent layers each catch the attack. **Recommended launch demo.** |
+| [`lethal-trifecta-demo`](../examples/lethal-trifecta-demo/) | OpenClaw ×2 | Reproduces the Jan-2026 Claude Cowork file-exfiltration attack against vanilla OpenClaw vs. an kars-managed agent — six independent layers each catch the attack. **Recommended launch demo.** |
 
 ---
 
@@ -178,12 +178,12 @@ The existing adapters are the reference. CrewAI is tracked in the [roadmap](road
 
 ---
 
-## Running OpenClaw locally and offloading to Kars (no in-cluster runtime)
+## Running OpenClaw locally and offloading to kars (no in-cluster runtime)
 
-The runtimes above describe agents that run **inside** an Kars sandbox pod. There is a second, complementary shape: a local OpenClaw (or OpenClaw variant, e.g. NVIDIA's `nemoclaw`) running on your laptop or a non-Kars host that uses the Kars **mesh-plugin** to delegate heavy work to a governed AKS sandbox over the encrypted mesh.
+The runtimes above describe agents that run **inside** an kars sandbox pod. There is a second, complementary shape: a local OpenClaw (or OpenClaw variant, e.g. NVIDIA's `nemoclaw`) running on your laptop or a non-kars host that uses the kars **mesh-plugin** to delegate heavy work to a governed AKS sandbox over the encrypted mesh.
 
-- **The local OpenClaw is not operated by Kars.** You install it yourself, configure it yourself, run it under your shell. Kars governs only the cloud-side environment that receives the offloaded task.
-- **The mesh-plugin (`@kars/mesh`) installs into your local OpenClaw.** It registers the local agent on AGT, pairs to your Kars cluster with a one-time token, and exposes tools (`mesh_send`, `mesh_offload`, `mesh_transfer_file`, etc.) that your agent can call.
+- **The local OpenClaw is not operated by kars.** You install it yourself, configure it yourself, run it under your shell. kars governs only the cloud-side environment that receives the offloaded task.
+- **The mesh-plugin (`@kars/mesh`) installs into your local OpenClaw.** It registers the local agent on AGT, pairs to your kars cluster with a one-time token, and exposes tools (`mesh_send`, `mesh_offload`, `mesh_transfer_file`, etc.) that your agent can call.
 - **All traffic is E2E encrypted.** The relay sees only ciphertext (same Signal Protocol stack as in-cluster mesh, see [`architecture.md` → The mesh](architecture.md#the-mesh)).
 - **Variants ship as flavored builds of the same plugin.** `mesh-plugin/` is the canonical `@kars/mesh` for stock OpenClaw; `mesh-plugin/nemoclaw/` is the NVIDIA NeMo / `nemoclaw` flavored build (policy presets + `setup.sh` that fits the nemoclaw container shape). The `sandbox-images/nemoclaw/Dockerfile` is the convenience image that bundles nemoclaw + the plugin together for users who want a pre-wired local container.
 

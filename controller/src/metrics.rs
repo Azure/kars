@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Prometheus metrics for the Kars controller.
+//! Prometheus metrics for the kars controller.
 //!
 //! S7.E (workqueue metrics): exposes counters / histograms that
 //! operators can scrape from the controller pod's `:9091/metrics`

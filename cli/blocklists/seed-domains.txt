@@ -1,4 +1,4 @@
-# Kars Domain Blocklist — Auto-refreshed Seed File
+# kars Domain Blocklist — Auto-refreshed Seed File
 # Generated: 2026-04-08T04:47:31Z
 # Sources: OISD small, URLhaus hostfile, manual entries
 #

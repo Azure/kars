@@ -1,6 +1,6 @@
 # Policy canonical format — per-kind byte rules
 
-> Byte-exact canonicalization rules for Kars signed Policy artifacts.
+> Byte-exact canonicalization rules for kars signed Policy artifacts.
 > The [`kars policy sign`](../cli-reference.md#kars-policy) CLI applies
 > these rules before computing the OCI layer digest; the controller's
 > `policy_fetcher` re-validates them after pulling. Both producer and consumer

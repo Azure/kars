@@ -534,7 +534,7 @@ Notes:
         }
       }
 
-      banner("Kars · Local Sandbox", "Secure AI Agent Runtime on Azure");
+      banner("kars · Local Sandbox", "Secure AI Agent Runtime on Azure");
 
       const stepper = new Stepper({ totalSteps: 4 });
 
@@ -713,7 +713,7 @@ Notes:
           if (!existsSync(dockerfilePath)) {
             stepper.fail("Dockerfile not found");
             console.log(chalk.yellow(`
-  Run from the Kars repo root:
+  Run from the kars repo root:
     ${chalk.cyan("git clone https://github.com/Azure/kars.git && cd kars")}
     ${chalk.cyan("kars dev")}
 `));

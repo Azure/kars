@@ -75,7 +75,7 @@ require_cluster() {
 
 require_kars_installed() {
     if ! kubectl get crd karssandboxes.kars.azure.com >/dev/null 2>&1; then
-        log_fail "Kars CRDs not installed in this cluster (no karssandboxes.kars.azure.com)"
+        log_fail "kars CRDs not installed in this cluster (no karssandboxes.kars.azure.com)"
         log_info "install with: helm upgrade --install kars deploy/helm/kars -n kars-system --create-namespace"
         exit 2
     fi

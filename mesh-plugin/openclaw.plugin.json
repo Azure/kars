@@ -1,9 +1,9 @@
 {
   "id": "kars-mesh",
-  "name": "Kars Mesh",
+  "name": "kars Mesh",
   "version": "0.1.0",
-  "description": "Connect to Kars for secure cloud offload, handoff, and inter-agent communication via E2E encrypted AgentMesh.",
-  "author": "Kars",
+  "description": "Connect to kars for secure cloud offload, handoff, and inter-agent communication via E2E encrypted AgentMesh.",
+  "author": "kars",
   "skills": [],
   "configSchema": {
     "relay_url": {

@@ -1,6 +1,6 @@
-# Kars Example: OpenAI Agents Python runtime
+# kars Example: OpenAI Agents Python runtime
 #
-# Hosts an OpenAI Agents SDK (Python) agent inside an Kars sandbox.
+# Hosts an OpenAI Agents SDK (Python) agent inside an kars sandbox.
 # The controller swaps the OpenClaw image for `sandbox-images/openai-agents/`
 # and points the SDK at the local inference router (HTTPS_PROXY=127.0.0.1:8444).
 # Egress guard, AGT governance, AgentMesh E2E, and seccomp/Landlock isolation
@@ -10,7 +10,7 @@
 #   kubectl apply -f examples/openai-agents-quickstart/karssandbox.yaml
 #
 # Pre-reqs:
-#   - Kars control plane installed (`kars up`)
+#   - kars control plane installed (`kars up`)
 #   - InferencePolicy below references an Azure OpenAI deployment named
 #     `gpt-4.1` reachable through your project. Adjust if needed.
 #   - Your agent code is published to a public OCI image. The example uses

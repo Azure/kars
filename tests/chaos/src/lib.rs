@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Kars chaos tier — fault-injection harness (Phase 2 S16).
+//! kars chaos tier — fault-injection harness (Phase 2 S16).
 //!
 //! This crate is empty by design: all logic lives in feature-gated
 //! integration tests under `tests/`. The library exists only so the

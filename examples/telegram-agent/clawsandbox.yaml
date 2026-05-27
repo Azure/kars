@@ -1,4 +1,4 @@
-# Kars Example: Telegram-Connected Agent
+# kars Example: Telegram-Connected Agent
 #
 # Deploys an OpenClaw agent with Telegram channel integration.
 # The agent responds to Telegram messages and optionally uses Bing web search

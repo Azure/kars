@@ -1,6 +1,6 @@
 # Internal Red-Team — Findings Log
 
-> Living log of internal red-team / adversarial-test exercises against Kars. Each entry records what was tested, what was found, and how it was closed. Findings that are still open carry an `OPEN` tag and link to a tracking issue.
+> Living log of internal red-team / adversarial-test exercises against kars. Each entry records what was tested, what was found, and how it was closed. Findings that are still open carry an `OPEN` tag and link to a tracking issue.
 
 This is **not** a coordinated-disclosure inbox. External researchers please use the procedure in [`SECURITY.md`](../../SECURITY.md).
 

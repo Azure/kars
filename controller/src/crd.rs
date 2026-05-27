@@ -113,8 +113,8 @@ pub struct KarsSandboxSpec {
     /// When `Some`, the controller will (in a future reconciler branch) accept
     /// inbound traffic in upstream wire formats (e.g. `sigs.k8s.io/agent-sandbox`
     /// SandboxClaim semantics) and translate them into the canonical
-    /// Kars runtime contracts before they reach the agent. The translation
-    /// path is **read-only at the boundary**: Kars never mutates upstream
+    /// kars runtime contracts before they reach the agent. The translation
+    /// path is **read-only at the boundary**: kars never mutates upstream
     /// objects in cluster, only mirrors observed state and emits canonical
     /// status conditions.
     ///
@@ -150,7 +150,7 @@ pub struct KarsSandboxSpec {
 ///
 /// **`OverlayMode` (Phase 2 S8).** When `sigs_agent_sandbox == "overlay"`,
 /// the operator already manages an upstream `Sandbox` CR in the same
-/// namespace; Kars provides only the *overlay* (namespace + sandbox
+/// namespace; kars provides only the *overlay* (namespace + sandbox
 /// ServiceAccount + Workload-Identity binding + NetworkPolicy + governance
 /// ConfigMaps). The controller **skips Deployment/Service/CronJob
 /// creation**: those are owned by the upstream reconciler. The
@@ -166,7 +166,7 @@ pub struct UpstreamCompatibilityConfig {
     /// - `"translate"` — accept SandboxClaim semantics on inbound (P1
     ///   schema-only, runtime path deferred).
     /// - `"overlay"` — operator's upstream `Sandbox` CR owns the Pod;
-    ///   Kars provides governance overlay only. Requires
+    ///   kars provides governance overlay only. Requires
     ///   [`upstream_sandbox_ref`] (admission-enforced).
     ///
     /// Reconciler refuses unknown strings.
@@ -177,7 +177,7 @@ pub struct UpstreamCompatibilityConfig {
     /// otherwise. The controller does not watch the upstream object's
     /// status today (deferred to a future slice that adds an upstream
     /// CRD discovery / informer); operators read overlay state from
-    /// the upstream CR directly. Kars never mutates the upstream
+    /// the upstream CR directly. kars never mutates the upstream
     /// object — the relationship is read-only at the boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_sandbox_ref: Option<LocalObjectRef>,

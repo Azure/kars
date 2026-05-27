@@ -1,6 +1,6 @@
 # Channels & Plugins
 
-Messaging channels and third-party plugins extend your Kars agent with external communication and search capabilities. Configuration is handled via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
+Messaging channels and third-party plugins extend your kars agent with external communication and search capabilities. Configuration is handled via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
 
 ---
 

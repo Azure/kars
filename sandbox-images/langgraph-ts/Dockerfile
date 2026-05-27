@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Kars runtime image: LangGraph (LangChain.js) for TypeScript /
+# kars runtime image: LangGraph (LangChain.js) for TypeScript /
 # Node.js 22.
 #
 # Ships the in-pod adapter package `@kars/runtime-langgraph-ts`,

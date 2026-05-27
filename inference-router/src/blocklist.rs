@@ -460,7 +460,7 @@ async fn fetch_feed(client: &reqwest::Client, url: &str) -> anyhow::Result<Strin
     let resp = client
         .get(url)
         .timeout(Duration::from_secs(60))
-        .header("user-agent", "Kars-Blocklist/1.0")
+        .header("user-agent", "kars-Blocklist/1.0")
         .send()
         .await?;
 

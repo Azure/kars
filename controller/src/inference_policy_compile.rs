@@ -28,7 +28,7 @@
 //!   `BehaviorMonitor` receives flags via
 //!   `safety::report_content_flags_to_agt`).
 //! - **Not** a token-budget enforcer. The runtime tracker today is
-//!   Kars-owned: [`inference-router::budget::TokenBudgetTracker`]
+//!   kars-owned: [`inference-router::budget::TokenBudgetTracker`]
 //!   fed from env vars. **AGT does NOT currently expose a
 //!   `TokenBudget` interface** (verified against `agentmesh` 3.1.0 on
 //!   crates.io — only `PolicyEngine`, `TrustManager`, `RateLimiter`,

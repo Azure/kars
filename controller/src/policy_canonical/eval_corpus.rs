@@ -12,7 +12,7 @@
 //!
 //! Built-in corpora ([`kars_eval_corpus::BUILTIN_NAMES`]) **do not**
 //! travel this path — they are compiled into the runner image and
-//! verified against the Kars release public key by the runner
+//! verified against the kars release public key by the runner
 //! itself. This `PolicyKind` impl exists exclusively for the
 //! `bundleRef` lane.
 

@@ -2,7 +2,7 @@
   "name": "@kars/tests-compat",
   "version": "0.0.0",
   "private": true,
-  "description": "Kars compatibility suite — zero-regression harness per docs/implementation-plan.md §5.4.",
+  "description": "kars compatibility suite — zero-regression harness per docs/implementation-plan.md §5.4.",
   "type": "module",
   "scripts": {
     "test": "vitest run",

@@ -12,7 +12,7 @@ The A2A 1.0 (Agent2Agent) protocol is a public-facing, peer-to-peer
 agent interop protocol with no central registry: each agent serves
 its own signed AgentCard at `/.well-known/agent.json` (RFC 7515 JWS,
 EdDSA per RFC 8037). To interoperate with foreign runtimes (LangChain,
-Google ADK, OpenAI Agents, AWS Bedrock Agents), Kars must offer
+Google ADK, OpenAI Agents, AWS Bedrock Agents), kars must offer
 a publicly-reachable A2A endpoint.
 
 The sandbox inference router is the most privileged process in the
@@ -38,7 +38,7 @@ router itself is never on the public internet?**
 ### D1. Single shared gateway component owns A2A public ingress
 
 A new component `kars-a2a-gateway` is the **only** public TLS
-endpoint for A2A. All foreign agents that talk to Kars resolve a
+endpoint for A2A. All foreign agents that talk to kars resolve a
 single hostname (e.g. `a2a.kars.example`); routing to the
 target sandbox happens after JWS verification, by sandbox-id in the
 URL path or JWS `sub` claim.
@@ -439,7 +439,7 @@ does not yet demand.
 - RFC 7515 (JWS): <https://www.rfc-editor.org/rfc/rfc7515>
 - RFC 8037 (JOSE EdDSA): <https://www.rfc-editor.org/rfc/rfc8037>
 - RFC 8725 (JWT BCP — alg confusion): <https://www.rfc-editor.org/rfc/rfc8725>
-- Kars implementation plan §1.2.1 (SigningProvider trait), §7
+- kars implementation plan §1.2.1 (SigningProvider trait), §7
   (Phase 1 protocol scope), §0.2 #11 (dev-only branching).
 
 ## Sign-off

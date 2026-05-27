@@ -1,6 +1,6 @@
 [package]
 name = "kars-cncf-conformance"
-description = "K8s AI Conformance v1.35+ test suite for Kars CRDs and operator manifests (S17)"
+description = "K8s AI Conformance v1.35+ test suite for kars CRDs and operator manifests (S17)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

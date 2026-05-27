@@ -1,4 +1,4 @@
-// Kars - AKS Module
+// kars - AKS Module
 // Deploys AKS cluster with Azure Linux node pools
 // Governance: Azure Policy add-on (no Defender for Cloud required)
 

@@ -5,7 +5,7 @@
 // Sets undici's EnvHttpProxyAgent as the global fetch dispatcher so all
 // outbound HTTP(S) requests honour HTTPS_PROXY / NO_PROXY env vars.
 // This runs before any OpenClaw code, ensuring Telegram polling, model
-// pricing, and every other fetch goes through the Kars forward proxy.
+// pricing, and every other fetch goes through the kars forward proxy.
 'use strict';
 
 if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {

@@ -1,8 +1,8 @@
-# AGT Boundary — what Kars consumes vs. what Kars builds
+# AGT Boundary — what kars consumes vs. what kars builds
 
-> Defines the operational seam between [Microsoft AGT](https://github.com/microsoft/agent-governance-toolkit) and Kars: what Kars imports, what it builds in-tree, and the four provider contracts that keep them aligned.
+> Defines the operational seam between [Microsoft AGT](https://github.com/microsoft/agent-governance-toolkit) and kars: what kars imports, what it builds in-tree, and the four provider contracts that keep them aligned.
 
-AGT ships the governance engine. Kars is the AKS operator and data plane that feeds AGT and surfaces AGT decisions as Kubernetes primitives. Any overlap is treated as a bug to resolve, not a feature to negotiate.
+AGT ships the governance engine. kars is the AKS operator and data plane that feeds AGT and surfaces AGT decisions as Kubernetes primitives. Any overlap is treated as a bug to resolve, not a feature to negotiate.
 
 ---
 
@@ -18,9 +18,9 @@ AGT ships the governance engine. Kars is the AKS operator and data plane that fe
 - **Rate-limit token bucket** — per-identity, per-tool, per-mesh counters. We configure caps; AGT enforces.
 - **Signing keys** — HSM / HW-backed key custody, key rotation, signing primitives for A2A cards and AP2 transfers.
 - **A2A 1.0.0 Signed Agent Card signing** — when AGT ships this primitive. Until then we implement via the `SigningProvider` seam and document the gap.
-- **AP2 policy grammar** — if AGT defines it. Until then Kars defines a private schema designed to be portable to a future AGT definition.
+- **AP2 policy grammar** — if AGT defines it. Until then kars defines a private schema designed to be portable to a future AGT definition.
 
-### Kars owns
+### kars owns
 
 - **Kubernetes operator** — controller, CRDs, admission policies, reconcilers.
 - **Router data plane** — L7 proxy, IMDS / Workload-Identity auth, Foundry calls, MCP transport (Streamable HTTP + SSE compat), A2A transport, OpenAI-SDK sandbox-provider adapter, channel plugins.
@@ -33,7 +33,7 @@ AGT ships the governance engine. Kars is the AKS operator and data plane that fe
 
 ## 2. Provider contracts
 
-Kars exposes four provider traits. Three of them (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) ship a vendored implementation alongside the AGT-Rust-SDK path; one (`MeshProvider`) links the `agentmesh` crate (the AGT Rust SDK) from crates.io.
+kars exposes four provider traits. Three of them (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) ship a vendored implementation alongside the AGT-Rust-SDK path; one (`MeshProvider`) links the `agentmesh` crate (the AGT Rust SDK) from crates.io.
 
 | Trait | Current implementations | Role |
 |---|---|---|
@@ -58,7 +58,7 @@ Every provider call passes through an outage-mode layer:
 
 Per-tenant override via `KarsSandbox.spec.agt.outageMode`.
 
-## 4. What Kars never builds
+## 4. What kars never builds
 
 - Signal / X3DH / Double-Ratchet primitives (no custom crypto).
 - A standalone audit chain (we emit into AGT's).
@@ -66,7 +66,7 @@ Per-tenant override via `KarsSandbox.spec.agt.outageMode`.
 - A rate-limit enforcement bucket outside AGT.
 - Key custody or HSM integration outside AGT.
 
-## 5. What Kars always builds
+## 5. What kars always builds
 
 - The Kubernetes-primitive surface (CRDs) for anything AGT exposes.
 - The router data-plane enforcement point for every AGT decision.
@@ -75,5 +75,5 @@ Per-tenant override via `KarsSandbox.spec.agt.outageMode`.
 ## 6. Working mode with AGT
 
 - This file is shared with the AGT team for confirmation as a living seam document.
-- Disagreements are resolved by: (a) AGT's ownership wins if they commit to shipping; (b) Kars picks it up temporarily if they cannot commit; (c) the scope is documented here and in the relevant security-audit doc.
+- Disagreements are resolved by: (a) AGT's ownership wins if they commit to shipping; (b) kars picks it up temporarily if they cannot commit; (c) the scope is documented here and in the relevant security-audit doc.
 - AGT Rust SDK releases trigger a manual audit pass to verify behaviour against our `MeshProvider` integration tests.

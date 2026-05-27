@@ -75,7 +75,7 @@ export function renderHeader(ctx: HeaderRenderContext): void {
   }
 
   const viewLabel = viewMode === "cluster" ? "{blue-fg}{bold}[CLUSTER]{/bold}{/}  │  " : "";
-  const title = ` ${spin}{bold}Kars Operator{/bold}  │  ${cName}  │  ${viewLabel}`;
+  const title = ` ${spin}{bold}kars Operator{/bold}  │  ${cName}  │  ${viewLabel}`;
   const summary = healthSummary(sandboxes);
   const stats = `${clusterTag}${meshTag}${summary}  │  ${totalEgressCount} domain(s)  │  {gray-fg}${now}{/}`;
   const shortStats = `${summary}  │  {gray-fg}${now}{/}`;

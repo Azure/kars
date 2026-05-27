@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Kars Infrastructure E2E Test Suite
+# kars Infrastructure E2E Test Suite
 #
 # Runs against a LIVE AKS cluster with Azure AI Foundry connectivity.
 # Validates all Foundry API routes through the inference router.

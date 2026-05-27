@@ -1,8 +1,8 @@
 # Lifecycle — what happens when you apply a CRD
 
-This page is the end-to-end story for every Kars CRD: which CLI command writes it, what the controller does when it lands, what cluster artifacts get produced, and which component consumes those artifacts at runtime.
+This page is the end-to-end story for every kars CRD: which CLI command writes it, what the controller does when it lands, what cluster artifacts get produced, and which component consumes those artifacts at runtime.
 
-If you only read one document about how Kars fits together, read this one.
+If you only read one document about how kars fits together, read this one.
 
 > Source of truth: `controller/src/*_reconciler.rs` and `inference-router/src/routes/*.rs`. Every diagram and table here is grounded in those files.
 
@@ -50,7 +50,7 @@ This is the whole loop. Everything else on this page is detail.
 
 ## Two reconcile patterns
 
-Kars's nine user-facing CRDs split into two operational shapes:
+kars's nine user-facing CRDs split into two operational shapes:
 
 | Pattern | CRDs | What gets produced |
 |---|---|---|

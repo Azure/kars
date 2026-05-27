@@ -139,7 +139,7 @@ pub(super) async fn handle_offload_request(
         &tool_policy_ref_name,
     );
 
-    // No OFFLOAD_MODE — sandbox starts as a full Kars agent.
+    // No OFFLOAD_MODE — sandbox starts as a full kars agent.
     // The external agent talks to it directly via existing mesh protocol
     // (mesh_send, mesh_transfer_file). AGT_TRUSTED_PEERS locks the sandbox
     // so only the paired external agent can communicate with it.

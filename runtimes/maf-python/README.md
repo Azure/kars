@@ -1,8 +1,8 @@
-# Kars runtime adapter — Microsoft Agent Framework (Python)
+# kars runtime adapter — Microsoft Agent Framework (Python)
 
 `kars_runtime_maf_python` is the in-pod adapter that wires the
 [Microsoft Agent Framework Python SDK](https://github.com/microsoft/agent-framework)
-into the Kars sandbox. It ships inside the
+into the kars sandbox. It ships inside the
 `sandbox-images/maf-python` container image and is invoked from
 `entrypoint.sh` before the user's agent code runs.
 
@@ -25,7 +25,7 @@ into the Kars sandbox. It ships inside the
    `tools` attribute).
 5. **Router base URLs** — sets `OPENAI_BASE_URL` and
    `AZURE_OPENAI_ENDPOINT` to the local router so `OpenAIChatClient`
-   and `AzureOpenAIChatClient` route through the Kars governance
+   and `AzureOpenAIChatClient` route through the kars governance
    gate.
 
 `bootstrap()` is idempotent via the `__KARS_RUNTIME_INITIALIZED__`

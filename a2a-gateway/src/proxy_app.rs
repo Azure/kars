@@ -68,7 +68,7 @@ use crate::rate_limit::SubjectLimiter;
 use crate::verify::ReplayCache;
 
 /// Header carrying a per-request nonce used for replay protection.
-/// Not part of the A2A spec; Kars-private convention.
+/// Not part of the A2A spec; kars-private convention.
 pub const NONCE_HEADER: &str = "X-A2A-Nonce";
 
 /// Header set by the rate-limit middleware on 429 responses so the

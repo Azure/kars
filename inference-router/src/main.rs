@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Kars Inference Router
+//! kars Inference Router
 #![allow(
     clippy::collapsible_if,
     clippy::redundant_guards,
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    tracing::info!("Kars Inference Router starting");
+    tracing::info!("kars Inference Router starting");
 
     // Slice 4d.2: surface per-server McpServer JWKS mounts at startup
     // so operators can verify that all `mcpServerRefs` on the sandbox

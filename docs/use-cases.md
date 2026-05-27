@@ -1,4 +1,4 @@
-# Kars Use Cases
+# kars Use Cases
 
 Six fully-shipped use cases covering every deployment pattern from laptop inner-loop to cross-organisation A2A federation. All six are implemented end-to-end and exercised by the compat / conformance / e2e harness before any merge.
 
@@ -6,12 +6,12 @@ Six fully-shipped use cases covering every deployment pattern from laptop inner-
 
 | # | Scenario | Where the user runs | Network shape | Status | Reference |
 |---|---|---|---|---|---|
-| 1 | **Kars-native agents (OpenClaw)** | AKS (operator owns the cluster) | Cluster-internal | ✅ Shipping | [`docs/architecture.md`](architecture.md) |
-| 2 | **Any-OpenClaw → Kars cloud offload** | Laptop / NemoClaw / any OpenClaw host (no Kars CLI required) | Host ↔ AKS via AgentMesh relay (E2E-encrypted) | ✅ Shipping | See § 2 below |
-| 3 | **Kars ↔ Kars mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | See § 3 below |
+| 1 | **kars-native agents (OpenClaw)** | AKS (operator owns the cluster) | Cluster-internal | ✅ Shipping | [`docs/architecture.md`](architecture.md) |
+| 2 | **Any-OpenClaw → kars cloud offload** | Laptop / NemoClaw / any OpenClaw host (no kars CLI required) | Host ↔ AKS via AgentMesh relay (E2E-encrypted) | ✅ Shipping | See § 2 below |
+| 3 | **kars ↔ kars mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | See § 3 below |
 | 4 | **Multi-runtime hosting** | AKS (same operator, different agent stacks) | Cluster-internal per sandbox | ✅ Shipping (OpenClaw, OpenAIAgents, MAF Python, LangGraph Py+TS, Anthropic, PydanticAi, BYO) | [`docs/runtimes.md`](runtimes.md) |
 | 5 | **A2A federation across organisations** | Foreign agent anywhere; inbound via public a2a-gateway | Internet → A2A gateway → per-sandbox router (mTLS-pinned) | ✅ Shipping | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
-| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → Kars cluster | Translate + apply | ✅ Shipping | See § 6 below |
+| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → kars cluster | Translate + apply | ✅ Shipping | See § 6 below |
 
 All use cases share the same trust boundary:
 
@@ -23,7 +23,7 @@ All use cases share the same trust boundary:
 
 ---
 
-## 1. Kars-native agents (OpenClaw)
+## 1. kars-native agents (OpenClaw)
 
 > "I run AKS. Give me a hardened, governed AI agent I can talk to from Telegram
 > or a TUI, with all access mediated by Azure AI Foundry."
@@ -159,7 +159,7 @@ spec:
 
 ---
 
-## 2. Any-OpenClaw → Kars cloud offload
+## 2. Any-OpenClaw → kars cloud offload
 
 > "I run OpenClaw on my laptop (or NemoClaw, or any other OpenClaw host).
 > A heavy or sensitive task came in; I want to offload it to a hardened
@@ -168,7 +168,7 @@ spec:
 
 ### What the operator wants
 
-The defining property of this scenario is that **the plugin user does not install Kars**. They install the `kars-mesh` plugin into their existing OpenClaw host. An Kars operator runs the AKS cluster, mints a one-time pairing token, and sends it to the user over any secure channel. The walkthrough below covers the host-side pairing flow end to end.
+The defining property of this scenario is that **the plugin user does not install kars**. They install the `kars-mesh` plugin into their existing OpenClaw host. An kars operator runs the AKS cluster, mints a one-time pairing token, and sends it to the user over any secure channel. The walkthrough below covers the host-side pairing flow end to end.
 
 ### Topology
 
@@ -219,12 +219,12 @@ kars mesh list
 kars pair revoke alice-laptop
 ```
 
-### What the plugin user does (no Kars CLI)
+### What the plugin user does (no kars CLI)
 
 1. Install the `kars-mesh` plugin in their OpenClaw host.
 2. Set `KARS_PAIRING_TOKEN=azc_pair_v1_…` **or** paste the token into chat once.
 3. The plugin calls `kars_pair`; performs X3DH handshake; the token is single-use and auto-zeroized.
-4. Say: *"Offload `analyze_repo("/big-codebase")` to Kars cloud."*
+4. Say: *"Offload `analyze_repo("/big-codebase")` to kars cloud."*
 
 ### Example `KarsSandbox` YAML (offload sub-agent — controller-generated)
 
@@ -272,9 +272,9 @@ spec:
 
 ---
 
-## 3. Kars ↔ Kars mesh
+## 3. kars ↔ kars mesh
 
-> "I have multiple Kars agents — in one cluster, or two. I want them to
+> "I have multiple kars agents — in one cluster, or two. I want them to
 > coordinate end-to-end-encrypted, with policy + trust + audit on every hop."
 
 ### What the operator wants
@@ -581,7 +581,7 @@ spec:
 ## 5. A2A federation across organisations
 
 > "A foreign agent (LangChain, Google ADK, OpenAI Agents, AWS Bedrock) wants
-> to call one of my Kars sandboxes as a tool surface. I want that
+> to call one of my kars sandboxes as a tool surface. I want that
 > collaboration to be audited, rate-limited, and revocable without exposing
 > the router to the internet."
 
@@ -735,11 +735,11 @@ spec:
 
 > "My team already uses `kagent.dev/v1alpha2 Agent` YAMLs or
 > `agents.x-k8s.io/v1alpha1 Sandbox` manifests. I want to run them on
-> Kars without rewriting YAML from scratch."
+> kars without rewriting YAML from scratch."
 
 ### What the operator wants
 
-A translator that converts existing agent manifests into Kars resource bundles, with explicit warnings for lossy fields and a dry-run path. The full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`) are documented in the translator source under `cli/src/commands/migrate/`.
+A translator that converts existing agent manifests into kars resource bundles, with explicit warnings for lossy fields and a dry-run path. The full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`) are documented in the translator source under `cli/src/commands/migrate/`.
 
 ### Topology — migration flow
 
@@ -753,7 +753,7 @@ graph LR
         MIGRATE["kars migrate from-kagent"]
         CONVERT["kars convert"]
     end
-    subgraph Target["Kars cluster"]
+    subgraph Target["kars cluster"]
         CS["KarsSandbox CR"]
         IP["InferencePolicy CR"]
         TP["ToolPolicy CR"]
@@ -782,7 +782,7 @@ kars migrate from-kagent agent.yaml \
 kubectl get agent my-agent -n kagent-system -o yaml \
   | kars migrate from-kagent -
 
-# Allow lossy translation (fields with no Kars analog are dropped with warnings)
+# Allow lossy translation (fields with no kars analog are dropped with warnings)
 kars migrate from-kagent agent.yaml \
   --allow-lossy \
   --out-dir ./manifests
@@ -806,13 +806,13 @@ head -20 karssandbox.yaml
 # Convert a KarsSandbox to upstream format (for cluster comparison)
 kars convert -f karssandbox.yaml --to upstream-sandbox --allow-lossy
 
-# Overlay mode: Kars adds governance over an existing upstream-controller-owned pod
+# Overlay mode: kars adds governance over an existing upstream-controller-owned pod
 kars convert -f sandbox.yaml --to overlay --sandbox-ref=prod/web-agent
 
 # Switch a live sandbox to overlay mode
 kars migrate to-overlay my-agent --upstream-ref upstream-sandbox
 
-# Revert to native Kars (controller resumes full ownership)
+# Revert to native kars (controller resumes full ownership)
 kars migrate to-native my-agent --dry-run
 kars migrate to-native my-agent
 ```
@@ -824,7 +824,7 @@ apiVersion: kars.azure.com/v1alpha1
 kind: KarsSandbox
 metadata:
   name: my-agent                    # preserved from kagent Agent metadata.name
-  namespace: kars-my-agent     # standard Kars namespace convention
+  namespace: kars-my-agent     # standard kars namespace convention
   annotations:
     kars.io/migrated-from: kagent.dev/v1alpha2/Agent
     kars.io/migration-date: "2026-04-30"
@@ -849,16 +849,16 @@ spec:
 
 ### Compatibility modes
 
-| Mode | What Kars does | When to use |
+| Mode | What kars does | When to use |
 |---|---|---|
-| `Native` (default) | Kars owns all objects. No upstream CR involved. | Fresh migrations; kagent YAML fully converted. |
-| `Translate` (opt-in) | Kars emits an upstream `Sandbox` CR as a subresource. | Co-existence with an existing upstream controller. |
-| `Overlay` (opt-in) | Kars adds only governance overlay; upstream CR owns the pod. | Upstream controller must remain; add governance without pod re-ownership. |
-| `Observe` | Kars mirrors status of an upstream CR without overlay. | Read-only integration for auditing. |
+| `Native` (default) | kars owns all objects. No upstream CR involved. | Fresh migrations; kagent YAML fully converted. |
+| `Translate` (opt-in) | kars emits an upstream `Sandbox` CR as a subresource. | Co-existence with an existing upstream controller. |
+| `Overlay` (opt-in) | kars adds only governance overlay; upstream CR owns the pod. | Upstream controller must remain; add governance without pod re-ownership. |
+| `Observe` | kars mirrors status of an upstream CR without overlay. | Read-only integration for auditing. |
 
 ### What is lossy
 
-The inverse translation (`Sandbox → KarsSandbox`) drops fields with no Kars analog:
+The inverse translation (`Sandbox → KarsSandbox`) drops fields with no kars analog:
 - Inter-agent mesh membership
 - Tool governance / policy decisions
 - A2A agent-card publication
@@ -879,8 +879,8 @@ All dropped fields default to `disabled` (dev-only label applied automatically) 
 
 ## What's NOT a use case
 
-- Kars is **not** a model router. Model selection sits in Foundry; `InferencePolicy` is a budget / guardrail CR, not a router.
-- Kars is **not** a memory backend. `KarsMemory` is a Foundry Memory Store binding CR, never an in-cluster store.
-- Kars is **not** a managed-MCP host for the public Microsoft-managed catalog. `McpServer` is for **AKS-hosted private/custom** tool servers; the publicly managed MCP surface stays with Foundry.
-- Kars is **not** a SaaS agent author. Agent authoring lives in Microsoft 365 Agent Framework / Copilot Studio. Kars is the AKS runtime substrate; M365 Copilot Studio agents can invoke Kars-hosted MCP servers as a tool surface.
-- Kars ships first-class adapters for `OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework` (Python), `LangGraph` (Python and TypeScript), `Anthropic`, `PydanticAi`, plus `BYO`. `SemanticKernel` and `MicrosoftAgentFramework` (`language: dotnet`) are in the schema but the adapters are not yet built — the controller stamps `RuntimeReady=False/AdapterMissing` (or `ShapeInvalid` for the .NET variant) so the operator knows immediately rather than silently booting broken sandboxes. See [Runtime catalog](runtimes.md).
+- kars is **not** a model router. Model selection sits in Foundry; `InferencePolicy` is a budget / guardrail CR, not a router.
+- kars is **not** a memory backend. `KarsMemory` is a Foundry Memory Store binding CR, never an in-cluster store.
+- kars is **not** a managed-MCP host for the public Microsoft-managed catalog. `McpServer` is for **AKS-hosted private/custom** tool servers; the publicly managed MCP surface stays with Foundry.
+- kars is **not** a SaaS agent author. Agent authoring lives in Microsoft 365 Agent Framework / Copilot Studio. kars is the AKS runtime substrate; M365 Copilot Studio agents can invoke kars-hosted MCP servers as a tool surface.
+- kars ships first-class adapters for `OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework` (Python), `LangGraph` (Python and TypeScript), `Anthropic`, `PydanticAi`, plus `BYO`. `SemanticKernel` and `MicrosoftAgentFramework` (`language: dotnet`) are in the schema but the adapters are not yet built — the controller stamps `RuntimeReady=False/AdapterMissing` (or `ShapeInvalid` for the .NET variant) so the operator knows immediately rather than silently booting broken sandboxes. See [Runtime catalog](runtimes.md).

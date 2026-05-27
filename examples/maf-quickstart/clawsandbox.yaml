@@ -1,6 +1,6 @@
-# Kars Example: Microsoft Agent Framework (MAF) runtime
+# kars Example: Microsoft Agent Framework (MAF) runtime
 #
-# Hosts a Microsoft Agent Framework (Python) agent inside an Kars
+# Hosts a Microsoft Agent Framework (Python) agent inside an kars
 # sandbox. The controller swaps the OpenClaw image for
 # `sandbox-images/maf-python/` and points MAF's Azure OpenAI client at the
 # local inference router. Egress guard, AGT governance, AgentMesh E2E,
@@ -10,7 +10,7 @@
 #   kubectl apply -f examples/maf-quickstart/karssandbox.yaml
 #
 # Pre-reqs:
-#   - Kars control plane installed (`kars up`)
+#   - kars control plane installed (`kars up`)
 #   - InferencePolicy below references an Azure OpenAI deployment named
 #     `gpt-4.1`. Adjust if needed.
 #   - You publish your MAF agent code to an OCI registry and replace the

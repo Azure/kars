@@ -2,7 +2,7 @@
 #
 # The image must meet the contract documented in
 # docs/byo-runtime-contract.md. With controller.byoStrict=true the
-# Kars controller verifies that:
+# kars controller verifies that:
 #   * spec.runtime.byo.contractVersion is in {"v1", "1", "1.0"}
 #   * spec.runtime.byo.image looks like a valid image reference
 #     (host/path:tag or host/path@sha256:...)

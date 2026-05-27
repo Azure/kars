@@ -74,7 +74,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
 
   api.registerProvider({
     id: "azure-openai",
-    label: "Azure AI Foundry (via Kars)",
+    label: "Azure AI Foundry (via kars)",
     docsPath: "https://github.com/Azure/kars",
     aliases: ["azure", "kars", "foundry"],
     envVars: ["AZURE_OPENAI_API_KEY"],
@@ -85,7 +85,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         type: "api-key",
         envVar: "AZURE_OPENAI_API_KEY",
         headerName: "api-key",
-        label: "Azure API Key (or 'routed-via-inference-router' for Kars)",
+        label: "Azure API Key (or 'routed-via-inference-router' for kars)",
       },
     ],
   });
@@ -95,7 +95,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
     (ctx: any) => {
       const kars = ctx.program
         .command("kars")
-        .description("Kars — secure AI agent runtime on Azure");
+        .description("kars — secure AI agent runtime on Azure");
 
       kars
         .command("status")
@@ -112,10 +112,10 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
               req.on("error", reject);
               req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
             });
-            console.log("Kars Inference Router — Prometheus Metrics\n");
+            console.log("kars Inference Router — Prometheus Metrics\n");
             console.log(body);
           } catch {
-            console.log(`Kars Inference Router: not reachable (${routerUrl("/metrics")})`);
+            console.log(`kars Inference Router: not reachable (${routerUrl("/metrics")})`);
           }
         });
 
@@ -150,11 +150,11 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
   // ── Register /kars slash command ─────────────────────────────────
   api.registerCommand({
     name: "kars",
-    description: "Show Kars sandbox status, models, and security info",
+    description: "Show kars sandbox status, models, and security info",
     handler: async () => {
       return {
         text: [
-          "**Kars Sandbox** (Foundry-integrated)",
+          "**kars Sandbox** (Foundry-integrated)",
           `Model: ${config.model}`,
           `Sandbox: ${config.sandboxName}`,
           `Endpoint: ${config.endpoint || "(configured via Foundry)"}`,
@@ -265,7 +265,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         }
       }
       const modelsArr = [...allModels].map(id => ({
-        id, name: `${id} (Azure via Kars)`, reasoning: false,
+        id, name: `${id} (Azure via kars)`, reasoning: false,
         input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000, maxTokens: 8192, api: "openai-completions",
       }));
@@ -390,7 +390,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
       const isKata = kernel.includes("mshv");
       return {
         text: [
-          "**Kars Security Posture**",
+          "**kars Security Posture**",
           "",
           `Kernel: ${kernel}`,
           `User: ${user}`,
@@ -399,7 +399,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
           `Capabilities: ALL dropped`,
           `Seccomp: ${isKata ? "RuntimeDefault (VM boundary)" : "Localhost (kars-strict)"}`,
           `Network: default-deny egress + iptables UID guard`,
-          `Inference: routed through Kars inference router`,
+          `Inference: routed through kars inference router`,
           `Foundry Agent API: proxied via ${routerBase()}/agents/*`,
           `Auth: IMDS (kubelet MI, zero keys)`,
         ].join("\n"),
@@ -457,7 +457,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
         const parsed = JSON.parse(body);
         return {
           text: [
-            "**Kars AGT Governance**",
+            "**kars AGT Governance**",
             "",
             "**Application Layer** (plugin, @kars/mesh + node:crypto):",
             `  Identity: ${identityStatus}`,
@@ -478,9 +478,9 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
             "**Overlap resolution:**",
             "  Tool policy → AGT SDK (plugin)",
             "  Mesh routing → Rust router (K8s DNS)",
-            "  Content safety → Kars (Azure AI)",
-            "  Token budgets → Kars (router)",
-            "  Network/FS → Kars (iptables/seccomp)",
+            "  Content safety → kars (Azure AI)",
+            "  Token budgets → kars (router)",
+            "  Network/FS → kars (iptables/seccomp)",
             "",
             "Check policy: `/kars-agt check shell:rm -rf /`",
           ].filter(Boolean).join("\n"),
@@ -488,7 +488,7 @@ export function registerOpenClawCommands(api: AnyApi, deps: OpenClawCommandsDeps
       } catch {
         return {
           text: [
-            "**Kars AGT Governance**",
+            "**kars AGT Governance**",
             `Policy engine: ${sdkStatus}`,
             `Trust store: ${trustStatus}`,
             `Audit logger: ${auditStatus}`,

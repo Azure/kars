@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""Minimal BYO agent that proxies prompts to the Kars router.
+"""Minimal BYO agent that proxies prompts to the kars router.
 
 The agent never sees an API key. The router is reachable at
 ``http://127.0.0.1:8443/openai/v1`` from inside the sandbox; it

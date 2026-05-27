@@ -97,7 +97,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   // ══════════════════════════════════════════════════════════════
 
   if (!options.dryRun) {
-    banner("Kars · Preflight Check", "Validating environment before deployment");
+    banner("kars · Preflight Check", "Validating environment before deployment");
   } else {
     console.log(chalk.dim("  Preflight validation...\n"));
   }
@@ -410,7 +410,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
       enhanced: "enhanced (runc + kars-strict seccomp)",
       confidential: "confidential (Kata VM isolation)",
     };
-    console.log(blue(`\n  Kars · Dry Run\n`));
+    console.log(blue(`\n  kars · Dry Run\n`));
     console.log(`  Steps that would execute:\n`);
     console.log(`   1. Check Azure credentials (az account show)`);
     console.log(`   2. Create resource group '${rg}' in ${options.region}`);

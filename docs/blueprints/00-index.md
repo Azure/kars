@@ -1,12 +1,12 @@
 # Deployment blueprints
 
-Five concrete shapes for running Kars. Each blueprint pins down **who runs what**, **where the trust boundary sits**, and **the main flow** end to end.
+Five concrete shapes for running kars. Each blueprint pins down **who runs what**, **where the trust boundary sits**, and **the main flow** end to end.
 
-These are not mutually exclusive — one Kars cluster can serve several of them simultaneously (e.g. Blueprint 02 for internal employees + Blueprint 03 for external partners on the same cluster).
+These are not mutually exclusive — one kars cluster can serve several of them simultaneously (e.g. Blueprint 02 for internal employees + Blueprint 03 for external partners on the same cluster).
 
 ## Catalogue
 
-| # | Blueprint | Audience | Where Kars runs | Status |
+| # | Blueprint | Audience | Where kars runs | Status |
 |---|---|---|---|---|
 | **[01](01-developer-inner-loop.md)** | Developer inner loop | Individual contributor | Laptop (`kars dev` — single Docker container) | ✅ |
 | **[02](02-local-k8s-dev-loop.md)** | Local Kubernetes dev loop | Maintainer / agent author | Laptop (`kars dev --target local-k8s` — kind + Helm + Headlamp) | ✅ |
@@ -29,7 +29,7 @@ Every blueprint follows the same shape:
 
 ## What every blueprint inherits
 
-These properties are not blueprint-specific; they come from running Kars at all. If your environment cannot satisfy them, you are outside the threat model — open an issue before deploying.
+These properties are not blueprint-specific; they come from running kars at all. If your environment cannot satisfy them, you are outside the threat model — open an issue before deploying.
 
 - **Egress isolation.** Agent runs as UID 1000 with no path to the network. The router (UID 1001) is the only egress. Enforced by the `egress-guard` initContainer (iptables) and a Kubernetes NetworkPolicy.
 - **Foundry-side Content Safety.** `Microsoft.DefaultV2` Prompt Shields on every inference, both directions.

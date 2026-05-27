@@ -1135,7 +1135,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // upstream `Sandbox` CR (sigs.k8s.io/agent-sandbox) owns the Pod
     // lifecycle. Step 4b (SA annotations for Azure RBAC) and Step 4c
     // (governance ConfigMap + mesh ingress NetworkPolicy) intentionally
-    // still run — they form the *overlay* that Kars layers on top
+    // still run — they form the *overlay* that kars layers on top
     // of the upstream Pod.
     'deployment_block: {
         if overlay_mode {
@@ -2434,8 +2434,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // directly, the mounted file stays fresh.
     //
     // **OverlayMode (S8):** skipped. The blocklist is mounted into the
-    // Kars-managed router container; in overlay mode the upstream
-    // Sandbox CR owns the Pod and there is no Kars router to consume
+    // kars-managed router container; in overlay mode the upstream
+    // Sandbox CR owns the Pod and there is no kars router to consume
     // the ConfigMap. Recreating it would be dead overhead (CronJob would
     // run every 6h with nothing reading the output).
     if !overlay_mode {

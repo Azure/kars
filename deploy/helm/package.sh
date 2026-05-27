@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# Package the Kars Helm chart locally — for release engineering
+# Package the kars Helm chart locally — for release engineering
 # and local testing only. The packaged tarball is *not* published from
 # this script; publishing to a registry is a separate, deliberate step
 # performed by a maintainer with the appropriate credentials.
