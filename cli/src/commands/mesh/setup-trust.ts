@@ -139,7 +139,30 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
       // skip the CLI attempt entirely.
       if (opts.mode === "agent-id") {
         banner("kars · Mesh Setup Trust", "Entra Agent ID blueprint + controller MI");
-        const { ensureAgentIdTrustAutoFallback } = await import("./agent_id_setup.js");
+        const { ensureAgentIdTrustAutoFallback, karsAuthConfigExists } = await import(
+          "./agent_id_setup.js"
+        );
+
+        // Short-circuit when the cluster already has the CR — avoids
+        // a wasteful Graph REST attempt (which always triggers a
+        // device-code prompt in CA-blocked tenants) when the work is
+        // already done. Operators who want to FORCE re-provisioning
+        // (e.g. after manually deleting the blueprint) should delete
+        // the CR first: `kubectl delete karsauthconfig default`.
+        try {
+          const exists = await karsAuthConfigExists();
+          if (exists) {
+            console.log();
+            console.log(chalk.green("  ✓ KarsAuthConfig/default already present — trust is already provisioned."));
+            console.log(chalk.dim("    Inspect:  kubectl get karsauthconfig default -o yaml"));
+            console.log(chalk.dim("    Re-do:    kubectl delete karsauthconfig default && kars mesh setup-trust --mode agent-id"));
+            return;
+          }
+        } catch {
+          // kubectl not configured / cluster unreachable — fall through
+          // and let the provisioning path produce a clearer error.
+        }
+
         try {
           const result = await ensureAgentIdTrustAutoFallback({
             clusterName: opts.clusterName,
@@ -175,6 +198,25 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
       if (opts.mode === "bicep") {
         banner("kars · Mesh Setup Trust (bicep)", "Entra Agent ID via ARM deployment");
         const { ensureAgentIdTrustViaBicep } = await import("./agent_id_setup_bicep.js");
+        const { karsAuthConfigExists } = await import("./agent_id_setup.js");
+
+        // Short-circuit when the cluster already has the CR — Bicep
+        // is idempotent but still consumes ~30-90s of ARM polling.
+        // No reason to incur that cost when the trust is already in
+        // place.
+        try {
+          const exists = await karsAuthConfigExists();
+          if (exists) {
+            console.log();
+            console.log(chalk.green("  ✓ KarsAuthConfig/default already present — trust is already provisioned."));
+            console.log(chalk.dim("    Inspect:  kubectl get karsauthconfig default -o yaml"));
+            console.log(chalk.dim("    Re-do:    kubectl delete karsauthconfig default && kars mesh setup-trust --mode bicep"));
+            return;
+          }
+        } catch {
+          // kubectl not configured — fall through to provisioning.
+        }
+
         try {
           const result = await ensureAgentIdTrustViaBicep({
             clusterName: opts.clusterName,

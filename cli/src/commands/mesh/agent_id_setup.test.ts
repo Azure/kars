@@ -28,7 +28,7 @@ beforeEach(() => {
 });
 
 describe("karsAuthConfigExists", () => {
-  it("returns true when kubectl confirms the CR exists", async () => {
+  it("returns true when kubectl returns the short-form CR reference", async () => {
     mockedExeca.mockResolvedValueOnce(ok("karsauthconfig/default") as any);
     await expect(karsAuthConfigExists()).resolves.toBe(true);
     expect(mockedExeca).toHaveBeenCalledWith(
@@ -36,6 +36,14 @@ describe("karsAuthConfigExists", () => {
       ["get", "karsauthconfig", "default", "-o", "name"],
       { stdio: "pipe" },
     );
+  });
+
+  it("returns true when kubectl returns the fully-qualified CR reference", async () => {
+    // Newer clusters return `karsauthconfig.kars.azure.com/default`.
+    mockedExeca.mockResolvedValueOnce(
+      ok("karsauthconfig.kars.azure.com/default") as any,
+    );
+    await expect(karsAuthConfigExists()).resolves.toBe(true);
   });
 
   it("returns false when kubectl errors (NotFound / no CRD / no cluster)", async () => {

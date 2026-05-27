@@ -598,7 +598,11 @@ export async function karsAuthConfigExists(): Promise<boolean> {
       ["get", "karsauthconfig", "default", "-o", "name"],
       { stdio: "pipe" },
     );
-    return res.stdout.includes("karsauthconfig/default");
+    // kubectl may return either short form ("karsauthconfig/default")
+    // or fully-qualified ("karsauthconfig.kars.azure.com/default")
+    // depending on cluster version; match the trailing "/default"
+    // segment which is invariant.
+    return res.stdout.includes("/default");
   } catch {
     return false;
   }
