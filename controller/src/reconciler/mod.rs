@@ -1604,6 +1604,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             // container (UID 1000) to localhost + DNS only, with a transparent
             // forward proxy for HTTP/HTTPS egress enforcement and learn mode.
             //
+            // Script generation lives in `sidecar_injection::build_egress_guard_command`
+            // so the security-critical rule order is owned in a single
+            // testable place. `agent_id_mode` flips on additional REJECT
+            // rules that block UID 1000 → sidecar and UID 1001 → IMDS.
+            // We start in legacy mode here; the agent-id post-pass (below)
+            // rewrites this command to `agent_id_mode = true` when the
+            // sandbox is in AgentId mesh-auth mode and the controller has
+            // successfully provisioned a per-sandbox agent identity.
+            //
             // Filter chain (OUTPUT):
             //   UID 1000 → allow loopback, DNS, established → DROP everything else
             //
@@ -1624,24 +1633,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             "initContainers": [{
                 "name": "egress-guard",
                 "image": &ctx.inference_router_image,
-                "command": ["sh", "-c", concat!(
-                    // Filter chain: allow localhost, DNS, established — drop everything else
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
-                    // Allow reply packets (SYN-ACK etc.) for inbound connections to the
-                    // gateway — without this, the WebUX and Telegram channel can't respond.
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
-                    // NAT chain: redirect HTTP/HTTPS from UID 1000 to the transparent
-                    // forward proxy (port 8444) in the inference-router. This
-                    // enables learn mode (domain discovery) and per-domain enforcement.
-                    // Redirected packets go to 127.0.0.1:8444, matching the -o lo ACCEPT
-                    // rule above. The proxy (UID 1001) then connects to the real destination.
-                    "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && ",
-                    "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && ",
-                    "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
-                )],
+                "command": ["sh", "-c", crate::sidecar_injection::build_egress_guard_command(false)],
                 "securityContext": {
                     "runAsUser": 0,
                     "runAsNonRoot": false,

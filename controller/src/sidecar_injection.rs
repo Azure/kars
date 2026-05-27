@@ -170,44 +170,109 @@ pub fn build_router_sidecar_url_env() -> Value {
 ///
 /// - openclaw (UID 1000) cannot reach `127.0.0.1:SIDECAR_PORT` —
 ///   prevents untrusted agent code from impersonating the router and
-///   acquiring downstream tokens.
-/// - openclaw (UID 1000) cannot reach `169.254.169.254` (IMDS) —
-///   prevents untrusted agent code from pulling the controller MI's
-///   raw token and impersonating the blueprint directly.
+///   acquiring downstream tokens. Uses `-I` to insert BEFORE the
+///   existing `--uid-owner 1000 -o lo -j ACCEPT` rule — otherwise
+///   the loopback-allow would shadow this REJECT and the security
+///   boundary would silently break (rubber-duck finding #5).
 /// - inference-router (UID 1001) cannot reach `169.254.169.254` —
 ///   defence-in-depth; the router has no business reading IMDS in
-///   agent-id mode (the sidecar handles it).
-/// - sidecar (UID 1002) is allowed to reach IMDS and the Entra
-///   token endpoint over the host network namespace.
+///   agent-id mode (the sidecar handles it). `-A` is fine here because
+///   no prior rule for UID 1001 exists.
+/// - openclaw (UID 1000) is already blocked from IMDS (`169.254.169.254`)
+///   by the pre-existing catch-all `DROP UID 1000` rule, so no extra
+///   rule is required for that boundary.
+/// - sidecar (UID 1002) is implicitly allowed: the OUTPUT chain
+///   default policy is ACCEPT and we add no restrictive rule for
+///   UID 1002.
 ///
 /// Returned as a vec of `iptables` argument lists so the caller can
 /// emit them into the init container's shell script. Each element is
-/// a complete `iptables` invocation minus the binary name.
+/// a complete `iptables` invocation minus the binary name. The order
+/// of the returned vec is the order in which they MUST be applied to
+/// preserve the security boundary.
 pub fn agent_id_egress_rules() -> Vec<Vec<&'static str>> {
     vec![
-        // Block UID 1000 from sidecar.
+        // Insert at position 1 (before any existing UID 1000 ACCEPT rule).
+        // Otherwise the pre-existing `-A OUTPUT --uid-owner 1000 -o lo
+        // -j ACCEPT` rule matches first and the sidecar block never fires.
         vec![
-            "-A", "OUTPUT", "-m", "owner", "--uid-owner", "1000",
+            "-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", "1000",
             "-d", "127.0.0.1", "-p", "tcp", "--dport", "8080",
             "-j", "REJECT", "--reject-with", "tcp-reset",
         ],
-        // Block UID 1000 from IMDS.
-        vec![
-            "-A", "OUTPUT", "-m", "owner", "--uid-owner", "1000",
-            "-d", "169.254.169.254", "-j", "REJECT", "--reject-with", "icmp-host-prohibited",
-        ],
-        // Block UID 1001 (router) from IMDS — sidecar mediates.
+        // Defence-in-depth: router (UID 1001) must NOT reach IMDS in
+        // agent-id mode — sidecar is the only authorised IMDS caller.
+        // `-A` is correct because no prior --uid-owner 1001 rule exists.
         vec![
             "-A", "OUTPUT", "-m", "owner", "--uid-owner", "1001",
             "-d", "169.254.169.254", "-j", "REJECT", "--reject-with", "icmp-host-prohibited",
         ],
-        // Explicitly allow UID 1002 (sidecar) to reach IMDS.
-        // Placed before any catch-all REJECT for the sidecar UID.
-        vec![
-            "-I", "OUTPUT", "-m", "owner", "--uid-owner", "1002",
-            "-d", "169.254.169.254", "-j", "ACCEPT",
-        ],
     ]
+}
+
+/// Compose the full egress-guard shell command — both the baseline
+/// rules (always applied) and the agent-id additions when requested.
+///
+/// Owning the script generation here (rather than scattered `concat!`
+/// macros in `reconciler/mod.rs`) makes the security boundary auditable
+/// in one place and makes it impossible to add a new agent-id rule
+/// without explicitly choosing its insertion point.
+///
+/// The returned string is suitable as the `args` value for an `sh -c`
+/// init-container invocation. It is `&&`-chained so any iptables
+/// failure aborts the init container (which causes pod-startup
+/// failure — exactly what we want; a partially-applied egress policy
+/// is worse than no policy because it suggests false confidence).
+///
+/// The ordering inside this function is load-bearing — see the
+/// per-rule comments in [`agent_id_egress_rules`].
+pub fn build_egress_guard_command(agent_id_mode: bool) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // ── Agent-id additions (when active) ──────────────────────────
+    //
+    // These MUST be emitted BEFORE the baseline rules because they
+    // use `-I OUTPUT 1` to insert at the chain head. Emitting them
+    // first ensures the chain order is REJECT-then-ACCEPT-loopback,
+    // not the reverse (which would silently break the boundary).
+    if agent_id_mode {
+        for rule in agent_id_egress_rules() {
+            parts.push(format!("iptables {}", rule.join(" ")));
+        }
+    }
+
+    // ── Baseline rules (existing behaviour, kept verbatim) ────────
+    //
+    // Filter chain: allow localhost, DNS, established — drop everything
+    // else for UID 1000. The catch-all `DROP UID 1000` also blocks
+    // IMDS (169.254.169.254) for the agent container.
+    parts.extend([
+        "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT".to_string(),
+        "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT".to_string(),
+        "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT".to_string(),
+        // Reply packets to inbound gateway connections (WebUX, Telegram).
+        "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT".to_string(),
+        "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP".to_string(),
+        // NAT chain: redirect HTTP/HTTPS from UID 1000 to the
+        // transparent forward proxy at port 8444 (router, UID 1001).
+        "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444".to_string(),
+        "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444".to_string(),
+    ]);
+
+    // Trailing echo gives a useful log line in `kubectl logs <pod> -c egress-guard`.
+    if agent_id_mode {
+        parts.push(
+            "echo 'egress-guard: agent-id mode — UID 1000 blocked from sidecar; UID 1001 blocked from IMDS'"
+                .to_string(),
+        );
+    } else {
+        parts.push(
+            "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
+                .to_string(),
+        );
+    }
+
+    parts.join(" && ")
 }
 
 #[cfg(test)]
@@ -265,31 +330,91 @@ mod tests {
     }
 
     #[test]
-    fn egress_rules_cover_required_boundaries() {
+    fn egress_rules_use_insert_before_baseline_loopback_allow() {
+        // Regression for rubber-duck finding #5: the sidecar-block rule
+        // MUST be `-I OUTPUT 1` (insert at position 1) so it runs
+        // BEFORE the pre-existing `-A OUTPUT --uid-owner 1000 -o lo
+        // -j ACCEPT`. A naive `-A` here would mean the loopback allow
+        // matches first and the agent silently has access to the
+        // sidecar.
         let rules = agent_id_egress_rules();
-        // Four rules required for the security boundary in
-        // docs/architecture/entra-agent-id/01-runtime-token-flow.md.
-        assert_eq!(rules.len(), 4);
+        assert_eq!(rules.len(), 2, "agent-id mode emits exactly two iptables rules");
 
-        // UID 1000 must not reach sidecar.
-        assert!(rules.iter().any(|r| {
-            let s = r.join(" ");
-            s.contains("--uid-owner 1000") && s.contains("--dport 8080") && s.contains("REJECT")
-        }));
-        // UID 1000 must not reach IMDS.
-        assert!(rules.iter().any(|r| {
-            let s = r.join(" ");
-            s.contains("--uid-owner 1000") && s.contains("169.254.169.254") && s.contains("REJECT")
-        }));
-        // UID 1001 (router) must not reach IMDS.
-        assert!(rules.iter().any(|r| {
-            let s = r.join(" ");
-            s.contains("--uid-owner 1001") && s.contains("169.254.169.254") && s.contains("REJECT")
-        }));
-        // UID 1002 (sidecar) must explicitly be allowed to IMDS.
-        assert!(rules.iter().any(|r| {
-            let s = r.join(" ");
-            s.contains("--uid-owner 1002") && s.contains("169.254.169.254") && s.contains("ACCEPT")
-        }));
+        let sidecar_block = &rules[0];
+        let s = sidecar_block.join(" ");
+        assert!(
+            s.starts_with("-I OUTPUT 1 "),
+            "sidecar-block must use -I OUTPUT 1 (insert at chain head); got: {s}"
+        );
+        assert!(s.contains("--uid-owner 1000"));
+        assert!(s.contains("--dport 8080"));
+        assert!(s.contains("REJECT"));
+
+        // Router-IMDS block can use -A since no prior --uid-owner 1001 rule exists.
+        let router_block = &rules[1];
+        let r = router_block.join(" ");
+        assert!(r.contains("--uid-owner 1001"));
+        assert!(r.contains("169.254.169.254"));
+        assert!(r.contains("REJECT"));
+    }
+
+    #[test]
+    fn egress_guard_command_legacy_mode_matches_existing_behaviour() {
+        // When agent_id_mode = false the output must contain exactly
+        // the historical seven iptables lines plus the trailing echo.
+        // Pinning this shape protects existing (non-agent-id) sandboxes
+        // from any accidental regression.
+        let cmd = build_egress_guard_command(false);
+        assert!(cmd.contains("--uid-owner 1000 -o lo -j ACCEPT"));
+        assert!(cmd.contains("--dport 53 -j ACCEPT"));
+        assert!(cmd.contains("ctstate ESTABLISHED,RELATED -j ACCEPT"));
+        assert!(cmd.contains("--uid-owner 1000 -j DROP"));
+        assert!(cmd.contains("REDIRECT --to-port 8444"));
+        assert!(cmd.contains("UID 1000 → transparent proxy on :8444"));
+        // No agent-id additions.
+        assert!(!cmd.contains("--dport 8080"));
+        assert!(!cmd.contains("--uid-owner 1001"));
+    }
+
+    #[test]
+    fn egress_guard_command_agent_id_mode_prepends_security_rules() {
+        let cmd = build_egress_guard_command(true);
+        // Security: the sidecar REJECT must appear before the loopback
+        // ACCEPT in the script text — guarantees `-I` is meaningless
+        // even if iptables semantics were ever mis-read by a reader.
+        let block_pos = cmd
+            .find("--uid-owner 1000 -d 127.0.0.1")
+            .expect("sidecar-block rule present");
+        let allow_pos = cmd
+            .find("--uid-owner 1000 -o lo -j ACCEPT")
+            .expect("loopback-allow rule present");
+        assert!(
+            block_pos < allow_pos,
+            "sidecar block (idx {block_pos}) must precede loopback allow (idx {allow_pos}) in the egress-guard script"
+        );
+        // Both agent-id rules present.
+        assert!(cmd.contains("--uid-owner 1000 -d 127.0.0.1 -p tcp --dport 8080 -j REJECT"));
+        assert!(cmd.contains("--uid-owner 1001 -d 169.254.169.254"));
+        // Baseline rules preserved.
+        assert!(cmd.contains("REDIRECT --to-port 8444"));
+        // Mode-specific echo.
+        assert!(cmd.contains("agent-id mode"));
+    }
+
+    #[test]
+    fn egress_guard_command_is_shell_safe_chained() {
+        // Every step is && joined so a failing iptables aborts the
+        // init container — a partially-applied policy is worse than
+        // no policy (gives false confidence).
+        let cmd = build_egress_guard_command(true);
+        let steps: Vec<&str> = cmd.split(" && ").collect();
+        // Each non-empty step is either an iptables invocation or the
+        // trailing echo.
+        for step in &steps {
+            assert!(
+                step.starts_with("iptables ") || step.starts_with("echo "),
+                "unexpected step shape: {step}"
+            );
+        }
     }
 }
