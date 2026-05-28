@@ -1,30 +1,31 @@
 {{- /*
 NetworkPolicy gating ingress to the shared auth-sidecar.
 
-Trust-boundary control: **only pods labeled
-`kars.azure.com/component=inference-router`** may reach the sidecar
-Service. Agent code runs in a different container (UID 1000) inside
-the same sandbox pod; the egress-guard's iptables baseline already
-prevents UID 1000 from sending TCP traffic outbound, and even if it
-escaped that, the NetworkPolicy ingress selector matches POD labels,
-not container UIDs — every sandbox pod IS labeled inference-router-
-component because the router IS one of its containers. The trust
-boundary is therefore "pods whose inference-router container holds
-the right PINNED_AGENT_IDENTITY_APP_ID env value."
+Trust-boundary control: **only pods in sandbox namespaces, labeled
+`kars.azure.com/component=sandbox`**, may reach the sidecar Service.
+NetworkPolicy selectors match the POD, not individual containers.
+A sandbox pod hosts three containers — agent (UID 1000),
+inference-router (UID 1001), and possibly an init container — so
+the trust boundary is "any pod inside a sandbox namespace".
+
+Inside the pod, the egress-guard iptables baseline blocks UID 1000
+(the agent code itself) from making outbound TCP, so only the
+inference-router (UID 1001) can actually open a socket to the
+sidecar. Even if agent code somehow escaped that, the
+inference-router's `PINNED_AGENT_IDENTITY_APP_ID` env (set at pod
+create time by the controller, immutable thereafter) is the
+identity passed in the `?AgentIdentity=<appId>` query parameter —
+agent code cannot escalate to a different sandbox's identity from
+within its own pod.
 
 This is the architectural trade-off vs. the per-pod sidecar model:
 trust expands from pod-local (iptables UID isolation) to namespace-
 scoped (NetworkPolicy ingress selector + env-var-based identity
 pinning). Acceptable per Microsoft's documentation: the
-`?AgentIdentity=<appId>` parameter ON THE SIDECAR CALL itself
-identifies which child identity to mint for, so a malicious sandbox
-trying to acquire tokens for a different sandbox's identity would
-need to fabricate that appId on the wire — and the inference-
-router's `PINNED_AGENT_IDENTITY_APP_ID` env (immutable post-pod-
-create) is what the router actually passes.
+`?AgentIdentity=<appId>` parameter ON THE SIDECAR CALL is what
+identifies which child identity to mint for.
 
-Conditionally rendered: only when `.Values.entraSidecar.enabled` AND
-the cluster has NetworkPolicy support (every CNI we support does).
+Conditionally rendered: only when `.Values.entraSidecar.enabled`.
 */}}
 {{- if .Values.entraSidecar.enabled }}
 apiVersion: networking.k8s.io/v1
@@ -44,9 +45,14 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # Allow inbound from any sandbox namespace's inference-router pod.
-    # The sandbox namespaces are stamped with the same project label
-    # by the controller (see reconciler/mod.rs:create_namespace).
+    # Allow inbound from any sandbox namespace's sandbox pod.
+    # NetworkPolicy selectors operate at POD level, not container
+    # level — the inference-router lives inside the sandbox pod, so
+    # we select the pod by its `kars.azure.com/component=sandbox`
+    # label. Sandbox namespaces are stamped with the matching
+    # `app.kubernetes.io/name=kars` +
+    # `app.kubernetes.io/component=sandbox` labels by the controller
+    # (see reconciler/mod.rs ~line 650).
     - from:
         - namespaceSelector:
             matchLabels:
@@ -54,7 +60,7 @@ spec:
               app.kubernetes.io/component: sandbox
           podSelector:
             matchLabels:
-              kars.azure.com/component: inference-router
+              kars.azure.com/component: sandbox
       ports:
         - port: 5000
           protocol: TCP

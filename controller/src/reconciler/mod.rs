@@ -912,6 +912,23 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 {"protocol": "TCP", "port": 8082}
             ]
         }),
+        // Allow the inference-router to reach the shared Entra
+        // auth-sidecar in kars-system on TCP 5000. The auth-sidecar's
+        // own NetworkPolicy further restricts who may connect (only
+        // pods labeled `kars.azure.com/component=sandbox` in sandbox
+        // namespaces); this egress rule opens the other half of the
+        // path. Unconditional because every kars cluster runs in
+        // either Pattern A (corp tenant) or Pattern B (WI) mode and
+        // both terminate at this Service. When `entraSidecar.enabled`
+        // is false at the Helm level, no Service / Deployment exists
+        // and the rule is a harmless no-op.
+        json!({
+            "to": [{"namespaceSelector": {"matchLabels": {
+                "app.kubernetes.io/name": "kars",
+                "app.kubernetes.io/component": "system"
+            }}}],
+            "ports": [{"protocol": "TCP", "port": 5000}]
+        }),
     ];
 
     // Add user-defined allowed endpoints (for the inference-router to reach
