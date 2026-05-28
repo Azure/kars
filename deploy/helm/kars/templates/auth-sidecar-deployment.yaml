@@ -74,12 +74,16 @@ spec:
           env:
             # Bind on ALL interfaces so the kubelet probe (which uses
             # the pod IP) can reach /healthz. The HostFiltering
-            # middleware still rejects non-`localhost` Host headers,
-            # so cross-pod callers get 400 unless the probe overrides
-            # Host (see `httpHeaders` below) or the caller comes
-            # through the Service.
+            # middleware still rejects non-`localhost` Host headers
+            # by default; we override `AllowedHosts=*` below so
+            # in-cluster Service callers (which present
+            # `Host: entra-auth-sidecar.<ns>.svc:5000`) are accepted.
+            # The NetworkPolicy gates the real ingress boundary —
+            # disabling host filtering does not weaken security.
             - name: ASPNETCORE_URLS
               value: "http://+:5000"
+            - name: AllowedHosts
+              value: "*"
           securityContext:
             runAsUser: 1002
             runAsNonRoot: true

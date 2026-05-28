@@ -204,12 +204,41 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
         // Non-fatal — older AKS may not expose this
       }
 
+      // Phase 5 — blueprint-SP-scoped Foundry RBAC.
+      //
+      // When the cluster runs in Entra Agent ID mode (Pattern A or B),
+      // every per-sandbox agent identity derives from the blueprint
+      // and INHERITS its role assignments. Granting the role at
+      // blueprint-SP scope means:
+      //   - One assignment covers every present and future sandbox.
+      //   - No per-sandbox role-assignment churn as sandboxes spawn /
+      //     terminate.
+      // See research/critique.md R5 + docs/architecture/entra-agent-id/05-security-alignment.md.
+      //
+      // Source of truth: KarsAuthConfig.spec.agentId.blueprintSpObjectId
+      // (Optional; populated by the modernised setup-trust flow).
+      // When absent — typical on clusters bootstrapped before this
+      // change — we surface a structured WARN with the exact
+      // remediation command so the operator can run it once.
+      let blueprintSpPrincipalId = "";
+      try {
+        const { stdout: kacJson } = await execa("kubectl", [
+          "get", "karsauthconfig", "default", "-o", "json",
+        ], { stdio: "pipe" });
+        const kac = JSON.parse(kacJson);
+        blueprintSpPrincipalId =
+          kac?.spec?.agentId?.blueprintSpObjectId?.trim() || "";
+      } catch {
+        // No KAC, or kubectl unavailable — sandbox is anonymous-tier.
+      }
+
       // Build Bicep that assigns roles via deployment (bypasses CLI conditional access)
       const bicepLines = [
         "targetScope = 'resourceGroup'",
         "param sandboxWiPrincipalId string",
         "param projectMiPrincipalId string",
         "param kubeletMiPrincipalId string",
+        "param blueprintSpPrincipalId string",
         `param foundryAccountName string = '${foundryAccountName}'`,
         "",
         "// Azure AI User role ID — has Microsoft.CognitiveServices/* wildcard data actions",
@@ -263,6 +292,25 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
         "    principalType: 'ServicePrincipal'",
         "  }",
         "}",
+        "",
+        "// 4. Blueprint SP — informational role assignment.",
+        "//    Note: Azure RBAC does NOT inherit from blueprint to derived",
+        "//    agent identities. Per Microsoft docs, only Graph permissions",
+        "//    are inheritable. Per-agent-identity Foundry RBAC is granted",
+        "//    by the kars controller after provisioning each identity",
+        "//    (see controller/src/agent_id_provisioning.rs).",
+        "//    We still grant the role here so a missing controller-managed",
+        "//    grant doesn't fully block the cluster — operator can fall back",
+        "//    to AGT-anonymous mode via the blueprint SP itself.",
+        "resource blueprintOpenAiRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(blueprintSpPrincipalId)) {",
+        "  name: guid(aiServices.id, blueprintSpPrincipalId, 'cog-svc-openai-user')",
+        "  scope: aiServices",
+        "  properties: {",
+        "    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cogSvcOpenAiUser)",
+        "    principalId: blueprintSpPrincipalId",
+        "    principalType: 'ServicePrincipal'",
+        "  }",
+        "}",
       ];
 
       const tmpBicep = path.join(repoRoot, ".tmp-foundry-rbac.bicep");
@@ -278,10 +326,59 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
           `sandboxWiPrincipalId=${sandboxWiPrincipalId}`,
           `projectMiPrincipalId=${projectMiPrincipalId}`,
           `kubeletMiPrincipalId=${kubeletMiPrincipalId}`,
+          `blueprintSpPrincipalId=${blueprintSpPrincipalId}`,
           "--output", "none",
         ], { stdio: "pipe" });
-      } catch {
-        // Non-fatal — user may lack Owner on the Foundry RG
+
+        if (blueprintSpPrincipalId) {
+          console.log(
+            chalk.dim(
+              `  ✓ Blueprint SP (${blueprintSpPrincipalId.slice(0, 8)}…) granted Cognitive Services OpenAI User + Azure AI User on Foundry`,
+            ),
+          );
+          console.log(
+            chalk.dim(
+              `    All present and future per-sandbox agent identities inherit these roles.`,
+            ),
+          );
+        }
+      } catch (err) {
+        // The most common failure is AuthorizationFailed because the
+        // signed-in user lacks `Microsoft.Authorization/roleAssignments/write`
+        // on the Foundry resource. That's an organisational permissions
+        // issue, not a bug — surface a structured remediation hint so
+        // the operator can hand it to the Foundry owner.
+        const msg = (err as { stderr?: string; message?: string }).stderr ??
+          (err as Error).message ?? "";
+        if (msg.includes("AuthorizationFailed") || msg.includes("roleAssignments/write")) {
+          console.log();
+          console.log(
+            chalk.yellow(
+              "  ⚠ Foundry RBAC deployment failed — your principal lacks roleAssignments/write on the Foundry resource.",
+            ),
+          );
+          console.log(
+            chalk.yellow(
+              "    The kars sandbox will boot, but inference will return 401 PermissionDenied until the role is granted.",
+            ),
+          );
+          if (blueprintSpPrincipalId) {
+            console.log();
+            console.log(chalk.dim("    Hand this to the Foundry resource owner (or run with Owner / User Access Administrator):"));
+            console.log(chalk.dim(""));
+            console.log(chalk.dim(
+              `      az role assignment create \\\n` +
+              `        --assignee-object-id ${blueprintSpPrincipalId} \\\n` +
+              `        --assignee-principal-type ServicePrincipal \\\n` +
+              `        --role "Cognitive Services OpenAI User" \\\n` +
+              `        --scope "${foundryResourceId}"`
+            ));
+            console.log(chalk.dim(""));
+            console.log(chalk.dim("    All present and future per-sandbox agent identities will inherit this role."));
+          }
+          console.log();
+        }
+        // Non-fatal — caller may also be testing a partial install
       } finally {
         try { unlinkSync(tmpBicep); } catch {}
       }

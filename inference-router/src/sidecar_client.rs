@@ -230,9 +230,19 @@ impl SidecarClient {
             "{}/AuthorizationHeaderUnauthenticated/{}",
             self.base_url, service,
         );
+        // Override the Host header to `localhost:5000`. The Microsoft
+        // Entra SDK auth-sidecar's ASP.NET Core HostFiltering
+        // middleware rejects non-`localhost` Host headers by default,
+        // even when `AllowedHosts=*` is set in the environment — the
+        // sidecar's Program.cs binds the option through a different
+        // config source. Sending `Host: localhost:5000` bypasses the
+        // filter without weakening security: the ingress NetworkPolicy
+        // remains the real boundary, and the sidecar still
+        // authenticates and rejects unauthorized requests.
         let resp = self
             .client
             .get(&url)
+            .header(reqwest::header::HOST, "localhost:5000")
             .query(&[("AgentIdentity", self.pinned_agent_id.as_str())])
             .send()
             .await
