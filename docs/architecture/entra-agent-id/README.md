@@ -1,94 +1,123 @@
-# Entra Agent ID Provisioning POC
+# Entra Agent ID — Architecture Index
 
-Measures end-to-end wall-clock for provisioning an Entra Agent ID via
-Bicep's `Microsoft.Graph` extension, so we can decide whether to inline
-the call in `kars up` / sandbox-spawn or keep it pre-provisioned.
+> kars per-sandbox Entra Agent ID with **shared auth-sidecar** architecture.
+> Status: ✅ verified live in Microsoft corp tenant on `kars-aks` (2026-05-28).
 
-## What this POC answers
+This directory is the canonical reference for how kars provisions and uses
+per-sandbox [Microsoft Entra Agent Identities][entra-agent-id]. Documents are
+numbered by deployment order and scope.
 
-1. **Do I have the privileges?** `--probe` lists your tenant role
-   assignments and tells you up-front whether the deployment will
-   succeed before you try.
-2. **How fast?** Times each phase: Bicep compile → deploy (app + SP +
-   federated credential) → token acquisition → cleanup.
-3. **What claims does the token carry?** Decoded after acquisition so
-   we can verify what kars' AGT registry would see.
+[entra-agent-id]: https://learn.microsoft.com/en-us/entra/agent-id/
 
-## Required privileges
+## Contents
 
-The deployment principal needs **one** of:
+| Doc | Scope |
+|-----|-------|
+| [01-runtime-token-flow.md](01-runtime-token-flow.md) | Runtime auth flow — sidecar → blueprint → agent token → Foundry |
+| [02-aci-token-flow.md](02-aci-token-flow.md) | Alternative ACI-based token flow (reference / not deployed) |
+| [03-original-findings.md](03-original-findings.md) | Initial POC findings + design constraints |
+| [05-security-alignment.md](05-security-alignment.md) | Phase 5 — custom security attributes, CA baseline, scale-out invariant |
+| [00-poc-archive.md](00-poc-archive.md) | Archived original POC README |
 
-| Role | Notes |
-|---|---|
-| Application Administrator | Minimal viable, recommended |
-| Cloud Application Administrator | Equivalent |
-| Global Administrator | Overkill but works |
-| Custom role | Must include `microsoft.directory/applications/createAsOwner` + `microsoft.directory/servicePrincipals/createAsOwner` + `microsoft.directory/applications/credentials/update` |
-
-If your tenant has Token Binding Conditional Access (the `AADSTS530084`
-error from a stale token), re-auth with:
+## TL;DR architecture
 
 ```
-az login --tenant <tenant-id> --scope https://graph.microsoft.com//.default
+                            ┌─────────────────────┐
+                            │ Microsoft Entra ID  │
+                            │  - blueprint app    │
+                            │  - per-sandbox      │
+                            │    agent identities │
+                            │    (typed SPs)      │
+                            └──────────┬──────────┘
+                                       │
+                       ┌───────────────┼────────────────────┐
+                       │ (Pattern A: IMDS-MI bridge)        │
+                       │ (Pattern B: WI federated subject)  │
+                       │                                    │
+            ┌──────────▼─────────────┐         ┌───────────▼───────────┐
+            │ shared entra-auth-     │         │ Foundry data plane    │
+            │ sidecar (Deployment)   │         │ (Azure RBAC per       │
+            │ in kars-system, x2 HA  │         │  agent identity SP)   │
+            └──────────┬─────────────┘         └───────────▲───────────┘
+                       │ HTTP                              │
+                       │ /AuthorizationHeaderUnauthenticated/Foundry
+                       │ ?AgentIdentity=<sandbox appId>    │
+                       │                                   │
+            ┌──────────▼─────────────────────────────────────────────────┐
+            │ kars sandbox pod                                            │
+            │  ┌────────────────────┐    ┌──────────────────────────┐    │
+            │  │ openclaw agent     │───▶│ inference-router         │    │
+            │  │  (UID 1000)        │ http (UID 1001)               │    │
+            │  │  pinned via env →  │    │ • fail-closed sidecar    │    │
+            │  └────────────────────┘    │   mode (no WI/IMDS/API)  │    │
+            │                            │ • pins tid, principal,   │    │
+            │   iptables egress-guard:   │   aud, exp on every      │    │
+            │   UID 1000 → blocked from  │   sidecar response       │    │
+            │   IMDS + sidecar           │ • forwards to Foundry    │    │
+            │                            └──────────┬───────────────┘    │
+            └───────────────────────────────────────┼────────────────────┘
+                                                    │ TCP 5000
+                                                    ▼
+                                              NetworkPolicy gate
+                                              (kars-system ns, port 5000)
 ```
 
-## Usage
+## Pattern selection
 
-```sh
-# Probe role assignments without deploying
-./drive.sh --probe
+| Tenant capability | Pattern | Sidecar credential source |
+|-------------------|---------|---------------------------|
+| Tenant allows AKS OIDC as FIC issuer | B (WorkloadIdentity) | `SignedAssertionFilePath` against projected SA token |
+| Tenant rejects AKS OIDC (Microsoft corp, restricted) | A (ManagedIdentityImds) | `SignedAssertionFromManagedIdentity` via IMDS |
 
-# Full provision + measure + cleanup
-./drive.sh
+The kars CLI `kars mesh setup-trust` auto-detects which pattern works in your
+tenant and provisions accordingly. Pattern A is the conservative default;
+Pattern B requires no per-cluster controller MI.
 
-# Provision and leave in place for portal inspection
-./drive.sh --keep
+## Phase ledger
 
-# Cleanup a --keep-ed run:
-#   az ad app delete --id <appObjectId printed by drive.sh>
-```
+| Phase | Commit | Description |
+|-------|--------|-------------|
+| 0 | `a124f0c` | Branch surgery — drop per-pod injection, keep shared model |
+| 1 | `27d5495` | Shared sidecar Helm chart (Deployment, Service, NetworkPolicy, SA) |
+| 2 | `7c77ec8` | Controller egress rule + NP label fix |
+| 3 | `b021610` | Router sidecar_client + 4-claim pinning (tid, principal, aud, exp) |
+| 4 | `405e331` | CLI + Bicep dual-pattern auto-detect |
+| 5 | `8e8e811` | Custom security attributes + scale-out invariant + CA baseline |
+| 7 | `8cfb05d` | Live deploy + multi-agent exec-brief demo verified on kars-aks |
 
-## What the Bicep template creates
+## Key files
 
-`main.bicep` declares three Microsoft.Graph resources:
+| Layer | File |
+|-------|------|
+| Helm — sidecar | `deploy/helm/kars/templates/auth-sidecar-{deployment,service,networkpolicy,serviceaccount}.yaml` |
+| Helm — controller | `deploy/helm/kars/values.yaml` (`entraSidecar:` block) |
+| Bicep | `deploy/bicep/agent-id-trust.bicep` |
+| Bicep standalone | `deploy/bicep/standalone/foundry-rbac.bicep`, `custom-security-attributes.sh`, `conditional-access-baseline.sh` |
+| Controller — CRD | `controller/src/auth_config.rs` (`KarsAuthConfig`) |
+| Controller — provisioning | `controller/src/agent_id_provisioning.rs`, `controller/src/agent_identity.rs` |
+| Controller — reconciler | `controller/src/auth_config_reconciler.rs` |
+| Router | `inference-router/src/sidecar_client.rs`, `inference-router/src/auth.rs` |
+| CLI | `cli/src/commands/mesh/agent_id_setup.ts`, `cli/src/commands/mesh/agent_id_setup_bicep.ts` |
+| CLI | `cli/src/commands/up/sandbox_bringup.ts` (Foundry RBAC inline Bicep) |
 
-1. **`Microsoft.Graph/applications@v1.0`** — the Entra "agent identity",
-   tagged with `EntraAgentId` so it surfaces in the GA portal section
-2. **`Microsoft.Graph/servicePrincipals@v1.0`** — tenant-scoped instance
-   of the app, gives it a stable `oid` per tenant
-3. **`Microsoft.Graph/applications/federatedIdentityCredentials@v1.0`** —
-   maps a synthetic K8s service-account JWT to this app (the
-   per-sandbox unit-of-work that kars' `controller/src/fedcred.rs`
-   does today via ARM REST)
+## Open follow-ups
 
-## How this maps to kars
+- **Phase 5b** (next PR): controller-driven per-agent ARM RBAC assignment.
+  Eliminates the manual `az role assignment create` step operators run today
+  for each new sandbox.
+- **Phase 6** (separate PR): mesh trust — use Entra-signed JWTs (instead of
+  anonymous tier) for AGT trust scoring.
 
-| Phase | What kars does today | What changes with Entra Agent ID |
-|---|---|---|
-| Bicep compile | n/a (controller uses raw ARM calls) | n/a |
-| App + SP create | `kars mesh setup-trust` (one-time, tenant-wide) | Per-sandbox if we want fine-grained identity, OR one-time if we keep sandbox-as-fedcred |
-| Federated credential | `fedcred.rs` ARM call on sandbox create | Same call but via the new Graph endpoint |
-| Token acquisition | `entrypoint.sh:158-235` with `api://agentmesh/.default` | New scope per Entra Agent ID GA |
-| Cleanup | `fedcred_reaper.rs` on sandbox delete | Same |
+## Live validation snapshot (2026-05-28)
 
-## Integration plan (if POC numbers are good)
+Verified end-to-end on `kars-aks` cluster (Microsoft corp tenant `72f988bf-...`):
 
-1. **Phase 1 (~1 week):** swap the scope string in
-   `sandbox-images/openclaw/entrypoint.sh` from
-   `api://agentmesh/.default` to the GA Entra Agent ID resource ID.
-   Update `cli/src/commands/mesh/setup-trust.ts` to register the app
-   with the `EntraAgentId` tag.
-2. **Phase 2 (~2-3 weeks):** new `KarsAgentIdentity` CRD declaring
-   each sandbox's logical agent role + owner + sponsor. Controller
-   reconciles to Microsoft.Graph/applications via the deployment SDK.
-3. **Phase 3 (later):** Conditional Access, OBO, Defender / Purview
-   wire-up (out of scope for the POC).
-
-## Files
-
-- `main.bicep` — the template (84 lines)
-- `drive.sh` — wall-clock measurement driver (200 lines)
-- `README.md` — this file
-
-Both files are POC scaffolding; nothing in this directory is wired
-into the production `kars` deployment path.
+- 5 typed `microsoft.graph.agentIdentity` SPs derived from one typed
+  `microsoft.graph.agentIdentityBlueprint`, each with its own `appId`, sponsors,
+  and Foundry RBAC.
+- Real Foundry tokens minted via shared sidecar — JWT decode confirms all four
+  claim pins match.
+- Multi-agent exec-brief demo: parent + 3 sub-agents booted, exchanged AGT-mesh
+  messages, transferred files via E2E encrypted relay, all under their own
+  agent identities. 65+ successful Foundry 200s, 0 PermissionDenied,
+  0 NetworkPolicy denials.
