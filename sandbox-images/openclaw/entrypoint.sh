@@ -172,6 +172,49 @@ if [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
     echo "[entrypoint] AGT_SKIP_ENTRA=1 overrides AGT_TRUST_THRESHOLD=${AGT_TRUST_THRESHOLD} → 0 (anonymous-tier fail-open)"
   fi
   export AGT_TRUST_THRESHOLD=0
+elif [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
+  # Phase 6 path: ask the router's /v1/mesh-token endpoint for a
+  # verified-tier mesh peer token from the shared auth-sidecar. The
+  # router exposes the route only when MESH_AUTH_BACKEND=EntraAgentIdentity
+  # (controller-injected from KarsAuthConfig.spec.meshAuthBackend), so
+  # a 404 here means a stale router image — fall back to legacy WI
+  # exchange below to keep the sandbox bootable.
+  #
+  # The router listens on loopback :8443, which UID 1000 IS permitted
+  # to reach by the egress-guard baseline (it's how every
+  # mesh/inference call already flows).
+  echo "[entrypoint] MESH_AUTH_BACKEND=EntraAgentIdentity — acquiring mesh token via /v1/mesh-token"
+  _ROUTER_URL="${ROUTER_LOCAL_URL:-http://127.0.0.1:8443}"
+  _MESH_RESP=""
+  _MESH_STATUS=""
+  _MESH_RESP=$(curl -s -4 --connect-timeout 3 --max-time 8 \
+    -w "\n__HTTP_STATUS__%{http_code}" \
+    "${_ROUTER_URL}/v1/mesh-token" 2>/dev/null || echo "")
+  _MESH_STATUS=$(printf '%s\n' "$_MESH_RESP" | grep -E '^__HTTP_STATUS__' | sed 's/^__HTTP_STATUS__//')
+  _MESH_BODY=$(printf '%s\n' "$_MESH_RESP" | sed '/^__HTTP_STATUS__/d')
+  if [ "$_MESH_STATUS" = "200" ]; then
+    _ACCESS_TOKEN=$(printf '%s' "$_MESH_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+    if [ -n "$_ACCESS_TOKEN" ]; then
+      echo "[entrypoint] Mesh token acquired via auth-sidecar — verified-tier registration"
+      export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
+    else
+      echo "[entrypoint] /v1/mesh-token returned 200 but no access_token in body; falling back to anonymous tier"
+      export AGT_TRUST_THRESHOLD=0
+    fi
+    unset _ACCESS_TOKEN
+  elif [ "$_MESH_STATUS" = "404" ]; then
+    # Router image predates Phase 6 — gracefully fall through to legacy
+    # WI exchange in the next `elif` branch (we cannot re-enter the
+    # `if/elif` chain, so emit a warning and force anonymous tier).
+    # In practice the controller only sets MESH_AUTH_BACKEND when both
+    # halves are deployed together, so this should never fire.
+    echo "[entrypoint] /v1/mesh-token returned 404 — router image too old for Phase 6; registering as anonymous tier"
+    export AGT_TRUST_THRESHOLD=0
+  else
+    echo "[entrypoint] /v1/mesh-token failed (status=${_MESH_STATUS:-network-error}); registering as anonymous tier"
+    export AGT_TRUST_THRESHOLD=0
+  fi
+  unset _MESH_RESP _MESH_STATUS _MESH_BODY _ROUTER_URL
 elif [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
    [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ] && \
    [ -z "${AGT_OAUTH_TOKEN:-}" ]; then

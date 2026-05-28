@@ -308,6 +308,46 @@ pub fn render_sidecar_env(spec: &KarsAuthConfigSpec) -> BTreeMap<String, String>
         }
     }
 
+    // Phase 6: auto-emit an `AgentMesh` downstream entry when the
+    // operator opts into Entra-signed mesh peer auth. The router's
+    // `/v1/mesh-token` route calls `sidecar.get_token("api://agentmesh/.default")`,
+    // which the sidecar resolves via `DownstreamApis__AgentMesh__*`
+    // — without this entry the sidecar 404s the request and the
+    // entrypoint falls back to anonymous tier.
+    //
+    // We auto-emit so flipping the CRD field is a one-toggle change.
+    // If the operator has already declared an explicit `AgentMesh`
+    // downstream API entry (e.g. for a custom relay audience), we
+    // respect it and skip the auto-emit. The case match is
+    // case-insensitive against the standard Pascal-case key the
+    // sidecar expects, matching downstream env-var rendering.
+    if matches!(spec.mesh_auth_backend, super::auth_config::MeshAuthBackend::EntraAgentIdentity)
+        && !spec.downstream_apis.keys().any(|k| k.eq_ignore_ascii_case("AgentMesh"))
+    {
+        // BaseUrl is irrelevant — the route never calls the relay
+        // via the sidecar's downstream HTTP forwarder. It's required
+        // by the sidecar's config validator, so set a sentinel value
+        // that's deliberately not reachable from the sandbox NP.
+        env.insert(
+            "DownstreamApis__AgentMesh__BaseUrl".into(),
+            "https://agentmesh.invalid/".into(),
+        );
+        env.insert(
+            "DownstreamApis__AgentMesh__RequestAppToken".into(),
+            "true".into(),
+        );
+        let audience = spec
+            .mesh_auth_audience
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("api://agentmesh/.default");
+        env.insert(
+            "DownstreamApis__AgentMesh__Scopes__0".into(),
+            audience.to_string(),
+        );
+    }
+
     env
 }
 
@@ -655,5 +695,80 @@ mod tests {
             managed_identity_principal_id: None,
         };
         assert!(cfg.is_valid_for_mode(), "WI mode has no field requirements");
+    }
+
+    #[test]
+    fn anonymous_mesh_backend_does_not_emit_agent_mesh_entry() {
+        // Default is Anonymous → no AgentMesh downstream auto-emit.
+        // This is the backward-compat contract: every existing cluster
+        // keeps rendering the exact same env, byte-identical, so a
+        // controller upgrade does not bounce sidecar pods on an
+        // unrelated drift.
+        let env = render_sidecar_env(&fixture_spec());
+        assert!(env.get("DownstreamApis__AgentMesh__BaseUrl").is_none());
+        assert!(env.get("DownstreamApis__AgentMesh__Scopes__0").is_none());
+        assert!(env.get("DownstreamApis__AgentMesh__RequestAppToken").is_none());
+    }
+
+    #[test]
+    fn entra_mesh_backend_auto_emits_agent_mesh_entry() {
+        let mut spec = fixture_spec();
+        spec.mesh_auth_backend = crate::auth_config::MeshAuthBackend::EntraAgentIdentity;
+        let env = render_sidecar_env(&spec);
+        assert_eq!(
+            env.get("DownstreamApis__AgentMesh__Scopes__0").map(String::as_str),
+            Some("api://agentmesh/.default"),
+            "default audience must match the entrypoint legacy scope"
+        );
+        assert_eq!(
+            env.get("DownstreamApis__AgentMesh__RequestAppToken").map(String::as_str),
+            Some("true"),
+            "app-token flow is the only flow that makes sense for a mesh peer"
+        );
+        assert!(
+            env.get("DownstreamApis__AgentMesh__BaseUrl").is_some(),
+            "sidecar config validator requires BaseUrl; ours is sentinel"
+        );
+    }
+
+    #[test]
+    fn entra_mesh_backend_respects_custom_audience() {
+        let mut spec = fixture_spec();
+        spec.mesh_auth_backend = crate::auth_config::MeshAuthBackend::EntraAgentIdentity;
+        spec.mesh_auth_audience = Some("api://my-custom-relay/.default".into());
+        let env = render_sidecar_env(&spec);
+        assert_eq!(
+            env.get("DownstreamApis__AgentMesh__Scopes__0").map(String::as_str),
+            Some("api://my-custom-relay/.default")
+        );
+    }
+
+    #[test]
+    fn entra_mesh_backend_does_not_overwrite_operator_supplied_entry() {
+        // Forward-compat: an operator that has already added an
+        // explicit `AgentMesh` downstream API entry (e.g. for a
+        // multi-relay scenario with non-default BaseUrl) MUST win
+        // over the auto-emit.
+        let mut spec = fixture_spec();
+        spec.mesh_auth_backend = crate::auth_config::MeshAuthBackend::EntraAgentIdentity;
+        spec.downstream_apis.insert(
+            "AgentMesh".into(),
+            DownstreamApiConfig {
+                base_url: "https://operator-supplied-relay.example/".into(),
+                scopes: vec!["api://operator-scope/.default".into()],
+                request_app_token: true,
+            },
+        );
+        let env = render_sidecar_env(&spec);
+        assert_eq!(
+            env.get("DownstreamApis__AgentMesh__BaseUrl").map(String::as_str),
+            Some("https://operator-supplied-relay.example/"),
+            "operator-supplied BaseUrl must win"
+        );
+        assert_eq!(
+            env.get("DownstreamApis__AgentMesh__Scopes__0").map(String::as_str),
+            Some("api://operator-scope/.default"),
+            "operator-supplied scope must win"
+        );
     }
 }

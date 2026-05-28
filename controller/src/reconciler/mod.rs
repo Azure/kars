@@ -1196,14 +1196,24 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         &ctx.agent_id_cache,
     )
     .await;
-    let agent_id_active: Option<(crate::crd::AgentIdentityStatus, String)> = match &agent_id_outcome {
+    let agent_id_active: Option<(
+        crate::crd::AgentIdentityStatus,
+        String,
+        crate::auth_config::MeshAuthBackend,
+        Option<String>,
+    )> = match &agent_id_outcome {
         crate::agent_id_provisioning::ProvisioningOutcome::Ready { agent_identity, auth_spec } => {
             tracing::info!(
                 sandbox = %name,
                 app_id = %agent_identity.app_id,
                 "agent identity ready; sidecar will be injected"
             );
-            Some((agent_identity.clone(), auth_spec.tenant.tenant_id.clone()))
+            Some((
+                agent_identity.clone(),
+                auth_spec.tenant.tenant_id.clone(),
+                auth_spec.mesh_auth_backend.clone(),
+                auth_spec.mesh_auth_audience.clone(),
+            ))
         }
         crate::agent_id_provisioning::ProvisioningOutcome::Skipped { reason } => {
             tracing::debug!(
@@ -1640,7 +1650,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // `AUTH_SIDECAR_URL` is set, ALL Foundry auth goes through
         // the sidecar — no IMDS / WI fallback — preserving the
         // per-sandbox audit principal.
-        if let Some((agent_id, tenant_id)) = agent_id_active.as_ref() {
+        if let Some((agent_id, tenant_id, mesh_backend, mesh_audience)) = agent_id_active.as_ref() {
             router_env.push(json!({
                 "name": "PINNED_AGENT_IDENTITY_APP_ID",
                 "value": agent_id.app_id.clone(),
@@ -1663,6 +1673,30 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "name": "EXPECTED_TENANT_ID",
                 "value": tenant_id.clone(),
             }));
+
+            // Phase 6: opt-in mesh-token route enablement. When the
+            // operator flips `KarsAuthConfig.spec.meshAuthBackend` to
+            // `EntraAgentIdentity`, the router exposes
+            // `/v1/mesh-token` and the sandbox entrypoint uses it to
+            // acquire a verified-tier AGT mesh peer token from the
+            // shared sidecar (instead of the legacy direct
+            // Workload-Identity → Entra exchange). Default
+            // `Anonymous` keeps the legacy behaviour 100 % unchanged
+            // — the route returns 404 and the entrypoint falls
+            // through to its existing logic. See
+            // docs/architecture/entra-agent-id/06-mesh-trust-design.md.
+            if matches!(mesh_backend, crate::auth_config::MeshAuthBackend::EntraAgentIdentity) {
+                router_env.push(json!({
+                    "name": "MESH_AUTH_BACKEND",
+                    "value": "EntraAgentIdentity",
+                }));
+                if let Some(aud) = mesh_audience.as_ref().filter(|s| !s.trim().is_empty()) {
+                    router_env.push(json!({
+                        "name": "MESH_AUTH_AUDIENCE",
+                        "value": aud.clone(),
+                    }));
+                }
+            }
         }
 
         // ── Agent container ──────────────────────────────────────────

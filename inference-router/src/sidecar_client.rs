@@ -688,6 +688,13 @@ fn resource_to_service_name(resource: &str) -> Option<&'static str> {
         Some("Management")
     } else if r.starts_with("https://search.azure.com") {
         Some("Search")
+    } else if r == "api://agentmesh" || r.starts_with("api://agentmesh/") {
+        // AGT mesh peer authentication. The controller emits a
+        // matching `DownstreamApis__AgentMesh__*` cluster on the
+        // sidecar when `KarsAuthConfig.spec.meshAuthBackend ==
+        // EntraAgentIdentity`. See
+        // docs/architecture/entra-agent-id/06-mesh-trust-design.md.
+        Some("AgentMesh")
     } else {
         None
     }
@@ -731,6 +738,34 @@ mod tests {
             None
         );
         assert_eq!(resource_to_service_name(""), None);
+    }
+
+    #[test]
+    fn resource_mapping_handles_agent_mesh_audience() {
+        // Phase 6: `/v1/mesh-token` calls `get_token("api://agentmesh/.default")`.
+        // Pin the mapping so the sidecar receives `AgentMesh` and
+        // resolves `DownstreamApis__AgentMesh__Scopes__0` correctly.
+        assert_eq!(
+            resource_to_service_name("api://agentmesh/.default"),
+            Some("AgentMesh")
+        );
+        assert_eq!(
+            resource_to_service_name("api://agentmesh"),
+            Some("AgentMesh")
+        );
+        assert_eq!(
+            resource_to_service_name("api://agentmesh/"),
+            Some("AgentMesh")
+        );
+        // Forward-compat: future scope-suffixed variants the
+        // entrypoint may emit must still resolve.
+        assert_eq!(
+            resource_to_service_name("api://agentmesh/user_impersonation"),
+            Some("AgentMesh")
+        );
+        // Boundary: a similarly-named but distinct audience must NOT
+        // map to the same service entry.
+        assert_eq!(resource_to_service_name("api://agentmesh-other"), None);
     }
 
     #[test]
