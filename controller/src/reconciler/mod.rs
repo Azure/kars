@@ -1182,14 +1182,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         &ctx.agent_id_cache,
     )
     .await;
-    let agent_id_active: Option<crate::crd::AgentIdentityStatus> = match &agent_id_outcome {
-        crate::agent_id_provisioning::ProvisioningOutcome::Ready { agent_identity, .. } => {
+    let agent_id_active: Option<(crate::crd::AgentIdentityStatus, String)> = match &agent_id_outcome {
+        crate::agent_id_provisioning::ProvisioningOutcome::Ready { agent_identity, auth_spec } => {
             tracing::info!(
                 sandbox = %name,
                 app_id = %agent_identity.app_id,
                 "agent identity ready; sidecar will be injected"
             );
-            Some(agent_identity.clone())
+            Some((agent_identity.clone(), auth_spec.tenant.tenant_id.clone()))
         }
         crate::agent_id_provisioning::ProvisioningOutcome::Skipped { reason } => {
             tracing::debug!(
@@ -1626,7 +1626,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // `AUTH_SIDECAR_URL` is set, ALL Foundry auth goes through
         // the sidecar — no IMDS / WI fallback — preserving the
         // per-sandbox audit principal.
-        if let Some(ref agent_id) = agent_id_active {
+        if let Some((agent_id, tenant_id)) = agent_id_active.as_ref() {
             router_env.push(json!({
                 "name": "PINNED_AGENT_IDENTITY_APP_ID",
                 "value": agent_id.app_id.clone(),
@@ -1634,6 +1634,20 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             router_env.push(json!({
                 "name": "AUTH_SIDECAR_URL",
                 "value": "http://entra-auth-sidecar.kars-system.svc:5000",
+            }));
+            // Defense-in-depth: pin the tenant ID expected on the
+            // token returned by the sidecar. The router decodes the
+            // JWT payload (no signature verification — downstream
+            // Azure validates that) and rejects the token if
+            // `tid` != EXPECTED_TENANT_ID. Protects against:
+            //   - Misconfigured sidecar pointing at a different tenant
+            //   - Cross-tenant token-confusion attack via a
+            //     compromised KarsAuthConfig
+            // Sourced from KarsAuthConfig.spec.tenant.tenantId via
+            // `ProvisioningOutcome::Ready.auth_spec`.
+            router_env.push(json!({
+                "name": "EXPECTED_TENANT_ID",
+                "value": tenant_id.clone(),
             }));
         }
 

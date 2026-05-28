@@ -44,5 +44,6 @@ pub mod proxy;
 pub mod rate_limiter;
 pub mod routes;
 pub mod safety;
+pub mod sidecar_client;
 pub mod spawn;
 pub mod telemetry;
