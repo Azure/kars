@@ -508,6 +508,7 @@ mod tests {
                 managed_identity_principal_id: Some("5eaee919-d1bf-4ed0-9da0-0f1589dc2f4b".into()),
             },
             downstream_apis: downstream,
+            foundry_rbac: vec![],
         }
     }
 

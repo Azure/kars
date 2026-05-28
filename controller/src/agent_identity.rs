@@ -632,6 +632,238 @@ impl AgentIdentityClient {
         }
     }
 
+    /// Acquire an ARM management token via the controller MI.
+    ///
+    /// Used for `Microsoft.Authorization/roleAssignments` operations —
+    /// PUT to grant a role to an agent identity SP at provisioning
+    /// time, and DELETE on sandbox deprovision.
+    ///
+    /// This is the SAME MI chain as `graph_token`, just with the
+    /// audience set to `https://management.azure.com/`. The token is
+    /// cached separately because Entra issues per-audience tokens.
+    async fn arm_token(&self) -> Result<String, String> {
+        self.mi_token("https://management.azure.com/").await
+    }
+
+    /// Assign an Azure RBAC role to an agent identity SP at the given
+    /// scope. Idempotent via deterministic assignment GUID derived from
+    /// `(scope, principal_id, role_definition_id)` — Azure returns 409
+    /// `RoleAssignmentExists` on a re-PUT with the same GUID, which we
+    /// treat as success.
+    ///
+    /// Requires the controller MI to have
+    /// `Microsoft.Authorization/roleAssignments/write` at the
+    /// requested scope. When the permission is missing, Azure returns
+    /// 403 `AuthorizationFailed` and the caller surfaces this on
+    /// `KarsSandbox.status` as `AgentRbacAssignmentFailed=False`.
+    ///
+    /// `subscription_id` is parsed out of the scope to construct the
+    /// fully-qualified role definition URI per ARM's contract.
+    pub async fn assign_role_to_agent_identity(
+        &self,
+        principal_id: &str,
+        role_definition_id: &str,
+        scope: &str,
+    ) -> Result<(), String> {
+        let token = self.arm_token().await?;
+
+        // Stable assignment name = guid(scope, principalId, roleId).
+        // Azure ARM requires the assignment name to be a GUID; using a
+        // deterministic hash ensures retries always upsert the same row.
+        let assignment_name = deterministic_assignment_guid(scope, principal_id, role_definition_id);
+
+        // Extract subscription id from the scope so we can build the
+        // role-definition URI. Scopes always start with
+        // `/subscriptions/<sub>/...`.
+        let sub_id = extract_subscription_id(scope).ok_or_else(|| {
+            format!("scope '{scope}' does not contain a subscription id")
+        })?;
+        let role_def_uri = format!(
+            "/subscriptions/{sub_id}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
+        );
+
+        // ARM normalises scopes by trimming leading slashes; we keep
+        // them so the URL builds cleanly.
+        let url = format!(
+            "https://management.azure.com{scope}/providers/Microsoft.Authorization/roleAssignments/{assignment_name}?api-version=2022-04-01"
+        );
+
+        let body = serde_json::json!({
+            "properties": {
+                "roleDefinitionId": role_def_uri,
+                "principalId": principal_id,
+                "principalType": "ServicePrincipal",
+                "description": format!("kars-managed; agent identity {principal_id}")
+            }
+        });
+
+        let resp = self
+            .http
+            .put(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| format!("ARM role assignment PUT failed: {e}"))?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+
+        // Success: 201 Created (fresh) or 200 OK (idempotent overwrite).
+        if status.is_success() {
+            tracing::info!(
+                principal_id,
+                role_definition_id,
+                scope,
+                "ARM role assignment created/updated"
+            );
+            return Ok(());
+        }
+
+        // 409 RoleAssignmentExists — ARM rejects a PUT against the same
+        // (scope, principal, role) tuple even with the same name. Treat
+        // as idempotent success: the assignment already exists.
+        if status.as_u16() == 409 && body_text.contains("RoleAssignmentExists") {
+            tracing::debug!(
+                principal_id,
+                role_definition_id,
+                scope,
+                "role assignment already present (RoleAssignmentExists) — idempotent"
+            );
+            return Ok(());
+        }
+
+        Err(format!(
+            "ARM role assignment PUT returned {status}: {}",
+            &body_text[..body_text.len().min(400)]
+        ))
+    }
+
+    /// Delete every Azure RBAC role assignment held by a given agent
+    /// identity SP at the given scope.
+    ///
+    /// Called from the sandbox-deletion finalizer to clean up after a
+    /// `KarsSandbox` is destroyed. The agent identity SP itself is
+    /// deleted separately via [`delete_agent_identity`]; this method
+    /// only reaps the role assignments so the SP doesn't leave
+    /// orphaned grants on the Foundry resource.
+    ///
+    /// Idempotent: an empty list of assignments is success. A 404 on
+    /// any individual DELETE is success.
+    pub async fn delete_role_assignments_for_principal(
+        &self,
+        principal_id: &str,
+        scope: &str,
+    ) -> Result<usize, String> {
+        let token = self.arm_token().await?;
+
+        // Azure ARM only accepts ONE of `atScope()` or `principalId eq`
+        // in the `$filter` query — combining them returns 400
+        // `UnsupportedQuery`. We pass `principalId eq` (the more
+        // selective filter) and then narrow to assignments at the
+        // requested scope (or below) on the client side. The list
+        // call already only returns assignments visible at this
+        // scope's read path, so this is just an extra defensive
+        // filter on the assignment `scope` property.
+        let list_url = format!(
+            "https://management.azure.com{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId+eq+%27{principal_id}%27"
+        );
+
+        let resp = self
+            .http
+            .get(&list_url)
+            .header("Authorization", format!("Bearer {token}"))
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| format!("ARM role assignment list failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "ARM list role assignments returned {status}: {}",
+                &body[..body.len().min(400)]
+            ));
+        }
+
+        #[derive(Deserialize)]
+        struct ListResp {
+            value: Vec<AssignmentRef>,
+        }
+        #[derive(Deserialize)]
+        struct AssignmentRef {
+            id: String,
+            properties: Option<AssignmentProps>,
+        }
+        #[derive(Deserialize)]
+        struct AssignmentProps {
+            scope: Option<String>,
+        }
+
+        let list: ListResp = resp
+            .json()
+            .await
+            .map_err(|e| format!("ARM list role assignments parse failed: {e}"))?;
+
+        let scope_lower = scope.to_ascii_lowercase();
+        let mut deleted = 0;
+        for a in &list.value {
+            // Narrow client-side: skip assignments whose scope is
+            // not the requested scope itself. Parent-scope inherited
+            // assignments belong to a different lifecycle (typically
+            // an operator-managed RG-level grant), and we MUST NOT
+            // delete those on sandbox teardown.
+            if let Some(p) = &a.properties
+                && let Some(s) = &p.scope
+            {
+                let s_lower = s.to_ascii_lowercase();
+                if s_lower != scope_lower {
+                    tracing::debug!(
+                        assignment_id = %a.id,
+                        assignment_scope = %s,
+                        target_scope = %scope,
+                        "skipping assignment at non-matching scope (likely inherited)"
+                    );
+                    continue;
+                }
+            }
+
+            // a.id already includes /subscriptions/...; build the full URL.
+            let delete_url = format!("https://management.azure.com{}?api-version=2022-04-01", a.id);
+            let r = self
+                .http
+                .delete(&delete_url)
+                .header("Authorization", format!("Bearer {token}"))
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+                .await
+                .map_err(|e| format!("ARM role assignment DELETE failed: {e}"))?;
+            let s = r.status();
+            if s.is_success() || s.as_u16() == 404 {
+                deleted += 1;
+            } else {
+                let body = r.text().await.unwrap_or_default();
+                return Err(format!(
+                    "ARM DELETE role assignment {} returned {s}: {}",
+                    a.id,
+                    &body[..body.len().min(200)]
+                ));
+            }
+        }
+
+        tracing::info!(
+            principal_id,
+            scope,
+            deleted,
+            "deleted role assignments for principal"
+        );
+
+        Ok(deleted)
+    }
+
     /// Fetch an existing agent identity by object ID.
     ///
     /// Used during reconcile to confirm the SP we recorded in status
@@ -893,6 +1125,58 @@ fn odata_type_for_value(value: &serde_json::Value) -> Result<String, String> {
     }
 }
 
+/// Derive a deterministic UUID for an ARM role assignment.
+///
+/// Azure ARM requires assignment names to be GUIDs. To make our
+/// PUT-then-PUT idempotent across reconciles and across clusters, we
+/// derive the GUID from `(scope, principal_id, role_definition_id)`
+/// using a stable hash. Two callers granting the same role to the same
+/// principal at the same scope will produce the same GUID and either
+/// see the existing assignment (200) or a 409 RoleAssignmentExists
+/// (treated as success). No randomness, no clock dependence.
+///
+/// Implementation: SHA-256 the canonical key, take 16 bytes, format
+/// as a UUIDv4-shaped string (we set the version + variant bits to
+/// produce a valid v4 GUID per RFC 4122).
+fn deterministic_assignment_guid(scope: &str, principal_id: &str, role_definition_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"kars-role-assignment-v1\x00");
+    h.update(scope.to_ascii_lowercase().as_bytes());
+    h.update(b"\x00");
+    h.update(principal_id.to_ascii_lowercase().as_bytes());
+    h.update(b"\x00");
+    h.update(role_definition_id.to_ascii_lowercase().as_bytes());
+    let digest = h.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // Set UUIDv4 version + RFC4122 variant bits.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+/// Extract the subscription id from an ARM scope.
+///
+/// Returns `None` when the scope does not start with the expected
+/// `/subscriptions/<guid>/...` pattern. Used by
+/// [`AgentIdentityClient::assign_role_to_agent_identity`] to build the
+/// fully-qualified role-definition URI.
+fn extract_subscription_id(scope: &str) -> Option<String> {
+    let s = scope.trim_start_matches('/');
+    let mut parts = s.splitn(3, '/');
+    match (parts.next(), parts.next()) {
+        (Some("subscriptions"), Some(id)) if !id.is_empty() => Some(id.to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,5 +1301,115 @@ mod tests {
         let err = odata_type_for_value(&v).unwrap_err();
         // First-element validator catches the float as unsupported.
         assert!(err.contains("unsupported"), "got: {err}");
+    }
+
+    // ─── ARM RBAC helpers ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_subscription_id_full_scope() {
+        let s = "/subscriptions/1f67a2fd-4c9f-4de2-986a-32492d427fd9/resourceGroups/foo/providers/Microsoft.Cog/accounts/bar";
+        assert_eq!(
+            extract_subscription_id(s).as_deref(),
+            Some("1f67a2fd-4c9f-4de2-986a-32492d427fd9")
+        );
+    }
+
+    #[test]
+    fn extract_subscription_id_subscription_only() {
+        let s = "/subscriptions/aaaa-bbbb";
+        assert_eq!(extract_subscription_id(s).as_deref(), Some("aaaa-bbbb"));
+    }
+
+    #[test]
+    fn extract_subscription_id_rejects_management_group_scope() {
+        let s = "/providers/Microsoft.Management/managementGroups/myMg";
+        assert_eq!(extract_subscription_id(s), None);
+    }
+
+    #[test]
+    fn extract_subscription_id_rejects_empty() {
+        assert_eq!(extract_subscription_id(""), None);
+        assert_eq!(extract_subscription_id("/"), None);
+        // Missing subscription value after the keyword.
+        assert_eq!(extract_subscription_id("/subscriptions/"), None);
+    }
+
+    #[test]
+    fn assignment_guid_is_stable_across_invocations() {
+        let g1 = deterministic_assignment_guid(
+            "/subscriptions/x/resourceGroups/rg/providers/Microsoft.Cog/accounts/foundry",
+            "889ab472-6ebc-4e3c-9e07-618f5d361663",
+            "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd",
+        );
+        let g2 = deterministic_assignment_guid(
+            "/subscriptions/x/resourceGroups/rg/providers/Microsoft.Cog/accounts/foundry",
+            "889ab472-6ebc-4e3c-9e07-618f5d361663",
+            "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd",
+        );
+        assert_eq!(g1, g2, "same key must produce same GUID for idempotency");
+    }
+
+    #[test]
+    fn assignment_guid_changes_when_role_changes() {
+        let g1 = deterministic_assignment_guid(
+            "/subscriptions/x/resourceGroups/rg",
+            "principal-1",
+            "role-A",
+        );
+        let g2 = deterministic_assignment_guid(
+            "/subscriptions/x/resourceGroups/rg",
+            "principal-1",
+            "role-B",
+        );
+        assert_ne!(g1, g2);
+    }
+
+    #[test]
+    fn assignment_guid_changes_when_principal_changes() {
+        let g1 = deterministic_assignment_guid("/scope", "principal-1", "role");
+        let g2 = deterministic_assignment_guid("/scope", "principal-2", "role");
+        assert_ne!(g1, g2);
+    }
+
+    #[test]
+    fn assignment_guid_is_case_insensitive_on_inputs() {
+        // Azure RBAC IDs are case-insensitive, and the same logical
+        // (scope, principal, role) tuple in different casing must map
+        // to the same assignment GUID — otherwise an operator switching
+        // from upper- to lower-case in their Bicep would create a
+        // duplicate assignment.
+        let g1 = deterministic_assignment_guid(
+            "/subscriptions/X/resourceGroups/RG",
+            "AAAAA",
+            "BBBBB",
+        );
+        let g2 = deterministic_assignment_guid(
+            "/subscriptions/x/resourceGroups/rg",
+            "aaaaa",
+            "bbbbb",
+        );
+        assert_eq!(g1, g2);
+    }
+
+    #[test]
+    fn assignment_guid_is_valid_uuid_v4_format() {
+        let g = deterministic_assignment_guid("/s", "p", "r");
+        // 8-4-4-4-12 hex digits.
+        assert_eq!(g.len(), 36, "{g}");
+        let parts: Vec<&str> = g.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+        // Version nibble at position 14 must be '4' for UUIDv4.
+        assert_eq!(parts[2].chars().next(), Some('4'), "version nibble: {g}");
+        // Variant bits: first char of group 4 must be 8, 9, a, or b.
+        let variant = parts[3].chars().next().unwrap();
+        assert!(
+            "89ab".contains(variant),
+            "variant nibble must be 8/9/a/b: {g}"
+        );
     }
 }

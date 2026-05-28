@@ -262,6 +262,20 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             crate::pairing::release_offload_slot(client.clone(), requester, &name).await;
         }
 
+        // Deprovision the per-sandbox Entra agent identity + ARM role
+        // assignments. Best-effort: failures are logged but do NOT
+        // block the finalizer removal — the orphan reaper catches
+        // anything that fails here (typically due to transient Graph
+        // or ARM unavailability). Blocking the finalizer on Azure
+        // failures would leave the CR stuck in Terminating forever
+        // when Azure is degraded.
+        crate::agent_id_provisioning::cleanup_agent_identity_for_sandbox(
+            client,
+            &sandbox,
+            &ctx.agent_id_cache,
+        )
+        .await;
+
         // Remove the finalizer so K8s can complete CRD deletion
         let sandbox_api: Api<KarsSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());

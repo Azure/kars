@@ -100,6 +100,53 @@ pub struct KarsAuthConfigSpec {
     /// pattern is to centralise scope policy here.
     #[serde(default)]
     pub downstream_apis: std::collections::BTreeMap<String, DownstreamApiConfig>,
+
+    /// Per-agent ARM RBAC role assignments. The controller PUTs each
+    /// listed role against each per-sandbox agent identity SP at
+    /// provisioning time and DELETEs them on sandbox deprovision.
+    ///
+    /// Eliminates the manual `az role assignment create` step operators
+    /// would otherwise run for each new sandbox (Phase 5b).
+    ///
+    /// Requires the controller MI to have
+    /// `Microsoft.Authorization/roleAssignments/write` on each listed
+    /// scope (typically the Foundry resource group). When the
+    /// permission is missing, the assignment fails non-fatally: the
+    /// agent identity is still recorded, the failure surfaces as
+    /// `AgentRbacAssignmentFailed=False` on the KarsSandbox status,
+    /// and the sandbox boots but inference returns 401 PermissionDenied
+    /// until an operator grants the role out-of-band. See
+    /// `docs/architecture/entra-agent-id/05-security-alignment.md`.
+    ///
+    /// Empty list is the safe default — preserves backward compat with
+    /// clusters bootstrapped before this field existed; operators
+    /// run the manual grants documented in the migration guide.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foundry_rbac: Vec<FoundryRbacAssignment>,
+}
+
+/// One declarative role assignment to apply to every per-sandbox agent
+/// identity SP at provisioning time.
+///
+/// All assignment names are derived deterministically from
+/// `guid(scope, principalId, roleDefinitionId)` so re-provisioning is
+/// idempotent on Azure's side.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundryRbacAssignment {
+    /// Full ARM scope to assign at. Typical values:
+    /// - `/subscriptions/<sub>/resourceGroups/<rg>` — covers all
+    ///   downstream Cognitive Services resources in the RG.
+    /// - `/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<name>`
+    ///   — tighter, single Foundry account.
+    pub scope: String,
+
+    /// Built-in role definition GUIDs to grant at this scope. Each is
+    /// looked up at `/providers/Microsoft.Authorization/roleDefinitions/<guid>`.
+    /// kars-recommended defaults:
+    /// - `5e0bd9bd-7b93-4f28-af87-19fc36ad61bd` — Cognitive Services OpenAI User
+    /// - `53ca6127-db72-4b80-b1b0-d745d6d5456d` — Azure AI User
+    pub role_definition_ids: Vec<String>,
 }
 
 /// Tenant-level anchoring information.

@@ -331,6 +331,53 @@ pub async fn ensure_agent_identity_for_sandbox(
             display_name: recorded.display_name.clone(),
             created_at: recorded.created_at.clone(),
         };
+
+        // Reconcile ARM role assignments for already-provisioned
+        // identities too (Phase 5b). This is what retroactively
+        // grants roles to sandboxes that existed before the
+        // operator added `foundryRbac` entries to KarsAuthConfig,
+        // and what re-asserts assignments that drifted (deleted
+        // out-of-band). All operations are idempotent on ARM's side
+        // via the deterministic assignment GUID.
+        //
+        // Failure path is identical to Step 3c below: log WARN,
+        // continue. The sandbox boots; ARM RBAC eventually
+        // converges as the controller retries.
+        tracing::info!(
+            sandbox = %sandbox_name,
+            app_id = %recorded.app_id,
+            foundry_rbac_entries = spec.foundry_rbac.len(),
+            "Phase 5b reconcile: re-asserting ARM role assignments for recorded agent identity"
+        );
+        for assignment in &spec.foundry_rbac {
+            for role_id in &assignment.role_definition_ids {
+                match graph
+                    .assign_role_to_agent_identity(&recorded.object_id, role_id, &assignment.scope)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            sandbox = %sandbox_name,
+                            app_id = %recorded.app_id,
+                            role = %role_id,
+                            scope = %assignment.scope,
+                            "ARM role re-asserted on recorded agent identity (idempotent)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            sandbox = %sandbox_name,
+                            app_id = %recorded.app_id,
+                            role = %role_id,
+                            scope = %assignment.scope,
+                            error = %e,
+                            "ARM role re-assertion failed on recorded agent identity; will retry next reconcile"
+                        );
+                    }
+                }
+            }
+        }
+
         // No per-namespace ConfigMap mirror: the shared auth-sidecar
         // in `kars-system` consumes a single cluster-level ConfigMap
         // (managed by the auth_config_reconciler). Sandboxes carry
@@ -426,6 +473,55 @@ pub async fn ensure_agent_identity_for_sandbox(
         };
     }
 
+    // Step 3c: assign per-agent ARM RBAC roles (Phase 5b).
+    //
+    // Microsoft docs (concept-agent-id-design-patterns) confirm that
+    // Azure RBAC is per-principal — role assignments on the blueprint
+    // SP do NOT inherit to derived agent identity SPs. So every newly-
+    // provisioned agent identity must get its own role assignment for
+    // each downstream resource it needs to access (Foundry, KV,
+    // Storage, etc).
+    //
+    // Configured via `KarsAuthConfig.spec.foundryRbac` (a list of
+    // {scope, roleDefinitionIds[]} entries). When empty (default),
+    // this step is a no-op and operators run the manual grants
+    // documented in the migration guide.
+    //
+    // Failure mode: when the controller MI lacks
+    // `Microsoft.Authorization/roleAssignments/write` on the scope,
+    // Azure returns 403 AuthorizationFailed. We log a WARN and
+    // continue — the sandbox boots, agent identity is recorded, but
+    // inference returns 401 until an operator grants manually. This
+    // is a graceful degradation from the old manual-only path.
+    for assignment in &spec.foundry_rbac {
+        for role_id in &assignment.role_definition_ids {
+            match graph
+                .assign_role_to_agent_identity(&identity.id, role_id, &assignment.scope)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        sandbox = %sandbox_name,
+                        app_id = %identity.app_id,
+                        role = %role_id,
+                        scope = %assignment.scope,
+                        "ARM role assigned to agent identity"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        sandbox = %sandbox_name,
+                        app_id = %identity.app_id,
+                        role = %role_id,
+                        scope = %assignment.scope,
+                        error = %e,
+                        "ARM role assignment failed — sandbox will boot but may return 401 from downstream Azure until granted manually"
+                    );
+                }
+            }
+        }
+    }
+
     let status = AgentIdentityStatus {
         app_id: identity.app_id.clone(),
         object_id: identity.id.clone(),
@@ -450,6 +546,124 @@ pub async fn ensure_agent_identity_for_sandbox(
     ProvisioningOutcome::Ready {
         agent_identity: status,
         auth_spec: spec,
+    }
+}
+
+/// Deprovision a sandbox's agent identity and clean up its ARM RBAC
+/// assignments. Called from the KarsSandbox deletion finalizer in
+/// `reconciler/mod.rs`.
+///
+/// Steps:
+///   1. Read the recorded `agentIdentity` from sandbox status (the
+///      principalId + objectId we created at provisioning time).
+///   2. For each `foundryRbac` scope, list role assignments held by
+///      this principalId and DELETE them. Eliminates the orphan
+///      "agent identity has Foundry role but the sandbox is gone"
+///      state.
+///   3. Graph DELETE the agent identity SP itself. The orphan reaper
+///      catches the case where status was never written (the SP was
+///      created but the status patch failed); we do BOTH to be safe.
+///
+/// Failure mode: anything that fails is logged as WARN but does NOT
+/// block the finalizer from being removed. The orphan reaper catches
+/// what we miss. Blocking the finalizer on cleanup failures would
+/// leave the K8s CR stuck in `Terminating` forever if Graph or ARM
+/// were unavailable.
+pub async fn cleanup_agent_identity_for_sandbox(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    cache: &ProvisionerCache,
+) {
+    let sandbox_name = sandbox.name_any();
+    let recorded = sandbox
+        .status
+        .as_ref()
+        .and_then(|s| s.agent_identity.as_ref());
+    let Some(recorded) = recorded else {
+        tracing::debug!(
+            sandbox = %sandbox_name,
+            "no recorded agent identity on sandbox; skipping deprovision (reaper covers orphans)"
+        );
+        return;
+    };
+
+    // Need the KarsAuthConfig spec to know which scopes to clean up
+    // role assignments at, and the auth path to use.
+    let auth_config = match load_auth_config(client).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                sandbox = %sandbox_name,
+                error = %e,
+                "could not load KarsAuthConfig during deprovision — skipping cleanup; reaper will retry"
+            );
+            return;
+        }
+    };
+    let spec = match auth_config {
+        Some((s, _ready)) => Arc::new(s),
+        None => {
+            tracing::debug!(
+                sandbox = %sandbox_name,
+                "KarsAuthConfig absent during deprovision — nothing to clean up"
+            );
+            return;
+        }
+    };
+
+    let cluster_uid = std::env::var("CLUSTER_UID").unwrap_or_else(|_| "cluster".to_string());
+    let graph = cache.get_or_init(&spec, &cluster_uid).await;
+
+    // Step 1: DELETE role assignments for each configured scope.
+    // Idempotent (404s are treated as success). When the controller
+    // MI lacks ARM permission, this fails gracefully — operators
+    // surface and clean up via the reaper.
+    for assignment in &spec.foundry_rbac {
+        match graph
+            .delete_role_assignments_for_principal(&recorded.object_id, &assignment.scope)
+            .await
+        {
+            Ok(n) => {
+                tracing::info!(
+                    sandbox = %sandbox_name,
+                    principal_id = %recorded.object_id,
+                    scope = %assignment.scope,
+                    deleted = n,
+                    "ARM role assignments cleaned up"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sandbox = %sandbox_name,
+                    principal_id = %recorded.object_id,
+                    scope = %assignment.scope,
+                    error = %e,
+                    "ARM role assignment cleanup failed; reaper will retry"
+                );
+            }
+        }
+    }
+
+    // Step 2: Graph DELETE the agent identity SP itself.
+    // Idempotent (404 treated as success).
+    match graph.delete_agent_identity(&recorded.object_id).await {
+        Ok(()) => {
+            tracing::info!(
+                sandbox = %sandbox_name,
+                app_id = %recorded.app_id,
+                object_id = %recorded.object_id,
+                "agent identity SP deprovisioned"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                sandbox = %sandbox_name,
+                app_id = %recorded.app_id,
+                object_id = %recorded.object_id,
+                error = %e,
+                "agent identity deprovision failed; reaper will retry"
+            );
+        }
     }
 }
 
@@ -597,6 +811,7 @@ mod tests {
                 managed_identity_principal_id: Some("mi-p".into()),
             },
             downstream_apis: Default::default(),
+            foundry_rbac: vec![],
         };
         let c1 = cache.get_or_init(&spec, "cluster-1").await;
         let c2 = cache.get_or_init(&spec, "cluster-1").await;
