@@ -1,0 +1,79 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "13833512217347218197"
+    }
+  },
+  "parameters": {
+    "blueprintSpObjectId": {
+      "type": "string",
+      "metadata": {
+        "description": "Blueprint service principal object ID (NOT appId). Read from `KarsAuthConfig.spec.agentId.blueprintObjectId` or the `blueprintSpObjectId` output of `agent-id-trust.bicep`."
+      }
+    },
+    "foundryResourceName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional: explicit Foundry resource name to scope the role assignment to a single AI Services account. When empty, the role is granted at the resource-group scope so all Foundry resources in this RG inherit."
+      }
+    },
+    "roleDefinitionId": {
+      "type": "string",
+      "defaultValue": "53ca6127-db72-4b80-b1b0-d745d6d5456d",
+      "metadata": {
+        "description": "Role to grant. Defaults to `Azure AI User` (53ca6127-db72-4b80-b1b0-d745d6d5456d), the least-privilege role for inference + memory. Use `Cognitive Services User` for legacy AI Services compatibility."
+      }
+    }
+  },
+  "variables": {
+    "roleDefId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', parameters('roleDefinitionId'))]",
+    "rgScopedAssignmentName": "[guid(resourceGroup().id, parameters('blueprintSpObjectId'), parameters('roleDefinitionId'))]",
+    "resourceScopedAssignmentName": "[guid(resourceGroup().id, parameters('foundryResourceName'), parameters('blueprintSpObjectId'), parameters('roleDefinitionId'))]"
+  },
+  "resources": [
+    {
+      "condition": "[empty(parameters('foundryResourceName'))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[variables('rgScopedAssignmentName')]",
+      "properties": {
+        "principalId": "[parameters('blueprintSpObjectId')]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[variables('roleDefId')]",
+        "description": "kars blueprint SP — inherited by all derived agent identities (rg-scoped)"
+      }
+    },
+    {
+      "condition": "[not(empty(parameters('foundryResourceName')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('foundryResourceName'))]",
+      "name": "[variables('resourceScopedAssignmentName')]",
+      "properties": {
+        "principalId": "[parameters('blueprintSpObjectId')]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[variables('roleDefId')]",
+        "description": "kars blueprint SP — inherited by all derived agent identities (resource-scoped)"
+      }
+    }
+  ],
+  "outputs": {
+    "assignedScope": {
+      "type": "string",
+      "value": "[if(empty(parameters('foundryResourceName')), resourceGroup().id, format('{0}/providers/Microsoft.CognitiveServices/accounts/{1}', resourceGroup().id, parameters('foundryResourceName')))]"
+    },
+    "assignmentName": {
+      "type": "string",
+      "value": "[if(empty(parameters('foundryResourceName')), variables('rgScopedAssignmentName'), variables('resourceScopedAssignmentName'))]"
+    },
+    "roleDefinitionId": {
+      "type": "string",
+      "value": "[parameters('roleDefinitionId')]"
+    }
+  }
+}

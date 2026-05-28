@@ -170,12 +170,52 @@ pub struct KarsSandboxSpec {
 /// is `Ready`, and `Anonymous` otherwise. Operators set an explicit
 /// mode to override the auto-detect (e.g. forcing `Anonymous` on a
 /// sandbox even though tenant setup completed).
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshAuthConfig {
     /// Desired authentication mode. Default `Auto`.
     #[serde(default)]
     pub mode: MeshAuthMode,
+
+    /// Custom security attributes to apply to the provisioned agent
+    /// identity (SP) at creation time. Two-level map:
+    /// `<attributeSet> → <attributeName> → <value>`.
+    ///
+    /// Required pre-step (tenant admin): each `<attributeSet>` /
+    /// `<attributeName>` pair must be declared in the tenant's
+    /// `customSecurityAttributeDefinitions` collection before kars can
+    /// reference it — otherwise the Graph PATCH returns 400
+    /// `Request_BadRequest`. The kars-shipped Bicep template
+    /// `deploy/bicep/standalone/custom-security-attributes.bicep`
+    /// declares the recommended `AgentGovernance` set with
+    /// `AgentClassification` and `DataSensitivity` attributes (see
+    /// `docs/architecture/entra-agent-id/05-conditional-access.md`).
+    ///
+    /// Attribute-driven Conditional Access policies can then target
+    /// these attributes via `userTargetMembers` /
+    /// `agentTargetMembers` filters (per Microsoft's
+    /// `policy-autonomous-agents` baseline template).
+    ///
+    /// Setting this map on a sandbox whose attribute set is undefined
+    /// in the tenant causes the agent identity provisioning to fail
+    /// with `phase=Degraded reason=CustomSecurityAttributePatchFailed`.
+    /// Empty / absent map → no security attributes applied.
+    ///
+    /// Example (`AgentGovernance.AgentClassification=Standard`):
+    /// ```yaml
+    /// meshAuth:
+    ///   mode: AgentId
+    ///   customSecurityAttributes:
+    ///     AgentGovernance:
+    ///       AgentClassification: "Standard"
+    ///       DataSensitivity: "Internal"
+    /// ```
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub custom_security_attributes:
+        std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, serde_json::Value>,
+        >,
 }
 
 /// Mesh authentication mode discriminator. See

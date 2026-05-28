@@ -28,6 +28,27 @@
 //!    from Graph. On 200 reuse; on 404 reprovision (drop the stale
 //!    status). On 5xx requeue with backoff.
 //! 2. If status is empty, list the cluster's agent identities filtered
+//!
+//! ## Scale-out invariant
+//!
+//! Per the Phase 5 security review (rubber-duck #4), kars MUST NOT
+//! provision one agent identity per pod when a `KarsSandbox` scales
+//! to N replicas — all replicas of the same sandbox CR share ONE
+//! agent identity. This is enforced architecturally:
+//!
+//! - The agent identity is keyed on `KarsSandbox.metadata.uid` (the
+//!   CR's identity, not any pod's) via the
+//!   `kars-sandbox-uid:<uid>` Graph tag.
+//! - The status field `agentIdentity` lives on the CR itself, so
+//!   every reconcile of the same CR resolves to the same identity.
+//! - The pod template carries the appId in
+//!   `PINNED_AGENT_IDENTITY_APP_ID` env, which is identical across
+//!   all replicas of the Deployment.
+//!
+//! If `KarsSandbox` later grows a `replicas` field, the invariant
+//! holds because nothing in this module branches on replica count.
+//! The `recovers_existing_identity_on_repeat_reconcile` test below
+//! pins this behaviour.
 //!    by `kars-sandbox-uid:<uid>` tag. If one matches (a previous
 //!    reconcile created it but crashed before status patch), reuse.
 //! 3. Otherwise create a new one, patch status immediately, then
@@ -373,6 +394,38 @@ pub async fn ensure_agent_identity_for_sandbox(
         }
     };
 
+    // Step 3b: apply per-sandbox custom security attributes (Phase 5).
+    //
+    // PATCH is run on every reconcile (idempotent on Graph's side) so
+    // edits to `KarsSandbox.spec.meshAuth.customSecurityAttributes`
+    // propagate without requiring a fresh identity. Fail-closed: when
+    // the attribute set is undeclared in the tenant, Graph returns
+    // 400; we surface as Failed so the operator notices rather than
+    // silently running the identity without the intended Conditional
+    // Access targeting.
+    let attrs = sandbox
+        .spec
+        .mesh_auth
+        .as_ref()
+        .map(|m| &m.custom_security_attributes);
+    if let Some(attrs) = attrs
+        && !attrs.is_empty()
+        && let Err(e) = graph
+            .patch_custom_security_attributes(&identity.id, attrs)
+            .await
+    {
+        tracing::warn!(
+            sandbox = %sandbox_name,
+            app_id = %identity.app_id,
+            error = %e,
+            "PATCH custom security attributes failed; retrying next reconcile"
+        );
+        return ProvisioningOutcome::Failed {
+            reason: format!("PATCH custom security attributes: {e}"),
+            retry_after_secs: 60,
+        };
+    }
+
     let status = AgentIdentityStatus {
         app_id: identity.app_id.clone(),
         object_id: identity.id.clone(),
@@ -548,5 +601,45 @@ mod tests {
         let c1 = cache.get_or_init(&spec, "cluster-1").await;
         let c2 = cache.get_or_init(&spec, "cluster-1").await;
         assert!(Arc::ptr_eq(&c1, &c2));
+    }
+
+    /// Pins the scale-out invariant from the Phase 5 security review:
+    /// the agent-identity tag layout is keyed purely on the CR's
+    /// `metadata.uid` (and the cluster UID), with NO dimension for
+    /// pod ordinal, replica index, or any other per-pod attribute.
+    /// This guarantees that scaling a KarsSandbox to N replicas
+    /// resolves to ONE shared agent identity at provisioning time,
+    /// not N distinct identities (the anti-pattern Microsoft's
+    /// design-patterns documentation explicitly warns against).
+    ///
+    /// If a future change ever introduces per-pod keying here, this
+    /// test will fail by surfacing the new tag dimension.
+    #[test]
+    fn tag_layout_excludes_per_pod_attributes() {
+        let tags = crate::agent_identity::AgentIdentityClient::tags_for(
+            "cluster-abc",
+            "sandbox-xyz",
+        );
+        // Sanity: both the cluster + sandbox dimensions are present
+        // (those are the legitimate keys).
+        assert!(tags.iter().any(|t| t.starts_with("kars-cluster-uid:")));
+        assert!(tags.iter().any(|t| t.starts_with("kars-sandbox-uid:")));
+        // Anti-pattern guards: no pod-, replica-, ordinal-, or
+        // hostname-keyed dimensions. If a future PR adds any of
+        // these tag prefixes, the scale-out invariant breaks and
+        // this test will catch it.
+        for forbidden_prefix in &[
+            "kars-pod-",
+            "kars-replica-",
+            "kars-ordinal-",
+            "kars-hostname-",
+            "kars-podname-",
+        ] {
+            assert!(
+                !tags.iter().any(|t| t.starts_with(forbidden_prefix)),
+                "tag layout has per-pod-keyed dimension '{forbidden_prefix}*' \
+                 which would break the scale-out invariant"
+            );
+        }
     }
 }
