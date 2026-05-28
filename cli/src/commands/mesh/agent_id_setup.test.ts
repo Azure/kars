@@ -115,6 +115,39 @@ describe("ensureAgentIdTrust dry-run", () => {
       /Azure CLI is not signed in/,
     );
   });
+
+  it("dry-run defaults credentialMode to ManagedIdentityImds when caller omits it", async () => {
+    mockedExeca.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          id: "sub-123",
+          tenantId: "tenant-abc",
+          user: { name: "user@example.com" },
+        }),
+      ) as any,
+    );
+    const result = await ensureAgentIdTrust({ dryRun: true });
+    // The dry-run path returns the requested mode (or default) verbatim
+    // so the caller's expectations are clear before any side effects.
+    expect(result.credentialMode).toBe("ManagedIdentityImds");
+  });
+
+  it("dry-run preserves explicit credentialMode=WorkloadIdentity", async () => {
+    mockedExeca.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          id: "sub-123",
+          tenantId: "tenant-abc",
+          user: { name: "user@example.com" },
+        }),
+      ) as any,
+    );
+    const result = await ensureAgentIdTrust({
+      dryRun: true,
+      credentialMode: "WorkloadIdentity",
+    });
+    expect(result.credentialMode).toBe("WorkloadIdentity");
+  });
 });
 
 describe("checkAgentIdRole", () => {

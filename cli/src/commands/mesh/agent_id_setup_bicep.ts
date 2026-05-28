@@ -26,6 +26,15 @@ export interface BicepSetupOptions {
   resourceGroup?: string;
   region: string;
   serviceTree?: string;
+  /// Credential mode: "ManagedIdentityImds" (Pattern A) or
+  /// "WorkloadIdentity" (Pattern B). Defaults to ManagedIdentityImds
+  /// for backward compatibility. The CLI's auto-mode does NOT use
+  /// the Bicep path for switching modes — auto detection lives in
+  /// `agent_id_setup.ts` and only invokes Bicep in CA-blocked
+  /// scenarios where the chosen mode is already known.
+  credentialMode?: "ManagedIdentityImds" | "WorkloadIdentity";
+  /// AKS OIDC issuer URL — required when credentialMode=WorkloadIdentity.
+  aksOidcIssuerUrl?: string;
   dryRun?: boolean;
 }
 
@@ -36,6 +45,8 @@ export interface BicepSetupResult {
   controllerMiClientId: string;
   controllerMiResourceId: string;
   controllerMiPrincipalId: string;
+  credentialMode: "ManagedIdentityImds" | "WorkloadIdentity";
+  aksOidcIssuerUrl?: string;
 }
 
 interface AzAccount {
@@ -54,9 +65,11 @@ interface BicepOutputs {
   blueprintClientId: BicepOutput<string>;
   blueprintObjectId: BicepOutput<string>;
   blueprintSpObjectId: BicepOutput<string>;
+  credentialMode: BicepOutput<string>;
   controllerMiClientId: BicepOutput<string>;
   controllerMiResourceId: BicepOutput<string>;
   controllerMiPrincipalId: BicepOutput<string>;
+  aksOidcIssuerUrl?: BicepOutput<string>;
 }
 
 interface DeploymentResult {
@@ -154,8 +167,21 @@ export async function ensureAgentIdTrustViaBicep(
       controllerMiClientId: "<dry-run>",
       controllerMiResourceId: "<dry-run>",
       controllerMiPrincipalId: "<dry-run>",
+      credentialMode: opts.credentialMode ?? "ManagedIdentityImds",
+      aksOidcIssuerUrl: opts.aksOidcIssuerUrl,
     };
   }
+
+  const credentialMode = opts.credentialMode ?? "ManagedIdentityImds";
+  if (credentialMode === "WorkloadIdentity") {
+    if (!opts.aksOidcIssuerUrl || !opts.aksOidcIssuerUrl.trim()) {
+      throw new Error(
+        "credentialMode=WorkloadIdentity requires aksOidcIssuerUrl. " +
+          "Discover via: az aks show -n <cluster> -g <rg> --query oidcIssuerProfile.issuerUrl -o tsv",
+      );
+    }
+  }
+  kvLine("Credential mode", credentialMode);
 
   // ── Run the deployment at subscription scope ─────────────────────
   const args = [
@@ -174,9 +200,14 @@ export async function ensureAgentIdTrustViaBicep(
     `resourceGroupName=${rg}`,
     "--parameters",
     `region=${region}`,
+    "--parameters",
+    `credentialMode=${credentialMode}`,
   ];
   if (serviceTree) {
     args.push("--parameters", `serviceManagementReference=${serviceTree}`);
+  }
+  if (credentialMode === "WorkloadIdentity" && opts.aksOidcIssuerUrl) {
+    args.push("--parameters", `aksOidcIssuerUrl=${opts.aksOidcIssuerUrl}`);
   }
 
   console.log();
@@ -226,12 +257,27 @@ export async function ensureAgentIdTrustViaBicep(
     controllerMiClientId: outputs.controllerMiClientId.value,
     controllerMiResourceId: outputs.controllerMiResourceId.value,
     controllerMiPrincipalId: outputs.controllerMiPrincipalId.value,
+    credentialMode: (outputs.credentialMode?.value as
+      | "ManagedIdentityImds"
+      | "WorkloadIdentity") ?? credentialMode,
+    aksOidcIssuerUrl: outputs.aksOidcIssuerUrl?.value || undefined,
   };
 
   // ── Write the KarsAuthConfig CR ──────────────────────────────────
   // Same shape as the imperative path. Wrapped in try/catch so a
   // missing CRD is reported clearly instead of bubbling up a raw
   // kubectl error.
+  const controllerBlock: Record<string, unknown> = {
+    credentialMode: result.credentialMode,
+  };
+  if (result.credentialMode === "ManagedIdentityImds") {
+    if (result.controllerMiClientId)
+      controllerBlock.managedIdentityClientId = result.controllerMiClientId;
+    if (result.controllerMiResourceId)
+      controllerBlock.managedIdentityResourceId = result.controllerMiResourceId;
+    if (result.controllerMiPrincipalId)
+      controllerBlock.managedIdentityPrincipalId = result.controllerMiPrincipalId;
+  }
   const cr = {
     apiVersion: "kars.azure.com/v1alpha1",
     kind: "KarsAuthConfig",
@@ -246,11 +292,7 @@ export async function ensureAgentIdTrustViaBicep(
         blueprintClientId: result.blueprintClientId,
         blueprintObjectId: result.blueprintObjectId,
       },
-      controller: {
-        managedIdentityClientId: result.controllerMiClientId,
-        managedIdentityResourceId: result.controllerMiResourceId,
-        managedIdentityPrincipalId: result.controllerMiPrincipalId,
-      },
+      controller: controllerBlock,
       downstreamApis: {
         Foundry: {
           baseUrl: "https://ai.azure.com/",

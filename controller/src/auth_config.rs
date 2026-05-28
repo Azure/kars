@@ -189,16 +189,45 @@ pub struct AgentIdConfig {
 /// `169.254.169.254`. The IMDS-issued token is **not** federated, so
 /// presenting it as the blueprint's MI-as-FIC assertion does not
 /// trigger the Entra anti-loop check (`AADSTS700231`).
+///
+/// **Pattern B (WorkloadIdentity)**: when the cluster's tenant
+/// accepts the AKS OIDC issuer URL as a federated-identity issuer
+/// (the default for most non-restricted Entra tenants), kars deploys
+/// in Pattern B: the auth-sidecar pod's projected service-account
+/// token is the credential, and no controller MI is needed. The MI
+/// fields then stay empty.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ControllerIdentityConfig {
-    /// Managed identity `clientId`. Sidecar consumes this as
-    /// `AzureAd__ClientCredentials__0__ManagedIdentityClientId`.
-    pub managed_identity_client_id: String,
+    /// Credential mode the auth-sidecar uses to authenticate AS the
+    /// blueprint. Defaults to `ManagedIdentityImds` for backward
+    /// compatibility with kars deployments prior to Phase 4.
+    ///
+    /// - `ManagedIdentityImds`: sidecar uses
+    ///   `SignedAssertionFromManagedIdentity` against the controller
+    ///   MI's IMDS endpoint. Required in Entra tenants whose FIC
+    ///   issuer-allowlist policy rejects the AKS OIDC issuer
+    ///   (notably Microsoft-corporate, observed:
+    ///   `InvalidFederatedIdentityCredentialValue`).
+    /// - `WorkloadIdentity`: sidecar uses `SignedAssertionFilePath`
+    ///   against the K8s SA token projected at
+    ///   `/var/run/secrets/azure/tokens/azure-identity-token`.
+    ///   Simpler, no per-cluster MI, no VMSS identity assignment.
+    ///   Requires the cluster tenant to accept the AKS OIDC issuer.
+    #[serde(default)]
+    pub credential_mode: CredentialMode,
 
-    /// Managed identity full ARM resource ID. Required for the
-    /// controller to verify VMSS assignment and to delete on teardown.
-    pub managed_identity_resource_id: String,
+    /// Managed identity `clientId`. Required when `credentialMode` is
+    /// `ManagedIdentityImds`. Ignored (and may be empty) when
+    /// `WorkloadIdentity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_identity_client_id: Option<String>,
+
+    /// Managed identity full ARM resource ID. Required when
+    /// `credentialMode` is `ManagedIdentityImds`. Ignored (and may be
+    /// empty) when `WorkloadIdentity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_identity_resource_id: Option<String>,
 
     /// Optional managed identity `principalId` (the SP object id used
     /// as the subject in the blueprint's MI-as-FIC). Recorded for
@@ -206,6 +235,45 @@ pub struct ControllerIdentityConfig {
     /// the sidecar at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_identity_principal_id: Option<String>,
+}
+
+/// Auth-sidecar credential source mode.
+///
+/// Determines which `AzureAd__ClientCredentials__0__SourceType` value
+/// the auth-sidecar is configured with — and consequently whether the
+/// cluster needs a per-cluster controller managed identity (Pattern A)
+/// or relies solely on the auth-sidecar Service-Account's Workload
+/// Identity projection (Pattern B).
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+pub enum CredentialMode {
+    /// Sidecar uses `SignedAssertionFromManagedIdentity` against the
+    /// controller MI's IMDS endpoint. Default for backward compat.
+    #[default]
+    ManagedIdentityImds,
+    /// Sidecar uses `SignedAssertionFilePath` against the projected
+    /// K8s SA token. Requires the cluster tenant to accept the AKS
+    /// OIDC issuer as a FIC subject.
+    WorkloadIdentity,
+}
+
+impl ControllerIdentityConfig {
+    /// `true` when the spec is in a configurationally-valid state for
+    /// the chosen credential mode.
+    ///
+    /// - `ManagedIdentityImds`: requires `managed_identity_client_id`
+    ///   to be `Some(non-empty)`.
+    /// - `WorkloadIdentity`: no field requirements (the SA-WI
+    ///   credential lives in the K8s SA token, not in the CR).
+    pub fn is_valid_for_mode(&self) -> bool {
+        match self.credential_mode {
+            CredentialMode::ManagedIdentityImds => self
+                .managed_identity_client_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty()),
+            CredentialMode::WorkloadIdentity => true,
+        }
+    }
 }
 
 /// One downstream API entry pre-configured on the sidecar.

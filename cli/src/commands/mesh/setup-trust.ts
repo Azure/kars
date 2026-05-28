@@ -110,16 +110,26 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
     .description(
       `Provision the tenant Entra trust for kars sandboxes. Default (--mode agent-id) creates the Entra Agent ID blueprint + controller MI; --mode legacy provisions the deprecated ${AGENTMESH_IDENTIFIER_URI} app registration.`,
     )
-    .option(
-      "--mode <mode>",
-      "Trust mode: 'agent-id' (CLI/Graph), 'bicep' (ARM/Graph extension, bypasses az CLI Graph CA blocks), or 'legacy' (deprecated api://agentmesh)",
-      "agent-id",
-    )
+    .option("--mode <mode>", "Trust mode: 'agent-id' (CLI/Graph), 'bicep' (ARM/Graph extension, bypasses az CLI Graph CA blocks), or 'legacy' (deprecated api://agentmesh)", "agent-id")
     .option("--display-name <name>", "Display name for the Entra app registration (legacy mode only)", "kars AgentMesh")
     .option("--service-tree <guid>", "ServiceTree / service-management-reference GUID (agent-id mode in Microsoft-style tenants)")
     .option("--cluster-name <name>", "Cluster name suffix for the controller MI (agent-id mode)", "kars")
     .option("--resource-group <name>", "Resource group for the controller MI (agent-id mode)")
     .option("--region <region>", "Azure region for the controller MI (agent-id mode)", "eastus")
+    .option(
+      "--credential-mode <mode>",
+      "Auth-sidecar credential mode: 'auto' (try WorkloadIdentity first, fall back on InvalidFederatedIdentityCredentialValue), 'WorkloadIdentity' (require AKS-OIDC FIC), or 'ManagedIdentityImds' (force controller MI path). Defaults to 'auto'.",
+      "auto",
+    )
+    .option(
+      "--aks-cluster-name <name>",
+      "AKS cluster name (used to discover the OIDC issuer URL when credentialMode is auto or WorkloadIdentity)",
+    )
+    .option(
+      "--aks-cluster-resource-group <rg>",
+      "AKS cluster resource group (used to discover the OIDC issuer URL when credentialMode is auto or WorkloadIdentity)",
+    )
+    .option("--aks-oidc-issuer-url <url>", "AKS OIDC issuer URL — direct override for Bicep mode + WorkloadIdentity")
     .option("--dry-run", "Print what would be created without making changes", false)
     .action(async (opts: {
       mode: string;
@@ -128,6 +138,10 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
       clusterName?: string;
       resourceGroup?: string;
       region?: string;
+      credentialMode: "auto" | "WorkloadIdentity" | "ManagedIdentityImds";
+      aksClusterName?: string;
+      aksClusterResourceGroup?: string;
+      aksOidcIssuerUrl?: string;
       dryRun: boolean;
     }) => {
       // ── Agent ID mode (recommended) ────────────────────────────
@@ -169,12 +183,21 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
             resourceGroup: opts.resourceGroup,
             region: opts.region,
             serviceTree: opts.serviceTree,
+            credentialMode: opts.credentialMode,
+            aksClusterName: opts.aksClusterName,
+            aksClusterResourceGroup: opts.aksClusterResourceGroup,
             dryRun: opts.dryRun,
           });
           console.log();
           console.log(chalk.green("  ✓ Entra Agent ID trust ready"));
           console.log(chalk.dim(`    blueprint client ID: ${result.blueprintClientId}`));
-          console.log(chalk.dim(`    controller MI:       ${result.controllerMiClientId}`));
+          console.log(chalk.dim(`    credential mode:     ${result.credentialMode}`));
+          if (result.credentialMode === "ManagedIdentityImds" && result.controllerMiClientId) {
+            console.log(chalk.dim(`    controller MI:       ${result.controllerMiClientId}`));
+          }
+          if (result.credentialMode === "WorkloadIdentity" && result.aksOidcIssuerUrl) {
+            console.log(chalk.dim(`    AKS OIDC issuer:     ${result.aksOidcIssuerUrl}`));
+          }
           console.log(chalk.dim(`    KarsAuthConfig:      kubectl get karsauthconfig default`));
         } catch (e) {
           const msg = (e as Error).message;
@@ -223,12 +246,23 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
             resourceGroup: opts.resourceGroup,
             region: opts.region ?? "eastus",
             serviceTree: opts.serviceTree,
+            credentialMode:
+              opts.credentialMode === "WorkloadIdentity"
+                ? "WorkloadIdentity"
+                : "ManagedIdentityImds",
+            aksOidcIssuerUrl: opts.aksOidcIssuerUrl,
             dryRun: opts.dryRun,
           });
           console.log();
           console.log(chalk.green("  ✓ Entra Agent ID trust ready (via Bicep)"));
           console.log(chalk.dim(`    blueprint client ID: ${result.blueprintClientId}`));
-          console.log(chalk.dim(`    controller MI:       ${result.controllerMiClientId}`));
+          console.log(chalk.dim(`    credential mode:     ${result.credentialMode}`));
+          if (result.credentialMode === "ManagedIdentityImds" && result.controllerMiClientId) {
+            console.log(chalk.dim(`    controller MI:       ${result.controllerMiClientId}`));
+          }
+          if (result.credentialMode === "WorkloadIdentity" && result.aksOidcIssuerUrl) {
+            console.log(chalk.dim(`    AKS OIDC issuer:     ${result.aksOidcIssuerUrl}`));
+          }
           console.log(chalk.dim(`    KarsAuthConfig:      kubectl get karsauthconfig default`));
         } catch (e) {
           const msg = (e as Error).message;

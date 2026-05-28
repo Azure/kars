@@ -19,11 +19,19 @@
 //   2. Microsoft.Graph/servicePrincipals — blueprint service
 //      principal (required for derivation).
 //   3. Microsoft.ManagedIdentity/userAssignedIdentities — the
-//      per-cluster controller MI.
+//      per-cluster controller MI (Pattern A only; skipped in
+//      Pattern B).
 //   4. Microsoft.Graph/applications/federatedIdentityCredentials
-//      — MI-as-FIC trust on the blueprint, using the universally
-//      allow-listed `login.microsoftonline.com/<tenant>/v2.0` issuer
-//      so AKS-issuer allow-list policies do not need to be touched.
+//      — one of TWO patterns:
+//         A. `ManagedIdentityImds`: MI-as-FIC on the blueprint, using
+//            the universally allow-listed
+//            `login.microsoftonline.com/<tenant>/v2.0` issuer.
+//            Required in tenants whose issuer allowlist policy
+//            rejects the AKS OIDC issuer.
+//         B. `WorkloadIdentity`: SA-as-FIC on the blueprint, using
+//            the AKS cluster's OIDC issuer URL. Subject is
+//            `system:serviceaccount:kars-system:entra-auth-sidecar`.
+//            Simpler, no per-cluster MI required.
 //
 // Outputs are consumed by `kars mesh setup-trust --mode bicep`
 // to render the `KarsAuthConfig/default` CR for the cluster.
@@ -42,10 +50,10 @@ param clusterName string = 'kars'
 @description('Blueprint display name. Tenant-wide; multiple clusters in the same tenant share it.')
 param blueprintDisplayName string = 'kars-blueprint'
 
-@description('Resource group for the controller managed identity. Created if it does not exist.')
+@description('Resource group for the controller managed identity. Created if it does not exist. Ignored when credentialMode=WorkloadIdentity.')
 param resourceGroupName string = '${clusterName}-agentid-rg'
 
-@description('Azure region for the controller managed identity.')
+@description('Azure region for the controller managed identity. Ignored when credentialMode=WorkloadIdentity.')
 param region string = 'eastus'
 
 @description('Microsoft ServiceTree GUID for app-registration ownership. Required in Microsoft-corporate tenants. For non-Microsoft tenants, leave empty.')
@@ -54,18 +62,38 @@ param serviceManagementReference string = ''
 @description('Tenant ID. Defaults to the deployment tenant. Override only for cross-tenant scenarios.')
 param tenantId string = tenant().tenantId
 
-// ── 1. Resource group for the controller MI ────────────────────────
-resource agentIdRg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
+@description('Credential mode for the auth-sidecar. `ManagedIdentityImds` creates a controller MI and an MI-as-FIC on the blueprint (Pattern A, corp-tenant safe). `WorkloadIdentity` creates a SA-as-FIC pointing at the cluster\'s AKS OIDC issuer (Pattern B, OSS / non-restricted tenants).')
+@allowed([
+  'ManagedIdentityImds'
+  'WorkloadIdentity'
+])
+param credentialMode string = 'ManagedIdentityImds'
+
+@description('AKS cluster\'s OIDC issuer URL. Required when credentialMode=WorkloadIdentity. Obtain via `az aks show -n <c> -g <rg> --query oidcIssuerProfile.issuerUrl -o tsv`.')
+param aksOidcIssuerUrl string = ''
+
+@description('K8s namespace hosting the shared auth-sidecar Deployment. Used to build the FIC subject in Pattern B.')
+param sidecarNamespace string = 'kars-system'
+
+@description('K8s ServiceAccount name of the shared auth-sidecar. Used to build the FIC subject in Pattern B.')
+param sidecarServiceAccount string = 'entra-auth-sidecar'
+
+// ── Mode-derived booleans ──────────────────────────────────────────
+var useMi = credentialMode == 'ManagedIdentityImds'
+var useWi = credentialMode == 'WorkloadIdentity'
+
+// ── 1. Resource group for the controller MI (Pattern A only) ──────
+resource agentIdRg 'Microsoft.Resources/resourceGroups@2024-03-01' = if (useMi) {
   name: resourceGroupName
   location: region
 }
 
-// ── 2. Controller managed identity ─────────────────────────────────
+// ── 2. Controller managed identity (Pattern A only) ────────────────
 //
 // Nested deployment because user-assigned MIs are scoped to a
 // resource group, and we declared the deployment at subscription
 // scope so we could create the RG above.
-module controllerMi 'modules/controller-mi.bicep' = {
+module controllerMi 'modules/controller-mi.bicep' = if (useMi) {
   name: 'controllerMi'
   scope: agentIdRg
   params: {
@@ -74,7 +102,7 @@ module controllerMi 'modules/controller-mi.bicep' = {
   }
 }
 
-// ── 3. Blueprint application ───────────────────────────────────────
+// ── 3. Blueprint application (always) ──────────────────────────────
 //
 // Tagged `EntraAgentId` so the Entra Agents portal page recognises
 // it as a blueprint. Microsoft-corporate tenants additionally require
@@ -89,7 +117,7 @@ resource blueprintApp 'Microsoft.Graph/applications@v1.0' = {
   requiredResourceAccess: []
 }
 
-// ── 4. Blueprint service principal ─────────────────────────────────
+// ── 4. Blueprint service principal (always) ────────────────────────
 //
 // The blueprint app must have a corresponding SP for two reasons:
 // the Entra Agents portal filters by SP type, and agent identities
@@ -101,7 +129,7 @@ resource blueprintSp 'Microsoft.Graph/servicePrincipals@v1.0' = {
   tags: [ 'EntraAgentId', 'kars-managed' ]
 }
 
-// ── 5. MI-as-FIC on the blueprint ──────────────────────────────────
+// ── 5a. MI-as-FIC on the blueprint (Pattern A only) ────────────────
 //
 // The federation issuer is the tenant's own login endpoint, which
 // every Entra tenant allow-lists by default. Subject is the
@@ -114,12 +142,32 @@ resource blueprintSp 'Microsoft.Graph/servicePrincipals@v1.0' = {
 // portable across Azure Public / Gov / China clouds; the Bicep
 // `no-hardcoded-env-urls` linter rule requires it.
 var loginEndpoint = environment().authentication.loginEndpoint
-resource blueprintFic 'Microsoft.Graph/applications/federatedIdentityCredentials@v1.0' = {
+resource blueprintMiFic 'Microsoft.Graph/applications/federatedIdentityCredentials@v1.0' = if (useMi) {
   name: '${blueprintApp.uniqueName}/kars-controller-mi'
   audiences: [ 'api://AzureADTokenExchange' ]
   issuer: '${loginEndpoint}${tenantId}/v2.0'
-  subject: controllerMi.outputs.principalId
+  subject: controllerMi!.outputs.principalId
   description: 'kars controller MI — trust hop into the blueprint (kars cluster ${clusterName})'
+}
+
+// ── 5b. SA-as-FIC on the blueprint (Pattern B only) ────────────────
+//
+// Subject is the K8s ServiceAccount the auth-sidecar pod uses. The
+// AKS azure-wi-webhook projects an SA token signed by the cluster's
+// AKS OIDC issuer; that token is presented as the federated
+// assertion when the sidecar mints a blueprint token.
+//
+// Pattern B requires the tenant to accept the AKS OIDC issuer as a
+// FIC issuer. The Microsoft corporate tenant rejects this with
+// `InvalidFederatedIdentityCredentialValue`; in that case the
+// caller MUST deploy with credentialMode=ManagedIdentityImds
+// instead.
+resource blueprintSaFic 'Microsoft.Graph/applications/federatedIdentityCredentials@v1.0' = if (useWi) {
+  name: '${blueprintApp.uniqueName}/kars-auth-sidecar-sa'
+  audiences: [ 'api://AzureADTokenExchange' ]
+  issuer: aksOidcIssuerUrl
+  subject: 'system:serviceaccount:${sidecarNamespace}:${sidecarServiceAccount}'
+  description: 'kars auth-sidecar SA — trust hop into the blueprint (kars cluster ${clusterName})'
 }
 
 // ── Outputs consumed by the kars CLI ───────────────────────────────
@@ -127,8 +175,10 @@ output tenantId string = tenantId
 output blueprintClientId string = blueprintApp.appId
 output blueprintObjectId string = blueprintApp.id
 output blueprintSpObjectId string = blueprintSp.id
-output controllerMiClientId string = controllerMi.outputs.clientId
-output controllerMiResourceId string = controllerMi.outputs.resourceId
-output controllerMiPrincipalId string = controllerMi.outputs.principalId
+output credentialMode string = credentialMode
+output controllerMiClientId string = useMi ? controllerMi!.outputs.clientId : ''
+output controllerMiResourceId string = useMi ? controllerMi!.outputs.resourceId : ''
+output controllerMiPrincipalId string = useMi ? controllerMi!.outputs.principalId : ''
 output serviceManagementReference string = serviceManagementReference
-output ficName string = blueprintFic.name
+output ficName string = useMi ? blueprintMiFic!.name : blueprintSaFic!.name
+output aksOidcIssuerUrl string = aksOidcIssuerUrl

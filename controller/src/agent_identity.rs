@@ -90,7 +90,19 @@ impl AgentIdentityConfig {
             tenant_id: spec.tenant.tenant_id.clone(),
             authority_host: spec.tenant.authority_host.clone(),
             blueprint_client_id: spec.agent_id.blueprint_client_id.clone(),
-            controller_mi_client_id: spec.controller.managed_identity_client_id.clone(),
+            // The controller's own Graph client uses MI+IMDS regardless
+            // of which CredentialMode the sidecar is configured for.
+            // When the MI field is None (Pattern B, sidecar-only WI),
+            // the IMDS request will fail and `wi_mi_token` will run —
+            // and that path itself fails today because there's no
+            // controller-side WI FIC. Adding controller WI support is
+            // tracked as a follow-up; Phase 4 only switches the
+            // SIDECAR's credential mode.
+            controller_mi_client_id: spec
+                .controller
+                .managed_identity_client_id
+                .clone()
+                .unwrap_or_default(),
             cluster_uid,
         }
     }

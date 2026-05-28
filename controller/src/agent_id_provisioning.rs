@@ -538,8 +538,9 @@ mod tests {
                 sponsor_user_object_ids: vec![],
             },
             controller: crate::auth_config::ControllerIdentityConfig {
-                managed_identity_client_id: "mi-c".into(),
-                managed_identity_resource_id: "mi-r".into(),
+                credential_mode: Default::default(),
+                managed_identity_client_id: Some("mi-c".into()),
+                managed_identity_resource_id: Some("mi-r".into()),
                 managed_identity_principal_id: Some("mi-p".into()),
             },
             downstream_apis: Default::default(),

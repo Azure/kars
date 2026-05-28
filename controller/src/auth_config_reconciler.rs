@@ -127,6 +127,36 @@ async fn reconcile(
         return Ok(Action::await_change());
     }
 
+    // Validate the spec is configurationally consistent for the
+    // chosen credential mode. ManagedIdentityImds requires the MI
+    // clientId to be populated; WorkloadIdentity has no field
+    // requirements. A misconfigured spec surfaces as a Degraded
+    // condition so an operator can self-diagnose without trawling
+    // logs, and we DO NOT materialise the sidecar ConfigMap (which
+    // would otherwise propagate the misconfiguration to running
+    // sandboxes).
+    if !obj.spec.controller.is_valid_for_mode() {
+        let reason = match obj.spec.controller.credential_mode {
+            crate::auth_config::CredentialMode::ManagedIdentityImds => {
+                "credentialMode=ManagedIdentityImds requires \
+                 spec.controller.managedIdentityClientId to be set"
+            }
+            crate::auth_config::CredentialMode::WorkloadIdentity => {
+                "internal: WorkloadIdentity should not fail is_valid_for_mode"
+            }
+        };
+        tracing::warn!(reason, "KarsAuthConfig spec is invalid for chosen credentialMode");
+        let _ = patch_degraded_status(
+            &ctx.client,
+            &name,
+            obj.metadata.generation.unwrap_or(0),
+            "InvalidCredentialMode",
+            reason,
+        )
+        .await;
+        return Ok(Action::requeue(std::time::Duration::from_secs(60)));
+    }
+
     // Render the env-var map from the spec.
     let env_map = render_sidecar_env(&obj.spec);
     let spec_hash = hash_spec(&obj.spec);
@@ -207,18 +237,58 @@ pub fn render_sidecar_env(spec: &KarsAuthConfigSpec) -> BTreeMap<String, String>
         spec.agent_id.blueprint_client_id.clone(),
     );
 
-    // The single credential entry: SignedAssertionFromManagedIdentity
-    // pointed at the controller MI's IMDS endpoint. This is the
-    // anti-loop-safe path proven during the POC; see
+    // Credential entry shape depends on the controller's chosen mode.
+    //
+    // - ManagedIdentityImds (Pattern A, default — corp-tenant
+    //   safe): the sidecar uses `SignedAssertionFromManagedIdentity`
+    //   to bridge an IMDS-issued MI token into the blueprint's
+    //   MI-as-FIC. Anti-loop-safe per the POC; required when the
+    //   tenant's FIC issuer-allowlist policy blocks the AKS OIDC.
+    //
+    // - WorkloadIdentity (Pattern B — OSS / non-restricted tenant):
+    //   the sidecar uses `SignedAssertionFilePath` to present its
+    //   projected SA token directly as the federated assertion
+    //   against the blueprint's SA-as-FIC. No MI involvement, no
+    //   VMSS identity assignment needed for the sidecar.
+    //
+    // See `crate::auth_config::CredentialMode` and
     // `docs/architecture/entra-agent-id/01-runtime-token-flow.md`.
-    env.insert(
-        "AzureAd__ClientCredentials__0__SourceType".into(),
-        "SignedAssertionFromManagedIdentity".into(),
-    );
-    env.insert(
-        "AzureAd__ClientCredentials__0__ManagedIdentityClientId".into(),
-        spec.controller.managed_identity_client_id.clone(),
-    );
+    match spec.controller.credential_mode {
+        crate::auth_config::CredentialMode::ManagedIdentityImds => {
+            env.insert(
+                "AzureAd__ClientCredentials__0__SourceType".into(),
+                "SignedAssertionFromManagedIdentity".into(),
+            );
+            // Empty when the operator declared MI mode but forgot to
+            // populate the field — let the sidecar fail loudly at
+            // boot rather than silently using "default MI" (which on
+            // a multi-MI node would attribute calls unpredictably).
+            env.insert(
+                "AzureAd__ClientCredentials__0__ManagedIdentityClientId".into(),
+                spec.controller
+                    .managed_identity_client_id
+                    .clone()
+                    .unwrap_or_default(),
+            );
+        }
+        crate::auth_config::CredentialMode::WorkloadIdentity => {
+            env.insert(
+                "AzureAd__ClientCredentials__0__SourceType".into(),
+                "SignedAssertionFilePath".into(),
+            );
+            // AKS azure-wi-webhook projects the federated SA token at
+            // this path when the pod is labeled
+            // `azure.workload.identity/use=true` and the SA is
+            // annotated with `azure.workload.identity/client-id`.
+            // The path is also overrideable via `AZURE_FEDERATED_TOKEN_FILE`
+            // env (set by the webhook), but the absolute path is the
+            // documented contract — the sidecar reads it directly.
+            env.insert(
+                "AzureAd__ClientCredentials__0__SignedAssertionFileDiskPath".into(),
+                "/var/run/secrets/azure/tokens/azure-identity-token".into(),
+            );
+        }
+    }
 
     // Downstream API config — emit one cluster of env vars per entry.
     for (api_name, api_cfg) in &spec.downstream_apis {
@@ -326,15 +396,52 @@ async fn patch_ready_status(
 ) -> Result<(), String> {
     let api: Api<KarsAuthConfig> = Api::all(client.clone());
     let condition = build_condition_blueprint_ready(observed_generation, message);
-    // Status conditions on K8s status subresources are serialised as
-    // an array of objects with the standard ten fields. We construct
-    // the JSON directly so we don't have to depend on a TypeMeta
-    // sub-tree just to emit a patch.
     let patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsAuthConfig",
         "status": {
             "phase": crate::status::phase::PHASE_READY,
+            "observedGeneration": observed_generation,
+            "conditions": [{
+                "type": condition.type_,
+                "status": condition.status,
+                "reason": condition.reason,
+                "message": condition.message,
+                "lastTransitionTime": condition.last_transition_time.0.to_string(),
+                "observedGeneration": observed_generation,
+            }],
+        }
+    });
+    api.patch_status(name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(&patch))
+        .await
+        .map_err(|e| format!("patch_status {name}: {e}"))?;
+    Ok(())
+}
+
+/// Patch `KarsAuthConfig/<name>.status` with `phase=Degraded` plus a
+/// `SidecarConfigMaterialized=False` condition explaining why the
+/// reconciler refused to materialise the sidecar-env ConfigMap.
+async fn patch_degraded_status(
+    client: &Client,
+    name: &str,
+    observed_generation: i64,
+    reason: &str,
+    message: &str,
+) -> Result<(), String> {
+    let api: Api<KarsAuthConfig> = Api::all(client.clone());
+    let condition = Condition {
+        type_: "SidecarConfigMaterialized".into(),
+        status: "False".into(),
+        reason: reason.into(),
+        message: message.into(),
+        last_transition_time: Time(Timestamp::now()),
+        observed_generation: Some(observed_generation),
+    };
+    let patch = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsAuthConfig",
+        "status": {
+            "phase": crate::status::phase::PHASE_DEGRADED,
             "observedGeneration": observed_generation,
             "conditions": [{
                 "type": condition.type_,
@@ -392,10 +499,12 @@ mod tests {
                 sponsor_user_object_ids: vec![],
             },
             controller: ControllerIdentityConfig {
-                managed_identity_client_id: "a5cc7e08-ee03-4eee-b034-5302b6b54547".into(),
-                managed_identity_resource_id:
+                credential_mode: Default::default(),
+                managed_identity_client_id: Some("a5cc7e08-ee03-4eee-b034-5302b6b54547".into()),
+                managed_identity_resource_id: Some(
                     "/subscriptions/X/resourceGroups/Y/providers/Microsoft.ManagedIdentity/userAssignedIdentities/Z"
                         .into(),
+                ),
                 managed_identity_principal_id: Some("5eaee919-d1bf-4ed0-9da0-0f1589dc2f4b".into()),
             },
             downstream_apis: downstream,
@@ -463,5 +572,85 @@ mod tests {
         a.agent_id.blueprint_client_id = "00000000-0000-0000-0000-000000000001".into();
         b.agent_id.blueprint_client_id = "00000000-0000-0000-0000-000000000002".into();
         assert_ne!(hash_spec(&a), hash_spec(&b));
+    }
+
+    #[test]
+    fn renders_workload_identity_mode_with_file_assertion() {
+        let mut spec = fixture_spec();
+        spec.controller.credential_mode = crate::auth_config::CredentialMode::WorkloadIdentity;
+        // In WI mode, MI clientId is irrelevant; clear it to prove
+        // the renderer doesn't depend on it.
+        spec.controller.managed_identity_client_id = None;
+        let env = render_sidecar_env(&spec);
+        assert_eq!(
+            env.get("AzureAd__ClientCredentials__0__SourceType").map(String::as_str),
+            Some("SignedAssertionFilePath")
+        );
+        assert_eq!(
+            env.get("AzureAd__ClientCredentials__0__SignedAssertionFileDiskPath").map(String::as_str),
+            Some("/var/run/secrets/azure/tokens/azure-identity-token")
+        );
+        // The MI-mode env vars MUST NOT leak into the WI rendering.
+        assert!(
+            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId").is_none(),
+            "WI mode must not emit ManagedIdentityClientId"
+        );
+    }
+
+    #[test]
+    fn renders_managed_identity_mode_with_empty_field_emits_empty_string() {
+        // Defensive: if an operator selects MI mode but forgets to
+        // populate the clientId, the sidecar should fail loudly at
+        // boot rather than silently using the node's "first MI".
+        // The auth_config reconciler refuses to materialise such a
+        // CR (validated by is_valid_for_mode), but this test pins
+        // the render_sidecar_env shape so the bug can't slip past
+        // the validator either.
+        let mut spec = fixture_spec();
+        spec.controller.managed_identity_client_id = None;
+        let env = render_sidecar_env(&spec);
+        assert_eq!(
+            env.get("AzureAd__ClientCredentials__0__SourceType").map(String::as_str),
+            Some("SignedAssertionFromManagedIdentity")
+        );
+        assert_eq!(
+            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId").map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn is_valid_for_mode_requires_mi_field_in_mi_mode() {
+        use crate::auth_config::{ControllerIdentityConfig, CredentialMode};
+
+        let mut cfg = ControllerIdentityConfig {
+            credential_mode: CredentialMode::ManagedIdentityImds,
+            managed_identity_client_id: Some("abc".into()),
+            managed_identity_resource_id: None,
+            managed_identity_principal_id: None,
+        };
+        assert!(cfg.is_valid_for_mode(), "MI mode + populated clientId → valid");
+
+        cfg.managed_identity_client_id = None;
+        assert!(!cfg.is_valid_for_mode(), "MI mode + missing clientId → invalid");
+
+        cfg.managed_identity_client_id = Some("   ".into());
+        assert!(!cfg.is_valid_for_mode(), "MI mode + whitespace-only clientId → invalid");
+
+        cfg.managed_identity_client_id = Some("".into());
+        assert!(!cfg.is_valid_for_mode(), "MI mode + empty clientId → invalid");
+    }
+
+    #[test]
+    fn is_valid_for_mode_does_not_require_mi_field_in_wi_mode() {
+        use crate::auth_config::{ControllerIdentityConfig, CredentialMode};
+
+        let cfg = ControllerIdentityConfig {
+            credential_mode: CredentialMode::WorkloadIdentity,
+            managed_identity_client_id: None,
+            managed_identity_resource_id: None,
+            managed_identity_principal_id: None,
+        };
+        assert!(cfg.is_valid_for_mode(), "WI mode has no field requirements");
     }
 }

@@ -68,6 +68,22 @@ export interface AgentIdSetupOptions {
   /// tenants. Falls back to `KARS_SERVICE_TREE` env var if not
   /// passed explicitly.
   serviceTree?: string;
+  /// Credential mode the auth-sidecar should be provisioned for:
+  ///   - "auto" (default): try WorkloadIdentity first, fall back to
+  ///     ManagedIdentityImds on `InvalidFederatedIdentityCredentialValue`
+  ///     (the tenant rejected the AKS OIDC issuer).
+  ///   - "WorkloadIdentity": OSS / non-restricted tenants. Creates
+  ///     a SA-as-FIC pointing at the cluster's AKS OIDC issuer.
+  ///     No controller MI is provisioned.
+  ///   - "ManagedIdentityImds": corp-tenant safe. Creates a controller
+  ///     MI and an MI-as-FIC on the blueprint. Current default for
+  ///     existing kars deployments.
+  credentialMode?: "auto" | "WorkloadIdentity" | "ManagedIdentityImds";
+  /// AKS cluster name + RG for fetching the OIDC issuer URL in
+  /// WorkloadIdentity / auto mode. When omitted in WI mode we read
+  /// them from `kubectl config` and `az aks list` heuristically.
+  aksClusterName?: string;
+  aksClusterResourceGroup?: string;
   /// If `true`, prints what would happen without making any changes.
   dryRun?: boolean;
 }
@@ -81,6 +97,13 @@ export interface AgentIdSetupResult {
   controllerMiClientId: string;
   controllerMiResourceId: string;
   controllerMiPrincipalId: string;
+  /// Which credential mode was actually provisioned. May differ from
+  /// the requested mode when the caller passed `auto` and the tenant
+  /// rejected the AKS OIDC issuer (we then fall back to
+  /// `ManagedIdentityImds`).
+  credentialMode: "WorkloadIdentity" | "ManagedIdentityImds";
+  /// AKS OIDC issuer URL, present when `credentialMode=WorkloadIdentity`.
+  aksOidcIssuerUrl?: string;
   /// `true` when this invocation created the blueprint (vs.
   /// short-circuiting on an existing one). Useful for telling the
   /// user "first-time setup complete" vs "already wired up".
@@ -422,15 +445,170 @@ async function ensureBlueprintMiAsFic(
   );
 }
 
+/// Sentinel error class thrown when the tenant's issuer-allowlist
+/// policy rejects the AKS OIDC issuer (Microsoft corporate tenant
+/// observed `InvalidFederatedIdentityCredentialValue`). The auto-mode
+/// orchestrator catches this and falls back to ManagedIdentityImds.
+class TenantRejectedAksOidcIssuer extends Error {
+  constructor(public readonly issuer: string, cause: string) {
+    super(
+      `Tenant rejected AKS OIDC issuer '${issuer}' as a federated identity credential — ${cause}`,
+    );
+    this.name = "TenantRejectedAksOidcIssuer";
+  }
+}
+
+/// Create (or verify) a SA-as-FIC on the blueprint with the given
+/// AKS OIDC issuer URL and SA subject. Used in Pattern B.
+/// Throws `TenantRejectedAksOidcIssuer` on
+/// `InvalidFederatedIdentityCredentialValue` so the auto-mode
+/// orchestrator can recognise the failure cleanly.
+async function ensureBlueprintSaAsFic(
+  blueprintObjectId: string,
+  aksOidcIssuerUrl: string,
+  saNamespace: string,
+  saName: string,
+): Promise<void> {
+  const subject = `system:serviceaccount:${saNamespace}:${saName}`;
+  const existing = await azGraphRest<FicListResp>(
+    "GET",
+    `/beta/applications/${blueprintObjectId}/federatedIdentityCredentials`,
+  );
+  if (
+    existing &&
+    existing.value &&
+    existing.value.some(
+      (f) => f.subject === subject && (f as { issuer?: string }).issuer === aksOidcIssuerUrl,
+    )
+  ) {
+    return;
+  }
+  try {
+    await azGraphRest(
+      "POST",
+      `/beta/applications/${blueprintObjectId}/federatedIdentityCredentials`,
+      {
+        name: "kars-auth-sidecar-sa",
+        issuer: aksOidcIssuerUrl,
+        subject,
+        audiences: ["api://AzureADTokenExchange"],
+      },
+    );
+  } catch (e) {
+    const msg = (e as Error).message ?? "";
+    // Microsoft-corporate tenants set an `InvalidFederatedIdentityCredentialValue`
+    // policy that rejects AKS-OIDC-shaped issuers — the documented
+    // marker substring is `not allowed as per assigned policy`.
+    if (
+      msg.includes("InvalidFederatedIdentityCredentialValue") ||
+      msg.includes("not allowed as per assigned policy")
+    ) {
+      throw new TenantRejectedAksOidcIssuer(aksOidcIssuerUrl, msg.split("\n")[0]);
+    }
+    throw e;
+  }
+}
+
+interface AksClusterShowResponse {
+  name: string;
+  resourceGroup: string;
+  oidcIssuerProfile?: { enabled?: boolean; issuerUrl?: string };
+}
+
+/// Look up the AKS cluster's OIDC issuer URL, required for Pattern B.
+///
+/// When the caller passed explicit `aksClusterName + aksClusterResourceGroup`,
+/// uses those. Otherwise discovers the kubeconfig current-context's
+/// cluster name and walks `az aks list` to find an AKS cluster matching
+/// it. Returns `null` if no matching AKS cluster is discoverable — the
+/// caller then falls back to Pattern A.
+async function discoverAksOidcIssuerUrl(opts: {
+  aksClusterName?: string;
+  aksClusterResourceGroup?: string;
+}): Promise<{ name: string; rg: string; issuerUrl: string } | null> {
+  const fromArgs =
+    opts.aksClusterName && opts.aksClusterResourceGroup
+      ? { name: opts.aksClusterName, rg: opts.aksClusterResourceGroup }
+      : await guessAksFromKubeconfig();
+  if (!fromArgs) return null;
+
+  const show = await azJson<AksClusterShowResponse>([
+    "aks",
+    "show",
+    "--name",
+    fromArgs.name,
+    "--resource-group",
+    fromArgs.rg,
+  ]);
+  if (!show) return null;
+  const url = show.oidcIssuerProfile?.issuerUrl;
+  if (!url) {
+    throw new Error(
+      `AKS cluster ${fromArgs.rg}/${fromArgs.name} does not have an OIDC issuer URL. ` +
+        `Enable it with: az aks update -n ${fromArgs.name} -g ${fromArgs.rg} --enable-oidc-issuer`,
+    );
+  }
+  return { name: fromArgs.name, rg: fromArgs.rg, issuerUrl: url };
+}
+
+interface KubeconfigDoc {
+  "current-context": string;
+  contexts: { name: string; context: { cluster: string } }[];
+}
+
+async function guessAksFromKubeconfig(): Promise<{ name: string; rg: string } | null> {
+  let cluster: string | null = null;
+  try {
+    const res = await execa("kubectl", ["config", "view", "-o", "json"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const doc = JSON.parse(res.stdout) as KubeconfigDoc;
+    const current = doc["current-context"];
+    const ctx = doc.contexts.find((c) => c.name === current);
+    cluster = ctx?.context.cluster ?? null;
+  } catch {
+    return null;
+  }
+  if (!cluster) return null;
+  // kubectl + AKS conventionally name the cluster after the AKS
+  // resource name. Match the first AKS resource with that name.
+  const list = await azJson<{ name: string; resourceGroup: string }[]>([
+    "aks",
+    "list",
+    "--query",
+    `[?name=='${cluster}']`,
+  ]);
+  if (!list || list.length === 0) return null;
+  return { name: list[0].name, rg: list[0].resourceGroup };
+}
+
 async function writeKarsAuthConfig(result: {
   tenantId: string;
   blueprintClientId: string;
   blueprintObjectId: string;
-  controllerMiClientId: string;
-  controllerMiResourceId: string;
-  controllerMiPrincipalId: string;
+  controllerMiClientId?: string;
+  controllerMiResourceId?: string;
+  controllerMiPrincipalId?: string;
+  credentialMode: "WorkloadIdentity" | "ManagedIdentityImds";
   serviceTree?: string;
 }): Promise<void> {
+  // MI fields are populated in Pattern A and stripped in Pattern B —
+  // the controller-side validator (auth_config_reconciler) refuses
+  // to materialise an MI-mode CR with empty MI clientId, so we must
+  // not write blank strings in WI mode (would falsely register as
+  // "populated" to the validator's is-non-empty check).
+  const controllerBlock: Record<string, unknown> = {
+    credentialMode: result.credentialMode,
+  };
+  if (result.credentialMode === "ManagedIdentityImds") {
+    if (result.controllerMiClientId)
+      controllerBlock.managedIdentityClientId = result.controllerMiClientId;
+    if (result.controllerMiResourceId)
+      controllerBlock.managedIdentityResourceId = result.controllerMiResourceId;
+    if (result.controllerMiPrincipalId)
+      controllerBlock.managedIdentityPrincipalId = result.controllerMiPrincipalId;
+  }
+
   const cr: Record<string, unknown> = {
     apiVersion: "kars.azure.com/v1alpha1",
     kind: "KarsAuthConfig",
@@ -447,11 +625,7 @@ async function writeKarsAuthConfig(result: {
         blueprintClientId: result.blueprintClientId,
         blueprintObjectId: result.blueprintObjectId,
       },
-      controller: {
-        managedIdentityClientId: result.controllerMiClientId,
-        managedIdentityResourceId: result.controllerMiResourceId,
-        managedIdentityPrincipalId: result.controllerMiPrincipalId,
-      },
+      controller: controllerBlock,
       downstreamApis: {
         Foundry: {
           baseUrl: "https://ai.azure.com/",
@@ -520,6 +694,7 @@ export async function ensureAgentIdTrust(
       controllerMiClientId: "<dry-run>",
       controllerMiResourceId: "<dry-run>",
       controllerMiPrincipalId: "<dry-run>",
+      credentialMode: opts.credentialMode === "WorkloadIdentity" ? "WorkloadIdentity" : "ManagedIdentityImds",
       freshlyCreated: false,
     };
   }
@@ -540,14 +715,82 @@ export async function ensureAgentIdTrust(
   const sp = await ensureBlueprintSp(blueprint.appId);
   kvLine("Blueprint SP", chalk.dim(sp.id));
 
-  // Phase 3: controller MI in customer sub.
-  await ensureResourceGroup(rg, region);
-  const mi = await ensureControllerMi(rg, region, miName);
-  kvLine("Controller MI", chalk.dim(`${mi.clientId} (rg=${rg})`));
+  // Phase 3-4: Credential-mode-dependent provisioning.
+  //
+  // For Pattern A (ManagedIdentityImds): create controller MI + MI-as-FIC.
+  // For Pattern B (WorkloadIdentity):    discover AKS OIDC + create SA-as-FIC.
+  // For "auto":                          try B first, fall back to A on
+  //                                      InvalidFederatedIdentityCredentialValue.
+  const requestedMode = opts.credentialMode ?? "auto";
+  let resolvedMode: "WorkloadIdentity" | "ManagedIdentityImds";
+  let mi: ManagedIdentityResponse | null = null;
+  let aksOidcIssuerUrl: string | undefined;
 
-  // Phase 4: MI-as-FIC on blueprint.
-  await ensureBlueprintMiAsFic(blueprint.id, realTenant, mi.principalId);
-  kvLine("MI-as-FIC", chalk.green("present"));
+  const tryPatternB = async (): Promise<boolean> => {
+    const aks = await discoverAksOidcIssuerUrl({
+      aksClusterName: opts.aksClusterName,
+      aksClusterResourceGroup: opts.aksClusterResourceGroup,
+    });
+    if (!aks) {
+      kvLine(
+        "AKS OIDC issuer",
+        chalk.yellow("not discoverable — cannot try WorkloadIdentity"),
+      );
+      return false;
+    }
+    kvLine("AKS OIDC issuer", chalk.dim(aks.issuerUrl));
+    try {
+      await ensureBlueprintSaAsFic(
+        blueprint.id,
+        aks.issuerUrl,
+        "kars-system",
+        "entra-auth-sidecar",
+      );
+      kvLine("SA-as-FIC", chalk.green("present"));
+      aksOidcIssuerUrl = aks.issuerUrl;
+      return true;
+    } catch (e) {
+      if (e instanceof TenantRejectedAksOidcIssuer) {
+        kvLine(
+          "SA-as-FIC",
+          chalk.yellow("tenant rejected AKS OIDC issuer — falling back to ManagedIdentityImds"),
+        );
+        return false;
+      }
+      throw e;
+    }
+  };
+
+  if (requestedMode === "WorkloadIdentity") {
+    const ok = await tryPatternB();
+    if (!ok) {
+      throw new Error(
+        "credentialMode=WorkloadIdentity requested but Pattern B provisioning failed. " +
+          "Either fix the AKS OIDC issuer configuration or use --credential-mode ManagedIdentityImds.",
+      );
+    }
+    resolvedMode = "WorkloadIdentity";
+  } else if (requestedMode === "auto") {
+    const ok = await tryPatternB();
+    if (ok) {
+      resolvedMode = "WorkloadIdentity";
+    } else {
+      await ensureResourceGroup(rg, region);
+      mi = await ensureControllerMi(rg, region, miName);
+      kvLine("Controller MI", chalk.dim(`${mi.clientId} (rg=${rg})`));
+      await ensureBlueprintMiAsFic(blueprint.id, realTenant, mi.principalId);
+      kvLine("MI-as-FIC", chalk.green("present"));
+      resolvedMode = "ManagedIdentityImds";
+    }
+  } else {
+    // requestedMode === "ManagedIdentityImds"
+    await ensureResourceGroup(rg, region);
+    mi = await ensureControllerMi(rg, region, miName);
+    kvLine("Controller MI", chalk.dim(`${mi.clientId} (rg=${rg})`));
+    await ensureBlueprintMiAsFic(blueprint.id, realTenant, mi.principalId);
+    kvLine("MI-as-FIC", chalk.green("present"));
+    resolvedMode = "ManagedIdentityImds";
+  }
 
   // Phase 5: KarsAuthConfig CR.
   // kubectl apply may fail if the CRD hasn't been installed yet
@@ -559,12 +802,13 @@ export async function ensureAgentIdTrust(
       tenantId: realTenant,
       blueprintClientId: blueprint.appId,
       blueprintObjectId: blueprint.id,
-      controllerMiClientId: mi.clientId,
-      controllerMiResourceId: mi.id,
-      controllerMiPrincipalId: mi.principalId,
+      controllerMiClientId: mi?.clientId,
+      controllerMiResourceId: mi?.id,
+      controllerMiPrincipalId: mi?.principalId,
+      credentialMode: resolvedMode,
       serviceTree,
     });
-    kvLine("KarsAuthConfig CR", chalk.green("applied"));
+    kvLine("KarsAuthConfig CR", chalk.green(`applied (mode=${resolvedMode})`));
   } catch (e) {
     const msg = (e as Error).message;
     if (msg.includes("no matches for kind")) {
@@ -581,9 +825,11 @@ export async function ensureAgentIdTrust(
     tenantId: realTenant,
     blueprintClientId: blueprint.appId,
     blueprintObjectId: blueprint.id,
-    controllerMiClientId: mi.clientId,
-    controllerMiResourceId: mi.id,
-    controllerMiPrincipalId: mi.principalId,
+    controllerMiClientId: mi?.clientId ?? "",
+    controllerMiResourceId: mi?.id ?? "",
+    controllerMiPrincipalId: mi?.principalId ?? "",
+    credentialMode: resolvedMode,
+    aksOidcIssuerUrl,
     freshlyCreated,
   };
 }
@@ -802,12 +1048,36 @@ export async function ensureAgentIdTrustAutoFallback(
       `    Falling back to Bicep ARM deployment — bypasses az CLI Graph CA.`,
     );
 
+    // The Bicep path doesn't have its own auto-mode (Bicep is
+    // declarative — it can't try a FIC and fall back). When the
+    // imperative path failed at the AADSTS530084 stage we don't yet
+    // know whether the tenant accepts AKS OIDC. Conservative choice:
+    // run Bicep in `ManagedIdentityImds` mode (the same mode that
+    // worked historically in CA-blocked tenants). Operators who want
+    // Pattern B via the Bicep path can re-run with
+    // `--credential-mode WorkloadIdentity` + `--aks-oidc-issuer-url`.
+    const explicitMode = opts.credentialMode;
+    const bicepMode: "ManagedIdentityImds" | "WorkloadIdentity" =
+      explicitMode === "WorkloadIdentity"
+        ? "WorkloadIdentity"
+        : "ManagedIdentityImds";
+    let aksOidcIssuerUrl: string | undefined;
+    if (bicepMode === "WorkloadIdentity") {
+      const aks = await discoverAksOidcIssuerUrl({
+        aksClusterName: opts.aksClusterName,
+        aksClusterResourceGroup: opts.aksClusterResourceGroup,
+      });
+      aksOidcIssuerUrl = aks?.issuerUrl;
+    }
+
     const { ensureAgentIdTrustViaBicep } = await import("./agent_id_setup_bicep.js");
     const bicepResult = await ensureAgentIdTrustViaBicep({
       clusterName: opts.clusterName,
       resourceGroup: opts.resourceGroup,
       region: opts.region ?? "eastus",
       serviceTree: opts.serviceTree,
+      credentialMode: bicepMode,
+      aksOidcIssuerUrl,
       dryRun: opts.dryRun,
     });
 
