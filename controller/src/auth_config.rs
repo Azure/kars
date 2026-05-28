@@ -123,6 +123,54 @@ pub struct KarsAuthConfigSpec {
     /// run the manual grants documented in the migration guide.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foundry_rbac: Vec<FoundryRbacAssignment>,
+
+    /// Mesh authentication backend (Phase 6 scaffold).
+    ///
+    /// Determines how the per-sandbox AGT mesh peer authenticates to
+    /// the relay/registry. Today only `Anonymous` is enforced
+    /// end-to-end; `EntraAgentIdentity` is scaffolded for the next
+    /// milestone (sandbox entrypoint + relay JWKS verification).
+    ///
+    /// Default: `Anonymous` — preserves backward compatibility.
+    /// Operators on clusters that have completed Phase 6 deployment
+    /// flip this to `EntraAgentIdentity` to require verified mesh peers.
+    ///
+    /// See `docs/architecture/entra-agent-id/06-mesh-trust-design.md`.
+    #[serde(default)]
+    pub mesh_auth_backend: MeshAuthBackend,
+
+    /// Token audience for AGT mesh peer authentication when
+    /// `meshAuthBackend == EntraAgentIdentity`. Defaults to
+    /// `api://agentmesh`; operators may override with a per-deployment
+    /// custom audience matching what their relay is configured to
+    /// verify.
+    ///
+    /// Ignored when `meshAuthBackend == Anonymous`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_auth_audience: Option<String>,
+}
+
+/// AGT mesh peer authentication backend.
+///
+/// Variant selection determines whether sandboxes register with the
+/// AGT relay anonymously (current behaviour) or with a verifiable
+/// per-agent-identity token (Phase 6 target).
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq, Default)]
+pub enum MeshAuthBackend {
+    /// Sandbox connects to the AGT relay without a token; trust
+    /// threshold is forced to 0. This is the only mode fully
+    /// implemented today.
+    #[default]
+    Anonymous,
+    /// Sandbox acquires an Entra-signed agent identity token via the
+    /// shared auth-sidecar and presents it on every relay connection.
+    /// Relay verifies the JWT against Entra's JWKS, extracts `appid`
+    /// as the peer DID, and assigns a trust tier from the custom
+    /// security attribute lookup table. Requires the sandbox image's
+    /// entrypoint mesh-token path AND a JWKS-verifying relay to be
+    /// deployed together — see
+    /// `docs/architecture/entra-agent-id/06-mesh-trust-design.md`.
+    EntraAgentIdentity,
 }
 
 /// One declarative role assignment to apply to every per-sandbox agent
@@ -396,3 +444,34 @@ pub struct KarsAuthConfigStatus {
 /// Conventional singleton name. The reconciler rejects CRs with any
 /// other name and surfaces a `NotDefault` condition.
 pub const DEFAULT_AUTH_CONFIG_NAME: &str = "default";
+
+#[cfg(test)]
+mod mesh_auth_backend_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_anonymous_for_backward_compat() {
+        assert_eq!(MeshAuthBackend::default(), MeshAuthBackend::Anonymous);
+    }
+
+    #[test]
+    fn deserialize_anonymous_round_trips() {
+        let json = r#""Anonymous""#;
+        let v: MeshAuthBackend = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(v, MeshAuthBackend::Anonymous);
+    }
+
+    #[test]
+    fn deserialize_entra_agent_identity_round_trips() {
+        let json = r#""EntraAgentIdentity""#;
+        let v: MeshAuthBackend = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(v, MeshAuthBackend::EntraAgentIdentity);
+    }
+
+    #[test]
+    fn deserialize_unknown_variant_is_rejected() {
+        let json = r#""FutureUnknownVariant""#;
+        let r: Result<MeshAuthBackend, _> = serde_json::from_str(json);
+        assert!(r.is_err(), "unknown variants must be rejected so the controller doesn't silently fall back");
+    }
+}

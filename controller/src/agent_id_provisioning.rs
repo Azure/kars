@@ -812,6 +812,8 @@ mod tests {
             },
             downstream_apis: Default::default(),
             foundry_rbac: vec![],
+            mesh_auth_backend: Default::default(),
+            mesh_auth_audience: None,
         };
         let c1 = cache.get_or_init(&spec, "cluster-1").await;
         let c2 = cache.get_or_init(&spec, "cluster-1").await;

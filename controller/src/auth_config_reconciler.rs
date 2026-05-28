@@ -509,6 +509,8 @@ mod tests {
             },
             downstream_apis: downstream,
             foundry_rbac: vec![],
+            mesh_auth_backend: Default::default(),
+            mesh_auth_audience: None,
         }
     }
 
