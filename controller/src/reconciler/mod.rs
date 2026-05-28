@@ -1590,22 +1590,34 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // ── Agent-Id mode: pin per-sandbox identity into router env ──
         //
         // When `agent_id_active` is `Some`, the controller has
-        // provisioned an Entra Agent Identity for this sandbox and the
-        // auth-sidecar will be appended below. The router consumes
-        // these two env vars to switch from the legacy IMDS+token-
-        // exchange path to the sidecar (`AUTH_SIDECAR_URL`) and pins
-        // the identity (`PINNED_AGENT_IDENTITY_APP_ID`) so it cannot
-        // be tampered with by inbound query-param manipulation.
+        // provisioned an Entra Agent Identity for this sandbox. The
+        // router consumes these two env vars to switch from the
+        // legacy IMDS+token-exchange path to the shared cluster
+        // auth-sidecar Service (`AUTH_SIDECAR_URL`) and pins the
+        // identity (`PINNED_AGENT_IDENTITY_APP_ID`) so it cannot be
+        // tampered with by inbound query-param manipulation.
         //
-        // The router's fail-closed contract (inference-router/src/
-        // sidecar_client.rs) ensures that when `AUTH_SIDECAR_URL` is
-        // set, ALL Foundry auth goes through the sidecar — no IMDS
-        // fallback — preserving the per-sandbox audit principal.
+        // The sidecar runs ONCE per cluster in `kars-system` as a
+        // Helm-deployed Deployment behind a ClusterIP Service +
+        // NetworkPolicy (only inference-router pods may ingress).
+        // The sidecar's `?AgentIdentity=<appId>` query parameter
+        // routes the token mint to the correct child agent identity,
+        // so the same sidecar serves all sandboxes in the cluster.
+        //
+        // The router's fail-closed contract
+        // (inference-router/src/sidecar_client.rs) ensures that when
+        // `AUTH_SIDECAR_URL` is set, ALL Foundry auth goes through
+        // the sidecar — no IMDS / WI fallback — preserving the
+        // per-sandbox audit principal.
         if let Some(ref agent_id) = agent_id_active {
-            router_env.push(crate::sidecar_injection::build_router_pinned_identity_env(
-                &agent_id.app_id,
-            ));
-            router_env.push(crate::sidecar_injection::build_router_sidecar_url_env());
+            router_env.push(json!({
+                "name": "PINNED_AGENT_IDENTITY_APP_ID",
+                "value": agent_id.app_id.clone(),
+            }));
+            router_env.push(json!({
+                "name": "AUTH_SIDECAR_URL",
+                "value": "http://entra-auth-sidecar.kars-system.svc:5000",
+            }));
         }
 
         // ── Agent container ──────────────────────────────────────────
@@ -1699,15 +1711,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             // container (UID 1000) to localhost + DNS only, with a transparent
             // forward proxy for HTTP/HTTPS egress enforcement and learn mode.
             //
-            // Script generation lives in `sidecar_injection::build_egress_guard_command`
-            // so the security-critical rule order is owned in a single
-            // testable place. `agent_id_mode` flips on additional REJECT
-            // rules that block UID 1000 → sidecar and UID 1001 → IMDS.
-            // We start in legacy mode here; the agent-id post-pass (below)
-            // rewrites this command to `agent_id_mode = true` when the
-            // sandbox is in AgentId mesh-auth mode and the controller has
-            // successfully provisioned a per-sandbox agent identity.
-            //
             // Filter chain (OUTPUT):
             //   UID 1000 → allow loopback, DNS, established → DROP everything else
             //
@@ -1725,10 +1728,26 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             //
             // The agent can only reach the inference-router on localhost:8443.
             // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
+            //
+            // Agent-id mode reuses the same baseline: cross-pod access to the
+            // shared `entra-auth-sidecar` Service in `kars-system` is gated
+            // by NetworkPolicy on the sidecar's namespace (ingress-only-from-
+            // inference-router-labeled-pods), so no extra in-pod iptables
+            // rule is needed to keep the agent code from reaching the
+            // sidecar.
             "initContainers": [{
                 "name": "egress-guard",
                 "image": &ctx.inference_router_image,
-                "command": ["sh", "-c", crate::sidecar_injection::build_egress_guard_command(agent_id_active.is_some())],
+                "command": ["sh", "-c", concat!(
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
+                    "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
+                    "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && ",
+                    "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && ",
+                    "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
+                )],
                 "securityContext": {
                     "runAsUser": 0,
                     "runAsNonRoot": false,
@@ -1802,47 +1821,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .insert("runtimeClassName".into(), json!(rc));
         }
 
-        // ── Append auth-sidecar container when agent-id mode is active ──
+        // ── Shared sidecar — NO per-pod injection ────────────────────
         //
-        // The sidecar is the only IMDS caller in the pod and the only
-        // process authorised to acquire downstream tokens. It listens
-        // on 127.0.0.1:8080 and is reachable ONLY by the inference-
-        // router (UID 1001); the egress-guard's `-I OUTPUT 1` rule
-        // (see `build_egress_guard_command(true)`) rejects connections
-        // from openclaw (UID 1000).
+        // The auth-sidecar runs ONCE per cluster in `kars-system`
+        // (Helm-deployed Deployment), not as a per-pod container.
+        // Cross-pod access is gated by a NetworkPolicy on the
+        // sidecar's namespace that allows ingress only from pods
+        // labeled `kars.azure.com/component=inference-router`. The
+        // per-sandbox identity attribution is enforced by the
+        // PINNED_AGENT_IDENTITY_APP_ID env var on the inference-
+        // router (set above) — the sidecar's
+        // `?AgentIdentity=<appId>` query parameter mints the token
+        // for that specific child agent identity.
         //
-        // The image is pinned to the GA Microsoft distroless build by
-        // default; operators can override via the (future) cluster
-        // config field. Pull policy matches the rest of the pod.
-        if agent_id_active.is_some() {
-            let sidecar_image_override = std::env::var("KARS_SIDECAR_IMAGE").ok();
-            let sidecar = crate::sidecar_injection::build_sidecar_container(
-                sidecar_image_override.as_deref(),
-                pull_policy,
-            );
-            if let Some(containers) = pod_spec
-                .get_mut("containers")
-                .and_then(|c| c.as_array_mut())
-            {
-                containers.push(sidecar);
-            } else {
-                tracing::error!(
-                    sandbox = %name,
-                    "pod_spec.containers is missing or not an array — cannot inject auth-sidecar"
-                );
-            }
-            // Append the sidecar's writable scratch volume for ASP.NET
-            // Data Protection keys. Without this, the .NET sidecar
-            // crashes at startup with `Access to /app/keys is denied`
-            // because the distroless image has /app owned by root and
-            // the sidecar runs as UID 1002.
-            if let Some(volumes) = pod_spec
-                .get_mut("volumes")
-                .and_then(|v| v.as_array_mut())
-            {
-                volumes.push(crate::sidecar_injection::build_sidecar_keys_volume());
-            }
-        }
+        // Resource savings: 10 sandboxes × 128MiB sidecar = 1.28GB
+        // saved vs the per-pod model. MSAL token cache is centralized
+        // in the single sidecar instance.
 
         // S7 wiring — mirror governance CRD ConfigMaps/Secrets from the
         // user namespace into the sandbox namespace, then inject mounts

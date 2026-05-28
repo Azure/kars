@@ -55,7 +55,6 @@ mod policy_canonical;
 mod policy_fetcher;
 mod providers;
 mod reconciler;
-mod sidecar_injection;
 mod signer_policy;
 mod status;
 #[allow(dead_code)] // helpers consumed by tool_policy_reconciler + future slices.

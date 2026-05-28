@@ -39,13 +39,9 @@
 //! `agent_identity_reaper` (separate module, follow-up PR) sweeps any
 //! truly-orphaned SPs whose owning sandbox is gone.
 
-use crate::agent_identity::{AgentIdentity, AgentIdentityClient, AgentIdentityConfig};
+use crate::agent_identity::{AgentIdentityClient, AgentIdentityConfig};
 use crate::auth_config::{DEFAULT_AUTH_CONFIG_NAME, KarsAuthConfig, KarsAuthConfigSpec};
-use crate::auth_config_reconciler::render_sidecar_env;
 use crate::crd::{AgentIdentityStatus, KarsSandbox, MeshAuthMode};
-use crate::sidecar_injection::SIDECAR_ENV_CONFIGMAP_NAME;
-use k8s_openapi::api::core::v1::ConfigMap;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{OwnerReference, ObjectMeta};
 use kube::{
     Client, ResourceExt,
     api::{Api, Patch, PatchParams},
@@ -314,12 +310,11 @@ pub async fn ensure_agent_identity_for_sandbox(
             display_name: recorded.display_name.clone(),
             created_at: recorded.created_at.clone(),
         };
-        if let Err(e) = materialise_sidecar_configmap(client, sandbox, &spec, &status).await {
-            return ProvisioningOutcome::Failed {
-                reason: format!("materialise sidecar ConfigMap: {e}"),
-                retry_after_secs: 30,
-            };
-        }
+        // No per-namespace ConfigMap mirror: the shared auth-sidecar
+        // in `kars-system` consumes a single cluster-level ConfigMap
+        // (managed by the auth_config_reconciler). Sandboxes carry
+        // their per-identity attribution via PINNED_AGENT_IDENTITY_APP_ID
+        // env on the inference-router.
         return ProvisioningOutcome::Ready {
             agent_identity: status,
             auth_spec: spec,
@@ -396,13 +391,8 @@ pub async fn ensure_agent_identity_for_sandbox(
         );
     }
 
-    // Step 5: materialise per-namespace sidecar env CM.
-    if let Err(e) = materialise_sidecar_configmap(client, sandbox, &spec, &status).await {
-        return ProvisioningOutcome::Failed {
-            reason: format!("materialise sidecar ConfigMap: {e}"),
-            retry_after_secs: 30,
-        };
-    }
+    // No per-namespace ConfigMap mirror in the shared-sidecar
+    // architecture — see the doc comment at the top of this module.
 
     ProvisioningOutcome::Ready {
         agent_identity: status,
@@ -410,85 +400,12 @@ pub async fn ensure_agent_identity_for_sandbox(
     }
 }
 
-/// Copy the sidecar env into the sandbox's namespace.
-///
-/// Required because `envFrom.configMapRef` cannot cross namespaces.
-/// The CR-level reconciler owns the `kars-system`-namespace copy as
-/// the source of truth; we replicate it per-sandbox so the sidecar
-/// container's `envFrom` works.
-///
-/// We deliberately do NOT set `ownerReferences` here: KarsSandbox is
-/// a namespace-scoped CR living in `kars-system`, while the sidecar
-/// CM lives in `kars-<sandbox>`. K8s OwnerReferences must be in the
-/// same namespace as the owned object (or cluster-scoped); a
-/// cross-namespace ref triggers `OwnerRefInvalidNamespace` and the
-/// kube-controller-manager garbage-collects the CM seconds after
-/// creation. Cleanup of the CM happens implicitly via namespace
-/// deletion: when the KarsSandbox is removed, the per-sandbox
-/// namespace `kars-<sandbox>` is deleted, and the CM goes with it.
-/// This matches the pattern used by the existing per-sandbox CMs
-/// (`*-blocklist`, `*-egress-allowlist`, `toolpolicy-*`).
-async fn materialise_sidecar_configmap(
-    client: &Client,
-    sandbox: &KarsSandbox,
-    spec: &KarsAuthConfigSpec,
-    _identity: &AgentIdentityStatus,
-) -> Result<(), String> {
-    let name = sandbox.name_any();
-    let sandbox_ns = format!("kars-{name}");
-    let env = render_sidecar_env(spec);
-    let env_count = env.len();
-
-    let mut labels: BTreeMap<String, String> = BTreeMap::new();
-    labels.insert("app.kubernetes.io/managed-by".into(), "kars".into());
-    labels.insert(
-        "app.kubernetes.io/component".into(),
-        "auth-sidecar-env".into(),
-    );
-    labels.insert("kars.azure.com/sandbox".into(), name.clone());
-
-    let mut annotations: BTreeMap<String, String> = BTreeMap::new();
-    annotations.insert(
-        "kars.azure.com/blueprint-client-id".into(),
-        spec.agent_id.blueprint_client_id.clone(),
-    );
-
-    let cm = ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(SIDECAR_ENV_CONFIGMAP_NAME.to_string()),
-            namespace: Some(sandbox_ns.clone()),
-            labels: Some(labels),
-            annotations: Some(annotations),
-            ..Default::default()
-        },
-        data: Some(env),
-        ..Default::default()
-    };
-
-    let api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
-    api.patch(
-        SIDECAR_ENV_CONFIGMAP_NAME,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(&cm),
-    )
-    .await
-    .map_err(|e| format!("apply ConfigMap {sandbox_ns}/{SIDECAR_ENV_CONFIGMAP_NAME}: {e}"))?;
-
-    tracing::debug!(
-        sandbox = %name,
-        ns = %sandbox_ns,
-        env_keys = env_count,
-        "materialised auth-sidecar env ConfigMap"
-    );
-    Ok(())
-}
-
-fn sandbox_owner_ref(_sandbox: &KarsSandbox) -> Option<OwnerReference> {
-    // Retained for future use; intentionally returns None for the
-    // sidecar-env ConfigMap path (see `materialise_sidecar_configmap`
-    // doc for why cross-namespace owner refs cannot be used).
-    None
-}
+/// (Removed) `materialise_sidecar_configmap` lived here in the
+/// per-pod-sidecar design — each sandbox got a copy of the shared
+/// auth-sidecar env in its own namespace. The shared-sidecar
+/// architecture (one Deployment in `kars-system`) makes that
+/// mirroring unnecessary: the sidecar consumes a single
+/// `kars-system`-scoped ConfigMap managed by `auth_config_reconciler`.
 
 async fn patch_sandbox_status(
     client: &Client,
