@@ -51,7 +51,8 @@ It is built for three audiences:
                     │  ┌────────────────────────────────────┐     │
                     │  │  Inference Router (Rust)           │     │
                     │  │                                    │     │
-                    │  │  Identity (Workload Identity)      │     │
+                    │  │  Identity (Entra Agent ID *or*     │     │
+                    │  │    cluster Workload Identity)      │     │
                     │  │  Content Safety (Foundry inline)   │     │
                     │  │  Token budget · rate limit         │     │
                     │  │  Tool policy · governance (AGT)    │     │
@@ -63,7 +64,8 @@ It is built for three audiences:
                     │       can only reach the router locally)     │
                     └────────────────────┼────────────────────────┘
                                          │
-                            Workload Identity (no keys)
+                       Per-sandbox Entra Agent ID (default)
+                       or shared Workload Identity (opt-out)
                                          │
                   ┌──────────────────────┼─────────────────────────┐
                   ▼                      ▼                         ▼
@@ -105,11 +107,11 @@ You write the same `KarsSandbox` YAML for both. The difference is where it runs 
 | Where | One Docker container on your laptop | An AKS cluster in your subscription |
 | Pod shape | **Single container** — agent + router co-located in one image | **Multi-container pod** — agent (UID 1000) + router (UID 1001) + init `egress-guard` |
 | Network isolation | Docker network, no egress guard | Router is the policy point; `NetworkPolicy` + `egress-guard` initContainer act as safety nets containing blast radius |
-| Identity | Provider credential — Copilot OAuth token, Foundry resource key, or GitHub PAT (mounted from a local secret) | Workload Identity (federated, no keys on disk) |
+| Identity | Provider credential — Copilot OAuth token, Foundry resource key, or GitHub PAT (mounted from a local secret) | **Per-sandbox Entra Agent ID** when `--mesh-trust=entra` (default `anonymous` uses the cluster's federated Workload Identity for Foundry); router never sees a long-lived key |
 | Optional VM isolation | n/a | Kata + AMD SEV-SNP (Confidential Containers) — requires a Kata-enabled node pool |
 | Use it for | Inner-loop dev, plugin authoring, demos | Real workloads, multi-tenant, production |
 
-There is also a third option for when Docker dev is too simple but AKS is too heavy: **`kars dev --target local-k8s`** runs a real Kubernetes cluster locally (kind) with the same Helm chart, the same controller, the same multi-container pod shape, and the same NetworkPolicies as AKS. The only differences from prod are static-key auth (no Workload Identity) and the absence of cloud node pools. See [Architecture → Local Kubernetes mode](docs/architecture.md#local-kubernetes-mode-kars-dev---target-local-k8s) and [Blueprint 02 — Local Kubernetes dev loop](docs/blueprints/02-local-k8s-dev-loop.md).
+There is also a third option for when Docker dev is too simple but AKS is too heavy: **`kars dev --target local-k8s`** runs a real Kubernetes cluster locally (kind) with the same Helm chart, the same controller, the same multi-container pod shape, and the same NetworkPolicies as AKS. The only differences from prod are static-key auth (no Workload Identity, no Entra Agent ID) and the absence of cloud node pools. See [Architecture → Local Kubernetes mode](docs/architecture.md#local-kubernetes-mode-kars-dev---target-local-k8s) and [Blueprint 02 — Local Kubernetes dev loop](docs/blueprints/02-local-k8s-dev-loop.md).
 
 Same CRDs. Same router code path. Same audit format. Same governance profiles. The graduation from `dev` to `up` is a one-line CLI change, not a port to a new system.
 
@@ -172,7 +174,21 @@ When you are ready for the real thing:
 kars up --name prod-agent --region swedencentral
 ```
 
-`kars up` provisions the AKS cluster, ACR, Foundry resource, Foundry-side Content Safety, controller, A2A gateway, Microsoft AGT AgentMesh relay+registry, and your first sandbox — Workload Identity wired end-to-end. The same command auto-provisions a **per-sandbox Microsoft Entra Agent ID** (one identity per `KarsSandbox`, including spawned sub-agents) when the signed-in user holds the `Agent ID Developer` role — see **[`docs/agent-identity.md`](docs/agent-identity.md)**. See **[`docs/getting-started.md`](docs/getting-started.md)** for the full walkthrough including how to bring your own AKS / Foundry / ACR.
+`kars up` provisions the AKS cluster, ACR, Foundry resource, Foundry-side Content Safety, controller, A2A gateway, Microsoft AGT AgentMesh relay+registry, and your first sandbox. Identity is gated by **one operator flag**:
+
+```bash
+# Default — anonymous mesh tier, shared cluster Workload Identity for Foundry.
+# Zero Entra prerequisites. Suitable for single-tenant clusters and demos.
+kars up --name prod-agent --region swedencentral
+
+# Verified mesh tier — per-sandbox Microsoft Entra Agent ID.
+# Each KarsSandbox (incl. spawned sub-agents) gets its own typed Entra
+# agentIdentity SP + Foundry RBAC scoped to that SP + federated credential.
+# Requires the Agent ID Developer directory role on the signed-in user.
+kars up --name prod-agent --region swedencentral --mesh-trust=entra
+```
+
+`--mesh-trust=entra` activates the full **per-sandbox Microsoft Entra Agent ID** chain (Phase 5b/6.c): the controller provisions a typed `microsoft.graph.agentIdentity` SP per sandbox, assigns Foundry RBAC to that SP, wires a federated credential, and configures the AGT mesh relay+registry to verify peer JWTs against Entra's JWKS. The default `anonymous` skips Entra entirely and uses the cluster's federated Workload Identity for Foundry — same security model as v0.0.x. See **[`docs/agent-identity.md`](docs/agent-identity.md)** and **[`docs/architecture/entra-agent-id/`](docs/architecture/entra-agent-id/)** for the full chain. See **[`docs/getting-started.md`](docs/getting-started.md)** for the full walkthrough including how to bring your own AKS / Foundry / ACR.
 
 ---
 
@@ -256,7 +272,7 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 
 We would rather you find these in this list than in production. None of them block the core promise (one router, one audit chain, one CRD shape across runtimes), but they shape how you should run the rc:
 
-- **Mesh trust tiers default to anonymous.** Sub-agents register with the AgentMesh registry as the *anonymous* tier unless the tenant administrator provisions an Entra app registration with `api://agentmesh` as an identifier URI. The router fails open: failed token-exchange logs `registering as anonymous tier` and the agent continues to function — KNOCK gating still happens, just against trust-score `0`. Resolution is one CLI command (`kars mesh setup-trust`, idempotent, needs tenant admin); see **[`docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite`](docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite)** for the details.
+- **Mesh trust tiers default to anonymous.** Sub-agents register with the AgentMesh registry as the *anonymous* tier unless the operator passes `--mesh-trust=entra` to `kars up` AND holds the `Agent ID Developer` Entra directory role. Under the default, the relay accepts every peer at trust score `0`; KNOCK gating still happens but score-based admission is moot. Verified-tier registration (per-sandbox Entra Agent ID JWTs verified by the AGT relay against tenant JWKS) is fully wired in this repo; the AGT-side relay+registry patches are tracked upstream in [microsoft/agent-governance-toolkit#2659](https://github.com/microsoft/agent-governance-toolkit/pull/2659). One CLI flag (`--mesh-trust=entra`) is the whole opt-in; see **[`docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite`](docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite)** for the failure modes when the role / upstream patches are missing.
 - **Multi-runtime images are not yet published to a public registry.** OpenClaw runs out of the box; the other six wired runtimes (OpenAI Agents SDK, Microsoft Agent Framework Python, LangGraph, LangGraph.js, Anthropic, Pydantic-AI) currently require `kars push --build` against your own ACR before `kars add --runtime <kind>` will succeed. The build pipeline is in tree (`sandbox-images/<kind>/Dockerfile`); the public distribution is what's pending.
 - **Semantic Kernel and MAF .NET runtimes are CRD-wired but adapter-incomplete.** The CRD enum accepts the values, the controller emits a `ShapeInvalid` condition, the agent does not start. Treat them as future work, not silent breakage.
 - **Attestation is router-and-audit only.** We sign and hash-chain audit entries; we do not yet emit cosign-signed runtime receipts (`attest sign`/`attest verify` are scaffolded — see `docs/roadmap.md`).

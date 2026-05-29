@@ -14,7 +14,7 @@ not a cluster-wide shared identity. That means:
   files on disk. The entire chain is federated through Microsoft
   Entra; tokens are minted on demand and never persisted.
 - **Sub-agents get their own identity automatically.** A parent agent
-  that spawns a sub-agent (via `azureclaw spawn` or AGT mesh) yields a
+  that spawns a sub-agent (via `kars_spawn` or AGT mesh) yields a
   new `KarsSandbox` Custom Resource, which the controller reconciles
   into a new agent identity. Same reconcile path for every sandbox —
   there is no special-case code.
@@ -34,13 +34,16 @@ token-acquisition mechanics, see
 | **`Agent ID Developer`** | Entra directory (tenant) | Create the blueprint + per-sandbox agent identities |
 
 The first two are the standard `kars up` baseline. The third is what
-**unlocks per-sandbox identity**; without it `kars up` still succeeds
-but the cluster runs in AGT anonymous tier. Activate `Agent ID
-Developer` via PIM at <https://portal.azure.com> → Privileged Identity
-Management → My roles → Microsoft Entra roles.
+**unlocks per-sandbox identity** when you opt in with
+`--mesh-trust=entra`. Without the flag, `kars up` runs in anonymous
+mode (shared cluster Workload Identity for Foundry, anonymous AGT
+mesh tier) and the role check is skipped. With the flag and without
+the role, `kars up` fails preflight with a clear error. Activate
+`Agent ID Developer` via PIM at <https://portal.azure.com> →
+Privileged Identity Management → My roles → Microsoft Entra roles.
 
-`kars up` runs a preflight check and warns clearly if the role is
-missing — you don't have to remember.
+`kars up --mesh-trust=entra` runs a preflight check and warns
+clearly if the role is missing — you don't have to remember.
 
 ---
 
@@ -50,14 +53,17 @@ missing — you don't have to remember.
 # Sign in once.
 az login --tenant <your-tenant>
 
-# Deploy.
+# Deploy with per-sandbox Entra Agent ID (opt in via --mesh-trust=entra).
+kars up --name prod-agent --location swedencentral --mesh-trust=entra
+
+# Anonymous mode (default) — shared cluster MI, no Entra prerequisites.
 kars up --name prod-agent --location swedencentral
 
 # Microsoft-corp users (and any tenant that requires ServiceTree):
-kars up --name prod-agent --location swedencentral --service-tree <guid>
+kars up --name prod-agent --location swedencentral --mesh-trust=entra --service-tree <guid>
 # or
 export KARS_SERVICE_TREE=<guid>
-kars up --name prod-agent --location swedencentral
+kars up --name prod-agent --location swedencentral --mesh-trust=entra
 ```
 
 `kars up` is idempotent. Re-running on the same cluster is safe.
@@ -138,7 +144,7 @@ Foundry / Graph call attributed to the agent appears here.
 
 ## Spawning sub-agents
 
-When a kars agent spawns another (`azureclaw spawn` or AGT
+When a kars agent spawns another (`kars_spawn` or AGT
 `mesh_send`), the spawned sandbox is a separate `KarsSandbox` CR with
 its own name. The controller reconciles it like any other: a new agent
 identity is created, the sidecar is wired up, RBAC is assigned

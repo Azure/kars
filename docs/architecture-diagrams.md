@@ -35,7 +35,10 @@ flowchart TB
 
 ## 2. Sandbox pod — prod mode
 
-Multi-container Kubernetes pod, hard egress isolation, Workload Identity.
+Multi-container Kubernetes pod, hard egress isolation. Identity is
+either AKS Workload Identity (anonymous mesh tier, default) or a
+per-sandbox Microsoft Entra Agent ID minted through the shared
+`entra-auth-sidecar` (verified mesh tier, `kars up --mesh-trust=entra`).
 
 ```mermaid
 flowchart TB
@@ -52,17 +55,24 @@ flowchart TB
     NP -.- Pod
     SA["projected SA token"]
     SA -.-> Router
+    subgraph SysNs["kars-system (shared)"]
+      Sidecar["entra-auth-sidecar<br/>(2× HA Deployment)<br/>only present when<br/>--mesh-trust=entra"]
+    end
   end
 
-  WI["Workload Identity<br/>(AAD federated token)"]
+  WI["AKS Workload Identity<br/>(AAD federated)"]
+  EntraID["Microsoft Entra ID<br/>blueprint + per-sandbox<br/>agentIdentity SP"]
   Foundry["Azure AI Foundry"]
   Mesh["AgentMesh relay+registry<br/>(another namespace)"]
   A2A["A2A gateway<br/>(public ingress)"]
 
-  Router -->|exchange SA→AAD| WI
+  Router -.->|"anonymous mode:<br/>exchange SA→AAD"| WI
+  Router -->|"entra mode:<br/>?AgentIdentity=&lt;sandbox appId&gt;"| Sidecar
+  Sidecar -->|"mints per-sandbox<br/>Entra Agent ID token"| EntraID
   WI -.->|no keys on disk| Router
+  Sidecar -.->|bearer token<br/>tid+aud+exp pinned| Router
   Router -->|HTTPS, AAD token| Foundry
-  Router -->|"WS, opaque ciphertext (agent-sourced)"| Mesh
+  Router -->|"WS, opaque ciphertext (agent-sourced)<br/>(connect frame carries Entra JWT<br/>when --mesh-trust=entra)"| Mesh
   Router -->|HTTPS| A2A
 
   classDef cluster fill:#e6f0ff,stroke:#0078d4
@@ -71,7 +81,18 @@ flowchart TB
   class Pod pod
 ```
 
-**Three containers, one rule:** the agent container has no path to the network. Anything labelled `Foundry` / `Mesh` / `A2A` above leaves through the router. iptables (egress-guard) and NetworkPolicy enforce this in two independent layers.
+**Three containers, one rule:** the agent container has no path to
+the network. Anything labelled `Foundry` / `Mesh` / `A2A` above
+leaves through the router. iptables (egress-guard) and NetworkPolicy
+enforce this in two independent layers.
+
+**Two identity modes, one fail-closed contract:** when
+`AUTH_SIDECAR_URL` is set on the router (Entra mode), there is **no
+fallback** to AKS Workload Identity / IMDS / API key. Sidecar
+unreachable → 503, sandbox stays unverified. Anonymous mode skips
+the sidecar entirely and uses the cluster's shared Workload Identity
+for Foundry. See [`docs/architecture/entra-agent-id/`](architecture/entra-agent-id/)
+for the full chain.
 
 ---
 
@@ -85,7 +106,7 @@ sequenceDiagram
   participant Agent as Agent (UID 1000)
   participant Router as Router (UID 1001)
   participant Gov as Governance (AGT + InferencePolicy)
-  participant WI as Workload Identity
+  participant WI as Identity layer<br/>(WI or Entra Agent ID sidecar)
   participant Foundry as Foundry model<br/>(+ inline Content Safety)
 
   Agent->>Router: POST /v1/chat (prompt)
@@ -212,7 +233,7 @@ flowchart LR
   Ctrl --> Svc["Service"]
   Ctrl --> NP["NetworkPolicy"]
   Ctrl --> CM["ConfigMap<br/>(governance profile)"]
-  Ctrl --> FedCred["Federated credentials<br/>(Workload Identity)"]
+  Ctrl --> FedCred["Federated credentials<br/>(Workload Identity +<br/>per-sandbox Entra Agent ID<br/>when --mesh-trust=entra)"]
   Ctrl --> Status["CRD status<br/>conditions"]
 
   Status --> User
@@ -264,7 +285,7 @@ flowchart TB
     ACR["ACR<br/>(your private registry)"]
     Foundry["Azure AI Foundry<br/>+ Content Safety"]
     KV["Key Vault<br/>(optional)"]
-    subgraph AKS["AKS cluster (Workload Identity + OIDC issuer)"]
+    subgraph AKS["AKS cluster (Workload Identity + OIDC issuer; per-sandbox Entra Agent ID when --mesh-trust=entra)"]
       subgraph Sys["kars-system"]
         CtrlPod["controller"]
         GwPod["a2a-gateway"]

@@ -68,7 +68,9 @@ This mode runs the same controller reconciliation loop and the same router data 
   - `agent` — the runtime, **UID 1000**, no direct egress.
   - `inference-router` — the Rust router, **UID 1001**. The HTTP listener binds `0.0.0.0:8443` and the forward proxy binds `0.0.0.0:8444`; the egress-guard iptables rules + the NetworkPolicy together pin the only reachable peer for UID 1000 to those two ports on loopback. This is where egress, governance, content-safety, token-budget, and audit are actually enforced.
 - **Isolation:** The router enforces the egress allowlist on every outbound request. A Kubernetes NetworkPolicy on the namespace is generated as a **safety net** that limits blast radius if the router process is bypassed or compromised; it pins egress to DNS, Foundry, the AgentMesh relay, and the A2A gateway. Optionally Kata + AMD SEV-SNP for hardware-enforced isolation.
-- **Identity:** Workload Identity. The router exchanges the projected service-account token for a federated AAD token. No keys on disk.
+- **Identity:** Two modes, gated by `kars up --mesh-trust=anonymous|entra` (default `anonymous`).
+  - **Anonymous mode** — the cluster's federated AKS Workload Identity is the calling principal for every sandbox's Foundry traffic. The router exchanges the projected service-account token for an AAD token; no keys on disk. AGT mesh registration is anonymous tier (score 0). Suitable for single-tenant clusters and demos.
+  - **Entra mode** (`--mesh-trust=entra`) — each `KarsSandbox` gets a typed Microsoft Entra Agent ID (a `microsoft.graph.agentIdentity` SP derived from a tenant-wide blueprint), with Foundry RBAC scoped to that SP, a federated credential trusting the sandbox's K8s service account, and per-sandbox Entra-signed JWTs for AGT mesh verified-tier registration. One identity across the data plane (Foundry) and the mesh plane (AGT relay/registry). See [`docs/architecture/entra-agent-id/`](architecture/entra-agent-id/).
 - **What it is for:** real workloads, multi-tenant fleets, anything that touches customer data.
 
 Whichever mode you run in, the CRDs are the same, the audit chain is the same, and the policy profiles are the same. The dev → prod jump is one CLI command, not a re-architecture.
@@ -86,7 +88,7 @@ sequenceDiagram
   participant Router as Router (UID 1001)
   participant Gov as Governance<br/>(InferencePolicy + AGT)
   participant Budget as Token budget
-  participant WI as Workload Identity<br/>(IMDS / federated)
+  participant WI as Identity layer<br/>(Workload Identity or<br/>Entra Agent ID sidecar)
   participant Model as Inference backend<br/>(Copilot · Foundry · GitHub Models · ...)
 
   Agent->>Router: POST /v1/chat (prompt)
@@ -133,7 +135,7 @@ In prose:
 3. It checks the **token budget** for the tenant. Over → 429.
 4. It branches by provider (read from `~/.kars/config.json` → `provider`):
    - **GitHub Copilot** (default for `kars dev`, full Copilot model catalogue: Claude Opus / Sonnet, GPT-5 / 4.1, Gemini, o-series): the router exchanges the GitHub OAuth token for a short-lived **Copilot JWT** at `https://api.github.com/copilot_internal/v2/token` and proactively refreshes it. Outbound requests carry the static headers Copilot's ingress requires (`Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id`). For Claude models the router routes natively to `/v1/messages` (Anthropic shape passthrough — no lossy OpenAI-to-Anthropic rewrite, full tool-calling fidelity). For all other models the standard `/chat/completions` path is used. Copilot doesn't return `prompt_filter_results` either, so inline Content Safety isn't enforced — same caveat as GitHub Models.
-   - **Foundry / Azure OpenAI** (full feature set, default for AKS): mints a **Workload Identity** AAD token (or uses a resource-level API key in dev), forwards to Foundry. **Content Safety is enforced by Foundry's DefaultV2 guardrails inline** — the router does not make a separate Content Safety call. The Foundry response carries `prompt_filter_results` annotations; the router parses them and reports flags to AGT's `BehaviorMonitor`.
+   - **Foundry / Azure OpenAI** (full feature set, default for AKS): mints an **AAD token** — either the cluster's Workload Identity (anonymous mode) or a **per-sandbox Entra Agent ID** token via the shared `entra-auth-sidecar` (Entra mode, `kars up --mesh-trust=entra`). Same fail-closed token-acquisition contract either way: when `AUTH_SIDECAR_URL` is set the router refuses to fall back to WI/IMDS/API-key. **Content Safety is enforced by Foundry's DefaultV2 guardrails inline** — the router does not make a separate Content Safety call. The Foundry response carries `prompt_filter_results` annotations; the router parses them and reports flags to AGT's `BehaviorMonitor`.
    - **GitHub Models** (dev mode, free tier): forwards `Authorization: Bearer <PAT>` directly to `https://models.github.ai/inference`. GitHub Models doesn't return `prompt_filter_results`, so inline Content Safety isn't enforced — see [security.md → What we do *not* defend against](security.md#what-we-do-not-defend-against). Foundry-only routes (Memory Store, agents, evaluations, indexes) return clean 501.
 5. The router appends an **audit record** — prompt-fingerprint, model, tokens-in / tokens-out, decision, latency — hash-chained to the previous record so tampering is detectable.
 6. The router returns to the agent.
