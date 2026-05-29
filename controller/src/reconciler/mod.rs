@@ -1202,7 +1202,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         crate::auth_config::MeshAuthBackend,
         Option<String>,
     )> = match &agent_id_outcome {
-        crate::agent_id_provisioning::ProvisioningOutcome::Ready { agent_identity, auth_spec } => {
+        crate::agent_id_provisioning::ProvisioningOutcome::Ready {
+            agent_identity,
+            auth_spec,
+        } => {
             tracing::info!(
                 sandbox = %name,
                 app_id = %agent_identity.app_id,
@@ -1223,7 +1226,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             );
             None
         }
-        crate::agent_id_provisioning::ProvisioningOutcome::Failed { reason, retry_after_secs } => {
+        crate::agent_id_provisioning::ProvisioningOutcome::Failed {
+            reason,
+            retry_after_secs,
+        } => {
             tracing::warn!(
                 sandbox = %name,
                 error = %reason,
@@ -1399,7 +1405,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // never sees the toggle and falls back to anonymous-tier
         // even when the operator has flipped KAC.meshAuthBackend.
         if let Some((_, _, mesh_backend, mesh_audience)) = agent_id_active.as_ref()
-            && matches!(mesh_backend, crate::auth_config::MeshAuthBackend::EntraAgentIdentity)
+            && matches!(
+                mesh_backend,
+                crate::auth_config::MeshAuthBackend::EntraAgentIdentity
+            )
         {
             openclaw_env.push(json!({
                 "name": "MESH_AUTH_BACKEND",
@@ -1724,7 +1733,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             // — the route returns 404 and the entrypoint falls
             // through to its existing logic. See
             // docs/architecture/entra-agent-id/06-mesh-trust-design.md.
-            if matches!(mesh_backend, crate::auth_config::MeshAuthBackend::EntraAgentIdentity) {
+            if matches!(
+                mesh_backend,
+                crate::auth_config::MeshAuthBackend::EntraAgentIdentity
+            ) {
                 router_env.push(json!({
                     "name": "MESH_AUTH_BACKEND",
                     "value": "EntraAgentIdentity",

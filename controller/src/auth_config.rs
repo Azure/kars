@@ -472,6 +472,9 @@ mod mesh_auth_backend_tests {
     fn deserialize_unknown_variant_is_rejected() {
         let json = r#""FutureUnknownVariant""#;
         let r: Result<MeshAuthBackend, _> = serde_json::from_str(json);
-        assert!(r.is_err(), "unknown variants must be rejected so the controller doesn't silently fall back");
+        assert!(
+            r.is_err(),
+            "unknown variants must be rejected so the controller doesn't silently fall back"
+        );
     }
 }

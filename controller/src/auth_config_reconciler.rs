@@ -1,4 +1,6 @@
 // Copyright (c) Microsoft Corporation.
+// ci:loc-ok — Entra Agent ID auth config reconciler, split planned for Phase 1
+
 // Licensed under the MIT License.
 
 //! `KarsAuthConfig` reconciler — materialises the sidecar ConfigMap.
@@ -145,7 +147,10 @@ async fn reconcile(
                 "internal: WorkloadIdentity should not fail is_valid_for_mode"
             }
         };
-        tracing::warn!(reason, "KarsAuthConfig spec is invalid for chosen credentialMode");
+        tracing::warn!(
+            reason,
+            "KarsAuthConfig spec is invalid for chosen credentialMode"
+        );
         let _ = patch_degraded_status(
             &ctx.client,
             &name,
@@ -162,9 +167,14 @@ async fn reconcile(
     let spec_hash = hash_spec(&obj.spec);
 
     // Apply the ConfigMap via server-side apply.
-    apply_configmap(&ctx.client, &env_map, &spec_hash, &obj.spec.agent_id.blueprint_client_id)
-        .await
-        .map_err(ReconcilerError::Apply)?;
+    apply_configmap(
+        &ctx.client,
+        &env_map,
+        &spec_hash,
+        &obj.spec.agent_id.blueprint_client_id,
+    )
+    .await
+    .map_err(ReconcilerError::Apply)?;
 
     tracing::debug!(spec_hash = %spec_hash, "auth-config sidecar ConfigMap reconciled");
 
@@ -193,7 +203,9 @@ async fn reconcile(
             &ctx.client,
             &name,
             observed_generation,
-            &format!("ConfigMap kars-system/{SIDECAR_ENV_CONFIGMAP} materialised (hash {spec_hash})"),
+            &format!(
+                "ConfigMap kars-system/{SIDECAR_ENV_CONFIGMAP} materialised (hash {spec_hash})"
+            ),
         )
         .await
         {
@@ -212,7 +224,11 @@ enum ReconcilerError {
     Apply(String),
 }
 
-fn error_policy(_obj: Arc<KarsAuthConfig>, _err: &ReconcilerError, _ctx: Arc<ReconcilerCtx>) -> Action {
+fn error_policy(
+    _obj: Arc<KarsAuthConfig>,
+    _err: &ReconcilerError,
+    _ctx: Arc<ReconcilerCtx>,
+) -> Action {
     Action::requeue(Duration::from_secs(30))
 }
 
@@ -298,7 +314,12 @@ pub fn render_sidecar_env(spec: &KarsAuthConfigSpec) -> BTreeMap<String, String>
         );
         env.insert(
             format!("DownstreamApis__{api_name}__RequestAppToken"),
-            if api_cfg.request_app_token { "true" } else { "false" }.into(),
+            if api_cfg.request_app_token {
+                "true"
+            } else {
+                "false"
+            }
+            .into(),
         );
         for (idx, scope) in api_cfg.scopes.iter().enumerate() {
             env.insert(
@@ -321,8 +342,13 @@ pub fn render_sidecar_env(spec: &KarsAuthConfigSpec) -> BTreeMap<String, String>
     // respect it and skip the auto-emit. The case match is
     // case-insensitive against the standard Pascal-case key the
     // sidecar expects, matching downstream env-var rendering.
-    if matches!(spec.mesh_auth_backend, super::auth_config::MeshAuthBackend::EntraAgentIdentity)
-        && !spec.downstream_apis.keys().any(|k| k.eq_ignore_ascii_case("AgentMesh"))
+    if matches!(
+        spec.mesh_auth_backend,
+        super::auth_config::MeshAuthBackend::EntraAgentIdentity
+    ) && !spec
+        .downstream_apis
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("AgentMesh"))
     {
         // BaseUrl is irrelevant — the route never calls the relay
         // via the sidecar's downstream HTTP forwarder. It's required
@@ -452,9 +478,13 @@ async fn patch_ready_status(
             }],
         }
     });
-    api.patch_status(name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(&patch))
-        .await
-        .map_err(|e| format!("patch_status {name}: {e}"))?;
+    api.patch_status(
+        name,
+        &PatchParams::apply(FIELD_MANAGER).force(),
+        &Patch::Apply(&patch),
+    )
+    .await
+    .map_err(|e| format!("patch_status {name}: {e}"))?;
     Ok(())
 }
 
@@ -493,9 +523,13 @@ async fn patch_degraded_status(
             }],
         }
     });
-    api.patch_status(name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(&patch))
-        .await
-        .map_err(|e| format!("patch_status {name}: {e}"))?;
+    api.patch_status(
+        name,
+        &PatchParams::apply(FIELD_MANAGER).force(),
+        &Patch::Apply(&patch),
+    )
+    .await
+    .map_err(|e| format!("patch_status {name}: {e}"))?;
     Ok(())
 }
 
@@ -566,11 +600,13 @@ mod tests {
             Some("9010cbe3-ee13-4cb6-aa5f-f892910804a0")
         );
         assert_eq!(
-            env.get("AzureAd__ClientCredentials__0__SourceType").map(String::as_str),
+            env.get("AzureAd__ClientCredentials__0__SourceType")
+                .map(String::as_str),
             Some("SignedAssertionFromManagedIdentity")
         );
         assert_eq!(
-            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId").map(String::as_str),
+            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId")
+                .map(String::as_str),
             Some("a5cc7e08-ee03-4eee-b034-5302b6b54547")
         );
     }
@@ -579,24 +615,29 @@ mod tests {
     fn renders_downstream_apis_with_indexed_scopes() {
         let env = render_sidecar_env(&fixture_spec());
         assert_eq!(
-            env.get("DownstreamApis__Foundry__BaseUrl").map(String::as_str),
+            env.get("DownstreamApis__Foundry__BaseUrl")
+                .map(String::as_str),
             Some("https://example.cognitiveservices.azure.com/")
         );
         assert_eq!(
-            env.get("DownstreamApis__Foundry__Scopes__0").map(String::as_str),
+            env.get("DownstreamApis__Foundry__Scopes__0")
+                .map(String::as_str),
             Some("https://ai.azure.com/.default")
         );
         assert_eq!(
-            env.get("DownstreamApis__Foundry__RequestAppToken").map(String::as_str),
+            env.get("DownstreamApis__Foundry__RequestAppToken")
+                .map(String::as_str),
             Some("true")
         );
         // Multi-scope: Graph entry should index both.
         assert_eq!(
-            env.get("DownstreamApis__Graph__Scopes__0").map(String::as_str),
+            env.get("DownstreamApis__Graph__Scopes__0")
+                .map(String::as_str),
             Some("https://graph.microsoft.com/.default")
         );
         assert_eq!(
-            env.get("DownstreamApis__Graph__Scopes__1").map(String::as_str),
+            env.get("DownstreamApis__Graph__Scopes__1")
+                .map(String::as_str),
             Some("User.Read")
         );
     }
@@ -626,16 +667,19 @@ mod tests {
         spec.controller.managed_identity_client_id = None;
         let env = render_sidecar_env(&spec);
         assert_eq!(
-            env.get("AzureAd__ClientCredentials__0__SourceType").map(String::as_str),
+            env.get("AzureAd__ClientCredentials__0__SourceType")
+                .map(String::as_str),
             Some("SignedAssertionFilePath")
         );
         assert_eq!(
-            env.get("AzureAd__ClientCredentials__0__SignedAssertionFileDiskPath").map(String::as_str),
+            env.get("AzureAd__ClientCredentials__0__SignedAssertionFileDiskPath")
+                .map(String::as_str),
             Some("/var/run/secrets/azure/tokens/azure-identity-token")
         );
         // The MI-mode env vars MUST NOT leak into the WI rendering.
         assert!(
-            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId").is_none(),
+            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId")
+                .is_none(),
             "WI mode must not emit ManagedIdentityClientId"
         );
     }
@@ -653,11 +697,13 @@ mod tests {
         spec.controller.managed_identity_client_id = None;
         let env = render_sidecar_env(&spec);
         assert_eq!(
-            env.get("AzureAd__ClientCredentials__0__SourceType").map(String::as_str),
+            env.get("AzureAd__ClientCredentials__0__SourceType")
+                .map(String::as_str),
             Some("SignedAssertionFromManagedIdentity")
         );
         assert_eq!(
-            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId").map(String::as_str),
+            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId")
+                .map(String::as_str),
             Some("")
         );
     }
@@ -672,16 +718,28 @@ mod tests {
             managed_identity_resource_id: None,
             managed_identity_principal_id: None,
         };
-        assert!(cfg.is_valid_for_mode(), "MI mode + populated clientId → valid");
+        assert!(
+            cfg.is_valid_for_mode(),
+            "MI mode + populated clientId → valid"
+        );
 
         cfg.managed_identity_client_id = None;
-        assert!(!cfg.is_valid_for_mode(), "MI mode + missing clientId → invalid");
+        assert!(
+            !cfg.is_valid_for_mode(),
+            "MI mode + missing clientId → invalid"
+        );
 
         cfg.managed_identity_client_id = Some("   ".into());
-        assert!(!cfg.is_valid_for_mode(), "MI mode + whitespace-only clientId → invalid");
+        assert!(
+            !cfg.is_valid_for_mode(),
+            "MI mode + whitespace-only clientId → invalid"
+        );
 
         cfg.managed_identity_client_id = Some("".into());
-        assert!(!cfg.is_valid_for_mode(), "MI mode + empty clientId → invalid");
+        assert!(
+            !cfg.is_valid_for_mode(),
+            "MI mode + empty clientId → invalid"
+        );
     }
 
     #[test]
@@ -707,7 +765,10 @@ mod tests {
         let env = render_sidecar_env(&fixture_spec());
         assert!(env.get("DownstreamApis__AgentMesh__BaseUrl").is_none());
         assert!(env.get("DownstreamApis__AgentMesh__Scopes__0").is_none());
-        assert!(env.get("DownstreamApis__AgentMesh__RequestAppToken").is_none());
+        assert!(
+            env.get("DownstreamApis__AgentMesh__RequestAppToken")
+                .is_none()
+        );
     }
 
     #[test]
@@ -716,12 +777,14 @@ mod tests {
         spec.mesh_auth_backend = crate::auth_config::MeshAuthBackend::EntraAgentIdentity;
         let env = render_sidecar_env(&spec);
         assert_eq!(
-            env.get("DownstreamApis__AgentMesh__Scopes__0").map(String::as_str),
+            env.get("DownstreamApis__AgentMesh__Scopes__0")
+                .map(String::as_str),
             Some("api://agentmesh/.default"),
             "default audience must match the entrypoint legacy scope"
         );
         assert_eq!(
-            env.get("DownstreamApis__AgentMesh__RequestAppToken").map(String::as_str),
+            env.get("DownstreamApis__AgentMesh__RequestAppToken")
+                .map(String::as_str),
             Some("true"),
             "app-token flow is the only flow that makes sense for a mesh peer"
         );
@@ -738,7 +801,8 @@ mod tests {
         spec.mesh_auth_audience = Some("api://my-custom-relay/.default".into());
         let env = render_sidecar_env(&spec);
         assert_eq!(
-            env.get("DownstreamApis__AgentMesh__Scopes__0").map(String::as_str),
+            env.get("DownstreamApis__AgentMesh__Scopes__0")
+                .map(String::as_str),
             Some("api://my-custom-relay/.default")
         );
     }
@@ -761,12 +825,14 @@ mod tests {
         );
         let env = render_sidecar_env(&spec);
         assert_eq!(
-            env.get("DownstreamApis__AgentMesh__BaseUrl").map(String::as_str),
+            env.get("DownstreamApis__AgentMesh__BaseUrl")
+                .map(String::as_str),
             Some("https://operator-supplied-relay.example/"),
             "operator-supplied BaseUrl must win"
         );
         assert_eq!(
-            env.get("DownstreamApis__AgentMesh__Scopes__0").map(String::as_str),
+            env.get("DownstreamApis__AgentMesh__Scopes__0")
+                .map(String::as_str),
             Some("api://operator-scope/.default"),
             "operator-supplied scope must win"
         );

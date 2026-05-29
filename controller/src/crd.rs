@@ -212,10 +212,7 @@ pub struct MeshAuthConfig {
     /// ```
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub custom_security_attributes:
-        std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, serde_json::Value>,
-        >,
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 /// Mesh authentication mode discriminator. See

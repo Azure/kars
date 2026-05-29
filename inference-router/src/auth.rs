@@ -168,13 +168,16 @@ impl WorkloadIdentityAuth {
     /// of silently falling back to a different identity model.
     pub async fn get_mesh_token(&self) -> Result<String> {
         match self.sidecar.as_ref() {
-            Some(sc) => sc.get_token_for_service("AgentMesh").await.with_context(|| {
-                format!(
-                    "auth-sidecar mesh-token mint failed (pinned_agent_id={}); \
+            Some(sc) => sc
+                .get_token_for_service("AgentMesh")
+                .await
+                .with_context(|| {
+                    format!(
+                        "auth-sidecar mesh-token mint failed (pinned_agent_id={}); \
                      refusing to fall back",
-                    sc.pinned_agent_id()
-                )
-            }),
+                        sc.pinned_agent_id()
+                    )
+                }),
             None => Err(anyhow::anyhow!(
                 "mesh-token requested but sidecar mode is not active"
             )),

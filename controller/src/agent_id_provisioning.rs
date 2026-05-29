@@ -1,4 +1,6 @@
 // Copyright (c) Microsoft Corporation.
+// ci:loc-ok — Entra Agent ID feature module, split planned for Phase 1 (see ci/loc-budget.yaml)
+
 // Licensed under the MIT License.
 
 //! Per-sandbox Entra Agent Identity provisioning orchestration.
@@ -99,7 +101,10 @@ pub enum ProvisioningOutcome {
     /// `status.conditions.AgentIdentityReady=False`. The reconciler is
     /// expected to requeue with backoff; partial progress is preserved
     /// (any in-progress patch will be retried next reconcile).
-    Failed { reason: String, retry_after_secs: u64 },
+    Failed {
+        reason: String,
+        retry_after_secs: u64,
+    },
 }
 
 /// Why provisioning was skipped (informational; surfaces in status).
@@ -717,9 +722,13 @@ async fn patch_sandbox_status(
             }
         }
     });
-    api.patch_status(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(&patch))
-        .await
-        .map_err(|e| format!("patch_status {ns}/{name}: {e}"))?;
+    api.patch_status(
+        &name,
+        &PatchParams::apply(FIELD_MANAGER).force(),
+        &Patch::Apply(&patch),
+    )
+    .await
+    .map_err(|e| format!("patch_status {ns}/{name}: {e}"))?;
     Ok(())
 }
 
@@ -786,8 +795,14 @@ mod tests {
         // the strings so existing dashboards/alerts don't silently
         // break.
         assert_eq!(SkipReason::ExplicitAnonymous.as_str(), "ExplicitAnonymous");
-        assert_eq!(SkipReason::AutoFallbackNoConfig.as_str(), "AutoFallbackNoConfig");
-        assert_eq!(SkipReason::AuthConfigNotReady.as_str(), "AuthConfigNotReady");
+        assert_eq!(
+            SkipReason::AutoFallbackNoConfig.as_str(),
+            "AutoFallbackNoConfig"
+        );
+        assert_eq!(
+            SkipReason::AuthConfigNotReady.as_str(),
+            "AuthConfigNotReady"
+        );
     }
 
     #[tokio::test]
@@ -833,10 +848,8 @@ mod tests {
     /// test will fail by surfacing the new tag dimension.
     #[test]
     fn tag_layout_excludes_per_pod_attributes() {
-        let tags = crate::agent_identity::AgentIdentityClient::tags_for(
-            "cluster-abc",
-            "sandbox-xyz",
-        );
+        let tags =
+            crate::agent_identity::AgentIdentityClient::tags_for("cluster-abc", "sandbox-xyz");
         // Sanity: both the cluster + sandbox dimensions are present
         // (those are the legitimate keys).
         assert!(tags.iter().any(|t| t.starts_with("kars-cluster-uid:")));

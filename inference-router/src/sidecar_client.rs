@@ -1,4 +1,6 @@
 // Copyright (c) Microsoft Corporation.
+// ci:loc-ok — Entra Agent ID feature module, split planned for Phase 1 (see ci/loc-budget.yaml)
+
 // Licensed under the MIT License.
 
 //! HTTP client for the Microsoft Entra SDK auth sidecar.
@@ -290,8 +292,12 @@ impl SidecarClient {
         // sidecar returns one of the non-strict forms, and a
         // strict-only parser would silently disable agent-id auth
         // for the entire pod.
-        let (auth_header, expires_in_secs) = parse_sidecar_body(&body)
-            .with_context(|| format!("parse auth-sidecar response body: {}", &body[..body.len().min(200)]))?;
+        let (auth_header, expires_in_secs) = parse_sidecar_body(&body).with_context(|| {
+            format!(
+                "parse auth-sidecar response body: {}",
+                &body[..body.len().min(200)]
+            )
+        })?;
 
         let token = auth_header
             .strip_prefix("Bearer ")
@@ -381,9 +387,9 @@ impl SidecarClient {
     /// On success returns the max TTL (in seconds) the caller may
     /// cache this token for, capped by `exp - now - 60s` (60s skew).
     fn validate_token_claims(&self, token: &str, service: &str) -> Result<u64> {
-        let claims = decode_jwt_claims_unverified(token).with_context(|| {
-            "auth-sidecar returned a value that does not parse as a JWT — refusing"
-        })?;
+        let claims = decode_jwt_claims_unverified(token).with_context(
+            || "auth-sidecar returned a value that does not parse as a JWT — refusing",
+        )?;
 
         if let Some(expected) = self.expected_tenant_id.as_deref() {
             let actual = claims.tid.as_deref().unwrap_or("").trim();
@@ -577,8 +583,8 @@ fn decode_jwt_claims_unverified(token: &str) -> Result<JwtPayload> {
         .decode(payload_b64.as_bytes())
         .with_context(|| "base64url-decode JWT payload")?;
 
-    let claims: JwtPayload = serde_json::from_slice(&payload_bytes)
-        .with_context(|| "JSON-parse JWT payload claims")?;
+    let claims: JwtPayload =
+        serde_json::from_slice(&payload_bytes).with_context(|| "JSON-parse JWT payload claims")?;
     Ok(claims)
 }
 
@@ -684,12 +690,9 @@ fn parse_sidecar_body(body: &str) -> anyhow::Result<(String, Option<u64>)> {
 fn resource_to_service_name(resource: &str) -> Option<&'static str> {
     // Strip trailing slash and any `.default` scope suffix so callers
     // can pass either form.
-    let r = resource
-        .trim_end_matches('/')
-        .trim_end_matches("/.default");
+    let r = resource.trim_end_matches('/').trim_end_matches("/.default");
     // Match longest prefix first.
-    if r.starts_with("https://cognitiveservices.azure.com")
-        || r.starts_with("https://ai.azure.com")
+    if r.starts_with("https://cognitiveservices.azure.com") || r.starts_with("https://ai.azure.com")
     {
         Some("Foundry")
     } else if r.starts_with("https://graph.microsoft.com") {
@@ -786,18 +789,16 @@ mod tests {
 
     #[test]
     fn parse_sidecar_body_handles_documented_json_shape() {
-        let (h, ttl) = parse_sidecar_body(
-            r#"{"AuthorizationHeader": "Bearer abc", "ExpiresIn": 3600}"#,
-        )
-        .unwrap();
+        let (h, ttl) =
+            parse_sidecar_body(r#"{"AuthorizationHeader": "Bearer abc", "ExpiresIn": 3600}"#)
+                .unwrap();
         assert_eq!(h, "Bearer abc");
         assert_eq!(ttl, Some(3600));
     }
 
     #[test]
     fn parse_sidecar_body_handles_camelcase_json() {
-        let (h, ttl) =
-            parse_sidecar_body(r#"{"authorizationHeader": "Bearer xyz"}"#).unwrap();
+        let (h, ttl) = parse_sidecar_body(r#"{"authorizationHeader": "Bearer xyz"}"#).unwrap();
         assert_eq!(h, "Bearer xyz");
         assert_eq!(ttl, None);
     }
@@ -880,7 +881,10 @@ mod tests {
 
         // With expected tenant set, it must round-trip lowercased
         unsafe {
-            std::env::set_var(ENV_EXPECTED_TENANT_ID, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
+            std::env::set_var(
+                ENV_EXPECTED_TENANT_ID,
+                "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+            );
         }
         let c2 = SidecarClient::from_env().unwrap().unwrap();
         assert_eq!(
@@ -898,8 +902,8 @@ mod tests {
     // ─── JWT decode + claim pinning ──────────────────────────────────
 
     /// Build a synthetic JWT with the given payload claims object.
-    /// Header and signature segments are placeholder values — the
-    /// router's unverified decoder ignores them.
+    /// Header and signature segments are deterministic test fixtures —
+    /// the router's unverified decoder ignores them.
     fn make_jwt(payload_json: &str) -> String {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
@@ -912,12 +916,7 @@ mod tests {
     /// inspects, so individual tests don't have to repeat the
     /// boilerplate. `exp_offset_secs` is added to "now"; pass a
     /// large positive to produce a fresh token.
-    fn make_jwt_full(
-        tid: &str,
-        principal: &str,
-        aud: &str,
-        exp_offset_secs: i64,
-    ) -> String {
+    fn make_jwt_full(tid: &str, principal: &str, aud: &str, exp_offset_secs: i64) -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -931,8 +930,9 @@ mod tests {
 
     #[test]
     fn decode_jwt_extracts_all_pinning_claims() {
-        let token =
-            make_jwt(r#"{"tid":"AAAA-BBBB","appid":"app-1","azp":"app-2","aud":"https://ex","exp":4070908800}"#);
+        let token = make_jwt(
+            r#"{"tid":"AAAA-BBBB","appid":"app-1","azp":"app-2","aud":"https://ex","exp":4070908800}"#,
+        );
         let claims = decode_jwt_claims_unverified(&token).unwrap();
         assert_eq!(claims.tid.as_deref(), Some("AAAA-BBBB"));
         assert_eq!(claims.appid.as_deref(), Some("app-1"));
@@ -944,9 +944,7 @@ mod tests {
     #[test]
     fn decode_jwt_aud_array_is_normalized() {
         // RFC 7519 permits aud as an array of strings.
-        let token = make_jwt(
-            r#"{"tid":"t","aud":["https://a.example","https://b.example"]}"#,
-        );
+        let token = make_jwt(r#"{"tid":"t","aud":["https://a.example","https://b.example"]}"#);
         let claims = decode_jwt_claims_unverified(&token).unwrap();
         assert_eq!(
             claims.aud_iter(),
@@ -1160,12 +1158,7 @@ mod tests {
         let c = make_client_with_pin("app-1", Some("aaaa-bbbb"));
         // Token aud is for Graph but we're requesting Foundry — would
         // be cached under the Foundry key and poison subsequent calls.
-        let token = make_jwt_full(
-            "aaaa-bbbb",
-            "app-1",
-            "https://graph.microsoft.com",
-            3600,
-        );
+        let token = make_jwt_full("aaaa-bbbb", "app-1", "https://graph.microsoft.com", 3600);
         let err = c.validate_token_claims(&token, "Foundry").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -1223,12 +1216,7 @@ mod tests {
         // (rather than reject all). Lets operators add new
         // DownstreamApis entries without code changes.
         let c = make_client_with_pin("app-1", Some("aaaa-bbbb"));
-        let token = make_jwt_full(
-            "aaaa-bbbb",
-            "app-1",
-            "https://random.example",
-            3600,
-        );
+        let token = make_jwt_full("aaaa-bbbb", "app-1", "https://random.example", 3600);
         c.validate_token_claims(&token, "Custom").unwrap();
     }
 

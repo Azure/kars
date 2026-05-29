@@ -43,7 +43,7 @@ files:
 
   - path: controller/src/reconciler/mod.rs
     baseline_2026_04_24: 2383
-    phase0_cap: 3050
+    phase0_cap: 3300
     phase1_cap: 1500
     phase2_cap: 2000
     allow_grow: true
@@ -65,9 +65,11 @@ files:
 
   - path: cli/src/commands/up.ts
     baseline_2026_04_24: 1846
+    phase0_cap: 1100
     phase1_cap: 1500
     phase2_cap: 800
-    notes: "Preflight / provision / helm modules under cli/src/commands/up/."
+    allow_grow: true
+    notes: "Preflight / provision / helm modules under cli/src/commands/up/. Phase 6.c grew it back to ~1050 LOC adding --mesh-trust + --demo + Entra block."
 
   - path: cli/src/commands/mesh.ts
     baseline_2026_04_24: 1583

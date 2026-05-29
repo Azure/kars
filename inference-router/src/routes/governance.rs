@@ -447,7 +447,11 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
                             .get("completion_rate")
                             .and_then(|v| v.as_f64())
                             .unwrap_or(-1.0);
-                        let completion = if completion_raw < 0.0 { 0.0 } else { completion_raw };
+                        let completion = if completion_raw < 0.0 {
+                            0.0
+                        } else {
+                            completion_raw
+                        };
                         let feedback_count = successful + failed + timeout;
                         // Phase 6.c — tier from registry takes precedence
                         // over operator CLI's score-derived label. When

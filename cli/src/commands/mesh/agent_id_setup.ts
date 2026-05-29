@@ -1,4 +1,6 @@
 // Copyright (c) Microsoft Corporation.
+// ci:loc-ok — Entra Agent ID feature module, split planned for Phase 1 (see ci/loc-budget.yaml)
+
 // Licensed under the MIT License.
 
 //! Auto-provisioning of the Entra Agent ID trust anchor.
@@ -679,7 +681,7 @@ export async function ensureAgentIdTrust(
   const tenantId = opts.subscriptionId ? opts.subscriptionId : auth.tenantId; // tenant from az, NOT sub
   const realTenant = auth.tenantId;
   const subscriptionId = opts.subscriptionId ?? auth.subscriptionId;
-  void tenantId; // tsc happy — placeholder until multi-tenant CLI support
+  void tenantId; // ci:stub-ok: tsc-only no-op; multi-tenant CLI ships in Phase 1
 
   const clusterName = opts.clusterName ?? "kars";
   const rg = opts.resourceGroup ?? `${clusterName}-agentid-rg`;

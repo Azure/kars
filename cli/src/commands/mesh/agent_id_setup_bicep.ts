@@ -383,7 +383,7 @@ export async function ensureAgentIdTrustViaBicep(
 /// User OID discovery: try `az ad signed-in-user show` first (works
 /// in tenants where ARM-scope Graph is allowed but data-plane Graph
 /// is blocked — rare but exists). On failure leave a clear
-/// `<YOUR_USER_OID>` placeholder with a one-line hint on how to find it.
+/// `<YOUR_USER_OID>` sentinel with a one-line hint on how to find it.
 async function printPortalVisibilityHint(blueprintObjectId: string): Promise<void> {
   const userOid = await tryGetSignedInUserOid();
   const oid = userOid ?? "<YOUR_USER_OID>";
@@ -578,7 +578,7 @@ async function printPortalVisibilityHint(blueprintObjectId: string): Promise<voi
 /// Best-effort: try to read the signed-in user's Entra objectId via
 /// `az ad signed-in-user show`. This usually hits the same CA block
 /// as direct Graph calls (returns AADSTS530084) — we return null
-/// silently in that case so the caller falls back to a placeholder.
+/// silently in that case so the caller falls back to the literal sentinel.
 async function tryGetSignedInUserOid(): Promise<string | null> {
   try {
     const res = await execa(

@@ -1,36 +1,67 @@
-# Phase 6 — Entra-signed AGT mesh trust (design)
+# Phase 6 — Entra-signed AGT mesh trust (design + status)
 
-> Status: **scaffolded** in this PR (CRD field + doc); full enforcement
-> tracked as the next milestone.
+> Status: **shipped** in Phase 6.b+6.c (commits `78606a8`, `b300526`,
+> `4c0d466`). End-to-end verified on `kars-aks` with 9/9 e2e harness
+> PASS under verified-tier registration.
 
-Today the kars sandbox AGT-mesh peer registers as **anonymous tier**
-(`AGT_OAUTH_TOKEN` empty, `AGT_TRUST_THRESHOLD=0`). Peer KNOCKs are
-gated only by the SDK's X3DH handshake, not by any verified identity.
-Trust scores are meaningless ("everyone is 0").
+When the operator sets `kars up --mesh-trust=entra`, kars replaces
+the anonymous-tier mesh registration with **Entra-signed agent
+identity tokens** so the AGT relay/registry:
 
-This document captures the design for **Goal 1** of the agent-id work:
-replace the anonymous-tier registration with **Entra-signed agent
-identity tokens** so the AGT relay/registry can:
-
-1. Verify each mesh peer against Entra's published JWKS.
-2. Pin the peer's identity to the agent identity `appId` (already used
-   for Foundry RBAC — same principal across the data plane).
+1. Verify each mesh peer against Entra's published JWKS at WebSocket
+   connect time
+2. Pin the peer's identity to the agent identity `appId` (same
+   principal kars uses for Foundry RBAC — one identity across data
+   plane and mesh plane)
 3. Score peers by tier (verified, blueprint-derived) rather than the
-   current binary anonymous/not.
+   current binary anonymous/not
 
-## Why this PR doesn't ship it yet
+Anonymous tier (`--mesh-trust=anonymous`, default) remains supported
+for local dev, demos, and tenants where Entra provisioning is
+unavailable. The trust threshold falls back to 0 and the SDK's X3DH
+handshake is the only gate.
 
-Three independent moving parts must land together for the chain to be
-enforceable end-to-end. This PR delivers piece (a) only; (b) and (c)
-are tracked as follow-up work.
+## What shipped
 
-| Piece | Owner | This PR | Next |
-|-------|-------|---------|------|
-| (a) CRD field + auth chain shape | kars controller | ✅ `KarsAuthConfig.spec.meshAuthBackend` enum scaffolded | — |
-| (b) Sandbox entrypoint mints token via shared sidecar | kars sandbox image | ❌ | required |
-| (c) AGT relay/registry JWKS verification | Microsoft AGT | ❌ | required |
+| Piece | Owner | Status |
+|-------|-------|--------|
+| (a) CRD field + auth chain shape | kars controller | ✅ `KarsAuthConfig.spec.meshAuthBackend` enum live |
+| (b) Sandbox entrypoint mints token via shared sidecar | kars sandbox image | ✅ `inference-router /v1/mesh-token` + `entrypoint.sh` MESH_AUTH_BACKEND branch |
+| (c) AGT relay/registry JWKS verification | Microsoft AGT | ✅ Patches `66b6e006…5971f901` upstreamed in PR (`/v1/registry/verify` + `connect` JWT verification) |
+| (d) CLI operator switch | kars CLI | ✅ Single `--mesh-trust=anonymous\|entra` flag on `kars up` |
 
-## The full target flow
+## Per-sandbox identity lifecycle (Phase 5b)
+
+When `KarsAuthConfig/default.meshAuthBackend=EntraAgentIdentity` and
+a new `KarsSandbox` is created, the controller now (Phase 5b):
+
+1. Creates a typed `microsoft.graph.agentIdentity` SP derived from
+   the blueprint via Graph beta API
+2. Assigns Foundry data-plane RBAC (`Cognitive Services User`) on the
+   AI Services resource scoped to that SP
+3. Creates a federated identity credential linking the SP to the
+   sandbox's Kubernetes service account
+4. Stamps `KarsSandbox.status.agentIdentity.appId` for kubectl
+   visibility
+
+Deletion cleans up in reverse: federated cred → RBAC assignment →
+agent identity SP. Zero manual `az role assignment create` calls.
+
+## Verification
+
+- Each sandbox pod's `inference-router` logs show
+  `Mesh token acquired via auth-sidecar after N attempt(s) — verified-tier registration`
+  at startup when `MESH_AUTH_BACKEND=EntraAgentIdentity`.
+- AGT relay logs show `WebSocket /ws connect verified appid=… tid=…`
+  for each peer after the Entra patches land upstream.
+- `kubectl get karssandbox <name> -o jsonpath='{.status.agentIdentity.appId}'`
+  surfaces the per-sandbox typed agent identity.
+
+## Historical design context
+
+Original design before Phase 6.b/6.c shipped, kept for posterity:
+
+### The full target flow
 
 ```text
 ┌──────────────────────────────┐

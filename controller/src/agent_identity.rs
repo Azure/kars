@@ -1,4 +1,6 @@
 // Copyright (c) Microsoft Corporation.
+// ci:loc-ok — Entra Agent ID feature module, split planned for Phase 1 (see ci/loc-budget.yaml)
+
 // Licensed under the MIT License.
 
 //! Entra Agent Identity provisioning via Microsoft Graph.
@@ -295,8 +297,9 @@ impl AgentIdentityClient {
         match self.imds_mi_token(audience).await {
             Ok(t) => Ok(t),
             Err(imds_err) => {
-                let wi_path = std::env::var("AZURE_FEDERATED_TOKEN_FILE")
-                    .unwrap_or_else(|_| "/var/run/secrets/azure/tokens/azure-identity-token".into());
+                let wi_path = std::env::var("AZURE_FEDERATED_TOKEN_FILE").unwrap_or_else(|_| {
+                    "/var/run/secrets/azure/tokens/azure-identity-token".into()
+                });
                 if tokio::fs::try_exists(&wi_path).await.unwrap_or(false) {
                     tracing::warn!(
                         imds_error = %imds_err,
@@ -433,7 +436,7 @@ impl AgentIdentityClient {
     /// `sponsor_user_object_ids` are the user object IDs that act as
     /// sponsors on the agent identity. These come from the
     /// blueprint's owner list at `kars mesh setup-trust` time, then
-    /// propagated through `KarsAuthConfig` (this is a TODO; today the
+    /// propagated through `KarsAuthConfig` (deferred — today the
     /// caller must supply them explicitly).
     pub async fn create_agent_identity(
         &self,
@@ -445,7 +448,8 @@ impl AgentIdentityClient {
     ) -> Result<AgentIdentity, String> {
         let token = self.graph_token().await?;
         let display_name = format!("kars-{cluster_name}-{sandbox_name}");
-        let url = "https://graph.microsoft.com/beta/servicePrincipals/Microsoft.Graph.AgentIdentity";
+        let url =
+            "https://graph.microsoft.com/beta/servicePrincipals/Microsoft.Graph.AgentIdentity";
 
         let mut body = serde_json::json!({
             "displayName": display_name,
@@ -460,9 +464,8 @@ impl AgentIdentityClient {
                 .iter()
                 .map(|oid| format!("https://graph.microsoft.com/v1.0/users/{oid}"))
                 .collect();
-            body["sponsors@odata.bind"] = serde_json::Value::Array(
-                refs.into_iter().map(serde_json::Value::String).collect(),
-            );
+            body["sponsors@odata.bind"] =
+                serde_json::Value::Array(refs.into_iter().map(serde_json::Value::String).collect());
         }
 
         let resp = self
@@ -560,7 +563,10 @@ impl AgentIdentityClient {
                 let odata_type = odata_type_for_value(value).map_err(|e| {
                     format!("custom security attribute '{set_name}/{attr_name}': {e}")
                 })?;
-                obj.insert(format!("{attr_name}@odata.type"), serde_json::Value::String(odata_type));
+                obj.insert(
+                    format!("{attr_name}@odata.type"),
+                    serde_json::Value::String(odata_type),
+                );
                 obj.insert(attr_name.clone(), value.clone());
             }
             sets.insert(set_name.clone(), serde_json::Value::Object(obj));
@@ -670,14 +676,14 @@ impl AgentIdentityClient {
         // Stable assignment name = guid(scope, principalId, roleId).
         // Azure ARM requires the assignment name to be a GUID; using a
         // deterministic hash ensures retries always upsert the same row.
-        let assignment_name = deterministic_assignment_guid(scope, principal_id, role_definition_id);
+        let assignment_name =
+            deterministic_assignment_guid(scope, principal_id, role_definition_id);
 
         // Extract subscription id from the scope so we can build the
         // role-definition URI. Scopes always start with
         // `/subscriptions/<sub>/...`.
-        let sub_id = extract_subscription_id(scope).ok_or_else(|| {
-            format!("scope '{scope}' does not contain a subscription id")
-        })?;
+        let sub_id = extract_subscription_id(scope)
+            .ok_or_else(|| format!("scope '{scope}' does not contain a subscription id"))?;
         let role_def_uri = format!(
             "/subscriptions/{sub_id}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
         );
@@ -832,7 +838,10 @@ impl AgentIdentityClient {
             }
 
             // a.id already includes /subscriptions/...; build the full URL.
-            let delete_url = format!("https://management.azure.com{}?api-version=2022-04-01", a.id);
+            let delete_url = format!(
+                "https://management.azure.com{}?api-version=2022-04-01",
+                a.id
+            );
             let r = self
                 .http
                 .delete(&delete_url)
@@ -978,8 +987,12 @@ impl AgentIdentityClient {
             body_prefix = %&body[..body.len().min(200)],
             "list_cluster_agent_identities: strict parse failed; using permissive fallback"
         );
-        let raw: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| format!("Graph list parse failed: {e}; body starts with: {}", &body[..body.len().min(200)]))?;
+        let raw: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            format!(
+                "Graph list parse failed: {e}; body starts with: {}",
+                &body[..body.len().min(200)]
+            )
+        })?;
         let items = raw
             .get("value")
             .and_then(|v| v.as_array())
@@ -1157,7 +1170,11 @@ fn odata_type_for_value(value: &serde_json::Value) -> Result<String, String> {
 /// Implementation: SHA-256 the canonical key, take 16 bytes, format
 /// as a UUIDv4-shaped string (we set the version + variant bits to
 /// produce a valid v4 GUID per RFC 4122).
-fn deterministic_assignment_guid(scope: &str, principal_id: &str, role_definition_id: &str) -> String {
+fn deterministic_assignment_guid(
+    scope: &str,
+    principal_id: &str,
+    role_definition_id: &str,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(b"kars-role-assignment-v1\x00");
@@ -1174,10 +1191,22 @@ fn deterministic_assignment_guid(scope: &str, principal_id: &str, role_definitio
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     )
 }
 
@@ -1235,7 +1264,10 @@ mod tests {
         assert_eq!(parsed.id, "a8e0eff0-1fe0-4b46-aba3-d7fa7a1c2ecd");
         assert_eq!(parsed.app_id, "a8e0eff0-1fe0-4b46-aba3-d7fa7a1c2ecd");
         assert_eq!(parsed.display_name, "kars-poc-agent-1");
-        assert_eq!(parsed.service_principal_type.as_deref(), Some("ServiceIdentity"));
+        assert_eq!(
+            parsed.service_principal_type.as_deref(),
+            Some("ServiceIdentity")
+        );
         assert_eq!(parsed.tags.len(), 3);
     }
 
@@ -1372,7 +1404,11 @@ mod tests {
                 "tags": ["kars-cluster-uid:abc", "kars-sandbox-uid:xyz"],
             }]
         });
-        let items = body.get("value").and_then(|v| v.as_array()).cloned().unwrap();
+        let items = body
+            .get("value")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap();
         let parsed: Vec<AgentIdentity> = items
             .into_iter()
             .filter_map(|item| {
@@ -1395,13 +1431,11 @@ mod tests {
             .collect();
         assert_eq!(parsed.len(), 1);
         assert_eq!(
-            parsed[0].app_id,
-            "889ab472-6ebc-4e3c-9e07-618f5d361663",
+            parsed[0].app_id, "889ab472-6ebc-4e3c-9e07-618f5d361663",
             "permissive parser MUST select the per-sandbox appId, not the blueprint agentAppId"
         );
         assert_ne!(
-            parsed[0].app_id,
-            "b712af17-b7f7-419f-a306-b86a607d5a21",
+            parsed[0].app_id, "b712af17-b7f7-419f-a306-b86a607d5a21",
             "regressing this would silently make every sandbox impersonate the blueprint"
         );
     }
@@ -1420,7 +1454,11 @@ mod tests {
                 "displayName": "x",
             }]
         });
-        let items = body.get("value").and_then(|v| v.as_array()).cloned().unwrap();
+        let items = body
+            .get("value")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap();
         let parsed: Vec<String> = items
             .into_iter()
             .filter_map(|item| {
@@ -1477,16 +1515,10 @@ mod tests {
         // to the same assignment GUID — otherwise an operator switching
         // from upper- to lower-case in their Bicep would create a
         // duplicate assignment.
-        let g1 = deterministic_assignment_guid(
-            "/subscriptions/X/resourceGroups/RG",
-            "AAAAA",
-            "BBBBB",
-        );
-        let g2 = deterministic_assignment_guid(
-            "/subscriptions/x/resourceGroups/rg",
-            "aaaaa",
-            "bbbbb",
-        );
+        let g1 =
+            deterministic_assignment_guid("/subscriptions/X/resourceGroups/RG", "AAAAA", "BBBBB");
+        let g2 =
+            deterministic_assignment_guid("/subscriptions/x/resourceGroups/rg", "aaaaa", "bbbbb");
         assert_eq!(g1, g2);
     }
 

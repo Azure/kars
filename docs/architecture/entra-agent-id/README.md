@@ -83,6 +83,9 @@ Pattern B requires no per-cluster controller MI.
 | 3 | `b021610` | Router sidecar_client + 4-claim pinning (tid, principal, aud, exp) |
 | 4 | `405e331` | CLI + Bicep dual-pattern auto-detect |
 | 5 | `8e8e811` | Custom security attributes + scale-out invariant + CA baseline |
+| 5b | `4c0d466` | Controller-driven per-agent ARM RBAC assignment (auto Foundry binding) |
+| 6.b | `78606a8` | AGT mesh registry verify endpoint (Entra JWT → pubkey fallback) |
+| 6.c | `b300526` | Single `--mesh-trust=anonymous\|entra` operator switch on `kars up` |
 | 7 | `8cfb05d` | Live deploy + multi-agent exec-brief demo verified on kars-aks |
 
 ## Key files
@@ -100,13 +103,51 @@ Pattern B requires no per-cluster controller MI.
 | CLI | `cli/src/commands/mesh/agent_id_setup.ts`, `cli/src/commands/mesh/agent_id_setup_bicep.ts` |
 | CLI | `cli/src/commands/up/sandbox_bringup.ts` (Foundry RBAC inline Bicep) |
 
+## Operator surface (Phase 6.c)
+
+The whole Entra Agent ID stack — blueprint, per-sandbox SPs, RBAC,
+federated credentials, KAC, plus AGT mesh JWT verification — is
+gated by **one** CLI flag on `kars up`:
+
+```bash
+# Anonymous tier (default) — zero Entra prerequisites
+kars up --name myagent --mesh-trust=anonymous
+
+# Entra tier — full provisioning (greenfield supported)
+kars up --name myagent --mesh-trust=entra
+```
+
+When `--mesh-trust=entra`:
+
+1. `kars mesh setup-trust` runs as part of `up` and provisions the
+   tenant-wide blueprint + custom security attributes + conditional
+   access baseline (if not already present)
+2. The controller picks up `KarsAuthConfig/default` and, for every
+   `KarsSandbox`, mints a per-sandbox typed agent identity SP +
+   federated credential + Foundry RBAC scoped to that SP
+3. AGT mesh relay + registry get patched with
+   `AGENTMESH_ENTRA_AUDIENCE` + `AGENTMESH_ENTRA_TENANT_ID` so they
+   verify peer JWTs against Entra's JWKS
+
+Anonymous mode skips all of the above — sandboxes share the cluster's
+workload identity for Foundry, and the AGT mesh runs in trust score 0
+(everyone-accepts-everyone). Good for local dev, demos, and tenants
+where the operator can't (or won't) provision Entra resources.
+
+See [04-migration-guide.md](04-migration-guide.md) for the operator
+journey from anonymous → entra.
+
 ## Open follow-ups
 
-- **Phase 5b** (next PR): controller-driven per-agent ARM RBAC assignment.
-  Eliminates the manual `az role assignment create` step operators run today
-  for each new sandbox.
-- **Phase 6** (separate PR): mesh trust — use Entra-signed JWTs (instead of
-  anonymous tier) for AGT trust scoring.
+- **Phase 1 LOC budget** (next): split `agent_identity.rs` (1511 LOC),
+  `agent_id_provisioning.rs` (859 LOC), `auth_config_reconciler.rs`
+  (835 LOC), `sidecar_client.rs` (1468 LOC), and
+  `cli/src/commands/mesh/agent_id_setup.ts` (1106 LOC) into focused
+  modules. Tracked via `// ci:loc-ok` markers in each file.
+- **Multi-tenant CLI**: `kars mesh setup-trust` currently runs against
+  the operator's signed-in tenant. The `tenantId` plumbing is in
+  place (CRD + sidecar + router) but the CLI accepts it as a no-op
+  today.
 
 ## Live validation snapshot (2026-05-28)
 
