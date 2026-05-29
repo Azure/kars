@@ -1679,6 +1679,21 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "name": "PINNED_AGENT_IDENTITY_APP_ID",
                 "value": agent_id.app_id.clone(),
             }));
+            // Phase 6.b (mesh-identity-stability follow-up): the
+            // openclaw plugin reads PINNED_AGENT_IDENTITY_APP_ID at
+            // identity-generation time to derive a deterministic
+            // Ed25519/X25519 keypair. Without this on the openclaw
+            // container, every pod restart generates fresh keys →
+            // fresh DID → registry accumulates stale agent entries
+            // → mesh routing breaks across restarts. We push the
+            // same value the router gets so both containers agree
+            // on the principal.
+            if is_openclaw {
+                openclaw_env.push(json!({
+                    "name": "PINNED_AGENT_IDENTITY_APP_ID",
+                    "value": agent_id.app_id.clone(),
+                }));
+            }
             router_env.push(json!({
                 "name": "AUTH_SIDECAR_URL",
                 "value": "http://entra-auth-sidecar.kars-system.svc:5000",
