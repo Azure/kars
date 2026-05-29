@@ -41,6 +41,14 @@ tools/e2e-harness/
 ```bash
 # default: SCENARIO=exec-brief PLATFORM=aks
 SCENARIO=exec-brief PLATFORM=aks ./run.sh
+
+# Demo mode — clean storyboard view to stdout (suppresses raw monitor
+# stream, surfaces phases + Foundry/mesh counters + final verify panel).
+# Raw logs still land in out/<runId>/ for verify.py.
+DEMO=1 SCENARIO=exec-brief PLATFORM=aks ./run.sh
+
+# Replay a completed run with the same storyboard (no live tail).
+python3 tools/e2e-harness/format_demo.py --replay tools/e2e-harness/out/<runId>
 ```
 
 Output lands under `out/<runId>/`:

@@ -299,11 +299,54 @@ kubeProxy:
       "--values", valuesPath,
     ], { stdio: "pipe" });
 
-    await execa(
-      "kubectl",
-      kctl(context, ["apply", "-f", "-", "--server-side", "--force-conflicts"]),
-      { input: stdout, stdio: ["pipe", "inherit", "inherit"] },
-    );
+    // kube-prometheus-stack renders CRDs AND CRs in the same stream.
+    // `kubectl apply --server-side` racing both can fail with "no matches
+    // for kind Prometheus/ServiceMonitor" because the CR is processed
+    // before the API server has registered the CRD. Split the stream:
+    // apply CRDs first, wait for them to be Established, then apply
+    // the rest. Single source of truth — works on AKS (where the race
+    // is reliably losable) and on kind (where it usually worked
+    // accidentally because of timing).
+    const docs = stdout.split(/^---\s*$/m).filter((d) => d.trim().length > 0);
+    const crdDocs: string[] = [];
+    const otherDocs: string[] = [];
+    const crdNames: string[] = [];
+    for (const doc of docs) {
+      if (/^kind:\s*CustomResourceDefinition\s*$/m.test(doc)) {
+        crdDocs.push(doc);
+        const m = doc.match(/^\s*name:\s*([^\s]+)/m);
+        if (m) crdNames.push(m[1]);
+      } else {
+        otherDocs.push(doc);
+      }
+    }
+
+    if (crdDocs.length > 0) {
+      await execa(
+        "kubectl",
+        kctl(context, ["apply", "-f", "-", "--server-side", "--force-conflicts"]),
+        { input: crdDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
+      );
+      // Wait for each CRD to reach the Established condition so the
+      // API server's discovery cache picks it up before the CR apply.
+      for (const name of crdNames) {
+        try {
+          await execa("kubectl", kctl(context, [
+            "wait", "--for=condition=Established", `crd/${name}`, "--timeout=60s",
+          ]), { stdio: "pipe" });
+        } catch {
+          /* best-effort — some pre-existing CRDs may already be Established under a different name */
+        }
+      }
+    }
+
+    if (otherDocs.length > 0) {
+      await execa(
+        "kubectl",
+        kctl(context, ["apply", "-f", "-", "--server-side", "--force-conflicts"]),
+        { input: otherDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
+      );
+    }
   } finally {
     try { rmSync(tmpdir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }

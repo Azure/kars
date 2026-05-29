@@ -48,8 +48,30 @@ if [ "${PLATFORM}" != "docker" ]; then
     # Background monitor. Wrap in a subshell so $! is the subshell PID, which is
     # the parent of the entire `monitor.sh | tee` pipeline — we can then kill the
     # subshell *and* its children together via the process group.
-    ( "${SCRIPT_DIR}/monitor.sh" 2>&1 | tee "${OUT_DIR}/monitor.log" ) &
+    # In demo mode, the formatter renders the narrative — silence the
+    # raw monitor stream to the terminal but still capture it to disk.
+    if [ "${DEMO:-0}" = "1" ]; then
+        ( "${SCRIPT_DIR}/monitor.sh" >"${OUT_DIR}/monitor.log" 2>&1 ) &
+    else
+        ( "${SCRIPT_DIR}/monitor.sh" 2>&1 | tee "${OUT_DIR}/monitor.log" ) &
+    fi
     MONITOR_PID=$!
+fi
+
+# DEMO=1 — render a clean storyboard view to stdout instead of the raw
+# monitor stream. The raw drive.log + monitor.log + trace.jsonl still
+# accumulate in OUT_DIR for verify.py and post-mortem inspection; the
+# formatter only changes what the operator sees live during recording.
+# Start AFTER monitor.sh so trace.jsonl is being written by the time
+# the formatter picks it up.
+DEMO_PID=""
+if [ "${DEMO:-0}" = "1" ]; then
+    # format_demo.py tails drive.log + trace.jsonl and renders one-line
+    # milestones with evidence. Run in the background; its stdout
+    # becomes the demo view interleaved with run.sh's setup lines.
+    sleep 1  # let monitor.sh create trace.jsonl
+    ( python3 "${SCRIPT_DIR}/format_demo.py" "${OUT_DIR}" ) &
+    DEMO_PID=$!
 fi
 
 cleanup() {
@@ -67,16 +89,28 @@ cleanup() {
         # Just give the kernel a moment to reap.
         sleep 1
     fi
+    if [ -n "${DEMO_PID}" ] && kill -0 "${DEMO_PID}" 2>/dev/null; then
+        # SIGINT lets the demo formatter print its summary cleanly.
+        kill -INT "${DEMO_PID}" 2>/dev/null || true
+        sleep 1
+        kill "${DEMO_PID}" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
-# Foreground driver (provision + drive prompt).
+# Foreground driver (provision + drive prompt). With DEMO=1 we suppress
+# the raw drive output from the terminal — the formatter shows the
+# narrative — but keep tee'ing to drive.log for verify.py.
 set +e
-"${SCRIPT_DIR}/drive.sh" 2>&1 | tee "${OUT_DIR}/drive.log"
+if [ "${DEMO:-0}" = "1" ]; then
+    "${SCRIPT_DIR}/drive.sh" >"${OUT_DIR}/drive.log" 2>&1
+else
+    "${SCRIPT_DIR}/drive.sh" 2>&1 | tee "${OUT_DIR}/drive.log"
+fi
 DRIVE_RC=$?
 set -e
 
-# Give the monitor a beat to flush the last log lines.
+# Give the monitor + formatter a beat to flush the last log lines.
 sleep 5
 cleanup
 
