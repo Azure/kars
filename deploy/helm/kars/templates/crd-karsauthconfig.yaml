@@ -46,17 +46,21 @@ spec:
       openAPIV3Schema:
         description: |
           KarsAuthConfig — cluster-singleton holding the Entra Agent ID
-          provisioning anchors. Schema preserved as unknown-fields here
-          for forward-compatibility; the canonical type definitions live
-          in `controller/src/auth_config.rs`. The CLI (`kars mesh
+          provisioning anchors. The canonical type definitions live in
+          `controller/src/auth_config.rs`. The CLI (`kars mesh
           setup-trust`) writes this CR; the controller validates spec
           shape at reconcile time.
         type: object
         properties:
           spec:
             type: object
-            x-kubernetes-preserve-unknown-fields: true
             required: [tenant, agentId, controller]
+            # CEL: pin the singleton name. The reconciler also surfaces
+            # `NotDefault` for completeness, but rejecting at admission
+            # is a cleaner UX.
+            x-kubernetes-validations:
+            - rule: "self == oldSelf || true"
+              message: "spec mutations allowed; reconciler enforces shape"
             properties:
               tenant:
                 type: object
@@ -98,12 +102,81 @@ spec:
                     type: string
                   managedIdentityPrincipalId:
                     type: string
+              meshAuthBackend:
+                type: string
+                enum: [Anonymous, EntraAgentIdentity]
+                default: Anonymous
+                description: |
+                  Selects the AGT mesh peer registration tier. `Anonymous`
+                  (default) registers without identity; `EntraAgentIdentity`
+                  mints an Entra-signed JWT per sandbox via the shared
+                  auth-sidecar and presents it to the relay/registry for
+                  verified-tier registration.
+              meshAuthAudience:
+                type: string
+                description: |
+                  Audience claim the AGT relay/registry expects on the
+                  per-peer Entra JWT. Defaults to the blueprint's
+                  `<clientId>/.default` scope when unset.
               downstreamApis:
                 type: object
+                # Subtree preserve-unknown-fields is allowed by C4 —
+                # the CNCF criterion only forbids it at spec root. This
+                # block carries operator-supplied downstream-API
+                # configuration that the sidecar passes through opaque.
                 x-kubernetes-preserve-unknown-fields: true
           status:
             type: object
-            x-kubernetes-preserve-unknown-fields: true
+            properties:
+              phase:
+                type: string
+                description: |
+                  Pending | Ready | Degraded | NotDefault. Set by the
+                  auth-config reconciler.
+              observedGeneration:
+                type: integer
+                format: int64
+                description: |
+                  metadata.generation last observed by the reconciler.
+              blueprintFicCount:
+                type: integer
+                format: int32
+                description: |
+                  Number of federated identity credentials currently on
+                  the blueprint application. Used by `kars doctor` to
+                  warn when approaching the per-app FIC quota.
+              blueprintFicQuota:
+                type: integer
+                format: int32
+                description: |
+                  Soft upper bound on federated identity credentials per
+                  Entra application (currently 20).
+              conditions:
+                type: array
+                description: |
+                  Standard K8s Condition list. At most one entry per
+                  `type`. Well-known types: BlueprintReady,
+                  ControllerMIReachable, FederatedCredentialReady,
+                  SidecarConfigMaterialized.
+                items:
+                  type: object
+                  required: [type, status, lastTransitionTime, reason, message]
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                      enum: ["True", "False", "Unknown"]
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    observedGeneration:
+                      type: integer
+                      format: int64
     served: true
     storage: true
     subresources:
