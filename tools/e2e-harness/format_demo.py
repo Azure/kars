@@ -132,7 +132,12 @@ def parse_inner(msg: str) -> tuple[Optional[str], dict]:
 
 
 def follow(path: Path, replay: bool = False):
-    """Generator: yield new lines as they arrive. In replay mode, exits at EOF; live mode waits 60s after last growth."""
+    """Generator: yield lines, or yield None on no-data so the caller
+    can pump the other source. Critical for live mode where drive.log
+    and trace.jsonl write at very different rates — if this blocked
+    internally, the main loop would never get to the trace generator.
+    Replay mode exits at EOF.
+    """
     last_size = 0
     last_growth = time.time()
     fh = None
@@ -140,8 +145,8 @@ def follow(path: Path, replay: bool = False):
         if not path.exists():
             if replay:
                 return
-            time.sleep(0.3)
-            if time.time() - last_growth > 60:
+            yield None
+            if time.time() - last_growth > 120:
                 return
             continue
         if fh is None:
@@ -161,7 +166,7 @@ def follow(path: Path, replay: bool = False):
                 last_size = 0
                 continue
             last_size = cur
-            time.sleep(0.2)
+            yield None
 
 
 def handle_drive_line(line: str, state: dict, ctr: Counter) -> None:
@@ -487,14 +492,18 @@ def main() -> int:
 
     drive_done = drive_gen is None
     trace_done = trace_gen is None
-    # Interleave: pull from both generators round-robin so neither starves.
+    idle_since_done = None
+    # Interleave: pull from both generators round-robin. Each generator
+    # yields either a line (process it) or None (no data right now —
+    # try the other source).
     while not sigint["got"] and not (drive_done and trace_done):
         progress = False
         if not drive_done:
             try:
                 line = next(drive_gen)
-                handle_drive_line(line, state, ctr)
-                progress = True
+                if line is not None:
+                    handle_drive_line(line, state, ctr)
+                    progress = True
             except StopIteration:
                 drive_done = True
         if trace_gen is None and trace.exists():
@@ -503,14 +512,33 @@ def main() -> int:
         if not trace_done and trace_gen is not None:
             try:
                 line = next(trace_gen)
-                handle_trace_line(line, state, ctr)
-                progress = True
+                if line is not None:
+                    handle_trace_line(line, state, ctr)
+                    progress = True
             except StopIteration:
                 trace_done = True
         if not progress:
+            # Stay alive after the driver finishes so the trace drain
+            # AND verify.py have time to land. Exit only when either:
+            #   * verify.json exists (verify.py wrote it — done)
+            #   * SIGINT (cleanup() in run.sh)
+            #   * 90s after phase=done with no verify.json (verify
+            #     either skipped or crashed)
             if state.get("phase") == "done":
-                break
-            time.sleep(0.2)
+                verify_json = out_dir / "verify.json"
+                if verify_json.exists():
+                    # Give it one more drain pass to catch any late
+                    # mesh-teardown events, then exit.
+                    if idle_since_done is None:
+                        idle_since_done = time.time()
+                    elif time.time() - idle_since_done > 2:
+                        break
+                else:
+                    if idle_since_done is None:
+                        idle_since_done = time.time()
+                    elif time.time() - idle_since_done > 90:
+                        break
+            time.sleep(0.05)
 
     print_summary(out_dir, ctr)
     return 0

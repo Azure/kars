@@ -112,12 +112,24 @@ set -e
 
 # Give the monitor + formatter a beat to flush the last log lines.
 sleep 5
-cleanup
 
 if [ "${DRIVE_RC}" -ne 0 ]; then
     echo "[run] driver exited rc=${DRIVE_RC}, skipping verify"
+    cleanup
     exit "${DRIVE_RC}"
 fi
 
-# Verify.
+# Verify. In DEMO mode, suppress verify.py's raw stdout — the
+# formatter polls verify.json and renders the check panel itself.
+# Run verify.py BEFORE cleaning up the formatter so the formatter
+# is still alive to pick up verify.json.
+if [ "${DEMO:-0}" = "1" ]; then
+    python3 "${SCRIPT_DIR}/verify.py" >"${OUT_DIR}/verify.stdout.log" 2>&1
+    VERIFY_RC=$?
+    # Now stop the monitor + formatter; formatter will print verify panel.
+    cleanup
+    exit "${VERIFY_RC}"
+fi
+
+cleanup
 python3 "${SCRIPT_DIR}/verify.py"

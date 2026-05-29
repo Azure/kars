@@ -25,7 +25,7 @@
 import { execa } from "execa";
 import chalk from "chalk";
 import * as path from "node:path";
-import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
 import * as os from "node:os";
 
 /** Pin the same chart version as local-k8s so the kars plugin's
@@ -109,8 +109,36 @@ export async function installKarsPlugin(opts: HeadlampStackOptions): Promise<voi
   const mainJs = path.join(distDir, "main.js");
   const pkgJson = path.join(pluginDir, "package.json");
 
-  if (!existsSync(mainJs)) {
-    console.log(chalk.dim("    plugin not built yet — running 'npm run build' in tools/headlamp-plugin…"));
+  // Always rebuild when ANY source file is newer than dist/main.js.
+  // Stale dist was the source of "still shows AzureClaw, no agents
+  // visible" bugs on AKS — the plugin was renamed from azureclaw → kars
+  // but the cached dist predated the rename. Walk src/ + package.json
+  // and rebuild if needed.
+  let needsBuild = !existsSync(mainJs);
+  if (!needsBuild) {
+    try {
+      const distMtime = statSync(mainJs).mtimeMs;
+      const srcDir = path.join(pluginDir, "src");
+      const candidates = [pkgJson];
+      if (existsSync(srcDir)) {
+        for (const f of readdirSync(srcDir)) {
+          candidates.push(path.join(srcDir, f));
+        }
+      }
+      for (const f of candidates) {
+        if (existsSync(f) && statSync(f).mtimeMs > distMtime) {
+          needsBuild = true;
+          break;
+        }
+      }
+    } catch {
+      needsBuild = true;
+    }
+  }
+
+  if (needsBuild) {
+    const reason = !existsSync(mainJs) ? "no dist yet" : "src newer than dist";
+    console.log(chalk.dim(`    rebuilding plugin (${reason}) — npm run build in tools/headlamp-plugin…`));
     if (!existsSync(path.join(pluginDir, "node_modules"))) {
       try {
         await execa("npm", ["install", "--no-audit", "--no-fund"], { cwd: pluginDir, stdio: "inherit" });
