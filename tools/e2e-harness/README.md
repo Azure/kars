@@ -49,6 +49,14 @@ DEMO=1 SCENARIO=exec-brief PLATFORM=aks ./run.sh
 
 # Replay a completed run with the same storyboard (no live tail).
 python3 tools/e2e-harness/format_demo.py --replay tools/e2e-harness/out/<runId>
+
+# Replay at a pace tuned for demo recording (looks like a live run
+# without the 6-minute wait — pre-bake the run, then replay):
+#   --pace=1.0  → ~25s   (fast)
+#   --pace=1.5  → ~37s   (natural — matches the 2-min demo runbook)
+#   --pace=2.0  → ~50s   (slow, more voiceover headroom)
+python3 tools/e2e-harness/format_demo.py --replay --pace=1.5 \
+        tools/e2e-harness/out/latest
 ```
 
 Output lands under `out/<runId>/`:

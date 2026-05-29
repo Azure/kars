@@ -402,15 +402,19 @@ def print_summary(out_dir: Path, ctr: Counter) -> None:
     print()
 
 
-def run_replay(out_dir: Path, state: dict, ctr: Counter) -> None:
+def run_replay(out_dir: Path, state: dict, ctr: Counter, pace: float = 0.0) -> None:
     """Replay an existing run by walking drive.log narratively and dumping
-    all trace events under the "Agent at work" phase (where they belong).
+    all trace events under the "Agent at work" phase.
 
-    We can't reliably timestamp-merge because monitor.sh's `%3N` date
-    format is GNU-only — on macOS the `ts` field is malformed
-    ("12:39:07.3NZ"). Phase-bucketed replay sidesteps that entirely
-    and yields the narrative an operator wants for the demo: setup
-    steps first, mesh+Foundry activity second, final reply third.
+    `pace` controls demo-recording cadence: 0 = as-fast-as-possible
+    (post-mortem mode); >0 inserts simulated pauses so a 6-minute run
+    plays back at controlled speed with realistic-looking live cadence.
+
+    Recommended values:
+      * 0      — post-mortem replay (instant, ~5s total)
+      * 1.0    — fast demo (~30s)
+      * 1.5    — natural demo (~45s) — good for tight pitch
+      * 2.0    — slow demo (~60s) — good when you're voicing-over heavily
     """
     drive_log = out_dir / "drive.log"
     trace = out_dir / "trace.jsonl"
@@ -418,32 +422,80 @@ def run_replay(out_dir: Path, state: dict, ctr: Counter) -> None:
     drive_lines = drive_log.read_text(encoding="utf-8", errors="replace").splitlines() if drive_log.exists() else []
     trace_lines = trace.read_text(encoding="utf-8", errors="replace").splitlines() if trace.exists() else []
 
+    def beat(weight: float = 1.0) -> None:
+        """Sleep for pace*weight*0.5s. Skipped when pace=0."""
+        if pace > 0:
+            time.sleep(pace * weight * 0.5)
+
     # Phase 1: drive lines up to and including session_id=… (apply → Ready → posted)
     cursor = 0
     for i, line in enumerate(drive_lines):
         handle_drive_line(line, state, ctr)
         cursor = i + 1
-        if "session_id=" in line:
+        # Heavier beat on kubectl apply lines (visually punchy).
+        if "  -> " in line:
+            beat(1.5)
+        elif "waiting for KarsSandbox" in line or "sandbox Ready" in line:
+            beat(3.0)  # ~5s pause feels like waiting for the cluster
+        elif "session_id=" in line:
+            beat(2.0)
             break
+        else:
+            beat(0.3)
 
-    # Phase 2: dump every trace line (in file order, which is roughly
-    # chronological — monitor.sh appends concurrently from multiple
-    # log-tailers so it's not perfectly sorted, but it's the best
-    # available signal). Counters get bumped, and the more interesting
-    # events (spawn, mesh online, first web_search, first image,
-    # MCP tools/call) print inline.
+    # Phase 2: trace events under "Agent at work". To avoid 545 lines
+    # of beat-then-noop we ONLY pause on lines that produce a visible
+    # print (handle_trace_line filters >99% of input). Detect by
+    # comparing the counter snapshot before/after.
     for line in trace_lines:
+        before = (
+            len(ctr.sub_agents), ctr.web_search_calls, ctr.image_gen_calls,
+            ctr.code_exec_calls, ctr.mcp_calls, len(ctr.mesh_relay_connects),
+            ctr.file_transfers,
+        )
         handle_trace_line(line, state, ctr)
+        after = (
+            len(ctr.sub_agents), ctr.web_search_calls, ctr.image_gen_calls,
+            ctr.code_exec_calls, ctr.mcp_calls, len(ctr.mesh_relay_connects),
+            ctr.file_transfers,
+        )
+        # If a counter changed AND that change crossed a milestone the
+        # formatter actually prints (web_search at 1/2/5/10/20 etc),
+        # add a beat. Cheap heuristic: any counter delta = a print.
+        if before != after:
+            # Pause harder on the "first time" milestones (more dramatic).
+            spawn_delta = after[0] - before[0]
+            mesh_delta = after[5] - before[5]
+            if spawn_delta or mesh_delta:
+                beat(2.5)
+            else:
+                beat(0.8)
 
     # Phase 3: remaining drive lines (prompt completed → driver done)
     for line in drive_lines[cursor:]:
         handle_drive_line(line, state, ctr)
+        if "prompt completed" in line:
+            beat(3.0)  # let the final reply land
+        else:
+            beat(0.3)
 
 
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     flags = [a for a in sys.argv[1:] if a.startswith("--")]
     replay = "--replay" in flags
+    # --pace=<float> controls demo-recording cadence in replay mode.
+    # 0=instant; 1.0=fast demo; 1.5=natural demo (~90s); 2.0=slow demo.
+    pace = 0.0
+    for f in flags:
+        if f.startswith("--pace="):
+            try:
+                pace = float(f.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif f in ("--demo",):
+            # Alias: --demo sets pace=1.5 (natural pace, ~90s for exec-brief).
+            pace = 1.5
     out_arg = args[0] if args else None
     if out_arg:
         out_dir = Path(out_arg)
@@ -467,7 +519,7 @@ def main() -> int:
     print_header(out_dir, scenario)
 
     if replay:
-        run_replay(out_dir, state, ctr)
+        run_replay(out_dir, state, ctr, pace=pace)
         print_summary(out_dir, ctr)
         return 0
 
