@@ -145,4 +145,17 @@ export interface MeshHealth {
   registryReady: boolean;
   registryPods: number;
   registryReadyPods: number;
+  /** True when the relay's /health reports entra_verify_enabled=true.
+   * Indicates the operator has opted into Phase 6.c Entra-JWT verification
+   * (AGENTMESH_ENTRA_AUDIENCE+TENANT_ID set on the relay deployment).
+   * `null` means /health was not reachable / didn't include the field
+   * (older relay image). */
+  entraVerifyEnabled: boolean | null;
+  /** Count of currently-connected mesh peers whose connect-frame JWT
+   * was successfully verified against Entra JWKS. Always 0 when
+   * entraVerifyEnabled is false. `null` when /health not reachable. */
+  verifiedAgents: number | null;
+  /** Total agents currently connected to the relay (verified + legacy
+   * anonymous-tier). */
+  connectedAgents: number | null;
 }

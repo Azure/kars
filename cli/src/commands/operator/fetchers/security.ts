@@ -302,9 +302,24 @@ export async function fetchSecurityState(sb: SandboxInfo, kubeContext?: string):
       // Registry reputation (from agentmesh-registry Postgres)
       if (rep.registry) {
         const r = rep.registry;
+        // AGT v3.7.0 registry returns `tier: null` for the score;
+        // server doesn't compute the band. Derive client-side from
+        // the 0.0–1.0 reputation score so the UI shows a meaningful
+        // label instead of literal "unknown". Threshold bands match
+        // AGT's local_trust nomenclature where applicable
+        // (Sovereign/Verified/Known/Observed/Anonymous), scaled to
+        // the 0.0–1.0 reputation domain.
+        const score01 = r.score ?? 0;
+        const derivedTier =
+          score01 >= 0.9 ? "Sovereign"
+          : score01 >= 0.7 ? "Verified"
+          : score01 >= 0.5 ? "Known"
+          : score01 >= 0.3 ? "Observed"
+          : score01 > 0    ? "Anonymous"
+          : "no-history";
         state.agtReputation = {
-          score: r.score ?? 0,
-          tier: r.tier || "unknown",
+          score: score01,
+          tier: r.tier || derivedTier,
           completionRate: r.completion_rate ?? 0,
           totalSessions: r.total_sessions ?? 0,
           feedbackCount: r.feedback_count ?? 0,
