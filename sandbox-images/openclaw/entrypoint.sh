@@ -160,29 +160,21 @@ fi
 # falling back to anonymous tier — long enough to break parent→sub-agent
 # spawn-and-message workflows because the parent's tool-call timeout
 # fires before the sub-agent finishes booting.
-if [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
-  echo "[entrypoint] AGT_SKIP_ENTRA=1 — Entra token exchange disabled by operator, registering as anonymous tier"
-  # Trust scoring is meaningless without OAuth identity: every peer registers
-  # as anonymous (registry score 0), so a non-zero AGT_TRUST_THRESHOLD would
-  # reject all sibling-to-sibling KNOCKs even after a successful X3DH handshake.
-  # When Entra is intentionally disabled by the operator, fail-open the trust
-  # gate (threshold=0). Policy evaluation in onKnock still runs, and the SDK's
-  # KNOCK/X3DH still proves cryptographic identity end-to-end.
-  if [ -n "${AGT_TRUST_THRESHOLD:-}" ] && [ "${AGT_TRUST_THRESHOLD}" != "0" ]; then
-    echo "[entrypoint] AGT_SKIP_ENTRA=1 overrides AGT_TRUST_THRESHOLD=${AGT_TRUST_THRESHOLD} → 0 (anonymous-tier fail-open)"
-  fi
-  export AGT_TRUST_THRESHOLD=0
-elif [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
-  # Phase 6 path: ask the router's /v1/mesh-token endpoint for a
-  # verified-tier mesh peer token from the shared auth-sidecar. The
-  # router exposes the route only when MESH_AUTH_BACKEND=EntraAgentIdentity
-  # (controller-injected from KarsAuthConfig.spec.meshAuthBackend), so
-  # a 404 here means a stale router image — fall back to legacy WI
-  # exchange below to keep the sandbox bootable.
+if [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
+  # Phase 6.b path: ask the router's /v1/mesh-token endpoint for a
+  # verified-tier mesh peer token from the shared auth-sidecar.
+  #
+  # Priority order: this branch deliberately wins over AGT_SKIP_ENTRA=1
+  # because the sidecar-mediated mint does NOT have the AADSTS500011
+  # tenant-config issue that AGT_SKIP_ENTRA was designed to skip — the
+  # sidecar uses the controller's MI + blueprint OBO, not a WI direct
+  # exchange against api://agentmesh. So when the operator opts in to
+  # MESH_AUTH_BACKEND=EntraAgentIdentity, they want the sidecar path,
+  # NOT the anonymous-tier fallback.
   #
   # The router listens on loopback :8443, which UID 1000 IS permitted
-  # to reach by the egress-guard baseline (it's how every
-  # mesh/inference call already flows).
+  # to reach by the egress-guard baseline (it's how every mesh /
+  # inference call already flows).
   echo "[entrypoint] MESH_AUTH_BACKEND=EntraAgentIdentity — acquiring mesh token via /v1/mesh-token"
   _ROUTER_URL="${ROUTER_LOCAL_URL:-http://127.0.0.1:8443}"
   _MESH_RESP=""
@@ -203,18 +195,25 @@ elif [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TO
     fi
     unset _ACCESS_TOKEN
   elif [ "$_MESH_STATUS" = "404" ]; then
-    # Router image predates Phase 6 — gracefully fall through to legacy
-    # WI exchange in the next `elif` branch (we cannot re-enter the
-    # `if/elif` chain, so emit a warning and force anonymous tier).
-    # In practice the controller only sets MESH_AUTH_BACKEND when both
-    # halves are deployed together, so this should never fire.
-    echo "[entrypoint] /v1/mesh-token returned 404 — router image too old for Phase 6; registering as anonymous tier"
+    echo "[entrypoint] /v1/mesh-token returned 404 — router image too old for Phase 6.b; registering as anonymous tier"
     export AGT_TRUST_THRESHOLD=0
   else
     echo "[entrypoint] /v1/mesh-token failed (status=${_MESH_STATUS:-network-error}); registering as anonymous tier"
     export AGT_TRUST_THRESHOLD=0
   fi
   unset _MESH_RESP _MESH_STATUS _MESH_BODY _ROUTER_URL
+elif [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
+  echo "[entrypoint] AGT_SKIP_ENTRA=1 — Entra token exchange disabled by operator, registering as anonymous tier"
+  # Trust scoring is meaningless without OAuth identity: every peer registers
+  # as anonymous (registry score 0), so a non-zero AGT_TRUST_THRESHOLD would
+  # reject all sibling-to-sibling KNOCKs even after a successful X3DH handshake.
+  # When Entra is intentionally disabled by the operator, fail-open the trust
+  # gate (threshold=0). Policy evaluation in onKnock still runs, and the SDK's
+  # KNOCK/X3DH still proves cryptographic identity end-to-end.
+  if [ -n "${AGT_TRUST_THRESHOLD:-}" ] && [ "${AGT_TRUST_THRESHOLD}" != "0" ]; then
+    echo "[entrypoint] AGT_SKIP_ENTRA=1 overrides AGT_TRUST_THRESHOLD=${AGT_TRUST_THRESHOLD} → 0 (anonymous-tier fail-open)"
+  fi
+  export AGT_TRUST_THRESHOLD=0
 elif [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
    [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ] && \
    [ -z "${AGT_OAUTH_TOKEN:-}" ]; then

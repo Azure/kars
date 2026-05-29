@@ -302,13 +302,22 @@ export async function fetchSecurityState(sb: SandboxInfo, kubeContext?: string):
       // Registry reputation (from agentmesh-registry Postgres)
       if (rep.registry) {
         const r = rep.registry;
-        // AGT v3.7.0 registry returns `tier: null` for the score;
-        // server doesn't compute the band. Derive client-side from
-        // the 0.0–1.0 reputation score so the UI shows a meaningful
-        // label instead of literal "unknown". Threshold bands match
-        // AGT's local_trust nomenclature where applicable
-        // (Sovereign/Verified/Known/Observed/Anonymous), scaled to
-        // the 0.0–1.0 reputation domain.
+        // Phase 6.c — tier preference order:
+        //   1. r.tier from registry (canonical, set on /v1/registry/verify)
+        //      Values today: "anonymous" | "verified"
+        //   2. r.verified_app_id presence → derived "Verified (Entra)"
+        //      so even if tier field is missing/unknown we still surface
+        //      the cryptographic identification
+        //   3. Score-derived 5-band label (legacy operator-CLI behaviour)
+        //
+        // This means an operator sees:
+        //   "Verified (Entra) abcdef01-..." when the registry has a JWT
+        //   "Verified"                       when score >= 0.7 (no JWT)
+        //   "Known" / "Observed" / etc.      lower-score bands
+        //
+        // Until cluster opts in to Phase 6.c (registry env vars set +
+        // sandboxes get tokens), all peers stay at score-derived labels
+        // — identical to today's behaviour.
         const score01 = r.score ?? 0;
         const derivedTier =
           score01 >= 0.9 ? "Sovereign"
@@ -317,9 +326,21 @@ export async function fetchSecurityState(sb: SandboxInfo, kubeContext?: string):
           : score01 >= 0.3 ? "Observed"
           : score01 > 0    ? "Anonymous"
           : "no-history";
+        const registryTier = typeof r.tier === "string" ? r.tier : null;
+        const verifiedAppId = typeof r.verified_app_id === "string" ? r.verified_app_id : null;
+        let tier: string;
+        if (verifiedAppId) {
+          // Show short appId suffix so the operator can correlate to
+          // the Entra Agent ID without dumping the full GUID.
+          tier = `Verified (Entra ${verifiedAppId.slice(0, 8)}…)`;
+        } else if (registryTier && registryTier !== "anonymous") {
+          tier = registryTier;
+        } else {
+          tier = derivedTier;
+        }
         state.agtReputation = {
           score: score01,
-          tier: r.tier || derivedTier,
+          tier,
           completionRate: r.completion_rate ?? 0,
           totalSessions: r.total_sessions ?? 0,
           feedbackCount: r.feedback_count ?? 0,

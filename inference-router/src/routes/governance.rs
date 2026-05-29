@@ -448,20 +448,24 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
                             .and_then(|v| v.as_f64())
                             .unwrap_or(-1.0);
                         let completion = if completion_raw < 0.0 { 0.0 } else { completion_raw };
-                        // feedback_count = total sessions where peer
-                        // explicitly graded us (success/failed/timeout).
-                        // AGT's three buckets sum to the total — we
-                        // surface that sum as `feedback_count` so the
-                        // CLI's existing "N reviews" line populates.
                         let feedback_count = successful + failed + timeout;
-                        // avg_feedback is the same as reputation_score
-                        // post-EMA. AGT doesn't track an independent
-                        // raw average — use the EMA score so the
-                        // star-rating in the CLI is non-zero once we
-                        // have any history.
+                        // Phase 6.c — tier from registry takes precedence
+                        // over operator CLI's score-derived label. When
+                        // the AGT registry has been Entra-verified the
+                        // tier here is "verified"; otherwise "anonymous".
+                        // metadata.tier (older registry shape) is kept
+                        // as a fallback for forward-compat.
+                        let tier = rec
+                            .get("tier")
+                            .and_then(|v| v.as_str())
+                            .map(|s| serde_json::Value::String(s.to_string()))
+                            .or_else(|| rec.get("metadata").and_then(|m| m.get("tier")).cloned());
                         serde_json::json!({
                             "score": score,
-                            "tier": rec.get("metadata").and_then(|m| m.get("tier")),
+                            "tier": tier,
+                            "verified_app_id": rec.get("verified_app_id"),
+                            "verified_tenant_id": rec.get("verified_tenant_id"),
+                            "verified_at": rec.get("verified_at"),
                             "total_sessions": total,
                             "successful_sessions": successful,
                             "failed_sessions": failed,

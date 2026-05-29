@@ -970,6 +970,14 @@ impl AgentIdentityClient {
         // schema. Losing optional metadata is acceptable; losing the
         // recovery path is not (would cause an unbounded duplicate-
         // SP creation loop as observed live on kars-aks).
+        //
+        // Log the strict-parse failure at WARN so operators see WHY
+        // the fallback fired (Graph response shape drift) — silent
+        // fallback was hiding a critical mis-mapping bug (see below).
+        tracing::warn!(
+            body_prefix = %&body[..body.len().min(200)],
+            "list_cluster_agent_identities: strict parse failed; using permissive fallback"
+        );
         let raw: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| format!("Graph list parse failed: {e}; body starts with: {}", &body[..body.len().min(200)]))?;
         let items = raw
@@ -981,13 +989,24 @@ impl AgentIdentityClient {
             .into_iter()
             .filter_map(|item| {
                 let id = item.get("id")?.as_str()?.to_string();
-                // List responses use `agentAppId` (the AgentIdentity-typed
-                // field); regular SP responses use `appId`. Accept both
-                // so the same parser handles `GET /spn/{id}` and
-                // `GET /spn/Microsoft.Graph.AgentIdentity?...` shapes.
+                // CRITICAL ORDER: `appId` is the PER-SANDBOX identity's
+                // own client ID. `agentAppId` (when present) is the
+                // PARENT BLUEPRINT's appId — using it as the
+                // per-sandbox identity's app_id silently makes every
+                // sandbox impersonate the blueprint, which then
+                // (a) PINs the blueprint in router env so the sidecar
+                // mints tokens for the wrong principal, and (b) makes
+                // KarsSandbox.status.agentIdentity.appId useless for
+                // distinguishing sandboxes from each other.
+                //
+                // Pre-fix: `agentAppId` was tried first, causing the
+                // exact failure mode above on the kars-aks Phase 6.b
+                // dogfood run (2026-05-29T07:26 — first 4 sandboxes
+                // all ended up with status.agentIdentity.appId =
+                // <blueprint>, which broke /v1/mesh-token + RBAC).
                 let app_id = item
-                    .get("agentAppId")
-                    .or_else(|| item.get("appId"))
+                    .get("appId")
+                    .or_else(|| item.get("agentAppId"))
                     .and_then(|v| v.as_str())?
                     .to_string();
                 let display_name = item
@@ -1332,6 +1351,86 @@ mod tests {
         assert_eq!(extract_subscription_id("/"), None);
         // Missing subscription value after the keyword.
         assert_eq!(extract_subscription_id("/subscriptions/"), None);
+    }
+
+    /// Regression pin: the permissive fallback in
+    /// `list_cluster_agent_identities` MUST prefer `appId` over
+    /// `agentAppId`. The latter is the parent BLUEPRINT's app_id and
+    /// using it for the per-sandbox identity makes every sandbox
+    /// impersonate the blueprint — observed live on kars-aks
+    /// 2026-05-29T07:26 when Graph response shape drift caused the
+    /// strict parser to fall through to the permissive path. See
+    /// commit message for the failure mode trace.
+    #[test]
+    fn permissive_fallback_prefers_app_id_over_agent_app_id() {
+        let body = serde_json::json!({
+            "value": [{
+                "id": "889ab472-6ebc-4e3c-9e07-618f5d361663",
+                "appId": "889ab472-6ebc-4e3c-9e07-618f5d361663",
+                "agentAppId": "b712af17-b7f7-419f-a306-b86a607d5a21",
+                "displayName": "kars-test-execbrief",
+                "tags": ["kars-cluster-uid:abc", "kars-sandbox-uid:xyz"],
+            }]
+        });
+        let items = body.get("value").and_then(|v| v.as_array()).cloned().unwrap();
+        let parsed: Vec<AgentIdentity> = items
+            .into_iter()
+            .filter_map(|item| {
+                let id = item.get("id")?.as_str()?.to_string();
+                let app_id = item
+                    .get("appId")
+                    .or_else(|| item.get("agentAppId"))
+                    .and_then(|v| v.as_str())?
+                    .to_string();
+                Some(AgentIdentity {
+                    id,
+                    app_id,
+                    display_name: String::new(),
+                    agent_identity_blueprint_id: None,
+                    created_date_time: None,
+                    service_principal_type: None,
+                    tags: vec![],
+                })
+            })
+            .collect();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].app_id,
+            "889ab472-6ebc-4e3c-9e07-618f5d361663",
+            "permissive parser MUST select the per-sandbox appId, not the blueprint agentAppId"
+        );
+        assert_ne!(
+            parsed[0].app_id,
+            "b712af17-b7f7-419f-a306-b86a607d5a21",
+            "regressing this would silently make every sandbox impersonate the blueprint"
+        );
+    }
+
+    /// Forward-compat: when `appId` is absent (older Graph variants
+    /// or some extension types), fall back to `agentAppId` so we
+    /// don't break the SP discovery path entirely. This is the
+    /// "lose attribution, keep the recovery path" trade-off the
+    /// permissive parser is explicitly designed for.
+    #[test]
+    fn permissive_fallback_uses_agent_app_id_when_app_id_absent() {
+        let body = serde_json::json!({
+            "value": [{
+                "id": "abc",
+                "agentAppId": "b712af17-...",
+                "displayName": "x",
+            }]
+        });
+        let items = body.get("value").and_then(|v| v.as_array()).cloned().unwrap();
+        let parsed: Vec<String> = items
+            .into_iter()
+            .filter_map(|item| {
+                item.get("appId")
+                    .or_else(|| item.get("agentAppId"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .collect();
+        assert_eq!(parsed, vec!["b712af17-..."]);
     }
 
     #[test]
