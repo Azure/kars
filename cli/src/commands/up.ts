@@ -52,6 +52,11 @@ export function upCommand(): Command {
     .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
     .option("--expose-registry", "Deploy AGIC Ingress to expose this cluster's registry publicly", false)
     .option("-m, --mesh-provider <provider>", "Mesh stack to deploy. Only 'agt' is supported (vendored Rust relay/registry were removed in Phase 5.2). Kept as a flag for backward-compatible scripts.", "agt")
+    .option(
+      "--mesh-trust <mode>",
+      "Mesh peer trust mode. 'anonymous' (default): peers register without verification — works on any tenant, simpler setup. 'entra': peers must present Entra-signed JWTs from per-sandbox Agent Identity SPs — registry stamps verified_app_id + tier=verified; requires 'Agent ID Developer' Entra role at first kars up.",
+      "anonymous",
+    )
     // ── Output / lifecycle ────────────────────────────────────────────
     .option("--dry-run", "Show what would be done without executing", false)
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
@@ -63,7 +68,7 @@ Flag groups:
   Infrastructure:     --skip-infra, --force-infra, --skip-preflight
   Images:             --source-acr, --build, --skip-runtime-images
   Foundry:            --foundry-endpoint, --openai-endpoint
-  Mesh federation:    --mesh-peer / --no-mesh-peer, --global-registry, --expose-registry
+  Mesh federation:    --mesh-peer / --no-mesh-peer, --global-registry, --expose-registry, --mesh-trust=anonymous|entra
   Output / lifecycle: --dry-run, --upgrade, --from-scratch
 
 Examples:
@@ -888,11 +893,92 @@ Auto-resume:
         stepper.done(`Controller ${helmExists ? "upgraded" : "deployed"}`);
         markPhaseDone("helm", {}, resumeTopology);
 
-        // ── Step 6b/6c: Inspektor Gadget + AgentMesh deploy ──────────
+        // ── Step 6b: Entra Agent ID trust anchor (idempotent) ────────
+        // Only fires when --mesh-trust=entra (default is 'anonymous').
+        // Provisions the tenant-wide blueprint + controller MI +
+        // MI-as-FIC + KarsAuthConfig CR. Skipped automatically when
+        // KarsAuthConfig/default already exists.
+        //
+        // When --mesh-trust=anonymous (default), this whole block is
+        // skipped — the cluster runs without per-sandbox Entra
+        // identities and the relay accepts unverified WebSocket
+        // connects. Operators can opt in later via
+        // `kars mesh setup-trust` followed by patching
+        // KarsAuthConfig.spec.meshAuthBackend=EntraAgentIdentity.
+        let entraVerifyForMesh: { audience: string; tenantId: string } | undefined;
+        const meshTrustMode = (options as { meshTrust?: string }).meshTrust ?? "anonymous";
+        if (meshTrustMode !== "anonymous" && meshTrustMode !== "entra") {
+          throw new Error(
+            `--mesh-trust must be 'anonymous' or 'entra' (got '${meshTrustMode}')`,
+          );
+        }
+        if (meshTrustMode === "entra") {
+          try {
+            const { karsAuthConfigExists, ensureAgentIdTrustAutoFallback } = await import(
+              "./mesh/agent_id_setup.js"
+            );
+            const already = await karsAuthConfigExists();
+            if (already) {
+              stepper.detail("ok", "KarsAuthConfig/default already present — skipping Entra Agent ID setup");
+              // Read the existing CR to wire Phase 6.c on the relay
+              // even though setup-trust itself was skipped.
+              try {
+                const { execa } = await import("execa");
+                const { stdout } = await execa("kubectl", [
+                  "get", "karsauthconfig", "default", "-o",
+                  "jsonpath={.spec.agentId.blueprintClientId}|{.spec.tenant.tenantId}",
+                ], { stdio: "pipe" });
+                const [bp, tid] = stdout.split("|");
+                if (bp && tid) {
+                  entraVerifyForMesh = { audience: bp, tenantId: tid };
+                }
+              } catch { /* best effort */ }
+            } else {
+              stepper.step("Provisioning Entra Agent ID trust anchor (--mesh-trust=entra)...");
+              const result = await ensureAgentIdTrustAutoFallback({
+                clusterName: baseName,
+                resourceGroup: rg,
+                region: options.region,
+                serviceTree: (options as { serviceTree?: string }).serviceTree,
+              });
+              stepper.done(
+                result.freshlyCreated
+                  ? `Entra Agent ID trust created (blueprint=${result.blueprintClientId})`
+                  : `Entra Agent ID trust reused (blueprint=${result.blueprintClientId})`,
+              );
+              entraVerifyForMesh = {
+                audience: result.blueprintClientId,
+                tenantId: result.tenantId,
+              };
+            }
+          } catch (e) {
+            const msg = (e as Error).message;
+            stepper.detail(
+              "info",
+              `Entra Agent ID setup skipped — ${msg.split("\n")[0].slice(0, 160)}`,
+            );
+            console.log(
+              chalk.yellow(
+                "  ⚠ --mesh-trust=entra requested but setup failed; falling back to anonymous tier.",
+              ),
+            );
+            if (msg.includes("Agent ID Developer")) {
+              console.log(
+                chalk.dim(
+                  "    Grant the 'Agent ID Developer' Entra role to your account and retry.",
+                ),
+              );
+            }
+          }
+        } else {
+          stepper.detail("ok", "--mesh-trust=anonymous (default) — skipping Entra Agent ID provisioning");
+        }
+
+        // ── Step 6c: Inspektor Gadget + AgentMesh deploy ──────────
         // (S15.d.3: extracted to ./up/agentmesh_deploy.ts)
         const { deployAgentMesh } = await import("./up/agentmesh_deploy.js");
         const meshResult = await deployAgentMesh(
-          { repoRoot, acr, acrLoginServer, baseName, rg, stepper },
+          { repoRoot, acr, acrLoginServer, baseName, rg, stepper, entraVerify: entraVerifyForMesh },
           {
             globalRegistry: options.globalRegistry,
             exposeRegistry: options.exposeRegistry,
@@ -903,69 +989,6 @@ Auto-resume:
         const globalRegistryUrl = meshResult.globalRegistryUrl;
         const globalRelayUrl = meshResult.globalRelayUrl;
         markPhaseDone("mesh", { registryMode, globalRegistryUrl, globalRelayUrl }, resumeTopology);
-
-        // ── Step 6d: Entra Agent ID trust anchor (idempotent) ────────
-        // Provisions the tenant-wide blueprint + controller MI +
-        // MI-as-FIC + KarsAuthConfig CR. Skipped automatically when
-        // KarsAuthConfig/default already exists (e.g. a previous
-        // `kars up` ran). The user only needs `Agent ID Developer`
-        // role at Entra scope — no Application Administrator required.
-        //
-        // When the user does NOT have the role, this step surfaces a
-        // clear error but does NOT abort `kars up`: the cluster
-        // continues into anonymous-tier mode and the operator can
-        // re-run `kars mesh setup-trust` once the role is granted.
-        try {
-          const { karsAuthConfigExists, ensureAgentIdTrustAutoFallback } = await import(
-            "./mesh/agent_id_setup.js"
-          );
-          const already = await karsAuthConfigExists();
-          if (already) {
-            stepper.detail("ok", "KarsAuthConfig/default already present — skipping Entra Agent ID setup");
-          } else {
-            stepper.step("Provisioning Entra Agent ID trust anchor...");
-            // Auto-fallback wrapper: tries the fast Graph REST path
-            // first, transparently switches to Bicep ARM deployment
-            // when Microsoft tenant Conditional Access blocks the az
-            // CLI's Graph token (AADSTS530084). End result is the same
-            // KarsAuthConfig CR either way.
-            const result = await ensureAgentIdTrustAutoFallback({
-              clusterName: baseName,
-              resourceGroup: rg,
-              region: options.region,
-              // serviceTree comes from --service-tree flag or
-              // KARS_SERVICE_TREE env var; both surface from the
-              // setup function itself.
-              serviceTree: (options as { serviceTree?: string }).serviceTree,
-            });
-            stepper.done(
-              result.freshlyCreated
-                ? `Entra Agent ID trust created (blueprint=${result.blueprintClientId})`
-                : `Entra Agent ID trust reused (blueprint=${result.blueprintClientId})`,
-            );
-          }
-        } catch (e) {
-          // Non-fatal: cluster continues to anonymous tier. The user
-          // can re-run `kars mesh setup-trust` after granting the
-          // missing role.
-          const msg = (e as Error).message;
-          stepper.detail(
-            "info",
-            `Entra Agent ID setup skipped — ${msg.split("\n")[0].slice(0, 160)}`,
-          );
-          console.log(
-            chalk.yellow(
-              "  ⚠ Cluster will run in anonymous tier until `kars mesh setup-trust` succeeds.",
-            ),
-          );
-          if (msg.includes("Agent ID Developer")) {
-            console.log(
-              chalk.dim(
-                "    Grant the 'Agent ID Developer' Entra role to your account and retry.",
-              ),
-            );
-          }
-        }
 
         // ── Step 7+8: Sandbox bring-up (S15.d.4: extracted to ./up/sandbox_bringup.ts) ──
         // Federated credentials, MI Contributor, Foundry RBAC, KarsSandbox CR,

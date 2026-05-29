@@ -638,6 +638,22 @@ async function writeKarsAuthConfig(result: {
           requestAppToken: true,
         },
       },
+      // Phase 6.b: verified-tier mesh peer authentication.
+      // Audience is the blueprint clientId because the blueprint SP
+      // is the only Entra resource we're guaranteed exists in every
+      // customer tenant — `api://agentmesh` is a kars-Azure-internal
+      // SP that customer tenants don't have. The token's `azp` claim
+      // carries the per-sandbox agent identity appId, which the
+      // registry stamps as `verified_app_id`.
+      //
+      // Enabled here unconditionally because this `writeKarsAuthConfig`
+      // is only called from `--mesh-trust entra` (or explicit
+      // `kars mesh setup-trust`); the operator has already opted in.
+      // Anonymous-tier deployments never reach this code path
+      // because `--mesh-trust anonymous` (the default) skips the
+      // Entra Agent ID block entirely.
+      meshAuthBackend: "EntraAgentIdentity",
+      meshAuthAudience: `${result.blueprintClientId}/.default`,
     },
   };
 

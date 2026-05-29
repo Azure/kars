@@ -27,6 +27,17 @@ export interface AgentMeshDeployContext {
   /** Resolved resource group name. */
   rg: string;
   stepper: Stepper;
+  /**
+   * Phase 6.c — when set, the relay + registry are configured at
+   * deploy time to verify inbound Entra-signed JWTs from sandbox
+   * mesh peers. Both env vars are required; both empty/undefined
+   * keeps the relay+registry on the legacy anonymous-tier path
+   * for backward compatibility.
+   */
+  entraVerify?: {
+    audience: string;
+    tenantId: string;
+  };
 }
 
 export interface AgentMeshDeployOptions {
@@ -56,7 +67,7 @@ export async function deployAgentMesh(
   options: AgentMeshDeployOptions,
 ): Promise<AgentMeshDeployResult> {
   const { execa } = await import("execa");
-  const { repoRoot, acr: _acr, acrLoginServer, baseName, rg, stepper } = ctx;
+  const { repoRoot, acr: _acr, acrLoginServer, baseName, rg, stepper, entraVerify } = ctx;
 
   // Inspektor Gadget (eBPF observability) — non-fatal
   await execa("kubectl", ["gadget", "deploy"], { stdio: "pipe" }).catch(() => {});
@@ -112,6 +123,38 @@ export async function deployAgentMesh(
         ], { stdio: "pipe" }).catch(() => {});
 
         stepper.done(`AgentMesh infrastructure deployed (agt)`);
+
+        // Phase 6.c — enable JWT verification on the relay + registry
+        // when the operator has provisioned an Entra Agent Identity
+        // blueprint. Both env vars must be set together (the verifier
+        // refuses to enable on a half-configured deployment), so we
+        // apply both via a single kubectl set env on each deploy.
+        // Idempotent: running again with the same values is a no-op.
+        if (entraVerify?.audience && entraVerify?.tenantId) {
+          stepper.update("Enabling Phase 6.c Entra-signed JWT verification on relay + registry...");
+          for (const deploy of ["registry", "relay"]) {
+            try {
+              await execa("kubectl", [
+                "set", "env", "-n", "agentmesh", `deploy/${deploy}`,
+                `AGENTMESH_ENTRA_AUDIENCE=${entraVerify.audience}`,
+                `AGENTMESH_ENTRA_TENANT_ID=${entraVerify.tenantId}`,
+              ], { stdio: "pipe" });
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e);
+              stepper.detail("info", `set env on deploy/${deploy} failed: ${msg.split("\n")[0].slice(0, 100)}`);
+            }
+          }
+          // Wait briefly for the rollout — set env triggers a fresh
+          // pod, and the registry needs to be Ready before the first
+          // sandbox boots and POSTs /v1/registry/verify.
+          for (const deploy of ["registry", "relay"]) {
+            await execa("kubectl", [
+              "rollout", "status", "-n", "agentmesh", `deploy/${deploy}`,
+              "--timeout=120s",
+            ], { stdio: "pipe" }).catch(() => {});
+          }
+          kvLine("Entra verify", `enabled (aud=${entraVerify.audience})`);
+        }
       } finally {
         try { unlinkSync(tmpManifest); } catch { /* noop */ }
       }
