@@ -413,14 +413,63 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
                     // panel + CLI fetchers schema-agnostic. AGT agent record
                     // has `reputation_score: f64` in [0, 1]; vendored has
                     // `score: i64`.
+                    //
+                    // Phase 6.c follow-up — also surface session counters
+                    // (`total_sessions`, `successful_sessions`,
+                    // `failed_sessions`, `timeout_sessions`,
+                    // `completion_rate`, `last_session_at`) so the operator
+                    // CLI's existing fields in /agt/reputation fill in.
+                    // The AGT registry returns `completion_rate: -1.0`
+                    // when there's no history; we collapse that to 0.0
+                    // here because the CLI bar renderer expects [0,1].
                     body.map(|rec| {
                         let score = rec
                             .get("reputation_score")
                             .and_then(|v| v.as_f64())
                             .unwrap_or(0.0);
+                        let total = rec
+                            .get("total_sessions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let successful = rec
+                            .get("successful_sessions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let failed = rec
+                            .get("failed_sessions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let timeout = rec
+                            .get("timeout_sessions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let completion_raw = rec
+                            .get("completion_rate")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(-1.0);
+                        let completion = if completion_raw < 0.0 { 0.0 } else { completion_raw };
+                        // feedback_count = total sessions where peer
+                        // explicitly graded us (success/failed/timeout).
+                        // AGT's three buckets sum to the total — we
+                        // surface that sum as `feedback_count` so the
+                        // CLI's existing "N reviews" line populates.
+                        let feedback_count = successful + failed + timeout;
+                        // avg_feedback is the same as reputation_score
+                        // post-EMA. AGT doesn't track an independent
+                        // raw average — use the EMA score so the
+                        // star-rating in the CLI is non-zero once we
+                        // have any history.
                         serde_json::json!({
                             "score": score,
                             "tier": rec.get("metadata").and_then(|m| m.get("tier")),
+                            "total_sessions": total,
+                            "successful_sessions": successful,
+                            "failed_sessions": failed,
+                            "timeout_sessions": timeout,
+                            "feedback_count": feedback_count,
+                            "average_feedback": score,
+                            "completion_rate": completion,
+                            "last_session_at": rec.get("last_session_at"),
                             "raw": rec,
                         })
                     })
