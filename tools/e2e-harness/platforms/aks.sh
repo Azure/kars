@@ -260,6 +260,19 @@ platform_collect_artifacts() {
             kubectl exec -n "kars-${SCENARIO_INCOMING_SANDBOX}" "$pod" \
                 -c openclaw -- ls -la "${SCENARIO_INCOMING_PATH}" 2>/dev/null \
                 >"${OUT_DIR}/${SCENARIO_INCOMING_SANDBOX}-incoming.txt" || true
+
+            # Copy any image artefacts (hero/scorecard PNGs etc.) the
+            # writer received into OUT_DIR so render_html.py can rewrite
+            # the markdown image refs to local files. Use `tar` over
+            # `kubectl exec` to avoid the per-file `kubectl cp` round
+            # trips and to skip files the writer hasn't produced (the
+            # incoming/ dir may legitimately be empty for some scenarios).
+            local incoming_clean="${SCENARIO_INCOMING_PATH%/}"
+            kubectl exec -n "kars-${SCENARIO_INCOMING_SANDBOX}" "$pod" \
+                -c openclaw -- sh -c \
+                "cd '${incoming_clean}' 2>/dev/null && tar cf - *.png *.jpg *.jpeg *.gif *.svg 2>/dev/null" \
+                2>/dev/null \
+                | tar xf - -C "${OUT_DIR}" 2>/dev/null || true
         fi
     fi
 

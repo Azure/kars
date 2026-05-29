@@ -56,12 +56,22 @@ Output lands under `out/<runId>/`:
 ```
 out/2025-…/
 ├── trace.jsonl              # JSONL of every event monitor.sh saw
-├── transcript.log           # parent agent's reply
+├── transcript.log           # parent agent's reply (raw markdown)
+├── brief.html               # transcript.log rendered as a polished HTML
+│                            # page — auto-opens in your browser at the
+│                            # end of the run. Image refs rewritten to
+│                            # the local PNGs copied out of the writer
+│                            # sandbox so hero/scorecard render inline.
+├── *.png / *.jpg            # image artefacts copied from the writer
+│                            # sandbox's incoming/ dir
 ├── platform-notes.txt       # platform caveats (e.g. kindnetd vs Cilium)
 ├── *-gateway.log            # per-sub-agent OpenClaw gateway logs
 ├── …-incoming.txt           # ls of any file-transfer destination dir
 └── verify.json              # final verdict (`pass: bool`, per-check status)
 ```
+
+Set `NO_OPEN_BROWSER=1` to skip the browser open at the end (the HTML
+is always rendered regardless).
 
 ## Platforms
 

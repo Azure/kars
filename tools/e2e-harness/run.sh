@@ -138,8 +138,31 @@ if [ "${DEMO:-0}" = "1" ]; then
     VERIFY_RC=$?
     # Now stop the monitor + formatter; formatter will print verify panel.
     cleanup
+    # Render the final brief as a browser-openable HTML page so the
+    # operator can showcase the actual deliverable (with hero +
+    # scorecard images inline) at the end of the demo. Best-effort
+    # — never fails the run.
+    python3 "${SCRIPT_DIR}/render_html.py" "${OUT_DIR}" 2>/dev/null || true
+    if [ -f "${OUT_DIR}/brief.html" ]; then
+        echo
+        echo "  📄  Final brief rendered: ${OUT_DIR}/brief.html"
+        if [ "${NO_OPEN_BROWSER:-0}" != "1" ]; then
+            if command -v open >/dev/null 2>&1; then
+                open "${OUT_DIR}/brief.html" 2>/dev/null || true
+            elif command -v xdg-open >/dev/null 2>&1; then
+                xdg-open "${OUT_DIR}/brief.html" >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
     exit "${VERIFY_RC}"
 fi
 
 cleanup
 python3 "${SCRIPT_DIR}/verify.py"
+VERIFY_RC=$?
+python3 "${SCRIPT_DIR}/render_html.py" "${OUT_DIR}" 2>/dev/null || true
+if [ -f "${OUT_DIR}/brief.html" ]; then
+    echo
+    echo "  Final brief rendered: ${OUT_DIR}/brief.html"
+fi
+exit "${VERIFY_RC}"
