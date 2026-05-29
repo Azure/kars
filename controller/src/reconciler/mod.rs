@@ -1190,7 +1190,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     //     legacy — explicit user request for AgentId must not silently
     //     degrade to a weaker identity model.
     let agent_id_outcome = crate::agent_id_provisioning::ensure_agent_identity_for_sandbox(
-        &client,
+        client,
         &sandbox,
         &ctx.cluster_uid,
         &ctx.agent_id_cache,

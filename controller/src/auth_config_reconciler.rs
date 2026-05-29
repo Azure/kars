@@ -198,8 +198,8 @@ async fn reconcile(
     let current_observed_gen = obj.status.as_ref().and_then(|s| s.observed_generation);
     let already_ready = current_phase == Some(crate::status::phase::PHASE_READY)
         && current_observed_gen == Some(observed_generation);
-    if !already_ready {
-        if let Err(e) = patch_ready_status(
+    if !already_ready
+        && let Err(e) = patch_ready_status(
             &ctx.client,
             &name,
             observed_generation,
@@ -208,9 +208,8 @@ async fn reconcile(
             ),
         )
         .await
-        {
-            tracing::warn!(error = %e, "patch KarsAuthConfig status failed; will retry next reconcile");
-        }
+    {
+        tracing::warn!(error = %e, "patch KarsAuthConfig status failed; will retry next reconcile");
     }
 
     // Re-reconcile on a slow cadence as a defensive measure against
@@ -678,8 +677,7 @@ mod tests {
         );
         // The MI-mode env vars MUST NOT leak into the WI rendering.
         assert!(
-            env.get("AzureAd__ClientCredentials__0__ManagedIdentityClientId")
-                .is_none(),
+            !env.contains_key("AzureAd__ClientCredentials__0__ManagedIdentityClientId"),
             "WI mode must not emit ManagedIdentityClientId"
         );
     }
@@ -763,12 +761,9 @@ mod tests {
         // controller upgrade does not bounce sidecar pods on an
         // unrelated drift.
         let env = render_sidecar_env(&fixture_spec());
-        assert!(env.get("DownstreamApis__AgentMesh__BaseUrl").is_none());
-        assert!(env.get("DownstreamApis__AgentMesh__Scopes__0").is_none());
-        assert!(
-            env.get("DownstreamApis__AgentMesh__RequestAppToken")
-                .is_none()
-        );
+        assert!(!env.contains_key("DownstreamApis__AgentMesh__BaseUrl"));
+        assert!(!env.contains_key("DownstreamApis__AgentMesh__Scopes__0"));
+        assert!(!env.contains_key("DownstreamApis__AgentMesh__RequestAppToken"));
     }
 
     #[test]
@@ -789,7 +784,7 @@ mod tests {
             "app-token flow is the only flow that makes sense for a mesh peer"
         );
         assert!(
-            env.get("DownstreamApis__AgentMesh__BaseUrl").is_some(),
+            env.contains_key("DownstreamApis__AgentMesh__BaseUrl"),
             "sidecar config validator requires BaseUrl; ours is sentinel"
         );
     }

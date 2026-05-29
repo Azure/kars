@@ -123,6 +123,7 @@ pub enum SkipReason {
 }
 
 impl SkipReason {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             SkipReason::ExplicitAnonymous => "ExplicitAnonymous",
@@ -678,7 +679,6 @@ pub async fn cleanup_agent_identity_for_sandbox(
 /// architecture (one Deployment in `kars-system`) makes that
 /// mirroring unnecessary: the sidecar consumes a single
 /// `kars-system`-scoped ConfigMap managed by `auth_config_reconciler`.
-
 async fn patch_sandbox_status(
     client: &Client,
     sandbox: &KarsSandbox,
@@ -694,14 +694,12 @@ async fn patch_sandbox_status(
         .status
         .as_ref()
         .and_then(|s| s.agent_identity.as_ref())
+        && current.app_id == identity.app_id
+        && current.object_id == identity.object_id
+        && current.display_name == identity.display_name
+        && current.created_at == identity.created_at
     {
-        if current.app_id == identity.app_id
-            && current.object_id == identity.object_id
-            && current.display_name == identity.display_name
-            && current.created_at == identity.created_at
-        {
-            return Ok(());
-        }
+        return Ok(());
     }
     let name = sandbox.name_any();
     let ns = sandbox.namespace().unwrap_or_default();

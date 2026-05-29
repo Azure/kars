@@ -878,6 +878,7 @@ impl AgentIdentityClient {
     /// Used during reconcile to confirm the SP we recorded in status
     /// still exists. Returns `Ok(None)` on 404 so the reconciler can
     /// treat "SP was deleted out-of-band" as a re-create signal.
+    #[allow(dead_code)]
     pub async fn get_agent_identity(
         &self,
         object_id: &str,
@@ -1313,7 +1314,9 @@ mod tests {
 
     #[test]
     fn odata_type_rejects_floats() {
-        let v = serde_json::json!(3.14);
+        // Intentional non-PI float — clippy::approx_constant flags 3.14 as
+        // approximating std::f64::consts::PI even in a test fixture.
+        let v = serde_json::json!(2.71);
         let err = odata_type_for_value(&v).unwrap_err();
         assert!(err.contains("floats") && err.contains("not supported"));
     }
