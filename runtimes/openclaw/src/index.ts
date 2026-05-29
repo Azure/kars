@@ -2130,14 +2130,21 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // If AGT_OAUTH_TOKEN is set (from Workload Identity token exchange or
     // manual config), POST to /registry/verify to upgrade tier from anonymous
     // to verified. Also sets up 12-hour periodic re-verification.
+    //
+    // Phase 6.c — send `did` (the DID-prefixed identifier the registry
+    // stores agents under), falling back to `amid` for SDK versions
+    // that don't expose .did. The registry accepts either shape, but
+    // `did` is the canonical key and avoids an O(n) lookup-by-pubkey
+    // fallback path on the registry side.
     const oauthToken = process.env.AGT_OAUTH_TOKEN || "";
     if (oauthToken && connected) {
+      const verifyId = agtIdentity.did || agtIdentity.amid;
       try {
         await _routerCall("POST", "/agt/registry/v1/registry/verify", {
-          amid: agtIdentity.amid,
+          amid: verifyId,
           verification_token: oauthToken,
         });
-        log.info("AGT identity verified via OAuth — tier upgraded to 'verified'");
+        log.info(`AGT identity verified via OAuth — tier upgraded to 'verified' (id=${verifyId})`);
       } catch (verifyErr: any) {
         log.warn(`AGT OAuth verification failed: ${verifyErr.message} — running as anonymous tier`);
       }
@@ -2146,9 +2153,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       setInterval(async () => {
         const token = process.env.AGT_OAUTH_TOKEN || "";
         if (!token || !agtIdentity) return;
+        const rid = agtIdentity.did || agtIdentity.amid;
         try {
           await _routerCall("POST", "/agt/registry/v1/registry/verify", {
-            amid: agtIdentity.amid,
+            amid: rid,
             verification_token: token,
           });
           log.info("AGT identity re-verified (12hr cycle)");
