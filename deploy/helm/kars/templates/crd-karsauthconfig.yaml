@@ -1,0 +1,183 @@
+# kars KarsAuthConfig CRD
+#
+# DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
+# schema in `controller/src/auth_config.rs`.
+#
+# Cluster-scoped singleton (`metadata.name == "default"`). Holds the
+# tenant-wide Entra Agent ID blueprint anchors + per-cluster controller
+# managed identity reference. Materialised into a sibling ConfigMap by
+# `controller/src/auth_config_reconciler.rs`.
+#
+# See docs/architecture/entra-agent-id/01-runtime-token-flow.md for the
+# runtime contract.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karsauthconfigs.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: KarsAuthConfig
+    plural: karsauthconfigs
+    shortNames:
+    - kac
+    singular: karsauthconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.tenant.tenantId
+      name: Tenant
+      type: string
+    - jsonPath: .spec.agentId.blueprintClientId
+      name: Blueprint
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |
+          KarsAuthConfig — cluster-singleton holding the Entra Agent ID
+          provisioning anchors. The canonical type definitions live in
+          `controller/src/auth_config.rs`. The CLI (`kars mesh
+          setup-trust`) writes this CR; the controller validates spec
+          shape at reconcile time.
+        type: object
+        properties:
+          spec:
+            type: object
+            required: [tenant, agentId, controller]
+            # CEL: pin the singleton name. The reconciler also surfaces
+            # `NotDefault` for completeness, but rejecting at admission
+            # is a cleaner UX.
+            x-kubernetes-validations:
+            - rule: "self == oldSelf || true"
+              message: "spec mutations allowed; reconciler enforces shape"
+            properties:
+              tenant:
+                type: object
+                required: [tenantId]
+                properties:
+                  tenantId:
+                    type: string
+                    description: Microsoft Entra tenant GUID.
+                  authorityHost:
+                    type: string
+                    description: Authority host (default login.microsoftonline.com).
+                    default: "https://login.microsoftonline.com/"
+                  serviceManagementReference:
+                    type: string
+                    description: |
+                      ServiceTree GUID required by Microsoft-style enterprise
+                      tenants when registering new Entra applications. Audit
+                      lineage only; not used at runtime.
+              agentId:
+                type: object
+                required: [blueprintClientId, blueprintObjectId]
+                properties:
+                  blueprintClientId:
+                    type: string
+                  blueprintObjectId:
+                    type: string
+                  sponsorUserObjectIds:
+                    type: array
+                    items:
+                      type: string
+                    description: "Entra user objectIds applied as sponsors on every per-sandbox agent identity. Required in tenants where Graph rejects identities lacking a sponsor."
+              controller:
+                type: object
+                required: [managedIdentityClientId, managedIdentityResourceId]
+                properties:
+                  managedIdentityClientId:
+                    type: string
+                  managedIdentityResourceId:
+                    type: string
+                  managedIdentityPrincipalId:
+                    type: string
+              meshAuthBackend:
+                type: string
+                enum: [Anonymous, EntraAgentIdentity]
+                default: Anonymous
+                description: |
+                  Selects the AGT mesh peer registration tier. `Anonymous`
+                  (default) registers without identity; `EntraAgentIdentity`
+                  mints an Entra-signed JWT per sandbox via the shared
+                  auth-sidecar and presents it to the relay/registry for
+                  verified-tier registration.
+              meshAuthAudience:
+                type: string
+                description: |
+                  Audience claim the AGT relay/registry expects on the
+                  per-peer Entra JWT. Defaults to the blueprint's
+                  `<clientId>/.default` scope when unset.
+              downstreamApis:
+                type: object
+                # Subtree preserve-unknown-fields is allowed by C4 —
+                # the CNCF criterion only forbids it at spec root. This
+                # block carries operator-supplied downstream-API
+                # configuration that the sidecar passes through opaque.
+                x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                description: |
+                  Pending | Ready | Degraded | NotDefault. Set by the
+                  auth-config reconciler.
+              observedGeneration:
+                type: integer
+                format: int64
+                description: |
+                  metadata.generation last observed by the reconciler.
+              blueprintFicCount:
+                type: integer
+                format: int32
+                description: |
+                  Number of federated identity credentials currently on
+                  the blueprint application. Used by `kars doctor` to
+                  warn when approaching the per-app FIC quota.
+              blueprintFicQuota:
+                type: integer
+                format: int32
+                description: |
+                  Soft upper bound on federated identity credentials per
+                  Entra application (currently 20).
+              conditions:
+                type: array
+                description: |
+                  Standard K8s Condition list. At most one entry per
+                  `type`. Well-known types: BlueprintReady,
+                  ControllerMIReachable, FederatedCredentialReady,
+                  SidecarConfigMaterialized.
+                items:
+                  type: object
+                  required: [type, status, lastTransitionTime, reason, message]
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                      enum: ["True", "False", "Unknown"]
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    observedGeneration:
+                      type: integer
+                      format: int64
+    served: true
+    storage: true
+    subresources:
+      status: {}

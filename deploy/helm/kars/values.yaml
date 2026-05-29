@@ -379,3 +379,39 @@ egress:
 # finalizer.
 egressApproval:
   maxTtlSeconds: 86400
+
+# ─── Shared Microsoft Entra Auth Sidecar ─────────────────────────
+# (PR feat/entra-agent-id) — one auth-sidecar Deployment per cluster
+# serving all sandboxes via `?AgentIdentity=<appId>`. Replaces the
+# earlier per-pod sidecar injection design.
+#
+# When `enabled=true`, the controller's reconciler stamps
+# AUTH_SIDECAR_URL=http://entra-auth-sidecar.<ns>.svc:5000 and
+# PINNED_AGENT_IDENTITY_APP_ID on every inference-router for sandboxes
+# in agent-id mesh-auth mode. The router then routes ALL downstream
+# token acquisitions through this shared sidecar (fail-closed; no
+# IMDS / WI fallback inside the pod).
+#
+# Set `blueprintClientId` + `tenantId` from your KarsAuthConfig CR
+# (or let `kars up` patch these via `--set` automatically).
+entraSidecar:
+  enabled: false
+  replicas: 2
+  # Pin the Microsoft GA distroless image. Override only to use a
+  # registry mirror.
+  image: "mcr.microsoft.com/entra-sdk/auth-sidecar:1.0.0-azurelinux3.0-distroless"
+  imagePullPolicy: IfNotPresent
+  # Required when enabled=true. The blueprint app's appId — used as
+  # `AzureAd__ClientId` AND as the Workload Identity client-id
+  # annotation on the SA. Read from KarsAuthConfig/default.spec.agentId.blueprintClientId.
+  blueprintClientId: ""
+  # Required when enabled=true. The Entra tenant ID. Read from
+  # KarsAuthConfig/default.spec.tenant.tenantId.
+  tenantId: ""
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"

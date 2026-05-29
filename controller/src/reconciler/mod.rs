@@ -152,6 +152,17 @@ struct Context {
     /// from colliding on agent memories. `None` keeps the legacy
     /// cluster-less fallback scope (`agent:<sandbox>`).
     cluster_name: Option<String>,
+    /// Cluster UID — sourced from the controller's leader-election
+    /// lease metadata.uid at startup. Stable for the lifetime of the
+    /// cluster's controller installation. Propagated into Graph object
+    /// tags so the `agent_identity_reaper` can identify orphans
+    /// belonging to this cluster vs. other kars clusters sharing the
+    /// same tenant.
+    cluster_uid: String,
+    /// Process-wide cache of `AgentIdentityClient`s keyed by blueprint
+    /// client ID. Shared across reconciles so token caches and
+    /// HTTP-connection pooling are reused.
+    agent_id_cache: Arc<crate::agent_id_provisioning::ProvisionerCache>,
 }
 
 /// Main reconciliation function — called whenever a KarsSandbox changes.
@@ -250,6 +261,20 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         {
             crate::pairing::release_offload_slot(client.clone(), requester, &name).await;
         }
+
+        // Deprovision the per-sandbox Entra agent identity + ARM role
+        // assignments. Best-effort: failures are logged but do NOT
+        // block the finalizer removal — the orphan reaper catches
+        // anything that fails here (typically due to transient Graph
+        // or ARM unavailability). Blocking the finalizer on Azure
+        // failures would leave the CR stuck in Terminating forever
+        // when Azure is degraded.
+        crate::agent_id_provisioning::cleanup_agent_identity_for_sandbox(
+            client,
+            &sandbox,
+            &ctx.agent_id_cache,
+        )
+        .await;
 
         // Remove the finalizer so K8s can complete CRD deletion
         let sandbox_api: Api<KarsSandbox> =
@@ -901,6 +926,23 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 {"protocol": "TCP", "port": 8082}
             ]
         }),
+        // Allow the inference-router to reach the shared Entra
+        // auth-sidecar in kars-system on TCP 5000. The auth-sidecar's
+        // own NetworkPolicy further restricts who may connect (only
+        // pods labeled `kars.azure.com/component=sandbox` in sandbox
+        // namespaces); this egress rule opens the other half of the
+        // path. Unconditional because every kars cluster runs in
+        // either Pattern A (corp tenant) or Pattern B (WI) mode and
+        // both terminate at this Service. When `entraSidecar.enabled`
+        // is false at the Helm level, no Service / Deployment exists
+        // and the rule is a harmless no-op.
+        json!({
+            "to": [{"namespaceSelector": {"matchLabels": {
+                "app.kubernetes.io/name": "kars",
+                "app.kubernetes.io/component": "system"
+            }}}],
+            "ports": [{"protocol": "TCP", "port": 5000}]
+        }),
     ];
 
     // Add user-defined allowed endpoints (for the inference-router to reach
@@ -1130,6 +1172,85 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         )));
     }
 
+    // ── Step 3.5: Provision per-sandbox Entra Agent Identity (when active) ──
+    //
+    // Runs BEFORE pod-spec assembly because the resulting `appId` is
+    // pinned into the inference-router's env. Order is load-bearing:
+    // the rubber-duck critique caught this — we cannot inject a
+    // sidecar without first knowing which identity it should mint
+    // tokens for, and we cannot lazily defer the Graph call to the
+    // sidecar itself because the sidecar runs as UID 1002 inside the
+    // sandbox namespace with zero Graph credentials.
+    //
+    // Outcome:
+    //   - Skipped(reason): no sidecar injection; sandbox runs legacy
+    //     fedcred + anonymous-tier path. Backwards-compatible.
+    //   - Ready: capture identity for the pod-spec assembler below.
+    //   - Failed: surface as Degraded + requeue. Do NOT fall back to
+    //     legacy — explicit user request for AgentId must not silently
+    //     degrade to a weaker identity model.
+    let agent_id_outcome = crate::agent_id_provisioning::ensure_agent_identity_for_sandbox(
+        client,
+        &sandbox,
+        &ctx.cluster_uid,
+        &ctx.agent_id_cache,
+    )
+    .await;
+    let agent_id_active: Option<(
+        crate::crd::AgentIdentityStatus,
+        String,
+        crate::auth_config::MeshAuthBackend,
+        Option<String>,
+    )> = match &agent_id_outcome {
+        crate::agent_id_provisioning::ProvisioningOutcome::Ready {
+            agent_identity,
+            auth_spec,
+        } => {
+            tracing::info!(
+                sandbox = %name,
+                app_id = %agent_identity.app_id,
+                "agent identity ready; sidecar will be injected"
+            );
+            Some((
+                agent_identity.clone(),
+                auth_spec.tenant.tenant_id.clone(),
+                auth_spec.mesh_auth_backend.clone(),
+                auth_spec.mesh_auth_audience.clone(),
+            ))
+        }
+        crate::agent_id_provisioning::ProvisioningOutcome::Skipped { reason } => {
+            tracing::debug!(
+                sandbox = %name,
+                reason = ?reason,
+                "agent-id mode skipped; using legacy auth path"
+            );
+            None
+        }
+        crate::agent_id_provisioning::ProvisioningOutcome::Failed {
+            reason,
+            retry_after_secs,
+        } => {
+            tracing::warn!(
+                sandbox = %name,
+                error = %reason,
+                "agent identity provisioning failed; requeuing without pod deployment"
+            );
+            let sandbox_api: Api<KarsSandbox> =
+                Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+            let status_obj = crate::status::build_degraded_status_patch(
+                &sandbox,
+                "AgentIdentityProvisioningFailed",
+                reason,
+            );
+            let _ = sandbox_api
+                .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
+                .await;
+            return Ok(Action::requeue(crate::backoff::requeue_secs_with_jitter(
+                *retry_after_secs,
+            )));
+        }
+    };
+
     // ── Step 4: Deploy sandbox pod ───────────────────────────────────────
     // Skipped wholesale in OverlayMode (Phase 2 S8): the operator's
     // upstream `Sandbox` CR (sigs.k8s.io/agent-sandbox) owns the Pod
@@ -1272,6 +1393,33 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             std::env::var("KARS_DISABLE_ENTRA_AUTH").unwrap_or_else(|_| "1".to_string());
         if skip_entra == "1" || skip_entra.eq_ignore_ascii_case("true") {
             openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
+        }
+
+        // Phase 6.b — propagate the mesh-auth backend toggle into the
+        // openclaw container so the entrypoint's elif chain can prefer
+        // the /v1/mesh-token sidecar path over AGT_SKIP_ENTRA=1. The
+        // router already has this env (set later in router_env); the
+        // sandbox entrypoint script (sandbox-images/openclaw/
+        // entrypoint.sh) reads MESH_AUTH_BACKEND to decide which token
+        // acquisition path to take. Without this push, the entrypoint
+        // never sees the toggle and falls back to anonymous-tier
+        // even when the operator has flipped KAC.meshAuthBackend.
+        if let Some((_, _, mesh_backend, mesh_audience)) = agent_id_active.as_ref()
+            && matches!(
+                mesh_backend,
+                crate::auth_config::MeshAuthBackend::EntraAgentIdentity
+            )
+        {
+            openclaw_env.push(json!({
+                "name": "MESH_AUTH_BACKEND",
+                "value": "EntraAgentIdentity",
+            }));
+            if let Some(aud) = mesh_audience.as_ref().filter(|s| !s.trim().is_empty()) {
+                openclaw_env.push(json!({
+                    "name": "MESH_AUTH_AUDIENCE",
+                    "value": aud.clone(),
+                }));
+            }
         }
 
         // Strict-mode tool definitions: when the controller is launched with
@@ -1513,6 +1661,95 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         };
         router_env.push(json!({"name": "EGRESS_MODE", "value": egress_mode_str}));
 
+        // ── Agent-Id mode: pin per-sandbox identity into router env ──
+        //
+        // When `agent_id_active` is `Some`, the controller has
+        // provisioned an Entra Agent Identity for this sandbox. The
+        // router consumes these two env vars to switch from the
+        // legacy IMDS+token-exchange path to the shared cluster
+        // auth-sidecar Service (`AUTH_SIDECAR_URL`) and pins the
+        // identity (`PINNED_AGENT_IDENTITY_APP_ID`) so it cannot be
+        // tampered with by inbound query-param manipulation.
+        //
+        // The sidecar runs ONCE per cluster in `kars-system` as a
+        // Helm-deployed Deployment behind a ClusterIP Service +
+        // NetworkPolicy (only inference-router pods may ingress).
+        // The sidecar's `?AgentIdentity=<appId>` query parameter
+        // routes the token mint to the correct child agent identity,
+        // so the same sidecar serves all sandboxes in the cluster.
+        //
+        // The router's fail-closed contract
+        // (inference-router/src/sidecar_client.rs) ensures that when
+        // `AUTH_SIDECAR_URL` is set, ALL Foundry auth goes through
+        // the sidecar — no IMDS / WI fallback — preserving the
+        // per-sandbox audit principal.
+        if let Some((agent_id, tenant_id, mesh_backend, mesh_audience)) = agent_id_active.as_ref() {
+            router_env.push(json!({
+                "name": "PINNED_AGENT_IDENTITY_APP_ID",
+                "value": agent_id.app_id.clone(),
+            }));
+            // Phase 6.b (mesh-identity-stability follow-up): the
+            // openclaw plugin reads PINNED_AGENT_IDENTITY_APP_ID at
+            // identity-generation time to derive a deterministic
+            // Ed25519/X25519 keypair. Without this on the openclaw
+            // container, every pod restart generates fresh keys →
+            // fresh DID → registry accumulates stale agent entries
+            // → mesh routing breaks across restarts. We push the
+            // same value the router gets so both containers agree
+            // on the principal.
+            if is_openclaw {
+                openclaw_env.push(json!({
+                    "name": "PINNED_AGENT_IDENTITY_APP_ID",
+                    "value": agent_id.app_id.clone(),
+                }));
+            }
+            router_env.push(json!({
+                "name": "AUTH_SIDECAR_URL",
+                "value": "http://entra-auth-sidecar.kars-system.svc:5000",
+            }));
+            // Defense-in-depth: pin the tenant ID expected on the
+            // token returned by the sidecar. The router decodes the
+            // JWT payload (no signature verification — downstream
+            // Azure validates that) and rejects the token if
+            // `tid` != EXPECTED_TENANT_ID. Protects against:
+            //   - Misconfigured sidecar pointing at a different tenant
+            //   - Cross-tenant token-confusion attack via a
+            //     compromised KarsAuthConfig
+            // Sourced from KarsAuthConfig.spec.tenant.tenantId via
+            // `ProvisioningOutcome::Ready.auth_spec`.
+            router_env.push(json!({
+                "name": "EXPECTED_TENANT_ID",
+                "value": tenant_id.clone(),
+            }));
+
+            // Phase 6: opt-in mesh-token route enablement. When the
+            // operator flips `KarsAuthConfig.spec.meshAuthBackend` to
+            // `EntraAgentIdentity`, the router exposes
+            // `/v1/mesh-token` and the sandbox entrypoint uses it to
+            // acquire a verified-tier AGT mesh peer token from the
+            // shared sidecar (instead of the legacy direct
+            // Workload-Identity → Entra exchange). Default
+            // `Anonymous` keeps the legacy behaviour 100 % unchanged
+            // — the route returns 404 and the entrypoint falls
+            // through to its existing logic. See
+            // docs/architecture/entra-agent-id/06-mesh-trust-design.md.
+            if matches!(
+                mesh_backend,
+                crate::auth_config::MeshAuthBackend::EntraAgentIdentity
+            ) {
+                router_env.push(json!({
+                    "name": "MESH_AUTH_BACKEND",
+                    "value": "EntraAgentIdentity",
+                }));
+                if let Some(aud) = mesh_audience.as_ref().filter(|s| !s.trim().is_empty()) {
+                    router_env.push(json!({
+                        "name": "MESH_AUTH_AUDIENCE",
+                        "value": aud.clone(),
+                    }));
+                }
+            }
+        }
+
         // ── Agent container ──────────────────────────────────────────
         // S10.A2.b: branch the agent container shape on the runtime
         // kind. OpenClaw container = "openclaw" with gateway port 18789
@@ -1621,23 +1858,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             //
             // The agent can only reach the inference-router on localhost:8443.
             // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
+            //
+            // Agent-id mode reuses the same baseline: cross-pod access to the
+            // shared `entra-auth-sidecar` Service in `kars-system` is gated
+            // by NetworkPolicy on the sidecar's namespace (ingress-only-from-
+            // inference-router-labeled-pods), so no extra in-pod iptables
+            // rule is needed to keep the agent code from reaching the
+            // sidecar.
             "initContainers": [{
                 "name": "egress-guard",
                 "image": &ctx.inference_router_image,
                 "command": ["sh", "-c", concat!(
-                    // Filter chain: allow localhost, DNS, established — drop everything else
                     "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
                     "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
                     "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
-                    // Allow reply packets (SYN-ACK etc.) for inbound connections to the
-                    // gateway — without this, the WebUX and Telegram channel can't respond.
                     "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
                     "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
-                    // NAT chain: redirect HTTP/HTTPS from UID 1000 to the transparent
-                    // forward proxy (port 8444) in the inference-router. This
-                    // enables learn mode (domain discovery) and per-domain enforcement.
-                    // Redirected packets go to 127.0.0.1:8444, matching the -o lo ACCEPT
-                    // rule above. The proxy (UID 1001) then connects to the real destination.
                     "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && ",
                     "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && ",
                     "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
@@ -1714,6 +1950,23 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .unwrap()
                 .insert("runtimeClassName".into(), json!(rc));
         }
+
+        // ── Shared sidecar — NO per-pod injection ────────────────────
+        //
+        // The auth-sidecar runs ONCE per cluster in `kars-system`
+        // (Helm-deployed Deployment), not as a per-pod container.
+        // Cross-pod access is gated by a NetworkPolicy on the
+        // sidecar's namespace that allows ingress only from pods
+        // labeled `kars.azure.com/component=inference-router`. The
+        // per-sandbox identity attribution is enforced by the
+        // PINNED_AGENT_IDENTITY_APP_ID env var on the inference-
+        // router (set above) — the sidecar's
+        // `?AgentIdentity=<appId>` query parameter mints the token
+        // for that specific child agent identity.
+        //
+        // Resource savings: 10 sandboxes × 128MiB sidecar = 1.28GB
+        // saved vs the per-pod model. MSAL token cache is centralized
+        // in the single sidecar instance.
 
         // S7 wiring — mirror governance CRD ConfigMaps/Secrets from the
         // user namespace into the sandbox namespace, then inject mounts
@@ -2802,6 +3055,49 @@ pub async fn run(client: Client) -> Result<()> {
         );
     }
 
+    // Cluster UID — read once at startup from kube-system metadata.uid.
+    // This is the canonical "this cluster" identifier in K8s
+    // (referenced in CNCF conformance suites and used by upstream
+    // tools like Cluster API and Karpenter). Propagated into Graph
+    // object tags so the agent_identity_reaper can distinguish this
+    // cluster's SPs from other kars clusters in the same tenant.
+    //
+    // Fail-soft: if we can't read kube-system (RBAC misconfig, custom
+    // distribution that hides the ns), fall back to a deployment-time
+    // env var. Last resort is a random string — which means the
+    // reaper can't identify orphans across controller restarts, but
+    // at least the agent-id path doesn't fail at startup.
+    let cluster_uid = match Api::<Namespace>::all(client.clone())
+        .get("kube-system")
+        .await
+    {
+        Ok(ns) => ns.metadata.uid.unwrap_or_else(|| {
+            tracing::warn!("kube-system namespace has no uid; using fallback");
+            std::env::var("KARS_CLUSTER_UID").unwrap_or_else(|_| {
+                format!(
+                    "kars-cluster-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                )
+            })
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read kube-system uid; agent_identity_reaper will be limited to current process lifetime");
+            std::env::var("KARS_CLUSTER_UID").unwrap_or_else(|_| {
+                format!(
+                    "kars-cluster-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                )
+            })
+        }
+    };
+    tracing::info!(cluster_uid = %cluster_uid, "controller cluster UID resolved");
+
     let ctx = Arc::new(Context {
         client,
         wi_client_id,
@@ -2822,6 +3118,8 @@ pub async fn run(client: Client) -> Result<()> {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
+        cluster_uid,
+        agent_id_cache: Arc::new(crate::agent_id_provisioning::ProvisionerCache::new()),
     });
 
     Controller::new(sandboxes, kube::runtime::watcher::Config::default())

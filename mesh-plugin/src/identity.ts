@@ -160,18 +160,73 @@ function rawFromPrefixedB64(value: string, prefix: string): Buffer {
   return Buffer.from(stripPrefix(value, prefix), "base64");
 }
 
-function rawEd25519Keys(): { pub: Buffer; priv: Buffer } {
-  const kp = crypto.generateKeyPairSync("ed25519");
+function rawEd25519Keys(seed?: Buffer): { pub: Buffer; priv: Buffer } {
+  let kp;
+  if (seed && seed.length >= 32) {
+    // Deterministic key derivation from a 32-byte seed.
+    //
+    // Node's `crypto.createPrivateKey` accepts an Ed25519 private key
+    // in PKCS#8 DER form. The PKCS#8 prefix for an Ed25519 32-byte
+    // private key is fixed (16-byte header + 32-byte seed = 48 bytes
+    // total). We construct the DER ourselves so we don't need an
+    // additional dependency on `@noble/ed25519` or similar.
+    //
+    // Seed: SHA-256 of (KARS_IDENTITY_SEED env || PINNED_AGENT_IDENTITY_APP_ID
+    // env || hostname). Caller provides the pre-hashed 32-byte buffer.
+    const pkcs8Prefix = Buffer.from([
+      0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
+      0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+    ]);
+    const der = Buffer.concat([pkcs8Prefix, seed.subarray(0, 32)]);
+    const privKey = crypto.createPrivateKey({
+      key: der,
+      format: "der",
+      type: "pkcs8",
+    });
+    const pubKey = crypto.createPublicKey(privKey);
+    type Jwk = { x?: string; d?: string };
+    const pubJwk = pubKey.export({ format: "jwk" }) as Jwk;
+    const privJwk = privKey.export({ format: "jwk" }) as Jwk;
+    if (!pubJwk.x || !privJwk.d) {
+      throw new Error("Ed25519 deterministic JWK export missing x/d field");
+    }
+    return { pub: b64urlToBuffer(pubJwk.x), priv: b64urlToBuffer(privJwk.d) };
+  }
+  // Fallback: random keypair (legacy path)
+  const kp2 = crypto.generateKeyPairSync("ed25519");
   type Jwk = { x?: string; d?: string };
-  const pub = kp.publicKey.export({ format: "jwk" }) as Jwk;
-  const priv = kp.privateKey.export({ format: "jwk" }) as Jwk;
+  const pub = kp2.publicKey.export({ format: "jwk" }) as Jwk;
+  const priv = kp2.privateKey.export({ format: "jwk" }) as Jwk;
   if (!pub.x || !priv.d) {
     throw new Error("Ed25519 JWK export missing x/d field");
   }
   return { pub: b64urlToBuffer(pub.x), priv: b64urlToBuffer(priv.d) };
 }
 
-function rawX25519Keys(): { pub: Buffer; priv: Buffer } {
+function rawX25519Keys(seed?: Buffer): { pub: Buffer; priv: Buffer } {
+  if (seed && seed.length >= 32) {
+    // PKCS#8 DER prefix for an X25519 32-byte private key (12-byte
+    // header + 32-byte raw key = 44 bytes for the prefix wrap, ASN.1
+    // shape mirrors Ed25519 above with the X25519 OID 1.3.101.110).
+    const pkcs8Prefix = Buffer.from([
+      0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
+      0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20,
+    ]);
+    const der = Buffer.concat([pkcs8Prefix, seed.subarray(0, 32)]);
+    const privKey = crypto.createPrivateKey({
+      key: der,
+      format: "der",
+      type: "pkcs8",
+    });
+    const pubKey = crypto.createPublicKey(privKey);
+    type Jwk = { x?: string; d?: string };
+    const pubJwk = pubKey.export({ format: "jwk" }) as Jwk;
+    const privJwk = privKey.export({ format: "jwk" }) as Jwk;
+    if (!pubJwk.x || !privJwk.d) {
+      throw new Error("X25519 deterministic JWK export missing x/d field");
+    }
+    return { pub: b64urlToBuffer(pubJwk.x), priv: b64urlToBuffer(privJwk.d) };
+  }
   const kp = crypto.generateKeyPairSync("x25519");
   type Jwk = { x?: string; d?: string };
   const pub = kp.publicKey.export({ format: "jwk" }) as Jwk;
@@ -180,6 +235,53 @@ function rawX25519Keys(): { pub: Buffer; priv: Buffer } {
     throw new Error("X25519 JWK export missing x/d field");
   }
   return { pub: b64urlToBuffer(pub.x), priv: b64urlToBuffer(priv.d) };
+}
+
+/**
+ * Derive a stable 32-byte seed from environment for deterministic
+ * identity generation. Priority:
+ *   1. `KARS_IDENTITY_SEED` — explicit override (32 bytes hex)
+ *   2. `PINNED_AGENT_IDENTITY_APP_ID` — Phase 6.b: per-sandbox Entra
+ *      Agent Identity appId, injected by the controller. The Agent ID
+ *      itself is provisioned once per sandbox lifecycle and persists
+ *      across pod restarts, so an identity derived from it is stable
+ *      across restarts too — which fixes the duplicate-DID accumulation
+ *      in the registry that breaks mesh routing on AKS clusters that
+ *      have opted into Phase 6.b.
+ *   3. `null` — random per-process keys (legacy path, used by cloud-
+ *      offload openclaw instances on developer laptops and by AKS
+ *      clusters that haven't opted into Phase 6.b). Stability for
+ *      those modes comes from `loadOrCreateIdentity` reading the
+ *      previously-persisted `~/.kars/identity.json` — when that file
+ *      survives restart, identity is stable; when it doesn't (AKS
+ *      emptyDir, fresh laptop boot), the random fallback fires.
+ *
+ * Note on cloud-offload + dev contexts: the mesh-plugin runs anywhere
+ * openclaw runs, including laptop instances with no kars-controller
+ * env vars. We deliberately do NOT derive from `SANDBOX_NAME` because
+ * (a) that env isn't guaranteed to be set in those contexts and
+ * (b) it would let any process on the laptop forge another sandbox's
+ * identity just by setting the env. Entra-binding via the controller-
+ * injected `PINNED_AGENT_IDENTITY_APP_ID` is the only seed we trust
+ * for cryptographic identity beyond the persisted-on-disk envelope.
+ */
+function deriveIdentitySeed(): Buffer | null {
+  const explicit = process.env.KARS_IDENTITY_SEED;
+  if (explicit && /^[0-9a-fA-F]{64}$/.test(explicit)) {
+    return Buffer.from(explicit, "hex");
+  }
+  const pinnedAgentId = process.env.PINNED_AGENT_IDENTITY_APP_ID;
+  if (pinnedAgentId && pinnedAgentId.trim().length > 0) {
+    // Domain-separated SHA-256 so the same seed isn't reused for two
+    // unrelated purposes if PINNED_AGENT_IDENTITY_APP_ID ever appears
+    // in another context.
+    return crypto
+      .createHash("sha256")
+      .update("kars-mesh-identity-v1:")
+      .update(pinnedAgentId.trim())
+      .digest();
+  }
+  return null;
 }
 
 function buildFacade(data: IdentityData): MeshIdentity {
@@ -209,10 +311,29 @@ async function writeEnvelope(data: IdentityData): Promise<void> {
   fs.writeFileSync(IDENTITY_FILE, JSON.stringify(envelope, null, 2), { mode: 0o600 });
 }
 
-/** Generate a fresh identity (Ed25519 signing + X25519 exchange) and persist it. */
+/** Generate a fresh identity (Ed25519 signing + X25519 exchange) and persist it.
+ *
+ * When `PINNED_AGENT_IDENTITY_APP_ID` (or `KARS_IDENTITY_SEED`) is set in env,
+ * the keypair is derived deterministically from that seed via SHA-256 → 32-byte
+ * PKCS#8 → cryptographic key import. Stable across pod restarts → stable DID
+ * → no duplicate-DID accumulation in the registry.
+ *
+ * Falls back to random keypairs when no seed is available, preserving the
+ * legacy behaviour for clusters that haven't migrated to Phase 6.b agent
+ * identity provisioning yet.
+ *
+ * Also: deterministic Ed25519/X25519 from the SAME seed is intentional. The
+ * SDK's X3DH handshake assumes both key types belong to the same identity;
+ * using one seed for both keeps that invariant without exposing more
+ * envelope-state surface area for an attacker to probe.
+ */
 export async function generateIdentity(): Promise<MeshIdentity> {
-  const sig = rawEd25519Keys();
-  const exch = rawX25519Keys();
+  const seed = deriveIdentitySeed();
+  // We intentionally use the same seed for both Ed25519 (signing) and X25519
+  // (exchange) — they're cryptographically independent algorithms even with
+  // identical 32-byte raw input, and re-derive distinct public keys.
+  const sig = rawEd25519Keys(seed ?? undefined);
+  const exch = rawX25519Keys(seed ?? undefined);
   const data: IdentityData = {
     signing_public_key: `ed25519:${sig.pub.toString("base64")}`,
     signing_private_key: `ed25519:${sig.priv.toString("base64")}`,

@@ -1,0 +1,162 @@
+{{- /*
+Shared Microsoft Entra SDK auth-sidecar Deployment.
+
+Runs ONCE per cluster (2 replicas for HA). All sandbox inference-
+routers in the cluster hit this shared instance via the
+`entra-auth-sidecar.<ns>.svc:5000` Service. The sidecar serves
+per-sandbox token mints via the documented
+`?AgentIdentity=<appId>` query parameter — see Microsoft's
+`AuthorizationHeaderUnauthenticated/{service}` contract.
+
+Resource-budget rationale: each sidecar uses ~80MB resident + ~50m
+CPU steady-state per the Microsoft POC. Two replicas across cluster
+nodes = ~160MB total cluster cost, vs. ~1.28GB at 10 sandboxes for
+the per-pod model. MSAL token cache is centralized inside the
+sidecar process per replica; clients (inference-routers) also cache
+locally, so a single mint per (service, agentIdentity) ripples.
+
+Conditionally rendered: only when `.Values.entraSidecar.enabled`.
+*/}}
+{{- if .Values.entraSidecar.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: entra-auth-sidecar
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: entra-auth-sidecar
+    app.kubernetes.io/managed-by: helm
+spec:
+  replicas: {{ .Values.entraSidecar.replicas | default 2 }}
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kars
+      app.kubernetes.io/component: entra-auth-sidecar
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kars
+        app.kubernetes.io/component: entra-auth-sidecar
+        # `azure.workload.identity/use: "true"` is REQUIRED for the
+        # AKS azure-wi-webhook to mutate the pod and project the
+        # federated SA token. Without it the sidecar starts but the
+        # FIC-assertion mint fails with `SA token file not found`.
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: entra-auth-sidecar
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: auth-sidecar
+          image: {{ .Values.entraSidecar.image | default "mcr.microsoft.com/entra-sdk/auth-sidecar:1.0.0-azurelinux3.0-distroless" | quote }}
+          imagePullPolicy: {{ .Values.entraSidecar.imagePullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: auth-sdk
+              containerPort: 5000
+              protocol: TCP
+          # The sidecar's full Entra configuration (tenant, blueprint
+          # client id, credential source type, downstream API table)
+          # is rendered into a single ConfigMap by the
+          # auth_config_reconciler and projected as env vars.
+          envFrom:
+            - configMapRef:
+                name: kars-auth-sidecar-env
+                optional: false
+          env:
+            # Bind on ALL interfaces so the kubelet probe (which uses
+            # the pod IP) can reach /healthz. The HostFiltering
+            # middleware still rejects non-`localhost` Host headers
+            # by default; we override `AllowedHosts=*` below so
+            # in-cluster Service callers (which present
+            # `Host: entra-auth-sidecar.<ns>.svc:5000`) are accepted.
+            # The NetworkPolicy gates the real ingress boundary —
+            # disabling host filtering does not weaken security.
+            - name: ASPNETCORE_URLS
+              value: "http://+:5000"
+            - name: AllowedHosts
+              value: "*"
+          securityContext:
+            runAsUser: 1002
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: {{ .Values.entraSidecar.resources.requests.cpu | default "50m" | quote }}
+              memory: {{ .Values.entraSidecar.resources.requests.memory | default "128Mi" | quote }}
+            limits:
+              cpu: {{ .Values.entraSidecar.resources.limits.cpu | default "500m" | quote }}
+              memory: {{ .Values.entraSidecar.resources.limits.memory | default "256Mi" | quote }}
+          volumeMounts:
+            # ASP.NET Data Protection writes encryption keys here. The
+            # distroless image has /app owned by root and UID 1002
+            # cannot mkdir, so we provide an emptyDir.
+            - name: auth-sidecar-keys
+              mountPath: /app/keys
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: auth-sdk
+              # Override Host so HostFiltering accepts the kubelet
+              # probe (it sends the pod IP by default).
+              httpHeaders:
+                - name: Host
+                  value: "localhost:5000"
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: auth-sdk
+              httpHeaders:
+                - name: Host
+                  value: "localhost:5000"
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 5
+      volumes:
+        - name: auth-sidecar-keys
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      # Topology spread to keep the two replicas on different nodes
+      # if possible. Don't HARD-require it (single-node clusters
+      # should still get one replica).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: kars
+              app.kubernetes.io/component: entra-auth-sidecar
+      # Pod-anti-affinity is a softer guarantee than topology-spread
+      # but provides a clearer scheduler hint when multiple zones are
+      # available.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: kars
+                    app.kubernetes.io/component: entra-auth-sidecar
+{{- end }}

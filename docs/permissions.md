@@ -181,32 +181,107 @@ az provider register -n Microsoft.ContainerService
 
 ## Tenant-level (Entra ID) considerations
 
-kars's inter-agent mesh (AGT) authenticates agents to the AgentMesh
-relay using an Entra-issued token for the scope `api://agentmesh/.default`.
-**Registering that scope requires a tenant administrator** (Global
-Administrator or Application Administrator). kars does **not** create
-the app registration automatically.
+kars per-sandbox identity uses **Microsoft Entra Agent ID** (GA, May 2026).
+Each kars sandbox calls Foundry / Graph / Key Vault as its own Entra
+agent identity (`kars-<cluster>-<sandbox>`), and Foundry's audit logs
+attribute every call by name. This replaces the legacy
+`api://agentmesh` app-registration pattern.
 
-If nobody has provisioned the `api://agentmesh` Entra application in your
-tenant, sandboxes still come up — they fall back to the **AGT anonymous
-tier**, which works for dev/test but not for production tenant-isolated
-workloads.
+### What the operator needs
 
-The fastest fix is the kars CLI helper, which is idempotent and
-prints the tenant/client IDs when it's done:
+The user running `kars up` must hold one of the following Entra
+directory roles at tenant scope:
+
+| Role | Sufficiency |
+|------|-------------|
+| **Agent ID Developer** | ✅ Recommended — narrowest scope that works |
+| Agent ID Administrator | ✅ Stronger than required |
+| Privileged Role Administrator | ✅ Stronger than required |
+| Global Administrator | ✅ Stronger than required |
+
+Most Microsoft-corporate users self-elevate via PIM at
+<https://portal.azure.com> → Privileged Identity Management → My
+roles. External tenants typically grant the role through Entra
+portal → Identity → Roles & admins.
+
+### What `kars up` does automatically
+
+When you run `kars up` for the first time on a tenant, the CLI:
+
+1. Detects whether a `KarsAuthConfig/default` resource already exists
+   in the cluster (idempotent — skipped on re-runs).
+2. Creates the **agent identity blueprint** via Microsoft Graph
+   (`POST /v1.0/applications/` with
+   `@odata.type=#Microsoft.Graph.AgentIdentityBlueprint`).
+3. Creates the blueprint service principal so it appears in the Entra
+   Agents portal (<https://entra.microsoft.com> → Agents → Agent
+   identities) and agent identities can be derived from it.
+4. Creates a per-cluster **controller managed identity** in your
+   subscription.
+5. Adds a federated identity credential on the blueprint that trusts
+   the controller MI's IMDS-issued token (issuer
+   `https://login.microsoftonline.com/<tenant>/v2.0`). This is the
+   anti-loop-safe credential path — see
+   [`docs/architecture/entra-agent-id/`](./architecture/entra-agent-id/).
+6. Writes the `KarsAuthConfig/default` Custom Resource. The
+   controller's auth-config reconciler materialises a sibling
+   ConfigMap with the sidecar environment variables every kars
+   sandbox pod consumes.
+
+After that, every `KarsSandbox` CR — whether created by `kars up`,
+`kars handoff`, or sub-agent spawning — automatically gets its own
+agent identity provisioned by the controller during reconcile.
+
+### Microsoft-corporate (and similarly-policed) tenants
+
+The Microsoft corporate tenant policy `538f1913-…` requires a
+`serviceManagementReference` GUID on every new Entra application.
+Pass it through `--service-tree`:
 
 ```bash
-# Requires Application Administrator or Global Admin
-kars mesh setup-trust
+kars up --service-tree 1c826d4f-22b0-4c67-b755-778a05d7ffc9
+# or via env var:
+export KARS_SERVICE_TREE=1c826d4f-22b0-4c67-b755-778a05d7ffc9
+kars up
 ```
 
-If you'd rather run the underlying `az` calls directly:
+Non-Microsoft tenants leave it empty — the field is omitted from
+the Graph create call when unset.
+
+### Anonymous-tier fallback
+
+If the user running `kars up` does **not** hold the Agent ID
+Developer role, the auto-provisioning step fails (non-fatal) and the
+cluster comes up in the **AGT anonymous tier**: sandboxes start
+successfully but cannot call Foundry / Graph as a named principal.
+Once the role is granted, run `kars mesh setup-trust` (or `kars up`
+again on the same cluster — both are idempotent) to complete
+provisioning.
+
+### Provisioning a blueprint manually (rare)
+
+If you want to provision the blueprint outside of `kars up` (e.g.
+in your IT-managed tenant pipeline), this is the minimal Graph
+sequence — see
+[`docs/architecture/entra-agent-id/01-runtime-token-flow.md`](./architecture/entra-agent-id/01-runtime-token-flow.md)
+for the full chain:
 
 ```bash
-# Requires Application Administrator or Global Admin
-az ad app create --display-name "AgentMesh" --identifier-uris "api://agentmesh"
-APP_ID=$(az ad app list --display-name AgentMesh --query "[0].appId" -o tsv)
-az ad sp create --id "$APP_ID"
+# Requires Agent ID Developer (or stronger)
+az rest --method POST \
+  --url "https://graph.microsoft.com/beta/applications/" \
+  --headers OData-Version=4.0 \
+  --body '{
+    "@odata.type": "#Microsoft.Graph.AgentIdentityBlueprint",
+    "displayName": "kars-blueprint",
+    "sponsors@odata.bind": ["https://graph.microsoft.com/beta/users/<your-oid>"],
+    "owners@odata.bind":   ["https://graph.microsoft.com/beta/users/<your-oid>"]
+  }'
+# Then create the SP so it shows up in the Entra Agents portal:
+APP_ID=...  # appId from the previous response
+az rest --method POST \
+  --url "https://graph.microsoft.com/beta/servicePrincipals" \
+  --body "{\"appId\": \"$APP_ID\"}"
 ```
 
 ---
@@ -219,8 +294,10 @@ az ad sp create --id "$APP_ID"
 | `FeatureNotRegistered` during Bicep | `EncryptionAtHost` not propagated yet | Wait 5–15 min after `az feature register`, then retry |
 | `SubscriptionNotRegistered` for Microsoft.ContainerService | Locked-down sub blocks auto-registration | `az provider register -n Microsoft.ContainerService` |
 | `ResourceQuotaExceeded` for VM cores | Regional vCPU quota | Request quota increase or use `--region` to pick a different region |
-| Sandboxes come up but AGT messages fail auth | `api://agentmesh` Entra app not registered | Ask tenant admin (see above) — sandboxes fall back to anonymous tier |
-| `AADSTS500011` in router logs | Same as above | Tenant admin registers `api://agentmesh` |
+| `kars up` warns "Entra Agent ID setup skipped" | Signed-in user lacks Agent ID Developer role | Activate the role via PIM, then re-run `kars up` |
+| `CredentialInvalidLifetimeAsPerAppPolicy` during blueprint create | Microsoft-corporate tenant policy blocks Application credential creation | This indicates a misconfigured tenant policy; only FIC-based credentials work — `kars up` uses MI-as-FIC which is allow-listed by default |
+| `InvalidFederatedIdentityCredentialValue` on blueprint FIC | Tenant blocks the OIDC issuer | The issuer used by kars is `login.microsoftonline.com/<tenant>/v2.0`, which is universally allow-listed. Report this as a kars bug. |
+| Sandbox tokens have `appid` matching the controller MI rather than the agent identity | Reconciler did not yet inject the sidecar | Pod-spec sidecar injection lands in the follow-up PR after the auth foundation PR. Update kars and re-create the sandbox. |
 
 ---
 

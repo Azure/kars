@@ -44,6 +44,9 @@ pub use governance::sensitive_agt_routes;
 mod mesh;
 pub use mesh::mesh_routes;
 
+mod mesh_token;
+pub use mesh_token::mesh_token_routes;
+
 mod egress;
 pub use egress::egress_routes;
 

@@ -34,6 +34,7 @@
 - [Channels & plugins](channels-plugins.md)
 - [Operator TUI](operator-tui.md)
 - [Permissions model](permissions.md)
+- [Per-sandbox identity (Entra Agent ID)](agent-identity.md)
 - [Demo script](demo-script.md)
 - [Examples catalogue](examples.md)
 

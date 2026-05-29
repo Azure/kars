@@ -116,6 +116,7 @@ kars up [options]
 | `--skip-runtime-images` | `false` | Skip building/importing the 6 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
 | `--foundry-endpoint <url>` | — | Existing Azure AI Foundry project endpoint (`services.ai.azure.com`) |
 | `--openai-endpoint <url>` | — | Existing Azure OpenAI endpoint (`openai.azure.com`; derived from Foundry if omitted) |
+| `--service-tree <guid>` | — | ServiceTree / `serviceManagementReference` GUID for the Entra blueprint. Required only in Microsoft-style enterprise tenants. Falls back to `KARS_SERVICE_TREE` env var. |
 | `--dry-run` | `false` | Show what would be done without executing |
 | `--upgrade` | `false` | Fast upgrade: skip prompts, reuse cached context, re-run Helm + RBAC only |
 | `--from-scratch` | `false` | Ignore any partial state from a prior failed run and start over |
@@ -140,6 +141,9 @@ kars up --dry-run
 
 # Developer — build images locally, connect to Foundry
 kars up --build --foundry-endpoint https://my-project.services.ai.azure.com
+
+# Microsoft-corporate tenant (or any tenant that mandates ServiceTree)
+kars up --service-tree 1c826d4f-22b0-4c67-b755-778a05d7ffc9
 
 # Force a clean run (discard any auto-resume state)
 kars up --from-scratch

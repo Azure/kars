@@ -1,0 +1,76 @@
+{{- /*
+NetworkPolicy gating ingress to the shared auth-sidecar.
+
+Trust-boundary control: **only pods in sandbox namespaces, labeled
+`kars.azure.com/component=sandbox`**, may reach the sidecar Service.
+NetworkPolicy selectors match the POD, not individual containers.
+A sandbox pod hosts three containers — agent (UID 1000),
+inference-router (UID 1001), and possibly an init container — so
+the trust boundary is "any pod inside a sandbox namespace".
+
+Inside the pod, the egress-guard iptables baseline blocks UID 1000
+(the agent code itself) from making outbound TCP, so only the
+inference-router (UID 1001) can actually open a socket to the
+sidecar. Even if agent code somehow escaped that, the
+inference-router's `PINNED_AGENT_IDENTITY_APP_ID` env (set at pod
+create time by the controller, immutable thereafter) is the
+identity passed in the `?AgentIdentity=<appId>` query parameter —
+agent code cannot escalate to a different sandbox's identity from
+within its own pod.
+
+This is the architectural trade-off vs. the per-pod sidecar model:
+trust expands from pod-local (iptables UID isolation) to namespace-
+scoped (NetworkPolicy ingress selector + env-var-based identity
+pinning). Acceptable per Microsoft's documentation: the
+`?AgentIdentity=<appId>` parameter ON THE SIDECAR CALL is what
+identifies which child identity to mint for.
+
+Conditionally rendered: only when `.Values.entraSidecar.enabled`.
+*/}}
+{{- if .Values.entraSidecar.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: entra-auth-sidecar-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: entra-auth-sidecar
+    app.kubernetes.io/managed-by: helm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kars
+      app.kubernetes.io/component: entra-auth-sidecar
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow inbound from any sandbox namespace's sandbox pod.
+    # NetworkPolicy selectors operate at POD level, not container
+    # level — the inference-router lives inside the sandbox pod, so
+    # we select the pod by its `kars.azure.com/component=sandbox`
+    # label. Sandbox namespaces are stamped with the matching
+    # `app.kubernetes.io/name=kars` +
+    # `app.kubernetes.io/component=sandbox` labels by the controller
+    # (see reconciler/mod.rs ~line 650).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/name: kars
+              app.kubernetes.io/component: sandbox
+          podSelector:
+            matchLabels:
+              kars.azure.com/component: sandbox
+      ports:
+        - port: 5000
+          protocol: TCP
+    # Also allow inbound from the operator namespace itself (e.g. for
+    # kars CLI verify-trust health probes via kubectl exec curl).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - port: 5000
+          protocol: TCP
+{{- end }}

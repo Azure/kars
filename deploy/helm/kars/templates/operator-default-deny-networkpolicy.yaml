@@ -105,4 +105,31 @@ spec:
       ports:
         - protocol: TCP
           port: 8443
+    # Azure IMDS (Instance Metadata Service) for managed-identity tokens.
+    #
+    # The controller's `agent_identity` module exchanges an IMDS-acquired
+    # `kars-controller-mi` token for a blueprint Graph token (used to
+    # provision per-sandbox Entra Agent Identities). Without this egress
+    # rule the controller's WI-fallback IMDS call times out and agent-id
+    # provisioning silently never starts; sandboxes degrade to anonymous
+    # tier.
+    #
+    # IMDS is at the well-known link-local address 169.254.169.254:80.
+    # This is a per-node service (not a cluster IP) so we scope the rule
+    # by `ipBlock` rather than `namespaceSelector`. The address is not
+    # routable outside the node — there is no exfiltration risk in
+    # allowing this egress.
+    #
+    # Why IMDS (and not WI) here: tokens minted by the WI exchange are
+    # themselves derived from federated credentials. Entra rejects
+    # FIC-derived tokens as FIC assertions with AADSTS700231 (anti-loop).
+    # The `kars-controller-mi` MUST be assigned to the AKS node-pool
+    # VMSS (`az vmss identity assign`) — `kars up` automates this; the
+    # CLI verify command surfaces it as a check.
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80
 {{- end }}

@@ -1,0 +1,290 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "13161435738657406677"
+    }
+  },
+  "parameters": {
+    "clusterName": {
+      "type": "string",
+      "defaultValue": "kars",
+      "metadata": {
+        "description": "Cluster name suffix. Used in the blueprint display name and the controller MI name. Matches what `kars up --name <name>` would use."
+      }
+    },
+    "blueprintDisplayName": {
+      "type": "string",
+      "defaultValue": "kars-blueprint",
+      "metadata": {
+        "description": "Blueprint display name. Tenant-wide; multiple clusters in the same tenant share it."
+      }
+    },
+    "resourceGroupName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-agentid-rg', parameters('clusterName'))]",
+      "metadata": {
+        "description": "Resource group for the controller managed identity. Created if it does not exist. Ignored when credentialMode=WorkloadIdentity."
+      }
+    },
+    "region": {
+      "type": "string",
+      "defaultValue": "eastus",
+      "metadata": {
+        "description": "Azure region for the controller managed identity. Ignored when credentialMode=WorkloadIdentity."
+      }
+    },
+    "serviceManagementReference": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Microsoft ServiceTree GUID for app-registration ownership. Required in Microsoft-corporate tenants. For non-Microsoft tenants, leave empty."
+      }
+    },
+    "tenantId": {
+      "type": "string",
+      "defaultValue": "[tenant().tenantId]",
+      "metadata": {
+        "description": "Tenant ID. Defaults to the deployment tenant. Override only for cross-tenant scenarios."
+      }
+    },
+    "credentialMode": {
+      "type": "string",
+      "defaultValue": "ManagedIdentityImds",
+      "allowedValues": [
+        "ManagedIdentityImds",
+        "WorkloadIdentity"
+      ],
+      "metadata": {
+        "description": "Credential mode for the auth-sidecar. `ManagedIdentityImds` creates a controller MI and an MI-as-FIC on the blueprint (Pattern A, corp-tenant safe). `WorkloadIdentity` creates a SA-as-FIC pointing at the cluster's AKS OIDC issuer (Pattern B, OSS / non-restricted tenants)."
+      }
+    },
+    "aksOidcIssuerUrl": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "AKS cluster's OIDC issuer URL. Required when credentialMode=WorkloadIdentity. Obtain via `az aks show -n <c> -g <rg> --query oidcIssuerProfile.issuerUrl -o tsv`."
+      }
+    },
+    "sidecarNamespace": {
+      "type": "string",
+      "defaultValue": "kars-system",
+      "metadata": {
+        "description": "K8s namespace hosting the shared auth-sidecar Deployment. Used to build the FIC subject in Pattern B."
+      }
+    },
+    "sidecarServiceAccount": {
+      "type": "string",
+      "defaultValue": "entra-auth-sidecar",
+      "metadata": {
+        "description": "K8s ServiceAccount name of the shared auth-sidecar. Used to build the FIC subject in Pattern B."
+      }
+    }
+  },
+  "variables": {
+    "useMi": "[equals(parameters('credentialMode'), 'ManagedIdentityImds')]",
+    "useWi": "[equals(parameters('credentialMode'), 'WorkloadIdentity')]",
+    "loginEndpoint": "[environment().authentication.loginEndpoint]"
+  },
+  "imports": {
+    "microsoftGraphV1": {
+      "provider": "MicrosoftGraph",
+      "version": "0.2.0-preview"
+    }
+  },
+  "resources": {
+    "agentIdRg": {
+      "condition": "[variables('useMi')]",
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('resourceGroupName')]",
+      "location": "[parameters('region')]"
+    },
+    "blueprintApp": {
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/applications@v1.0",
+      "properties": {
+        "uniqueName": "[format('{0}-{1}', parameters('blueprintDisplayName'), parameters('clusterName'))]",
+        "displayName": "[parameters('blueprintDisplayName')]",
+        "signInAudience": "AzureADMyOrg",
+        "tags": [
+          "EntraAgentId",
+          "kars-managed"
+        ],
+        "serviceManagementReference": "[parameters('serviceManagementReference')]",
+        "requiredResourceAccess": []
+      }
+    },
+    "blueprintSp": {
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/servicePrincipals@v1.0",
+      "properties": {
+        "appId": "[reference('blueprintApp').appId]",
+        "displayName": "[parameters('blueprintDisplayName')]",
+        "tags": [
+          "EntraAgentId",
+          "kars-managed"
+        ]
+      },
+      "dependsOn": [
+        "blueprintApp"
+      ]
+    },
+    "blueprintMiFic": {
+      "condition": "[variables('useMi')]",
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/applications/federatedIdentityCredentials@v1.0",
+      "properties": {
+        "name": "[format('{0}/kars-controller-mi', reference('blueprintApp').uniqueName)]",
+        "audiences": [
+          "api://AzureADTokenExchange"
+        ],
+        "issuer": "[format('{0}{1}/v2.0', variables('loginEndpoint'), parameters('tenantId'))]",
+        "subject": "[reference('controllerMi').outputs.principalId.value]",
+        "description": "[format('kars controller MI — trust hop into the blueprint (kars cluster {0})', parameters('clusterName'))]"
+      },
+      "dependsOn": [
+        "blueprintApp",
+        "controllerMi"
+      ]
+    },
+    "blueprintSaFic": {
+      "condition": "[variables('useWi')]",
+      "import": "microsoftGraphV1",
+      "type": "Microsoft.Graph/applications/federatedIdentityCredentials@v1.0",
+      "properties": {
+        "name": "[format('{0}/kars-auth-sidecar-sa', reference('blueprintApp').uniqueName)]",
+        "audiences": [
+          "api://AzureADTokenExchange"
+        ],
+        "issuer": "[parameters('aksOidcIssuerUrl')]",
+        "subject": "[format('system:serviceaccount:{0}:{1}', parameters('sidecarNamespace'), parameters('sidecarServiceAccount'))]",
+        "description": "[format('kars auth-sidecar SA — trust hop into the blueprint (kars cluster {0})', parameters('clusterName'))]"
+      },
+      "dependsOn": [
+        "blueprintApp"
+      ]
+    },
+    "controllerMi": {
+      "condition": "[variables('useMi')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "controllerMi",
+      "resourceGroup": "[parameters('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[format('{0}-controller-mi', parameters('clusterName'))]"
+          },
+          "location": {
+            "value": "[parameters('region')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "14309602180283647598"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string",
+              "metadata": {
+                "description": "Managed identity name. Convention: kars-<cluster>-controller-mi."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]"
+            }
+          ],
+          "outputs": {
+            "clientId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('name')), '2023-01-31').clientId]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('name')), '2023-01-31').principalId]"
+            },
+            "resourceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('name'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "agentIdRg"
+      ]
+    }
+  },
+  "outputs": {
+    "tenantId": {
+      "type": "string",
+      "value": "[parameters('tenantId')]"
+    },
+    "blueprintClientId": {
+      "type": "string",
+      "value": "[reference('blueprintApp').appId]"
+    },
+    "blueprintObjectId": {
+      "type": "string",
+      "value": "[reference('blueprintApp').id]"
+    },
+    "blueprintSpObjectId": {
+      "type": "string",
+      "value": "[reference('blueprintSp').id]"
+    },
+    "credentialMode": {
+      "type": "string",
+      "value": "[parameters('credentialMode')]"
+    },
+    "controllerMiClientId": {
+      "type": "string",
+      "value": "[if(variables('useMi'), reference('controllerMi').outputs.clientId.value, '')]"
+    },
+    "controllerMiResourceId": {
+      "type": "string",
+      "value": "[if(variables('useMi'), reference('controllerMi').outputs.resourceId.value, '')]"
+    },
+    "controllerMiPrincipalId": {
+      "type": "string",
+      "value": "[if(variables('useMi'), reference('controllerMi').outputs.principalId.value, '')]"
+    },
+    "serviceManagementReference": {
+      "type": "string",
+      "value": "[parameters('serviceManagementReference')]"
+    },
+    "ficName": {
+      "type": "string",
+      "value": "[if(variables('useMi'), reference('blueprintMiFic').name, reference('blueprintSaFic').name)]"
+    },
+    "aksOidcIssuerUrl": {
+      "type": "string",
+      "value": "[parameters('aksOidcIssuerUrl')]"
+    }
+  }
+}

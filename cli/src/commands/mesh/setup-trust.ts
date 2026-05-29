@@ -108,12 +108,175 @@ export function attachSetupTrustSubcommand(cmd: Command): void {
   cmd
     .command("setup-trust")
     .description(
-      `Provision the tenant-wide Entra app registration (${AGENTMESH_IDENTIFIER_URI}) so sandboxes register as the AGT verified tier`,
+      `Provision the tenant Entra trust for kars sandboxes. Default (--mode agent-id) creates the Entra Agent ID blueprint + controller MI; --mode legacy provisions the deprecated ${AGENTMESH_IDENTIFIER_URI} app registration.`,
     )
-    .option("--display-name <name>", "Display name for the Entra app registration", "kars AgentMesh")
+    .option("--mode <mode>", "Trust mode: 'agent-id' (CLI/Graph), 'bicep' (ARM/Graph extension, bypasses az CLI Graph CA blocks), or 'legacy' (deprecated api://agentmesh)", "agent-id")
+    .option("--display-name <name>", "Display name for the Entra app registration (legacy mode only)", "kars AgentMesh")
+    .option("--service-tree <guid>", "ServiceTree / service-management-reference GUID (agent-id mode in Microsoft-style tenants)")
+    .option("--cluster-name <name>", "Cluster name suffix for the controller MI (agent-id mode)", "kars")
+    .option("--resource-group <name>", "Resource group for the controller MI (agent-id mode)")
+    .option("--region <region>", "Azure region for the controller MI (agent-id mode)", "eastus")
+    .option(
+      "--credential-mode <mode>",
+      "Auth-sidecar credential mode: 'auto' (try WorkloadIdentity first, fall back on InvalidFederatedIdentityCredentialValue), 'WorkloadIdentity' (require AKS-OIDC FIC), or 'ManagedIdentityImds' (force controller MI path). Defaults to 'auto'.",
+      "auto",
+    )
+    .option(
+      "--aks-cluster-name <name>",
+      "AKS cluster name (used to discover the OIDC issuer URL when credentialMode is auto or WorkloadIdentity)",
+    )
+    .option(
+      "--aks-cluster-resource-group <rg>",
+      "AKS cluster resource group (used to discover the OIDC issuer URL when credentialMode is auto or WorkloadIdentity)",
+    )
+    .option("--aks-oidc-issuer-url <url>", "AKS OIDC issuer URL — direct override for Bicep mode + WorkloadIdentity")
     .option("--dry-run", "Print what would be created without making changes", false)
-    .action(async (opts: { displayName: string; dryRun: boolean }) => {
-      banner("kars · Mesh Setup Trust", "Entra App Registration for api://agentmesh");
+    .action(async (opts: {
+      mode: string;
+      displayName: string;
+      serviceTree?: string;
+      clusterName?: string;
+      resourceGroup?: string;
+      region?: string;
+      credentialMode: "auto" | "WorkloadIdentity" | "ManagedIdentityImds";
+      aksClusterName?: string;
+      aksClusterResourceGroup?: string;
+      aksOidcIssuerUrl?: string;
+      dryRun: boolean;
+    }) => {
+      // ── Agent ID mode (recommended) ────────────────────────────
+      // Forwards to the same idempotent helper that `kars up` invokes
+      // automatically. Auto-fallback wrapper: tries the fast Graph
+      // REST path first, transparently switches to Bicep when
+      // Microsoft tenant Conditional Access blocks the az CLI's
+      // Graph token (AADSTS530084). Use --mode bicep explicitly to
+      // skip the CLI attempt entirely.
+      if (opts.mode === "agent-id") {
+        banner("kars · Mesh Setup Trust", "Entra Agent ID blueprint + controller MI");
+        const { ensureAgentIdTrustAutoFallback, karsAuthConfigExists } = await import(
+          "./agent_id_setup.js"
+        );
+
+        // Short-circuit when the cluster already has the CR — avoids
+        // a wasteful Graph REST attempt (which always triggers a
+        // device-code prompt in CA-blocked tenants) when the work is
+        // already done. Operators who want to FORCE re-provisioning
+        // (e.g. after manually deleting the blueprint) should delete
+        // the CR first: `kubectl delete karsauthconfig default`.
+        try {
+          const exists = await karsAuthConfigExists();
+          if (exists) {
+            console.log();
+            console.log(chalk.green("  ✓ KarsAuthConfig/default already present — trust is already provisioned."));
+            console.log(chalk.dim("    Inspect:  kubectl get karsauthconfig default -o yaml"));
+            console.log(chalk.dim("    Re-do:    kubectl delete karsauthconfig default && kars mesh setup-trust --mode agent-id"));
+            return;
+          }
+        } catch {
+          // kubectl not configured / cluster unreachable — fall through
+          // and let the provisioning path produce a clearer error.
+        }
+
+        try {
+          const result = await ensureAgentIdTrustAutoFallback({
+            clusterName: opts.clusterName,
+            resourceGroup: opts.resourceGroup,
+            region: opts.region,
+            serviceTree: opts.serviceTree,
+            credentialMode: opts.credentialMode,
+            aksClusterName: opts.aksClusterName,
+            aksClusterResourceGroup: opts.aksClusterResourceGroup,
+            dryRun: opts.dryRun,
+          });
+          console.log();
+          console.log(chalk.green("  ✓ Entra Agent ID trust ready"));
+          console.log(chalk.dim(`    blueprint client ID: ${result.blueprintClientId}`));
+          console.log(chalk.dim(`    credential mode:     ${result.credentialMode}`));
+          if (result.credentialMode === "ManagedIdentityImds" && result.controllerMiClientId) {
+            console.log(chalk.dim(`    controller MI:       ${result.controllerMiClientId}`));
+          }
+          if (result.credentialMode === "WorkloadIdentity" && result.aksOidcIssuerUrl) {
+            console.log(chalk.dim(`    AKS OIDC issuer:     ${result.aksOidcIssuerUrl}`));
+          }
+          console.log(chalk.dim(`    KarsAuthConfig:      kubectl get karsauthconfig default`));
+        } catch (e) {
+          const msg = (e as Error).message;
+          console.error(chalk.red(`\n  ✘ ${msg.split("\n")[0]}`));
+          if (msg.includes("Agent ID Developer") || msg.includes("Insufficient privileges")) {
+            console.error(chalk.dim("\n    The signed-in identity needs the 'Agent ID Developer' Entra directory role."));
+            console.error(chalk.dim("    Activate via PIM at https://portal.azure.com and retry."));
+          }
+          process.exit(1);
+        }
+        return;
+      }
+
+      // ── Bicep mode (CA-policy-tolerant) ────────────────────────
+      // Runs the same provisioning as agent-id mode but via the
+      // Microsoft.Graph Bicep extension. ARM's deployment principal
+      // gets a fresh Graph token through its own auth path — bypasses
+      // Conditional Access token-binding policy on the az CLI's
+      // first-party app. Use this when `kars mesh setup-trust --mode
+      // agent-id` fails with AADSTS530084.
+      if (opts.mode === "bicep") {
+        banner("kars · Mesh Setup Trust (bicep)", "Entra Agent ID via ARM deployment");
+        const { ensureAgentIdTrustViaBicep } = await import("./agent_id_setup_bicep.js");
+        const { karsAuthConfigExists } = await import("./agent_id_setup.js");
+
+        // Short-circuit when the cluster already has the CR — Bicep
+        // is idempotent but still consumes ~30-90s of ARM polling.
+        // No reason to incur that cost when the trust is already in
+        // place.
+        try {
+          const exists = await karsAuthConfigExists();
+          if (exists) {
+            console.log();
+            console.log(chalk.green("  ✓ KarsAuthConfig/default already present — trust is already provisioned."));
+            console.log(chalk.dim("    Inspect:  kubectl get karsauthconfig default -o yaml"));
+            console.log(chalk.dim("    Re-do:    kubectl delete karsauthconfig default && kars mesh setup-trust --mode bicep"));
+            return;
+          }
+        } catch {
+          // kubectl not configured — fall through to provisioning.
+        }
+
+        try {
+          const result = await ensureAgentIdTrustViaBicep({
+            clusterName: opts.clusterName,
+            resourceGroup: opts.resourceGroup,
+            region: opts.region ?? "eastus",
+            serviceTree: opts.serviceTree,
+            credentialMode:
+              opts.credentialMode === "WorkloadIdentity"
+                ? "WorkloadIdentity"
+                : "ManagedIdentityImds",
+            aksOidcIssuerUrl: opts.aksOidcIssuerUrl,
+            dryRun: opts.dryRun,
+          });
+          console.log();
+          console.log(chalk.green("  ✓ Entra Agent ID trust ready (via Bicep)"));
+          console.log(chalk.dim(`    blueprint client ID: ${result.blueprintClientId}`));
+          console.log(chalk.dim(`    credential mode:     ${result.credentialMode}`));
+          if (result.credentialMode === "ManagedIdentityImds" && result.controllerMiClientId) {
+            console.log(chalk.dim(`    controller MI:       ${result.controllerMiClientId}`));
+          }
+          if (result.credentialMode === "WorkloadIdentity" && result.aksOidcIssuerUrl) {
+            console.log(chalk.dim(`    AKS OIDC issuer:     ${result.aksOidcIssuerUrl}`));
+          }
+          console.log(chalk.dim(`    KarsAuthConfig:      kubectl get karsauthconfig default`));
+        } catch (e) {
+          const msg = (e as Error).message;
+          console.error(chalk.red(`\n  ✘ ${msg.split("\n")[0]}`));
+          process.exit(1);
+        }
+        return;
+      }
+
+      // ── Legacy mode ────────────────────────────────────────────
+      // Preserves the original api://agentmesh flow for installations
+      // that haven't migrated to Entra Agent ID yet. Slated for
+      // removal once all consumers have switched.
+      banner("kars · Mesh Setup Trust (legacy)", "Entra App Registration for api://agentmesh");
 
       // Step 1: confirm az is signed in and which tenant we're targeting
       section("Tenant");

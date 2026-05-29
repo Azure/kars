@@ -708,6 +708,27 @@ spec:
                   type: string
                   enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "BYO"]
                   description: "Runtime kind the controller observed for the current observedGeneration (S10.A1)."
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: "metadata.generation last reconciled (per Slice 0)."
+                agentIdentity:
+                  type: object
+                  description: "Per-sandbox Entra Agent Identity provisioned by the controller when meshAuth.mode resolves to AgentId. Empty in anonymous-tier mode."
+                  required: [appId, objectId, displayName]
+                  properties:
+                    appId:
+                      type: string
+                      description: "Entra service principal appId (clientId) — pinned into the inference-router as PINNED_AGENT_IDENTITY_APP_ID."
+                    objectId:
+                      type: string
+                      description: "Entra service principal objectId — used by ARM role assignments and Graph DELETE."
+                    displayName:
+                      type: string
+                      description: "kars-<cluster>-<sandbox> — surfaces in Entra sign-in logs and Foundry audit logs."
+                    createdAt:
+                      type: string
+                      description: "Graph creation timestamp (ISO-8601). Recorded for diagnostics; not used in decision logic."
       subresources:
         status: {}
       additionalPrinterColumns:

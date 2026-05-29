@@ -71,7 +71,22 @@ export function renderHeader(ctx: HeaderRenderContext): void {
     const relayColor = meshHealth.relayReady ? "green" : "red";
     const regColor = meshHealth.registryReady ? (meshHealth.registryReadyPods < meshHealth.registryPods ? "yellow" : "green") : "red";
     const regCount = meshHealth.registryPods > 0 ? ` (${meshHealth.registryReadyPods}/${meshHealth.registryPods})` : "";
-    meshTag = `{${relayColor}-fg}●{/} relay  {${regColor}-fg}●{/} registry${regCount}  │  `;
+    // Phase 6.c — show the Entra-verification toggle inline with
+    // the relay indicator. Three states:
+    //   - null  → relay /health unreachable / pre-6.c image → no tag
+    //   - false → relay deployed but operator hasn't opted in
+    //              → grey "auth:open" (matches today's behaviour)
+    //   - true  → relay verifying tokens
+    //              → green "auth:entra N/M" with verified-over-total counts
+    let authTag = "";
+    if (meshHealth.entraVerifyEnabled === true) {
+      const verified = meshHealth.verifiedAgents ?? 0;
+      const total = meshHealth.connectedAgents ?? 0;
+      authTag = `  {green-fg}🔐 auth:entra ${verified}/${total}{/}`;
+    } else if (meshHealth.entraVerifyEnabled === false) {
+      authTag = `  {gray-fg}auth:open{/}`;
+    }
+    meshTag = `{${relayColor}-fg}●{/} relay${authTag}  {${regColor}-fg}●{/} registry${regCount}  │  `;
   }
 
   const viewLabel = viewMode === "cluster" ? "{blue-fg}{bold}[CLUSTER]{/bold}{/}  │  " : "";

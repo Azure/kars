@@ -1697,19 +1697,50 @@ kubeProxy:
       "--values",
       valuesPath,
     ]);
-    await execa(
-      tools.kubectl,
-      [
-        "--context",
-        ctx,
-        "apply",
-        "-f",
-        "-",
-        "--server-side",
-        "--force-conflicts",
-      ],
-      { input: stdout, stdio: ["pipe", "inherit", "inherit"] },
-    );
+
+    // Split CRDs from CRs: kubectl --server-side races otherwise, which
+    // surfaces on AKS as "no matches for kind Prometheus/ServiceMonitor".
+    // Apply CRDs, wait for Established, then apply the rest.
+    const docs = stdout.split(/^---\s*$/m).filter((d) => d.trim().length > 0);
+    const crdDocs: string[] = [];
+    const otherDocs: string[] = [];
+    const crdNames: string[] = [];
+    for (const doc of docs) {
+      if (/^kind:\s*CustomResourceDefinition\s*$/m.test(doc)) {
+        crdDocs.push(doc);
+        const m = doc.match(/^\s*name:\s*([^\s]+)/m);
+        if (m) crdNames.push(m[1]);
+      } else {
+        otherDocs.push(doc);
+      }
+    }
+
+    if (crdDocs.length > 0) {
+      await execa(
+        tools.kubectl,
+        ["--context", ctx, "apply", "-f", "-", "--server-side", "--force-conflicts"],
+        { input: crdDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
+      );
+      for (const name of crdNames) {
+        try {
+          await execa(
+            tools.kubectl,
+            ["--context", ctx, "wait", "--for=condition=Established", `crd/${name}`, "--timeout=60s"],
+            { stdio: "pipe" },
+          );
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+
+    if (otherDocs.length > 0) {
+      await execa(
+        tools.kubectl,
+        ["--context", ctx, "apply", "-f", "-", "--server-side", "--force-conflicts"],
+        { input: otherDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
+      );
+    }
   } finally {
     try {
       rmSync(tmpdir, { recursive: true, force: true });

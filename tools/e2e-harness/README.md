@@ -41,6 +41,22 @@ tools/e2e-harness/
 ```bash
 # default: SCENARIO=exec-brief PLATFORM=aks
 SCENARIO=exec-brief PLATFORM=aks ./run.sh
+
+# Demo mode — clean storyboard view to stdout (suppresses raw monitor
+# stream, surfaces phases + Foundry/mesh counters + final verify panel).
+# Raw logs still land in out/<runId>/ for verify.py.
+DEMO=1 SCENARIO=exec-brief PLATFORM=aks ./run.sh
+
+# Replay a completed run with the same storyboard (no live tail).
+python3 tools/e2e-harness/format_demo.py --replay tools/e2e-harness/out/<runId>
+
+# Replay at a pace tuned for demo recording (looks like a live run
+# without the 6-minute wait — pre-bake the run, then replay):
+#   --pace=1.0  → ~25s   (fast)
+#   --pace=1.5  → ~37s   (natural — matches the 2-min demo runbook)
+#   --pace=2.0  → ~50s   (slow, more voiceover headroom)
+python3 tools/e2e-harness/format_demo.py --replay --pace=1.5 \
+        tools/e2e-harness/out/latest
 ```
 
 Output lands under `out/<runId>/`:
@@ -48,12 +64,22 @@ Output lands under `out/<runId>/`:
 ```
 out/2025-…/
 ├── trace.jsonl              # JSONL of every event monitor.sh saw
-├── transcript.log           # parent agent's reply
+├── transcript.log           # parent agent's reply (raw markdown)
+├── brief.html               # transcript.log rendered as a polished HTML
+│                            # page — auto-opens in your browser at the
+│                            # end of the run. Image refs rewritten to
+│                            # the local PNGs copied out of the writer
+│                            # sandbox so hero/scorecard render inline.
+├── *.png / *.jpg            # image artefacts copied from the writer
+│                            # sandbox's incoming/ dir
 ├── platform-notes.txt       # platform caveats (e.g. kindnetd vs Cilium)
 ├── *-gateway.log            # per-sub-agent OpenClaw gateway logs
 ├── …-incoming.txt           # ls of any file-transfer destination dir
 └── verify.json              # final verdict (`pass: bool`, per-check status)
 ```
+
+Set `NO_OPEN_BROWSER=1` to skip the browser open at the end (the HTML
+is always rendered regardless).
 
 ## Platforms
 

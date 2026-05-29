@@ -1,0 +1,35 @@
+{{- /*
+ClusterIP Service exposing the shared auth-sidecar.
+
+Stable DNS: `entra-auth-sidecar.<ns>.svc:5000`. Sandbox inference-
+routers point at this via the `AUTH_SIDECAR_URL` env var.
+
+Why ClusterIP (not headless): the two replicas behind the Service
+form an HA pair; clients don't care which one they hit because the
+sidecar is stateless beyond the MSAL cache (which each replica
+maintains independently). Cache misses cost one mint round-trip;
+not worth the complexity of routing affinity.
+
+Conditionally rendered: only when `.Values.entraSidecar.enabled`.
+*/}}
+{{- if .Values.entraSidecar.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: entra-auth-sidecar
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: entra-auth-sidecar
+    app.kubernetes.io/managed-by: helm
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: entra-auth-sidecar
+  ports:
+    - name: auth-sdk
+      port: 5000
+      targetPort: 5000
+      protocol: TCP
+{{- end }}

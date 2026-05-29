@@ -249,7 +249,8 @@ async fn main() -> Result<()> {
             .merge(routes::foundry_standalone_routes())
             .merge(routes::health_routes())
             .merge(routes::metrics_routes())
-            .merge(routes::mesh_routes());
+            .merge(routes::mesh_routes())
+            .merge(routes::mesh_token_routes());
 
         // Protected routes — require admin token when configured
         let protected = Router::new()

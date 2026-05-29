@@ -26,6 +26,13 @@ pub struct WorkloadIdentityAuth {
     token_cache: Arc<RwLock<HashMap<String, CachedToken>>>,
     /// API key loaded from /run/secrets/ (dev mode fallback)
     api_key: Option<String>,
+    /// Shared Microsoft Entra SDK auth-sidecar client. When `Some`,
+    /// ALL `get_token` calls are routed through the sidecar — no
+    /// fallback to WI / IMDS / API key. This preserves the per-sandbox
+    /// audit principal (Entra Agent ID) in downstream Azure RBAC.
+    /// Constructed from `AUTH_SIDECAR_URL` + `PINNED_AGENT_IDENTITY_APP_ID`
+    /// + `EXPECTED_TENANT_ID` (see `sidecar_client` module docs).
+    sidecar: Option<Arc<crate::sidecar_client::SidecarClient>>,
 }
 
 impl Default for WorkloadIdentityAuth {
@@ -47,7 +54,34 @@ impl WorkloadIdentityAuth {
                     .filter(|s| !s.is_empty())
             });
 
-        if api_key.is_some() {
+        // Sidecar config: fail-closed on partial / inconsistent env.
+        // A misconfigured pod (e.g. AUTH_SIDECAR_URL set but
+        // PINNED_AGENT_IDENTITY_APP_ID missing) is an operator error
+        // and the router MUST refuse to start rather than silently
+        // fall through to WI / IMDS / API-key — which would
+        // attribute downstream calls to a different principal than
+        // the operator configured.
+        let sidecar = match crate::sidecar_client::SidecarClient::from_env() {
+            Ok(maybe) => maybe.map(Arc::new),
+            Err(e) => {
+                tracing::error!(error = %e, "FATAL: sidecar env is inconsistent — refusing to start");
+                // Panic = pod crashes = AKS surfaces the error in
+                // CrashLoopBackoff + logs, which is exactly the
+                // operator UX we want for misconfiguration.
+                panic!("FATAL: inconsistent auth-sidecar env: {e:#}");
+            }
+        };
+
+        if sidecar.is_some() {
+            // Sidecar mode is the EXCLUSIVE auth path when enabled.
+            // Log even when an API key is also present — operators
+            // should know that the sidecar wins so they can audit
+            // the change in audit trails.
+            tracing::info!(
+                "Auth mode: shared entra-auth-sidecar (per-sandbox agent identity, \
+                 fail-closed — no WI/IMDS/API-key fallback)"
+            );
+        } else if api_key.is_some() {
             tracing::info!("Auth mode: API key from /run/secrets/ (dev mode)");
         } else {
             tracing::info!("Auth mode: Workload Identity (AKS mode)");
@@ -57,12 +91,27 @@ impl WorkloadIdentityAuth {
             client: reqwest::Client::new(),
             token_cache: Arc::new(RwLock::new(HashMap::new())),
             api_key,
+            sidecar,
         }
     }
 
     /// Get auth header value. Returns either an API key or a bearer token.
     /// The caller should use this as the `api-key` header for Azure OpenAI.
     pub async fn get_token(&self, resource: &str) -> Result<String> {
+        // Sidecar mode is EXCLUSIVE — no fallback. Falling back to a
+        // different identity would mean downstream Azure RBAC silently
+        // sees a different principal than the per-sandbox agent
+        // identity the operator configured. See sidecar_client docs.
+        if let Some(sc) = self.sidecar.as_ref() {
+            return sc.get_token(resource).await.with_context(|| {
+                format!(
+                    "auth-sidecar token acquisition failed for resource '{resource}' \
+                     (pinned_agent_id={}); refusing to fall back to a different identity",
+                    sc.pinned_agent_id()
+                )
+            });
+        }
+
         // Dev mode: use API key directly
         if let Some(ref key) = self.api_key {
             return Ok(key.clone());
@@ -94,7 +143,45 @@ impl WorkloadIdentityAuth {
 
     /// Returns true if using API key auth (dev mode), false if Workload Identity.
     pub fn is_api_key_mode(&self) -> bool {
-        self.api_key.is_some()
+        // Sidecar mode is neither api-key nor pure WI; report as
+        // "not api-key" so callers default to Bearer-style headers.
+        self.api_key.is_some() && self.sidecar.is_none()
+    }
+
+    /// Returns true when the shared Entra auth-sidecar is the
+    /// exclusive token path. Surfaced for diagnostics + healthz.
+    pub fn is_sidecar_mode(&self) -> bool {
+        self.sidecar.is_some()
+    }
+
+    /// Acquire an AGT mesh peer token from the sidecar (Phase 6.b).
+    ///
+    /// Bypasses the resource → service-name mapping in `get_token`
+    /// because the mesh audience is operator-configurable (e.g.
+    /// `api://agentmesh/.default`, a blueprint GUID, etc.) and the
+    /// sidecar already has the correct scope stored in its
+    /// `DownstreamApis__AgentMesh__Scopes__0` env var (auto-emitted
+    /// by the controller from `KarsAuthConfig.spec.meshAuthAudience`).
+    ///
+    /// Fail-closed: returns an error when sidecar mode is not
+    /// active, so the caller can return 503 to the entrypoint instead
+    /// of silently falling back to a different identity model.
+    pub async fn get_mesh_token(&self) -> Result<String> {
+        match self.sidecar.as_ref() {
+            Some(sc) => sc
+                .get_token_for_service("AgentMesh")
+                .await
+                .with_context(|| {
+                    format!(
+                        "auth-sidecar mesh-token mint failed (pinned_agent_id={}); \
+                     refusing to fall back",
+                        sc.pinned_agent_id()
+                    )
+                }),
+            None => Err(anyhow::anyhow!(
+                "mesh-token requested but sidecar mode is not active"
+            )),
+        }
     }
 
     async fn exchange_token(&self, resource: &str) -> Result<String> {
@@ -219,6 +306,7 @@ mod tests {
             client: reqwest::Client::new(),
             token_cache: Arc::new(RwLock::new(HashMap::new())),
             api_key: api_key.map(|k| k.to_string()),
+            sidecar: None,
         }
     }
 

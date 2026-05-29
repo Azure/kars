@@ -20,7 +20,10 @@ import type { ClusterHealth, MeshHealth } from "../types.js";
 import { kctl, timeSince } from "../helpers.js";
 
 export async function fetchMeshHealth(devMode: boolean, kubeContext?: string): Promise<MeshHealth> {
-  const result: MeshHealth = { relayReady: false, registryReady: false, registryPods: 0, registryReadyPods: 0 };
+  const result: MeshHealth = {
+    relayReady: false, registryReady: false, registryPods: 0, registryReadyPods: 0,
+    entraVerifyEnabled: null, verifiedAgents: null, connectedAgents: null,
+  };
   if (devMode) {
     try {
       const { stdout } = await execa("docker", ["ps", "--filter", "name=relay", "--filter", "status=running", "--format", "{{.Names}}"], { stdio: "pipe", timeout: 5000 });
@@ -49,6 +52,35 @@ export async function fetchMeshHealth(devMode: boolean, kubeContext?: string): P
       }
     }
   } catch {}
+
+  // Phase 6.c — probe the relay's /health for the Entra-verification
+  // toggle. Two reasons this is here and not in the security-fetcher:
+  //  (a) the toggle is a cluster-level property (one relay → one value)
+  //      so probing it per-sandbox would duplicate work;
+  //  (b) the relay's /health is reachable cluster-wide via a single
+  //      `kubectl run --rm` curl, no per-sandbox exec needed.
+  //
+  // Failures (older relay image, /health unreachable, JSON malformed)
+  // leave the three new fields as `null` so the renderer can distinguish
+  // "not probed" from "probed and disabled". See deploy/agentmesh-agt.yaml
+  // for the env vars that flip entra_verify_enabled to true.
+  if (result.relayReady) {
+    try {
+      const { stdout } = await execa("kubectl", kctl([
+        "exec", "-n", "agentmesh", "deploy/relay", "--",
+        "python", "-c",
+        "import urllib.request,json,sys; sys.stdout.write(urllib.request.urlopen('http://localhost:8083/health', timeout=2).read().decode())",
+      ], kubeContext), { stdio: "pipe", timeout: 6000 });
+      const h = JSON.parse(stdout);
+      result.entraVerifyEnabled = h.entra_verify_enabled ?? null;
+      result.verifiedAgents = h.verified_agents ?? null;
+      result.connectedAgents = h.connected_agents ?? null;
+    } catch {
+      // Leave fields as null — renderer treats null as "unknown" and
+      // shows neither green nor red, so an older relay image (pre
+      // Phase 6.c) renders identically to today.
+    }
+  }
   return result;
 }
 

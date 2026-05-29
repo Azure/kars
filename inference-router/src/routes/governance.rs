@@ -413,14 +413,71 @@ async fn agt_reputation(State(state): State<AppState>) -> impl IntoResponse {
                     // panel + CLI fetchers schema-agnostic. AGT agent record
                     // has `reputation_score: f64` in [0, 1]; vendored has
                     // `score: i64`.
+                    //
+                    // Phase 6.c follow-up — also surface session counters
+                    // (`total_sessions`, `successful_sessions`,
+                    // `failed_sessions`, `timeout_sessions`,
+                    // `completion_rate`, `last_session_at`) so the operator
+                    // CLI's existing fields in /agt/reputation fill in.
+                    // The AGT registry returns `completion_rate: -1.0`
+                    // when there's no history; we collapse that to 0.0
+                    // here because the CLI bar renderer expects [0,1].
                     body.map(|rec| {
                         let score = rec
                             .get("reputation_score")
                             .and_then(|v| v.as_f64())
                             .unwrap_or(0.0);
+                        let total = rec
+                            .get("total_sessions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let successful = rec
+                            .get("successful_sessions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let failed = rec
+                            .get("failed_sessions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let timeout = rec
+                            .get("timeout_sessions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let completion_raw = rec
+                            .get("completion_rate")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(-1.0);
+                        let completion = if completion_raw < 0.0 {
+                            0.0
+                        } else {
+                            completion_raw
+                        };
+                        let feedback_count = successful + failed + timeout;
+                        // Phase 6.c — tier from registry takes precedence
+                        // over operator CLI's score-derived label. When
+                        // the AGT registry has been Entra-verified the
+                        // tier here is "verified"; otherwise "anonymous".
+                        // metadata.tier (older registry shape) is kept
+                        // as a fallback for forward-compat.
+                        let tier = rec
+                            .get("tier")
+                            .and_then(|v| v.as_str())
+                            .map(|s| serde_json::Value::String(s.to_string()))
+                            .or_else(|| rec.get("metadata").and_then(|m| m.get("tier")).cloned());
                         serde_json::json!({
                             "score": score,
-                            "tier": rec.get("metadata").and_then(|m| m.get("tier")),
+                            "tier": tier,
+                            "verified_app_id": rec.get("verified_app_id"),
+                            "verified_tenant_id": rec.get("verified_tenant_id"),
+                            "verified_at": rec.get("verified_at"),
+                            "total_sessions": total,
+                            "successful_sessions": successful,
+                            "failed_sessions": failed,
+                            "timeout_sessions": timeout,
+                            "feedback_count": feedback_count,
+                            "average_feedback": score,
+                            "completion_rate": completion,
+                            "last_session_at": rec.get("last_session_at"),
                             "raw": rec,
                         })
                     })

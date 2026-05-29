@@ -182,23 +182,40 @@ az account set --subscription <your-subscription-id>
 
 You need permission to create resource groups, AKS clusters, ACRs, Foundry resources, and federated credentials in your subscription.. `Contributor` + `User Access Administrator` is sufficient.
 
+For **per-sandbox Entra Agent IDs**, you also need the **Agent ID Developer** Entra directory role. Activate it through PIM or ask your tenant admin to assign it. Without it (and without `--mesh-trust=entra`), `kars up` skips the agent-identity setup and the cluster falls back to the AGT anonymous tier — see [permissions.md](permissions.md#tenant-level-entra-id-considerations) for the full breakdown.
+
 ### 2.2 Bring it up
 
 ```bash
+# Anonymous tier (default) — zero Entra prerequisites, shared cluster MI
 kars up --name prod-agent --location swedencentral
+
+# Entra tier — full per-sandbox Entra Agent IDs + verified mesh trust
+kars up --name prod-agent --location swedencentral --mesh-trust=entra
+
+# Microsoft-corp users: also pass your ServiceTree GUID
+kars up --name prod-agent --location swedencentral --mesh-trust=entra --service-tree <guid>
 ```
+
+The `--mesh-trust=entra` flag turns on Phase 5b (per-sandbox typed
+agent identity SPs + Foundry RBAC + federated credentials) plus
+Phase 6.b/6.c (AGT mesh relay/registry verify peer JWTs against
+Entra's JWKS). One flag, full chain. See
+[docs/architecture/entra-agent-id/](architecture/entra-agent-id/)
+for the architecture.
 
 What this does, in order:
 
-1. Creates a resource group `kars-<name>-rg`.
-2. Creates an ACR (your private registry) and an AKS cluster with Workload Identity and OIDC issuer enabled.
-3. Creates an Azure AI Foundry project, Content Safety binding, and a model deployment.
-4. Builds and pushes the controller, inference-router, A2A gateway, and sandbox images to the new ACR.
-5. Installs the kars Helm chart (controller + AgentMesh relay/registry + A2A gateway + CRDs).
-6. Creates the federated credentials so each sandbox's pod identity can call Foundry without keys.
-7. Submits your first `KarsSandbox` and waits until it is `Ready`.
+1. Runs preflight: subscription RBAC, resource providers, **Entra Agent ID directory role** (skipped when `--mesh-trust=anonymous`), preview features.
+2. Creates a resource group `kars-<name>-rg`.
+3. Creates an ACR (your private registry) and an AKS cluster with Workload Identity and OIDC issuer enabled.
+4. Creates an Azure AI Foundry project, Content Safety binding, and a model deployment.
+5. Builds and pushes the controller, inference-router, A2A gateway, and sandbox images to the new ACR.
+6. Installs the kars Helm chart (controller + AgentMesh relay/registry + A2A gateway + CRDs).
+7. **(--mesh-trust=entra only)** Provisions the Entra Agent ID trust anchor (idempotent): blueprint application + service principal in your tenant, controller managed identity in your subscription, and a federated identity credential trusting the controller MI. Writes a `KarsAuthConfig/default` CR to the cluster. Wires `AGENTMESH_ENTRA_AUDIENCE` + `AGENTMESH_ENTRA_TENANT_ID` env on the AGT relay+registry deployments for verified-tier mesh registration.
+8. Submits your first `KarsSandbox` and waits until it is `Ready`. With `--mesh-trust=entra`, the controller mints a per-sandbox **Entra Agent ID** (`kars-<cluster>-<sandbox>`) and Foundry sees that agent identity as the calling principal. With `--mesh-trust=anonymous`, sandboxes share the cluster's workload identity.
 
-The whole flow is idempotent. If it fails halfway through (a quota error, an IAM hiccup), re-running picks up where it left off.
+The whole flow is idempotent. If it fails halfway through (a quota error, an IAM hiccup), re-running picks up where it left off. To deploy fresh and ignore any cached partial state from a previous run, pass `--from-scratch`. The tenant-wide blueprint is **reused** across `kars up` invocations — only the per-cluster controller MI is recreated when you target a new cluster name.
 
 ### 2.3 The pod you get
 

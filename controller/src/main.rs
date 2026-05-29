@@ -17,6 +17,10 @@
 mod a2a_agent;
 mod a2a_agent_compile;
 mod a2a_agent_reconciler;
+mod agent_id_provisioning;
+mod agent_identity;
+mod auth_config;
+mod auth_config_reconciler;
 mod backoff;
 mod config_hash;
 mod crd;
@@ -210,6 +214,18 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { egress_approval_reconciler::run(client).await })
     };
+    let auth_config_handle = {
+        // KarsAuthConfig reconciler — materialises the sidecar env
+        // ConfigMap when an operator installs the tenant trust anchor
+        // via `kars mesh setup-trust`. Idle when the CRD is absent
+        // (cluster runs in anonymous tier).
+        let client = client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = auth_config_reconciler::run(client).await {
+                tracing::error!(error = %e, "auth-config reconciler exited");
+            }
+        })
+    };
 
     // S12.d: SignerPolicy ConfigMap watcher. Installs a process-global
     // handle so `policy_fetcher::maybe_verify_allowlist` resolves
@@ -354,6 +370,12 @@ async fn main() -> Result<()> {
         }
         res = egress_approval_handle => {
             res??;
+        }
+        res = auth_config_handle => {
+            // auth-config reconciler exiting is non-fatal (it sleeps
+            // forever when the CRD is absent), but we propagate any
+            // join error so a real panic surfaces.
+            res?;
         }
         res = mesh_peer_handle => {
             res??;

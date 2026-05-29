@@ -141,6 +141,94 @@ pub struct KarsSandboxSpec {
     /// stamped, no Deployment is created either way).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended: Option<bool>,
+
+    /// Sandbox authentication / identity mode (Entra Agent ID).
+    ///
+    /// When `Some`, controls how the sandbox pod acquires tokens to
+    /// reach Foundry / Graph / KV / etc. When `None`, defaults to the
+    /// behaviour of the cluster-wide `KarsAuthConfig` (or anonymous
+    /// tier if that CR is absent).
+    ///
+    /// See `docs/architecture/entra-agent-id/01-runtime-token-flow.md`
+    /// for the full design.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_auth: Option<MeshAuthConfig>,
+}
+
+/// Per-sandbox mesh authentication mode.
+///
+/// Two terminal modes are supported:
+///
+/// - `AgentId` — provision a per-sandbox Entra Agent Identity from the
+///   cluster-wide blueprint and inject the Microsoft Entra SDK sidecar
+///   into the pod. Requires `KarsAuthConfig/default` to exist and be
+///   `Ready`. Fails closed if Graph provisioning errors.
+/// - `Anonymous` — no token acquisition; pod participates in the AGT
+///   mesh at trust score 0 (existing default-deny fallback).
+///
+/// The default `Auto` resolves to `AgentId` when `KarsAuthConfig/default`
+/// is `Ready`, and `Anonymous` otherwise. Operators set an explicit
+/// mode to override the auto-detect (e.g. forcing `Anonymous` on a
+/// sandbox even though tenant setup completed).
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshAuthConfig {
+    /// Desired authentication mode. Default `Auto`.
+    #[serde(default)]
+    pub mode: MeshAuthMode,
+
+    /// Custom security attributes to apply to the provisioned agent
+    /// identity (SP) at creation time. Two-level map:
+    /// `<attributeSet> → <attributeName> → <value>`.
+    ///
+    /// Required pre-step (tenant admin): each `<attributeSet>` /
+    /// `<attributeName>` pair must be declared in the tenant's
+    /// `customSecurityAttributeDefinitions` collection before kars can
+    /// reference it — otherwise the Graph PATCH returns 400
+    /// `Request_BadRequest`. The kars-shipped Bicep template
+    /// `deploy/bicep/standalone/custom-security-attributes.bicep`
+    /// declares the recommended `AgentGovernance` set with
+    /// `AgentClassification` and `DataSensitivity` attributes (see
+    /// `docs/architecture/entra-agent-id/05-conditional-access.md`).
+    ///
+    /// Attribute-driven Conditional Access policies can then target
+    /// these attributes via `userTargetMembers` /
+    /// `agentTargetMembers` filters (per Microsoft's
+    /// `policy-autonomous-agents` baseline template).
+    ///
+    /// Setting this map on a sandbox whose attribute set is undefined
+    /// in the tenant causes the agent identity provisioning to fail
+    /// with `phase=Degraded reason=CustomSecurityAttributePatchFailed`.
+    /// Empty / absent map → no security attributes applied.
+    ///
+    /// Example (`AgentGovernance.AgentClassification=Standard`):
+    /// ```yaml
+    /// meshAuth:
+    ///   mode: AgentId
+    ///   customSecurityAttributes:
+    ///     AgentGovernance:
+    ///       AgentClassification: "Standard"
+    ///       DataSensitivity: "Internal"
+    /// ```
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub custom_security_attributes:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
+}
+
+/// Mesh authentication mode discriminator. See
+/// [`MeshAuthConfig`] for semantics.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum MeshAuthMode {
+    /// Resolve to `AgentId` when `KarsAuthConfig/default` is `Ready`,
+    /// `Anonymous` otherwise.
+    #[default]
+    Auto,
+    /// Provision a per-sandbox Entra Agent Identity and inject the
+    /// Microsoft Entra SDK sidecar.
+    AgentId,
+    /// No token acquisition; AGT mesh anonymous tier (trust score 0).
+    Anonymous,
 }
 
 /// Upstream-protocol compatibility (Phase 1 scaffold extended in Phase 2 S8).
@@ -994,6 +1082,16 @@ pub struct KarsSandboxStatus {
     pub tokens_used: Option<TokensUsed>,
     /// Foundry Agent ID created by the controller.
     pub foundry_agent_id: Option<String>,
+    /// Per-sandbox Entra Agent Identity provisioned by the controller
+    /// when `spec.meshAuth.mode` resolves to `AgentId`. Absent in
+    /// `Anonymous` mode or before the first successful Graph
+    /// provisioning. Cleared on sandbox deletion via finalizer.
+    ///
+    /// See `controller/src/agent_identity.rs` for provisioning logic
+    /// and `docs/architecture/entra-agent-id/01-runtime-token-flow.md`
+    /// for the runtime token flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_identity: Option<AgentIdentityStatus>,
     /// The runtime kind the controller observed for the current
     /// `observedGeneration`. Mirrors `spec.runtime.kind` once the
     /// reconciler has accepted it; consumers should interpret this
@@ -1012,6 +1110,37 @@ pub struct KarsSandboxStatus {
     /// status reconciles).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+}
+
+/// Per-sandbox Entra Agent Identity provisioned by the controller.
+///
+/// Created on first reconcile when `spec.meshAuth.mode == AgentId`
+/// (or `Auto` resolves to `AgentId`). The controller calls Microsoft
+/// Graph (`POST /beta/serviceprincipals/Microsoft.Graph.AgentIdentity`)
+/// authenticated as the blueprint via the controller MI's IMDS token
+/// (see `controller/src/agent_identity.rs`).
+///
+/// `appId` is what the inference-router pins into the sidecar's
+/// `AgentIdentity=<id>` query parameter when minting downstream tokens.
+/// `objectId` is what `kars policy grant` uses as the principal id in
+/// ARM role assignments.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentIdentityStatus {
+    /// Entra service principal `appId` (client ID). Stable identifier
+    /// for token issuance.
+    pub app_id: String,
+    /// Entra service principal `id` (object ID). Used by ARM role
+    /// assignments and Graph delete operations.
+    pub object_id: String,
+    /// Display name (`kars-<cluster>-<sandbox>`). Surfaces in Entra
+    /// sign-in logs and Foundry audit logs.
+    pub display_name: String,
+    /// Creation timestamp from Graph, as an ISO-8601 string. Recorded
+    /// for diagnostics; the reconciler does not use it for any
+    /// decision logic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
