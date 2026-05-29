@@ -154,6 +154,33 @@ impl WorkloadIdentityAuth {
         self.sidecar.is_some()
     }
 
+    /// Acquire an AGT mesh peer token from the sidecar (Phase 6.b).
+    ///
+    /// Bypasses the resource → service-name mapping in `get_token`
+    /// because the mesh audience is operator-configurable (e.g.
+    /// `api://agentmesh/.default`, a blueprint GUID, etc.) and the
+    /// sidecar already has the correct scope stored in its
+    /// `DownstreamApis__AgentMesh__Scopes__0` env var (auto-emitted
+    /// by the controller from `KarsAuthConfig.spec.meshAuthAudience`).
+    ///
+    /// Fail-closed: returns an error when sidecar mode is not
+    /// active, so the caller can return 503 to the entrypoint instead
+    /// of silently falling back to a different identity model.
+    pub async fn get_mesh_token(&self) -> Result<String> {
+        match self.sidecar.as_ref() {
+            Some(sc) => sc.get_token_for_service("AgentMesh").await.with_context(|| {
+                format!(
+                    "auth-sidecar mesh-token mint failed (pinned_agent_id={}); \
+                     refusing to fall back",
+                    sc.pinned_agent_id()
+                )
+            }),
+            None => Err(anyhow::anyhow!(
+                "mesh-token requested but sidecar mode is not active"
+            )),
+        }
+    }
+
     async fn exchange_token(&self, resource: &str) -> Result<String> {
         // Read projected service account token
         let sa_token_path = std::env::var("AZURE_FEDERATED_TOKEN_FILE")

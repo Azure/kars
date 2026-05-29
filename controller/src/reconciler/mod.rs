@@ -1389,6 +1389,30 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             openclaw_env.push(json!({"name": "AGT_SKIP_ENTRA", "value": "1"}));
         }
 
+        // Phase 6.b — propagate the mesh-auth backend toggle into the
+        // openclaw container so the entrypoint's elif chain can prefer
+        // the /v1/mesh-token sidecar path over AGT_SKIP_ENTRA=1. The
+        // router already has this env (set later in router_env); the
+        // sandbox entrypoint script (sandbox-images/openclaw/
+        // entrypoint.sh) reads MESH_AUTH_BACKEND to decide which token
+        // acquisition path to take. Without this push, the entrypoint
+        // never sees the toggle and falls back to anonymous-tier
+        // even when the operator has flipped KAC.meshAuthBackend.
+        if let Some((_, _, mesh_backend, mesh_audience)) = agent_id_active.as_ref()
+            && matches!(mesh_backend, crate::auth_config::MeshAuthBackend::EntraAgentIdentity)
+        {
+            openclaw_env.push(json!({
+                "name": "MESH_AUTH_BACKEND",
+                "value": "EntraAgentIdentity",
+            }));
+            if let Some(aud) = mesh_audience.as_ref().filter(|s| !s.trim().is_empty()) {
+                openclaw_env.push(json!({
+                    "name": "MESH_AUTH_AUDIENCE",
+                    "value": aud.clone(),
+                }));
+            }
+        }
+
         // Strict-mode tool definitions: when the controller is launched with
         // KARS_STRICT_TOOLS=1 (e.g. via the Helm chart's `strictTools`
         // value), propagate it into every sandbox's openclaw container.

@@ -179,29 +179,48 @@ if [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKE
   _ROUTER_URL="${ROUTER_LOCAL_URL:-http://127.0.0.1:8443}"
   _MESH_RESP=""
   _MESH_STATUS=""
-  _MESH_RESP=$(curl -s -4 --connect-timeout 3 --max-time 8 \
-    -w "\n__HTTP_STATUS__%{http_code}" \
-    "${_ROUTER_URL}/v1/mesh-token" 2>/dev/null || echo "")
-  _MESH_STATUS=$(printf '%s\n' "$_MESH_RESP" | grep -E '^__HTTP_STATUS__' | sed 's/^__HTTP_STATUS__//')
-  _MESH_BODY=$(printf '%s\n' "$_MESH_RESP" | sed '/^__HTTP_STATUS__/d')
-  if [ "$_MESH_STATUS" = "200" ]; then
-    _ACCESS_TOKEN=$(printf '%s' "$_MESH_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-    if [ -n "$_ACCESS_TOKEN" ]; then
-      echo "[entrypoint] Mesh token acquired via auth-sidecar — verified-tier registration"
-      export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
-    else
-      echo "[entrypoint] /v1/mesh-token returned 200 but no access_token in body; falling back to anonymous tier"
-      export AGT_TRUST_THRESHOLD=0
+  _ACCESS_TOKEN=""
+  # Retry loop — the openclaw entrypoint runs at pod startup BEFORE
+  # the inference-router has finished booting. The router takes
+  # ~5-15s on a cold pod (rust binary cold-start + cluster IP wiring
+  # + blocklist load). Without a retry, the first call fails with
+  # connect-refused (curl status 000) and the sandbox falls back to
+  # anonymous-tier even on a healthy cluster — exactly the bug
+  # observed on kars-aks 2026-05-29T10:21 first-boot.
+  _DELAY=1
+  _ELAPSED=0
+  _MAX_WAIT="${MESH_TOKEN_MAX_WAIT:-60}"
+  _ATTEMPT=0
+  while [ "$_ELAPSED" -lt "$_MAX_WAIT" ]; do
+    _ATTEMPT=$((_ATTEMPT + 1))
+    _MESH_RESP=$(curl -s -4 --connect-timeout 3 --max-time 8 \
+      -w "\n__HTTP_STATUS__%{http_code}" \
+      "${_ROUTER_URL}/v1/mesh-token" 2>/dev/null || echo "")
+    _MESH_STATUS=$(printf '%s\n' "$_MESH_RESP" | grep -E '^__HTTP_STATUS__' | sed 's/^__HTTP_STATUS__//')
+    _MESH_BODY=$(printf '%s\n' "$_MESH_RESP" | sed '/^__HTTP_STATUS__/d')
+    if [ "$_MESH_STATUS" = "200" ]; then
+      _ACCESS_TOKEN=$(printf '%s' "$_MESH_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+      if [ -n "$_ACCESS_TOKEN" ]; then
+        echo "[entrypoint] Mesh token acquired via auth-sidecar after ${_ATTEMPT} attempt(s) (${_ELAPSED}s) — verified-tier registration"
+        export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
+        break
+      fi
     fi
-    unset _ACCESS_TOKEN
-  elif [ "$_MESH_STATUS" = "404" ]; then
-    echo "[entrypoint] /v1/mesh-token returned 404 — router image too old for Phase 6.b; registering as anonymous tier"
-    export AGT_TRUST_THRESHOLD=0
-  else
-    echo "[entrypoint] /v1/mesh-token failed (status=${_MESH_STATUS:-network-error}); registering as anonymous tier"
+    # 404 means MESH_AUTH_BACKEND was set but the router image doesn't
+    # have the /v1/mesh-token route — no point retrying that.
+    if [ "$_MESH_STATUS" = "404" ]; then
+      echo "[entrypoint] /v1/mesh-token returned 404 — router image too old for Phase 6.b"
+      break
+    fi
+    sleep "$_DELAY"
+    _ELAPSED=$((_ELAPSED + _DELAY))
+    if [ "$_DELAY" -lt 4 ]; then _DELAY=$((_DELAY * 2)); fi
+  done
+  if [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
+    echo "[entrypoint] /v1/mesh-token failed after ${_ELAPSED}s (${_ATTEMPT} attempts, last status=${_MESH_STATUS:-network-error}); registering as anonymous tier"
     export AGT_TRUST_THRESHOLD=0
   fi
-  unset _MESH_RESP _MESH_STATUS _MESH_BODY _ROUTER_URL
+  unset _MESH_RESP _MESH_STATUS _MESH_BODY _ROUTER_URL _ACCESS_TOKEN _DELAY _ELAPSED _MAX_WAIT _ATTEMPT
 elif [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
   echo "[entrypoint] AGT_SKIP_ENTRA=1 — Entra token exchange disabled by operator, registering as anonymous tier"
   # Trust scoring is meaningless without OAuth identity: every peer registers

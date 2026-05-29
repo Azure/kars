@@ -213,7 +213,23 @@ impl SidecarClient {
                  extend resource_to_service_name() in sidecar_client.rs"
             )
         })?;
+        self.get_token_for_service(service).await
+    }
 
+    /// Acquire a token by explicit sidecar service name, bypassing
+    /// the resource → service lookup.
+    ///
+    /// Phase 6.b — the AGT mesh peer audience is operator-configurable
+    /// (default `api://agentmesh/.default`, but in tenants that don't
+    /// have that SP provisioned, operators set it to the blueprint
+    /// app's GUID or any other valid Entra resource). The
+    /// `resource_to_service_name` mapping cannot enumerate every
+    /// possible operator value; the `/v1/mesh-token` route therefore
+    /// calls this method directly with `service="AgentMesh"`, and
+    /// the sidecar mints via the
+    /// `DownstreamApis__AgentMesh__Scopes__0` env (which the controller
+    /// already auto-emits from `KarsAuthConfig.spec.meshAuthAudience`).
+    pub async fn get_token_for_service(&self, service: &str) -> Result<String> {
         // Cache key is (service, agent_id) — agent_id is stable for
         // the pod lifetime but include it for future-proofing.
         let cache_key = format!("{}|{}", service, self.pinned_agent_id);

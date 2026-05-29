@@ -127,7 +127,15 @@ async fn mesh_token_handler(State(state): State<AppState>) -> impl IntoResponse 
     }
 
     let audience = mesh_audience();
-    match state.auth.get_token(&audience).await {
+    // Phase 6.b — use the dedicated mesh-token path that bypasses
+    // resource → service-name mapping. The audience is operator-
+    // configurable and may not match any well-known mapping
+    // (e.g. blueprint GUID instead of api://agentmesh) — but the
+    // sidecar already has the correct scope wired via
+    // DownstreamApis__AgentMesh__Scopes__0 (auto-emitted by the
+    // controller). We log the audience for diagnostics so operators
+    // can confirm what scope is requested.
+    match state.auth.get_mesh_token().await {
         Ok(token) => (
             StatusCode::OK,
             Json(MeshTokenResponse {
