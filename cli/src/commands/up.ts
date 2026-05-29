@@ -59,6 +59,11 @@ export function upCommand(): Command {
     )
     // ── Output / lifecycle ────────────────────────────────────────────
     .option("--dry-run", "Show what would be done without executing", false)
+    .option(
+      "--demo",
+      "Recording-friendly walkthrough: simulates the deploy at real-time pace using read-only queries against the current Azure subscription + kubeconfig context. Same stepper visuals as a real `kars up` but creates/modifies nothing. Designed for demo capture.",
+      false,
+    )
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
     .option("--from-scratch", "Ignore any partial state from a prior failed run and start over", false)
     .addHelpText("after", `
@@ -100,6 +105,27 @@ Auto-resume:
       }
 
       const { execa } = await import("execa");
+
+      // ── DEMO MODE (recording-friendly walkthrough) ─────────────────
+      // Walks every phase using read-only queries against the current
+      // Azure subscription + kubeconfig context. No mutations. Designed
+      // for capturing demo videos without burning ~20 min on a real
+      // provision and without leaving disposable resources behind.
+      if (options.demo) {
+        const { runUpDemo } = await import("./up/demo.js");
+        await runUpDemo({
+          name: options.name,
+          model: options.model,
+          region: options.region,
+          clusterName: options.clusterName,
+          isolation: options.isolation,
+          resourceGroup: options.resourceGroup,
+          sourceAcr: options.sourceAcr,
+          meshTrust: (options as { meshTrust?: string }).meshTrust,
+          meshPeer: options.meshPeer,
+        });
+        return;
+      }
 
       // ── FAST UPGRADE PATH (S15.d.1: extracted to ./up/fast_upgrade.ts) ──
       // Skip all prompts and infra — just re-run Helm with cached context.

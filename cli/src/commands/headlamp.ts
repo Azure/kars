@@ -55,9 +55,22 @@ export function headlampCommand(): Command {
         const kctl = (args: string[]) => ["--context", ctx!, ...args];
 
         // Optional install — works on any cluster kubectl can reach.
+        // Installs the full stack: Headlamp + kars plugin + Prometheus
+        // + Grafana + monitoring manifests. Mirrors what
+        // `kars dev --target local-k8s` installs for kind, so the
+        // same dashboard experience lands on AKS.
         if (options.install) {
-          await installHeadlamp(execa, ctx!);
-          console.log("");
+          const { installHeadlamp: stackInstallHeadlamp, installKarsPlugin, installPrometheus } =
+            await import("./up/headlamp_stack.js");
+          const { findRepoRoot } = await import("./up/helpers.js");
+          const repoRoot = findRepoRoot(process.cwd());
+          console.log(chalk.bold(`  Installing Headlamp + kars plugin + Prometheus into ${chalk.cyan(ctx!)}…\n`));
+          await stackInstallHeadlamp({ context: ctx!, repoRoot });
+          console.log();
+          await installKarsPlugin({ context: ctx!, repoRoot });
+          console.log();
+          await installPrometheus({ context: ctx!, repoRoot });
+          console.log(chalk.green("\n  ✓ Headlamp + kars plugin + Prometheus installed.\n"));
         }
 
         // Verify Headlamp is present.
