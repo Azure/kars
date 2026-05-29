@@ -110,10 +110,10 @@ export async function installKarsPlugin(opts: HeadlampStackOptions): Promise<voi
   const pkgJson = path.join(pluginDir, "package.json");
 
   // Always rebuild when ANY source file is newer than dist/main.js.
-  // Stale dist was the source of "still shows AzureClaw, no agents
-  // visible" bugs on AKS — the plugin was renamed from azureclaw → kars
-  // but the cached dist predated the rename. Walk src/ + package.json
-  // and rebuild if needed.
+  // Stale dist was the source of "no agents visible / wrong CRD group"
+  // bugs on AKS — the plugin was renamed from the pre-v0.1.0 brand to
+  // kars but the cached dist predated the rename. Walk src/ +
+  // package.json and rebuild if needed.
   let needsBuild = !existsSync(mainJs);
   if (!needsBuild) {
     try {

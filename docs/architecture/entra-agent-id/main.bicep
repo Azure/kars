@@ -88,8 +88,8 @@ resource agentSp 'Microsoft.Graph/servicePrincipals@v1.0' = {
 // ── 3. Federated identity credential ─────────────────────────────
 //
 // This is the per-sandbox surface kars cares about most. In production
-// the controller writes one of these per ClawSandbox using the AKS
-// cluster's OIDC issuer URL + `system:serviceaccount:azureclaw-<name>:sandbox`.
+// the controller writes one of these per KarsSandbox using the AKS
+// cluster's OIDC issuer URL + `system:serviceaccount:kars-<name>:sandbox`.
 // For the POC we use stand-in values so the operation completes
 // without needing an AKS cluster.
 resource agentFedCred 'Microsoft.Graph/applications/federatedIdentityCredentials@v1.0' = if (createFederatedCredential) {
