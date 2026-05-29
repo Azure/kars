@@ -85,18 +85,28 @@ cleanup() {
         for pid in $(ps -o pid=,command= | awk '/kubectl[[:space:]]+logs[[:space:]]+-f/ {print $1}'); do
             kill "${pid}" 2>/dev/null || true
         done
-        # Don't `wait` — the subshell may have detached from job control.
-        # Just give the kernel a moment to reap.
-        sleep 1
     fi
     if [ -n "${DEMO_PID}" ] && kill -0 "${DEMO_PID}" 2>/dev/null; then
         # SIGINT lets the demo formatter print its summary cleanly.
         kill -INT "${DEMO_PID}" 2>/dev/null || true
-        sleep 1
-        kill "${DEMO_PID}" 2>/dev/null || true
     fi
+    # Hunt any in-flight kubectl port-forward / kubectl wait / kubectl
+    # apply children of this run. macOS BSD pkill/killall would be
+    # easier but is sandbox-forbidden, so iterate via ps.
+    for pid in $(ps -o pid=,command= | awk '/kubectl[[:space:]]+(port-forward|wait|logs)/ {print $1}'); do
+        kill "${pid}" 2>/dev/null || true
+    done
+    sleep 1
+    # Last-resort SIGKILL for anything still alive.
+    [ -n "${MONITOR_PID}" ] && kill -9 "${MONITOR_PID}" 2>/dev/null || true
+    [ -n "${DEMO_PID}" ] && kill -9 "${DEMO_PID}" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+
+# Explicit exit in the INT/TERM trap — without `exit`, bash runs the
+# trap then continues the script as if nothing happened (e.g. sleeps
+# resume, the next command runs). That's why Ctrl+C felt unresponsive.
+trap 'cleanup; exit 130' INT TERM
+trap cleanup EXIT
 
 # Foreground driver (provision + drive prompt). With DEMO=1 we suppress
 # the raw drive output from the terminal — the formatter shows the
