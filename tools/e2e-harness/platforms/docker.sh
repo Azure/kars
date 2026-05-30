@@ -57,7 +57,7 @@ platform_preflight() {
         # applied — docker mode requires the scenario to either preload
         # the bundles into the image or provide a docker-overlay/ dir
         # the helper sources. We do not pretend otherwise.
-        kars dev --target docker --once \
+        kars dev --target docker \
             --name "${DOCKER_CONTAINER_NAME}" \
             >>"${OUT_DIR}/dev-bringup.log" 2>&1 || {
                 log "ERR kars dev bring-up failed; tail of dev-bringup.log:"
@@ -204,6 +204,42 @@ platform_collect_artifacts() {
         sh -c 'cat /tmp/gateway.log 2>/dev/null || true' \
         >"${OUT_DIR}/${SCENARIO_SANDBOX}-gateway.log" || true
 
+    # Synthesize a trace.jsonl from each container's inference-router
+    # log so verify.py's router_lines-based checks (e.g. image_calls,
+    # container_hits) work on docker the same way they do on K8s where
+    # monitor.sh produces this file from `kubectl logs`. monitor.sh is
+    # kubectl-based and skipped on docker (see run.sh), so we build it
+    # here.
+    local trace_file="${OUT_DIR}/trace.jsonl"
+    : >"${trace_file}"
+    _append_router_lines() {
+        local cname="$1"
+        docker exec "${cname}" \
+            sh -c 'cat /tmp/inference-router.log 2>/dev/null || true' \
+            | while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                # router emits structured JSON whose "fields.message"
+                # carries the human-readable text. Extract message plus
+                # any per-event fields (path, url, deployment) that
+                # verify.py's checks regex against (e.g. image_calls
+                # match on "images/generations" or "gpt-image-1").
+                python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    f = d.get("fields", {})
+    parts = [f.get("message", "")]
+    for k in ("path","url","deployment","model"):
+        v = f.get(k)
+        if v: parts.append(f"{k}={v}")
+    print(json.dumps({"src":"ROUTER","msg":" ".join(parts)}))
+except Exception:
+    pass
+' "$line" 2>/dev/null
+            done >>"${trace_file}"
+    }
+    _append_router_lines "${DOCKER_CONTAINER_NAME}"
+
     for sub in "${SCENARIO_SUB_SANDBOXES[@]}"; do
         # Try plain name first, then prefixed name.
         local cname
@@ -221,6 +257,7 @@ platform_collect_artifacts() {
         docker exec "${cname}" sh -c \
             "grep -E '${pat}' /tmp/gateway.log 2>/dev/null || true" \
             >"${OUT_DIR}/${sub}-gateway.log" || true
+        _append_router_lines "${cname}"
     done
 
     if [ -n "${SCENARIO_INCOMING_SANDBOX}" ] \
