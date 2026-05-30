@@ -960,6 +960,7 @@ Notes:
               "-e", "HOST=0.0.0.0",
               "-e", `PORT=${meshPorts.registry}`,
               "-e", "LOG_LEVEL=info",
+              "-e", "AGENTMESH_REGISTRY_ALLOW_UNAUTHED_DID=1",
               "agentmesh-registry:dev",
             ], { stdio: "pipe" });
           }
