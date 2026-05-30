@@ -210,3 +210,110 @@
 4. **9/9 verify checks pass on all three platforms** with the platform-aware `check_mcp_traffic` (docker correctly bypasses the MCP CRD requirement since dev mode has no controller).
 
 5. **5 follow-up findings (Findings #3–#7)** are tracked in the remediation plan above. None block the existing AKS deployment story; all are improvements to dev modes or to documented-roadmap items.
+
+---
+
+# Addendum — Env-variable inventory on AKS (per-container)
+
+User question: *"do we have more env variables than we should set for the router and sandbox pods, and how do those look?"*
+
+## A. openclaw (agent) container — execbrief, AKS
+
+42 total env vars. Categorized:
+
+| Category | Count | Vars |
+|---|---:|---|
+| **AGT mesh control** | 7 | `AGT_GOVERNANCE_ENABLED`, `AGT_POLICY_DIR`, `AGT_REGISTRY_MODE`, `AGT_REGISTRY_URL`, `AGT_RELAY_URL`, `AGT_SKIP_ENTRA=1`, `AGT_TRUST_THRESHOLD=0` |
+| **Azure identity / Entra Agent ID** | 8 | `AZURE_AUTHORITY_HOST`, `AZURE_CLIENT_ID` (SA's WI), `AZURE_FEDERATED_TOKEN_FILE` (RO path), `AZURE_OPENAI_ENDPOINT`, `AZURE_TENANT_ID`, `MESH_AUTH_AUDIENCE`, `MESH_AUTH_BACKEND=EntraAgentIdentity`, `PINNED_AGENT_IDENTITY_APP_ID` (per-sandbox) |
+| **Foundry discovery** | 2 | `FOUNDRY_DEPLOYMENTS` (JSON list of available models), `FOUNDRY_PROJECT_ENDPOINT` |
+| **kars-specific** | 3 | `KARS_AUTH_MODE=workload-identity`, `KARS_MCP_SERVERS`, `KARS_MESH_PROVIDER=agt` |
+| **OpenClaw** | 2 | `OPENCLAW_GATEWAY_TOKEN` (32-char hex bearer for `kars connect`), `OPENCLAW_MODEL=gpt-5.4` |
+| **Sandbox** | 1 | `SANDBOX_NAME=execbrief` |
+| **K8s auto-injected service-link vars** | 16 | `EXECBRIEF_PORT*` (×8), `KUBERNETES_PORT*` (×8) |
+| **System** | 3 | `HOME`, `HOSTNAME`, `PATH` |
+
+### Secret-class env vars on openclaw container
+- ✅ **No `AZURE_OPENAI_API_KEY`**
+- ✅ **No `COPILOT_GITHUB_TOKEN`**
+- ✅ **No federated token VALUE** — only the path to the RO-mounted token file
+- ⚠️ **`OPENCLAW_GATEWAY_TOKEN` is in env in plaintext** — 32-char hex bearer for `kars connect`. Should ideally be a file mount; today it's `env.valueFrom.secretKeyRef` (visible via `kubectl describe pod`, leaks to audit logs and etcd if not encrypted-at-rest).
+
+### Sub-agent-specific extras
+Sub-agents (analyst/viz/writer) additionally get:
+- `AGT_TRUSTED_PEERS=execbrief:2Ud7drFrKecHdxZiNh3uGCvmwhxZ` — pre-seeded trust with parent's DID
+- `AGT_TRUST_THRESHOLD=500` — sub-agents reject anonymous peers (vs parent at `0`)
+- `PARENT_SANDBOX=execbrief` — for the "parent" mesh alias
+- Unique `PINNED_AGENT_IDENTITY_APP_ID` (one per sub-agent)
+
+---
+
+## B. inference-router container — execbrief, AKS
+
+54 total env vars. The router has 12 more than openclaw because it carries CRD bundle paths, auth-sidecar config, and feature toggles.
+
+### Categories unique to the router
+| Category | Vars |
+|---|---|
+| **Auth sidecar (Entra Agent ID)** | `AUTH_SIDECAR_URL=http://entra-auth-sidecar.kars-system.svc:5000`, `EXPECTED_TENANT_ID=72f988bf-…`, `IMDS_CLIENT_ID=263c59d1-…` (kubelet MI for IMDS fallback) |
+| **Content Safety / Prompt Shields** | `CONTENT_SAFETY_ENABLED=true`, `CONTENT_SAFETY_ENDPOINT`, **`PROMPT_SHIELDS_ENABLED=false`** (see note below) |
+| **Egress** | `BLOCKLIST_ENABLED=true`, `BLOCKLIST_SEED_PATH`, `EGRESS_ALLOWLIST_DIR`, `EGRESS_APPROVAL_DIR`, `EGRESS_MODE=strict` |
+| **CRD bundle paths** | `INFERENCE_POLICY_DIR`, `MEMORY_BINDING_DIR`, `MCP_JWKS_DIR`, `MCP_JWKS_PATH`, `MCP_SIGNING_KEY_DIR` |
+| **Token budget** | `TOKEN_BUDGET_DAILY=4000000`, `TOKEN_BUDGET_PER_REQUEST=200000` |
+| **Foundry deployment binding** | `AZURE_OPENAI_DEPLOYMENT=gpt-5.4`, `FOUNDRY_ENDPOINT`, `FOUNDRY_PROJECT_ENDPOINT` |
+| **Misc** | `SANDBOX_ISOLATION=enhanced`, `RUST_LOG=info,inference_router=debug` |
+
+### Note on `PROMPT_SHIELDS_ENABLED=false`
+This is **intentional, set by the exec-brief scenario's InferencePolicy CRD**:
+```yaml
+# tools/e2e-harness/scenarios/exec-brief/manifests/01-inferencepolicy.yaml
+spec:
+  contentSafety:
+    # Prompt Shields enforcement requires upstream prompt_filter_results
+    # annotations, which the Foundry data-plane stream does not emit.
+    requirePromptShields: false
+```
+Server-side Foundry Content Safety is still on (`CONTENT_SAFETY_ENABLED=true`); the router just doesn't gate on the `prompt_filter_results` field that isn't emitted by this Foundry deployment. **Not a security gap** — the controller default for new CRDs is `requirePromptShields: true` (`controller/src/inference_policy_compile.rs:221`).
+
+### Secret-class env vars on the router
+- ✅ **No `AZURE_OPENAI_API_KEY`** (AKS uses sidecar-issued tokens, not API keys — verified by `Auth mode: shared entra-auth-sidecar … fail-closed — no WI/IMDS/API-key fallback` log line)
+- ✅ **No `COPILOT_GITHUB_TOKEN`** (the only AKS log shows GitHub tokens via Secret mount, not env)
+- ✅ All credential PATHS are mounted RO from Secrets, not the credentials themselves
+
+---
+
+## C. Findings on env-var hygiene (additions to §9 of the main report)
+
+### Finding #8 — LOW — `OPENCLAW_GATEWAY_TOKEN` exposed via env on openclaw container
+- **Where**: openclaw container of every sandbox pod (AKS, local-k8s, docker)
+- **Result**: `kubectl describe pod` and pod-spec ETCD records contain the per-sandbox gateway bearer token in plaintext. A reader with `get pods` RBAC can pull the token and then `curl localhost:18789` with it. The token is also visible to any sidecar/init container in the pod.
+- **Mitigation today**: token is per-sandbox and rotates on pod restart (32-char hex). The blast radius is one sandbox session.
+- **Fix**: mount the token as a file via `secretKeyRef`/`volumeMounts` instead of `env.valueFrom.secretKeyRef`. Read-once at startup by openclaw gateway.
+
+### Finding #9 — LOW — `enableServiceLinks: true` (K8s default) leaks internal cluster IPs into env
+- **Where**: every sandbox pod (16 service-link env vars on AKS execbrief: `EXECBRIEF_PORT_*` + `KUBERNETES_PORT_*` each expanded into 8 variants)
+- **Result**: Cluster-internal IPs (`10.0.8.20`, `10.0.0.1`) are reachable to the agent process even though docs/security.md headline guarantee #2 says "The agent has no network of its own". The agent can't reach those IPs (iptables egress-guard blocks UID 1000 to localhost+DNS only), but the IPs are still leaked into the agent's memory.
+- **Fix**: set `spec.enableServiceLinks: false` on the sandbox pod template in the controller. Zero functional impact (kars uses DNS-based service discovery, not these legacy env vars).
+
+### Finding #10 — LOW — possibly-redundant env vars on openclaw container
+The openclaw (agent) container holds 4 env vars that are arguably unnecessary because the router is the only thing that should make Foundry/mesh-auth calls:
+- `AZURE_OPENAI_ENDPOINT=https://azureclaw-foundry-services.openai.azure.com` (router is the only Foundry caller)
+- `FOUNDRY_PROJECT_ENDPOINT=https://azureclaw-foundry-services.services.ai.azure.com/api/projects/azureclaw`
+- `FOUNDRY_DEPLOYMENTS=["gpt-5-mini",…]` (model discovery — useful for openclaw's MEMORY.md context, but could be in a mounted ConfigMap)
+- `MESH_AUTH_AUDIENCE=b712af17-…` (set on both openclaw and router; openclaw has `AGT_SKIP_ENTRA=1` so the audience is unused)
+
+**Impact**: Low — these are public-ish identifiers, not credentials. They make the headline guarantee "the agent has no Azure-relevant configuration" softer in spirit (information disclosure even if not credential disclosure). Worth either moving to a ConfigMap volume the openclaw process reads at startup, or removing entirely.
+
+**Mitigation today**: even if a prompt injection exfils these strings, the agent has no key to make calls and no network path to the endpoints (iptables egress-guard).
+
+---
+
+## D. Summary table — env-var hygiene per container
+
+| Container | Total vars | Secret-class in plain env | Mount-based secrets only | K8s service-link leak | Redundant/unused |
+|---|---:|---:|:---:|---:|---:|
+| AKS openclaw | 42 | 1 (`OPENCLAW_GATEWAY_TOKEN`) | ✅ federated token, MCP keys, agt policies | 16 vars | 4 vars |
+| AKS inference-router | 54 | 0 | ✅ all | 16 vars | (router needs all) |
+| local-k8s openclaw | ~38 | 1 (`OPENCLAW_GATEWAY_TOKEN`) | partial — no federated token | 16 vars | 4 vars |
+| local-k8s inference-router | ~50 | **2** (`AZURE_OPENAI_API_KEY` + `COPILOT_GITHUB_TOKEN`) | partial | 16 vars | — |
+| docker kars-execbrief (single container) | ~30 | 0 in env (secrets in `/run/secrets/`) | ✅ but see Finding #1 (UID 1000 reads it on macOS) | none (no K8s) | — |
+
