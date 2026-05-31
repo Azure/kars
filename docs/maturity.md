@@ -53,8 +53,8 @@ closed — not that the field merely exists on a CRD.
 
 | Capability | Status | Enforcement point |
 |---|---|---|
-| Content Safety / Prompt Shield (Foundry providers) | ✅ Enforced | Server-side `Microsoft.DefaultV2`; router parses `prompt_filter_results`. [security.md Layer 6](security.md#layer-6--inference-safety) |
-| Content Safety on GitHub Copilot / GitHub Models paths | ⚠️ Not available | Those providers do not return `prompt_filter_results` — see [security.md → What we do not defend against](security.md#what-we-do-not-defend-against) |
+| Content Safety / Prompt Shield (Foundry providers) | ✅ Enforced | Server-side `Microsoft.DefaultV2`; router parses `prompt_filter_results` into AGT `BehaviorMonitor` flags. [security.md Layer 6](security.md#layer-6--inference-safety) |
+| Content Safety on GitHub Copilot / GitHub Models paths (provider-side) | ✅ Enforced (provider-side, opaque to router) | Both providers enforce Microsoft Responsible AI content filtering server-side. The router itself does not see per-request `prompt_filter_results` annotations, so AGT `BehaviorMonitor` cannot tune severity or surface category flags on those paths — see [security.md → What we do *not* defend against](security.md#what-we-do-not-defend-against) for the router-side gap. The underlying content filter is on. |
 | Per-request token cap (`tokenBudget.perRequestTokens`) | ✅ Enforced | Router, HTTP 429 on overrun |
 | Per-tenant daily / monthly UTC token counters | ✅ Enforced | On-disk persistence in the router |
 | `InferencePolicy` **aggregate** token budgets (per-hour / per-day windows, `rejectOnExceed`) | 🟡 Reconciler-only | Accepted on spec and surfaced in status; not yet metered at the router. [roadmap](roadmap.md#inference-policy-enforcement) |
