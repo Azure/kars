@@ -225,7 +225,7 @@ In AKS mode the sandbox is a multi-container pod, **not** a single container:
 
 - `init: egress-guard` — installs iptables rules so only the router can reach the cluster network.
 - `agent` — your runtime (OpenClaw, OpenAI Agents, MAF, LangGraph, Anthropic, Pydantic-AI, or BYO), running as **UID 1000** with no direct egress.
-- `inference-router` — the Rust router, running as **UID 1001** on `127.0.0.1:8443`. It is the only container in the pod that can talk to Foundry, the mesh, or A2A peers.
+- `inference-router` — the Rust router, running as **UID 1001** on `127.0.0.1:8443`. It is the only container in the pod with network egress — it brokers identity/auth for Foundry calls and **WebSocket-bridges opaque mesh ciphertext** between the agent and the AgentMesh relay (the Signal session itself is owned plugin-side inside the agent container — see [Architecture → The mesh](architecture.md#the-mesh)).
 
 A NetworkPolicy on the namespace pins the pod's allowed egress to exactly: cluster DNS, Foundry, the AgentMesh relay, the A2A gateway. Nothing else. See **[Architecture diagrams](architecture-diagrams.md)** for the full picture.
 
