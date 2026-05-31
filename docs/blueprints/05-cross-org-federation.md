@@ -1,10 +1,10 @@
-# Blueprint 04 — Cross-org federation
+# Blueprint 05 — Cross-org federation
 
 > "We're two organisations who want our agents to collaborate. Each side runs their own kars cluster. Neither side trusts the other's network, the other's Foundry quota, or the other's audit destination. We want E2E-encrypted, mutually-policy-evaluated agent-to-agent collaboration without merging trust domains."
 
 ## Persona & intent
 
-- **You are:** the platform team in *one* of two collaborating organisations. The other org also runs their own kars — Blueprint 02 in their tenant.
+- **You are:** the platform team in *one* of two collaborating organisations. The other org also runs their own kars — Blueprint 03 in their tenant.
 - **You want:** named agents on either side to exchange messages, hand off tasks, and run sub-agents on each other's substrate, with both sides' AGT policies enforced on every hop.
 - **You do not want:** to share kubeconfigs. To share Foundry quotas. To share Entra tenants. To trust the other side's audit chain to alibi misbehaviour from your own agents.
 
@@ -269,7 +269,7 @@ The controller verifies against the `kars-signer-policy` ConfigMap in `kars-syst
 
 - **Two policy boundaries on every frame.** Both sides' AGT decides on ingress AND egress; this is the only way two organisations can collaborate without merging trust.
 - **Two audit chains.** Both sides have a verifiable, hash-chained record of what their agents said and what was said to them. Disputes are decidable from each org's own logs.
-- **Mesh peering is *cluster-scoped*, not agent-scoped.** Once Org A and Org B are peered, any number of agents on either side can address each other (subject to per-agent AGT policy). This is fundamentally different from Blueprint 03 where each customer is a Pairing slot.
+- **Mesh peering is *cluster-scoped*, not agent-scoped.** Once Org A and Org B are peered, any number of agents on either side can address each other (subject to per-agent AGT policy). This is fundamentally different from Blueprint 04 where each customer is a Pairing slot.
 - **No shared identity provider.** No need for cross-tenant Entra B2B, no need to share Workload Identity audiences. Each side authenticates the other through Ed25519 mesh identities + the federation pairing.
 - **A2A 1.0.0 gateway for non-kars callers.** The `kars-a2a-gateway` (Rust axum + rustls, distroless static image) accepts A2A 1.0.0 HTTP from foreign agents, verifies JWS Ed25519 signatures, enforces replay-cache and per-subject rate limits, and forwards to sandboxes over mTLS `:8445`. Per-sandbox opt-in; VAP blocks inference-router exposure to the internet.
 
@@ -284,7 +284,7 @@ The controller verifies against the `kars-signer-policy` ConfigMap in `kars-syst
 ## What this blueprint is NOT
 
 - Not a single-cluster pattern — a single cluster's agents-talking-to-agents is just regular `kars pair` between two `KarsSandbox`es (Use Case 3).
-- Not a SaaS pattern — federation assumes both sides have ops teams. If one side is a self-service customer, you want Blueprint 03.
+- Not a SaaS pattern — federation assumes both sides have ops teams. If one side is a self-service customer, you want Blueprint 04.
 - Not a substitute for a contract / DPA. kars enforces *what's technically possible*; what's *commercially permitted* is still legal-team work.
 
 ## References

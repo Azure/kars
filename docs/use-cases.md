@@ -2,7 +2,7 @@
 
 Six fully-shipped use cases covering every deployment pattern from laptop inner-loop to cross-organisation A2A federation. All six are implemented end-to-end and exercised by the compat / conformance / e2e harness before any merge.
 
-> **Looking for a concrete deployment recipe?** See [`docs/blueprints/`](blueprints/00-index.md) for five end-to-end deployment shapes (developer inner-loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped) — each with topology, trust-boundary, and flow Mermaid diagrams.
+> **Looking for a concrete deployment recipe?** See [`docs/blueprints/`](blueprints/00-index.md) for six end-to-end deployment shapes (developer inner-loop, local Kubernetes dev loop, enterprise self-hosted, managed public offload, cross-org federation, sovereign / air-gapped) — each with topology, trust-boundary, and flow Mermaid diagrams.
 
 | # | Scenario | Where the user runs | Network shape | Status | Reference |
 |---|---|---|---|---|---|
@@ -19,7 +19,7 @@ All use cases share the same trust boundary:
 - All external traffic flows through the per-sandbox **inference router** (UID 1001).
 - All inter-agent traffic flows through the **AgentMesh relay** (Signal Protocol — X3DH + Double Ratchet); the relay sees only ciphertext.
 - Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture.md#four-seam-provider-architecture).
-- All 9 CRDs (`KarsSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval`) are first-class and visible in the operator TUI. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
+- The nine workload CRDs (`KarsSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval`) are first-class and reconciled. The operator TUI (`kars operator`) renders live panels for the sandbox, its policy / peer / memory / eval CRDs, and `KarsPairing`; `TrustGraph` and `EgressApproval` are inspected via `kubectl` and `kars egress` rather than a dedicated panel. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
 
 ---
 
@@ -30,7 +30,7 @@ All use cases share the same trust boundary:
 
 ### What the operator wants
 
-A single-tenant AKS cluster running one or more OpenClaw agents in fully isolated namespaces. The operator wants the developer inner-loop (`kars up`, `kars add`, `kars connect`) plus an operational dashboard (`kars operator`) covering all 9 CRDs.
+A single-tenant AKS cluster running one or more OpenClaw agents in fully isolated namespaces. The operator wants the developer inner-loop (`kars up`, `kars add`, `kars connect`) plus an operational dashboard (`kars operator`) covering the sandbox and its policy, peer, memory, eval, and pairing CRDs.
 
 ### Topology
 
@@ -78,7 +78,7 @@ kars credentials update research-bot \
 # 4. Connect (opens OpenClaw TUI via port-forward)
 kars connect research-bot
 
-# 5. Operator dashboard — shows all 9 CRDs live
+# 5. Operator dashboard — live panels for the sandbox + policy/peer/memory/eval CRDs
 kars operator
 
 # 6. Learn, review, and enforce egress for analyst
@@ -146,13 +146,13 @@ spec:
 - AGT governance: `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` (native Rust, in-process, <1 µs eval latency).
 - Optional `confidential` isolation — Kata VM on AMD SEV-SNP; per-pod dedicated kernel.
 - Signed OCI egress allowlists (`spec.networkPolicy.allowlistRef`) — the controller refuses unsigned artifacts when a `SignerPolicy` is configured.
-- Operator TUI (`kars operator`) renders all 9 CRDs in real time.
+- Operator TUI (`kars operator`) renders live panels for the sandbox and its policy / peer / memory / eval / pairing CRDs in real time.
 
 ### Cross-links
 
 | Resource | Reference |
 |---|---|
-| Blueprint | [Blueprint 01 — Developer inner-loop](blueprints/01-developer-inner-loop.md), [Blueprint 02 — Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md) |
+| Blueprint | [Blueprint 01 — Developer inner-loop](blueprints/01-developer-inner-loop.md), [Blueprint 03 — Enterprise self-hosted](blueprints/03-enterprise-self-hosted.md) |
 | CRD fields | [`spec.runtime.openclaw`](api/crd-reference.md#spcruntimeopenclaw-sub-table), [`spec.sandbox`](api/crd-reference.md#spec-fields--specsandbox), [`spec.networkPolicy.allowlistRef`](api/crd-reference.md#spec-fields--specnetworkpolicy) |
 | CLI commands | [`kars up`](cli-reference.md#kars-up), [`kars add`](cli-reference.md#kars-add), [`kars operator`](cli-reference.md#kars-operator), [`kars egress`](cli-reference.md#kars-egress) |
 | Architecture | [`docs/architecture.md`](architecture.md) |
@@ -266,7 +266,7 @@ spec:
 
 | Resource | Reference |
 |---|---|
-| Blueprint | [Blueprint 03 — Managed public offload](blueprints/03-managed-public-offload.md) |
+| Blueprint | [Blueprint 04 — Managed public offload](blueprints/04-managed-public-offload.md) |
 | CLI commands | [`kars mesh`](cli-reference.md#kars-mesh), [`kars pair`](cli-reference.md#kars-pair) |
 | CRD fields | [`KarsPairing`](api/crd-reference.md#karspairing), [`spec.governance`](api/crd-reference.md#spec-fields--specgovernance) |
 
@@ -378,7 +378,7 @@ spec:
 
 | Resource | Reference |
 |---|---|
-| Blueprint | [Blueprint 04 — Cross-org federation](blueprints/04-cross-org-federation.md) |
+| Blueprint | [Blueprint 05 — Cross-org federation](blueprints/05-cross-org-federation.md) |
 | CLI commands | [`kars mesh`](cli-reference.md#kars-mesh), [`kars pair`](cli-reference.md#kars-pair), [`kars up --expose-registry`](cli-reference.md#kars-up) |
 | CRD fields | [`KarsPairing`](api/crd-reference.md#karspairing), [`spec.governance.registryMode`](api/crd-reference.md#spec-fields--specgovernance) |
 | ADR | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
@@ -564,7 +564,7 @@ spec:
 - Same inference router — `InferencePolicy`, Content Safety, token budgets, Workload Identity auth.
 - Same AGT governance — `ToolPolicy`, `TrustManager`, `AuditLogger`, `RateLimiter`.
 - Same `KarsMemory` (Foundry Memory Store binding) and `KarsEval` CRDs.
-- Same operator TUI — all 9 CRDs visible regardless of runtime kind.
+- Same operator TUI — same sandbox, policy, peer, memory, and eval panels regardless of runtime kind.
 - `RuntimeReady` condition reflects per-runtime health; runtime kinds without a shipped adapter stamp `False/AdapterMissing` (currently `SemanticKernel`).
 
 ### Cross-links
@@ -723,7 +723,7 @@ spec:
 
 | Resource | Reference |
 |---|---|
-| Blueprint | [Blueprint 04 — Cross-org federation](blueprints/04-cross-org-federation.md) |
+| Blueprint | [Blueprint 05 — Cross-org federation](blueprints/05-cross-org-federation.md) |
 | ADR | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
 | CRD fields | [`spec.a2a`](api/crd-reference.md#spec-fields--speca2a), [`AllowlistVerified` condition](api/crd-reference.md#conditions-emitted) |
 | CLI commands | [`kars a2a list-exposed`](cli-reference.md#kars-a2a), [`kars a2a schema`](cli-reference.md#kars-a2a) |
@@ -873,7 +873,7 @@ All dropped fields default to `disabled` (dev-only label applied automatically) 
 |---|---|
 | CLI commands | [`kars migrate from-kagent`](cli-reference.md#kars-migrate), [`kars migrate to-overlay`](cli-reference.md#kars-migrate), [`kars convert`](cli-reference.md#kars-convert) |
 | CRD fields | [`spec.upstreamCompatibility`](api/crd-reference.md#spec-fields--specupstreamcompatibility) |
-| Blueprint | [Blueprint 02 — Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md) |
+| Blueprint | [Blueprint 03 — Enterprise self-hosted](blueprints/03-enterprise-self-hosted.md) |
 
 ---
 

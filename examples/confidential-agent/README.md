@@ -79,5 +79,5 @@ kubectl delete -f examples/confidential-agent/karssandbox.yaml
   (use that if your cluster doesn't have Confidential Containers)
 - [`docs/security.md`](../../docs/security.md) — where Kata sits in the
   nine-layer model
-- [`docs/blueprints/02-enterprise-self-hosted.md`](../../docs/blueprints/02-enterprise-self-hosted.md)
+- [`docs/blueprints/03-enterprise-self-hosted.md`](../../docs/blueprints/03-enterprise-self-hosted.md)
   — production blueprint that pairs naturally with confidential isolation

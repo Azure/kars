@@ -54,16 +54,16 @@ clearly if the role is missing — you don't have to remember.
 az login --tenant <your-tenant>
 
 # Deploy with per-sandbox Entra Agent ID (opt in via --mesh-trust=entra).
-kars up --name prod-agent --location swedencentral --mesh-trust=entra
+kars up --name prod-agent --region swedencentral --mesh-trust=entra
 
 # Anonymous mode (default) — shared cluster MI, no Entra prerequisites.
-kars up --name prod-agent --location swedencentral
+kars up --name prod-agent --region swedencentral
 
 # Microsoft-corp users (and any tenant that requires ServiceTree):
-kars up --name prod-agent --location swedencentral --mesh-trust=entra --service-tree <guid>
+kars up --name prod-agent --region swedencentral --mesh-trust=entra --service-tree <guid>
 # or
 export KARS_SERVICE_TREE=<guid>
-kars up --name prod-agent --location swedencentral --mesh-trust=entra
+kars up --name prod-agent --region swedencentral --mesh-trust=entra
 ```
 
 `kars up` is idempotent. Re-running on the same cluster is safe.

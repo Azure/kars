@@ -22,6 +22,8 @@
 # Security
 
 - [Security overview](security.md)
+- [Feature maturity & status](maturity.md)
+- [Control mapping](compliance.md)
 - [STRIDE × trust boundaries](security/stride.md)
 - [Red team playbook](security/red-team.md)
 - [CRD trust model](security/crd-trust-model.md)
@@ -64,10 +66,10 @@
 - [Index](blueprints/00-index.md)
 - [Developer inner loop](blueprints/01-developer-inner-loop.md)
 - [Local k8s dev loop](blueprints/02-local-k8s-dev-loop.md)
-- [Enterprise self-hosted](blueprints/02-enterprise-self-hosted.md)
-- [Managed public offload](blueprints/03-managed-public-offload.md)
-- [Cross-org federation](blueprints/04-cross-org-federation.md)
-- [Sovereign / air-gapped](blueprints/05-sovereign-airgapped.md)
+- [Enterprise self-hosted](blueprints/03-enterprise-self-hosted.md)
+- [Managed public offload](blueprints/04-managed-public-offload.md)
+- [Cross-org federation](blueprints/05-cross-org-federation.md)
+- [Sovereign / air-gapped](blueprints/06-sovereign-airgapped.md)
 
 # Roadmap & ADRs
 
@@ -75,4 +77,3 @@
 - [ADR index](adr/README.md)
   - [ADR-0001: A2A ingress front edge](adr/0001-a2a-ingress-front-edge.md)
   - [ADR-0002: Inference endpoint sourcing](adr/0002-inference-endpoint-sourcing.md)
-

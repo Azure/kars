@@ -110,7 +110,7 @@ The CLI handles:
 
 ## What is unique
 
-| Property | This blueprint | Blueprint 01 (Docker dev) | Blueprint 02 (AKS) |
+| Property | This blueprint | Blueprint 01 (Docker dev) | Blueprint 03 (AKS) |
 |---|---|---|---|
 | Runtime | kind cluster | Single Docker container | Managed AKS |
 | CRDs / controller | ✅ Real | ❌ Skipped (CLI generates equivalent config inline) | ✅ Real |
