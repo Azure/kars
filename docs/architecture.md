@@ -21,8 +21,9 @@ kars has four code components, two languages, and one rule that ties them togeth
 | Component | Language | Crate / package | Responsibility |
 |---|---|---|---|
 | **Controller** | Rust (kube-rs) | `kars-controller` | Watches `KarsSandbox` and its eight peer workload CRDs, plus the infrastructure CRDs `KarsAuthConfig` and (controller-internal) `KarsPairing`; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
-| **Inference router** | Rust (axum) | `kars-inference-router` | Sits in the data path of every external call. Identity, content safety, governance, audit, mesh, A2A — all of it. |
+| **Inference router** | Rust (axum) | `kars-inference-router` | Sits in the data path of every external call — identity, content safety, governance, audit, A2A. **Mesh**: WebSocket-bridges opaque Signal-Protocol ciphertext for the agent (the Signal session is plugin-owned; see [The mesh](#the-mesh)). |
 | **A2A gateway** | Rust (axum) | `kars-a2a-gateway` + `kars-a2a-core` | Public-ingress entry point for A2A 1.0.0 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
+| **kars OpenClaw plugin** | TypeScript | `runtimes/openclaw/` (id `kars`) | The agent-side surface: registers 24 governance-aware tools with OpenClaw (`kars_spawn`, `kars_mesh_send`, `kars_mesh_transfer_file`, `foundry_web_search`, `foundry_code_execute`, `foundry_image_generation`, …) and owns the Signal Protocol session via `@microsoft/agent-governance-sdk`. Catalogued in [Channels & plugins](channels-plugins.md). |
 | **CLI** | TypeScript | `@kars/cli` | Lifecycle of clusters, sandboxes, policies. 30+ commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
 
 The rule that ties them together: **the agent has no network of its own**. The router is the only process in the sandbox pod that can talk to the outside. Every other property of kars is a downstream consequence of holding that line.
