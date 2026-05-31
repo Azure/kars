@@ -55,8 +55,12 @@ This page maps kars's **shipped, enforced** controls (the ✅ rows in
 | RateLimiter — global + per-agent token bucket | SC-5, SI-10 | — | `inference-router/src/governance/mod.rs` |
 | Per-request + per-tenant token budgets | SC-6, SC-5 | — | Router |
 
-> Content Safety is **not** enforced on GitHub Copilot / GitHub Models provider paths —
-> see [security.md → What we do not defend against](security.md#what-we-do-not-defend-against).
+> Content Safety **is** enforced server-side on GitHub Copilot / GitHub Models provider
+> paths (Microsoft Responsible AI filter, on by default, not opt-out). What is *not*
+> available on those paths is the **router-tunable inline surface** — severity-floor
+> changes, per-category audit entries, AGT `BehaviorMonitor` flag deltas. See
+> [security.md → What we do not defend against](security.md#what-we-do-not-defend-against)
+> and [maturity.md → Inference safety](maturity.md#inference-safety).
 
 ## Configuration management (NIST **CM**)
 
