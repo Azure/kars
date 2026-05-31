@@ -12,12 +12,12 @@ AGT ships the governance engine. kars is the AKS operator and data plane that fe
 
 - **Policy evaluation** — `PolicyEngine.decide(request) -> verdict`. Policy-profile schema is AGT's. We emit profiles from CRDs; we do not redefine the schema.
 - **Signal Protocol primitives** — X3DH key exchange, Double Ratchet, prekey lifecycle, session state machine.
+- **Mesh-relay + mesh-registry** — including **opt-in Entra-signed JWT verification on the connect frame** (audience + tenant + issuer enforcement), **per-agent session counters** + `completion_rate` reputation surface, and the `POST /v1/registry/verify` endpoint. Upstreamed by kars in [microsoft/agent-governance-toolkit#2719](https://github.com/microsoft/agent-governance-toolkit/pull/2719); kars now consumes this as a regular AGT dependency rather than a vendored fork.
 - **Audit chain** — `AuditLogger.append(event) -> ReceiptId`. Storage, retention SLA, queryability API. The runtime uses AGT's linear SHA-256 hash chain today; Merkle anchoring and signed roots are a planned extension (the library exists in `inference-router/src/audit/merkle.rs` but is not yet wired into the live pipeline).
 - **Trust scoring** — `TrustManager`. Per-peer trust scores, transitive evaluation, decay functions, negative-signal ingestion.
 - **Behavior anomaly detection** — `BehaviorMonitor`. Baseline capture, deviation detection, Shadow-MCP behavioral signals.
 - **Rate-limit token bucket** — per-identity, per-tool, per-mesh counters. We configure caps; AGT enforces.
 - **Signing keys** — HSM / HW-backed key custody, key rotation, signing primitives for A2A cards and AP2 transfers.
-- **A2A 1.0.0 Signed Agent Card signing** — when AGT ships this primitive. Until then we implement via the `SigningProvider` seam and document the gap.
 - **AP2 policy grammar** — if AGT defines it. Until then kars defines a private schema designed to be portable to a future AGT definition.
 
 ### kars owns

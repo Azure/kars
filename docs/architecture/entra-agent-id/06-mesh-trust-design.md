@@ -27,7 +27,7 @@ handshake is the only gate.
 |-------|-------|--------|
 | (a) CRD field + auth chain shape | kars controller | ✅ `KarsAuthConfig.spec.meshAuthBackend` enum live |
 | (b) Sandbox entrypoint mints token via shared sidecar | kars sandbox image | ✅ `inference-router /v1/mesh-token` + `entrypoint.sh` MESH_AUTH_BACKEND branch |
-| (c) AGT relay/registry JWKS verification | Microsoft AGT | ✅ Patches `66b6e006…5971f901` upstreamed in PR (`/v1/registry/verify` + `connect` JWT verification) |
+| (c) AGT relay/registry JWKS verification | Microsoft AGT | ✅ **Merged upstream as [microsoft/agent-governance-toolkit#2719](https://github.com/microsoft/agent-governance-toolkit/pull/2719)** — `agent-governance-python/agent-mesh/src/agentmesh/identity/entra_verifier.py` (330 LOC JWKS verifier), `POST /v1/registry/verify` endpoint, per-agent session counters + `completion_rate`, opt-in via `AGENTMESH_ENTRA_AUDIENCE` + `AGENTMESH_ENTRA_TENANT_ID`. Merged 2026-05-31, +2289/-560 across 14 files (commit `a8a96bf4`). |
 | (d) CLI operator switch | kars CLI | ✅ Single `--mesh-trust=anonymous\|entra` flag on `kars up` |
 
 ## Per-sandbox identity lifecycle (Phase 5b)
