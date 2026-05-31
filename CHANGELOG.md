@@ -3405,7 +3405,7 @@ single-slice plan is now S12.a–S12.g; this is slice (a). See plan.md §S12.
   `build` script becomes `cp -r profiles dist/profiles`. CI scope
   regexes (`security-audit-required.sh`, `no-stubs.sh`,
   `no-custom-crypto.sh`) and docs (`README.md`,
-  `docs/blueprints/05-sovereign-airgapped.md`,
+  `docs/blueprints/06-sovereign-airgapped.md`,
   `docs/security-reviewers.md`, `docs/internal/security-audits/README.md`,
   `docs/competitive.md`, `docs/implementation-plan.md`,
   `docs/security.md`, `tests/conformance/specs/sandbox-isolation.spec.ts`,
@@ -3687,7 +3687,7 @@ session — e.g. on re-init or reconnect).
 #### Refactored
 
 - `cli/src/plugin.ts` 6890 → **6648 LOC** (−242, cumulative S15.f
-  −491). The chunked-transport layer (`meshSend` + 
+  −491). The chunked-transport layer (`meshSend` +
   `meshHandleTransportMessage` + `pendingTransfers` Map + TTL
   cleanup + `MESH_*` constants + `PendingMeshTransfer` interface,
   ~265 LOC) extracted to `core/mesh-transport.ts`. Signal Protocol

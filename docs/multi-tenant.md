@@ -27,7 +27,7 @@ kars-tenant-c        # Tenant C sandbox pod + NetworkPolicy + ServiceAccount
 
 ## Tenant Isolation Guarantees
 
-- **No cross-namespace access** — NetworkPolicy blocks inter-namespace traffic
+- **Namespace-scoped network isolation** — NetworkPolicy default-denies cross-namespace traffic, except AGT mesh/gateway ingress (ports 8443/18789/18791) between sandbox namespaces when governance is enabled (see [Network Isolation](#network-isolation))
 - **No shared secrets** — each namespace has its own ServiceAccount and config
 - **No credential leakage** — agent (UID 1000) cannot reach IMDS; only the router (UID 1001) can
 - **No container escape** — seccomp + read-only rootfs + non-root + drop ALL + optional Kata VM
@@ -67,10 +67,10 @@ Three layers enforce network boundaries between tenants:
 | Layer | Enforcement | Scope |
 |-------|------------|-------|
 | **iptables** | UID-based egress rules (init container) | Per-container — agent (UID 1000) restricted to localhost + DNS |
-| **NetworkPolicy** | Default-deny egress per namespace | Per-namespace — blocks all cross-namespace traffic |
+| **NetworkPolicy** | Default-deny ingress + egress per namespace | Per-namespace — default-denies cross-namespace traffic; permits AGT mesh/gateway ingress between sandbox namespaces when governance is enabled |
 | **Cilium CNI** | Pod-level enforcement on AKS | Cluster-wide — NetworkPolicy backed by eBPF |
 
-Cross-namespace traffic is blocked by default. The only exception is AGT mesh traffic (port 8443) when governance is enabled — this requires an explicit ingress NetworkPolicy created by the controller.
+Cross-namespace traffic is default-denied. When governance is enabled, the controller emits an ingress rule that opens the router mesh port (8443) and gateway ports (18789/18791) to any namespace labeled `kars.azure.com/role: sandbox`, plus router :8443 to the operator namespace. This is a coarse selector (all sandbox namespaces, not just paired peers); inbound A2A caller-card verification at the gateway is a roadmap item (see [security.md](security.md)), so peer-level trust on this path currently rests on the Gateway API mTLS layer rather than the NetworkPolicy.
 
 ## Content Safety floor
 
@@ -125,9 +125,12 @@ When `a2aGateway.enabled: true` the Helm chart provisions:
 
 **Cross-tenant A2A federation:** an external agent (in another cluster or
 tenant) discovers the sandbox via its Agent Card (`/.well-known/agent.json`),
-then initiates an authenticated A2A session over the public ingress. The
-inference router's A2A handler validates the inbound Agent Card signature and
-enforces `KarsPairing` policy before forwarding the request to the sandbox.
+then initiates an A2A session over the public ingress. Caller authentication is
+performed at the Gateway API mTLS layer, which sets the verified caller subject
+that the inference router consumes. Cryptographic verification of the inbound
+Agent Card signature at the A2A gateway is a roadmap item — see
+[security.md](security.md) → *What is not yet enforced*. The router fail-closed
+verifies AP2 payment mandates on inbound commerce requests before forwarding.
 
 **Security note:** enabling public ingress adds a `Microsoft.Network/loadBalancers/write`
 action requirement to the deployer role — see [permissions.md](permissions.md)

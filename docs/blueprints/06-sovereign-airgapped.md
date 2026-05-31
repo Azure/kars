@@ -1,4 +1,4 @@
-# Blueprint 05 — Sovereign / air-gapped
+# Blueprint 06 — Sovereign / air-gapped
 
 > "We run regulated, classified, sovereign-cloud, or fully air-gapped workloads. There is no public internet. There is no commercial Foundry endpoint. There is no Microsoft-hosted MCP catalogue. We still want kars's isolation + governance + audit guarantees, on locally-hosted models, with everything reproducible from a signed bundle."
 
@@ -115,7 +115,7 @@ sequenceDiagram
 
 ### Runtime and CRD model in air-gap
 
-All nine CRDs work offline. The runtime adapter and model connection are configured via Helm values, not by choosing a different CRD schema:
+All of kars's CRDs work offline. The runtime adapter and model connection are configured via Helm values, not by choosing a different CRD schema:
 
 | CRD | Air-gap role |
 |---|---|
@@ -278,5 +278,5 @@ bundle.tar.gz
 - `cli/profiles/` (offline-portable policy bundle)
 - `controller/src/policy_fetcher.rs` (allowlist fetch + offline KMS verify)
 - `Makefile` `bundle` target (🚧 to be added)
-- `docs/api/crd-reference.md` (all 8 CRDs; `spec.runtime.kind` enum; `spec.networkPolicy.allowlistRef.*`)
+- `docs/api/crd-reference.md` (all eleven CRDs; `spec.runtime.kind` enum; `spec.networkPolicy.allowlistRef.*`)
 - `docs/security.md` § "Air-gapped operating mode"

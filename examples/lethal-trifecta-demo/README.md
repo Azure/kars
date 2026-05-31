@@ -127,4 +127,4 @@ say at each second mark for a recorded or live demo.
 
 - [`docs/architecture.md`](../../docs/architecture.md) — inference data-path with both providers
 - [`docs/security.md`](../../docs/security.md) — the nine layers + what we do *not* defend against
-- [`docs/blueprints/02-enterprise-self-hosted.md`](../../docs/blueprints/02-enterprise-self-hosted.md) — how this maps to a real prod deploy
+- [`docs/blueprints/03-enterprise-self-hosted.md`](../../docs/blueprints/03-enterprise-self-hosted.md) — how this maps to a real prod deploy

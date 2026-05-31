@@ -210,7 +210,7 @@ kars up --name prod-agent --region swedencentral --mesh-trust=entra
 | **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. *(`v1alpha1` — reconciler-only; router-side **mesh-admission gating** against the projected graph is on the [roadmap](docs/roadmap.md). KNOCK accept/deny stays agent-side — the router cannot decrypt the Signal session.)* |
 | **`EgressApproval`** | Ephemeral, TTL-bounded extra egress hosts overlaid on the baseline allowlist. |
 
-Plus the controller-internal `KarsPairing` record (10th kind) used to bind sandboxes to AgentMesh registry IDs.
+Plus two infrastructure CRDs you don't author per agent: **`KarsAuthConfig`** (cluster-scoped singleton written by `kars mesh setup-trust` — the tenant-wide Entra Agent ID trust anchor) and the controller-internal **`KarsPairing`** record (binds sandboxes to AgentMesh registry IDs). Eleven CRDs in total.
 
 Full schema in **[`docs/api/crd-reference.md`](docs/api/crd-reference.md)**.
 

@@ -72,7 +72,7 @@ flowchart TB
   WI -.->|no keys on disk| Router
   Sidecar -.->|bearer token<br/>tid+aud+exp pinned| Router
   Router -->|HTTPS, AAD token| Foundry
-  Router -->|"WS, opaque ciphertext (agent-sourced)<br/>(connect frame carries Entra JWT<br/>when --mesh-trust=entra)"| Mesh
+  Router -->|"WS, opaque ciphertext<br/>(Entra JWT in entra mode)"| Mesh
   Router -->|HTTPS| A2A
 
   classDef cluster fill:#e6f0ff,stroke:#0078d4
@@ -239,7 +239,7 @@ flowchart LR
   Status --> User
 ```
 
-The controller is a vanilla kube-rs reconciler. It owns the nine user-facing CRDs (plus the controller-internal `KarsPairing`), watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
+The controller is a vanilla kube-rs reconciler. It owns the nine user-facing CRDs (plus the infrastructure CRDs `KarsAuthConfig` and the controller-internal `KarsPairing`), watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
 
 ---
 
@@ -269,9 +269,9 @@ flowchart TB
   TG -.->|projected cluster-wide<br/>by controller| CS
 ```
 
-`KarsSandbox` is the unit of work; the other CRDs bind policy, identity, peers, evaluation, or break-glass egress to it. You can build a complete deployment with just `KarsSandbox` + `ToolPolicy` + `InferencePolicy`; the rest are opt-in for richer scenarios.
+`KarsSandbox` is the unit of work; the other CRDs bind policy, identity, peers, evaluation, or break-glass egress to it. The smallest valid deployment is just `KarsSandbox` + a sibling `InferencePolicy` (`spec.inferenceRef` is required — there is no inline fallback). `ToolPolicy` and the rest are opt-in: you only need a `ToolPolicy` once you set `spec.governance` (see the [minimal example](api/crd-reference.md#minimal-example)).
 
-`TrustGraph` is the one cluster-scoped CRD: the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/kars/trustgraph/graph.json`). It is not referenced by name from a `KarsSandbox` spec — it applies cluster-wide. **Router-side mesh-admission gating** against the projected graph (refuse to bridge a WS for an edge not in the graph) is tracked in the [roadmap](roadmap.md). This is not KNOCK gating — KNOCK lives inside the Signal session the agent owns end-to-end and the router never sees it. Today the router keeps a post-decision trust-score map populated from KNOCK outcomes the agent reports out-of-band, for audit and rate-limit purposes only (see CRD reference §TrustGraph).
+`TrustGraph` is the one cluster-scoped *workload* CRD (the infrastructure CRD `KarsAuthConfig` is also cluster-scoped): the controller projects its edges into every sandbox namespace as a ConfigMap (`/etc/kars/trustgraph/graph.json`). It is not referenced by name from a `KarsSandbox` spec — it applies cluster-wide. **Router-side mesh-admission gating** against the projected graph (refuse to bridge a WS for an edge not in the graph) is tracked in the [roadmap](roadmap.md). This is not KNOCK gating — KNOCK lives inside the Signal session the agent owns end-to-end and the router never sees it. Today the router keeps a post-decision trust-score map populated from KNOCK outcomes the agent reports out-of-band, for audit and rate-limit purposes only (see CRD reference §TrustGraph).
 
 Schema details in **[`docs/api/crd-reference.md`](api/crd-reference.md)**.
 
@@ -357,4 +357,4 @@ We treat the agent as **adversarial** — anything that comes out of the model c
 - **[Architecture](architecture.md)** — the prose explanation.
 - **[Security model](security.md)** — per-layer guarantees.
 - **[STRIDE threat model](security/stride.md)**.
-- **[Blueprints](blueprints/00-index.md)** — five reference deployment shapes built from these primitives.
+- **[Blueprints](blueprints/00-index.md)** — six reference deployment shapes built from these primitives.

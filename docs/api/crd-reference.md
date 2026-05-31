@@ -1,6 +1,6 @@
 # CRD reference
 
-kars exposes its API through **nine** first-class CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
+kars exposes its API through **eleven** CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. **Nine are workload CRDs** you author per agent or per policy — catalogued in [At a glance](#at-a-glance) below. **Two are infrastructure CRDs** you do not hand-write: [`KarsAuthConfig`](#karsauthconfig--cluster-trust-anchor) (a cluster-scoped singleton created by `kars mesh setup-trust`) and [`KarsPairing`](#infrastructure-crds) (a controller-internal binding record). This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
 
 > **Version.** All CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.0`; see [`CHANGELOG.md`](../../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](../roadmap.md) for what's next.
 
@@ -8,19 +8,71 @@ kars exposes its API through **nine** first-class CustomResourceDefinitions in t
 
 | CRD | Kind | Short names | Scope | Signing surface | What it represents |
 |---|---|---|---|---|---|
-| `karssandboxes.kars.azure.com` | `KarsSandbox` | `cs`, `claw` | Namespaced | `spec.networkPolicy.allowlistRef` (signed OCI egress bundle, optional) | One agent. The unit of work. |
+| `karssandboxes.kars.azure.com` | `KarsSandbox` | `cs` | Namespaced | `spec.networkPolicy.allowlistRef` (signed OCI egress bundle, optional) | One agent. The unit of work. |
 | `a2aagents.kars.azure.com` | `A2AAgent` | `a2a` | Namespaced | Inline `spec.signingKeys[]` (Ed25519, peer-callable JWS verification) | A public-ingress endpoint a peer can call. |
 | `mcpservers.kars.azure.com` | `McpServer` | `mcp` | Namespaced | `spec.bundleRef` (signed OCI tool-allow-list bundle, optional) | An external MCP server the sandbox may call. |
-| `toolpolicies.kars.azure.com` | `ToolPolicy` | `tp` | Namespaced | `spec.bundleRef` (signed OCI tool-policy bundle, optional) | Per-tool allow/approval/rate-limit/commerce gate. |
+| `toolpolicies.kars.azure.com` | `ToolPolicy` | `tp` | Namespaced | `spec.agtProfile.bundleRef` (signed OCI AGT-profile bundle, mutex with `agtProfile.inline`) | Per-tool allow/approval/rate-limit/commerce gate. |
 | `inferencepolicies.kars.azure.com` | `InferencePolicy` | `ip` | Namespaced | `spec.bundleRef` (signed OCI inference-policy bundle, optional) | Model preference, content-safety floor, token budgets. |
 | `karsmemories.kars.azure.com` | `KarsMemory` | `cmem` | Namespaced | `spec.bundleRef` (signed OCI memory-binding bundle, optional) | Memory-store binding (Foundry Memory Store). |
 | `karsevals.kars.azure.com` | `KarsEval` | `ceval` | Namespaced | `spec.corpus.bundleRef` (signed OCI eval-corpus bundle, mutex with `corpus.builtin`) | Reproducible evaluation run. |
 | `trustgraphs.kars.azure.com` | `TrustGraph` | `tg` | Cluster | Inline `spec.edges[].signature` (Ed25519 per edge, domain-separated payload) | Cross-namespace / cross-cluster mesh trust topology. |
 | `egressapprovals.kars.azure.com` | `EgressApproval` | `eappr` | Namespaced | None on the CR itself (it's a sibling overlay); the sandbox's signed `allowlistRef` is the cryptographic baseline | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
 
-A tenth CRD, `karspairings.kars.azure.com` (`KarsPairing`, `cp`), is a controller-internal record used to bind sandboxes to AgentMesh registry IDs. It is created by the controller; you generally do not write it directly.
+### Infrastructure CRDs
 
-The full Kubernetes schema lives in `deploy/helm/kars/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
+Two more CRDs round out the API. You don't author these per agent, but the same Helm chart installs them and they show up under `kubectl get crds`:
+
+| CRD | Kind | Short name | Scope | Who writes it | What it represents |
+|---|---|---|---|---|---|
+| `karsauthconfigs.kars.azure.com` | `KarsAuthConfig` | `kac` | Cluster | `kars mesh setup-trust` (singleton, `metadata.name: default`) | Tenant-wide Entra Agent ID trust anchor. When absent, sandboxes run in the AGT anonymous tier. Fully documented in [KarsAuthConfig](#karsauthconfig--cluster-trust-anchor) below. |
+| `karspairings.kars.azure.com` | `KarsPairing` | `cp` | Namespaced | Controller | Binds two agents to their AgentMesh registry IDs and tracks handshake/trust state. Created from a one-time pairing token; read-only from your side. |
+
+The full Kubernetes schema for all eleven lives in `deploy/helm/kars/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
+
+> **A note on short names.** The `c`-prefixed aliases (`cs`, `cmem`, `ceval`, `cp`) are retained from the project's earlier name and kept stable for API compatibility. One caveat: `cs` overlaps with kubectl's deprecated built-in `componentstatuses` alias, so in scripts prefer the unambiguous full plural (`karssandboxes`) or the kind (`KarsSandbox`).
+
+---
+
+## Minimal example
+
+The smallest deployable agent is a `KarsSandbox` plus the `InferencePolicy` it references — `spec.inferenceRef` is required and there is **no inline fallback**, so the two are always authored together in the same namespace. Everything else has secure defaults (`sandbox.isolation: enhanced`, `seccompProfile: kars-strict`, `networkPolicy.defaultDeny: true`), so you only add a block when you need to override a default.
+
+```yaml
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: hello-inference
+  namespace: kars-system
+spec:
+  appliesTo:
+    sandboxName: hello
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: hello
+  namespace: kars-system          # the InferencePolicy must share this namespace
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      config:
+        agent:
+          model: "azure/gpt-4.1"
+  inferenceRef:
+    name: hello-inference
+```
+
+```bash
+kubectl apply -f hello.yaml
+kubectl get karssandbox hello -n kars-system -w   # wait for phase: Running
+```
+
+That's the whole contract: pick a runtime, point at an `InferencePolicy`, apply. The runnable version of this pair (with comments) is [`examples/basic-agent/`](https://github.com/Azure/kars/tree/main/examples/basic-agent). To add governance, memory, MCP servers, or a tighter egress allowlist, layer the optional blocks documented per-CRD below — starting with the full [`KarsSandbox`](#karssandbox--the-agent) schema.
 
 ---
 
@@ -281,6 +333,7 @@ spec:
 | `spec.allowedTools[]` | Allow-list of tool names. `["*"]` exposes everything; an explicit list selects a subset; an **empty** list fails closed and the server is skipped on the registry. |
 | `spec.allowedSandboxes.matchLabels` | Selector restricting which sandboxes can reach this server. Empty = same-namespace only. |
 | `spec.bundleRef` | Signed OCI artifact alternative to inline content fields (see [Policy canonical format](policy-canonical-format.md)). |
+| `spec.bearerFromEnv` | Name of an environment variable on the inference-router container whose value is attached as `Authorization: Bearer <value>` on every outbound `tools/list` / `tools/call` request to this server. The primary intended consumer is the GitHub Copilot dev-credential path (`COPILOT_GITHUB_TOKEN`). Non-fatal when the named variable is unset or empty — the router records a `skipped` entry and other servers stay advertised. |
 
 > Content-safety floors are not configured on `McpServer` — they live on [`InferencePolicy.spec.contentSafety`](#inferencepolicy--model-routing-and-budgets).
 
@@ -488,7 +541,7 @@ status:
       status: "True"
 ```
 
-To trigger a one-shot run without a schedule, add the `kars.azure.com/run-now=true` annotation (or use `kars eval run <name>`). To run from a signed corpus instead of a builtin, replace `corpus.builtin` with `corpus.bundleRef: { registry, repository, digest }` (mutex enforced by CEL).
+To trigger a one-shot run without a schedule, add the `kars.azure.com/run-now=true` annotation (or use `kars eval run <name>`). To run from a signed corpus instead of a builtin, replace `corpus.builtin` with `corpus.bundleRef: { registry, repository, digest }` (mutex enforced by CEL). The optional `spec.runnerImage` overrides the conformance-runner container image — an in-cluster development escape hatch; production should pin the image globally via the Helm chart.
 
 ---
 
@@ -591,6 +644,73 @@ status:
 ```
 
 CLI: `kars egress allow-extra <sandbox> --host … --reason … --ttl PT4H` to grant, `kars egress approvals <sandbox>` to list, `kars egress revoke <name>` to revoke. See **[Network egress & proxy](../egress-proxy.md)** for the full lifecycle, status semantics, and FAQ.
+
+---
+
+## `KarsAuthConfig` — cluster trust anchor
+
+Cluster-scoped **singleton** (the reconciler accepts only `metadata.name: default`). It holds the tenant-wide [Entra Agent ID](../agent-identity.md) provisioning anchors that every per-sandbox agent identity derives from. You do not write this CR by hand — `kars mesh setup-trust` provisions the Entra blueprint + controller managed identity and writes it for you. When the CR is **absent**, sandboxes start in the AGT **anonymous tier** (trust score 0, no token acquisition); this is the supported default for clusters that haven't opted into Entra Agent ID.
+
+The `auth_config_reconciler` validates the spec and materialises a sibling **ConfigMap** (`kars-auth-sidecar-env` in `kars-system`) with the flat environment variables the auth-sidecar consumes. Pods `envFrom` that ConfigMap rather than reading the CR directly.
+
+```yaml
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsAuthConfig
+metadata:
+  name: default                       # the only accepted name (singleton)
+spec:
+  tenant:
+    tenantId: "00000000-0000-0000-0000-000000000000"
+    authorityHost: "https://login.microsoftonline.com/"   # override only for Gov/China clouds
+    serviceManagementReference: "<servicetree-guid>"      # Microsoft-corp tenants only; audit lineage, not used at runtime
+  agentId:
+    blueprintClientId: "11111111-1111-1111-1111-111111111111"   # blueprint application appId → sidecar AzureAd__ClientId
+    blueprintObjectId: "22222222-2222-2222-2222-222222222222"   # blueprint application object id → Graph PATCH / FIC management
+    sponsorUserObjectIds:                                       # governance sponsors stamped on each agent identity
+      - "33333333-3333-3333-3333-333333333333"
+  controller:
+    credentialMode: ManagedIdentityImds                  # | WorkloadIdentity
+    managedIdentityClientId: "44444444-4444-4444-4444-444444444444"      # required for ManagedIdentityImds
+    managedIdentityResourceId: "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<name>"
+  downstreamApis:                                        # optional; centralises scope policy for the sidecar
+    foundry:
+      baseUrl: "https://<account>.cognitiveservices.azure.com/"
+      scopes: ["https://cognitiveservices.azure.com/.default"]
+      requestAppToken: true
+  foundryRbac:                                           # optional; controller PUTs these per agent identity at provision time
+    - scope: "/subscriptions/<sub>/resourceGroups/<rg>"
+      roleDefinitionIds:
+        - "53ca6127-db72-4b80-b1b0-d745d6d5456d"           # Azure AI User
+  meshAuthBackend: Anonymous                            # | EntraAgentIdentity (scaffolded; see roadmap)
+```
+
+| `spec` group | Required | Notes |
+|---|---|---|
+| `tenant` | ✅ | `tenantId` required. `authorityHost` defaults to the public-cloud login endpoint. `serviceManagementReference` carries a ServiceTree GUID for Microsoft-style tenants — recorded for audit lineage, not consumed at runtime. |
+| `agentId` | ✅ | `blueprintClientId` + `blueprintObjectId` required. `sponsorUserObjectIds` lists Entra user OIDs designated as sponsors on every agent identity derived from the blueprint (some tenants reject creation without a sponsor). Editable without rebuilding any runtime artefact. |
+| `controller` | ✅ | Selects how the auth-sidecar authenticates *as* the blueprint. `ManagedIdentityImds` (default) needs `managedIdentityClientId` + `managedIdentityResourceId`; `WorkloadIdentity` needs neither (the credential is the projected SA token). |
+| `downstreamApis` | optional | Map of `<name> → { baseUrl, scopes[], requestAppToken }` rendered into `DownstreamApis__<name>__*` sidecar env vars. Empty map is allowed. |
+| `foundryRbac` | optional | List of `{ scope, roleDefinitionIds[] }`. The controller assigns each role to every per-sandbox agent identity SP at provision time and removes them on deprovision. Empty list ⇒ operators run the manual `az role assignment create` grants. |
+| `meshAuthBackend` | optional | `Anonymous` (default, fully enforced) or `EntraAgentIdentity` (scaffolded for verified mesh peers). `meshAuthAudience` overrides the token audience when the backend is `EntraAgentIdentity`. |
+
+`status`:
+
+```yaml
+status:
+  phase: Ready                         # Pending | Ready | Degraded | NotDefault
+  observedGeneration: 3
+  blueprintFicCount: 4                 # federated identity credentials on the blueprint app
+  blueprintFicQuota: 20                # soft per-app FIC ceiling; kars doctor warns near it
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: SidecarConfigProjected
+      message: "kars-auth-sidecar-env ConfigMap materialised in kars-system."
+```
+
+A `phase: NotDefault` (with a matching condition) is how the reconciler tells you a `KarsAuthConfig` was created under the wrong name — rename it to `default`.
+
+CLI: created and updated by `kars mesh setup-trust`. Inspect with `kubectl get kac default` or `kubectl describe karsauthconfig default`. See **[Agent identity](../agent-identity.md)** for the end-to-end trust-setup walkthrough and the anonymous-vs-Entra decision.
 
 ---
 

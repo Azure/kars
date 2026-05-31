@@ -1,4 +1,4 @@
-# Blueprint 02 — Enterprise self-hosted cluster
+# Blueprint 03 — Enterprise self-hosted cluster
 
 > "I'm a platform team inside one organisation. I want to give my engineers and product teams a hardened, governed AI agent runtime on AKS that I own end-to-end — same Entra tenant, same network island, same audit destination, no third-party SaaS in the data path."
 
@@ -132,14 +132,14 @@ sequenceDiagram
 
 ### CRDs in use
 
-Blueprint 02 uses the full shipped CRD stack. Apply these in the sandbox namespace (`kars-<name>`) before creating the `KarsSandbox`:
+Blueprint 03 uses the full shipped CRD stack. Apply these in the sandbox namespace (`kars-<name>`) before creating the `KarsSandbox`:
 
 | CRD | Role in this blueprint |
 |---|---|
 | `InferencePolicy` | Token budget per sandbox / per team; content-safety floor; model-preference fallback order. Referenced by `KarsSandbox.spec.inferenceRef.name`. |
 | `ToolPolicy` | Per-tool rate limits, AP2 commerce spend caps, human-in-the-loop approval channels. Referenced by `KarsSandbox.spec.governance.toolPolicyRef.name`. |
 | `McpServer` | Declare private internal MCP tool servers (e.g., `ticketing.corp.example`, `code-search.corp.example`). OAuth 2.1 gated in production mode. |
-| `A2AAgent` | Publish an A2A 1.0.0 agent card for cross-org callers. See Blueprint 04 for federation use. |
+| `A2AAgent` | Publish an A2A 1.0.0 agent card for cross-org callers. See Blueprint 05 for federation use. |
 | `KarsMemory` | Bind a sandbox to a Foundry Memory Store for persistent per-agent or per-scope memory. |
 | `KarsEval` | Schedule regression eval runs via Foundry Evals; threshold-based pass/fail surfaced as `EvalsPassed` condition. |
 
@@ -297,9 +297,9 @@ The controller ships production-grade operator hygiene relevant to enterprise de
 
 ## What this blueprint is NOT
 
-- Not a multi-tenant SaaS. If you serve external customers, see Blueprint 03.
-- Not a federation pattern. If you collaborate with another org's kars, see Blueprint 04.
-- Not air-gapped. If your network can't reach Foundry, see Blueprint 05.
+- Not a multi-tenant SaaS. If you serve external customers, see Blueprint 04.
+- Not a federation pattern. If you collaborate with another org's kars, see Blueprint 05.
+- Not air-gapped. If your network can't reach Foundry, see Blueprint 06.
 
 ## References
 
@@ -311,5 +311,5 @@ The controller ships production-grade operator hygiene relevant to enterprise de
 - `controller/src/policy_fetcher.rs` (signed OCI allowlist fetch + verify)
 - `inference-router/src/auth.rs` (Workload Identity OIDC exchange)
 - `deploy/helm/kars/values.yaml` (Helm contract)
-- `docs/api/crd-reference.md` (all 9 CRDs)
+- `docs/api/crd-reference.md` (all eleven CRDs)
 - ADR-0001 — A2A ingress front-edge (`docs/adr/0001-a2a-ingress-front-edge.md`)

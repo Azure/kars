@@ -111,10 +111,10 @@ On the first run you are prompted to pick an inference provider — **GitHub Cop
 
 ## When this is the wrong blueprint
 
-- You want **multi-tenant isolation** — go to Blueprint 02.
-- You want **hardware-isolated execution** for customer prompts — go to Blueprint 03.
-- You want **two organisations to talk** — go to Blueprint 04.
-- You want **air-gapped deployment** — go to Blueprint 05.
+- You want **multi-tenant isolation** — go to Blueprint 03.
+- You want **hardware-isolated execution** for customer prompts — go to Blueprint 04.
+- You want **two organisations to talk** — go to Blueprint 05.
+- You want **air-gapped deployment** — go to Blueprint 06.
 
 ## References
 

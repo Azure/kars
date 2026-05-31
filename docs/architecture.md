@@ -20,7 +20,7 @@ kars has four code components, two languages, and one rule that ties them togeth
 
 | Component | Language | Crate / package | Responsibility |
 |---|---|---|---|
-| **Controller** | Rust (kube-rs) | `kars-controller` | Watches `KarsSandbox` and the nine peer CRDs (plus controller-internal `KarsPairing`); reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
+| **Controller** | Rust (kube-rs) | `kars-controller` | Watches `KarsSandbox` and its eight peer workload CRDs, plus the infrastructure CRDs `KarsAuthConfig` and (controller-internal) `KarsPairing`; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
 | **Inference router** | Rust (axum) | `kars-inference-router` | Sits in the data path of every external call. Identity, content safety, governance, audit, mesh, A2A — all of it. |
 | **A2A gateway** | Rust (axum) | `kars-a2a-gateway` + `kars-a2a-core` | Public-ingress entry point for A2A 1.0.0 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
 | **CLI** | TypeScript | `@kars/cli` | Lifecycle of clusters, sandboxes, policies. 30+ commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
@@ -213,10 +213,15 @@ Anything that fails all three tests is a `KarsSandbox` field, not its own CRD.
 | **`TrustGraph`** | Cluster admin. Cross-namespace, cross-cluster. | Sibling-trust at scale collapses: every sandbox would need a list of every peer's AMID. `TrustGraph` is the *only* cluster-scoped CRD precisely because trust topology is a cluster concern. <br><br> **Status — reconciler-only.** The graph is projected to `/etc/kars/trustgraph/graph.json` in each sandbox; the router does not yet consume it for mesh-admission gating. KNOCK accept/deny is — and stays — agent-side (the router cannot decrypt the Signal session). The router-side post-decision trust-score map exists for audit/governance only. **Tracked in the [roadmap](roadmap.md):** router-side **mesh-admission gating** against the projected graph (pre-handshake, refuse to bridge a WS for an edge not in the graph) — a separate, coarser layer that complements agent-side KNOCK rather than replacing it. See [`api/crd-reference.md` §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology). |
 | **`EgressApproval`** | On-call / SRE. Ephemeral, TTL-bounded. | A single inline overlay would mix permanent allowlist drift with short-lived break-glass grants. As a separate CRD, the grant carries its own audit record, TTL, and revocation path. |
 
-A tenth resource, `KarsPairing`, is **controller-internal** — it records the
-binding between a `KarsSandbox` and its AgentMesh registry identity. We
-expose it as a CRD so the controller can use the same reconciliation
-machinery as everything else, but you never write one by hand.
+Two further resources are **infrastructure CRDs** you don't author per
+agent. `KarsAuthConfig` is a cluster-scoped singleton, written by
+`kars mesh setup-trust`, that anchors tenant-wide Entra Agent ID trust
+(see [Agent identity](agent-identity.md)); when it's absent, sandboxes run
+in the AGT anonymous tier. `KarsPairing` is **controller-internal** — it
+records the binding between a `KarsSandbox` and its AgentMesh registry
+identity. Both are exposed as CRDs so the controller can use the same
+reconciliation machinery as everything else, but you never write either by
+hand. That brings the registered total to **eleven** CRDs.
 
 ### What you actually get from this design
 
@@ -268,5 +273,5 @@ The CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.0`; se
 
 - **[Architecture diagrams](architecture-diagrams.md)** — the same content, rendered.
 - **[Security model](security.md)** — what each layer enforces.
-- **[Blueprints](blueprints/00-index.md)** — five reference deployment shapes.
+- **[Blueprints](blueprints/00-index.md)** — six reference deployment shapes.
 - **[CRD reference](api/crd-reference.md)** — the operator's API.

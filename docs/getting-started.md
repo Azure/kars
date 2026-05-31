@@ -7,6 +7,8 @@ This guide takes you from a clean machine to a working kars agent in two steps:
 
 The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole point.
 
+> **Want production-shaped Kubernetes on your laptop?** Between these two there is a local-Kubernetes middle ground: `kars dev --target local-k8s` runs the same controller, CRDs, Helm chart, and NetworkPolicies on a [kind](https://kind.sigs.k8s.io/) cluster — no Azure, no AKS. Use it when you are changing the controller, the chart, or the CRDs and want to validate the Kubernetes glue before you touch AKS. Full walkthrough: **[Blueprint 02 — Local Kubernetes dev loop](blueprints/02-local-k8s-dev-loop.md)**.
+
 ---
 
 ## Prerequisites
@@ -180,7 +182,7 @@ az login
 az account set --subscription <your-subscription-id>
 ```
 
-You need permission to create resource groups, AKS clusters, ACRs, Foundry resources, and federated credentials in your subscription.. `Contributor` + `User Access Administrator` is sufficient.
+You need permission to create resource groups, AKS clusters, ACRs, Foundry resources, and federated credentials in your subscription. `Contributor` + `User Access Administrator` is sufficient.
 
 For **per-sandbox Entra Agent IDs**, you also need the **Agent ID Developer** Entra directory role. Activate it through PIM or ask your tenant admin to assign it. Without it (and without `--mesh-trust=entra`), `kars up` skips the agent-identity setup and the cluster falls back to the AGT anonymous tier — see [permissions.md](permissions.md#tenant-level-entra-id-considerations) for the full breakdown.
 
@@ -188,13 +190,13 @@ For **per-sandbox Entra Agent IDs**, you also need the **Agent ID Developer** En
 
 ```bash
 # Anonymous tier (default) — zero Entra prerequisites, shared cluster MI
-kars up --name prod-agent --location swedencentral
+kars up --name prod-agent --region swedencentral
 
 # Entra tier — full per-sandbox Entra Agent IDs + verified mesh trust
-kars up --name prod-agent --location swedencentral --mesh-trust=entra
+kars up --name prod-agent --region swedencentral --mesh-trust=entra
 
 # Microsoft-corp users: also pass your ServiceTree GUID
-kars up --name prod-agent --location swedencentral --mesh-trust=entra --service-tree <guid>
+kars up --name prod-agent --region swedencentral --mesh-trust=entra --service-tree <guid>
 ```
 
 The `--mesh-trust=entra` flag turns on Phase 5b (per-sandbox typed
@@ -266,7 +268,7 @@ helm install kars deploy/helm/kars \
   --set workloadIdentity.clientId=<federated-mi-client-id>
 ```
 
-Then submit `KarsSandbox` resources directly with `kubectl apply`. The CLI is convenient but optional — every action it takes is a Helm value, a Kubernetes resource, or an `az` call you can perform yourself. See **[Operations / GitOps](operations/gitops.md)**.
+Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [minimal example](api/crd-reference.md#minimal-example) for the smallest valid sandbox + `InferencePolicy` pair. The CLI is convenient but optional — every action it takes is a Helm value, a Kubernetes resource, or an `az` call you can perform yourself. See **[Operations / GitOps](operations/gitops.md)**.
 
 ---
 
@@ -275,7 +277,7 @@ Then submit `KarsSandbox` resources directly with `kubectl apply`. The CLI is co
 - **[Architecture](architecture.md)** — the design in 15 minutes.
 - **[CRD reference](api/crd-reference.md)** — every spec field of every CRD.
 - **[Runtimes](runtimes.md)** — choosing between the seven adapters and BYO.
-- **[Blueprints](blueprints/00-index.md)** — five reference deployment shapes (developer inner loop → sovereign air-gapped).
+- **[Blueprints](blueprints/00-index.md)** — six reference deployment shapes (developer inner loop → sovereign air-gapped).
 - **[Security model](security.md)** — what each layer enforces and what it does not.
 
 ---
