@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Upstream alignment — AGT mesh-identity hardening merged
+
+[microsoft/agent-governance-toolkit#2719](https://github.com/microsoft/agent-governance-toolkit/pull/2719)
+merged into AGT main on 2026-05-31 (+2289 / −560 across 14 files,
+upstream commit `a8a96bf4`). This was the Phase 6 Entra-signed mesh-trust
+work kars upstreamed:
+
+- **mesh-relay**: opt-in Entra-signed JWT verification on the connect
+  frame. `entra_verifier.py` (330 LOC) — JWKS fetcher + RS256/RS384/RS512
+  verifier + `aud`/`tid`/`exp`/`iat` claim enforcement. Opt-in via
+  `AGENTMESH_ENTRA_AUDIENCE` + `AGENTMESH_ENTRA_TENANT_ID`; rejects
+  empty/missing tokens with WebSocket code 4003 (no silent fallback).
+- **mesh-registry**: per-agent session counters
+  (`total_sessions` / `successful_sessions` / `failed_sessions` /
+  `timeout_sessions`) + derived `completion_rate` reputation field.
+  Bumped by both `/v1/registry/reputation/session` and the simple
+  heartbeat path.
+- **mesh-registry**: `POST /v1/registry/verify` endpoint surfacing
+  the per-agent verification status for cross-cluster trust decisions.
+- Plus 49 new tests across `tests/test_entra_verifier.py`,
+  `tests/test_relay.py`, `tests/test_registry.py`; CHANGELOG +
+  agent-mesh/README + security-audit doc additions.
+
+**kars impact**: from this point on, the kars Phase 6 verified-tier
+mesh stack consumes vanilla upstream AGT — no vendored fork required.
+
 ### Slice 5e.4 — `EgressApproval` E2E coverage + docs
 
 Closes the Slice 5e arc with operator-facing documentation and Kind-based
