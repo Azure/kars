@@ -41,7 +41,9 @@ This section mirrors the chapter groups in **[`SUMMARY.md`](SUMMARY.md)**, which
 - [Policy canonical format](api/policy-canonical-format.md) — signing canonicalization rules.
 
 ### Agent capabilities
-- [Channels & plugins](channels-plugins.md) — messaging channels and third-party plugins via CLI flags.
+- [kars OpenClaw plugin](openclaw-plugin.md) — the in-sandbox plugin (24 governance-aware tools, 10 skills) every kars-managed agent loads.
+- [`@kars/mesh` plugin](mesh-plugin.md) — the companion npm package for pairing a local OpenClaw with a remote kars cluster.
+- [Channels & external plugins](channels-plugins.md) — Telegram / Slack / Discord / WhatsApp channels + 3rd-party search/scrape API integrations via CLI flags.
 - [Operator TUI](operator-tui.md) — `kars operator`, the live cluster dashboard.
 - [Permissions model](permissions.md) — the Azure RBAC `kars up` needs, enumerated.
 - [Per-sandbox identity](agent-identity.md) — each sandbox runs under its own Entra Agent ID.

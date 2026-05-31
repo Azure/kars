@@ -1,63 +1,10 @@
-# Channels & Plugins
+# Channels & external plugins
 
-Messaging channels and third-party plugins extend your kars agent with external communication and search capabilities. Configuration is handled via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
+Messaging channels (Telegram, Slack, Discord, WhatsApp) and **third-party** search/scrape API integrations (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI) extend your kars agent with external communication and search capabilities. Configuration is via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
 
-This page also documents the **kars OpenClaw plugin** itself — the agent-side surface that registers the runtime's governance-aware tools and owns the AGT mesh session.
-
----
-
-## kars OpenClaw plugin (`runtimes/openclaw/`)
-
-When the sandbox image boots, OpenClaw auto-discovers and loads the **`kars` plugin** from `~/.openclaw-data/extensions/kars/`. The plugin is the agent's runtime contract with kars — it registers governance-aware tools that route through the inference router, owns the AGT mesh session (Signal Protocol via `@microsoft/agent-governance-sdk`), and ships skill manifests (`SKILL.md`) that teach the agent when to use each tool.
-
-> The plugin lives in the **sandbox container under UID 1000**. The inference router (UID 1001) is its only network egress. Plugin source: `runtimes/openclaw/src/`; tool manifest: `runtimes/openclaw/openclaw.plugin.json`.
-
-### Registered tools (24 total)
-
-The plugin replaces every privileged OpenClaw built-in with a governance-aware equivalent. Categories:
-
-| Category | Tools | What they do |
-|---|---|---|
-| **Mesh + sub-agents** | `kars_discover`, `kars_spawn`, `kars_spawn_list`, `kars_spawn_status`, `kars_spawn_destroy`, `kars_mesh_send`, `kars_mesh_inbox`, `kars_mesh_await`, `kars_mesh_transfer_file` | Discover sibling agents on the mesh, spawn governed sub-agents (each becomes its own `KarsSandbox`), and exchange E2E-encrypted messages + files via Signal Protocol. The mesh session is plugin-owned end-to-end; the router only WebSocket-bridges opaque ciphertext. |
-| **Handoff** | `kars_handoff_request`, `kars_handoff_confirm`, `kars_handoff_status` | Transfer ownership of a running session to another sandbox (e.g., escalate to a more-privileged peer). |
-| **Network** | `http_fetch` | Single governance-gated outbound HTTP; subject to L7 egress allowlist + blocklist. |
-| **Foundry data plane** | `foundry_code_execute`, `foundry_image_generation`, `foundry_web_search`, `foundry_file_search`, `foundry_memory`, `foundry_conversations`, `foundry_evaluations`, `foundry_deployments`, `foundry_agents`, `foundry_download_file` | Direct access to Azure AI Foundry hosted tools (code-exec containers, image gen via `gpt-image-1`, Bing Grounding web search, RAG, persistent memory store, conversation API, evaluations, deployment discovery, file management). All calls flow through the inference router which adds Entra Agent ID auth, content-safety inspection, audit chaining, and token-budget enforcement. |
-| **Channels** | `telegram_status` | Emit a status update to the configured Telegram channel. |
-
-Authoritative tool list is `runtimes/openclaw/openclaw.plugin.json` → `contracts.tools[]`. The plugin enforces this contract at startup — OpenClaw refuses to register tools not declared here.
-
-### Skills (10 — agent-facing how-to)
-
-Each skill is a `SKILL.md` markdown file that documents the agent-facing contract for a group of tools. OpenClaw exposes them as a discovery surface so the LLM knows when to invoke each tool:
-
-| Skill | Tools it covers |
-|---|---|
-| `kars-spawn` | `kars_spawn`, `kars_spawn_*`, `kars_mesh_*`, `kars_handoff_*`, `kars_discover` |
-| `agt-governance` | `http_fetch` + the AGT decision contract for every tool call |
-| `foundry-web-search` | `foundry_web_search` (Bing Grounding) |
-| `foundry-code` | `foundry_code_execute` (Python container) |
-| `foundry-memory` | `foundry_memory` (persistent long-term memory) |
-| `foundry-knowledge` | `foundry_file_search`, RAG patterns |
-| `foundry-conversations` | `foundry_conversations` (multi-turn state) |
-| `foundry-evaluations` | `foundry_evaluations` |
-| `foundry-agents` | `foundry_agents` (prompt-agent inspection) |
-| `foundry-deployments` | `foundry_deployments` (discover models, connections, indexes) |
-
-Skills directory: `runtimes/openclaw/skills/`. Each subdirectory contains `SKILL.md` plus the agent-facing examples.
-
-### The `@kars/mesh` companion plugin
-
-For users who run **OpenClaw on their laptop** and want to delegate heavy work to a governed AKS sandbox, the separate **`@kars/mesh`** plugin (`mesh-plugin/`, npm name `@kars/mesh`) installs into the local OpenClaw and pairs it with a kars cluster:
-
-- Registers the local agent on AGT (via a one-time pairing token from `kars pair generate`)
-- Exposes `mesh_offload`, `mesh_send`, `mesh_transfer_file` so the local agent can delegate to remote governed sandboxes
-- Includes a `mesh-federation` skill for cross-cluster federation patterns
-
-Manifest: `mesh-plugin/openclaw.plugin.json` (id `kars-mesh`). See also [Runtimes → Local-OpenClaw-with-mesh pattern](runtimes.md#local-openclaw-with-mesh-pattern) and [Blueprint 05 — Cross-org federation](blueprints/05-cross-org-federation.md).
-
-### How OpenClaw loads the plugin
-
-`sandbox-images/openclaw/entrypoint.sh` (around line 784, `cat > "$OPENCLAW_CONFIG"`) writes the openclaw.json with the kars provider config; the plugin then auto-loads from `~/.openclaw-data/extensions/kars/` via OpenClaw's standard extension-discovery contract. See [Upstream alignment](upstream-alignment.md) for why kars uses this mechanism rather than forking OpenClaw.
+> **Looking for the kars-owned plugins?** This page is about **external** integrations. For the kars-owned components:
+> - **[kars OpenClaw plugin](openclaw-plugin.md)** — the in-sandbox plugin (24 governance-aware tools, 10 skills) shipped with every kars-managed agent.
+> - **[`@kars/mesh` plugin](mesh-plugin.md)** — the companion npm package for pairing a **local** OpenClaw with a remote kars cluster (8 federation tools, 1 skill).
 
 ---
 

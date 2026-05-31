@@ -33,7 +33,9 @@
 
 # Agent capabilities
 
-- [Channels & plugins](channels-plugins.md)
+- [kars OpenClaw plugin](openclaw-plugin.md)
+- [`@kars/mesh` plugin (local OpenClaw)](mesh-plugin.md)
+- [Channels & external plugins](channels-plugins.md)
 - [Operator TUI](operator-tui.md)
 - [Permissions model](permissions.md)
 - [Per-sandbox identity (Entra Agent ID)](agent-identity.md)
