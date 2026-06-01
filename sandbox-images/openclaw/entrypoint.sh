@@ -811,7 +811,8 @@ ANTHEOF
   },
   "plugins": {
     "allow": [PLUGINS_ALLOW_PLACEHOLDER],
-    "entries": {PLUGINS_ENTRIES_PLACEHOLDER}
+    "entries": {PLUGINS_ENTRIES_PLACEHOLDER},
+    "bundledDiscovery": "compat"
   },
   "channels": {
     CHANNELS_PLACEHOLDER
@@ -827,7 +828,6 @@ ANTHEOF
       "model": { "primary": "${_PRIMARY_MODEL_REF}" },
       "imageGenerationModel": "azure-openai/gpt-image-1",
       "timeoutSeconds": 1500,
-      "systemPromptOverride": ${SYSTEM_PROMPT_JSON},
       "memorySearch": {
         "enabled": true,
         "provider": "azure-openai",
