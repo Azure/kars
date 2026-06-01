@@ -300,3 +300,133 @@ Both are accidentally green ✅ on every run. Items 3 and 5 above fix them.
 Anything else I'd flag as low-value but not a no-op:
 - `dockerfile-lint` (hadolint) does lint, but uses default config — no kars-specific rules. Could add `.hadolint.yaml` for ignored rules. Minor.
 - `bicep-validate` only validates the entry point `main.bicep`. Other bicep files (`agent-id-trust.bicep`) aren't linted.
+
+---
+
+## Addendum — How to make Rust build ONCE per CI run (user follow-up)
+
+User asked: *"what will prevent us having to build the rust binaries this many times — the e2e test I believe also builds the rust..."*
+
+Yes — on a Rust-touching PR, the same Rust source is compiled **5 times** in 3 different profiles:
+
+| Build # | Where | Profile | Notes |
+|---|---|---|---|
+| 1 | `rust-build` job: `cargo clippy --all-targets` | debug+check | Swatinem cache |
+| 2 | `rust-build` job: `cargo build --release` | release | Swatinem cache (partial — clippy's check artifacts ≠ build's codegen) |
+| 3 | `rust-build` job: `cargo test --all` | test (debug) | Swatinem cache (debug profile fresh again) |
+| 4 | `bench-regression` job: `cargo bench --no-run` | bench profile | Swatinem cache (yet another profile) |
+| 5a | `e2e` job: Docker pre-build of controller image | release in container | buildx GHA cache (Dockerfile-layer granularity) |
+| 5b | `e2e` job: Docker pre-build of router image | release in container | buildx GHA cache |
+| (6) | `image-cache-publish` job (dev/main pushes): controller + router + a2a-gateway | release in container | buildx GHA cache |
+
+### Why simple caching can't fix this
+
+Cargo's `target/` is **profile-segregated**:
+
+```
+target/debug/        ← clippy + test artifacts (no codegen)
+target/release/      ← cargo build --release
+target/criterion/    ← bench artifacts (separate profile)
+```
+
+Even with a perfect Swatinem cache hit, each profile rebuilds independently. Docker buildx GHA cache is **Dockerfile-layer-level** — one source change → cache miss on the `RUN cargo build` layer → full rebuild.
+
+### Three options, ordered by ambition
+
+#### Option A — `cargo-chef` two-stage Dockerfiles (4 hr total)
+
+Split each Rust Dockerfile into recipe + cook + build stages:
+1. **Recipe**: extract `Cargo.toml + Cargo.lock` into `recipe.json` (no source)
+2. **Cook**: build only deps from `recipe.json` (cached forever unless Cargo.lock changes)
+3. **Build**: copy first-party source + build only the workspace crate
+
+Result: changing `inference-router/src/routes/foo.rs` rebuilds only the inference-router crate (1–2 min), not 600+ transitive deps (8–10 min). Docker builds drop from 8–12 min to 1–2 min for first-party-only changes.
+
+**Total CI per PR**: ~30 min → ~20 min. Still rebuilds inside Docker just much faster.
+
+#### Option B — Build once on host, `COPY` binary into distroless Docker (½ day) ⭐ RECOMMENDED
+
+The state-of-the-art Rust CI pattern. One `cargo build` per CI run, every other job consumes the binary artifact.
+
+```yaml
+jobs:
+  build-rust:
+    name: Build Rust binaries (musl static)
+    runs-on: ubuntu-latest-8-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-musl }
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: musl-release }
+      - uses: mozilla-actions/sccache-action@v0.0.6
+      - run: cargo build --release --target x86_64-unknown-linux-musl --workspace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kars-binaries
+          path: target/x86_64-unknown-linux-musl/release/kars-*
+          retention-days: 1
+
+  rust-test:
+    needs: build-rust   # share the warm cache
+    steps:
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: musl-release }
+      - run: cargo nextest run --workspace --release
+
+  rust-bench:
+    needs: build-rust
+    if: <Rust-touching paths only>
+    steps: ...
+
+  e2e:
+    needs: build-rust
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: kars-binaries, path: ./bin }
+      # Dockerfile becomes:
+      #   FROM gcr.io/distroless/static:nonroot
+      #   COPY bin/kars-controller /usr/local/bin/
+      # No cargo build inside Docker at all
+      - run: docker buildx build -f controller/Dockerfile.distroless .
+```
+
+**Result**:
+- **1 Rust compile per CI run** (instead of 5)
+- **Docker builds: ~30 sec each** (just COPY a binary into distroless)
+- **Production images: ~10 MB** (instead of ~50 MB Azure Linux base)
+- **Total Rust-touching PR: 8–10 min** (instead of 30 min)
+
+**Concrete prerequisites**:
+1. Add `vendored-openssl` feature to crates that pull `openssl-sys` (5 min — Cargo.toml edits)
+2. Verify `cargo build --release --target x86_64-unknown-linux-musl --workspace` works locally (15 min)
+3. Rewrite each Rust Dockerfile to a 5-line distroless variant (1 hr)
+4. Restructure `ci.yml`: `build-rust` first, everything else `needs: build-rust` (2 hr)
+5. Delete `image-cache-publish.yml` — the `build-rust` job IS the cache now (10 min)
+
+**Total effort**: ½ day. **Risk**: medium — musl static linking has a few well-known gotchas (`reqwest` with rustls is fine; `tonic`/grpcio sometimes need build tweaks).
+
+#### Option C — `image-cache-publish` becomes the only source of truth (1 day)
+
+Make `image-cache-publish.yml` the only place Rust is compiled. Every other job pulls pre-built images from GHCR.
+
+Pros: zero duplicate work; preserves existing Dockerfiles
+Cons: tests run inside Docker (slower iteration); harder to debug cargo errors (buried in Docker layers)
+
+### Comparison table
+
+| Property | Option A | **Option B** ⭐ | Option C |
+|---|---|---|---|
+| Total Rust compiles per PR | 2 (host + Docker) | **1** | 1 |
+| Docker image size | Same (~50 MB) | **~10 MB distroless** | Same |
+| Test latency | Same | **Same** (host tests) | Slower (Docker build first) |
+| Effort | 4 hr | **½ day** | 1 day |
+| Debugging cargo errors | Easy | **Easy** | Hard |
+| State of the art? | Good | **Yes — current best practice** | Niche |
+
+### Recommended sequence (Option B)
+
+1. Land Phase 1 quick wins from the main plan above (path-gate bench, delete no-ops, merge Trivy) — 1–2 hr, drops PR time to ~15 min
+2. Apply Option B as a separate PR — ½ day, drops PR time to ~8–10 min
+
+The Phase 1 + Option B combination hits the "state of the art" target: doc-only <2 min, CLI/TS <4 min, Rust <10 min.
