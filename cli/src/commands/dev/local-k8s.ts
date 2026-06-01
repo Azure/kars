@@ -588,14 +588,21 @@ async function rebuildDevImages(
       name: "inference-router",
       tag: "kars-inference-router:dev",
       build: async () => {
-        // Router Dockerfile is COPY-only — stage the binary first.
-        await stageRustBinaries(repoRoot, ["kars-inference-router"], archToken as RustArch);
+        // On non-Linux hosts, use multistage Dockerfile (compiles rust
+        // inside docker). On Linux, use COPY-only + native cargo.
+        const useMultistage = process.platform !== "linux";
+        const df = useMultistage
+          ? "inference-router/Dockerfile.multistage"
+          : "inference-router/Dockerfile";
+        if (!useMultistage) {
+          await stageRustBinaries(repoRoot, ["kars-inference-router"], archToken as RustArch);
+        }
         await execa(runtime, [
           "build",
           "--platform", platform,
           "--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`,
           "-t", "kars-inference-router:dev",
-          "-f", path.join(repoRoot, "inference-router/Dockerfile"),
+          "-f", path.join(repoRoot, df),
           repoRoot,
         ], { stdio: "inherit" });
       },
@@ -604,13 +611,18 @@ async function rebuildDevImages(
       name: "controller",
       tag: "kars-controller:dev",
       build: async () => {
-        // Controller Dockerfile is COPY-only — stage the binary first.
-        await stageRustBinaries(repoRoot, ["kars-controller"], archToken as RustArch);
+        const useMultistage = process.platform !== "linux";
+        const df = useMultistage
+          ? "controller/Dockerfile.multistage"
+          : "controller/Dockerfile";
+        if (!useMultistage) {
+          await stageRustBinaries(repoRoot, ["kars-controller"], archToken as RustArch);
+        }
         await execa(runtime, [
           "build",
           "--platform", platform,
           "-t", "kars-controller:dev",
-          "-f", path.join(repoRoot, "controller/Dockerfile"),
+          "-f", path.join(repoRoot, df),
           repoRoot,
         ], { stdio: "inherit" });
       },

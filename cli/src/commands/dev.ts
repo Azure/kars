@@ -845,20 +845,27 @@ Notes:
 
           if (options.build || !routerExists) {
             const arch = archForDockerPlatform(dockerPlatform);
-            stepper.update(`Staging inference-router binary (${arch})...`);
+            const useMultistage = process.platform !== "linux";
+            const dfPath = useMultistage
+              ? path.join(repoRoot, "inference-router/Dockerfile.multistage")
+              : routerDockerfile;
+            if (!useMultistage) {
+              stepper.update(`Staging inference-router binary (${arch})...`);
+              stepper.stop();
+              await stageRustBinaries(repoRoot, ["kars-inference-router"], arch, {
+                forceRebuild: options.build,
+              });
+            }
+            stepper.update(useMultistage
+              ? "Building inference-router image (rust compile inside docker — ~3 min first run)..."
+              : "Packaging inference-router image (distroless COPY — ~10s)...");
             stepper.stop();
-            await stageRustBinaries(repoRoot, ["kars-inference-router"], arch, {
-              forceRebuild: options.build,
-            });
-
-            stepper.update("Packaging inference-router image (distroless COPY — ~10s)...");
-            stepper.stop();
-            console.log(chalk.dim("  docker build inference-router/Dockerfile (COPY only)...\n"));
+            console.log(chalk.dim(`  docker build ${useMultistage ? "Dockerfile.multistage" : "Dockerfile"}...\n`));
             await execa("docker", [
               "build",
               "--platform", dockerPlatform,
               "-t", routerImage,
-              "-f", routerDockerfile,
+              "-f", dfPath,
               repoRoot,
             ], { stdio: "inherit" });
             console.log();

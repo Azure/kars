@@ -169,6 +169,21 @@ export function pushCommand(): Command {
       }
 
       // Define all images
+      // push.ts targets AKS, which is amd64. If we're running on an
+      // arm64 host (Apple Silicon developer machine), `cargo build` on
+      // the host produces a macOS arm64 binary that fails with
+      // 'exec format error' when COPY'd into a linux/amd64 image. To
+      // avoid that, swap the COPY-only Dockerfiles for the multi-stage
+      // ones (which compile rust INSIDE docker for the right target).
+      // CI runs on linux amd64 so it keeps the fast COPY-only path.
+      const hostIsAmd64 = process.arch === "x64";
+      const controllerDf = hostIsAmd64
+        ? "controller/Dockerfile"
+        : "controller/Dockerfile.multistage";
+      const routerDf = hostIsAmd64
+        ? "inference-router/Dockerfile"
+        : "inference-router/Dockerfile.multistage";
+
       const images: Array<{
         name: string;
         tag: string;
@@ -177,8 +192,8 @@ export function pushCommand(): Command {
         absoluteContext?: string;
         buildArgs?: string[];
       }> = [
-        { name: "controller", tag: "kars-controller:latest", dockerfile: "controller/Dockerfile" },
-        { name: "router", tag: "kars-inference-router:latest", dockerfile: "inference-router/Dockerfile",
+        { name: "controller", tag: "kars-controller:latest", dockerfile: controllerDf },
+        { name: "router", tag: "kars-inference-router:latest", dockerfile: routerDf,
           buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`] },
         { name: "sandbox-base", tag: "kars-sandbox-base:latest", dockerfile: "sandbox-images/openclaw/Dockerfile.base",
           buildArgs: ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`] },
@@ -232,15 +247,21 @@ export function pushCommand(): Command {
       for (const img of targets) {
         const spin = ora(`Building ${img.tag}...`).start();
         try {
-          // Rust images (controller + router) use COPY-only Dockerfiles —
-          // stage the binary first via cargo. AKS nodes are amd64.
-          if (img.name === "controller") {
-            spin.text = `Compiling kars-controller (amd64) for ${img.tag}...`;
-            await stageRustBinaries(repoRoot, ["kars-controller"], "amd64");
-          } else if (img.name === "router") {
-            spin.text = `Compiling kars-inference-router (amd64) for ${img.tag}...`;
-            await stageRustBinaries(repoRoot, ["kars-inference-router"], "amd64");
-          } else if (img.name === "sandbox") {
+          // Rust images (controller + router) use COPY-only Dockerfiles
+          // ONLY when host is amd64 (so cargo's native output matches
+          // the linux/amd64 image). Otherwise we used Dockerfile.multistage
+          // (see above) which compiles inside docker — no host-side stage
+          // needed. AKS nodes are amd64.
+          if (hostIsAmd64) {
+            if (img.name === "controller") {
+              spin.text = `Compiling kars-controller (amd64) for ${img.tag}...`;
+              await stageRustBinaries(repoRoot, ["kars-controller"], "amd64");
+            } else if (img.name === "router") {
+              spin.text = `Compiling kars-inference-router (amd64) for ${img.tag}...`;
+              await stageRustBinaries(repoRoot, ["kars-inference-router"], "amd64");
+            }
+          }
+          if (img.name === "sandbox") {
             spin.text = `Building mesh-plugin (TypeScript) for ${img.tag}...`;
             await stageMeshPlugin(repoRoot);
           }

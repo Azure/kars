@@ -49,6 +49,18 @@ export async function stageRustBinaries(
   arch: RustArch,
   opts: { forceRebuild?: boolean } = {},
 ): Promise<string[]> {
+  // Hard guard: cargo on the host produces a binary for the HOST OS.
+  // On macOS that's a Mach-O binary which can't run inside a Linux
+  // container — `exec format error` at pod start. The COPY-only
+  // Dockerfile pattern only works when the host OS is Linux (CI).
+  // Callers running on macOS / Windows must use the *.multistage
+  // Dockerfile variants which compile rust inside the docker build.
+  if (process.platform !== "linux") {
+    throw new Error(
+      `stage-rust-bin: cannot cross-build for linux/${arch} from ${process.platform}. ` +
+      `Use the *.multistage Dockerfile variant instead (compiles rust inside docker).`,
+    );
+  }
   const binDir = path.join(repoRoot, "bin", arch);
   mkdirSync(binDir, { recursive: true });
 
