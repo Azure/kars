@@ -67,35 +67,36 @@ Every PR runs `.github/workflows/ci.yml`. On dev/main pushes,
 `.github/workflows/image-cache-publish.yml` builds + pushes to
 **`ghcr.io/azure/kars-*` (private)**. No public publishing happens.
 
-### Stage 2 — Release dry-run (before any real release)
+### Stage 2 — Internal Release (today, behind the wall)
 
-Run `.github/workflows/release-dryrun.yml` via `workflow_dispatch`. It:
+Tag `v0.1.0-internal.1` (or `v0.1.0-preview.1`) — or manual dispatch
+via the Actions UI. `.github/workflows/release-internal.yml` runs:
 
-- Compiles all Rust binaries (host glibc)
-- Builds all 5 container images (no push)
-- Generates SPDX SBOMs (5)
-- Runs Trivy HIGH/CRITICAL scans (5)
-- Exercises cosign keyless signing (`--upload=false`)
-- Runs `npm pack` + `npm publish --dry-run` (4)
-- Runs `cargo publish --dry-run` (2 libraries)
-- Assembles a `release-manifest.json` tying it all together
+- Compiles all Rust binaries (host glibc 2.35, runs on AL3 2.38)
+- Builds + pushes all 5 container images to **`ghcr.io/azure/kars-*` (PRIVATE)**
+- Cosign keyless signs every image (Sigstore Rekor public attestation)
+- `npm pack` for all 4 packages → tarballs attached to GitHub Release
+- `cargo package` for the 2 libraries → `.crate` files attached
+- Generates SPDX SBOMs (5) + Trivy HIGH/CRITICAL reports (5)
+- Creates a **GitHub Release** with `prerelease: true` + `make_latest: false`
+  — visible only to org members because the repo is private
 
-7-day-retained artefacts let a human reviewer inspect every tarball,
-SBOM, and Trivy report before triggering the real release.
+**This is a real release.** Versioned, tagged, signed, complete artefact set,
+nothing on a public registry. Anyone with repo access can pull
+`ghcr.io/azure/kars-controller:v0.1.0-internal.1` and run it.
 
-### Stage 3 — Real publish via ESRP (ADO pipeline)
+### Stage 3 — Public Release via ESRP (after onboarding)
 
-Triggered manually from ADO once dry-run is reviewed:
+Triggered manually from ADO once #384 (ESRP) + #386 (ADO project) close:
 `.github/pipelines/esrp-publish.yml`.
 
-- npm packages → npmjs.com via `EsrpRelease@11` task, `contenttype: npm`
-- Rust libraries → crates.io via `EsrpRelease@11` task, `contenttype: Rust`
-- Container images → MCR via the separate MCR onboarding pipeline (until
-  then: `image-sign-sbom.yml` on `v*` tag pushes to `karsacr.azurecr.io`
-  + cosign keyless signs).
+- Downloads `.tgz` + `.crate` artefacts from the Stage 2 GitHub Release
+- npm → npmjs.com under `@kars` scope, signed by Microsoft ESRP
+- crates.io → Microsoft-signed publish via `EsrpRelease@11`
+- Container images → MCR (after #385 onboarding)
 
-The pipeline has a `dryRun=true` parameter for ADO-side validation that
-matches the GHA dry-run.
+The ADO pipeline has a `dryRun=true` parameter for ADO-side validation that
+matches what Stage 2 already did in GHA.
 
 ---
 
