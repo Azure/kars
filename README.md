@@ -142,6 +142,12 @@ cd cli && npm ci && npm run build && npm link
 kars dev
 ```
 
+> **Faster clone (no sandbox base build):** The repo ships ~235 MB of vendored Python wheels under `vendor/sandbox-wheels/` so the sandbox base image builds hermetically (no PyPI dependency). If you only want to read code, run the CLI, or build the controller / router — skip the wheels with a partial clone:
+> ```bash
+> git clone --filter=blob:none https://github.com/Azure/kars.git
+> ```
+> Files are fetched on demand when you `git checkout` or `git log` actually needs them. If you later need the wheels (because you're rebuilding `kars-sandbox-base`), run `git lfs install && git lfs pull` (the wheels are tracked via LFS going forward) or simply `git checkout vendor/sandbox-wheels` to materialize them.
+
 The first `kars dev` pulls + caches the sandbox base image (~10 min once) and then launches near-instantly thereafter.
 
 <details>

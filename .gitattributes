@@ -1,0 +1,16 @@
+# Track vendored Python wheels via git-lfs going forward.
+#
+# Wheels are needed by sandbox-images/openclaw/Dockerfile.base for a
+# hermetic (no-PyPI) sandbox build. Historically they were stored as
+# regular git blobs and bloated the repo to ~320 MB.
+#
+# Adoption strategy:
+#   * Existing wheels stay as regular blobs (no history rewrite — that
+#     would force every contributor to re-clone).
+#   * Wheels added or replaced after this commit go to LFS instead.
+#   * Over time the working-tree size shrinks naturally as old wheels
+#     get rotated out.
+#
+# Users who just want to read code can skip the wheel download entirely
+# with a partial clone — see README.md "Cloning the repository".
+vendor/sandbox-wheels/*.whl filter=lfs diff=lfs merge=lfs -text
