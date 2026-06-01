@@ -88,29 +88,7 @@ export function operatorCommand(): Command {
 // Helper to build kubectl args with optional context
 
 async function startDashboard(refreshInterval: number, kubeContext?: string, devMode = false, panelOpts: { panels?: string; perSandbox?: boolean } = {}) {
-  // Auto-discover a reachable kube context when --context is not
-  // passed AND there's no current-context in kubeconfig — without this
-  // the operator's cluster-health + per-CRD fetchers fall through to
-  // localhost:8080 and silently report everything as down. Mirrors the
-  // logic in `kars list` and `kars connect`.
-  if (!devMode && !kubeContext) {
-    try {
-      const { stdout: cur } = await execa("kubectl", ["config", "current-context"], { stdio: "pipe" });
-      if (!cur.trim()) throw new Error("no current context");
-    } catch {
-      try {
-        const { stdout: list } = await execa("kubectl", ["config", "get-contexts", "-o", "name"], { stdio: "pipe" });
-        const candidates = list.trim().split("\n").filter(Boolean);
-        for (const ctx of candidates) {
-          try {
-            await execa("kubectl", ["--context", ctx, "get", "ns", "--request-timeout=3s", "--no-headers"], { stdio: "pipe", timeout: 5000 });
-            kubeContext = ctx;
-            break;
-          } catch { /* try next */ }
-        }
-      } catch { /* no contexts at all */ }
-    }
-  }
+  if (!devMode) kubeContext = await (await import("../lib/kube-context.js")).resolveKubeContext(kubeContext);
   // ── Resolve cluster ───────────────────────────────────────────────
   let clusterName = devMode ? "docker (dev)" : "unknown";
   if (!devMode) {
