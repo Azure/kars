@@ -13,7 +13,7 @@ RUN tdnf install -y gcc glibc-devel binutils make pkg-config openssl-devel ca-ce
 # Install Rust via rustup
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 ENV PATH="/usr/local/cargo/bin:${PATH}"
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
