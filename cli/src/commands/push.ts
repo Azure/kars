@@ -353,19 +353,18 @@ export function pushCommand(): Command {
           await execa("kubectl", ["rollout", "restart", "deployment", "kars-controller", "-n", ns], { stdio: "pipe" });
           spin.text = "Restarted kars-controller";
 
-          // If sandbox/router image changed, also restart all sandbox pods.
-          // We parallelize the per-namespace delete + show what we're
-          // actually doing in the spinner — serial delete with no status
-          // update made push --apply look frozen for several minutes on
-          // clusters with 5+ sandbox namespaces.
+          // If sandbox/router image changed, roll the sandbox Deployments.
+          // We use `kubectl rollout restart deploy -A -l kars.azure.com/component=sandbox`
+          // — annotation-bump that triggers a real rolling restart. The
+          // previous `delete pods --grace-period=10` approach was racy:
+          // the deletion fired BEFORE ACR/kubelet finished propagating
+          // the new `:latest` digest, so the recreated pod sometimes
+          // grabbed the OLD digest from a node-cache and the new push
+          // silently became "the next latest" with no one to re-pull.
+          // Rollout restart is the K8s-native fix that the deployment
+          // controller waits on (new pod must be Ready before old goes).
           const sandboxImages = ["sandbox", "router"];
           if (!options.only || sandboxImages.includes(options.only)) {
-            spin.text = "Recycling sandbox pods (kars-system)...";
-            await execa("kubectl", [
-              "delete", "pods", "-n", ns,
-              "-l", "kars.azure.com/component=sandbox",
-              "--grace-period=10",
-            ], { stdio: "pipe" }).catch(() => {});
             const { stdout: nsLines } = await execa("kubectl", [
               "get", "namespaces", "-o", "name",
             ], { stdio: "pipe" });
@@ -374,12 +373,43 @@ export function pushCommand(): Command {
               .map(l => l.replace("namespace/", "").trim())
               .filter(n => n.startsWith("kars-") && n !== "kars-system");
             if (perAgentNs.length > 0) {
-              spin.text = `Recycling sandbox pods in ${perAgentNs.length} agent namespace(s)...`;
-              await Promise.all(perAgentNs.map(nsName =>
-                execa("kubectl", [
-                  "delete", "pods", "--all", "-n", nsName, "--grace-period=10",
-                ], { stdio: "pipe" }).catch(() => {})
-              ));
+              spin.text = `Rolling out new image to ${perAgentNs.length} sandbox(es)...`;
+              // Per-namespace rollout restart of every Deployment labeled
+              // as a sandbox. Runs in parallel; each waits for the
+              // Deployment controller to bring up a Ready replica with
+              // the new pulled image before the old one terminates.
+              await Promise.all(perAgentNs.map(async nsName => {
+                try {
+                  const { stdout: deps } = await execa("kubectl", [
+                    "get", "deploy", "-n", nsName,
+                    "-l", "kars.azure.com/component=sandbox",
+                    "-o", "name",
+                  ], { stdio: "pipe" });
+                  const names = deps.split("\n").map(s => s.trim()).filter(Boolean);
+                  for (const dep of names) {
+                    await execa("kubectl", [
+                      "rollout", "restart", dep, "-n", nsName,
+                    ], { stdio: "pipe" }).catch(() => {});
+                  }
+                } catch { /* skip namespace */ }
+              }));
+              spin.text = `Waiting for ${perAgentNs.length} sandbox rollout(s) to complete...`;
+              // Wait for the rollouts to finish so the user can trust
+              // that on success their pods ARE running the new image.
+              await Promise.all(perAgentNs.map(async nsName => {
+                try {
+                  const { stdout: deps } = await execa("kubectl", [
+                    "get", "deploy", "-n", nsName,
+                    "-l", "kars.azure.com/component=sandbox",
+                    "-o", "name",
+                  ], { stdio: "pipe" });
+                  for (const dep of deps.split("\n").map(s => s.trim()).filter(Boolean)) {
+                    await execa("kubectl", [
+                      "rollout", "status", dep, "-n", nsName, "--timeout=120s",
+                    ], { stdio: "pipe" }).catch(() => {});
+                  }
+                } catch { /* skip */ }
+              }));
             }
           }
 
