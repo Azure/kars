@@ -91,13 +91,13 @@ nothing on a public registry. Anyone with repo access can pull
 
 ### Stage 3 — Public Release via ESRP (after onboarding)
 
-Triggered manually from ADO once #384 (ESRP) + #386 (ADO project) close:
+Triggered manually from ADO once the ESRP cert + ADO pipeline wiring are in place:
 `.github/pipelines/esrp-publish.yml`.
 
 - Downloads `.tgz` + `.crate` artefacts from the Stage 2 GitHub Release
 - npm → npmjs.com under `@kars` scope, signed by Microsoft ESRP
 - crates.io → Microsoft-signed publish via `EsrpRelease@11`
-- Container images → MCR (after #385 onboarding)
+- Container images → MCR (after MCR namespace onboarding completes)
 
 The ADO pipeline has a `dryRun=true` parameter for ADO-side validation that
 matches what Stage 2 already did in GHA.
@@ -173,7 +173,7 @@ When filling out the ESRP onboarding request (https://aka.ms/esrp-onboarding):
 | **Build system** | Azure DevOps Pipelines | Our `.github/pipelines/esrp-publish.yml` is an ADO YAML pipeline. |
 | **Signing scenarios** | Sign + Release | Sign = Authenticode for binaries. Release = package distribution to npm / crates.io / MCR. |
 | **Repository** | `Azure/kars` (GitHub) | GitHub-hosted source, ADO-hosted pipeline that pulls from it. |
-| **ADO project** | (TBD per #386) | Whichever Microsoft ADO project ends up hosting kars CI/CD. |
+| **ADO project** | (whichever Microsoft ADO project ends up hosting kars CI/CD) | Set up by the team that owns kars publishing. |
 
 The form note that says "Release customers should select ESRP Client unless
 you will only be submitting via the ESRP Release UI" is misleading — the

@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](LICENSE)
 [![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Azure/kars/actions/workflows/ci.yml)
 [![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry-0078D4)](https://azure.microsoft.com)
-[![Status: Public Preview](https://img.shields.io/badge/Status-Public%20Preview-orange)](#status--public-preview)
+[![Status: Reference Stack](https://img.shields.io/badge/Status-Reference%20Stack-yellow)](#status)
 
 Hardened sandbox per agent. Zero credentials in the agent. Every external call goes through a Rust router that enforces identity, content safety, governance, and audit. End-to-end encrypted inter-agent messaging. One CLI for the whole loop — laptop to AKS.
 
@@ -17,27 +17,31 @@ Hardened sandbox per agent. Zero credentials in the agent. Every external call g
 
 ---
 
-## Status — Public Preview
+## Status
 
-> ⚠️ **Microsoft-signed images and packages are in progress.** The container
-> images (controller, inference-router, a2a-gateway, sandbox-base,
-> conformance-runner), npm packages (`@kars/cli`, `@kars/mesh`, runtime
-> adapters), and Rust crates (`kars-a2a-core`, `kars-eval-corpus`) will be
-> published via [ESRP](https://aka.ms/esrp-onboarding) to **MCR**,
-> **npmjs.com**, and **crates.io** — signed by Microsoft — as soon as the
-> ESRP integration completes.
+> ℹ️ **kars is a reference stack / community sample — not an official
+> Microsoft product.** It is published under the Azure GitHub
+> organization as a learning resource and starting point for teams
+> building AI-agent platforms on AKS. There is no support contract,
+> SLA, or roadmap commitment attached to it. See
+> [TRADEMARKS.md](TRADEMARKS.md) and [LICENSE](LICENSE) for the full
+> framing.
 >
-> Until then, the **only supported install path is build-from-source after
-> cloning this repository** (see [Try it in five minutes](#try-it-in-five-minutes)).
-> All code, CRDs, Helm charts, and architecture documents in this repo are
-> production-ready and reviewed; only the binary distribution channel is
-> still being wired up.
+> ⚠️ **Microsoft-signed images and packages are in progress.** The
+> container images (controller, inference-router, a2a-gateway,
+> sandbox-base, conformance-runner), npm packages (`@kars/cli`,
+> `@kars/mesh`, runtime adapters), and Rust crates (`kars-a2a-core`,
+> `kars-eval-corpus`) will be published via
+> [ESRP](https://aka.ms/esrp-onboarding) to **MCR**, **npmjs.com**,
+> and **crates.io** — signed by Microsoft — as soon as the ESRP
+> integration completes.
 >
-> Tracking issues: [#384 ESRP](https://github.com/Azure/kars/issues/384) ·
-> [#385 MCR](https://github.com/Azure/kars/issues/385) ·
-> [#386 ADO pipeline](https://github.com/Azure/kars/issues/386) ·
-> [#387 npm scope](https://github.com/Azure/kars/issues/387) ·
-> [#388 crates.io](https://github.com/Azure/kars/issues/388).
+> Until then, the **only supported install path is build-from-source
+> after cloning this repository** (see
+> [Try it in five minutes](#try-it-in-five-minutes)). All code, CRDs,
+> Helm charts, and architecture documents in this repo are reviewed
+> and usable; only the binary distribution channel is still being
+> wired up.
 
 ---
 

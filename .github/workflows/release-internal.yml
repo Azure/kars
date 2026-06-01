@@ -504,7 +504,7 @@ jobs:
               "kars-a2a-gateway",
               "kars-conformance-runner"
             ],
-            "next_step_for_public_release": "Once ESRP is onboarded (issue #384), trigger the ADO pipeline .github/pipelines/esrp-publish.yml — it downloads from this Release and publishes signed copies to npmjs.com + crates.io + MCR."
+            "next_step_for_public_release": "Once the ESRP-signed ADO pipeline is wired (see docs/PUBLISHING.md), trigger .github/pipelines/esrp-publish.yml — it downloads from this Release and publishes signed copies to npmjs.com + crates.io + MCR."
           }
           EOF
           cat ./release-artefacts/release-manifest.json
@@ -529,10 +529,13 @@ jobs:
             - Rust crate tarballs are attached below (NOT published to crates.io)
             - Binaries + SBOMs + Trivy reports + checksums all attached
 
-            **To go public**: this release sits behind the wall until issue #384
-            (ESRP onboarding) is closed. Once ESRP is wired (ADO pipeline
-            `.github/pipelines/esrp-publish.yml`), Microsoft signs and republishes
-            the same artefacts to public registries.
+            **To go public**: this release sits behind the wall until the
+            ESRP-signed ADO pipeline is wired up (see
+            [docs/PUBLISHING.md](../blob/main/docs/PUBLISHING.md)). Once
+            wired, the ADO pipeline at `.github/pipelines/esrp-publish.yml`
+            downloads the same artefacts from this Release and Microsoft
+            signs + republishes them to public registries (MCR, npmjs.com,
+            crates.io).
 
             ### Container images
             All pushed to `ghcr.io/azure/kars-*:${{ env.VERSION }}` (PRIVATE).
@@ -590,6 +593,6 @@ jobs:
             echo "- 5 cosign signatures → Sigstore Rekor (public ledger; attestation only, no leak)"
             echo ""
             echo "### To go public"
-            echo "Wait for #384 ESRP onboarding. Then trigger the ADO pipeline:"
-            echo "\`.github/pipelines/esrp-publish.yml\`"
+            echo "Once the ESRP-signed ADO pipeline is wired (see docs/PUBLISHING.md),"
+            echo "trigger \`.github/pipelines/esrp-publish.yml\` to republish via MCR / npm / crates.io."
           } >> "$GITHUB_STEP_SUMMARY"
