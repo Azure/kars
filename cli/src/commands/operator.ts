@@ -147,8 +147,15 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     vi: false,
     fg: "white",
     label: " Agents  [↑↓ navigate] ",
-    columnSpacing: 1,
-    columnWidth: [3, 32, 14, 10, 14, 10, 5, 6, 18],
+    columnSpacing: 2,
+    // Widths line up with `headers` array below in operator.ts setData():
+    //    " "  Name  Status  Runtime  Model  Isolation  Ch   Age  Cluster
+    //    icon name  state   rk-tag   llm    iso        chnl age  ctx
+    // Cluster bumped to 22 so names like "azureclaw-demo-aks" + the
+    // " (parent)" / " (sub)" topology suffix have breathing room.
+    // Name bumped to 36 for long sandbox names; Model to 18 to fit
+    // "gpt-4.1-2025-04-14" without truncation.
+    columnWidth: [3, 36, 14, 10, 18, 10, 5, 6, 22],
     interactive: true,
     style: {
       border: { fg: "cyan" },
