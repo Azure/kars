@@ -1,29 +1,48 @@
-# Kars Code Owners
+# kars Code Owners
 # Each line is a file pattern followed by one or more owners.
+#
+# Owners are listed in order; the LAST matching pattern wins (per
+# GitHub CODEOWNERS semantics). Only direct push-permission users
+# are listed here — every owner shown below has been verified as a
+# repo collaborator with at least `push` or `maintain` role.
+#
+# When the OSS-release team alias (e.g. @Azure/kars-team) is
+# created by the org admins, replace the individual handles below
+# with the team alias (or keep both — individuals act as a safety
+# net while team membership is settling).
 
-# Core infrastructure
-/controller/                 @KarsTeam
-/inference-router/           @KarsTeam
+# ── Default fallback ───────────────────────────────────────────────
+*                            @pallakatos @lachie83 @johnsonshi
 
-# CLI and plugins
-/cli/                        @KarsTeam
+# ── Core platform ──────────────────────────────────────────────────
+/controller/                 @pallakatos @lachie83 @johnsonshi
+/inference-router/           @pallakatos @lachie83 @johnsonshi
+/a2a-gateway/                @pallakatos @lachie83 @johnsonshi
+/kars-a2a-core/              @pallakatos @lachie83 @johnsonshi
 
-# AGT Governance
-/cli/profiles/              @KarsTeam
+# ── CLI + plugins ──────────────────────────────────────────────────
+/cli/                        @pallakatos @lachie83 @johnsonshi
+/cli/profiles/               @pallakatos @lachie83 @johnsonshi
+/mesh-plugin/                @pallakatos @lachie83 @johnsonshi
+/runtimes/                   @pallakatos @lachie83 @johnsonshi
 
-# Deployment
-/deploy/                     @KarsTeam
-/Makefile                    @KarsTeam
+# ── Deploy / images / CI ───────────────────────────────────────────
+/deploy/                     @pallakatos @lachie83 @johnsonshi
+/sandbox-images/             @pallakatos @lachie83 @johnsonshi
+/.github/                    @pallakatos @lachie83 @johnsonshi
+/ci/                         @pallakatos @lachie83 @johnsonshi
 
-# Container images
-/sandbox-images/             @KarsTeam
+# ── Security-sensitive surfaces (extra review) ─────────────────────
+/SECURITY.md                 @pallakatos @lachie83 @johnsonshi
+/TRADEMARKS.md               @pallakatos @lachie83 @johnsonshi
+/LICENSE                     @pallakatos @lachie83 @johnsonshi
+/THIRD_PARTY_NOTICES.txt     @pallakatos @lachie83 @johnsonshi
+/docs/security.md            @pallakatos @lachie83 @johnsonshi
+/docs/security/              @pallakatos @lachie83 @johnsonshi
+/deploy/helm/kars/files/kars-strict.json @pallakatos @lachie83 @johnsonshi
+/deploy/helm/kars/templates/admission-*.yaml @pallakatos @lachie83 @johnsonshi
 
-# Documentation
-/docs/                       @KarsTeam
-*.md                         @KarsTeam
-
-# CI/CD
-/.github/                    @KarsTeam
-
-# Security-sensitive
-/SECURITY.md                 @KarsTeam
+# ── Docs ───────────────────────────────────────────────────────────
+/docs/                       @pallakatos @lachie83 @johnsonshi
+/README.md                   @pallakatos @lachie83 @johnsonshi
+/CHANGELOG.md                @pallakatos @lachie83 @johnsonshi

@@ -9,26 +9,17 @@ Use of Microsoft trademarks or logos in modified versions of this project must
 not cause confusion or imply Microsoft sponsorship. Any use of third-party
 trademarks or logos is subject to those third parties' policies.
 
-## Project marks
-
-"Agent Reference Stack for Kubernetes" (short form: `kars`), the kars
-wordmark, and the trident symbol used in this repository are project
-marks of Microsoft Corporation. They identify the official upstream
-distribution of the Agent Reference Stack for Kubernetes and the
-components published from this repository.
-
-You may reference these marks in factual, descriptive ways — for
-example, to state that your software interoperates with the Agent
-Reference Stack for Kubernetes, builds on it, or deploys it. You may
-not use them in a way that suggests endorsement, affiliation, or that
-your fork is the official distribution.
-
-If you fork or substantially modify the project and redistribute it,
-please use a distinct name and mark for the resulting project so
-users can tell the two apart. Removing or replacing project marks in
-source files you modify is permitted and encouraged for forks.
-
 ## Questions
 
 For trademark questions not answered above, contact the maintainers via the
 channels listed in [`SUPPORT.md`](SUPPORT.md).
+
+<!--
+  This file follows the standard Microsoft OSPO TRADEMARKS template
+  verbatim. Project-specific brand assertions (e.g. claiming the
+  "kars" wordmark or visual identity as Microsoft trademarks) are
+  intentionally omitted: they require CELA Branding sign-off before
+  being asserted in a public OSS repository. Once CELA has approved
+  the project name + visual identity, a "## Project marks" section
+  may be added back below this comment.
+-->
