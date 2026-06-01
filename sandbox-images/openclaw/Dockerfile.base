@@ -24,7 +24,7 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
 # NOTE: Docker caches RUN layers by instruction text, so @latest won't
 # re-pull once cached.  Pass --build-arg OPENCLAW_CACHE_BUST=$(date +%s)
 # or change the value below to force a fresh pull.
-ARG OPENCLAW_VERSION=latest
+ARG OPENCLAW_VERSION=2026.5.27
 ARG OPENCLAW_CACHE_BUST=0
 RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g openclaw@${OPENCLAW_VERSION}
 
