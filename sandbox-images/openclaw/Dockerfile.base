@@ -74,8 +74,21 @@ RUN openclaw skills install summarize 2>/dev/null || true && \
     openclaw skills install proactive-agent 2>/dev/null || true && \
     mkdir -p /root/.openclaw/workspace/skills
 
-# Install npm CLIs that unlock built-in OpenClaw skills
-RUN npm install -g clawhub mcporter @steipete/oracle 2>/dev/null || true
+# Install npm CLIs that unlock built-in OpenClaw skills.
+# - mcporter: TypeScript runtime + CLI that connects OpenClaw runtimes
+#   to configured Model Context Protocol servers in mcp.servers. WITHOUT
+#   this, mcp.servers config is parsed by `openclaw mcp list` but the
+#   per-session bundle-mcp tool materializer never produces callable
+#   tools for the LLM — verified live on AKS 2026-06-01 by reading
+#   require.resolve('mcporter') failing inside the running sandbox.
+# - clawhub: skill registry CLI used by `openclaw skills install`.
+# - @steipete/oracle: O3-mini oracle skill.
+#
+# NO `|| true` or `2>/dev/null` here on purpose — this is a hard
+# requirement for MCP to work end-to-end. Silent install failures
+# (e.g. registry timeouts) MUST fail the build so it's caught in CI
+# instead of shipping a sandbox image with no MCP support.
+RUN npm install -g clawhub mcporter @steipete/oracle
 
 # Pre-stage OpenClaw bundled-runtime-deps. OpenClaw 2026.4+ may lazily
 # npm-install per-channel runtime deps at first plugin load, which fails
