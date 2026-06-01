@@ -802,7 +802,9 @@ ANTHEOF
     "deny": ["sessions_spawn", "sessions_send"],
     "exec": {
       "security": "full"
-    }
+    },
+    "profile": "coding",
+    "allow": ["bundle-mcp", "group:plugins"]
   },
   "commands": {
     "mcp": true
