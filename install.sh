@@ -19,22 +19,40 @@
 #   - npm (Node.js 22 LTS recommended)
 #   - docker (optional — for pulling container images)
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh \
-#     | bash
+# Usage (company-managed device — SSO via browser is fine):
+#   gh auth login --hostname github.com --web --scopes read:packages,repo
+#   curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
 #
-#   or pin a specific release:
-#   KARS_VERSION=v0.1.0-internal.1 \
-#     curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh \
-#     | bash
+# Usage (personal / non-managed device — browser SSO blocked):
+#   Azure org SSO requires a managed device for the BROWSER auth flow,
+#   but SSO bless is per-token. Workaround:
+#     1. On your company device, generate a classic PAT:
+#          https://github.com/settings/tokens/new
+#          scopes: repo, read:packages
+#     2. On the token list page, click "Configure SSO" → "Authorize"
+#          next to "Azure"
+#     3. Send the PAT to your personal device via 1Password / Signal /
+#          encrypted note (NOT plain Slack/email)
+#     4. On the personal device:
+#          echo "ghp_..." | gh auth login --hostname github.com --with-token
+#          curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
 #
-#   or download the script first if you want to inspect it:
+#   The PAT is already SSO-blessed → install.sh works → no device-trust
+#   check anywhere. PAT is good until its expiry (set 90 days when you
+#   create it). Alternative: use GitHub Codespaces from the personal
+#   device's browser — SSO is handled server-side.
+#
+# Pin a specific release:
+#   KARS_VERSION=v0.1.0-internal.2 \
+#     curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
+#
+# Inspect before running:
 #   gh api repos/Azure/kars/contents/install.sh --jq .content | base64 -d > install.sh
 #   bash install.sh
 #
 # After install:
 #   kars --version
-#   kars up
+#   kars dev
 
 set -euo pipefail
 

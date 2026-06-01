@@ -121,10 +121,24 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 
 **Fastest path (recommended): GitHub Copilot.** If you have an active Copilot seat (Individual / Business / Enterprise), the only thing you need beyond Docker is one device-code login. No Azure account, no PAT, no key files.
 
-> **Prerequisites:** Docker Desktop · Node.js 22+ · Rust 1.88+ (for building the CLI from source) · one of: an active GitHub Copilot seat, an Azure AI Foundry deployment, or a GitHub PAT with `models:read`.
+> **Prerequisites:** Docker Desktop · Node.js 22+ · one of: an active GitHub Copilot seat, an Azure AI Foundry deployment, or a GitHub PAT with `models:read`.
+
+### Option 1 — install from a private release (no build)
+
+If you're an Azure org member with read access:
 
 ```bash
-# Build the CLI
+brew install gh node@22
+gh auth login --hostname github.com --web --scopes read:packages,repo
+curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
+kars dev
+```
+
+Pin a specific release with `KARS_VERSION=v0.1.0-internal.2 …`. Pre-pull all container images with `KARS_PULL_IMAGES=1 …`. See [`install.sh`](./install.sh) header for the **personal / non-managed device** path (PAT pre-blessed on a company device, used from anywhere).
+
+### Option 2 — build from source
+
+```bash
 git clone https://github.com/Azure/kars.git && cd kars
 cd cli && npm ci && npm run build && npm link
 
