@@ -75,20 +75,11 @@ RUN openclaw skills install summarize 2>/dev/null || true && \
     mkdir -p /root/.openclaw/workspace/skills
 
 # Install npm CLIs that unlock built-in OpenClaw skills.
-# - mcporter: TypeScript runtime + CLI that connects OpenClaw runtimes
-#   to configured Model Context Protocol servers in mcp.servers. WITHOUT
-#   this, mcp.servers config is parsed by `openclaw mcp list` but the
-#   per-session bundle-mcp tool materializer never produces callable
-#   tools for the LLM — verified live on AKS 2026-06-01 by reading
-#   require.resolve('mcporter') failing inside the running sandbox.
-# - clawhub: skill registry CLI used by `openclaw skills install`.
-# - @steipete/oracle: O3-mini oracle skill.
-#
-# NO `|| true` or `2>/dev/null` here on purpose — this is a hard
-# requirement for MCP to work end-to-end. Silent install failures
-# (e.g. registry timeouts) MUST fail the build so it's caught in CI
-# instead of shipping a sandbox image with no MCP support.
-RUN npm install -g clawhub mcporter @steipete/oracle
+# MOVED to AFTER the Node.js tarball extraction (~line 210) — see
+# the dedicated `RUN npm install -g clawhub mcporter @steipete/oracle`
+# block down there for the full rationale and bug-history comment.
+# This stays as a comment placeholder so anyone re-reading the
+# Dockerfile in original-flow order sees why the install isn't here.
 
 # Pre-stage OpenClaw bundled-runtime-deps. OpenClaw 2026.4+ may lazily
 # npm-install per-channel runtime deps at first plugin load, which fails
@@ -203,6 +194,26 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz && \
     npm install -g npm@latest
+
+# Install npm CLIs that unlock built-in OpenClaw skills. MUST come AFTER
+# the Node.js tarball extraction above — the tarball overwrites
+# /usr/local/bin/* with its own shims (node/npm/npx/corepack only),
+# wiping any /usr/local/bin/<cmd> symlinks created by earlier
+# `npm install -g`. Result: package contents survive at
+# /usr/local/lib/node_modules/<pkg>/ but their bin shim is gone, so
+# `command -v <cmd>` fails and openclaw's skill check reports
+# "Missing requirements: bin:mcporter" on every running pod.
+#
+# - mcporter: TS runtime + CLI that connects OpenClaw runtimes to the
+#   `mcp.servers` config. WITHOUT this `openclaw mcp list` shows the
+#   servers but the per-session bundle-mcp materializer never spawns,
+#   so MCP tools never reach the LLM.
+# - clawhub: skill registry CLI used by `openclaw skills install`.
+# - @steipete/oracle: O3-mini oracle skill.
+#
+# NO `|| true` or `2>/dev/null` — silent install failures MUST fail
+# the build so we catch them in CI instead of shipping a broken image.
+RUN npm install -g clawhub mcporter @steipete/oracle
 
 # AGT governance SDK — install from vendored wheels (GitHub release v3.0.0)
 # Avoids PyPI dependency during build (files.pythonhosted.org can be unreachable)
