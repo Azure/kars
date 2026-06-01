@@ -23,27 +23,7 @@ Hardened sandbox per agent. Zero credentials in the agent. Every external call g
 
 ## Status
 
-> 📌 **NOTE: This is not an officially supported Microsoft product.**
-> kars is an open-source reference implementation maintained under the
-> Azure GitHub organization. It is intended for teams building real
-> agent platforms on Kubernetes who want a hardened starting point
-> rather than a from-scratch rebuild. There is no SLA, support
-> contract, or product roadmap commitment attached to it. See
-> [SUPPORT.md](SUPPORT.md), [TRADEMARKS.md](TRADEMARKS.md), and
-> [LICENSE](LICENSE) for the legal framing.
->
-> ⚠️ **Microsoft-signed images and packages are coming soon.** The
-> container images (controller, inference-router, a2a-gateway,
-> sandbox-base, conformance-runner), npm packages (`@kars/cli`,
-> `@kars/mesh`, runtime adapters), and Rust crates (`kars-a2a-core`,
-> `kars-eval-corpus`) will be published via
-> [ESRP](https://aka.ms/esrp-onboarding) to **MCR**, **npmjs.com**,
-> and **crates.io** — signed by Microsoft — once the ESRP pipeline
-> integration completes. Until then the install path is
-> build-from-source after cloning this repository (see
-> [Try it in five minutes](#try-it-in-five-minutes)). All code,
-> CRDs, Helm charts, and architecture documents in this repo are
-> reviewed and ready to use today.
+> 📌 **NOTE: This is not an officially supported Microsoft product.** See [Project status](#project-status) below for distribution, framing, and limitations.
 
 ---
 
@@ -316,6 +296,10 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 ---
 
 ## Project status
+
+> 📌 **NOTE: This is not an officially supported Microsoft product.** kars is an open-source reference implementation maintained under the Azure GitHub organization. No SLA, support contract, or product roadmap commitment is attached — see [SUPPORT.md](SUPPORT.md), [TRADEMARKS.md](TRADEMARKS.md), and [LICENSE](LICENSE).
+
+> ⚠️ **Microsoft-signed packages coming soon.** Until they land on crates.io and npm, install via build-from-source after cloning (see [Try it in five minutes](#try-it-in-five-minutes)). All code, CRDs, Helm charts, and docs in this repo are reviewed and usable today.
 
 `v0.1.0`. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E, chaos-tier fault injection, CNCF conformance self-assessment, plus a documented manual matrix on AKS — see [`tests/`](tests/)). The CRD surface is served at `v1alpha1` and may change between minor releases; the data path, security model, and audit chain are stable. See **[`CHANGELOG.md`](CHANGELOG.md)** for the change log and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
 
