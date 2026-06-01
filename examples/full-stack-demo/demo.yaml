@@ -89,7 +89,7 @@ spec:
   url: "https://mcp.example.com/sse"
   productionMode: false   # dev-mode: skip OAuth + don't actually call
   allowedTools:
-    - "*"                  # whitelist all tools (tighten for prod)
+    - "*"                  # allowlist all tools (tighten for prod)
   displayName: "Demo MCP Server"
 
 ---

@@ -94,7 +94,7 @@ RUN cd /opt/kars-plugin && \
     fi
 
 # Harden image-level code: root-owned, read-only — prevents agent from tampering
-# with the master copy that gets re-installed on every container start.
+# with the canonical copy that gets re-installed on every container start.
 RUN chmod -R a-w /opt/kars-plugin && \
     chmod -R a+rX /opt/kars-plugin
 

@@ -372,7 +372,7 @@ mod upstream_compat_tests {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct A2aIngressConfig {
-    /// Master switch. `false` (or block absent) ⇒ no inbound A2A.
+    /// Main toggle. `false` (or block absent) ⇒ no inbound A2A.
     /// Setting this back to `false` triggers immediate (target < 30s)
     /// teardown of the Service + CNP + ConfigMap entry.
     #[serde(default)]
