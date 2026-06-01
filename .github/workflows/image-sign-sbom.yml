@@ -2,7 +2,17 @@ name: Image Build, Sign & SBOM
 
 on:
   push:
-    tags: ["v*"]
+    # Only fire for public-release tags (strict semver). Internal /
+    # preview tags (v*-internal*, v*-preview*) go through
+    # release-internal.yml which uses private GHCR — no ACR creds needed.
+    # This workflow targets karsacr.azurecr.io which requires ACR_USERNAME
+    # /ACR_PASSWORD secrets that won't exist until MCR onboarding (#385)
+    # completes.
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-alpha*'
+      - 'v[0-9]+.[0-9]+.[0-9]+-beta*'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc*'
   workflow_dispatch:
     inputs:
       version:
