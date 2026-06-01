@@ -186,3 +186,85 @@ shipped 50+ releases this way without picking "ESRP Client".
 - **Rust toolchain pinned** to `1.88.0` workspace-wide. ESRP pipeline
   installs the exact pinned version with a SHA256-verified rustup-init.
 - **Node.js** consumers expected on **20.x or 22.x**. ESRP pipeline uses 22.
+
+---
+
+## Consuming AGT from upstream `main` (temporary)
+
+kars depends on **Microsoft AGT** (the Agent Governance Toolkit) for both the
+Rust mesh primitives and the TypeScript SDK. We need fixes that landed in
+upstream `main` (PR [#2090](https://github.com/microsoft/agent-governance-toolkit/pull/2090),
+[#2719](https://github.com/microsoft/agent-governance-toolkit/pull/2719), and
+CI-stabilisation follow-ups) but are NOT yet in any AGT release.
+
+While we wait for an AGT release that contains the fix, kars consumes AGT
+from a pinned commit (`bae5de3` on `microsoft/agent-governance-toolkit`).
+This is wired in two places:
+
+### Rust — `[patch.crates-io]` in `Cargo.toml`
+
+```toml
+agentmesh = "4.0.0"          # floor — what we declare we want
+agentmesh-mcp = "4.0.0"
+
+[patch.crates-io]
+agentmesh = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bae5de3...", package = "agentmesh" }
+agentmesh-mcp = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bae5de3...", package = "agentmesh-mcp" }
+```
+
+When upstream cuts a release containing the pinned commit, drop the
+`[patch.crates-io]` block and Cargo automatically resolves from crates.io.
+
+### npm — vendored tarball in `vendor/agt/`
+
+The AGT TypeScript SDK has no `prepare` script, so installing from a git
+ref directly doesn't trigger the TypeScript build. We instead:
+
+1. Clone AGT at the pinned SHA
+2. Run `npm install && npm run build && npm pack`
+3. Commit the produced `.tgz` to `vendor/agt/`
+4. Reference it via `"@microsoft/agent-governance-sdk": "file:../vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-<sha>.tgz"`
+
+When upstream cuts an npm release containing the fix, flip back to the
+published version and delete `vendor/agt/`.
+
+### CI guard — `ci/check-agt-released.sh`
+
+Runs daily via `.github/workflows/check-agt-released.yml`. Walks the AGT
+release tags via the GitHub API, checks whether any of them contains the
+pinned commit, and opens a tracking issue (labelled `release`,
+`onboarding`) the moment a fixed release appears. Closes idempotently if
+already open. This bounds the time we sit on the git pin.
+
+### Updating the pin to a newer AGT commit
+
+If you need a newer AGT main than what's pinned today:
+
+```bash
+# 1. Pick the new commit SHA from microsoft/agent-governance-toolkit main
+NEW_SHA=$(gh api repos/microsoft/agent-governance-toolkit/commits/main --jq .sha)
+SHORT=$(echo "$NEW_SHA" | cut -c1-7)
+
+# 2. Update Cargo.toml [patch.crates-io] rev fields
+sed -i.bak "s|bae5de3[0-9a-f]*|$NEW_SHA|g" Cargo.toml && rm Cargo.toml.bak
+cargo update -p agentmesh -p agentmesh-mcp
+
+# 3. Rebuild + repack the TS SDK
+git clone --depth 1 https://github.com/microsoft/agent-governance-toolkit /tmp/agt
+( cd /tmp/agt && git fetch --depth 1 origin "$NEW_SHA" && git checkout "$NEW_SHA" )
+( cd /tmp/agt/agent-governance-typescript && npm install && npm run build && npm pack )
+rm vendor/agt/microsoft-agent-governance-sdk-*.tgz
+cp /tmp/agt/agent-governance-typescript/microsoft-agent-governance-sdk-*.tgz \
+   "vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-${SHORT}.tgz"
+
+# 4. Update package.json file: paths
+for f in mesh-plugin/package.json runtimes/openclaw/package.json; do
+  sed -i.bak "s|microsoft-agent-governance-sdk-4.0.0-agt-[0-9a-f]*.tgz|microsoft-agent-governance-sdk-4.0.0-agt-${SHORT}.tgz|g" "$f"
+  rm "${f}.bak"
+done
+
+# 5. Reinstall + checksum
+( cd mesh-plugin && npm install )
+( cd runtimes/openclaw && npm install )
+( cd vendor/agt && shasum -a 256 *.tgz > SHA256SUMS )
+```

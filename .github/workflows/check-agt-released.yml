@@ -1,0 +1,29 @@
+name: Check AGT Released
+
+# Runs daily to detect when Microsoft AGT publishes a release that
+# contains the fix-commits we currently consume via the git pin in
+# Cargo.toml. Opens a tracking issue when a fixed release appears
+# so we can flip back to the registry version.
+
+on:
+  schedule:
+    # 06:30 UTC daily — well after any nightly AGT release jobs.
+    - cron: '30 6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write   # the script opens an issue when a fixed release appears
+
+jobs:
+  check:
+    name: Check AGT release status
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Run check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash ci/check-agt-released.sh

@@ -78,9 +78,19 @@ hex = "0.4"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
-# AGT governance (native — replaces former Python sidecar)
-agentmesh = "3.7.0"
-agentmesh-mcp = "3.7.0"
+# AGT governance (native — replaces former Python sidecar).
+#
+# Pinned to a version on crates.io as the FLOOR, but redirected to
+# AGT main via [patch.crates-io] below until a release that contains
+# our fixes lands. When upstream cuts a fixed release:
+#   1. Update the version below to the new released version
+#   2. Delete the [patch.crates-io] block at the bottom of this file
+#   3. Run `cargo update -p agentmesh -p agentmesh-mcp`
+# CI guard `ci/check-agt-released.sh` runs daily and opens a tracking
+# issue the moment a release containing the merged fix-commit appears
+# on crates.io, so we don't sit on the git pin longer than necessary.
+agentmesh = "4.0.0"
+agentmesh-mcp = "4.0.0"
 
 # Benchmarking (S16 — chaos tier perf baselines). Used by `controller/benches/`
 # and `inference-router/benches/`. Kept out of the binary builds via dev-deps.
@@ -90,3 +100,18 @@ criterion = { version = "0.8", default-features = false, features = ["html_repor
 lto = true
 codegen-units = 1
 strip = true
+
+# ─── Temporary git override for AGT unreleased main ───────────────
+# Pinned to microsoft/agent-governance-toolkit@bae5de3 (2026-06-01)
+# which contains the fixes we authored upstream (PR #2090, PR #2719
+# and follow-up CI stabilisation). crates.io 4.0.0 was published
+# 2026-05-29 — BEFORE these fixes merged — so the released version
+# is missing them.
+#
+# Remove this whole [patch.crates-io] block when a release that
+# includes commit bae5de3 (or later) hits crates.io. The
+# `ci/check-agt-released.sh` daily check files an issue when that
+# happens, so this pin is bounded in time.
+[patch.crates-io]
+agentmesh = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bae5de307731c399d9121489c4597577f120d040", package = "agentmesh" }
+agentmesh-mcp = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bae5de307731c399d9121489c4597577f120d040", package = "agentmesh-mcp" }
