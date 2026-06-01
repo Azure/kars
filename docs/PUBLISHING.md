@@ -159,6 +159,23 @@ Hardcoded in pipeline:
   (PME tenant where ESRP certs live; do NOT add as ADO variable — causes
   cyclical reference warning, per AGT's experience.)
 
+### ESRP onboarding form answers
+
+When filling out the ESRP onboarding request (https://aka.ms/esrp-onboarding):
+
+| Field | Value | Why |
+|---|---|---|
+| **Integration Technology** | **VSTS Build** | This is the ADO YAML task path (`EsrpRelease@11`). NOT "ESRP Client" — that's for standalone build services calling ESRP REST APIs directly without ADO. NOT "CloudBuild" — that's only for projects using Microsoft's internal CloudBuild. AGT uses VSTS Build and ships every release this way. |
+| **Build system** | Azure DevOps Pipelines | Our `.github/pipelines/esrp-publish.yml` is an ADO YAML pipeline. |
+| **Signing scenarios** | Sign + Release | Sign = Authenticode for binaries. Release = package distribution to npm / crates.io / MCR. |
+| **Repository** | `Azure/kars` (GitHub) | GitHub-hosted source, ADO-hosted pipeline that pulls from it. |
+| **ADO project** | (TBD per #386) | Whichever Microsoft ADO project ends up hosting kars CI/CD. |
+
+The form note that says "Release customers should select ESRP Client unless
+you will only be submitting via the ESRP Release UI" is misleading — the
+`EsrpRelease@11` ADO task IS the supported VSTS-Build release path. AGT has
+shipped 50+ releases this way without picking "ESRP Client".
+
 ---
 
 ## Compatibility commitments
