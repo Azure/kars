@@ -2790,13 +2790,24 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                                         "requests": {"cpu": "50m", "memory": "64Mi"},
                                         "limits": {"cpu": "200m", "memory": "256Mi"}
                                     },
+                                    // readOnlyRootFilesystem MUST be true so the
+                                    // posture-lock VAP doesn't block finalizer
+                                    // removal on completion — without this,
+                                    // every reaped cronjob pod gets stuck on
+                                    // its `batch.kubernetes.io/job-tracking`
+                                    // finalizer and the sandbox namespace
+                                    // can never fully Terminate. /tmp is
+                                    // covered by the emptyDir below for the
+                                    // curl + kubectl scratch writes.
                                     "securityContext": {
                                         "runAsNonRoot": true,
                                         "runAsUser": 65534,
-                                        "readOnlyRootFilesystem": false,
+                                        "readOnlyRootFilesystem": true,
                                         "allowPrivilegeEscalation": false
-                                    }
-                                }]
+                                    },
+                                    "volumeMounts": [{"name": "scratch", "mountPath": "/tmp"}]
+                                }],
+                                "volumes": [{"name": "scratch", "emptyDir": {"sizeLimit": "128Mi"}}]
                             }
                         }
                     }

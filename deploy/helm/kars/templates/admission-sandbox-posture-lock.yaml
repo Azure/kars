@@ -57,49 +57,103 @@ spec:
       expression: |
         (object.spec.?containers.orValue([])) +
         (object.spec.?initContainers.orValue([]))
-    - name: privilegedSet
+    - name: allContainersOld
+      expression: |
+        (oldObject.spec.?containers.orValue([])) +
+        (oldObject.spec.?initContainers.orValue([]))
+    - name: privilegedSetNew
       expression: |
         variables.allContainersNew.exists(c,
           c.?securityContext.?privileged.orValue(false) == true)
-    - name: privEscSet
+    - name: privilegedSetOld
+      expression: |
+        variables.allContainersOld.exists(c,
+          c.?securityContext.?privileged.orValue(false) == true)
+    - name: privilegedAdded
+      expression: |
+        variables.privilegedSetNew && !variables.privilegedSetOld
+    - name: privEscSetNew
       expression: |
         variables.allContainersNew.exists(c,
           c.?securityContext.?allowPrivilegeEscalation.orValue(false) == true)
-    - name: rofsDowngraded
+    - name: privEscSetOld
+      expression: |
+        variables.allContainersOld.exists(c,
+          c.?securityContext.?allowPrivilegeEscalation.orValue(false) == true)
+    - name: privEscAdded
+      expression: |
+        variables.privEscSetNew && !variables.privEscSetOld
+    - name: rofsFalseNew
       expression: |
         variables.allContainersNew.exists(nc,
           nc.?securityContext.?readOnlyRootFilesystem.orValue(true) == false)
-    - name: runAsNonRootDowngraded
+    - name: rofsFalseOld
+      expression: |
+        variables.allContainersOld.exists(oc,
+          oc.?securityContext.?readOnlyRootFilesystem.orValue(true) == false)
+    - name: rofsDowngraded
+      expression: |
+        variables.rofsFalseNew && !variables.rofsFalseOld
+    - name: runAsNonRootFalseNew
       expression: |
         object.spec.?securityContext.?runAsNonRoot.orValue(true) == false ||
         variables.allContainersNew.exists(nc,
           nc.?securityContext.?runAsNonRoot.orValue(true) == false)
-    - name: seccompRemoved
+    - name: runAsNonRootFalseOld
+      expression: |
+        oldObject.spec.?securityContext.?runAsNonRoot.orValue(true) == false ||
+        variables.allContainersOld.exists(oc,
+          oc.?securityContext.?runAsNonRoot.orValue(true) == false)
+    - name: runAsNonRootDowngraded
+      expression: |
+        variables.runAsNonRootFalseNew && !variables.runAsNonRootFalseOld
+    - name: seccompRemovedNew
       expression: |
         !has(object.spec.securityContext) ||
         !has(object.spec.securityContext.seccompProfile) ||
         variables.allContainersNew.exists(nc,
           has(nc.securityContext) && has(nc.securityContext.seccompProfile) &&
           nc.securityContext.seccompProfile.type == 'Unconfined')
+    - name: seccompRemovedOld
+      expression: |
+        !has(oldObject.spec.securityContext) ||
+        !has(oldObject.spec.securityContext.seccompProfile) ||
+        variables.allContainersOld.exists(oc,
+          has(oc.securityContext) && has(oc.securityContext.seccompProfile) &&
+          oc.securityContext.seccompProfile.type == 'Unconfined')
+    - name: seccompDowngraded
+      expression: |
+        variables.seccompRemovedNew && !variables.seccompRemovedOld
     - name: ephemeralAdded
       expression: |
         size(object.spec.?ephemeralContainers.orValue([])) >
         size(oldObject.spec.?ephemeralContainers.orValue([]))
   validations:
-    - expression: "!variables.privilegedSet"
-      message: "privileged=true is not permitted on kars sandbox pods"
+    # All checks are TRUE-DELTAS (oldObject was OK → object is NOT OK).
+    # Critical reason: bare absolute checks (the previous shape) fire on
+    # EVERY pod UPDATE — including PATCH operations that only modify
+    # metadata.finalizers. CronJob pods complete with the
+    # `batch.kubernetes.io/job-tracking` finalizer that the controller
+    # must REMOVE for the pod to reap. If those pods have any (legacy)
+    # field that fails the absolute check, the finalizer-removal PATCH
+    # is blocked → pod stuck Terminating → namespace stuck Terminating
+    # → `kars destroy` is broken forever. Delta checks let pods that
+    # were created in a (legacy, dangerous, since-fixed) shape die
+    # gracefully without ever being re-validated against the new rules.
+    - expression: "!variables.privilegedAdded"
+      message: "privileged=true cannot be ADDED to a kars sandbox pod via UPDATE (delta check)"
       reason: Forbidden
-    - expression: "!variables.privEscSet"
-      message: "allowPrivilegeEscalation=true is not permitted on kars sandbox pods"
+    - expression: "!variables.privEscAdded"
+      message: "allowPrivilegeEscalation=true cannot be ADDED to a kars sandbox pod via UPDATE (delta check)"
       reason: Forbidden
     - expression: "!variables.rofsDowngraded"
-      message: "readOnlyRootFilesystem=false is not permitted on kars sandbox pods"
+      message: "readOnlyRootFilesystem=true cannot be downgraded to false via UPDATE (delta check)"
       reason: Forbidden
     - expression: "!variables.runAsNonRootDowngraded"
-      message: "runAsNonRoot=false is not permitted on kars sandbox pods"
+      message: "runAsNonRoot=true cannot be downgraded to false via UPDATE (delta check)"
       reason: Forbidden
-    - expression: "!variables.seccompRemoved"
-      message: "seccompProfile is required on kars sandbox pods (no Unconfined, no removal)"
+    - expression: "!variables.seccompDowngraded"
+      message: "seccompProfile cannot be removed/Unconfined'd via UPDATE (delta check)"
       reason: Forbidden
     - expression: "!variables.ephemeralAdded"
       message: "ephemeralContainers are not permitted in kars sandbox namespaces"
