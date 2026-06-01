@@ -802,6 +802,11 @@ ANTHEOF
     "deny": ["sessions_spawn", "sessions_send"],
     "exec": {
       "security": "full"
+    },
+    "sandbox": {
+      "tools": {
+        "alsoAllow": ["bundle-mcp"]
+      }
     }
   },
   "commands": {
