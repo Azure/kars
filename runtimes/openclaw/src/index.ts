@@ -524,21 +524,43 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
     try {
       // When AGT_OAUTH_TOKEN is set (Entra-verified tier via /v1/mesh-token
-      // or WI direct exchange), attach it as a Bearer header on the
-      // WebSocket Upgrade to the relay. The relay's entra-verify path
-      // reads Authorization here; without it, the peer is counted as
-      // unverified even when registry-tier upgrade succeeds. Browser-style
-      // WebSocket doesn't support custom headers — use the `ws` npm package's
-      // node-only constructor which does.
+      // or WI direct exchange), inject it into the SDK's WebSocket connect
+      // frame so the relay's entra-verifier path picks it up.
+      //
+      // History (correcting an earlier wrong fix):
+      //  - I first tried attaching `Authorization: Bearer ${token}` on the
+      //    WebSocket Upgrade header. That works at the HTTP layer but the
+      //    AGT Python relay (agentmesh/relay/app.py) doesn't read it —
+      //    it reads `frame.get("token")` from the FIRST `{type:"connect"}`
+      //    frame the SDK sends after onopen. So Bearer-on-Upgrade was
+      //    cargo-culting from other Bearer protocols.
+      //  - The right fix: wrap the WS's send() to JSON-parse outgoing
+      //    frames and inject `token` into the "connect" type one. Then
+      //    pass-through everything else verbatim. Browser/node WS
+      //    constructors don't expose a frame hook, so a proxy is needed.
       let wsFactory: ((url: string) => unknown) | undefined;
       const meshToken = process.env.AGT_OAUTH_TOKEN || "";
       if (meshToken) {
         // @ts-expect-error — `ws` is a peer dep, no @types/ws to keep deps slim
         const wsMod: any = await import("ws");
         const WS = wsMod.default ?? wsMod;
-        wsFactory = (url: string) => new WS(url, undefined, {
-          headers: { Authorization: `Bearer ${meshToken}` },
-        });
+        wsFactory = (url: string) => {
+          const ws: any = new WS(url);
+          const origSend = ws.send.bind(ws);
+          ws.send = function patchedSend(data: any, ...rest: any[]) {
+            try {
+              if (typeof data === "string") {
+                const frame = JSON.parse(data);
+                if (frame?.type === "connect" && !frame.token) {
+                  frame.token = meshToken;
+                  return origSend(JSON.stringify(frame), ...rest);
+                }
+              }
+            } catch { /* not JSON or already mutated — pass through */ }
+            return origSend(data, ...rest);
+          };
+          return ws;
+        };
       }
       agtMeshClient = await meshMod.createMeshTransport({
         relayUrl,
@@ -552,7 +574,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         displayName: agtSandboxName,
         wsFactory,
       });
-      log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @kars/mesh)${meshToken ? " + Entra-verified WS" : ""}`);
+      log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @kars/mesh)${meshToken ? " + Entra-verified WS (connect.token)" : ""}`);
     } catch (swapErr: any) {
       log.warn?.(`mesh transport init failed: ${swapErr?.message ?? swapErr}`);
       throw swapErr;
