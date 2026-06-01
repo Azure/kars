@@ -10,6 +10,8 @@
  */
 
 import { createCli } from "./cli.js";
+import { bootstrapKubeContext } from "./lib/kube-bootstrap.js";
 
+await bootstrapKubeContext(process.argv);
 const program = createCli();
 program.parse(process.argv);
