@@ -760,11 +760,49 @@ async function helmInstall(
     args.push("--set", kv);
   }
   const { stdout } = await execa(helm, args);
+  // Two-pass apply to avoid the CRD-establishment race: instances of
+  // a CRD (e.g. our kars-default ToolPolicy) can't be created before
+  // the apiserver has Established the CRD itself, and a single
+  // `kubectl apply -f -` doesn't wait between them. Split the helm
+  // output into CRDs vs everything else, apply CRDs first, wait,
+  // then apply the rest. Idempotent — re-runs just re-apply.
+  const docs = stdout.split(/^---\s*$/m).filter(d => d.trim().length > 0);
+  const crdDocs: string[] = [];
+  const otherDocs: string[] = [];
+  for (const doc of docs) {
+    if (/^kind:\s*CustomResourceDefinition\s*$/m.test(doc)) crdDocs.push(doc);
+    else otherDocs.push(doc);
+  }
+  if (crdDocs.length > 0) {
+    await execa(
+      kubectl,
+      ["apply", "-f", "-", "--server-side", "--force-conflicts"],
+      { input: crdDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
+    );
+    // Wait for each kars.azure.com CRD to be Established before
+    // applying CRs of those kinds. 60s budget is generous; usually <2s.
+    await execa(
+      kubectl,
+      ["wait", "--for=condition=Established", "--timeout=60s",
+        "crd", "-l", "app.kubernetes.io/name=kars"],
+      { stdio: "pipe" },
+    ).catch(async () => {
+      // Fallback: wait on the specific CRDs we know our chart ships.
+      await execa(kubectl, [
+        "wait", "--for=condition=Established", "--timeout=60s",
+        "crd/toolpolicies.kars.azure.com",
+        "crd/karssandboxes.kars.azure.com",
+        "crd/inferencepolicies.kars.azure.com",
+        "crd/karsmemories.kars.azure.com",
+        "crd/mcpservers.kars.azure.com",
+      ], { stdio: "pipe" }).catch(() => undefined);
+    });
+  }
   await execa(
     kubectl,
     ["apply", "-f", "-", "--server-side", "--force-conflicts"],
     {
-      input: stdout,
+      input: otherDocs.join("\n---\n"),
       stdio: ["pipe", "inherit", "inherit"],
     },
   );
