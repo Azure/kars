@@ -7,12 +7,37 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](LICENSE)
 [![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Azure/kars/actions/workflows/ci.yml)
 [![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry-0078D4)](https://azure.microsoft.com)
+[![Status: Public Preview](https://img.shields.io/badge/Status-Public%20Preview-orange)](#status--public-preview)
 
 Hardened sandbox per agent. Zero credentials in the agent. Every external call goes through a Rust router that enforces identity, content safety, governance, and audit. End-to-end encrypted inter-agent messaging. One CLI for the whole loop — laptop to AKS.
 
 [**Try it on your laptop →**](#try-it-in-five-minutes) &nbsp;·&nbsp; [**Run it on AKS →**](docs/getting-started.md#step-2--deploy-to-aks) &nbsp;·&nbsp; [**Architecture →**](docs/architecture.md) &nbsp;·&nbsp; [**Blueprints →**](docs/blueprints/00-index.md)
 
 </div>
+
+---
+
+## Status — Public Preview
+
+> ⚠️ **Microsoft-signed images and packages are in progress.** The container
+> images (controller, inference-router, a2a-gateway, sandbox-base,
+> conformance-runner), npm packages (`@kars/cli`, `@kars/mesh`, runtime
+> adapters), and Rust crates (`kars-a2a-core`, `kars-eval-corpus`) will be
+> published via [ESRP](https://aka.ms/esrp-onboarding) to **MCR**,
+> **npmjs.com**, and **crates.io** — signed by Microsoft — as soon as the
+> ESRP integration completes.
+>
+> Until then, the **only supported install path is build-from-source after
+> cloning this repository** (see [Try it in five minutes](#try-it-in-five-minutes)).
+> All code, CRDs, Helm charts, and architecture documents in this repo are
+> production-ready and reviewed; only the binary distribution channel is
+> still being wired up.
+>
+> Tracking issues: [#384 ESRP](https://github.com/Azure/kars/issues/384) ·
+> [#385 MCR](https://github.com/Azure/kars/issues/385) ·
+> [#386 ADO pipeline](https://github.com/Azure/kars/issues/386) ·
+> [#387 npm scope](https://github.com/Azure/kars/issues/387) ·
+> [#388 crates.io](https://github.com/Azure/kars/issues/388).
 
 ---
 
@@ -121,22 +146,7 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 
 **Fastest path (recommended): GitHub Copilot.** If you have an active Copilot seat (Individual / Business / Enterprise), the only thing you need beyond Docker is one device-code login. No Azure account, no PAT, no key files.
 
-> **Prerequisites:** Docker Desktop · Node.js 22+ · one of: an active GitHub Copilot seat, an Azure AI Foundry deployment, or a GitHub PAT with `models:read`.
-
-### Option 1 — install from a private release (no build)
-
-If you're an Azure org member with read access:
-
-```bash
-brew install gh node@22
-gh auth login --hostname github.com --web --scopes read:packages,repo
-curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
-kars dev
-```
-
-Pin a specific release with `KARS_VERSION=v0.1.0-internal.2 …`. Pre-pull all container images with `KARS_PULL_IMAGES=1 …`. See [`install.sh`](./install.sh) header for the **personal / non-managed device** path (PAT pre-blessed on a company device, used from anywhere).
-
-### Option 2 — build from source
+> **Prerequisites:** Docker Desktop · Node.js 22+ · Rust 1.88+ · one of: an active GitHub Copilot seat, an Azure AI Foundry deployment, or a GitHub PAT with `models:read`.
 
 ```bash
 git clone https://github.com/Azure/kars.git && cd kars
@@ -145,6 +155,27 @@ cd cli && npm ci && npm run build && npm link
 # Launch a sandbox locally — Docker only, no Azure, no AKS
 kars dev
 ```
+
+The first `kars dev` pulls + caches the sandbox base image (~10 min once) and then launches near-instantly thereafter.
+
+<details>
+<summary><strong>For Microsoft / Azure-org members: skip the build</strong></summary>
+
+While ESRP is still being wired up, internal preview releases live on the private GitHub Releases page + private GHCR. If you have Azure-org access:
+
+```bash
+brew install gh node@22
+gh auth login --hostname github.com --web --scopes read:packages,repo
+curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
+kars dev
+```
+
+Pin a specific release: `KARS_VERSION=v0.1.0-internal.2 …`.
+Pre-pull all container images: `KARS_PULL_IMAGES=1 …`.
+See [`install.sh`](./install.sh) header for the **personal / non-managed device** path (PAT pre-blessed on a company device, used from anywhere).
+
+This path goes away when ESRP-signed images land on MCR + npmjs.com + crates.io.
+</details>
 
 On first run `kars dev` shows a 3-way provider picker:
 

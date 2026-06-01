@@ -1,9 +1,13 @@
 # kars Publishing Strategy
 
-> **Status (2026-06-01):** Planning — onboarding to ESRP + MCR in progress.
-> Nothing in this repo currently publishes to public registries.
-> The "ship it" path is documented here so reviewers can validate
-> the design before the first GA release.
+> **Status (2026-06-01):** Legal review approved · ESRP onboarding done ·
+> ADO pipeline integration in progress · MCR / npm scope / crates.io
+> publishing wires up next. Until then the official supported install
+> path is **build-from-source after cloning the repo** (see
+> [main README](../README.md#try-it-in-five-minutes)). Internal
+> wall-off releases (private GHCR + private GitHub Releases) are
+> available to Microsoft / Azure-org members via
+> [`install.sh`](../install.sh).
 
 This document describes how kars artefacts will be published to public
 registries, with an explicit "keep it private until day-0" path and the
