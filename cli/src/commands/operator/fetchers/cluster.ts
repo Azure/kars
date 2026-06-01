@@ -16,7 +16,7 @@
  */
 
 import { execa } from "execa";
-import type { ClusterHealth, MeshHealth } from "../types.js";
+import type { ClusterHealth, MeshHealth, SandboxInfo } from "../types.js";
 import { kctl, timeSince } from "../helpers.js";
 
 export async function fetchMeshHealth(devMode: boolean, kubeContext?: string): Promise<MeshHealth> {
@@ -125,6 +125,24 @@ export async function fetchMeshHealthMulti(
     }
   }
   return merged;
+}
+
+/**
+ * Single entry point used by the operator: picks single- vs
+ * multi-cluster automatically. Lifted out of operator.ts to keep
+ * that file under the §4.3 LOC cap; behaviour is identical.
+ */
+export async function resolveMeshHealth(
+  devMode: boolean,
+  kubeContext: string | undefined,
+  sandboxes: SandboxInfo[],
+): Promise<MeshHealth> {
+  if (kubeContext) return fetchMeshHealth(devMode, kubeContext);
+  const contexts = Array.from(new Set(
+    sandboxes.filter((s) => s.runtime !== "docker" && s.kubeContext)
+      .map((s) => s.kubeContext as string),
+  ));
+  return fetchMeshHealthMulti(devMode, contexts);
 }
 
 export async function fetchClusterHealth(devMode: boolean, kubeContext?: string): Promise<ClusterHealth> {

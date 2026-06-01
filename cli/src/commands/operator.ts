@@ -38,6 +38,7 @@ import {
   fetchMeshHealth,
   fetchMeshHealthMulti,
   fetchClusterHealth,
+  resolveMeshHealth,
 } from "./operator/fetchers/cluster.js";
 import { createActions } from "./operator/actions.js";
 import { renderCluster as _renderCluster } from "./operator/render/cluster.js";
@@ -566,28 +567,8 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       if (fetchCluster) {
         promises.push(
           fetchClusterHealth(devMode, kubeContext).then((d) => { clusterData = d; }).catch(() => {}),
+          resolveMeshHealth(devMode, kubeContext, sandboxes).then((d) => { meshHealth = d; }).catch(() => {}),
         );
-        if (kubeContext) {
-          // Single-cluster mode — direct probe.
-          promises.push(
-            fetchMeshHealth(devMode, kubeContext).then((d) => { meshHealth = d; }).catch(() => {}),
-          );
-        } else {
-          // Multi-cluster mode — derive the set of contexts from the
-          // sandboxes we just fetched (they're already labelled with
-          // their kubeContext) and aggregate mesh health across them.
-          // Without this the mesh panel stays red when the user has
-          // no kubectl default-context set, even if every cluster's
-          // relay+registry are healthy.
-          const contexts = Array.from(new Set(
-            sandboxes
-              .filter((s) => s.runtime !== "docker" && s.kubeContext)
-              .map((s) => s.kubeContext as string)
-          ));
-          promises.push(
-            fetchMeshHealthMulti(devMode, contexts).then((d) => { meshHealth = d; }).catch(() => {}),
-          );
-        }
       }
 
       if (promises.length > 0) await Promise.allSettled(promises);
