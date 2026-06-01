@@ -19,29 +19,27 @@ Hardened sandbox per agent. Zero credentials in the agent. Every external call g
 
 ## Status
 
-> ℹ️ **kars is a reference stack / community sample — not an official
-> Microsoft product.** It is published under the Azure GitHub
-> organization as a learning resource and starting point for teams
-> building AI-agent platforms on AKS. There is no support contract,
-> SLA, or roadmap commitment attached to it. See
-> [TRADEMARKS.md](TRADEMARKS.md) and [LICENSE](LICENSE) for the full
-> framing.
+> 📌 **NOTE: This is not an officially supported Microsoft product.**
+> kars is an open-source reference implementation maintained under the
+> Azure GitHub organization. It is intended for teams building real
+> agent platforms on Kubernetes who want a hardened starting point
+> rather than a from-scratch rebuild. There is no SLA, support
+> contract, or product roadmap commitment attached to it. See
+> [SUPPORT.md](SUPPORT.md), [TRADEMARKS.md](TRADEMARKS.md), and
+> [LICENSE](LICENSE) for the legal framing.
 >
-> ⚠️ **Microsoft-signed images and packages are in progress.** The
+> ⚠️ **Microsoft-signed images and packages are coming soon.** The
 > container images (controller, inference-router, a2a-gateway,
 > sandbox-base, conformance-runner), npm packages (`@kars/cli`,
 > `@kars/mesh`, runtime adapters), and Rust crates (`kars-a2a-core`,
 > `kars-eval-corpus`) will be published via
 > [ESRP](https://aka.ms/esrp-onboarding) to **MCR**, **npmjs.com**,
-> and **crates.io** — signed by Microsoft — as soon as the ESRP
-> integration completes.
->
-> Until then, the **only supported install path is build-from-source
-> after cloning this repository** (see
-> [Try it in five minutes](#try-it-in-five-minutes)). All code, CRDs,
-> Helm charts, and architecture documents in this repo are reviewed
-> and usable; only the binary distribution channel is still being
-> wired up.
+> and **crates.io** — signed by Microsoft — once the ESRP pipeline
+> integration completes. Until then the install path is
+> build-from-source after cloning this repository (see
+> [Try it in five minutes](#try-it-in-five-minutes)). All code,
+> CRDs, Helm charts, and architecture documents in this repo are
+> reviewed and ready to use today.
 
 ---
 

@@ -1,0 +1,85 @@
+# Third-Party Notices
+
+This project incorporates source code, libraries, and binary
+dependencies from many open-source projects. Their licenses are
+preserved in the source they accompany and apply when the kars
+binaries are redistributed.
+
+The licenses below are listed once per project; the full list of
+transitive dependencies can be regenerated at any time with:
+
+```bash
+# Rust dependency manifest (controller, inference-router, a2a-gateway, conformance-runner)
+cargo tree --workspace --edges no-build,no-dev --prefix none | sort -u
+
+# Node dependency manifest (cli, mesh-plugin, runtimes/*)
+( cd cli && npm ls --all --json )
+```
+
+For licensing questions, please contact the maintainers via the
+channels in [SUPPORT.md](SUPPORT.md).
+
+---
+
+## Rust (controller, inference-router, a2a-gateway, conformance-runner)
+
+Direct workspace dependencies — see `Cargo.toml`:
+
+| Crate | License |
+|---|---|
+| agentmesh, agentmesh-mcp | MIT — Microsoft Agent Governance Toolkit |
+| anyhow, async-trait | MIT OR Apache-2.0 |
+| axum, hyper, tower, tower-http | MIT |
+| chrono, futures, futures-util | MIT OR Apache-2.0 |
+| ed25519-dalek, x25519-dalek | BSD-3-Clause |
+| jsonwebtoken | MIT |
+| k8s-openapi, kube, schemars | Apache-2.0 |
+| oci-client, sigstore, tough | Apache-2.0 |
+| opentelemetry, prometheus | Apache-2.0 |
+| reqwest, rustls, tokio, tokio-rustls, tokio-tungstenite | MIT OR Apache-2.0 |
+| ring | ISC / MIT-like (BoringSSL heritage) |
+| aws-lc-sys, aws-lc-rs | Apache-2.0 (AWS-LC — BoringSSL fork) |
+| serde, serde_json, serde_yaml | MIT OR Apache-2.0 |
+| cedar-policy | Apache-2.0 |
+| criterion (dev) | Apache-2.0 OR MIT |
+
+## Node.js (cli, mesh-plugin, runtimes/openclaw, runtimes/langgraph-ts)
+
+Direct dependencies — see each package's `package.json`:
+
+| Package | License |
+|---|---|
+| @microsoft/agent-governance-sdk | MIT — Microsoft AGT TypeScript SDK |
+| commander | MIT |
+| execa | MIT |
+| @kubernetes/client-node | Apache-2.0 |
+| blessed, blessed-contrib | MIT |
+| chalk, ora | MIT |
+| ws | MIT |
+| typescript (dev) | Apache-2.0 |
+| vitest (dev) | MIT |
+| oxlint (dev) | MIT |
+
+## Container base images
+
+| Image | License/Provenance |
+|---|---|
+| mcr.microsoft.com/azurelinux/distroless/base:3.0 | MIT (Microsoft Azure Linux) |
+| mcr.microsoft.com/azurelinux/base/core:3.0 | MIT (Microsoft Azure Linux) |
+| Node.js 22 (runtime in sandbox-base) | MIT and BSD-style |
+| Python 3.12 (runtime in sandbox-base) | PSF License |
+| Various pip/npm wheels installed inside sandbox-base | per-package, see vendored manifests in sandbox-images/openclaw/ |
+
+## Vendored TypeScript SDK build
+
+`vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-bae5de3.tgz`
+is a pre-built tarball of the AGT TypeScript SDK produced from
+[microsoft/agent-governance-toolkit](https://github.com/microsoft/agent-governance-toolkit)
+at commit `bae5de3`. License: MIT. See `docs/PUBLISHING.md` →
+"Consuming AGT from upstream main" for why this is vendored and
+when it will be removed.
+
+---
+
+If you find a dependency that is not listed here, please open an
+issue so we can add it.

@@ -463,3 +463,6 @@ runtimes/langgraph-ts/dist/
 # mdbook documentation site output (docs/site/book.toml writes here)
 /target/book/
 CRD-AUDIT-REPORT.md
+
+# e2e harness run artefacts — NEVER commit
+tools/e2e-harness/out/
