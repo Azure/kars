@@ -94,7 +94,24 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
         "config", "current-context",
       ], kubeContext), { stdio: "pipe" });
       clusterName = stdout.trim();
-    } catch { /* offline */ }
+    } catch {
+      // No current context AND no --context. Print a friendly message
+      // and bail; otherwise the dashboard renders empty everywhere and
+      // gives no clue why. Most common cause: user has both kind +
+      // AKS contexts in ~/.kube/config but never set a default.
+      console.error(
+        "\n\x1b[31m✗ No kubectl context available.\x1b[0m\n\n" +
+        "Pass one explicitly: \x1b[1mkars operator --context <name>\x1b[0m\n" +
+        "Or set a default: \x1b[1mkubectl config use-context <name>\x1b[0m\n\n" +
+        "Available contexts:"
+      );
+      try {
+        const { stdout } = await execa("kubectl", ["config", "get-contexts", "-o", "name"], { stdio: "pipe" });
+        console.error(stdout.split("\n").filter(Boolean).map((c) => `  - ${c}`).join("\n"));
+      } catch { /* no kubeconfig at all */ }
+      console.error("\nTip: --dev mode targets local Docker only (no kubectl required).\n");
+      process.exit(1);
+    }
   }
   // In dev mode, also check if kubectl is reachable for unified view
   let hasKubectl = !devMode;
@@ -822,6 +839,9 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
       activityLog,
       setDialogOpen: (v: boolean) => { dialogOpen = v; },
       refresh,
+      // Forward the operator's --context so kars destroy targets the
+      // SAME cluster we're looking at (kind-kars-dev vs kars-aks).
+      kubeContext,
     });
   }
 

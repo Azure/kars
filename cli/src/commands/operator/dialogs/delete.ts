@@ -21,6 +21,11 @@ export interface DeleteDialogContext {
   activityLog: ActivityLog;
   setDialogOpen: (open: boolean) => void;
   refresh: () => Promise<void>;
+  // Forwarded so the kars-destroy shell-out runs against the SAME
+  // cluster the operator is showing. Without this, `kars destroy` falls
+  // back to kubectl's current-context which may be wrong (kind-kars-dev
+  // vs kars-aks) and silently delete from the WRONG cluster.
+  kubeContext?: string;
 }
 
 export function deleteSelectedAgent(ctx: DeleteDialogContext): void {
@@ -77,17 +82,29 @@ export function deleteSelectedAgent(ctx: DeleteDialogContext): void {
       screen.removeListener("keypress", onKey);
       cleanup();
       if (selected === 0) {
-        activityLog.log(`{red-fg}🗑  Destroying {bold}${sb.name}{/bold}...{/}`);
+        // Resolve target cluster for the activity-log entry so the
+        // operator can see WHICH cluster the destroy went to. Prefer
+        // the per-sandbox kubeContext (cross-cluster aggregation),
+        // then the operator's --context, then "(current)".
+        const targetCtx = sb.kubeContext ?? ctx.kubeContext ?? "(current)";
+        activityLog.log(`{red-fg}🗑  Destroying {bold}${sb.name}{/bold} on {bold}${targetCtx}{/bold}...{/}`);
         screen.render();
         try {
           if (sb.runtime === "docker") {
             await execa("docker", ["rm", "-f", sb.podName!], { stdio: "pipe" });
           } else {
-            await execa("kars", ["destroy", sb.name, "--cloud", "--yes"], { stdio: "pipe" });
+            // Thread the kubeContext to `kars destroy` so it cannot
+            // accidentally target the wrong cluster when the user has
+            // both a kind (local-k8s) cluster and an AKS cluster in
+            // their kubeconfig.
+            const args = ["destroy", sb.name, "--cloud", "--yes"];
+            const effectiveCtx = sb.kubeContext ?? ctx.kubeContext;
+            if (effectiveCtx) args.push("--context", effectiveCtx);
+            await execa("kars", args, { stdio: "pipe" });
           }
-          activityLog.log(`{green-fg}✓ Destroyed{/} ${sb.name}`);
+          activityLog.log(`{green-fg}✓ Destroyed{/} ${sb.name} on ${targetCtx}`);
         } catch (e: any) {
-          activityLog.log(`{red-fg}✗ Destroy fail:{/} ${(e.stderr || e.message)?.substring(0, 60)}`);
+          activityLog.log(`{red-fg}✗ Destroy fail:{/} ${(e.stderr || e.message)?.substring(0, 80)}`);
         }
         await refresh();
       }

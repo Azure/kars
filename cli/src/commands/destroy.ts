@@ -17,8 +17,11 @@ export function destroyCommand(): Command {
     .option("--all", "Destroy ALL resources (AKS, ACR, KV, AOAI — deletes the resource group)", false)
     .option("-g, --resource-group <name>", "Resource group name")
     .option("--region <region>", "Azure region (used to derive resource group)", "eastus2")
+    .option("--context <name>", "Kubernetes context to use (defaults to current)")
     .action(async (name: string | undefined, options) => {
       const rg = options.resourceGroup || `kars-${options.region}`;
+      // Propagate --context to every kubectl invocation in this command.
+      const kctlCtx = options.context ? ["--context", options.context] : [];
 
       if (options.all) {
         // Full teardown — delete the entire resource group
@@ -87,6 +90,7 @@ export function destroyCommand(): Command {
         if (!options.local) {
           try {
             await execa("kubectl", [
+              ...kctlCtx,
               "get", "karssandbox", name, "-n", "kars-system", "--no-headers",
             ], { stdio: "pipe" });
             aksExists = true;
@@ -169,23 +173,46 @@ export function destroyCommand(): Command {
       try {
         const { execa } = await import("execa");
 
+        // Resolve + announce which cluster we're targeting. With both
+        // a kind cluster (local-k8s) and an AKS cluster (--cloud) in
+        // ~/.kube/config it's very easy to delete from the wrong one.
+        // Print the active context up-front so a `^C` is possible.
+        let activeContext = options.context || "";
+        if (!activeContext) {
+          try {
+            const { stdout } = await execa("kubectl", [
+              "config", "current-context",
+            ], { stdio: "pipe" });
+            activeContext = stdout.trim();
+          } catch {
+            activeContext = "(none — kubectl will fail)";
+          }
+        }
+        spinner.stop();
+        console.log(chalk.cyan(`  → targeting cluster context: ${chalk.bold(activeContext)}`));
+        if (!options.yes && !options.context) {
+          console.log(chalk.dim("    pass --context <name> to override"));
+        }
+        spinner.start();
+
         if (name) {
           // Destroy a single sandbox
           if (!options.yes) {
             console.log(
               chalk.yellow(
-                `\n⚠️  This will destroy sandbox '${name}' and its namespace.\n`
+                `\n⚠️  This will destroy sandbox '${name}' on cluster '${activeContext}' and its namespace.\n`
               )
             );
             console.log(chalk.dim(`  Run with --yes to confirm.\n`));
             return;
           }
 
-          spinner.text = `Destroying sandbox '${name}'...`;
+          spinner.text = `Destroying sandbox '${name}' on '${activeContext}'...`;
           const sandboxNs = `kars-${name}`;
 
           // Delete the CR (controller will clean up the namespace)
           await execa("kubectl", [
+            ...kctlCtx,
             "delete", "karssandbox", name,
             "-n", "kars-system",
             "--ignore-not-found",
@@ -193,6 +220,7 @@ export function destroyCommand(): Command {
 
           // Delete the namespace directly (in case controller doesn't handle finalizers)
           await execa("kubectl", [
+            ...kctlCtx,
             "delete", "ns", sandboxNs,
             "--ignore-not-found", "--wait=false",
           ], { stdio: "pipe" }).catch(() => {});
@@ -220,6 +248,7 @@ export function destroyCommand(): Command {
 
           spinner.text = "Destroying all sandboxes...";
           await execa("kubectl", [
+            ...kctlCtx,
             "delete", "karssandbox", "--all",
             "-n", "kars-system",
             "--ignore-not-found",
