@@ -71,15 +71,18 @@ jobs:
         # Reuses the target/release/ artefacts the previous step just
         # compiled. Only the test harnesses need to link (~30-60s).
         run: cargo nextest run --workspace --release --no-fail-fast
-      - name: Stage binaries for artifact upload
+      - name: Stage binaries (per-arch layout matches release-internal.yml Dockerfiles)
         run: |
-          mkdir -p ./bin
-          cp target/release/kars-controller         ./bin/
-          cp target/release/kars-inference-router   ./bin/
-          cp target/release/kars-a2a-gateway        ./bin/
-          cp target/release/kars-conformance-runner ./bin/
-          file ./bin/*
-          sha256sum ./bin/* | tee ./bin/SHA256SUMS
+          # CI runner is always amd64. release-internal.yml additionally
+          # builds arm64; the per-arch subdir layout matches the
+          # ${TARGETARCH} buildx substitution in the Dockerfiles.
+          mkdir -p ./bin/amd64
+          cp target/release/kars-controller         ./bin/amd64/
+          cp target/release/kars-inference-router   ./bin/amd64/
+          cp target/release/kars-a2a-gateway        ./bin/amd64/
+          cp target/release/kars-conformance-runner ./bin/amd64/
+          file ./bin/amd64/*
+          ( cd ./bin && sha256sum amd64/* | tee SHA256SUMS )
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
@@ -504,7 +507,9 @@ jobs:
           path: ./bin/
       - name: chmod binaries
         if: steps.paths.outputs.run == 'true'
-        run: chmod +x ./bin/*
+        # Per-arch layout (./bin/amd64/) matches release-internal.yml's
+        # multi-arch Dockerfile expectations (${BIN_PATH_PREFIX}/${TARGETARCH}/...)
+        run: find ./bin -type f -name 'kars-*' -exec chmod +x {} \;
 
       - name: Set up Docker Buildx
         if: steps.paths.outputs.run == 'true'

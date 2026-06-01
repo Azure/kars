@@ -11,13 +11,16 @@
 
 ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0
 ARG VERSION=0.1.0
-ARG BIN_PATH=bin/kars-controller
+ARG BIN_PATH_PREFIX=bin
 
 FROM ${AZURELINUX_DISTROLESS}
 
 ARG VERSION
-ARG BIN_PATH
-COPY ${BIN_PATH} /usr/local/bin/kars-controller
+ARG BIN_PATH_PREFIX
+# TARGETARCH is auto-set by buildx ("amd64" or "arm64") so we pick
+# the right pre-built binary from ./bin/<arch>/.
+ARG TARGETARCH
+COPY ${BIN_PATH_PREFIX}/${TARGETARCH}/kars-controller /usr/local/bin/kars-controller
 
 USER 1000:1000
 

@@ -101,28 +101,51 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         if: steps.find-ci.outputs.reuse != 'true'
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.find-ci.outputs.reuse != 'true'
         with:
-          shared-key: rust-glibc-release
+          shared-key: rust-glibc-release-multiarch
           save-if: false
-      - name: cargo build --release (only on cache miss)
-        if: steps.find-ci.outputs.reuse != 'true'
-        run: cargo build --release --workspace
-      - name: Stage binaries (only on fresh build)
+      - name: Install aarch64 cross-linker
         if: steps.find-ci.outputs.reuse != 'true'
         run: |
-          mkdir -p ./bin
-          cp target/release/kars-controller         ./bin/
-          cp target/release/kars-inference-router   ./bin/
-          cp target/release/kars-a2a-gateway        ./bin/
-          cp target/release/kars-conformance-runner ./bin/
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+      - name: cargo build --release (amd64 + arm64)
+        if: steps.find-ci.outputs.reuse != 'true'
+        env:
+          # cargo needs to know which C linker to use for the aarch64
+          # target. The cross-linker installed above provides it.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --workspace --target x86_64-unknown-linux-gnu
+          cargo build --release --workspace --target aarch64-unknown-linux-gnu
+      - name: Stage binaries per-arch (only on fresh build)
+        if: steps.find-ci.outputs.reuse != 'true'
+        run: |
+          mkdir -p ./bin/amd64 ./bin/arm64
+          for bin in kars-controller kars-inference-router kars-a2a-gateway kars-conformance-runner; do
+            cp "target/x86_64-unknown-linux-gnu/release/$bin"  "./bin/amd64/$bin"
+            cp "target/aarch64-unknown-linux-gnu/release/$bin" "./bin/arm64/$bin"
+          done
+
+      - name: Repack binaries from ci.yml artifact (reuse path — amd64 only)
+        if: steps.find-ci.outputs.reuse == 'true'
+        run: |
+          # The reuse path comes from ci.yml's build-rust which today only
+          # produces amd64. arm64 images for those tags will fall back to
+          # buildx QEMU emulation in the image-build step (slow but works).
+          # When ci.yml grows arm64, just mirror the per-arch staging here.
+          mkdir -p ./bin/amd64
+          mv ./bin/kars-* ./bin/amd64/
 
       - name: Verify + checksum (both paths converge here)
         run: |
-          chmod +x ./bin/kars-*
-          ( cd ./bin && sha256sum kars-* | tee SHA256SUMS )
-          file ./bin/kars-*
+          chmod +x ./bin/*/kars-*
+          ( cd ./bin && find . -type f -name 'kars-*' -exec sha256sum {} \; | tee SHA256SUMS )
+          file ./bin/*/kars-*
 
       - name: Upload binaries (release-scoped artifact name)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
@@ -150,23 +173,33 @@ jobs:
           - name: controller
             dockerfile: controller/Dockerfile
             ghcr: kars-controller
+            platforms: linux/amd64,linux/arm64
           - name: inference-router
             dockerfile: inference-router/Dockerfile
             ghcr: kars-inference-router
+            platforms: linux/amd64,linux/arm64
           - name: a2a-gateway
             dockerfile: a2a-gateway/Dockerfile
             ghcr: kars-a2a-gateway
+            platforms: linux/amd64,linux/arm64
           - name: conformance-runner
             dockerfile: sandbox-images/conformance-runner/Dockerfile
             ghcr: kars-conformance-runner
+            platforms: linux/amd64,linux/arm64
           - name: sandbox-base
             dockerfile: sandbox-images/openclaw/Dockerfile.base
             ghcr: kars-sandbox-base
             no_binaries: true
+            # sandbox-base depends on Python wheels (manylinux). Many
+            # transitive wheels lack aarch64 builds → arm64 build would
+            # silently fall back to source compile under QEMU, which is
+            # both slow and brittle. Stay amd64-only here; Apple Silicon
+            # users run this image under Rosetta — slower but functional.
+            platforms: linux/amd64
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download pre-built binaries
+      - name: Download pre-built binaries (per-arch)
         if: matrix.image.no_binaries != true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -174,7 +207,13 @@ jobs:
           path: ./bin/
       - name: chmod binaries
         if: matrix.image.no_binaries != true
-        run: chmod +x ./bin/*
+        # ./bin/ now holds amd64/ + arm64/ subdirs after the multi-arch
+        # build-binaries job. Walk recursively.
+        run: find ./bin -type f -name 'kars-*' -exec chmod +x {} \;
+
+      - name: Set up QEMU (for cross-arch buildx)
+        if: matrix.image.platforms != 'linux/amd64'
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
@@ -193,6 +232,7 @@ jobs:
           context: .
           file: ${{ matrix.image.dockerfile }}
           push: true
+          platforms: ${{ matrix.image.platforms }}
           tags: |
             ghcr.io/azure/${{ matrix.image.ghcr }}:${{ env.VERSION }}
             ghcr.io/azure/${{ matrix.image.ghcr }}:internal-latest

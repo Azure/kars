@@ -114,16 +114,25 @@ image-runtime-pydantic-ai: ## Build Pydantic-AI runtime image
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f sandbox-images/pydantic-ai/Dockerfile .
 
-build-rust-bin: ## Build Rust binaries and stage them in ./bin/ for Docker COPY
-	cargo build --release --workspace
-	mkdir -p bin
-	cp target/release/kars-controller         bin/
-	cp target/release/kars-inference-router   bin/
-	cp target/release/kars-a2a-gateway        bin/
-	cp target/release/kars-conformance-runner bin/
+build-rust-bin: ## Build Rust binaries and stage them in ./bin/<arch>/ for Docker COPY
+	# Detect host arch and stage there. Docker buildx will substitute
+	# ${TARGETARCH} ("amd64" or "arm64") in the Dockerfile COPY path.
+	@HOST_ARCH=$$(uname -m); \
+	case $$HOST_ARCH in \
+		x86_64)  ARCH=amd64 ;; \
+		aarch64|arm64) ARCH=arm64 ;; \
+		*) echo "unsupported host arch: $$HOST_ARCH" >&2; exit 1 ;; \
+	esac; \
+	echo "Building for $$ARCH"; \
+	cargo build --release --workspace; \
+	mkdir -p bin/$$ARCH; \
+	cp target/release/kars-controller         bin/$$ARCH/; \
+	cp target/release/kars-inference-router   bin/$$ARCH/; \
+	cp target/release/kars-a2a-gateway        bin/$$ARCH/; \
+	cp target/release/kars-conformance-runner bin/$$ARCH/
 
 image-controller: build-rust-bin ## Build controller Docker image (compiles Rust first)
-	docker build --platform linux/amd64 \
+	docker build \
 		-t $(REGISTRY)/kars-controller:$(IMAGE_TAG) \
 		-t $(REGISTRY)/kars-controller:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \
@@ -131,7 +140,7 @@ image-controller: build-rust-bin ## Build controller Docker image (compiles Rust
 		-f controller/Dockerfile .
 
 image-router: build-rust-bin ## Build inference router Docker image (compiles Rust first)
-	docker build --platform linux/amd64 \
+	docker build \
 		-t $(REGISTRY)/kars-inference-router:$(IMAGE_TAG) \
 		-t $(REGISTRY)/kars-inference-router:latest \
 		--label "org.opencontainers.image.version=$(VERSION)" \

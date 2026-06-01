@@ -51,13 +51,13 @@ jobs:
           shared-key: rust-glibc-release
       - name: cargo build --release
         run: cargo build --release --workspace
-      - name: Stage binaries
+      - name: Stage binaries (per-arch layout)
         run: |
-          mkdir -p ./bin
-          cp target/release/kars-controller         ./bin/
-          cp target/release/kars-inference-router   ./bin/
-          cp target/release/kars-a2a-gateway        ./bin/
-          cp target/release/kars-conformance-runner ./bin/
+          mkdir -p ./bin/amd64
+          cp target/release/kars-controller         ./bin/amd64/
+          cp target/release/kars-inference-router   ./bin/amd64/
+          cp target/release/kars-a2a-gateway        ./bin/amd64/
+          cp target/release/kars-conformance-runner ./bin/amd64/
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
@@ -105,7 +105,7 @@ jobs:
           path: ./bin/
       - name: chmod binaries
         if: matrix.image.needs_binaries
-        run: chmod +x ./bin/*
+        run: find ./bin -type f -name 'kars-*' -exec chmod +x {} \;
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3

@@ -73,18 +73,25 @@ build_images() {
     fi
 
     # Build the Rust binaries ONCE on the host (build-once pattern).
-    # The Dockerfiles are simple COPY templates that consume ./bin/
-    # so we must stage them before docker build runs.
-    if [ ! -x "$ROOT_DIR/bin/kars-controller" ] || [ ! -x "$ROOT_DIR/bin/kars-inference-router" ]; then
-        info "Compiling Rust binaries (cargo build --release)"
+    # The Dockerfiles are simple COPY templates that consume
+    # ./bin/<arch>/ so we must stage them before docker build runs.
+    HOST_ARCH=$(uname -m)
+    case "$HOST_ARCH" in
+        x86_64)        BUILD_ARCH=amd64 ;;
+        aarch64|arm64) BUILD_ARCH=arm64 ;;
+        *) die "unsupported host arch: $HOST_ARCH" ;;
+    esac
+    if [ ! -x "$ROOT_DIR/bin/$BUILD_ARCH/kars-controller" ] || \
+       [ ! -x "$ROOT_DIR/bin/$BUILD_ARCH/kars-inference-router" ]; then
+        info "Compiling Rust binaries for $BUILD_ARCH (cargo build --release)"
         ( cd "$ROOT_DIR" && cargo build --release --workspace )
-        mkdir -p "$ROOT_DIR/bin"
-        cp "$ROOT_DIR/target/release/kars-controller"         "$ROOT_DIR/bin/"
-        cp "$ROOT_DIR/target/release/kars-inference-router"   "$ROOT_DIR/bin/"
-        cp "$ROOT_DIR/target/release/kars-a2a-gateway"        "$ROOT_DIR/bin/"
-        cp "$ROOT_DIR/target/release/kars-conformance-runner" "$ROOT_DIR/bin/"
+        mkdir -p "$ROOT_DIR/bin/$BUILD_ARCH"
+        cp "$ROOT_DIR/target/release/kars-controller"         "$ROOT_DIR/bin/$BUILD_ARCH/"
+        cp "$ROOT_DIR/target/release/kars-inference-router"   "$ROOT_DIR/bin/$BUILD_ARCH/"
+        cp "$ROOT_DIR/target/release/kars-a2a-gateway"        "$ROOT_DIR/bin/$BUILD_ARCH/"
+        cp "$ROOT_DIR/target/release/kars-conformance-runner" "$ROOT_DIR/bin/$BUILD_ARCH/"
     else
-        info "Reusing existing ./bin/ Rust binaries"
+        info "Reusing existing ./bin/$BUILD_ARCH/ Rust binaries"
     fi
 
     # Retry docker pulls/builds to absorb transient MCR registry flakes
