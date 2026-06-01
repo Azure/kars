@@ -65,17 +65,55 @@ ok "Tools present"
 
 # ─── Pre-flight: gh auth ──────────────────────────────────────────
 if ! gh auth status >/dev/null 2>&1; then
-  die "gh is not authenticated. Run: gh auth login"
+  die "gh is not authenticated. Run: gh auth login --hostname github.com --web --scopes read:packages"
 fi
 GH_USER=$(gh api user --jq .login 2>/dev/null || echo "unknown")
 ok "Authenticated as $GH_USER"
 
-# Org access check — kars is private, so without org membership the
-# release endpoint returns 404 indistinguishably from "no such repo".
-if ! gh api "repos/$REPO" --jq .id >/dev/null 2>&1; then
-  die "Cannot see $REPO. Are you a member of the Azure org with read access? Visit https://github.com/$REPO to verify."
+# ─── SSO check — Azure org requires PAT/token SSO authorization ───
+# `gh auth status` returns success even if the token isn't SSO-blessed
+# for Azure; the actual symptom is a 401/403 on /repos/Azure/kars.
+# We probe explicitly so the user gets a clear "click here to bless"
+# message before Docker login + asset download fail mysteriously.
+say "Checking SSO authorization for Azure org"
+GH_TOKEN_SCOPES=$(gh api -i user 2>&1 | awk -F': ' '/^[xX]-[oO]auth-[sS]copes:/ {print $2}' | tr -d '\r')
+if ! echo "$GH_TOKEN_SCOPES" | grep -q 'read:packages'; then
+  warn "Your gh token is missing the 'read:packages' scope (needed for private container image pulls)."
+  warn "Re-run: gh auth refresh --hostname github.com --scopes read:packages,repo"
 fi
-ok "Repo $REPO accessible"
+
+# Probe — try to fetch a repo-internal field that requires Azure org access.
+# If this 401s, the token isn't SSO-authorized.
+if ! gh api "repos/Azure/kars" --jq .id >/dev/null 2>&1; then
+  cat >&2 <<EOF
+
+$(printf "\033[1;31m✗ Cannot access Azure/kars.\033[0m")
+
+This is almost certainly because your GitHub PAT / token is not
+SSO-authorized for the Azure org. To fix:
+
+  1. Go to https://github.com/settings/tokens
+  2. Find the token gh created (named "GitHub CLI" by default)
+  3. Click "Configure SSO" → "Authorize" next to the Azure org
+  4. Re-run this installer
+
+Alternative: re-auth with explicit SSO flow:
+
+  gh auth refresh --hostname github.com --web --scopes read:packages,repo
+
+EOF
+  exit 1
+fi
+ok "Repo Azure/kars accessible (SSO authorized)"
+
+# Org access check — already performed above via the explicit Azure/kars
+# probe. This second check would only fire if KARS_REPO was overridden.
+if [ "$REPO" != "Azure/kars" ]; then
+  if ! gh api "repos/$REPO" --jq .id >/dev/null 2>&1; then
+    die "Cannot see $REPO. Are you a member with read access?"
+  fi
+  ok "Repo $REPO accessible"
+fi
 
 # ─── Resolve release version ──────────────────────────────────────
 if [ -n "$REQUESTED_VERSION" ]; then
@@ -142,11 +180,37 @@ else
     warn "Docker not found — skipping GHCR login. Install Docker to pull images."
   else
     say "Logging Docker into ghcr.io with your gh token"
-    # `gh auth token` works whether the user logged in via web flow or PAT.
+    # `gh auth token` returns the user's PAT. For SSO-protected orgs
+    # like Azure the PAT must be SSO-authorized (one-click at
+    # https://github.com/settings/tokens → Configure SSO).
     if gh auth token | docker login ghcr.io -u "$GH_USER" --password-stdin >/dev/null 2>&1; then
       ok "Docker logged into ghcr.io"
+      # Probe a private package to confirm SSO bless covers packages too.
+      # (Some users SSO-authorize for repo but not packages.)
+      if ! docker manifest inspect "ghcr.io/azure/kars-controller:$VERSION" >/dev/null 2>&1; then
+        cat >&2 <<EOF
+
+$(printf "\033[1;33m⚠ Docker login OK but private image pull failed.\033[0m")
+
+You likely need to also SSO-authorize the token for the Azure org's
+PACKAGES (separate from repo access). Fix:
+
+  1. https://github.com/settings/tokens → find your gh token
+  2. "Configure SSO" → "Authorize" next to Azure
+  3. Make sure the token has the 'read:packages' scope
+     (re-run \`gh auth refresh --scopes read:packages\` if not)
+
+Or, if you want to use a fresh classic PAT instead of gh's token:
+  https://github.com/settings/tokens/new?scopes=read:packages
+  Then authorize it for Azure SSO + run:
+    echo "<PAT>" | docker login ghcr.io -u $GH_USER --password-stdin
+
+EOF
+      fi
     else
-      warn "Docker login failed. Try: echo \"<your-PAT-with-read:packages>\" | docker login ghcr.io -u $GH_USER --password-stdin"
+      warn "Docker login failed. Try:"
+      warn "  gh auth refresh --hostname github.com --scopes read:packages,repo"
+      warn "  echo \$(gh auth token) | docker login ghcr.io -u $GH_USER --password-stdin"
     fi
   fi
 fi
