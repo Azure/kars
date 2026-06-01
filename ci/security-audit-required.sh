@@ -17,7 +17,12 @@ cd "$REPO_ROOT"
 CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|runtimes/openclaw/src/(core|index\.ts)|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|cli/profiles/|deploy/seccomp/|deploy/helm/kars/files/)'
 
 changed=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || git diff --name-only HEAD)
-touches_cap=$(printf '%s\n' "$changed" | grep -E "$CAP_RE" || true)
+# Exclude test files — they exercise capabilities but don't introduce
+# them. Catches *.test.ts / *.test.js / *_test.rs / tests/ directories.
+touches_cap=$(printf '%s\n' "$changed" \
+  | grep -E "$CAP_RE" \
+  | grep -Ev '(\.test\.(ts|js|tsx|jsx)|_test\.rs|/tests?/|/__tests__/)' \
+  || true)
 if [ -z "$touches_cap" ]; then
   exit 0
 fi
