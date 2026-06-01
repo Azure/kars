@@ -803,8 +803,7 @@ ANTHEOF
     "exec": {
       "security": "full"
     },
-    "profile": "coding",
-    "allow": ["bundle-mcp", "group:plugins"]
+    "profile": "coding"
   },
   "commands": {
     "mcp": true
