@@ -67,14 +67,20 @@ export function resolveMemoryStoreName(agentName: string): string {
   return `memory-${agentName}`;
 }
 
-/** Resolve the default memory scope for this sandbox. */
+/** Resolve the default memory scope for this sandbox.
+ *
+ * Format uses `_` as separator instead of `:` because the Foundry
+ * Memory Store API validates scope characters to: letters, digits,
+ * `_`, `-`, `.`, `%`, `+`, `@`, `/`. A colon-prefixed scope like
+ * `agent:demo` rejects with HTTP 400 "Scope must contain only…".
+ */
 export function resolveMemoryScope(agentName: string): string {
   const b = readBinding();
   const scope = b?.scope;
   if (typeof scope === "string" && scope.trim().length > 0) return scope;
   const cluster = (process.env.CLUSTER_NAME || "").trim();
-  if (cluster.length > 0) return `agent:${cluster}/${agentName}`;
-  return `agent:${agentName}`;
+  if (cluster.length > 0) return `agent_${cluster}_${agentName}`;
+  return `agent_${agentName}`;
 }
 
 /** Test hook — reset the binding cache. */
