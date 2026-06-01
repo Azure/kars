@@ -224,35 +224,54 @@ jobs:
         pkg:
           - dir: cli
             name: kars-cli
+            # cli is leaf — no file: deps
+            needs_mesh_prebuild: false
           - dir: mesh-plugin
             name: kars-mesh
+            needs_mesh_prebuild: false
           - dir: runtimes/openclaw
             name: kars-runtime-openclaw
+            # openclaw has file:../../mesh-plugin in its deps; npm install
+            # runs mesh-plugin's `prepare` script during the install of the
+            # file: dep, but the symlinked source lacks node_modules so
+            # `tsc` can't find @types/node. Pre-build mesh-plugin first so
+            # its dist/ exists and `prepare` is essentially a no-op.
+            needs_mesh_prebuild: true
           - dir: runtimes/langgraph-ts
             name: kars-runtime-langgraph-ts
+            needs_mesh_prebuild: false
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
         with:
           node-version: '22'
-      - name: npm ci
-        run: npm ci
+      - name: 'Pre-build mesh-plugin (file: dep prerequisite)'
+        if: matrix.pkg.needs_mesh_prebuild
+        working-directory: mesh-plugin
+        run: |
+          npm install
+          npm run build
+      - name: 'npm install (use install not ci — some packages lack lockfile)'
+        # `npm install` is forgiving: works with or without a lockfile,
+        # handles file: deps correctly, runs prepare scripts. `npm ci`
+        # would fail on langgraph-ts (no lockfile committed yet).
+        run: npm install
         working-directory: ${{ matrix.pkg.dir }}
-      - name: npm build (if defined)
+      - name: 'npm run build (if defined)'
         run: |
           if npm run | grep -qE '^\s*build'; then
             npm run build
           fi
         working-directory: ${{ matrix.pkg.dir }}
-      - name: npm pack
+      - name: 'npm pack'
         run: |
           npm pack
           ls -la *.tgz
         working-directory: ${{ matrix.pkg.dir }}
-      - name: npm publish --dry-run (registry-side validation)
+      - name: 'npm publish --dry-run (registry-side validation)'
         run: npm publish --dry-run --access public
         working-directory: ${{ matrix.pkg.dir }}
-      - name: Upload tarball
+      - name: 'Upload tarball'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: npm-${{ matrix.pkg.name }}-${{ env.VERSION }}
