@@ -770,10 +770,14 @@ pub async fn run(client: Client) -> Result<()> {
             watcher::Config::default(),
             |sb: crate::crd::KarsSandbox| {
                 let ns = sb.namespace().unwrap_or_default();
-                if ns.is_empty() { return Vec::new().into_iter(); }
+                if ns.is_empty() {
+                    return Vec::new().into_iter();
+                }
                 let mut refs: Vec<ObjectRef<crate::tool_policy::ToolPolicy>> = Vec::new();
                 if let Some(gov) = sb.spec.governance.as_ref() {
-                    if !gov.enabled { return refs.into_iter(); }
+                    if !gov.enabled {
+                        return refs.into_iter();
+                    }
                     let name = if gov.tool_policy_ref.name.is_empty() {
                         "kars-default".to_string()
                     } else {
