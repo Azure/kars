@@ -534,36 +534,52 @@ async function rebuildDevImages(
   let agtSdkTarballBasename: string | undefined;
   let agtSdkTarballHostPath: string | undefined;
   if (agtRepo) {
-    try {
-      const fsMod = await import("node:fs");
-      const tsDir = path.join(agtRepo, "agent-governance-typescript");
-      const candidates = fsMod
-        .readdirSync(tsDir)
-        .filter((f) => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"))
-        .sort();
-      if (candidates.length > 0) {
-        const picked = candidates[candidates.length - 1];
-        const stagingDir = path.join(repoRoot, ".agt-sdk");
-        if (!fsMod.existsSync(stagingDir)) fsMod.mkdirSync(stagingDir, { recursive: true });
-        // Clean previous staged tarballs so build context stays tight
-        for (const f of fsMod.readdirSync(stagingDir)) {
-          if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
-            fsMod.unlinkSync(path.join(stagingDir, f));
-          }
-        }
-        fsMod.copyFileSync(path.join(tsDir, picked), path.join(stagingDir, picked));
-        agtSdkTarballBasename = picked;
-        agtSdkTarballHostPath = path.join(tsDir, picked);
+    const fsMod = await import("node:fs");
+    const tsDir = path.join(agtRepo, "agent-governance-typescript");
+    const findTarball = (): string | undefined => {
+      try {
+        const hits = fsMod
+          .readdirSync(tsDir)
+          .filter((f) => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"))
+          .sort();
+        return hits.length > 0 ? hits[hits.length - 1] : undefined;
+      } catch { return undefined; }
+    };
+
+    let picked = findTarball();
+    if (!picked && fsMod.existsSync(path.join(tsDir, "package.json"))) {
+      // No pre-packed tarball. Build & pack the SDK from source so the
+      // sandbox image gets the patched MeshClient (stock npm 3.5.0
+      // lacks registerSelf/autoRegister → sub-agents never register).
+      console.log(chalk.dim(`  No microsoft-agent-governance-sdk-*.tgz under ${tsDir} — packing from source (one-time)...\n`));
+      try {
+        await execa("npm", ["install", "--prefer-offline", "--no-audit", "--no-fund"], { cwd: tsDir, stdio: "inherit" });
+        await execa("npm", ["run", "build"], { cwd: tsDir, stdio: "inherit" });
+        await execa("npm", ["pack"], { cwd: tsDir, stdio: "inherit" });
+        picked = findTarball();
+      } catch (e) {
+        console.log(chalk.yellow(`  Could not pack AGT SDK: ${(e as Error).message}\n  Continuing with npm @^3.5.0 (mesh registration will not work).\n`));
       }
-    } catch {
-      // AGT repo not laid out as expected — fall through to npm fallback.
+    }
+
+    if (picked) {
+      const stagingDir = path.join(repoRoot, ".agt-sdk");
+      if (!fsMod.existsSync(stagingDir)) fsMod.mkdirSync(stagingDir, { recursive: true });
+      for (const f of fsMod.readdirSync(stagingDir)) {
+        if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
+          fsMod.unlinkSync(path.join(stagingDir, f));
+        }
+      }
+      fsMod.copyFileSync(path.join(tsDir, picked), path.join(stagingDir, picked));
+      agtSdkTarballBasename = picked;
+      agtSdkTarballHostPath = path.join(tsDir, picked);
     }
   }
   if (agtSdkTarballBasename) {
     console.log(chalk.dim(`  Using patched AGT SDK tarball: ${agtSdkTarballHostPath}\n`));
   } else if (agtRepo) {
     console.log(chalk.yellow(
-      `  Warning: no microsoft-agent-governance-sdk-*.tgz found under ${path.join(agtRepo, "agent-governance-typescript")} — falling back to npm @^3.5.0 (mesh registration will not work).\n`,
+      `  Warning: AGT SDK tarball unavailable under ${path.join(agtRepo, "agent-governance-typescript")} — falling back to npm @^3.5.0 (mesh registration will not work).\n`,
     ));
   }
   type Spec = { name: string; tag: string; build: () => Promise<void> };

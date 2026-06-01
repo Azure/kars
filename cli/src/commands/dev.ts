@@ -870,22 +870,39 @@ Notes:
             sandboxBuildArgs.push("--build-arg", `AGT_SDK_TARBALL=${tarballBasename}`);
             console.log(chalk.dim(`  Staged AGT SDK tarball: ${tarballBasename}\n`));
           } else if (meshProvider === "agt") {
-            // Try to auto-discover a packed tarball next to the AGT repo
-            try {
-              const tsDir = path.join(agtRepo, "agent-governance-typescript");
-              const candidates = fsMod.readdirSync(tsDir).filter(
-                f => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"),
-              );
-              if (candidates.length > 0) {
-                const tarballBasename = candidates[0];
-                fsMod.copyFileSync(
-                  path.join(tsDir, tarballBasename),
-                  path.join(agtSdkStagingDir, tarballBasename),
-                );
-                sandboxBuildArgs.push("--build-arg", `AGT_SDK_TARBALL=${tarballBasename}`);
-                console.log(chalk.dim(`  Auto-discovered AGT SDK tarball: ${tarballBasename}\n`));
+            // Auto-discover OR pack-on-demand from the AGT repo. Stock
+            // npm @^3.5.0 lacks registerSelf/autoRegister so the sandbox
+            // can't register on the mesh — packing from source ships the
+            // patched MeshClient that does.
+            const tsDir = path.join(agtRepo, "agent-governance-typescript");
+            const findTarball = (): string | undefined => {
+              try {
+                const hits = fsMod.readdirSync(tsDir).filter(
+                  f => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"),
+                ).sort();
+                return hits.length > 0 ? hits[hits.length - 1] : undefined;
+              } catch { return undefined; }
+            };
+            let tarballBasename = findTarball();
+            if (!tarballBasename && existsSync(path.join(tsDir, "package.json"))) {
+              console.log(chalk.dim(`  Packing AGT SDK from source (one-time, ~30s)...\n`));
+              try {
+                await execa("npm", ["install", "--prefer-offline", "--no-audit", "--no-fund"], { cwd: tsDir, stdio: "inherit" });
+                await execa("npm", ["run", "build"], { cwd: tsDir, stdio: "inherit" });
+                await execa("npm", ["pack"], { cwd: tsDir, stdio: "inherit" });
+                tarballBasename = findTarball();
+              } catch (e) {
+                console.log(chalk.yellow(`  Could not pack AGT SDK: ${(e as Error).message}\n`));
               }
-            } catch { /* AGT repo missing TS dir — fall through to npm install */ }
+            }
+            if (tarballBasename) {
+              fsMod.copyFileSync(
+                path.join(tsDir, tarballBasename),
+                path.join(agtSdkStagingDir, tarballBasename),
+              );
+              sandboxBuildArgs.push("--build-arg", `AGT_SDK_TARBALL=${tarballBasename}`);
+              console.log(chalk.dim(`  Staged AGT SDK tarball: ${tarballBasename}\n`));
+            }
           }
 
           await execa("docker", [
