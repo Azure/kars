@@ -761,25 +761,27 @@ ANTHEOF
   # gives the McpServer CRD true E2E semantics: an OpenClaw `tool.*` invocation
   # against `<name>` is governed, signed, allow-listed and audited by the
   # router before ever leaving the pod.
+  # Always register the router itself as an MCP source ("kars-router")
+  # so the agent gets the platform tools the inference-router exposes
+  # at /mcp (memory_*, foundry_*, etc) without needing a McpServer CR
+  # for the loopback router. This is independent of KARS_MCP_SERVERS,
+  # which is the list of EXTERNAL servers the operator wired via CRDs.
   _MCP_BLOCK=""
+  _MCP_ENTRIES="\"kars-router\": { \"transport\": \"streamable-http\", \"url\": \"http://127.0.0.1:8443/mcp\", \"headers\": { \"x-kars-sandbox\": \"${HOSTNAME:-dev-agent}\" } }"
+  _MCP_SEP=", "
   if [ -n "${KARS_MCP_SERVERS:-}" ]; then
-    _MCP_ENTRIES=""
-    _MCP_SEP=""
     OLDIFS="$IFS"; IFS=','
     for _mcp_name in $KARS_MCP_SERVERS; do
       _mcp_name=$(echo "$_mcp_name" | tr -d ' ')
       [ -z "$_mcp_name" ] && continue
       _MCP_ENTRIES="${_MCP_ENTRIES}${_MCP_SEP}\"${_mcp_name}\": { \"transport\": \"streamable-http\", \"url\": \"http://127.0.0.1:8443/mcp\", \"headers\": { \"x-kars-mcp-server\": \"${_mcp_name}\", \"x-kars-sandbox\": \"${HOSTNAME:-dev-agent}\" } }"
-      _MCP_SEP=", "
     done
     IFS="$OLDIFS"
-    if [ -n "$_MCP_ENTRIES" ]; then
-      _MCP_BLOCK=",
+  fi
+  _MCP_BLOCK=",
   \"mcp\": {
     \"servers\": { ${_MCP_ENTRIES} }
   }"
-    fi
-  fi
 
   # Write openclaw.json (2026.4.x config format — routed through inference router)
   cat > "$OPENCLAW_CONFIG" << EOF

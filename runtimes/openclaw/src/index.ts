@@ -523,6 +523,23 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     const relayUrl = routerWsUrl("/agt/relay");
 
     try {
+      // When AGT_OAUTH_TOKEN is set (Entra-verified tier via /v1/mesh-token
+      // or WI direct exchange), attach it as a Bearer header on the
+      // WebSocket Upgrade to the relay. The relay's entra-verify path
+      // reads Authorization here; without it, the peer is counted as
+      // unverified even when registry-tier upgrade succeeds. Browser-style
+      // WebSocket doesn't support custom headers — use the `ws` npm package's
+      // node-only constructor which does.
+      let wsFactory: ((url: string) => unknown) | undefined;
+      const meshToken = process.env.AGT_OAUTH_TOKEN || "";
+      if (meshToken) {
+        // @ts-expect-error — `ws` is a peer dep, no @types/ws to keep deps slim
+        const wsMod: any = await import("ws");
+        const WS = wsMod.default ?? wsMod;
+        wsFactory = (url: string) => new WS(url, undefined, {
+          headers: { Authorization: `Bearer ${meshToken}` },
+        });
+      }
       agtMeshClient = await meshMod.createMeshTransport({
         relayUrl,
         registryUrl,
@@ -533,8 +550,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           signingPrivateKey: meshIdentity.signingPrivateKey,
         },
         displayName: agtSandboxName,
+        wsFactory,
       });
-      log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @kars/mesh)`);
+      log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @kars/mesh)${meshToken ? " + Entra-verified WS" : ""}`);
     } catch (swapErr: any) {
       log.warn?.(`mesh transport init failed: ${swapErr?.message ?? swapErr}`);
       throw swapErr;
