@@ -1,0 +1,181 @@
+# kars full-stack demo — one kubectl apply, every CRD wired up.
+#
+# Provisions a single agent named `demo-agent` with:
+#   1. InferencePolicy   — which LLM, budget caps, content safety
+#   2. KarsMemory        — Foundry memory-store binding
+#   3. McpServer         — an external MCP server the agent can call
+#   4. ToolPolicy        — per-tool rate-limit / approval policy
+#   5. KarsSandbox       — the agent itself (ties everything together)
+#
+# All five live in the kars-system namespace and share the same
+# `kars.azure.com/sandbox: demo-agent` label so the operator dashboard
+# groups them together.
+#
+# Apply:
+#   kubectl apply --context <kars-aks-or-kind> -f examples/full-stack-demo/demo.yaml
+#
+# Watch:
+#   kubectl get karssandbox,inferencepolicy,karsmemory,mcpserver,toolpolicy \
+#     -n kars-system -l kars.azure.com/sandbox=demo-agent
+#
+# Tear down:
+#   kubectl delete -f examples/full-stack-demo/demo.yaml
+
+---
+# ── 1. InferencePolicy ─────────────────────────────────────────────
+# Tells the inference-router which model to route to, how many
+# tokens/day the agent gets, and that prompt-shields must be on.
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: demo-agent-inference
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: demo-agent
+spec:
+  appliesTo:
+    sandboxName: demo-agent
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+    # Optional fallback if primary is rate-limited:
+    # fallback:
+    #   provider: azure-openai
+    #   deployment: gpt-4.1-mini
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    dailyTokens: 500000
+    perRequestTokens: 128000
+
+---
+# ── 2. KarsMemory ──────────────────────────────────────────────────
+# Binds the agent to a Foundry memory store. The router uses this to
+# scope every memory_*  tool call so the agent can only read/write its
+# own memories. `scope: "agent:demo-agent"` is the default convention.
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsMemory
+metadata:
+  name: demo-agent-memory
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: demo-agent
+spec:
+  sandboxRef:
+    name: demo-agent
+  # Foundry memory-store name. Convention: `memory-<sandbox-name>` —
+  # see runtimes/openclaw/src/core/agt-tools/foundry.ts:634 (the
+  # plugin hardcodes this name when calling memory_* tools).
+  storeName: memory-demo-agent
+  scope: "agent:demo-agent"
+  retentionDays: 30
+  deleteOnSandboxDelete: true
+  displayName: "Demo Agent Memory"
+
+---
+# ── 3. McpServer ───────────────────────────────────────────────────
+# Registers an MCP 2026 server the agent can call. The router will
+# expose its tools through the MCP namespace at runtime.
+# Replace with your real MCP URL or use any test endpoint.
+apiVersion: kars.azure.com/v1alpha1
+kind: McpServer
+metadata:
+  name: demo-agent-mcp
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: demo-agent
+spec:
+  url: "https://mcp.example.com/sse"
+  productionMode: false   # dev-mode: skip OAuth + don't actually call
+  allowedTools:
+    - "*"                  # whitelist all tools (tighten for prod)
+  displayName: "Demo MCP Server"
+
+---
+# ── 4. ToolPolicy ──────────────────────────────────────────────────
+# Per-tool gating: rate limit `web_search` to 1 req/sec with 60-burst.
+# The router enforces these at the tool-invocation boundary (no
+# agent-side code needed).
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: demo-agent-tools
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: demo-agent
+spec:
+  appliesTo:
+    tool: "web_search"
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: demo-agent
+  rateLimit:
+    rps: 1        # 1 request per second
+    burst: 60     # allow up to 60 in a burst window
+    window: "1m"  # rolling 1-minute window
+  approval:
+    mode: "auto"  # "auto" | "human" — flip to "human" for HITL approval
+  displayName: "Demo Agent — web_search rate-limit"
+
+---
+# ── 5. KarsSandbox ─────────────────────────────────────────────────
+# THE AGENT. Ties everything above together via `inferenceRef`.
+# `KarsMemory`, `McpServer`, and `ToolPolicy` are discovered by the
+# controller via the `kars.azure.com/sandbox=demo-agent` label.
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: demo-agent
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: demo-agent
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw:
+      # Controller resolves the sandbox image from SANDBOX_IMAGE env
+      # (set by the helm chart). Don't hardcode here.
+      config:
+        agent:
+          model: "azure/gpt-4.1"
+          # Initial system prompt — keep it short, you can change at runtime.
+          systemPrompt: |
+            You are a helpful AI assistant. You have access to memory
+            (use memory_save / memory_search) and external MCP tools.
+            Be concise.
+
+  sandbox:
+    isolation: "enhanced"
+    seccompProfile: "kars-strict"
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    writablePaths:
+      - /sandbox
+      - /tmp
+
+  # InferencePolicy (#1) is sibling-by-name, NOT label.
+  inferenceRef:
+    name: demo-agent-inference
+
+  networkPolicy:
+    defaultDeny: true
+    allowedEndpoints:
+      - host: "github.com"
+        port: 443
+      - host: "api.github.com"
+        port: 443
+      - host: "mcp.example.com"   # match the McpServer above
+        port: 443
+
+  azureServices:
+    - service: ai-foundry
+      permissions: [inference, evaluate, memory]
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
