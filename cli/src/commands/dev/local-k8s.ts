@@ -25,6 +25,7 @@ import { existsSync, writeFileSync, mkdtempSync, rmSync, readFileSync } from "no
 import { Stepper } from "../../stepper.js";
 import { loadConfig, getSecret, type KarsConfig } from "../../config.js";
 import { loadAgtProfile } from "../../refs.js";
+import { stageRustBinaries, type RustArch } from "../../lib/stage-rust-bin.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -570,6 +571,8 @@ async function rebuildDevImages(
       name: "inference-router",
       tag: "kars-inference-router:dev",
       build: async () => {
+        // Router Dockerfile is COPY-only — stage the binary first.
+        await stageRustBinaries(repoRoot, ["kars-inference-router"], archToken as RustArch);
         await execa(runtime, [
           "build",
           "--platform", platform,
@@ -584,6 +587,8 @@ async function rebuildDevImages(
       name: "controller",
       tag: "kars-controller:dev",
       build: async () => {
+        // Controller Dockerfile is COPY-only — stage the binary first.
+        await stageRustBinaries(repoRoot, ["kars-controller"], archToken as RustArch);
         await execa(runtime, [
           "build",
           "--platform", platform,

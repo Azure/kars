@@ -9,6 +9,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants, type KarsConfig } from "../config.js";
+import { stageRustBinaries, archForDockerPlatform } from "../lib/stage-rust-bin.js";
 
 /**
  * Pre-flight: verify every binary `kars dev` shells out to is on PATH.
@@ -803,11 +804,9 @@ Notes:
             stepper.update("Sandbox base image cached ✓");
           }
 
-          // Build inference router locally (sandbox Dockerfile needs it).
-          // The router Dockerfile is COPY-only (build-once pattern) → it
-          // expects bin/<arch>/kars-inference-router to already exist.
-          // Stage that binary first via `cargo build --release`, then
-          // run docker build. ~3-5 min on first run, ~10s cached.
+          // Build inference router locally (sandbox Dockerfile copies
+          // the binary in via FROM router-bin). Router Dockerfile is
+          // COPY-only — stage the binary first.
           const routerImage = "kars-inference-router:dev";
           let routerExists = false;
           try {
@@ -816,30 +815,12 @@ Notes:
           } catch { /* not built yet */ }
 
           if (options.build || !routerExists) {
-            // Resolve target arch from the docker platform string so the
-            // Dockerfile's COPY ${BIN_PATH_PREFIX}/${TARGETARCH}/... finds
-            // the binary at the right path.
-            const arch = dockerPlatform.endsWith("/arm64") ? "arm64" : "amd64";
-            const binDir = path.join(repoRoot, "bin", arch);
-            const routerBin = path.join(binDir, "kars-inference-router");
-
-            if (!existsSync(routerBin) || options.build) {
-              stepper.update(`Compiling inference-router for ${arch} (cargo — first run takes a few minutes)...`);
-              stepper.stop();
-              console.log(chalk.dim(`  cargo build --release --package kars-inference-router\n`));
-              // Build for host arch. macOS Apple Silicon → arm64,
-              // x86 → amd64. cargo handles target selection by default.
-              await execa("cargo", ["build", "--release", "--package", "kars-inference-router"], {
-                stdio: "inherit",
-                cwd: repoRoot,
-              });
-              // Stage to bin/<arch>/ matching the Dockerfile contract
-              await execa("mkdir", ["-p", binDir]);
-              await execa("cp", [
-                path.join(repoRoot, "target/release/kars-inference-router"),
-                routerBin,
-              ]);
-            }
+            const arch = archForDockerPlatform(dockerPlatform);
+            stepper.update(`Staging inference-router binary (${arch})...`);
+            stepper.stop();
+            await stageRustBinaries(repoRoot, ["kars-inference-router"], arch, {
+              forceRebuild: options.build,
+            });
 
             stepper.update("Packaging inference-router image (distroless COPY — ~10s)...");
             stepper.stop();

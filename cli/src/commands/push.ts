@@ -8,6 +8,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { loadContext } from "../config.js";
+import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "Private/Repos/agt/agent-governance-toolkit");
 
@@ -230,6 +231,16 @@ export function pushCommand(): Command {
       for (const img of targets) {
         const spin = ora(`Building ${img.tag}...`).start();
         try {
+          // Rust images (controller + router) use COPY-only Dockerfiles —
+          // stage the binary first via cargo. AKS nodes are amd64.
+          if (img.name === "controller") {
+            spin.text = `Compiling kars-controller (amd64) for ${img.tag}...`;
+            await stageRustBinaries(repoRoot, ["kars-controller"], "amd64");
+          } else if (img.name === "router") {
+            spin.text = `Compiling kars-inference-router (amd64) for ${img.tag}...`;
+            await stageRustBinaries(repoRoot, ["kars-inference-router"], "amd64");
+          }
+          spin.text = `Building ${img.tag}...`;
           // Dockerfile path: absolute if provided absolute (AGT case), else relative to repoRoot
           const dockerfilePath = path.isAbsolute(img.dockerfile)
             ? img.dockerfile
