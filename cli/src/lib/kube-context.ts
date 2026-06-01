@@ -28,7 +28,13 @@ export async function resolveKubeContext(explicit?: string): Promise<string | un
   } catch { /* no current context — probe the list */ }
   try {
     const { stdout } = await execa("kubectl", ["config", "get-contexts", "-o", "name"], { stdio: "pipe" });
-    const candidates = stdout.trim().split("\n").filter(Boolean);
+    const all = stdout.trim().split("\n").filter(Boolean);
+    // Prefer contexts named like kars-* / *-kars-* / kind-kars-* over
+    // unrelated clusters the user may have credentials for. Without
+    // this, alphabetical ordering picks (e.g.) "azureclaw-aks" before
+    // "kars-aks" and every kubectl call hits the wrong cluster.
+    const karsy = (c: string) => /(^|[-_])kars([-_]|$)/i.test(c);
+    const candidates = [...all.filter(karsy), ...all.filter(c => !karsy(c))];
     for (const ctx of candidates) {
       try {
         await execa("kubectl", ["--context", ctx, "get", "ns", "--request-timeout=3s", "--no-headers"], { stdio: "pipe", timeout: 5000 });
