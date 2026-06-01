@@ -30,7 +30,8 @@
   },
   "dependencies": {
     "@kars/mesh": "file:../../mesh-plugin",
-    "commander": "^13.0.0"
+    "commander": "^13.0.0",
+    "ws": "^8.18.0"
   },
   "optionalDependencies": {
     "@microsoft/agent-governance-sdk": "file:../../vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-bae5de3.tgz"
