@@ -18,7 +18,7 @@ import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
  * `kars dev` takes ~5–10 min on a cold first run; bailing halfway
  * through with "helm: command not found" is a bad first impression.
  */
-async function preflightTools(target: "docker" | "local-k8s"): Promise<void> {
+async function preflightTools(target: "docker" | "local-k8s", agtRepo: string): Promise<void> {
   // Per-target tool requirements:
   //   docker     → just docker (single container, no kind/helm/kubectl)
   //   local-k8s  → docker + kind + kubectl + helm
@@ -45,16 +45,39 @@ async function preflightTools(target: "docker" | "local-k8s"): Promise<void> {
     }
   }
 
-  if (missing.length === 0) return;
+  // AGT toolkit checkout is required to build the mesh relay + registry
+  // images. Surface the missing clone HERE (before any other work) with
+  // a copy-pasteable command + env var hint, instead of failing 5
+  // minutes later inside the sandbox build step.
+  const agtDockerfile = path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile");
+  const agtMissing = !existsSync(agtDockerfile);
+
+  if (missing.length === 0 && !agtMissing) return;
 
   console.error("");
-  console.error(chalk.red(`  ✗ Missing required tool${missing.length > 1 ? "s" : ""} for \`kars dev --target ${target}\`:`));
-  for (const t of missing) {
-    console.error(chalk.red(`    • ${chalk.bold(t.bin)}  — install: ${chalk.cyan(t.install)}`));
+  if (missing.length > 0) {
+    console.error(chalk.red(`  ✗ Missing required tool${missing.length > 1 ? "s" : ""} for \`kars dev --target ${target}\`:`));
+    for (const t of missing) {
+      console.error(chalk.red(`    • ${chalk.bold(t.bin)}  — install: ${chalk.cyan(t.install)}`));
+    }
+    if (target === "local-k8s") {
+      console.error(chalk.dim(`\n  Tip: macOS one-liner — \`brew install kind kubectl helm\` + Docker Desktop.`));
+      console.error(chalk.dim(`       (Or fall back to \`--target docker\` which only needs Docker.)`));
+    }
   }
-  if (target === "local-k8s") {
-    console.error(chalk.dim(`\n  Tip: macOS one-liner — \`brew install kind kubectl helm\` + Docker Desktop.`));
-    console.error(chalk.dim(`       (Or fall back to \`--target docker\` which only needs Docker.)`));
+  if (agtMissing) {
+    if (missing.length > 0) console.error("");
+    console.error(chalk.red(`  ✗ Microsoft Agent Governance Toolkit checkout not found at:`));
+    console.error(chalk.red(`      ${agtRepo}`));
+    console.error("");
+    console.error(chalk.yellow(`  kars dev builds the AGT mesh relay + registry images from source.`));
+    console.error(chalk.yellow(`  Clone the toolkit and re-run:`));
+    console.error(chalk.cyan(`      git clone https://github.com/microsoft/agent-governance-toolkit ${agtRepo}`));
+    console.error(chalk.cyan(`      kars dev`));
+    console.error("");
+    console.error(chalk.dim(`  Or, if you already have it elsewhere, point kars at it:`));
+    console.error(chalk.cyan(`      export KARS_AGT_REPO=/path/to/agent-governance-toolkit`));
+    console.error(chalk.dim(`  (or pass --agt-repo <path>).`));
   }
   console.error("");
   process.exit(1);
@@ -279,7 +302,10 @@ Notes:
       // BEFORE we spend any time on creds/agent-name prompts. Bailing
       // 30s into setup with "helm: command not found" is a worse
       // first-run experience than getting the missing-tool list up front.
-      await preflightTools(options.target as "docker" | "local-k8s");
+      await preflightTools(
+        options.target as "docker" | "local-k8s",
+        options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO,
+      );
 
       // ── First-run common prompts (apply to BOTH targets) ──────────
       // Creds + agent name + (docker-only) channels and rebuild are all
