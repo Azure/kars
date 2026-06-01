@@ -133,15 +133,6 @@ anyway for supply-chain provenance.
 Status: **ESRP onboarded ✓ · everything else pending.**
 
 - [x] **ESRP onboarding** — https://aka.ms/esrp-onboarding (done)
-- [ ] **Microsoft DL for project contact** — file via idweb to create
-  `kars@microsoft.com` (or whichever alias the team picks). Needed
-  as:
-  - The `author` field in published npm/PyPI packages
-  - The `ESRP_OWNERS` / `ESRP_APPROVERS` distribution lists below
-  - The public contact point in `SUPPORT.md`
-
-  Until the DL exists, package metadata uses `Microsoft Corporation`
-  with no email (PyPI / npm both accept this).
 - [ ] **MCR onboarding** — https://aka.ms/mcr-onboarding
   - Request namespace `kars/*`
   - Map images: `controller`, `inference-router`, `a2a-gateway`,
@@ -164,9 +155,7 @@ Sourced from ADO pipeline variables (mark as secret):
 - `ESRP_RELEASE_CERT_IDENTIFIER` — cert name for `EsrpRelease@11`
 - `ESRP_CLIENT_ID` — Managed Identity client ID
 - `ESRP_OWNERS` — distribution list owning the published packages
-  (e.g., `kars@microsoft.com` once the DL exists — see Onboarding above)
 - `ESRP_APPROVERS` — distribution list authorised to approve releases
-  (can be the same DL or a separate `kars-leads@microsoft.com`)
 
 Hardcoded in pipeline:
 

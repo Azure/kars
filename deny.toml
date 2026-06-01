@@ -114,7 +114,13 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Temporary git override: agentmesh + agentmesh-mcp consumed from
+# upstream AGT main until a release that includes our merged fixes
+# lands on crates.io. See Cargo.toml [patch.crates-io] and
+# docs/PUBLISHING.md "Consuming AGT from upstream main".
+allow-git = [
+  "https://github.com/microsoft/agent-governance-toolkit",
+]
 
 [sources.allow-org]
 github = []
