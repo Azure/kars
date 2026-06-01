@@ -45,12 +45,12 @@
   },
   "dependencies": {
     "@microsoft/agent-governance-sdk": "^3.6.0",
-    "ws": "^8.18"
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
     "@types/ws": "^8",
     "typescript": "^5.7",
-    "vitest": "^3.2"
+    "vitest": "^4.1.8"
   }
 }

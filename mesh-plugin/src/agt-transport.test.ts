@@ -60,15 +60,28 @@ describe("AgtTransport", () => {
 
   beforeEach(() => {
     fakeClient = makeFakeClient();
-    MeshClient = vi.fn(() => fakeClient);
-    const X3DHKeyManager = vi.fn(() => ({
-      generateSignedPreKey: vi.fn(() => ({
-        keyId: 1,
-        publicKey: new Uint8Array(32),
-        signature: new Uint8Array(64),
-      })),
-      generateOneTimePreKeys: vi.fn(() => []),
-    }));
+    // Vitest 4 enforces constructor semantics on mocks invoked via
+    // `new`. Use `vi.fn(function(...) { return fakeClient; })` (note
+    // `function` keyword — arrow fns aren't constructable) so that
+    // `new sdk.MeshClient(...)` resolves to the test fake.
+    MeshClient = vi.fn(function () {
+      return fakeClient;
+    });
+    // Same pattern for X3DHKeyManager — a real class works cleanly
+    // with `new`. Vitest 3's arrow-function trick is no longer allowed.
+    class FakeX3DHKeyManager {
+      generateSignedPreKey() {
+        return {
+          keyId: 1,
+          publicKey: new Uint8Array(32),
+          signature: new Uint8Array(64),
+        };
+      }
+      generateOneTimePreKeys() {
+        return [];
+      }
+    }
+    const X3DHKeyManager = FakeX3DHKeyManager;
     __setAgtSdkForTesting({
       MeshClient: MeshClient as unknown as never,
       X3DHKeyManager: X3DHKeyManager as unknown as never,
