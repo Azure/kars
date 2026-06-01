@@ -290,6 +290,7 @@ Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [m
 | `kars up` fails on `az login` | Stale CLI session | `az logout && az login --use-device-code`. |
 | `kars connect` fails with `address already in use` | Leftover `kubectl port-forward` from a previous session is still holding the local port | `lsof -ti:18789 \| xargs kill` (or restart your terminal). Then retry. |
 | `kars dev` errors with `Unsupported engine` on `npm ci` | Node.js < 22 | Install Node 22+ (we test against the LTS line; see [`cli/package.json`](../cli/package.json) for the exact engines pin). |
+| `kars dev` aborts with `dyld: Library not loaded: …libllhttp.X.Y.dylib` | Homebrew Node was linked against a `llhttp` dylib that `brew cleanup` later removed (common after `brew install rust`/`brew upgrade`) | `brew reinstall node`. Node itself crashes before any kars code runs — preflight cannot catch this. |
 | `kind create cluster` fails with `cluster "kind" already exists` | A previous `kars dev --target local-k8s` run did not clean up | `kind delete cluster --name <name>` and retry. |
 | GitHub Copilot provider returns `401` | The token is a classic PAT, not a Copilot-enabled OAuth token; or your Copilot seat is inactive | Verify your seat at [github.com/settings/copilot](https://github.com/settings/copilot). See [`cli-reference.md#kars-dev`](cli-reference.md#kars-dev) for the OAuth flow. |
 | Sandbox stays `Pending` | Foundry quota / model not deployed | `kubectl describe karssandbox <name>` — the controller surfaces the cause as a `Condition`. |
