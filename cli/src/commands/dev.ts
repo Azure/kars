@@ -3,11 +3,60 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
+import { execa } from "execa";
 import { existsSync } from "fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants, type KarsConfig } from "../config.js";
+
+/**
+ * Pre-flight: verify every binary `kars dev` shells out to is on PATH.
+ * Fails fast (before any prompts) with copy-pasteable install URLs.
+ * `kars dev` takes ~5–10 min on a cold first run; bailing halfway
+ * through with "helm: command not found" is a bad first impression.
+ */
+async function preflightTools(target: "docker" | "local-k8s"): Promise<void> {
+  // Per-target tool requirements:
+  //   docker     → just docker (single container, no kind/helm/kubectl)
+  //   local-k8s  → docker + kind + kubectl + helm
+  const required: Array<{ bin: string; install: string }> =
+    target === "local-k8s"
+      ? [
+          { bin: "docker",  install: "https://docs.docker.com/get-docker/" },
+          { bin: "kind",    install: "https://kind.sigs.k8s.io/docs/user/quick-start/#installation" },
+          { bin: "kubectl", install: "https://kubernetes.io/docs/tasks/tools/" },
+          { bin: "helm",    install: "https://helm.sh/docs/intro/install/" },
+          { bin: "cargo",   install: "https://rustup.rs/" },
+        ]
+      : [
+          { bin: "docker", install: "https://docs.docker.com/get-docker/" },
+          { bin: "cargo",  install: "https://rustup.rs/" },
+        ];
+
+  const missing: typeof required = [];
+  for (const t of required) {
+    try {
+      await execa("which", [t.bin], { stdio: "pipe" });
+    } catch {
+      missing.push(t);
+    }
+  }
+
+  if (missing.length === 0) return;
+
+  console.error("");
+  console.error(chalk.red(`  ✗ Missing required tool${missing.length > 1 ? "s" : ""} for \`kars dev --target ${target}\`:`));
+  for (const t of missing) {
+    console.error(chalk.red(`    • ${chalk.bold(t.bin)}  — install: ${chalk.cyan(t.install)}`));
+  }
+  if (target === "local-k8s") {
+    console.error(chalk.dim(`\n  Tip: macOS one-liner — \`brew install kind kubectl helm\` + Docker Desktop.`));
+    console.error(chalk.dim(`       (Or fall back to \`--target docker\` which only needs Docker.)`));
+  }
+  console.error("");
+  process.exit(1);
+}
 
 const DEFAULT_SANDBOX_IMAGE =
   "kars-sandbox:dev";
@@ -222,6 +271,13 @@ Notes:
           );
         }
       }
+
+      // ── Pre-flight tool check ────────────────────────────────────
+      // Fail fast if docker / kind / kubectl / helm aren't on PATH,
+      // BEFORE we spend any time on creds/agent-name prompts. Bailing
+      // 30s into setup with "helm: command not found" is a worse
+      // first-run experience than getting the missing-tool list up front.
+      await preflightTools(options.target as "docker" | "local-k8s");
 
       // ── First-run common prompts (apply to BOTH targets) ──────────
       // Creds + agent name + (docker-only) channels and rebuild are all
@@ -747,7 +803,11 @@ Notes:
             stepper.update("Sandbox base image cached ✓");
           }
 
-          // Build inference router locally (sandbox Dockerfile needs it)
+          // Build inference router locally (sandbox Dockerfile needs it).
+          // The router Dockerfile is COPY-only (build-once pattern) → it
+          // expects bin/<arch>/kars-inference-router to already exist.
+          // Stage that binary first via `cargo build --release`, then
+          // run docker build. ~3-5 min on first run, ~10s cached.
           const routerImage = "kars-inference-router:dev";
           let routerExists = false;
           try {
@@ -756,13 +816,37 @@ Notes:
           } catch { /* not built yet */ }
 
           if (options.build || !routerExists) {
-            stepper.update("Building inference router (Rust — first run takes a few minutes)...");
+            // Resolve target arch from the docker platform string so the
+            // Dockerfile's COPY ${BIN_PATH_PREFIX}/${TARGETARCH}/... finds
+            // the binary at the right path.
+            const arch = dockerPlatform.endsWith("/arm64") ? "arm64" : "amd64";
+            const binDir = path.join(repoRoot, "bin", arch);
+            const routerBin = path.join(binDir, "kars-inference-router");
+
+            if (!existsSync(routerBin) || options.build) {
+              stepper.update(`Compiling inference-router for ${arch} (cargo — first run takes a few minutes)...`);
+              stepper.stop();
+              console.log(chalk.dim(`  cargo build --release --package kars-inference-router\n`));
+              // Build for host arch. macOS Apple Silicon → arm64,
+              // x86 → amd64. cargo handles target selection by default.
+              await execa("cargo", ["build", "--release", "--package", "kars-inference-router"], {
+                stdio: "inherit",
+                cwd: repoRoot,
+              });
+              // Stage to bin/<arch>/ matching the Dockerfile contract
+              await execa("mkdir", ["-p", binDir]);
+              await execa("cp", [
+                path.join(repoRoot, "target/release/kars-inference-router"),
+                routerBin,
+              ]);
+            }
+
+            stepper.update("Packaging inference-router image (distroless COPY — ~10s)...");
             stepper.stop();
-            console.log(chalk.dim("  Building inference-router (Rust)...\n"));
+            console.log(chalk.dim("  docker build inference-router/Dockerfile (COPY only)...\n"));
             await execa("docker", [
               "build",
               "--platform", dockerPlatform,
-              "--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`,
               "-t", routerImage,
               "-f", routerDockerfile,
               repoRoot,
