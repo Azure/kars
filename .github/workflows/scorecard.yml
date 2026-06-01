@@ -1,16 +1,26 @@
 name: OpenSSF Scorecard
 
-# NOTE: OpenSSF Scorecard requires public repository access (the action
-# clones via the public GitHub API and fails with "Repository not found"
-# on private repos). This workflow is manually-triggerable only and is
-# kept for completeness; it is not part of required CI.
+# OpenSSF Scorecard runs weekly + on push to main, but ONLY when the
+# repository is public — Scorecard's GitHub-API calls 404 on private
+# repos, which would otherwise leave a permanent red badge. The
+# `if: !github.event.repository.private` gate on the analysis job
+# skips cleanly while we're still in private staging; the workflow
+# self-activates the moment the repo flips public.
 on:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 06:30 UTC — re-evaluate weekly so the badge stays fresh.
+    - cron: '30 6 * * 1'
   workflow_dispatch:
 
 permissions: read-all
 
 jobs:
   analysis:
+    # Skip on private repos — Scorecard cannot scan them. Once Azure/kars
+    # flips to public, this becomes truthy and the scan runs normally.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:
       security-events: write

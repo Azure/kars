@@ -8,6 +8,10 @@
 [![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Azure/kars/actions/workflows/ci.yml)
 [![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry-0078D4)](https://azure.microsoft.com)
 [![Status: Reference Stack](https://img.shields.io/badge/Status-Reference%20Stack-yellow)](#status)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Azure/kars/badge)](https://scorecard.dev/viewer/?uri=github.com/Azure/kars)
+<!-- [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/<ID>/badge)](https://www.bestpractices.dev/projects/<ID>) -->
+<!-- Best Practices badge: uncomment + fill in <ID> after registering at https://www.bestpractices.dev/en/projects/new (post-public flip). -->
+
 
 Hardened sandbox per agent. Zero credentials in the agent. Every external call goes through a Rust router that enforces identity, content safety, governance, and audit. End-to-end encrypted inter-agent messaging. One CLI for the whole loop — laptop to AKS.
 
