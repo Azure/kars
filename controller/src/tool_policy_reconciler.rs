@@ -38,6 +38,8 @@ use kube::{
     Client, ResourceExt,
     api::{Api, ListParams, ObjectMeta, Patch, PatchParams},
     runtime::controller::{Action, Controller},
+    runtime::reflector::ObjectRef,
+    runtime::watcher,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -751,9 +753,37 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         http,
-        phase_reporter: PhaseEventReporter::new(client, "ToolPolicy"),
+        phase_reporter: PhaseEventReporter::new(client.clone(), "ToolPolicy"),
     });
-    Controller::new(tps, kube::runtime::watcher::Config::default())
+    // Watch KarsSandbox so when a sandbox is created/updated that points
+    // at this ToolPolicy via spec.governance.toolPolicyRef.name (OR uses
+    // the empty-toolPolicyRef → kars-default fallback), the ToolPolicy
+    // reconciler re-runs immediately instead of waiting up to 5 min for
+    // the next periodic resweep. Also handles the system-default
+    // 'kars-default' ToolPolicy: every sandbox in the chart's release
+    // namespace that doesn't set toolPolicyRef explicitly implicitly
+    // references it.
+    let sandboxes: Api<crate::crd::KarsSandbox> = Api::all(client);
+    Controller::new(tps, watcher::Config::default())
+        .watches(
+            sandboxes,
+            watcher::Config::default(),
+            |sb: crate::crd::KarsSandbox| {
+                let ns = sb.namespace().unwrap_or_default();
+                if ns.is_empty() { return Vec::new().into_iter(); }
+                let mut refs: Vec<ObjectRef<crate::tool_policy::ToolPolicy>> = Vec::new();
+                if let Some(gov) = sb.spec.governance.as_ref() {
+                    if !gov.enabled { return refs.into_iter(); }
+                    let name = if gov.tool_policy_ref.name.is_empty() {
+                        "kars-default".to_string()
+                    } else {
+                        gov.tool_policy_ref.name.clone()
+                    };
+                    refs.push(ObjectRef::<crate::tool_policy::ToolPolicy>::new(&name).within(&ns));
+                }
+                refs.into_iter()
+            },
+        )
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("ToolPolicy", reconcile(x, ctx)).await

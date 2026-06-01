@@ -1,4 +1,8 @@
 node_modules/
-dist/
 *.log
 .cache/
+# dist/ is intentionally tracked — `kars headlamp --install` reads it
+# straight off disk to sidestep yargs/Node 26 incompatibility in the
+# upstream @kinvolk/headlamp-plugin@0.13.0 build CLI. Regenerate with:
+#   cd tools/headlamp-plugin && npm install && npm run build
+# (use Node 22 LTS; Node 26 currently breaks the build).
