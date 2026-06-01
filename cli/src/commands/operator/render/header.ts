@@ -82,9 +82,20 @@ export function renderHeader(ctx: HeaderRenderContext): void {
     if (meshHealth.entraVerifyEnabled === true) {
       const verified = meshHealth.verifiedAgents ?? 0;
       const total = meshHealth.connectedAgents ?? 0;
-      authTag = `  {green-fg}🔐 auth:entra ${verified}/${total}{/}`;
+      // Color the count by verification ratio so operators see at a glance
+      // that "0/1" is a problem and "3/3" is healthy:
+      //   - green   → all connected agents are Entra-verified
+      //   - yellow  → some connected but not yet verified (warming up,
+      //               or one peer can't reach Entra → fail-open)
+      //   - red     → relay is in entra-mode but NO agent has verified
+      //               (likely misconfigured Entra app or wrong audience)
+      const authColor =
+        total === 0 ? "green" :
+        verified === total ? "green" :
+        verified === 0 ? "red" : "yellow";
+      authTag = `  {${authColor}-fg}🔐 auth:entra ${verified}/${total} verified{/}`;
     } else if (meshHealth.entraVerifyEnabled === false) {
-      authTag = `  {gray-fg}auth:open{/}`;
+      authTag = `  {gray-fg}auth:open (no Entra verification){/}`;
     }
     meshTag = `{${relayColor}-fg}●{/} relay${authTag}  {${regColor}-fg}●{/} registry${regCount}  │  `;
   }
