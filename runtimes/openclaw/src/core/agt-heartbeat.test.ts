@@ -5,7 +5,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { startTaskProgressHeartbeat } from "./agt-heartbeat.js";
 
 describe("startTaskProgressHeartbeat", () => {
-  let log: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> };
+  // Vitest 4's ReturnType<typeof vi.fn> is no longer assignable to the
+  // narrow callback type (m: string) => void. Use the structural type
+  // the production code expects so the mock satisfies MeshLogger.
+  let log: { info: (m: string) => void; warn: (m: string) => void };
 
   beforeEach(() => {
     vi.useFakeTimers();
