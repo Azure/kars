@@ -1,71 +1,35 @@
-# syntax=docker/dockerfile:1.7
+# kars A2A Gateway — distroless (build-once pattern)
 #
-# `kars-a2a-gateway` — distroless static image for the public
-# A2A ingress edge (Phase 2 S3.5, ADR-0001 #4).
+# Public A2A 1.0.0 ingress edge. Built from a pre-compiled binary
+# produced by the `build-rust` CI job; the binary is COPY'd in.
+# (See ADR-0001 #4 for the front-edge design.)
 #
-# Two-stage build:
-#   1. `builder` (rust:bookworm) — cargo build with musl target.
-#   2. `runtime` (gcr.io/distroless/static) — copy the static binary,
-#      no shell, no package manager, no libc.
+# Migration history:
+#   - Was: rust:bookworm builder → gcr.io/distroless/static-debian12
+#   - Now: pre-built binary + AL3 distroless (single MS supply chain
+#     across all kars Rust images)
 #
-# Hardening:
-#   - musl static link → no glibc symbol surface.
-#   - distroless static → no shell, no `apt`, no SSH agent.
-#   - runs as nonroot (UID 65532 in distroless, K8s overrides to 1002).
-#   - Single ENTRYPOINT, no CMD shell expansion.
+# Migrating to AL4 (preview) or AL5 (future GA): flip
+# AZURELINUX_DISTROLESS below.
 
-FROM rust:1.88-bookworm AS builder
+ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0
+ARG VERSION=0.1.0
+ARG BIN_PATH=bin/kars-a2a-gateway
 
-# musl cross-compile toolchain
-RUN rustup target add x86_64-unknown-linux-musl \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends musl-tools \
-    && rm -rf /var/lib/apt/lists/*
+FROM ${AZURELINUX_DISTROLESS}
 
-WORKDIR /work
+ARG VERSION
+ARG BIN_PATH
+COPY ${BIN_PATH} /usr/local/bin/kars-a2a-gateway
 
-# Bring in the workspace manifest + every crate Cargo.toml so cargo
-# can resolve the workspace lock graph. Source files come next; this
-# ordering lets Docker cache the dependency build separately from
-# our own code edits.
-COPY Cargo.toml Cargo.lock ./
-COPY a2a-gateway/Cargo.toml a2a-gateway/Cargo.toml
-COPY kars-a2a-core/Cargo.toml kars-a2a-core/Cargo.toml
-COPY inference-router/Cargo.toml inference-router/Cargo.toml
-COPY controller/Cargo.toml controller/Cargo.toml
-COPY eval-corpus/Cargo.toml eval-corpus/Cargo.toml
-COPY conformance-runner/Cargo.toml conformance-runner/Cargo.toml
-COPY tests/chaos/Cargo.toml tests/chaos/Cargo.toml
-COPY tests/cncf-conformance/Cargo.toml tests/cncf-conformance/Cargo.toml
-
-# Source. Workspace-wide copy is wasteful but keeps the image build
-# context honest with the workspace shape (cargo refuses to build a
-# member without seeing the others' manifests).
-COPY a2a-gateway/src a2a-gateway/src
-COPY a2a-gateway/testdata a2a-gateway/testdata
-COPY kars-a2a-core/src kars-a2a-core/src
-COPY inference-router/src inference-router/src
-COPY inference-router/benches inference-router/benches
-COPY controller/src controller/src
-COPY controller/benches controller/benches
-COPY eval-corpus/src eval-corpus/src
-COPY conformance-runner/src conformance-runner/src
-COPY tests/chaos/src tests/chaos/src
-COPY tests/cncf-conformance/src tests/cncf-conformance/src
-
-RUN cargo build \
-        --release \
-        --bin kars-a2a-gateway \
-        --target x86_64-unknown-linux-musl
-
-FROM gcr.io/distroless/static-debian12:nonroot
-
-COPY --from=builder \
-    /work/target/x86_64-unknown-linux-musl/release/kars-a2a-gateway \
-    /usr/local/bin/kars-a2a-gateway
-
-USER 65532:65532
-
+USER 1000:1000
 EXPOSE 8443 9090
+
+LABEL org.opencontainers.image.title="kars A2A Gateway" \
+      org.opencontainers.image.description="Public-ingress A2A 1.0.0 peer edge for kars" \
+      org.opencontainers.image.vendor="Microsoft" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/Azure/kars"
 
 ENTRYPOINT ["/usr/local/bin/kars-a2a-gateway"]

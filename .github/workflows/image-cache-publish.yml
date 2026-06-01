@@ -1,15 +1,18 @@
 name: Image Cache Publish
 
-# Publishes the long-lived build artefacts (sandbox base image, inference router
-# image, controller image) to GHCR so the Container Image Scan job in ci.yml
-# can pull known-good prebuilt images instead of rebuilding every Rust/Docker
-# layer from scratch on every PR. Public-CI rebuilds are slow and brittle —
-# they transitively depend on upstream npm / crates.io / network availability.
-#
-# Visibility: each package should be marked PRIVATE in the GitHub UI under
-# Packages → <name> → Package settings → Change visibility → Private. CI in
-# this repo can still pull private GHCR images using the auto-provided
+# Publishes runtime container images (controller, inference-router,
+# a2a-gateway, conformance-runner, sandbox-base) to GHCR so the
+# Container Image Scan job in ci.yml and downstream consumers can
+# pull known-good prebuilt images. Visibility: each package should
+# be marked PRIVATE in the GitHub UI under Packages → <name> →
+# Package settings → Change visibility → Private. CI in this repo
+# can still pull private GHCR images using the auto-provided
 # GITHUB_TOKEN (no extra secrets needed).
+#
+# Build-once pattern (Path B): `build-binaries` compiles the entire
+# Rust workspace ONCE for the musl static target, then the matrix
+# `publish-images` job COPY's the binaries into AL3 distroless images.
+# Each matrix image build is ~30s instead of ~8min cargo build.
 
 on:
   push:
@@ -21,6 +24,7 @@ on:
       - 'controller/**'
       - 'a2a-gateway/**'
       - 'kars-a2a-core/**'
+      - 'sandbox-images/conformance-runner/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/image-cache-publish.yml'
@@ -29,14 +33,43 @@ on:
 permissions:
   contents: read
   packages: write
-  # Required by docker/build-push-action GHA cache backend (cache-to: type=gha)
   actions: write
 
 jobs:
-  publish:
+  build-binaries:
+    name: Build Rust binaries (host glibc, build-once)
+    # Pinned to ubuntu-22.04 (glibc 2.35) so the binary runs on
+    # AL3 distroless (glibc 2.38). Newer runners would emit glibc
+    # 2.39 symbols that AL3 can't resolve.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-glibc-release
+      - name: cargo build --release
+        run: cargo build --release --workspace
+      - name: Stage binaries
+        run: |
+          mkdir -p ./bin
+          cp target/release/kars-controller         ./bin/
+          cp target/release/kars-inference-router   ./bin/
+          cp target/release/kars-a2a-gateway        ./bin/
+          cp target/release/kars-conformance-runner ./bin/
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: kars-binaries-${{ github.sha }}
+          path: ./bin/
+          retention-days: 1
+
+  publish-images:
     name: Build and publish ${{ matrix.image.name }}
+    needs: build-binaries
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -44,45 +77,40 @@ jobs:
           - name: sandbox-base
             suffix: -sandbox-base
             dockerfile: sandbox-images/openclaw/Dockerfile.base
-            paths: 'sandbox-images/openclaw/Dockerfile.base vendor/sandbox-wheels/'
+            needs_binaries: false
           - name: inference-router
             suffix: -inference-router
             dockerfile: inference-router/Dockerfile
-            paths: 'inference-router/ Cargo.toml Cargo.lock'
+            needs_binaries: true
           - name: controller
             suffix: -controller
             dockerfile: controller/Dockerfile
-            paths: 'controller/ Cargo.toml Cargo.lock'
+            needs_binaries: true
           - name: a2a-gateway
             suffix: -a2a-gateway
             dockerfile: a2a-gateway/Dockerfile
-            paths: 'a2a-gateway/ kars-a2a-core/ Cargo.toml Cargo.lock'
+            needs_binaries: true
+          - name: conformance-runner
+            suffix: -conformance-runner
+            dockerfile: sandbox-images/conformance-runner/Dockerfile
+            needs_binaries: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 2
 
-      - name: Skip when no relevant paths changed
-        id: changed
-        run: |
-          # On workflow_dispatch always run; on push only run if relevant paths changed.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git diff --name-only HEAD~1 HEAD -- ${{ matrix.image.paths }} | grep -q .; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping ${{ matrix.image.name }} — no changes in ${{ matrix.image.paths }}"
-          fi
+      - name: Download pre-built binaries
+        if: matrix.image.needs_binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: kars-binaries-${{ github.sha }}
+          path: ./bin/
+      - name: chmod binaries
+        if: matrix.image.needs_binaries
+        run: chmod +x ./bin/*
 
       - name: Set up Docker Buildx
-        if: steps.changed.outputs.run == 'true'
         uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
 
       - name: Log in to GHCR
-        if: steps.changed.outputs.run == 'true'
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
         with:
           registry: ghcr.io
@@ -90,7 +118,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute image tags
-        if: steps.changed.outputs.run == 'true'
         id: tags
         run: |
           REPO_LOWER="${GITHUB_REPOSITORY,,}"
@@ -103,7 +130,6 @@ jobs:
           fi
 
       - name: Build and push ${{ matrix.image.name }}
-        if: steps.changed.outputs.run == 'true'
         uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
         with:
           context: .
@@ -113,8 +139,9 @@ jobs:
             ${{ steps.tags.outputs.sha_tag }}
             ${{ steps.tags.outputs.branch_tag }}
             ${{ steps.tags.outputs.latest_tag }}
-          # GHA cache backend: rebuilds reuse the cargo dependency-fetch +
-          # `cargo build --release` layer across runs unless source code or
-          # Cargo.lock changes. Saves ~5-10min per image on warm cache.
-          cache-from: type=gha,scope=image-${{ matrix.image.name }}
-          cache-to: type=gha,scope=image-${{ matrix.image.name }},mode=max
+          # Sandbox-base still has its own GHA cache because it does
+          # heavy work (vendor wheels, system deps). The Rust images
+          # are short COPY Dockerfiles that build in <30s — no cache
+          # needed.
+          cache-from: ${{ matrix.image.needs_binaries && '' || format('type=gha,scope=image-{0}', matrix.image.name) }}
+          cache-to: ${{ matrix.image.needs_binaries && '' || format('type=gha,scope=image-{0},mode=max', matrix.image.name) }}

@@ -18,9 +18,39 @@ env:
   VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
 jobs:
+  build-binaries:
+    name: Build Rust binaries (host glibc)
+    # Pinned to ubuntu-22.04 (glibc 2.35) so the binary runs on
+    # AL3 distroless (glibc 2.38). Newer runners could emit symbols
+    # AL3 can't resolve.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-glibc-release
+      - name: cargo build --release
+        run: cargo build --release --workspace
+      - name: Stage binaries
+        run: |
+          mkdir -p ./bin
+          cp target/release/kars-controller         ./bin/
+          cp target/release/kars-inference-router   ./bin/
+          cp target/release/kars-a2a-gateway        ./bin/
+          cp target/release/kars-conformance-runner ./bin/
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: kars-binaries-${{ github.sha }}
+          path: ./bin/
+          retention-days: 1
+
   build-sign-sbom:
     name: Build, Sign & SBOM
-    runs-on: ubuntu-latest
+    needs: build-binaries
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
       packages: write
@@ -36,6 +66,14 @@ jobs:
             image: kars-inference-router
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: kars-binaries-${{ github.sha }}
+          path: ./bin/
+      - name: chmod binaries
+        run: chmod +x ./bin/*
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
