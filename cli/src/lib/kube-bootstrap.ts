@@ -37,8 +37,31 @@ import * as path from "node:path";
 
 const HELP_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
 
+// Commands that talk to an EXISTING cluster and therefore need a
+// kubeconfig context resolved up front. Everything not in this set
+// is allowed to run with no kubeconfig at all — most notably:
+//   - `kars dev`           (creates a kind cluster — no context yet)
+//   - `kars up`            (creates an AKS cluster — uses az, not kubectl)
+//   - `kars credentials`   (writes ~/.kars/credentials, no cluster touch)
+//   - `kars config`        (local config edits)
+//   - `kars --help` etc    (already short-circuited via HELP_FLAGS)
+//   - `kars` with no args  (top-level help)
+//
+// If a command outside this set ends up needing kubectl (rare), the
+// command itself can call resolveKubeContext() explicitly.
+const KUBE_COMMANDS = new Set([
+  "connect", "list", "operator", "push", "destroy", "logs", "status",
+  "inspect", "model", "policy", "egress", "headlamp", "trace", "eval",
+  "handoff", "mesh", "pair", "convert", "a2a", "a2a-agent", "attest",
+  "migrate", "toolpolicy", "inferencepolicy", "memory", "mcp",
+]);
+
 export async function bootstrapKubeContext(argv: string[]): Promise<void> {
   if (argv.some(a => HELP_FLAGS.has(a))) return;
+  // argv = [node, /path/to/kars, <cmd>, ...rest]. The command (if any)
+  // is argv[2]. With no command (or unknown command), don't gate kubectl.
+  const cmd = (argv[2] ?? "").split("=", 1)[0];
+  if (!cmd || cmd.startsWith("-") || !KUBE_COMMANDS.has(cmd)) return;
   if (process.env.KUBECONFIG) return;
 
   try {
