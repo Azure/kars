@@ -26,6 +26,7 @@ import { Stepper } from "../../stepper.js";
 import { loadConfig, getSecret, type KarsConfig } from "../../config.js";
 import { loadAgtProfile } from "../../refs.js";
 import { stageRustBinaries, type RustArch } from "../../lib/stage-rust-bin.js";
+import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -602,6 +603,8 @@ async function rebuildDevImages(
       name: "sandbox",
       tag: "kars-sandbox:dev",
       build: async () => {
+        // Sandbox Dockerfile COPYs mesh-plugin/dist — stage it first.
+        await stageMeshPlugin(repoRoot);
         // Base image first if not present (heavy — only built once).
         const baseTag = "kars-sandbox-base:dev";
         const azureLinux = "mcr.microsoft.com/azurelinux/base/core:3.0";
@@ -922,7 +925,8 @@ async function deployAgentMesh(
   // ── Build relay + registry images locally (AGT Python) ────────────
   if (!agtRepo) {
     throw new Error(
-      "--mesh-provider=agt requires --agt-repo or $KARS_AGT_REPO pointing at an agent-governance-toolkit checkout.",
+      "--mesh-provider=agt requires --agt-repo or $KARS_AGT_REPO pointing at an agent-governance-toolkit checkout.\n" +
+      "  Clone it:  git clone https://github.com/microsoft/agent-governance-toolkit",
     );
   }
   const agtDockerfile = path.join(
@@ -931,7 +935,9 @@ async function deployAgentMesh(
   );
   if (!existsSync(agtDockerfile)) {
     throw new Error(
-      `AGT Dockerfile not found at ${agtDockerfile}. Pass --agt-repo <path> or set $KARS_AGT_REPO.`,
+      `AGT Dockerfile not found at ${agtDockerfile}\n` +
+      `  Clone it:  git clone https://github.com/microsoft/agent-governance-toolkit ${agtRepo}\n` +
+      `  Or pass --agt-repo <path> / set $KARS_AGT_REPO if you already have it elsewhere.`,
     );
   }
   for (const component of ["relay", "registry"] as const) {

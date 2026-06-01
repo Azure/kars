@@ -17,11 +17,45 @@ export function connectCommand(): Command {
     .option("--cloud", "Connect to AKS cloud sandbox (skip Docker)", false)
     .option("--port <port>", "Local port for WebUI", "18789")
     .option("--reset", "Restart the openclaw deployment to clear gateway brute-force lockout (token is preserved)", false)
-    .action(async (name: string, options: { shell: boolean; web: boolean; local: boolean; cloud: boolean; port: string; reset: boolean }) => {
+    .option("--context <name>", "kubectl context to use (auto-discovered if omitted)")
+    .action(async (name: string, options: { shell: boolean; web: boolean; local: boolean; cloud: boolean; port: string; reset: boolean; context?: string }) => {
       const { execa } = await import("execa");
       const containerName = `kars-${name}`;
       const namespace = `kars-${name}`;
       const localPort = options.port;
+
+      // Resolve the kubectl context to use. `kars list` works without
+      // a current context because it explicitly probes every context;
+      // `kars connect` did not, so users with no active context saw a
+      // misleading "Sandbox not found" instead of the real cause. If
+      // --context was passed, honor it; otherwise probe each context
+      // until we find one where deploy/<name> exists in kars-<name>.
+      const resolveContext = async (): Promise<string | undefined> => {
+        if (options.context) return options.context;
+        let contexts: string[] = [];
+        try {
+          const { stdout } = await execa("kubectl", ["config", "get-contexts", "-o", "name"], { stdio: "pipe" });
+          contexts = stdout.trim().split("\n").filter(Boolean);
+        } catch { return undefined; }
+        // Try current context first (cheaper, common case).
+        try {
+          const { stdout: cur } = await execa("kubectl", ["config", "current-context"], { stdio: "pipe" });
+          const c = cur.trim();
+          if (c) contexts = [c, ...contexts.filter(x => x !== c)];
+        } catch { /* no current context — fall through to probing all */ }
+        for (const ctx of contexts) {
+          try {
+            await execa("kubectl", [
+              "--context", ctx, "get", "deploy", name, "-n", namespace,
+              "--request-timeout=3s", "--no-headers",
+            ], { stdio: "pipe", timeout: 5000 });
+            return ctx;
+          } catch { /* not in this context, try next */ }
+        }
+        return undefined;
+      };
+      const kctx = options.cloud || !options.local ? await resolveContext() : undefined;
+      const ctxArgs = kctx ? ["--context", kctx] : [];
 
       // Detect where the agent exists
       let localRunning = false;
@@ -41,7 +75,7 @@ export function connectCommand(): Command {
       if (!options.local) {
         try {
           await execa("kubectl", [
-            "get", "deploy", name, "-n", namespace, "--no-headers",
+            ...ctxArgs, "get", "deploy", name, "-n", namespace, "--no-headers",
           ], { stdio: "pipe" });
           aksExists = true;
         } catch { /* no AKS deployment */ }
@@ -57,7 +91,7 @@ export function connectCommand(): Command {
       if (aksExists) {
         try {
           const { stdout: crJson } = await execa("kubectl", [
-            "get", "karssandbox", name, "-n", "kars-system", "-o", "json",
+            ...ctxArgs, "get", "karssandbox", name, "-n", "kars-system", "-o", "json",
           ], { stdio: "pipe" });
           runtimeKind = runtimeKindFromCr(JSON.parse(crJson));
         } catch { /* fall back to OpenClaw default */ }
@@ -126,7 +160,7 @@ export function connectCommand(): Command {
         let isKata = false;
         try {
           const { stdout: rc } = await execa("kubectl", [
-            "get", "pod", "-n", namespace, "-l", `kars.azure.com/sandbox=${name}`,
+            ...ctxArgs, "get", "pod", "-n", namespace, "-l", `kars.azure.com/sandbox=${name}`,
             "-o", "jsonpath={.items[0].spec.runtimeClassName}",
           ], { stdio: "pipe" });
           isKata = rc.trim().includes("kata");
@@ -142,7 +176,7 @@ export function connectCommand(): Command {
         let gatewayToken = "";
         try {
           const { stdout: tokenB64 } = await execa("kubectl", [
-            "get", "secret", "-n", namespace, "gateway-token",
+            ...ctxArgs, "get", "secret", "-n", namespace, "gateway-token",
             "-o", "jsonpath={.data.token}",
           ], { stdio: "pipe" });
           if (tokenB64.trim()) {
@@ -168,10 +202,10 @@ export function connectCommand(): Command {
           console.log(chalk.yellow("  Resetting gateway lockout: restarting openclaw pod (token preserved)…"));
           try {
             await execa("kubectl", [
-              "rollout", "restart", "-n", namespace, `deploy/${name}`,
+              ...ctxArgs, "rollout", "restart", "-n", namespace, `deploy/${name}`,
             ], { stdio: "pipe" });
             await execa("kubectl", [
-              "rollout", "status", "-n", namespace, `deploy/${name}`, "--timeout=120s",
+              ...ctxArgs, "rollout", "status", "-n", namespace, `deploy/${name}`, "--timeout=120s",
             ], { stdio: "inherit" });
             console.log(chalk.green("  Gateway lockout cleared."));
             console.log(chalk.dim("  Tip: close any open browser tabs pointing at localhost:" + localPort + " before reopening — they may auto-reconnect with a stale token and re-trigger the lockout."));
@@ -192,7 +226,7 @@ export function connectCommand(): Command {
           console.log();
           console.log(chalk.dim("  Falling back to shell mode...\n"));
           await execa("kubectl", [
-            "exec", "-it", "-n", namespace,
+            ...ctxArgs, "exec", "-it", "-n", namespace,
             `deploy/${name}`, "-c", podContainer,
             "--", "/bin/bash", "--login",
           ], { stdio: "inherit" });
@@ -253,7 +287,7 @@ export function connectCommand(): Command {
         // "Disconnected." with no diagnostic.
         console.log(chalk.dim(`  Starting port-forward on localhost:${localPort}...`));
         const pf = execa("kubectl", [
-          "port-forward", "-n", namespace,
+          ...ctxArgs, "port-forward", "-n", namespace,
           `deploy/${name}`, `${localPort}:18789`,
         ], { stdio: ["ignore", "pipe", "pipe"] });
 

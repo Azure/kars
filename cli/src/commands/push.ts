@@ -9,8 +9,9 @@ import fs from "fs";
 import os from "os";
 import { loadContext } from "../config.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
+import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
 
-const DEFAULT_AGT_REPO = path.join(os.homedir(), "Private/Repos/agt/agent-governance-toolkit");
+const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
 
 export function pushCommand(): Command {
   const cmd = new Command("push");
@@ -239,6 +240,9 @@ export function pushCommand(): Command {
           } else if (img.name === "router") {
             spin.text = `Compiling kars-inference-router (amd64) for ${img.tag}...`;
             await stageRustBinaries(repoRoot, ["kars-inference-router"], "amd64");
+          } else if (img.name === "sandbox") {
+            spin.text = `Building mesh-plugin (TypeScript) for ${img.tag}...`;
+            await stageMeshPlugin(repoRoot);
           }
           spin.text = `Building ${img.tag}...`;
           // Dockerfile path: absolute if provided absolute (AGT case), else relative to repoRoot

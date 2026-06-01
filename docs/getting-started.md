@@ -20,6 +20,17 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 | Local mode (GitHub Models) | Docker Desktop, Node.js 22+, Rust 1.88+, a GitHub PAT with `models:read` scope. **No Azure account needed.** |
 | AKS mode | The above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
 
+> **AGT mesh prerequisite (sub-agent spawning).** Inter-agent E2E
+> messaging uses the [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
+> relay + registry, which kars builds from source locally. Clone it
+> next to your kars repo before the first `kars dev` / `kars up`:
+> ```bash
+> git clone https://github.com/microsoft/agent-governance-toolkit ~/agent-governance-toolkit
+> ```
+> Or pass `--agt-repo <path>` / set `$KARS_AGT_REPO` if you keep it
+> elsewhere. Once the relay + registry images are cached locally,
+> kars will not rebuild them on subsequent runs.
+
 The CLI bootstraps everything else (Helm chart install, Foundry resource creation, ACR build/push, federated identity wiring). You do not need to provision any of it by hand.
 
 ### Quickest path: GitHub Copilot (no Azure account, no PAT)
