@@ -969,21 +969,22 @@ pub struct AgentConfig {
 /// tool-call gating (rate limit, approval, AP2 commerce caps); this
 /// struct keeps only behavior knobs that aren't expressed by `ToolPolicy`
 /// itself (AGT enable flag, trust threshold, trusted peers, registry mode).
-#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GovernanceConfig {
     /// Enable AGT governance (tool policy, trust, audit).
-    #[serde(default)]
+    /// **Defaults to `true`** — AGT is part of every kars deployment.
+    /// Set to `false` to opt out (controller will skip Service + NetworkPolicy
+    /// ingress on :8443 and InferencePolicy enforcement loop).
+    #[serde(default = "default_governance_enabled")]
     pub enabled: bool,
     /// Reference to a `ToolPolicy` CR in the **same namespace** as this
-    /// `KarsSandbox`. Required — the controller resolves the target at
-    /// reconcile time; missing target → `Degraded` with reason
-    /// `ToolPolicyNotFound` (no inline-fallback path post-S13). The
-    /// resolved CR's `metadata.name` is used as the ConfigMap name
-    /// suffix (`toolpolicy-<name>-profile`) the sandbox pod mounts at
-    /// `/etc/agt/policies`. Post-Slice-1e the AGT engine reads only
-    /// from that mount; the legacy bundled `AGT_POLICY_PROFILE`
-    /// env-var path has been removed.
+    /// `KarsSandbox`. Optional — when omitted (and `enabled=true`), the
+    /// controller falls back to the system-default `kars-default`
+    /// ToolPolicy that the Helm chart ships in the same namespace as
+    /// the `KarsSandbox` CR (typically `kars-system`). To use the
+    /// fallback in a custom namespace, ship `kars-default` there or
+    /// set this field explicitly.
     #[serde(default)]
     pub tool_policy_ref: LocalObjectRef,
     /// Minimum trust score (0-1000) for inter-agent communication.
@@ -1068,6 +1069,27 @@ impl GovernanceConfig {
 
 fn default_trust_threshold() -> i32 {
     500
+}
+
+fn default_governance_enabled() -> bool {
+    true
+}
+
+/// Default-by-design: AGT governance ON, trust threshold 500, no
+/// explicit ToolPolicyRef (controller falls back to `kars-default`
+/// in the sandbox's namespace).
+impl Default for GovernanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_governance_enabled(),
+            tool_policy_ref: LocalObjectRef::default(),
+            trust_threshold: default_trust_threshold(),
+            trusted_peers: None,
+            registry_mode: None,
+            mcp_server_ref: None,
+            mcp_server_refs: Vec::new(),
+        }
+    }
 }
 
 /// KarsSandbox status — reflects the current observed state.

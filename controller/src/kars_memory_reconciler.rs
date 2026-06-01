@@ -87,6 +87,8 @@ use kube::{
     Client, ResourceExt,
     api::{Api, ListParams, ObjectMeta, Patch, PatchParams},
     runtime::controller::{Action, Controller},
+    runtime::reflector::ObjectRef,
+    runtime::watcher,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -869,9 +871,26 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         http,
-        phase_reporter: PhaseEventReporter::new(client, "KarsMemory"),
+        phase_reporter: PhaseEventReporter::new(client.clone(), "KarsMemory"),
     });
-    Controller::new(memories, kube::runtime::watcher::Config::default())
+    // Watch KarsSandbox so create/update of a sandbox that references
+    // a KarsMemory triggers an immediate reconcile of that memory CR
+    // — without this we'd wait up to REQUEUE_OK (5 min) for the next
+    // periodic resweep to flip NoSandboxesReferencing → RouterEnforcing.
+    let sandboxes: Api<crate::crd::KarsSandbox> = Api::all(client);
+    Controller::new(memories, watcher::Config::default())
+        .watches(
+            sandboxes,
+            watcher::Config::default(),
+            |sb: crate::crd::KarsSandbox| {
+                let ns = sb.namespace().unwrap_or_default();
+                sb.spec
+                    .memory_ref
+                    .as_ref()
+                    .map(|r| ObjectRef::<KarsMemory>::new(&r.name).within(&ns))
+                    .into_iter()
+            },
+        )
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("KarsMemory", reconcile(x, ctx)).await

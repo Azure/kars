@@ -593,14 +593,18 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // `BundledProfileInUse` condition during the deprecation window;
     // that surface is now dead and removed.
     let tool_policy_profile: String = if governance_config.enabled {
-        let tp_ref_name = governance_config.tool_policy_ref.name.clone();
-        if tp_ref_name.is_empty() {
-            tracing::error!(sandbox = %name, "spec.governance.toolPolicyRef.name is empty");
-            degrade!(
-                SPEC_INVALID,
-                "spec.governance.toolPolicyRef.name is required when governance.enabled=true"
-            );
-        }
+        // System-default fallback: when the user omits
+        // `spec.governance.toolPolicyRef.name`, the controller resolves
+        // to `kars-default` in the same namespace as the KarsSandbox CR
+        // (typically `kars-system`, where the Helm chart ships it). This
+        // means a bare `KarsSandbox` with no governance block — or one
+        // with `governance: { enabled: true }` and nothing else — works
+        // out of the box without forcing users to hand-write a ToolPolicy.
+        let tp_ref_name = if governance_config.tool_policy_ref.name.is_empty() {
+            "kars-default".to_string()
+        } else {
+            governance_config.tool_policy_ref.name.clone()
+        };
         let tp_api: Api<crate::tool_policy::ToolPolicy> =
             Api::namespaced(client.clone(), &sandbox_self_ns);
         match tp_api.get(&tp_ref_name).await {

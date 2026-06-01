@@ -187,9 +187,11 @@ spec:
   memoryRef:                        # optional: sibling KarsMemory
     name: my-agent-memory
   governance:
-    enabled: true
+    # AGT governance defaults to enabled=true since v0.1.0 — AGT is
+    # part of every kars deployment. To opt out, set enabled: false.
+    enabled: true                   # default true
     toolPolicyRef:
-      name: web-fetch-policy        # required when governance.enabled
+      name: web-fetch-policy        # optional; falls back to kars-default
     trustThreshold: 500             # 0..1000; default 500
     mcpServerRefs:
       - name: github-mcp
@@ -224,8 +226,8 @@ status:
 | `spec.memoryRef.name` | LocalObjectRef | Bind to a sibling `KarsMemory` (same namespace). |
 | `spec.sandbox` | object | Isolation primitives — `isolation` (`standard` \| `enhanced`, default `enhanced`), `seccompProfile` (default `kars-strict`), `writablePaths` (default `[/sandbox, /tmp]`). |
 | `spec.networkPolicy` | object | Baseline egress allowlist. Defaults `defaultDeny: true`, `egressMode: Learn`. |
-| `spec.governance.enabled` | bool | Turn on AGT governance — router guardrails are always on regardless; this gates AGT trust/audit. |
-| `spec.governance.toolPolicyRef.name` | LocalObjectRef | Required when `governance.enabled`. Resolves to a sibling `ToolPolicy`. |
+| `spec.governance.enabled` | bool | **Defaults to `true`.** Turn on AGT governance — router guardrails are always on regardless; this gates AGT trust/audit + creates the per-sandbox Service on `:8443` (required for InferencePolicy enforcement + cross-agent mesh DNS). Set to `false` to opt out. |
+| `spec.governance.toolPolicyRef.name` | LocalObjectRef | Optional. When `governance.enabled=true` and this is empty, the controller falls back to a sibling ToolPolicy named `kars-default` — the Helm chart ships one in `kars-system`. For sandboxes in custom namespaces, either ship `kars-default` there or set this explicitly. |
 | `spec.governance.trustThreshold` | int | Minimum trust score `0..1000` for KNOCK accept. Default `500`. |
 | `spec.governance.mcpServerRefs` | `[]LocalObjectRef` | Up to 8 sibling `McpServer` refs; controller mirrors per-server JWKS + signing keys into `/etc/kars/mcp/<name>/`; router builds a multi-issuer OAuth verifier and exposes tools under `{server}.{tool}`. Deprecated singular `governance.mcpServerRef` is still honoured (emits `McpSingularDeprecated` warning). |
 | `spec.governance.registryMode` | string | `local` (default) or `global`. Global enables cross-cluster mesh + handoff tools. |

@@ -1,0 +1,37 @@
+{{- if (.Values.governance | default dict).enabled | default true }}
+# kars-default ToolPolicy — the system-default AGT profile that the
+# controller falls back to when a KarsSandbox sets
+# `spec.governance.enabled=true` (the new default) and omits
+# `spec.governance.toolPolicyRef`. The body is the canonical
+# kars-default profile shipped under `cli/profiles/agt/kars-default.yaml`.
+#
+# A KarsSandbox in a custom namespace either ships its own
+# `kars-default` ToolPolicy locally, or sets `toolPolicyRef.name`
+# explicitly to an in-namespace policy. Cross-namespace policy
+# references are deliberately not supported (principles.md §3).
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: kars-default
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: system
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    kars.azure.com/system-default: "true"
+  annotations:
+    kars.azure.com/profile: default
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+spec:
+  appliesTo:
+    # CEL admission requires at least one label. The controller's
+    # empty-toolPolicyRef fallback resolves this policy by name
+    # ("kars-default"), not by selector match — this selector is
+    # essentially a no-op, but the schema demands a non-empty map.
+    sandboxMatchLabels:
+      kars.azure.com/system-default: "true"
+  agtProfile:
+    inline: |
+{{ .Files.Get "files/kars-default-agt-profile.yaml" | indent 6 }}
+{{- end }}

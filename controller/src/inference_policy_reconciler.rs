@@ -49,6 +49,8 @@ use kube::{
     Client, ResourceExt,
     api::{Api, ListParams, ObjectMeta, Patch, PatchParams},
     runtime::controller::{Action, Controller},
+    runtime::reflector::ObjectRef,
+    runtime::watcher,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -827,9 +829,29 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         http,
-        phase_reporter: PhaseEventReporter::new(client, "InferencePolicy"),
+        phase_reporter: PhaseEventReporter::new(client.clone(), "InferencePolicy"),
     });
-    Controller::new(policies, kube::runtime::watcher::Config::default())
+    // Watch KarsSandbox so a sandbox create/update that references an
+    // InferencePolicy triggers immediate reconcile of that policy —
+    // without this we'd wait up to 5 min (REQUEUE_OK) for the next
+    // periodic resweep to flip NoSandboxesReferencing → RouterEnforcing.
+    // Only handles the explicit `spec.inferenceRef.name` direction;
+    // pure label-selector-only policies (no sandboxName + no
+    // inferenceRef from sandbox) still rely on the periodic resync.
+    let sandboxes: Api<crate::crd::KarsSandbox> = Api::all(client);
+    Controller::new(policies, watcher::Config::default())
+        .watches(
+            sandboxes,
+            watcher::Config::default(),
+            |sb: crate::crd::KarsSandbox| {
+                let name = sb.spec.inference_ref.name.clone();
+                let ns = sb.namespace().unwrap_or_default();
+                if name.is_empty() || ns.is_empty() {
+                    return Vec::new().into_iter();
+                }
+                vec![ObjectRef::<InferencePolicy>::new(&name).within(&ns)].into_iter()
+            },
+        )
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("InferencePolicy", reconcile(x, ctx)).await
