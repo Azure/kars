@@ -130,21 +130,30 @@ anyway for supply-chain provenance.
 
 ## Onboarding checklist (one-time)
 
-Status: **all items still pending.**
+Status: **ESRP onboarded ✓ · everything else pending.**
 
+- [x] **ESRP onboarding** — https://aka.ms/esrp-onboarding (done)
+- [ ] **Microsoft DL for project contact** — file via idweb to create
+  `kars@microsoft.com` (or whichever alias the team picks). Needed
+  as:
+  - The `author` field in published npm/PyPI packages
+  - The `ESRP_OWNERS` / `ESRP_APPROVERS` distribution lists below
+  - The public contact point in `SUPPORT.md`
+
+  Until the DL exists, package metadata uses `Microsoft Corporation`
+  with no email (PyPI / npm both accept this).
 - [ ] **MCR onboarding** — https://aka.ms/mcr-onboarding
   - Request namespace `kars/*`
   - Map images: `controller`, `inference-router`, `a2a-gateway`,
     `conformance-runner`, `sandbox-base`
-- [ ] **ESRP onboarding** — https://aka.ms/esrp-onboarding
-  - Get ESRP Release certificate in Azure Key Vault
-  - Note the `ESRP_*` pipeline variables list below
 - [ ] **ADO project** — request kars space + service connection `kars`
   (Azure RM, Managed Identity)
 - [ ] **npm scope** — claim `@kars` scope, assign Microsoft team as owner
 - [ ] **crates.io** — register team account (no per-crate registration needed
   beyond the first publish via ESRP)
 - [ ] **PyPI Package Owners group** — N/A; kars has no Python packages
+  bound for PyPI today (the runtime adapters under `runtimes/*/` are
+  Python but distribute through container images)
 - [ ] **Anaconda** — N/A; kars has no conda packages
 
 ### Required ADO pipeline variables
@@ -154,8 +163,10 @@ Sourced from ADO pipeline variables (mark as secret):
 - `ESRP_KEYVAULT_NAME` — Azure Key Vault containing the release cert
 - `ESRP_RELEASE_CERT_IDENTIFIER` — cert name for `EsrpRelease@11`
 - `ESRP_CLIENT_ID` — Managed Identity client ID
-- `ESRP_OWNERS` — distribution list (e.g., `kars-team@microsoft.com`)
-- `ESRP_APPROVERS` — distribution list (e.g., `kars-leads@microsoft.com`)
+- `ESRP_OWNERS` — distribution list owning the published packages
+  (e.g., `kars@microsoft.com` once the DL exists — see Onboarding above)
+- `ESRP_APPROVERS` — distribution list authorised to approve releases
+  (can be the same DL or a separate `kars-leads@microsoft.com`)
 
 Hardcoded in pipeline:
 

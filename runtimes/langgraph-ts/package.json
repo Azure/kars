@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "kars in-pod adapter for LangGraph (TypeScript / Node.js) — AAD shim, OTel auto-init, AgentMesh bridge, and router-managed LLM credentials out of the box.",
   "license": "MIT",
-  "author": "Microsoft Corporation <kars@microsoft.com>",
+  "author": "Microsoft Corporation (https://github.com/Azure/kars)",
   "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
