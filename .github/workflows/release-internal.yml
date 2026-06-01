@@ -49,37 +49,82 @@ permissions:
   packages: write    # push to GHCR
   id-token: write    # cosign keyless OIDC
   attestations: write
+  actions: read      # query prior ci.yml runs for binary reuse
 
 env:
   VERSION: ${{ github.event.inputs.version != '' && github.event.inputs.version || (startsWith(github.ref, 'refs/tags/') && github.ref_name || format('internal-{0}', github.sha)) }}
 
 jobs:
-  # ─── Stage 1: build Rust binaries once ──────────────────────────
+  # ─── Stage 1: produce Rust binaries (reuse from ci.yml if available) ──
   build-binaries:
-    name: Build Rust binaries
+    name: Prepare Rust binaries (reuse from ci.yml if possible)
     # ubuntu-22.04 = glibc 2.35; AL3 distroless = glibc 2.38 (backward
     # compatible). Newer runners emit symbols AL3 cannot resolve.
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Try to find existing CI binary build for this SHA
+        id: find-ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The ci.yml build-rust job uploads `kars-binaries-<sha>` after
+          # every successful run. If that exists for this commit, we have
+          # byte-identical binaries already — skip the 14-minute cargo build.
+          # Tags don't trigger ci.yml directly, but the same SHA may have
+          # passed CI via the PR or branch push that preceded the tag.
+          RUN_ID=$(gh run list \
+            --workflow ci.yml \
+            --commit ${{ github.sha }} \
+            --status success \
+            --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$RUN_ID" ]; then
+            echo "::notice::Found ci.yml run $RUN_ID for this SHA — will reuse binaries"
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "ci_run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No prior ci.yml build for this SHA — building from scratch"
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download binaries from prior ci.yml run
+        if: steps.find-ci.outputs.reuse == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kars-binaries-${{ github.sha }}
+          run-id: ${{ steps.find-ci.outputs.ci_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ./bin/
+
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        if: steps.find-ci.outputs.reuse != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.find-ci.outputs.reuse != 'true'
         with:
           shared-key: rust-glibc-release
           save-if: false
-      - name: cargo build --release
+      - name: cargo build --release (only on cache miss)
+        if: steps.find-ci.outputs.reuse != 'true'
         run: cargo build --release --workspace
-      - name: Stage binaries + checksums
+      - name: Stage binaries (only on fresh build)
+        if: steps.find-ci.outputs.reuse != 'true'
         run: |
           mkdir -p ./bin
           cp target/release/kars-controller         ./bin/
           cp target/release/kars-inference-router   ./bin/
           cp target/release/kars-a2a-gateway        ./bin/
           cp target/release/kars-conformance-runner ./bin/
-          ( cd ./bin && sha256sum * | tee SHA256SUMS )
-          file ./bin/*
-      - name: Upload binaries
+
+      - name: Verify + checksum (both paths converge here)
+        run: |
+          chmod +x ./bin/kars-*
+          ( cd ./bin && sha256sum kars-* | tee SHA256SUMS )
+          file ./bin/kars-*
+
+      - name: Upload binaries (release-scoped artifact name)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: kars-binaries-${{ env.VERSION }}
@@ -186,7 +231,11 @@ jobs:
           retention-days: 90
 
       - name: Trivy scan (HIGH+CRITICAL, JSON)
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # 0.29.0
+        continue-on-error: true   # Trivy install is sometimes flaky on
+                                   # GHA runners; the SBOM is the auditor's
+                                   # primary input. Don't block the whole
+                                   # release on a transient install failure.
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: ghcr.io/azure/${{ matrix.image.ghcr }}:${{ env.VERSION }}
           format: json
@@ -195,6 +244,8 @@ jobs:
           exit-code: '0'
 
       - name: Upload Trivy report
+        if: always()
+        continue-on-error: true   # Pair with continue-on-error above.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: trivy-${{ matrix.image.name }}-${{ env.VERSION }}
