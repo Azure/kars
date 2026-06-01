@@ -84,6 +84,49 @@ export async function fetchMeshHealth(devMode: boolean, kubeContext?: string): P
   return result;
 }
 
+/**
+ * Multi-cluster aggregation: probe mesh health on every supplied
+ * context in parallel, OR-aggregate the booleans + sum the pod counts.
+ * Used by the operator when running in multi-cluster mode (no
+ * --context) so the mesh panel doesn't go red just because there's
+ * no kubectl default-context set.
+ *
+ * If `contexts` is empty, falls back to the single-context probe.
+ */
+export async function fetchMeshHealthMulti(
+  devMode: boolean,
+  contexts: string[],
+): Promise<MeshHealth> {
+  if (devMode || contexts.length === 0) {
+    return fetchMeshHealth(devMode, undefined);
+  }
+  const results = await Promise.allSettled(contexts.map((c) => fetchMeshHealth(false, c)));
+  const merged: MeshHealth = {
+    relayReady: false, registryReady: false, registryPods: 0, registryReadyPods: 0,
+    entraVerifyEnabled: null, verifiedAgents: null, connectedAgents: null,
+  };
+  for (const r of results) {
+    if (r.status !== "fulfilled") continue;
+    const m = r.value;
+    if (m.relayReady) merged.relayReady = true;
+    if (m.registryReady) merged.registryReady = true;
+    merged.registryPods += m.registryPods;
+    merged.registryReadyPods += m.registryReadyPods;
+    // For booleans, prefer the first non-null value. For counts,
+    // sum (best-effort — if only one cluster reports them).
+    if (merged.entraVerifyEnabled === null && m.entraVerifyEnabled !== null) {
+      merged.entraVerifyEnabled = m.entraVerifyEnabled;
+    }
+    if (m.verifiedAgents !== null) {
+      merged.verifiedAgents = (merged.verifiedAgents ?? 0) + m.verifiedAgents;
+    }
+    if (m.connectedAgents !== null) {
+      merged.connectedAgents = (merged.connectedAgents ?? 0) + m.connectedAgents;
+    }
+  }
+  return merged;
+}
+
 export async function fetchClusterHealth(devMode: boolean, kubeContext?: string): Promise<ClusterHealth> {
   const result: ClusterHealth = {
     apiLatencyMs: -1, apiReachable: false,
