@@ -194,9 +194,102 @@ jobs:
               echo "::warning::cosign sign returned non-zero (expected without --upload target)"
           fi
 
+  npm-pack:
+    name: npm pack ${{ matrix.pkg.dir }} (no publish)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg:
+          - dir: cli
+            name: '@kars/cli'
+          - dir: mesh-plugin
+            name: '@kars/mesh'
+          - dir: runtimes/openclaw
+            name: '@kars/runtime-openclaw'
+          - dir: runtimes/langgraph-ts
+            name: '@kars/runtime-langgraph-ts'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: npm ci
+        run: npm ci
+        working-directory: ${{ matrix.pkg.dir }}
+
+      - name: npm run build (if defined)
+        run: |
+          if npm run | grep -qE '^\s*build'; then
+            npm run build
+          else
+            echo "::notice::no build script in ${{ matrix.pkg.name }} — skipping"
+          fi
+        working-directory: ${{ matrix.pkg.dir }}
+
+      - name: npm pack (produces .tgz, does NOT publish)
+        run: |
+          npm pack
+          ls -la *.tgz
+        working-directory: ${{ matrix.pkg.dir }}
+
+      - name: npm publish --dry-run (validates registry-side checks)
+        run: npm publish --dry-run --access public
+        working-directory: ${{ matrix.pkg.dir }}
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: kars-npm-${{ matrix.pkg.dir }}-${{ github.sha }}
+          path: ${{ matrix.pkg.dir }}/*.tgz
+          retention-days: 7
+
+  cargo-pack:
+    name: cargo package + publish --dry-run (no publish)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-glibc-release
+          save-if: false
+
+      - name: cargo publish --dry-run (libraries — what people would consume via cargo add)
+        run: |
+          # kars-a2a-core + kars-eval-corpus are the LIB crates.
+          # binaries (controller/router/gateway/runner) ship via
+          # container images + GitHub release tarballs, not crates.io.
+          # `--dry-run` exercises the whole publish flow: tarball
+          # build, manifest validation, dep resolution, README+LICENSE
+          # checks — but does NOT upload to crates.io.
+          cargo publish --dry-run --allow-dirty -p kars-a2a-core
+          cargo publish --dry-run --allow-dirty -p kars-eval-corpus
+
+      - name: cargo package --list (sanity-check what would ship)
+        run: |
+          mkdir -p ./cargo-pack-manifests
+          for crate in kars-a2a-core kars-eval-corpus; do
+            echo "=== $crate ==="
+            cargo package --list --allow-dirty -p "$crate" > "./cargo-pack-manifests/${crate}.txt" 2>&1 || true
+            head -50 "./cargo-pack-manifests/${crate}.txt"
+            echo
+          done
+
+      - name: Upload cargo pack manifests
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: kars-cargo-pack-manifests-${{ github.sha }}
+          path: ./cargo-pack-manifests/
+          retention-days: 7
+
   release-manifest:
     name: Assemble release manifest
-    needs: build-images
+    needs: [build-images, npm-pack, cargo-pack]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -213,6 +306,12 @@ jobs:
           pattern: kars-trivy-*-${{ github.sha }}
           path: ./trivy
 
+      - name: Download npm tarballs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: kars-npm-*-${{ github.sha }}
+          path: ./npm
+
       - name: Build release manifest
         run: |
           cat > release-manifest.json <<EOF
@@ -223,18 +322,31 @@ jobs:
             "ref": "${{ github.ref }}",
             "actor": "${{ github.actor }}",
             "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "images": [
+            "container_images": [
               {"name": "kars-controller", "dockerfile": "controller/Dockerfile"},
               {"name": "kars-inference-router", "dockerfile": "inference-router/Dockerfile"},
               {"name": "kars-a2a-gateway", "dockerfile": "a2a-gateway/Dockerfile"},
               {"name": "kars-conformance-runner", "dockerfile": "sandbox-images/conformance-runner/Dockerfile"},
               {"name": "kars-sandbox-base", "dockerfile": "sandbox-images/openclaw/Dockerfile.base"}
             ],
+            "npm_packages": [
+              {"name": "@kars/cli", "dir": "cli"},
+              {"name": "@kars/mesh", "dir": "mesh-plugin"},
+              {"name": "@kars/runtime-openclaw", "dir": "runtimes/openclaw"},
+              {"name": "@kars/runtime-langgraph-ts", "dir": "runtimes/langgraph-ts"}
+            ],
+            "rust_libraries": [
+              {"name": "kars-a2a-core", "dir": "kars-a2a-core"},
+              {"name": "kars-eval-corpus", "dir": "eval-corpus"}
+            ],
             "sbom_count": $(find ./sboms -name '*.spdx.json' | wc -l),
             "trivy_report_count": $(find ./trivy -name '*.json' | wc -l),
+            "npm_tarball_count": $(find ./npm -name '*.tgz' | wc -l),
             "intended_registries": {
-              "acr": "karsacr.azurecr.io",
-              "ghcr": "ghcr.io/azure/kars"
+              "container_images_acr": "karsacr.azurecr.io",
+              "container_images_ghcr": "ghcr.io/azure/kars",
+              "npm_scope": "@kars (npmjs.org)",
+              "cargo_registry": "crates.io"
             },
             "publish_status": "DRY_RUN — nothing pushed to any registry"
           }
@@ -258,12 +370,22 @@ jobs:
             echo ""
             echo "**Nothing was pushed.** All artefacts are attached above."
             echo ""
-            echo "### Artefacts"
-            echo "- \`kars-binaries-${{ github.sha }}\` — 4 statically-linked binaries"
-            echo "- \`kars-image-*-${{ github.sha }}\` — 5 \`docker save\` tarballs (controller, router, a2a-gateway, conformance-runner, sandbox-base)"
-            echo "- \`kars-sbom-*-${{ github.sha }}\` — 5 SPDX SBOM JSON files"
-            echo "- \`kars-trivy-*-${{ github.sha }}\` — 5 Trivy CRITICAL+HIGH JSON reports"
-            echo "- \`kars-release-manifest-${{ github.sha }}\` — single manifest tying it all together"
+            echo "### Container images (5) — Docker tarballs + SBOM + Trivy"
+            echo "- \`kars-image-*-${{ github.sha }}\`"
+            echo "- \`kars-sbom-*-${{ github.sha }}\`"
+            echo "- \`kars-trivy-*-${{ github.sha }}\`"
             echo ""
-            echo "When ready: cut a real \`v*\` tag. \`release.yml\` + \`image-sign-sbom.yml\` will run the same flow but with \`push: true\` to \`karsacr.azurecr.io\` and create a GitHub Release."
+            echo "### npm packages (4) — \`npm pack\` tarballs + \`npm publish --dry-run\` verified"
+            echo "- \`kars-npm-*-${{ github.sha }}\`"
+            echo ""
+            echo "### Rust libraries (2) — \`cargo publish --dry-run\` verified"
+            echo "- \`kars-cargo-pack-manifests-${{ github.sha }}\`"
+            echo ""
+            echo "### Binaries (4) — host glibc"
+            echo "- \`kars-binaries-${{ github.sha }}\`"
+            echo ""
+            echo "### Manifest"
+            echo "- \`kars-release-manifest-${{ github.sha }}\` — single JSON tying it all together"
+            echo ""
+            echo "When ready: cut a real \`v*\` tag. \`release.yml\` + \`image-sign-sbom.yml\` will run the same flow but with \`push: true\` to \`karsacr.azurecr.io\`, npm publish to npmjs.org, cargo publish to crates.io, and create a GitHub Release."
           } >> "$GITHUB_STEP_SUMMARY"
