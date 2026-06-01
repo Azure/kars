@@ -114,7 +114,15 @@ image-runtime-pydantic-ai: ## Build Pydantic-AI runtime image
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f sandbox-images/pydantic-ai/Dockerfile .
 
-image-controller: ## Build controller Docker image
+build-rust-bin: ## Build Rust binaries and stage them in ./bin/ for Docker COPY
+	cargo build --release --workspace
+	mkdir -p bin
+	cp target/release/kars-controller         bin/
+	cp target/release/kars-inference-router   bin/
+	cp target/release/kars-a2a-gateway        bin/
+	cp target/release/kars-conformance-runner bin/
+
+image-controller: build-rust-bin ## Build controller Docker image (compiles Rust first)
 	docker build --platform linux/amd64 \
 		-t $(REGISTRY)/kars-controller:$(IMAGE_TAG) \
 		-t $(REGISTRY)/kars-controller:latest \
@@ -122,7 +130,7 @@ image-controller: ## Build controller Docker image
 		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
 		-f controller/Dockerfile .
 
-image-router: ## Build inference router Docker image
+image-router: build-rust-bin ## Build inference router Docker image (compiles Rust first)
 	docker build --platform linux/amd64 \
 		-t $(REGISTRY)/kars-inference-router:$(IMAGE_TAG) \
 		-t $(REGISTRY)/kars-inference-router:latest \

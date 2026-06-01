@@ -172,13 +172,18 @@ spec:
               cpu: {{ .Values.controller.resources.limits.cpu | quote }}
               memory: {{ .Values.controller.resources.limits.memory | quote }}
           livenessProbe:
-            exec:
-              command: ["sh", "-c", "test -f /proc/1/status"]
+            # /healthz served by controller/src/metrics_server.rs on
+            # the metrics port. distroless images have no shell, so we
+            # can't use `exec [sh -c ...]` probes here.
+            httpGet:
+              path: /healthz
+              port: metrics
             initialDelaySeconds: 5
             periodSeconds: 30
           readinessProbe:
-            exec:
-              command: ["sh", "-c", "test -f /proc/1/status"]
+            httpGet:
+              path: /healthz
+              port: metrics
             initialDelaySeconds: 3
             periodSeconds: 10
       volumes:

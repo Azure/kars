@@ -1,59 +1,34 @@
-# kars Conformance Runner — multi-stage Rust build (Azure Linux)
+# kars Conformance Runner — distroless (build-once pattern)
 #
-# Produces a small image whose single entrypoint is the
-# `kars-conformance-runner` binary (Slice 6.2). A `KarsEval` run
-# spawns this as an ephemeral Job; the runner replays an EvalCorpus
-# against the live inference router and writes a `RunReport` JSON
-# document to `--output` (and stdout). No kube-apiserver access; no
-# secrets minted in-container.
+# A `KarsEval` run spawns this as an ephemeral K8s Job; the runner
+# replays an EvalCorpus against the live inference router and writes
+# a `RunReport` JSON document to `--output` (and stdout). No
+# kube-apiserver access; no secrets minted in-container.
+#
+# Built from a pre-compiled binary produced by the `build-rust` CI job
+# (cargo build --release on the host glibc target). This image
+# does NOT run cargo — the binary is COPY'd in.
+#
+# Migrating to AL4 (preview) or AL5 (future GA): flip
+# AZURELINUX_DISTROLESS below.
 
-ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:35149ae8dd179684f969944f54a337c665a64e702486154eb44253fb39c2505b
+ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0
 ARG VERSION=0.1.0
+ARG BIN_PATH=bin/kars-conformance-runner
 
-# ─── Builder ──────────────────────────────────────────────────────────────────
+FROM ${AZURELINUX_DISTROLESS}
 
-FROM ${AZURELINUX_BASE} AS builder
+ARG VERSION
+ARG BIN_PATH
+COPY ${BIN_PATH} /usr/local/bin/kars-conformance-runner
 
-RUN tdnf install -y gcc glibc-devel binutils make pkg-config openssl-devel ca-certificates curl kernel-headers && tdnf clean all
-
-ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
-ENV PATH="/usr/local/cargo/bin:${PATH}"
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
-
-WORKDIR /build
-COPY Cargo.toml Cargo.lock* ./
-COPY conformance-runner/ conformance-runner/
-COPY eval-corpus/ eval-corpus/
-COPY controller/ controller/
-COPY inference-router/ inference-router/
-COPY a2a-gateway/ a2a-gateway/
-COPY kars-a2a-core/ kars-a2a-core/
-COPY tests/ tests/
-COPY cli/blocklists/ cli/blocklists/
-COPY cli/profiles/agt/ cli/profiles/agt/
-
-RUN cargo build --release --package kars-conformance-runner
-
-# ─── Runtime ──────────────────────────────────────────────────────────────────
-
-FROM ${AZURELINUX_BASE}
-
-RUN tdnf install -y ca-certificates shadow-utils && tdnf clean all
-
-RUN groupadd -g 1000 runner && useradd -u 1000 -g runner -s /sbin/nologin runner
-
-COPY --from=builder /build/target/release/kars-conformance-runner /usr/local/bin/kars-conformance-runner
-
-# Reports are written here by default; mount a Volume (emptyDir is fine)
-# so the spawning reconciler can read the report back out.
-RUN mkdir -p /var/run/conformance && chown runner:runner /var/run/conformance
-
-USER runner
+USER 1000:1000
 
 LABEL org.opencontainers.image.title="kars Conformance Runner" \
       org.opencontainers.image.description="Replays an EvalCorpus against the kars inference router and emits a RunReport JSON document" \
       org.opencontainers.image.vendor="Microsoft" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/Azure/kars"
 
-ENTRYPOINT ["kars-conformance-runner"]
+ENTRYPOINT ["/usr/local/bin/kars-conformance-runner"]

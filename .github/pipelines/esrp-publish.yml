@@ -1,0 +1,287 @@
+# ---------------------------------------------------------
+# Azure DevOps Pipeline: Unified ESRP Release Publishing — kars
+#
+# Pattern lifted from Microsoft AGT
+# (.github/pipelines/esrp-publish.yml in microsoft/agent-governance-toolkit).
+# Same ESRP task version, same connected-service contract, same dry-run UX.
+#
+# Publishes npm (npmjs.com), Rust libraries (crates.io), and container images
+# (signed via cosign keyless + ESRP-attested) via Microsoft's only approved
+# OSS publishing path: ESRP Release.
+#
+# Trigger: manual or release-gated (NEVER on PRs).
+#
+# Usage:
+#   - Select target: npm, rust, containers, or all
+#   - Use dryRun=true for build-only validation (the GitHub workflow
+#     `release-dryrun.yml` does the same thing in GHA for fast iteration;
+#     this ADO pipeline is the real path for actual publishing.)
+#
+# Prerequisites (one-time setup — see docs/PUBLISHING.md):
+#   1. Complete ESRP Release onboarding (https://aka.ms/esrp-onboarding)
+#   2. Create ADO service connection 'kars' (Azure RM, Managed Identity)
+#   3. Configure signing certificate in Azure Key Vault
+#   4. Install ESRP Release ADO Task extension (v11)
+#   5. Configure ADO pipeline variables (see ESRP Configuration block below)
+# ---------------------------------------------------------
+
+trigger: none  # Manual or release-gated trigger only
+
+pr: none
+
+parameters:
+  - name: target
+    type: string
+    displayName: 'What to publish'
+    default: 'all'
+    values:
+      - npm
+      - rust
+      - containers
+      - all
+
+  - name: dryRun
+    type: boolean
+    displayName: 'Dry run (build only, skip ESRP publish)'
+    default: false
+
+  - name: nodeVersion
+    type: string
+    displayName: 'Node.js version'
+    default: '22'
+
+  - name: rustVersion
+    type: string
+    displayName: 'Rust toolchain version'
+    default: '1.88.0'
+
+  # ─── npm packages — 4 publishable @kars scoped packages ─────────
+  - name: npmPackages
+    type: object
+    displayName: 'npm packages to publish'
+    default:
+      - name: '@kars/cli'
+        path: cli
+      - name: '@kars/mesh'
+        path: mesh-plugin
+      - name: '@kars/runtime-openclaw'
+        path: runtimes/openclaw
+      - name: '@kars/runtime-langgraph-ts'
+        path: runtimes/langgraph-ts
+
+  # ─── Rust libraries — 2 publishable crates ──────────────────────
+  # Binaries (controller/router/gateway/runner) ship via container
+  # images + GitHub release tarballs, not crates.io.
+  - name: rustCrates
+    type: object
+    displayName: 'Rust libraries to publish to crates.io'
+    default:
+      - name: kars-a2a-core
+        path: kars-a2a-core
+      - name: kars-eval-corpus
+        path: eval-corpus
+
+# -------------------------------------------------------
+# ESRP Configuration
+# Service connection name is hardcoded (required at compile time by ADO).
+# All other values sourced from ADO pipeline variables (mark as secret):
+#   ESRP_KEYVAULT_NAME, ESRP_RELEASE_CERT_IDENTIFIER, ESRP_CLIENT_ID,
+#   ESRP_OWNERS, ESRP_APPROVERS
+#
+# ESRP_RELEASE_CERT_IDENTIFIER = release certificate for EsrpRelease tasks
+#   (separate from any sign/auth certs you also have)
+#
+# ESRP_DOMAIN_TENANT_ID was removed in AGT due to cyclical reference; we
+# hardcode MICROSOFT_TENANT_ID below (the PME tenant for ESRP certs).
+# -------------------------------------------------------
+
+variables:
+  MICROSOFT_TENANT_ID: '975f013f-7f24-47e8-a7d3-abc4752bf346'
+
+pool:
+  vmImage: ubuntu-22.04   # glibc 2.35 — matches CI's build-rust runner
+
+stages:
+  # =======================================================
+  # NPM — 4 packages (@kars/cli, mesh, runtime-openclaw, runtime-langgraph-ts)
+  # =======================================================
+  - stage: Build_NPM
+    displayName: 'Build npm packages'
+    dependsOn: []
+    condition: or(eq('${{ parameters.target }}', 'npm'), eq('${{ parameters.target }}', 'all'))
+    jobs:
+      - ${{ each pkg in parameters.npmPackages }}:
+        - job: Build_${{ replace(replace(pkg.name, '@', 'at_'), '/', '_') }}
+          displayName: 'Build ${{ pkg.name }}'
+          steps:
+            - checkout: self
+            - task: NodeTool@0
+              inputs:
+                versionSpec: ${{ parameters.nodeVersion }}
+            - script: |
+                set -euo pipefail
+                cd ${{ pkg.path }}
+                npm ci
+                if npm run | grep -qE '^\s*build'; then
+                  npm run build
+                fi
+                npm pack
+              displayName: 'npm pack ${{ pkg.name }}'
+            - publish: ${{ pkg.path }}
+              artifact: npm-${{ replace(replace(pkg.name, '@', 'at_'), '/', '_') }}
+              displayName: 'Publish ${{ pkg.name }} tarball artifact'
+
+  - stage: Publish_NPM
+    displayName: 'Publish to npm via ESRP'
+    dependsOn: Build_NPM
+    condition: |
+      and(
+        succeeded(),
+        or(eq('${{ parameters.target }}', 'npm'), eq('${{ parameters.target }}', 'all')),
+        eq('${{ parameters.dryRun }}', false)
+      )
+    jobs:
+      - deployment: PublishNpm
+        displayName: 'ESRP Publish to npm'
+        environment: 'kars-npm-publish'   # gated by approvers in ADO
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  patterns: 'npm-*/**/*.tgz'
+                - script: |
+                    set -euo pipefail
+                    mkdir -p $(Pipeline.Workspace)/npm-publish
+                    find $(Pipeline.Workspace) -name '*.tgz' -exec cp {} $(Pipeline.Workspace)/npm-publish/ \;
+                    ls -la $(Pipeline.Workspace)/npm-publish/
+                  displayName: 'Consolidate all .tgz packages'
+                - task: EsrpRelease@11
+                  displayName: 'ESRP Publish to npm'
+                  inputs:
+                    connectedservicename: 'kars'
+                    usemanagedidentity: true
+                    keyvaultname: '$(ESRP_KEYVAULT_NAME)'
+                    signcertname: '$(ESRP_RELEASE_CERT_IDENTIFIER)'
+                    clientid: '$(ESRP_CLIENT_ID)'
+                    intent: 'PackageDistribution'
+                    contenttype: 'npm'
+                    contentsource: 'Folder'
+                    folderlocation: '$(Pipeline.Workspace)/npm-publish'
+                    waitforreleasecompletion: true
+                    owners: '$(ESRP_OWNERS)'
+                    approvers: '$(ESRP_APPROVERS)'
+                    serviceendpointurl: 'https://api.esrp.microsoft.com'
+                    mainpublisher: 'ESRPRELPACMAN'
+                    domaintenantid: '$(MICROSOFT_TENANT_ID)'
+
+  # =======================================================
+  # RUST (crates.io) — kars-a2a-core, kars-eval-corpus libraries
+  # =======================================================
+  - stage: Build_Rust
+    displayName: 'Build Rust libraries'
+    dependsOn: []
+    condition: or(eq('${{ parameters.target }}', 'rust'), eq('${{ parameters.target }}', 'all'))
+    jobs:
+      - job: PackageCrates
+        displayName: 'cargo package + test'
+        steps:
+          - checkout: self
+          - script: |
+              set -euo pipefail
+              # Pinned rustup installer for supply-chain integrity (AGT pattern)
+              RUSTUP_VERSION="1.27.1"
+              RUSTUP_SHA256="6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d"
+              RUST_TOOLCHAIN="${{ parameters.rustVersion }}"
+              if ! printf '%s' "$RUST_TOOLCHAIN" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "Invalid rust toolchain: $RUST_TOOLCHAIN" >&2
+                exit 1
+              fi
+              curl --proto '=https' --tlsv1.2 -fsSLo rustup-init \
+                "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
+              echo "${RUSTUP_SHA256}  rustup-init" | sha256sum -c -
+              chmod +x rustup-init
+              ./rustup-init -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+              echo "##vso[task.prependpath]$HOME/.cargo/bin"
+              "$HOME/.cargo/bin/rustc" --version
+              "$HOME/.cargo/bin/cargo" --version
+            displayName: 'Install Rust toolchain (pinned rustup)'
+          - script: |
+              set -euo pipefail
+              cargo build --release --workspace
+              cargo test --release --workspace
+            displayName: 'cargo build + test'
+          - script: |
+              set -euo pipefail
+              mkdir -p $(Build.ArtifactStagingDirectory)/rust-publish
+              ${{ each crate in parameters.rustCrates }}:
+                cargo package -p ${{ crate.name }} --allow-dirty
+                cp target/package/${{ crate.name }}-*.crate $(Build.ArtifactStagingDirectory)/rust-publish/
+            displayName: 'cargo package each crate'
+          - publish: $(Build.ArtifactStagingDirectory)/rust-publish
+            artifact: 'rust-publish'
+
+  - stage: Publish_Rust
+    displayName: 'Publish to crates.io via ESRP'
+    dependsOn: Build_Rust
+    condition: |
+      and(
+        succeeded(),
+        or(eq('${{ parameters.target }}', 'rust'), eq('${{ parameters.target }}', 'all')),
+        eq('${{ parameters.dryRun }}', false)
+      )
+    jobs:
+      - deployment: PublishCrates
+        displayName: 'ESRP Publish to crates.io'
+        environment: 'kars-rust-publish'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: rust-publish
+                - script: ls -la $(Pipeline.Workspace)/rust-publish
+                  displayName: 'List crate packages'
+                - task: EsrpRelease@11
+                  displayName: 'ESRP Publish to crates.io'
+                  inputs:
+                    connectedservicename: 'kars'
+                    usemanagedidentity: true
+                    keyvaultname: '$(ESRP_KEYVAULT_NAME)'
+                    signcertname: '$(ESRP_RELEASE_CERT_IDENTIFIER)'
+                    clientid: '$(ESRP_CLIENT_ID)'
+                    intent: 'PackageDistribution'
+                    contenttype: 'Rust'
+                    contentsource: 'Folder'
+                    folderlocation: '$(Pipeline.Workspace)/rust-publish'
+                    waitforreleasecompletion: true
+                    owners: '$(ESRP_OWNERS)'
+                    approvers: '$(ESRP_APPROVERS)'
+                    serviceendpointurl: 'https://api.esrp.microsoft.com'
+                    mainpublisher: 'ESRPRELPACMAN'
+                    domaintenantid: '$(MICROSOFT_TENANT_ID)'
+
+  # =======================================================
+  # CONTAINERS — MCR-bound images go through the separate MCR pipeline
+  # (https://aka.ms/mcr-onboarding). This stage runs the build + SBOM
+  # + cosign keyless sign and stages images for the MCR pipeline.
+  # Direct push to ghcr.io/azure/kars happens in image-cache-publish.yml.
+  # =======================================================
+  - stage: Build_Containers
+    displayName: 'Build container images (5)'
+    dependsOn: []
+    condition: or(eq('${{ parameters.target }}', 'containers'), eq('${{ parameters.target }}', 'all'))
+    jobs:
+      - job: BuildImages
+        displayName: 'Build all 5 images'
+        steps:
+          - checkout: self
+          - script: |
+              echo "TODO: container image build + MCR staging pipeline."
+              echo "Until MCR onboarding completes (see docs/PUBLISHING.md),"
+              echo "all container publishing happens via:"
+              echo "  - PRs: image-cache-publish.yml → ghcr.io/azure/kars (private)"
+              echo "  - releases: image-sign-sbom.yml → karsacr.azurecr.io"
+              echo "Once onboarded to MCR, the EsrpRelease task with"
+              echo "contenttype: 'Container' will replace the cosign-only flow."
+            displayName: 'Placeholder for MCR onboarding'

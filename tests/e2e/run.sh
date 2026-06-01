@@ -72,6 +72,21 @@ build_images() {
         fi
     fi
 
+    # Build the Rust binaries ONCE on the host (build-once pattern).
+    # The Dockerfiles are simple COPY templates that consume ./bin/
+    # so we must stage them before docker build runs.
+    if [ ! -x "$ROOT_DIR/bin/kars-controller" ] || [ ! -x "$ROOT_DIR/bin/kars-inference-router" ]; then
+        info "Compiling Rust binaries (cargo build --release)"
+        ( cd "$ROOT_DIR" && cargo build --release --workspace )
+        mkdir -p "$ROOT_DIR/bin"
+        cp "$ROOT_DIR/target/release/kars-controller"         "$ROOT_DIR/bin/"
+        cp "$ROOT_DIR/target/release/kars-inference-router"   "$ROOT_DIR/bin/"
+        cp "$ROOT_DIR/target/release/kars-a2a-gateway"        "$ROOT_DIR/bin/"
+        cp "$ROOT_DIR/target/release/kars-conformance-runner" "$ROOT_DIR/bin/"
+    else
+        info "Reusing existing ./bin/ Rust binaries"
+    fi
+
     # Retry docker pulls/builds to absorb transient MCR registry flakes
     # (e.g., 403/404 on pinned digests during MCR rollouts).
     docker_build_retry() {

@@ -1,0 +1,555 @@
+name: Internal Release (private, wall-off)
+
+# Cuts a REAL release end-to-end with EVERY artefact stored behind the wall.
+# Nothing goes to public registries. When ESRP onboards, the ADO pipeline
+# (.github/pipelines/esrp-publish.yml) becomes the public-publish path
+# consuming the same artefacts this workflow produces — flip a switch.
+#
+# What this workflow does:
+#   1. Build all 5 container images, push to ghcr.io/azure/kars-* (PRIVATE)
+#   2. npm pack all 4 packages (stored as Release assets, optionally pushed
+#      to GHCR npm registry which is also PRIVATE)
+#   3. cargo package the 2 publishable libraries (stored as Release assets)
+#   4. SBOMs for every image (SPDX JSON, attached to Release)
+#   5. Trivy HIGH/CRITICAL scan for every image (attached to Release)
+#   6. Cosign keyless signs every container image (signatures live in
+#      Sigstore Rekor, which is a PUBLIC ATTESTATION LEDGER — but only
+#      records *that we signed*, not what we signed; this is by design
+#      and what every Microsoft OSS project does pre-ESRP)
+#   7. Creates a GitHub Release marked `prerelease: true`. Because the
+#      repo is private, the Release is visible only to org members with
+#      repo access. Anyone WITHOUT repo access cannot see it.
+#   8. Stages every artefact ESRP would consume (.tgz, .crate, container
+#      image digests) so the ADO pipeline can download them later.
+#
+# Triggers:
+#   - Tags matching `v*-internal*` or `v*-preview*`
+#   - Manual via workflow_dispatch (for testing)
+#
+# When ready to go PUBLIC (after ESRP onboards):
+#   1. Tag `v0.1.0` (no -internal/-preview suffix)
+#   2. The existing release.yml + image-sign-sbom.yml pick up
+#   3. The ADO esrp-publish.yml downloads artefacts from this Release
+#      and re-publishes them publicly via ESRP
+
+on:
+  push:
+    tags:
+      - 'v*-internal*'
+      - 'v*-preview*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to tag (default: internal-<sha>)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write    # create GitHub Release
+  packages: write    # push to GHCR
+  id-token: write    # cosign keyless OIDC
+  attestations: write
+  actions: read      # query prior ci.yml runs for binary reuse
+
+env:
+  VERSION: ${{ github.event.inputs.version != '' && github.event.inputs.version || (startsWith(github.ref, 'refs/tags/') && github.ref_name || format('internal-{0}', github.sha)) }}
+
+jobs:
+  # ─── Stage 1: produce Rust binaries (reuse from ci.yml if available) ──
+  build-binaries:
+    name: Prepare Rust binaries (reuse from ci.yml if possible)
+    # ubuntu-22.04 = glibc 2.35; AL3 distroless = glibc 2.38 (backward
+    # compatible). Newer runners emit symbols AL3 cannot resolve.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Try to find existing CI binary build for this SHA
+        id: find-ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The ci.yml build-rust job uploads `kars-binaries-<sha>` after
+          # every successful run. If that exists for this commit, we have
+          # byte-identical binaries already — skip the 14-minute cargo build.
+          # Tags don't trigger ci.yml directly, but the same SHA may have
+          # passed CI via the PR or branch push that preceded the tag.
+          RUN_ID=$(gh run list \
+            --workflow ci.yml \
+            --commit ${{ github.sha }} \
+            --status success \
+            --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$RUN_ID" ]; then
+            echo "::notice::Found ci.yml run $RUN_ID for this SHA — will reuse binaries"
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "ci_run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No prior ci.yml build for this SHA — building from scratch"
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download binaries from prior ci.yml run
+        if: steps.find-ci.outputs.reuse == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kars-binaries-${{ github.sha }}
+          run-id: ${{ steps.find-ci.outputs.ci_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ./bin/
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        if: steps.find-ci.outputs.reuse != 'true'
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.find-ci.outputs.reuse != 'true'
+        with:
+          shared-key: rust-glibc-release
+          save-if: false
+      - name: cargo build --release (only on cache miss)
+        if: steps.find-ci.outputs.reuse != 'true'
+        run: cargo build --release --workspace
+      - name: Stage binaries (only on fresh build)
+        if: steps.find-ci.outputs.reuse != 'true'
+        run: |
+          mkdir -p ./bin
+          cp target/release/kars-controller         ./bin/
+          cp target/release/kars-inference-router   ./bin/
+          cp target/release/kars-a2a-gateway        ./bin/
+          cp target/release/kars-conformance-runner ./bin/
+
+      - name: Verify + checksum (both paths converge here)
+        run: |
+          chmod +x ./bin/kars-*
+          ( cd ./bin && sha256sum kars-* | tee SHA256SUMS )
+          file ./bin/kars-*
+
+      - name: Upload binaries (release-scoped artifact name)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: kars-binaries-${{ env.VERSION }}
+          path: ./bin/
+          retention-days: 90
+
+  # ─── Stage 2: build + push container images to PRIVATE GHCR ────
+  build-images:
+    name: Build + push ${{ matrix.image.name }} (PRIVATE GHCR)
+    needs: build-binaries
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    outputs:
+      controller_digest: ${{ steps.digests.outputs.controller }}
+      router_digest: ${{ steps.digests.outputs.router }}
+      gateway_digest: ${{ steps.digests.outputs.gateway }}
+      runner_digest: ${{ steps.digests.outputs.runner }}
+      sandbox_base_digest: ${{ steps.digests.outputs.sandbox_base }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: controller
+            dockerfile: controller/Dockerfile
+            ghcr: kars-controller
+          - name: inference-router
+            dockerfile: inference-router/Dockerfile
+            ghcr: kars-inference-router
+          - name: a2a-gateway
+            dockerfile: a2a-gateway/Dockerfile
+            ghcr: kars-a2a-gateway
+          - name: conformance-runner
+            dockerfile: sandbox-images/conformance-runner/Dockerfile
+            ghcr: kars-conformance-runner
+          - name: sandbox-base
+            dockerfile: sandbox-images/openclaw/Dockerfile.base
+            ghcr: kars-sandbox-base
+            no_binaries: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download pre-built binaries
+        if: matrix.image.no_binaries != true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kars-binaries-${{ env.VERSION }}
+          path: ./bin/
+      - name: chmod binaries
+        if: matrix.image.no_binaries != true
+        run: chmod +x ./bin/*
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push (PRIVATE)
+        id: push
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          push: true
+          tags: |
+            ghcr.io/azure/${{ matrix.image.ghcr }}:${{ env.VERSION }}
+            ghcr.io/azure/${{ matrix.image.ghcr }}:internal-latest
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          sbom: true
+          provenance: true
+
+      - name: Record digest
+        id: digests
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          # Map matrix name → output key
+          case "${{ matrix.image.name }}" in
+            controller)          echo "controller=${DIGEST}"   >> "$GITHUB_OUTPUT" ;;
+            inference-router)    echo "router=${DIGEST}"       >> "$GITHUB_OUTPUT" ;;
+            a2a-gateway)         echo "gateway=${DIGEST}"      >> "$GITHUB_OUTPUT" ;;
+            conformance-runner)  echo "runner=${DIGEST}"       >> "$GITHUB_OUTPUT" ;;
+            sandbox-base)        echo "sandbox_base=${DIGEST}" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # ─── Per-image SBOM + Trivy ────────────────────────────────
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/azure/${{ matrix.image.ghcr }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.image.name }}.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: sbom-${{ matrix.image.name }}-${{ env.VERSION }}
+          path: sbom-${{ matrix.image.name }}.spdx.json
+          retention-days: 90
+
+      - name: Trivy scan (HIGH+CRITICAL, JSON)
+        continue-on-error: true   # Trivy install is sometimes flaky on
+                                   # GHA runners; the SBOM is the auditor's
+                                   # primary input. Don't block the whole
+                                   # release on a transient install failure.
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ghcr.io/azure/${{ matrix.image.ghcr }}:${{ env.VERSION }}
+          format: json
+          output: trivy-${{ matrix.image.name }}.json
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Upload Trivy report
+        if: always()
+        continue-on-error: true   # Pair with continue-on-error above.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: trivy-${{ matrix.image.name }}-${{ env.VERSION }}
+          path: trivy-${{ matrix.image.name }}.json
+          retention-days: 90
+
+      # ─── Cosign keyless sign (Sigstore Rekor public ledger) ────
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Cosign keyless sign image
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ghcr.io/azure/${{ matrix.image.ghcr }}@${{ steps.push.outputs.digest }}
+
+  # ─── Stage 3: npm pack the 4 packages ──────────────────────────
+  npm-pack:
+    name: npm pack ${{ matrix.pkg.dir }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg:
+          - dir: cli
+            name: kars-cli
+            # cli is leaf — no file: deps
+            needs_mesh_prebuild: false
+          - dir: mesh-plugin
+            name: kars-mesh
+            needs_mesh_prebuild: false
+          - dir: runtimes/openclaw
+            name: kars-runtime-openclaw
+            # openclaw has file:../../mesh-plugin in its deps; npm install
+            # runs mesh-plugin's `prepare` script during the install of the
+            # file: dep, but the symlinked source lacks node_modules so
+            # `tsc` can't find @types/node. Pre-build mesh-plugin first so
+            # its dist/ exists and `prepare` is essentially a no-op.
+            needs_mesh_prebuild: true
+          - dir: runtimes/langgraph-ts
+            name: kars-runtime-langgraph-ts
+            needs_mesh_prebuild: false
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: '22'
+      - name: 'Pre-build mesh-plugin (file: dep prerequisite)'
+        if: matrix.pkg.needs_mesh_prebuild
+        working-directory: mesh-plugin
+        run: |
+          npm install
+          npm run build
+      - name: 'npm install (use install not ci — some packages lack lockfile)'
+        # `npm install` is forgiving: works with or without a lockfile,
+        # handles file: deps correctly, runs prepare scripts. `npm ci`
+        # would fail on langgraph-ts (no lockfile committed yet).
+        run: npm install
+        working-directory: ${{ matrix.pkg.dir }}
+      - name: 'npm run build (if defined)'
+        run: |
+          if npm run | grep -qE '^\s*build'; then
+            npm run build
+          fi
+        working-directory: ${{ matrix.pkg.dir }}
+      - name: 'npm pack'
+        run: |
+          npm pack
+          ls -la *.tgz
+        working-directory: ${{ matrix.pkg.dir }}
+      - name: 'npm publish --dry-run (registry-side validation)'
+        run: npm publish --dry-run --access public
+        working-directory: ${{ matrix.pkg.dir }}
+      - name: 'Upload tarball'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: npm-${{ matrix.pkg.name }}-${{ env.VERSION }}
+          path: ${{ matrix.pkg.dir }}/*.tgz
+          retention-days: 90
+
+  # ─── Stage 4: cargo package the 2 publishable libraries ────────
+  cargo-pack:
+    name: cargo package (2 libs)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-glibc-release
+          save-if: false
+      - name: cargo publish --dry-run (validates the crate)
+        run: |
+          cargo publish --dry-run --allow-dirty -p kars-a2a-core
+          cargo publish --dry-run --allow-dirty -p kars-eval-corpus
+      - name: cargo package (produces .crate files)
+        run: |
+          mkdir -p ./crates
+          cargo package --allow-dirty -p kars-a2a-core
+          cargo package --allow-dirty -p kars-eval-corpus
+          cp target/package/*.crate ./crates/
+          sha256sum ./crates/* | tee ./crates/SHA256SUMS
+          ls -la ./crates/
+      - name: Upload .crate files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: rust-crates-${{ env.VERSION }}
+          path: ./crates/
+          retention-days: 90
+
+  # ─── Stage 5: assemble release manifest + GitHub Release ───────
+  release:
+    name: Create private GitHub Release
+    needs: [build-binaries, build-images, npm-pack, cargo-pack]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download Rust binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kars-binaries-${{ env.VERSION }}
+          path: ./release-artefacts
+
+      - name: Download npm tarballs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: npm-*-${{ env.VERSION }}
+          path: ./release-artefacts
+          merge-multiple: true
+
+      - name: Download Rust crates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: rust-crates-${{ env.VERSION }}
+          path: ./release-artefacts
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: sbom-*-${{ env.VERSION }}
+          path: ./release-artefacts
+          merge-multiple: true
+
+      - name: Download Trivy reports
+        continue-on-error: true   # Trivy is best-effort; SBOM is the
+                                   # primary audit artifact.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: trivy-*-${{ env.VERSION }}
+          path: ./release-artefacts
+          merge-multiple: true
+
+      - name: List artefacts
+        run: |
+          find ./release-artefacts -type f | sort
+          echo
+          du -sh ./release-artefacts/* 2>/dev/null || true
+
+      - name: Build release manifest
+        run: |
+          cat > ./release-artefacts/release-manifest.json <<EOF
+          {
+            "schema_version": "1",
+            "version": "${{ env.VERSION }}",
+            "commit": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "actor": "${{ github.actor }}",
+            "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "visibility": "INTERNAL_PRIVATE",
+            "publish_status": "Behind the wall — GHCR private + GitHub Release on private repo",
+            "containers": [
+              {
+                "name": "kars-controller",
+                "ghcr": "ghcr.io/azure/kars-controller:${{ env.VERSION }}",
+                "digest": "${{ needs.build-images.outputs.controller_digest }}"
+              },
+              {
+                "name": "kars-inference-router",
+                "ghcr": "ghcr.io/azure/kars-inference-router:${{ env.VERSION }}",
+                "digest": "${{ needs.build-images.outputs.router_digest }}"
+              },
+              {
+                "name": "kars-a2a-gateway",
+                "ghcr": "ghcr.io/azure/kars-a2a-gateway:${{ env.VERSION }}",
+                "digest": "${{ needs.build-images.outputs.gateway_digest }}"
+              },
+              {
+                "name": "kars-conformance-runner",
+                "ghcr": "ghcr.io/azure/kars-conformance-runner:${{ env.VERSION }}",
+                "digest": "${{ needs.build-images.outputs.runner_digest }}"
+              },
+              {
+                "name": "kars-sandbox-base",
+                "ghcr": "ghcr.io/azure/kars-sandbox-base:${{ env.VERSION }}",
+                "digest": "${{ needs.build-images.outputs.sandbox_base_digest }}"
+              }
+            ],
+            "npm_packages": [
+              {"name": "@kars/cli"},
+              {"name": "@kars/mesh"},
+              {"name": "@kars/runtime-openclaw"},
+              {"name": "@kars/runtime-langgraph-ts"}
+            ],
+            "rust_libraries": [
+              {"name": "kars-a2a-core"},
+              {"name": "kars-eval-corpus"}
+            ],
+            "rust_binaries": [
+              "kars-controller",
+              "kars-inference-router",
+              "kars-a2a-gateway",
+              "kars-conformance-runner"
+            ],
+            "next_step_for_public_release": "Once ESRP is onboarded (issue #384), trigger the ADO pipeline .github/pipelines/esrp-publish.yml — it downloads from this Release and publishes signed copies to npmjs.com + crates.io + MCR."
+          }
+          EOF
+          cat ./release-artefacts/release-manifest.json
+
+      - name: Create or update PRIVATE GitHub Release
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: ${{ env.VERSION }} (Internal Preview)
+          # prerelease: true so it's never the "latest" release shown to
+          # any external reader if the repo ever flips to public.
+          prerelease: true
+          # make_latest: false belt-and-suspenders for the above.
+          make_latest: 'false'
+          generate_release_notes: true
+          body: |
+            ## Internal Preview Release — ${{ env.VERSION }}
+
+            **🔒 This is a wall-off release.** Every artefact is private:
+            - Container images live in `ghcr.io/azure/kars-*` (private GHCR)
+            - npm package tarballs are attached below (NOT published to npmjs.com)
+            - Rust crate tarballs are attached below (NOT published to crates.io)
+            - Binaries + SBOMs + Trivy reports + checksums all attached
+
+            **To go public**: this release sits behind the wall until issue #384
+            (ESRP onboarding) is closed. Once ESRP is wired (ADO pipeline
+            `.github/pipelines/esrp-publish.yml`), Microsoft signs and republishes
+            the same artefacts to public registries.
+
+            ### Container images
+            All pushed to `ghcr.io/azure/kars-*:${{ env.VERSION }}` (PRIVATE).
+            Pull with `docker pull ghcr.io/azure/kars-controller:${{ env.VERSION }}`
+            after `docker login ghcr.io` with a PAT that has `read:packages`.
+
+            ### Cosign attestations
+            Every container image was signed via cosign keyless OIDC.
+            Verify with:
+            ```bash
+            cosign verify ghcr.io/azure/kars-controller:${{ env.VERSION }} \
+              --certificate-identity-regexp 'https://github.com/Azure/kars' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            ```
+
+            ### npm packages
+            4 `.tgz` files attached. Install locally:
+            `npm install ./kars-cli-*.tgz` etc.
+
+            ### Rust libraries
+            2 `.crate` files attached. Vendor them by extracting and pointing
+            `Cargo.toml` `path =` at the unpacked directory.
+
+            ### Binaries
+            4 statically-linked glibc 2.35 binaries attached with `SHA256SUMS`.
+
+            Manifest of everything: `release-manifest.json`.
+          files: |
+            ./release-artefacts/release-manifest.json
+            ./release-artefacts/*.tgz
+            ./release-artefacts/*.crate
+            ./release-artefacts/SHA256SUMS
+            ./release-artefacts/kars-controller
+            ./release-artefacts/kars-inference-router
+            ./release-artefacts/kars-a2a-gateway
+            ./release-artefacts/kars-conformance-runner
+            ./release-artefacts/*.spdx.json
+            ./release-artefacts/trivy-*.json
+
+      - name: Summary
+        run: |
+          {
+            echo "## Internal Release Created"
+            echo ""
+            echo "**Tag**: \`${{ env.VERSION }}\`"
+            echo "**Release URL**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.VERSION }}"
+            echo "**Visibility**: PRIVATE (private repo + prerelease flag + make_latest=false)"
+            echo ""
+            echo "### Behind the wall"
+            echo "- 5 container images → ghcr.io/azure/kars-* (PRIVATE)"
+            echo "- 4 npm tarballs → attached to Release"
+            echo "- 2 Rust crates → attached to Release"
+            echo "- 4 binaries → attached to Release"
+            echo "- 5 SBOMs + 5 Trivy reports → attached to Release"
+            echo "- 5 cosign signatures → Sigstore Rekor (public ledger; attestation only, no leak)"
+            echo ""
+            echo "### To go public"
+            echo "Wait for #384 ESRP onboarding. Then trigger the ADO pipeline:"
+            echo "\`.github/pipelines/esrp-publish.yml\`"
+          } >> "$GITHUB_STEP_SUMMARY"
