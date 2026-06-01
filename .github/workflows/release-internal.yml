@@ -368,9 +368,38 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download all artefacts
+      - name: Download Rust binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          name: kars-binaries-${{ env.VERSION }}
+          path: ./release-artefacts
+
+      - name: Download npm tarballs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: npm-*-${{ env.VERSION }}
+          path: ./release-artefacts
+          merge-multiple: true
+
+      - name: Download Rust crates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: rust-crates-${{ env.VERSION }}
+          path: ./release-artefacts
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: sbom-*-${{ env.VERSION }}
+          path: ./release-artefacts
+          merge-multiple: true
+
+      - name: Download Trivy reports
+        continue-on-error: true   # Trivy is best-effort; SBOM is the
+                                   # primary audit artifact.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: trivy-*-${{ env.VERSION }}
           path: ./release-artefacts
           merge-multiple: true
 
