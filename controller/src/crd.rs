@@ -1311,13 +1311,18 @@ mod tests {
     #[test]
     fn default_governance_config() {
         let cfg = GovernanceConfig::default();
-        assert!(!cfg.enabled);
-        // S13: tool_policy is now a same-namespace ref to a ToolPolicy CR.
-        // Default is an empty name (a sandbox spec with governance.enabled=true
-        // MUST set toolPolicyRef.name; reconciler degrades on missing ref).
+        // fa97c68: governance is ON by default — AGT is part of every
+        // kars deployment. Was `enabled: false` before; tests updated.
+        assert!(cfg.enabled);
+        // tool_policy_ref defaults to empty name; the reconciler then
+        // falls back to the system-default `kars-default` ToolPolicy
+        // shipped by the Helm chart (see reconciler/mod.rs
+        // empty-toolPolicyRef fallback added with fa97c68).
         assert!(cfg.tool_policy_ref.name.is_empty());
         let cfg_serde: GovernanceConfig = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(cfg_serde.trust_threshold, 500);
+        // Serde round-trip preserves the new default.
+        assert!(cfg_serde.enabled);
     }
 
     #[test]

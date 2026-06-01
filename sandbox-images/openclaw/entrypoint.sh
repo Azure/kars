@@ -783,6 +783,20 @@ ANTHEOF
     \"servers\": { ${_MCP_ENTRIES} }
   }"
 
+  # mcporter (the runtime the openclaw bundle-mcp materializer spawns)
+  # reads its own config file, NOT openclaw.json. The shape it wants is
+  # the Claude-Desktop-style { "mcpServers": { <name>: { url|command,
+  # transport?, headers?, env? } } }. Without this, openclaw's bundle-mcp
+  # tries to materialize the LLM-facing MCP tools and mcporter responds
+  # with "No MCP servers configured" → tools never reach the LLM.
+  # Write the same _MCP_ENTRIES under the right top-level key.
+  mkdir -p /sandbox/.mcporter
+  cat > /sandbox/.mcporter/mcporter.json <<MCPEOF
+{
+  "mcpServers": { ${_MCP_ENTRIES} }
+}
+MCPEOF
+
   # Write openclaw.json (2026.4.x config format — routed through inference router)
   cat > "$OPENCLAW_CONFIG" << EOF
 {
