@@ -20,7 +20,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [javascript-typescript, actions]
+        # CodeQL Rust support reached GA in CodeQL CLI 2.23.3 (late 2025).
+        # We run Rust alongside the JS/TS + Actions packs to cover the
+        # whole repo. `cargo-deny` (deny.toml) + `cargo-audit` (Rust
+        # Supply-Chain Gate in ci.yml) + Dependabot weekly cargo
+        # updates remain in place as defense-in-depth.
+        language: [javascript-typescript, actions, rust]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 

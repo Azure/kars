@@ -308,4 +308,4 @@ project.
 
 ---
 
-> *kars, the kars logo, and the trident mark are project marks. See **[`TRADEMARKS.md`](TRADEMARKS.md)** for usage guidance.*
+> *Trademarks: see **[`TRADEMARKS.md`](TRADEMARKS.md)** for Microsoft trademark + third-party trademark guidance.*
