@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
 # install.sh — kars internal-release installer (private repo edition)
 #
 # What it does:

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
 # ci/check-agt-released.sh
 #
 # Runs daily (see .github/workflows/check-agt-released.yml) to detect
