@@ -89,28 +89,25 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   // ── Resolve cluster ───────────────────────────────────────────────
   let clusterName = devMode ? "docker (dev)" : "unknown";
   if (!devMode) {
-    try {
-      const { stdout } = await execa("kubectl", kctl([
-        "config", "current-context",
-      ], kubeContext), { stdio: "pipe" });
-      clusterName = stdout.trim();
-    } catch {
-      // No current context AND no --context. Print a friendly message
-      // and bail; otherwise the dashboard renders empty everywhere and
-      // gives no clue why. Most common cause: user has both kind +
-      // AKS contexts in ~/.kube/config but never set a default.
-      console.error(
-        "\n\x1b[31m✗ No kubectl context available.\x1b[0m\n\n" +
-        "Pass one explicitly: \x1b[1mkars operator --context <name>\x1b[0m\n" +
-        "Or set a default: \x1b[1mkubectl config use-context <name>\x1b[0m\n\n" +
-        "Available contexts:"
-      );
+    if (kubeContext) {
+      // User passed --context explicitly. Trust it. `kubectl config
+      // current-context` ignores --context flag and always reads the
+      // global default, so calling it here is pointless and would
+      // fail when no default is set.
+      clusterName = kubeContext;
+    } else {
+      // No --context → operator runs in multi-cluster discovery mode:
+      // fetchSandboxes() walks every reachable kube context AND Docker
+      // in parallel. Try kubectl's current-context just to label the
+      // header; "(multi)" is fine if there's no default set.
       try {
-        const { stdout } = await execa("kubectl", ["config", "get-contexts", "-o", "name"], { stdio: "pipe" });
-        console.error(stdout.split("\n").filter(Boolean).map((c) => `  - ${c}`).join("\n"));
-      } catch { /* no kubeconfig at all */ }
-      console.error("\nTip: --dev mode targets local Docker only (no kubectl required).\n");
-      process.exit(1);
+        const { stdout } = await execa("kubectl", [
+          "config", "current-context",
+        ], { stdio: "pipe" });
+        clusterName = `${stdout.trim()} (+ other reachable contexts)`;
+      } catch {
+        clusterName = "multi-cluster (auto-discover)";
+      }
     }
   }
   // In dev mode, also check if kubectl is reachable for unified view
