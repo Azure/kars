@@ -353,26 +353,33 @@ export function pushCommand(): Command {
           await execa("kubectl", ["rollout", "restart", "deployment", "kars-controller", "-n", ns], { stdio: "pipe" });
           spin.text = "Restarted kars-controller";
 
-          // If sandbox/router image changed, also restart all sandbox pods
+          // If sandbox/router image changed, also restart all sandbox pods.
+          // We parallelize the per-namespace delete + show what we're
+          // actually doing in the spinner — serial delete with no status
+          // update made push --apply look frozen for several minutes on
+          // clusters with 5+ sandbox namespaces.
           const sandboxImages = ["sandbox", "router"];
           if (!options.only || sandboxImages.includes(options.only)) {
-            // Delete sandbox pods so controller recreates them with new images
+            spin.text = "Recycling sandbox pods (kars-system)...";
             await execa("kubectl", [
               "delete", "pods", "-n", ns,
               "-l", "kars.azure.com/component=sandbox",
               "--grace-period=10",
             ], { stdio: "pipe" }).catch(() => {});
-            // Also restart pods in per-agent namespaces
             const { stdout: nsLines } = await execa("kubectl", [
               "get", "namespaces", "-o", "name",
             ], { stdio: "pipe" });
-            for (const line of nsLines.split("\n")) {
-              const nsName = line.replace("namespace/", "").trim();
-              if (nsName.startsWith("kars-") && nsName !== "kars-system") {
-                await execa("kubectl", [
+            const perAgentNs = nsLines
+              .split("\n")
+              .map(l => l.replace("namespace/", "").trim())
+              .filter(n => n.startsWith("kars-") && n !== "kars-system");
+            if (perAgentNs.length > 0) {
+              spin.text = `Recycling sandbox pods in ${perAgentNs.length} agent namespace(s)...`;
+              await Promise.all(perAgentNs.map(nsName =>
+                execa("kubectl", [
                   "delete", "pods", "--all", "-n", nsName, "--grace-period=10",
-                ], { stdio: "pipe" }).catch(() => {});
-              }
+                ], { stdio: "pipe" }).catch(() => {})
+              ));
             }
           }
 
