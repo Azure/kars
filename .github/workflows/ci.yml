@@ -50,7 +50,7 @@ jobs:
           # this with save-if: false so the host target/ stays warm.
           shared-key: rust-glibc-release
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: cargo-nextest
       - name: cargo fmt
