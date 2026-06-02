@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod docker;
+
+#[cfg(test)]
+mod dev_profile_test;
 pub use docker::{delete_sandbox_docker, list_sandboxes_docker};
 
 fn default_true() -> bool {
@@ -806,40 +809,6 @@ pub(crate) fn build_sub_agent_crd_with_labels(
 mod tests {
     use super::*;
 
-    /// RAII guard that snapshots an env var on construction and restores it
-    /// on drop. Tests that touch env must use this so siblings aren't
-    /// affected.
-    struct EnvGuard {
-        name: &'static str,
-        prior: Option<String>,
-    }
-    impl EnvGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let prior = std::env::var(name).ok();
-            // SAFETY: the dev-profile test that uses this guard runs
-            // single-threaded behaviour — `build_sub_agent_crd_with_labels`
-            // is pure aside from one env read at entry, so the guard
-            // scope brackets all reads.
-            unsafe { std::env::set_var(name, value) };
-            Self { name, prior }
-        }
-        fn unset(name: &'static str) -> Self {
-            let prior = std::env::var(name).ok();
-            unsafe { std::env::remove_var(name) };
-            Self { name, prior }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prior {
-                    Some(v) => std::env::set_var(self.name, v),
-                    None => std::env::remove_var(self.name),
-                }
-            }
-        }
-    }
-
     #[test]
     fn spawn_request_rejects_unknown_fields() {
         // deny_unknown_fields — a typo in the client payload must fail loudly
@@ -966,41 +935,6 @@ mod tests {
             spec["governance"].get("toolPolicy").is_none(),
             "legacy governance.toolPolicy (string field)"
         );
-    }
-
-    #[test]
-    fn sub_agent_crd_relaxes_network_policy_under_dev_profile() {
-        // KARS_DEV_PROFILE=true → spawned sub-agent CRDs should land
-        // with the relaxed dev defaults: egressMode=Learn (so novel
-        // destinations are logged not blocked) and approvalRequired=
-        // false (no operator-in-the-loop for first-run UX). The
-        // strict prod default (Strict + true) returns the moment the
-        // env is cleared. Both paths share the same builder so a
-        // single test pins both branches.
-        // Unset the docker-spawn-side env so it doesn't bleed in.
-        let _profile_off = EnvGuard::unset("KARS_DEV_PROFILE");
-        let strict = build_sub_agent_crd_with_labels(
-            "p",
-            "kars-system",
-            "enhanced",
-            "gpt-5.4",
-            &minimal_req("c"),
-            &BTreeMap::new(),
-        );
-        assert_eq!(strict["spec"]["networkPolicy"]["approvalRequired"], true);
-        assert_eq!(strict["spec"]["networkPolicy"]["egressMode"], "Strict");
-
-        let _profile_on = EnvGuard::set("KARS_DEV_PROFILE", "true");
-        let relaxed = build_sub_agent_crd_with_labels(
-            "p",
-            "kars-system",
-            "enhanced",
-            "gpt-5.4",
-            &minimal_req("c"),
-            &BTreeMap::new(),
-        );
-        assert_eq!(relaxed["spec"]["networkPolicy"]["approvalRequired"], false);
-        assert_eq!(relaxed["spec"]["networkPolicy"]["egressMode"], "Learn");
     }
 
     #[test]
