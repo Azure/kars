@@ -258,6 +258,22 @@ export class AgtTransport implements IMeshTransport {
     return this.options.identity.agentId;
   }
 
+  /**
+   * Server-canonical DID from the SDK MeshClient (`did:mesh:<sha256(pk)[:32]>`).
+   * Returns the legacy local-derived form (`did:agentmesh:<base58>`) when the
+   * client hasn't been constructed yet (pre-connect), or when running against
+   * a pre-2026-06-02 SDK build that didn't expose currentDid. Always prefer
+   * this over options.identity.agentId for any wire-level call (registry
+   * heartbeat, /v1/registry/verify, mesh_send `to=` resolution) because the
+   * POP-aware registry only stores agents under the canonical form.
+   */
+  get currentDid(): string {
+    return (
+      (this.client as unknown as { currentDid?: string } | null)?.currentDid
+        ?? this.options.identity.agentId
+    );
+  }
+
   async connect(opts?: {
     capabilities?: string[];
     displayName?: string;

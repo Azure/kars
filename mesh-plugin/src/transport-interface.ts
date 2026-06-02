@@ -48,6 +48,17 @@ export interface IMeshTransport {
   readonly agentId: string;
   /** Alias for agentId — kept for legacy callers using the AMID nomenclature. */
   readonly amid: string;
+  /**
+   * Server-canonical DID (`did:mesh:<sha256(pk)[:32]>`) once the
+   * transport has connected to a POP-aware AGT registry. Falls back to
+   * the local-derived `agentId` (legacy `did:agentmesh:<base58>`) when
+   * the transport isn't connected yet, or when running against an
+   * older AGT SDK build. Always prefer this over `agentId` for any
+   * wire-level call (registry heartbeat, /v1/registry/verify,
+   * mesh_send `to=` resolution) — the registry indexes agents under
+   * this canonical form.
+   */
+  readonly currentDid: string;
 
   // ── Messaging ────────────────────────────────────────────────
   send(toAmid: string, payload: unknown): Promise<string | undefined>;

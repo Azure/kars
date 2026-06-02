@@ -2200,14 +2200,22 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // manual config), POST to /registry/verify to upgrade tier from anonymous
     // to verified. Also sets up 12-hour periodic re-verification.
     //
-    // Phase 6.c — send `did` (the DID-prefixed identifier the registry
-    // stores agents under), falling back to `amid` for SDK versions
-    // that don't expose .did. The registry accepts either shape, but
-    // `did` is the canonical key and avoids an O(n) lookup-by-pubkey
-    // fallback path on the registry side.
+    // Use `agtMeshClient.currentDid` (server-canonical `did:mesh:<hex32>`,
+    // exposed by the kars-patched AGT SDK) rather than the local
+    // `agtIdentity.did` (`did:agentmesh:<truncated>`), because the registry
+    // stores agents under the canonical DID. Calling /v1/registry/verify
+    // with the legacy form lands on the registry's lookup-by-pubkey
+    // fallback path which can stamp `verified_app_id` on the WRONG record
+    // — the kars-internal DID format collides with a 16-char prefix of
+    // the canonical hex, so two agents that happen to share that prefix
+    // get cross-stamped. Reading currentDid from the SDK is the only safe
+    // choice; fall back to the local hint only when the SDK build is too
+    // old to expose it (pre-2026-06-02 SDK had no currentDid getter).
     const oauthToken = process.env.AGT_OAUTH_TOKEN || "";
     if (oauthToken && connected) {
-      const verifyId = agtIdentity.did || agtIdentity.amid;
+      const verifyId = (agtMeshClient as unknown as { currentDid?: string })?.currentDid
+        || agtIdentity.did
+        || agtIdentity.amid;
       try {
         await _routerCall("POST", "/agt/registry/v1/registry/verify", {
           amid: verifyId,
@@ -2222,7 +2230,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       setInterval(async () => {
         const token = process.env.AGT_OAUTH_TOKEN || "";
         if (!token || !agtIdentity) return;
-        const rid = agtIdentity.did || agtIdentity.amid;
+        const rid = (agtMeshClient as unknown as { currentDid?: string })?.currentDid
+          || agtIdentity.did
+          || agtIdentity.amid;
         try {
           await _routerCall("POST", "/agt/registry/v1/registry/verify", {
             amid: rid,
