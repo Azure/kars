@@ -136,7 +136,7 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 
 ```bash
 git clone https://github.com/Azure/kars.git && cd kars
-cd cli && npm ci && npm run build && npm link
+cd cli && npm ci && npm run build && npm link && cd ..
 
 # Launch a sandbox locally — Docker only, no Azure, no AKS
 kars dev
