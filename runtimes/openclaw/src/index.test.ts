@@ -1523,3 +1523,79 @@ describe("telegram_status tool", () => {
     expect(calls.map((c) => c.chat_id)).toEqual(["111", "222", "333"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// AGT onError handler — regression test for the "11,721 events / 40 min"
+// flood (commit 2026-06-02, audit
+// docs/internal/security-audits/2026-06-02-agt-onerror-type-mismatch.md).
+//
+// History: when we migrated to the AGT SDK in Phase 2 (May 2026), the SDK's
+// onError callback emits `kind ∈ {"ws", "decrypt", "knock", "frame",
+// "session_desync"}` (see agent-governance-typescript/src/encryption/
+// mesh-client.ts:123). Our handler was still checking the OLD vendored-fork
+// strings (`"knock_rejected"`, `"no_session"`, `"decrypt_failed"`) which
+// the AGT SDK never emits. Every transport error fell into the catch-all
+// `else` branch and was written to the inbox as a `security_event` with a
+// -0.5 trust penalty, flooding the inbox at the WS reconnect cadence.
+//
+// This grep-style test pins the contract: the source must reference the
+// AGT SDK's actual type strings AND must not bring back the old ones.
+// ---------------------------------------------------------------------------
+describe("AGT onError handler — flood-prevention contract", () => {
+  const fs = require("node:fs") as typeof import("node:fs");
+  const path = require("node:path") as typeof import("node:path");
+  // Resolve to the canonical src/index.ts from EITHER src/ or dist/ — the
+  // vitest config runs the dist copy of every test file too, so __dirname
+  // may be either runtimes/openclaw/src or runtimes/openclaw/dist.
+  const candidates = [
+    path.join(__dirname, "index.ts"),
+    path.join(__dirname, "..", "src", "index.ts"),
+  ];
+  const sourcePath = candidates.find((p) => fs.existsSync(p))!;
+  const source = fs.readFileSync(sourcePath, "utf-8");
+
+  // Locate the onError block: include a chunk BEFORE the onError() call too
+  // (the rate-cap state is declared on the lines immediately above).
+  const onErrorIdx = source.indexOf("agtMeshClient.onError(");
+  const handlerSlice = source.slice(Math.max(0, onErrorIdx - 2000), onErrorIdx + 4000);
+
+  it("references the AGT SDK's actual onError type strings", () => {
+    // Each of the SDK-emitted kinds must appear in the handler so it has an
+    // explicit branch — otherwise it falls into the unknown-type branch
+    // (which is silent log-only, the safer default).
+    for (const kind of ["ws", "decrypt", "knock", "frame", "session_desync"]) {
+      expect(handlerSlice).toContain(`'${kind}'`);
+    }
+  });
+
+  it("does not reference the OLD vendored-fork strings", () => {
+    // These were emitted by the vendored amitayks/agentmesh fork (removed
+    // in Phase 5.2). Bringing them back would mean someone re-introduced
+    // the dead branch from the pre-AGT codebase.
+    for (const oldKind of ["knock_rejected", "no_session", "decrypt_failed"]) {
+      expect(handlerSlice).not.toContain(`'${oldKind}'`);
+    }
+  });
+
+  it("does not penalise trust or write security_event for transport errors", () => {
+    // The "ws" branch must early-return BEFORE any pushTrustToRouter /
+    // security_event write. Anchor: the ws branch starts at `if (type === 'ws')`
+    // and ends at `return;` before the next `if (...)`.
+    const wsBranchStart = handlerSlice.indexOf("if (type === 'ws')");
+    expect(wsBranchStart).toBeGreaterThan(-1);
+    const wsBranchEnd = handlerSlice.indexOf("return;", wsBranchStart);
+    expect(wsBranchEnd).toBeGreaterThan(wsBranchStart);
+    const wsBranch = handlerSlice.slice(wsBranchStart, wsBranchEnd);
+    expect(wsBranch).not.toContain("pushTrustToRouter");
+    expect(wsBranch).not.toContain("security_event");
+    expect(wsBranch).not.toContain("pushInbox");
+  });
+
+  it("rate-caps inbox writes to prevent self-amplifying floods", () => {
+    // Without per-(type, peer) rate cap a flaky relay can fill the inbox
+    // at WS-error cadence. The cap key combines type + fromAmid; the
+    // interval must be a finite Number constant.
+    expect(handlerSlice).toMatch(/errorRateCap/);
+    expect(handlerSlice).toMatch(/ERROR_INBOX_INTERVAL_MS\s*=\s*\d+/);
+  });
+});

@@ -698,58 +698,87 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       return { accept: true };
     });
 
-    // Handle E2E decryption failures and KNOCK rejections — log and surface to operator
+    // Handle E2E decryption failures, KNOCK rejections, and transport errors.
+    //
+    // The AGT SDK's onError callback emits one of five `type` strings
+    // (mesh-client.ts:123 errorHandlers signature):
+    //   "ws"             — WebSocket transport: connect-fail, reconnect-fail,
+    //                       relay 4xx/5xx, registerSelf 422, etc. The `from`
+    //                       arg is OUR OWN agentDid (not a peer) — we MUST NOT
+    //                       penalise trust on these, and we MUST rate-cap them
+    //                       or a flaky relay will flood the inbox at the
+    //                       reconnect cadence (~1/sec → 3600/hr).
+    //   "decrypt"        — one-off ciphertext rejection: peer sent without
+    //                       a fresh X3DH bundle, or wrong session keys.
+    //                       Recoverable — SDK self-heals on next send.
+    //   "knock"          — KNOCK responder bootstrap failed. Recoverable —
+    //                       peer's next send will re-attach an X3DH bundle.
+    //   "frame"          — pre-knock buffer evicted (global cap reached).
+    //                       Capacity warning, not a peer issue.
+    //   "session_desync" — ratchet desync mid-stream. Recoverable via patch
+    //                       #17 (rebuild responder from fresh X3DH).
+    //
+    // None of these are "genuine security events" — those would surface via
+    // onKnock (rejected) and onMessage (signature failure), not onError.
+    // So we never penalise trust or write security_event entries here.
+    //
+    // Rate cap: keep one inbox entry per (type, fromAmid) per 60 seconds.
+    // The console log is also throttled to avoid log-volume bills.
+    const errorRateCap = new Map<string, number>();
+    const ERROR_INBOX_INTERVAL_MS = 60_000;
     agtMeshClient.onError((type: string, fromAmid: string, detail: string) => {
-      // Same rationale as onKnock above: full AMID as fallback identifier,
-      // not a 12-char prefix (which would conflate every unresolved peer).
       const fromName = amidToName.get(fromAmid) || fromAmid;
-      if (type === 'knock_rejected') {
-        log.warn(`⛔ Message blocked from '${fromName}': KNOCK not accepted — ${detail}`);
-        pushInbox({
-          from_amid: fromAmid,
-          from_agent: fromName,
-          content: `⛔ MESSAGE BLOCKED: ${fromName} attempted to send a message but has no accepted KNOCK session. The message was rejected and not delivered.`,
-          message_type: "security_event",
-          timestamp: new Date().toISOString(),
-          id: `agt-knock-${Date.now().toString(36)}`,
-        });
-      } else if (type === 'session_desync' || type === 'no_session' || type === 'decrypt_failed') {
-        // Vendor patches #11/#17: ratchet desync, no-session, and one-off
-        // decrypt failures are recoverable PROTOCOL events, not security
-        // events. The SDK self-heals via patch #17 (rebuild responder from
-        // fresh X3DH bundle on the peer's next send). Penalising trust
-        // here caused a "trust bleed" where every desync chain (often
-        // 3-10 messages mid-file-transfer) would drag a peer's score
-        // below threshold and then KNOCK-block them permanently.
-        // Surface a single advisory inbox entry per event for operator
-        // visibility, but do NOT touch trust score.
-        const advice = type === 'session_desync'
-          ? 'session cleared, next send will rekey via fresh X3DH'
-          : type === 'no_session'
-            ? 'peer sent without a fresh X3DH bundle; will recover on next x3dh-attached send'
-            : 'one-off decrypt failure; SDK will retry with fresh bundle on the next message';
-        log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail} — ${advice}`);
-        pushInbox({
-          from_amid: fromAmid,
-          from_agent: fromName,
-          content: `ℹ️ AGT protocol event (${type}) with ${fromName}: ${detail}. ${advice}. Trust score unchanged.`,
-          message_type: "session_event",
-          timestamp: new Date().toISOString(),
-          id: `agt-${type}-${Date.now().toString(36)}`,
-        });
-      } else {
-        // Genuine security events: tampering, signature failures, etc.
-        log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail}`);
-        pushTrustToRouter(fromName, -0.5);
-        pushInbox({
-          from_amid: fromAmid,
-          from_agent: fromName,
-          content: `⚠️ E2E SECURITY EVENT: ${type} — ${detail}. Message was REJECTED (not delivered).`,
-          message_type: "security_event",
-          timestamp: new Date().toISOString(),
-          id: `agt-err-${Date.now().toString(36)}`,
-        });
+      const rateKey = `${type}:${fromAmid}`;
+      const now = Date.now();
+      const lastAt = errorRateCap.get(rateKey) ?? 0;
+      const allow = now - lastAt >= ERROR_INBOX_INTERVAL_MS;
+      if (allow) errorRateCap.set(rateKey, now);
+
+      // GC the rate-cap map periodically so it can't grow without bound on a
+      // very flaky cluster (many distinct peers churning over time).
+      if (errorRateCap.size > 256) {
+        for (const [k, ts] of errorRateCap) {
+          if (now - ts > ERROR_INBOX_INTERVAL_MS * 10) errorRateCap.delete(k);
+        }
       }
+
+      if (type === 'ws') {
+        // Transport-layer error against OUR OWN connection. `fromAmid` is
+        // our agentDid, not a peer. Log-only (rate-capped). No trust delta,
+        // no inbox entry — these are operational events for the operator
+        // dashboard / Prometheus, not for the agent to read in its inbox.
+        if (allow) log.warn(`AGT transport error: ${detail}`);
+        return;
+      }
+
+      if (type === 'session_desync' || type === 'decrypt' || type === 'knock' || type === 'frame') {
+        // Recoverable protocol events. Surface ONE advisory inbox entry per
+        // (type, peer) per minute — enough for the agent to know "something
+        // happened with peer X" without drowning the inbox during a chain
+        // of related self-healing events.
+        const advice =
+          type === 'session_desync' ? 'session cleared, next send will rekey via fresh X3DH'
+          : type === 'decrypt'      ? 'one-off decrypt failure; SDK will retry with fresh bundle on the next message'
+          : type === 'knock'        ? 'KNOCK responder failed; peer will re-attach an X3DH bundle on next send'
+          :                            'pre-knock buffer evicted (global cap reached)';
+        if (allow) {
+          log.warn(`AGT E2E ${type} from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail} — ${advice}`);
+          pushInbox({
+            from_amid: fromAmid,
+            from_agent: fromName,
+            content: `ℹ️ AGT protocol event (${type}) with ${fromName}: ${detail}. ${advice}. Trust score unchanged.`,
+            message_type: "session_event",
+            timestamp: new Date().toISOString(),
+            id: `agt-${type}-${Date.now().toString(36)}`,
+          });
+        }
+        return;
+      }
+
+      // Unknown type — log it but DO NOT default to security_event. Adding a
+      // new SDK error type should be an explicit code change here, not a
+      // silent inbox flood.
+      if (allow) log.warn(`AGT unknown error type '${type}' from '${fromName}' (${fromAmid.slice(0, 12)}): ${detail}`);
     });
 
     // Log when E2E encrypted channel is verified with a peer

@@ -127,6 +127,19 @@ spec:
               value: "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"
             - name: REQUIRE_REGISTRATION
               value: "true"
+            # Temporary escape hatch — AGT relay commit 66918631 (May 28 2026)
+            # made DID proof-of-possession (public_key+timestamp+signature in
+            # the connect frame) MANDATORY by default. The AGT TypeScript SDK
+            # (the one we ship via vendor/agt/microsoft-agent-governance-sdk-
+            # 4.0.0-agt-bae5de3.tgz) does NOT yet sign the connect frame, so
+            # every WS connect is rejected and the SDK's auto-reconnect loop
+            # floods the agent's inbox with `security_event` entries (the
+            # "11,721 events / 40 min" incident, 2026-06-02).
+            # Re-enable POP HERE the moment the SDK upstream lands POP-signing
+            # in the connect frame — track in audit
+            # docs/internal/security-audits/2026-06-02-agt-relay-pop-flood.md
+            - name: AGENTMESH_RELAY_ALLOW_UNAUTHED_DID
+              value: "1"
           readinessProbe:
             httpGet:
               path: /health
