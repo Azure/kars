@@ -251,8 +251,7 @@ async fn register_with_registry(provider: Provider, identity: &MeshIdentity) -> 
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
     let pop_msg = format!("{public_key}{proof_ts}");
-    let proof_sig: ed25519_dalek::Signature =
-        identity.signing_key.sign(pop_msg.as_bytes());
+    let proof_sig: ed25519_dalek::Signature = identity.signing_key.sign(pop_msg.as_bytes());
     let proof = BASE64_URL.encode(proof_sig.to_bytes());
 
     let body = AgtRegisterAgentRequest {
@@ -347,10 +346,10 @@ async fn acquire_entra_mesh_token(
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(None), // WI not configured — local-k8s/docker
     };
-    let tenant_id = std::env::var("AZURE_TENANT_ID")
-        .map_err(|_| "AZURE_TENANT_ID unset".to_string())?;
-    let client_id = std::env::var("AZURE_CLIENT_ID")
-        .map_err(|_| "AZURE_CLIENT_ID unset".to_string())?;
+    let tenant_id =
+        std::env::var("AZURE_TENANT_ID").map_err(|_| "AZURE_TENANT_ID unset".to_string())?;
+    let client_id =
+        std::env::var("AZURE_CLIENT_ID").map_err(|_| "AZURE_CLIENT_ID unset".to_string())?;
     // Override-able so operators can flip from the default
     // `api://agentmesh/.default` to a per-deployment Entra app reg
     // without rebuilding the controller. Matches the sandbox plugin's
@@ -999,7 +998,8 @@ async fn connect_and_listen(
             }
             Ok(None) => {
                 tracing::info!(
-                    azure_federated_token_file_set = std::env::var("AZURE_FEDERATED_TOKEN_FILE").is_ok(),
+                    azure_federated_token_file_set =
+                        std::env::var("AZURE_FEDERATED_TOKEN_FILE").is_ok(),
                     azure_tenant_id_set = std::env::var("AZURE_TENANT_ID").is_ok(),
                     azure_client_id_set = std::env::var("AZURE_CLIENT_ID").is_ok(),
                     "Entra mesh token not acquired (WI env incomplete); connecting as anonymous tier"
