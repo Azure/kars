@@ -242,6 +242,13 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           ...(params.model ? { model: params.model } : {}),
           governance: params.governance !== false,
           trust_threshold: 500,
+          // Dev profile (docker / local-k8s) — propagate learn_egress
+          // so the sub-agent CRD lands with egressMode=Learn even
+          // before reaching the router's own KARS_DEV_PROFILE-gated
+          // override (defense in depth — works the same whether the
+          // router build is fresh or stale). Production sandboxes
+          // leave KARS_DEV_PROFILE unset and the strict default stays.
+          ...(process.env.KARS_DEV_PROFILE === "true" ? { learn_egress: true } : {}),
           trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
         });
 

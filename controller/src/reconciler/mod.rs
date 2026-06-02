@@ -145,6 +145,17 @@ struct Context {
     dev_openai_api_key: String,
     dev_provider: String,
     dev_copilot_github_token: String,
+    /// Dev-profile marker — `true` when the controller is running in a
+    /// dev cluster (kind via `kars dev --target local-k8s`) or docker
+    /// dev. AKS production leaves this false. When set, the controller
+    /// propagates `KARS_DEV_PROFILE=true` onto both router AND openclaw
+    /// containers of every sandbox. The router's spawn helper reads
+    /// this to apply relaxed defaults to sub-agent CRDs (egressMode =
+    /// Learn, approvalRequired = false) so first-run dev UX doesn't
+    /// hit blocks on novel egress destinations. Source: controller's
+    /// own `KARS_DEV_PROFILE` env var, set by
+    /// `cli/src/commands/dev/local-k8s.ts`.
+    dev_profile: bool,
     /// Optional cluster name (Helm value `meshPeer.clusterName`, env
     /// `CLUSTER_NAME`). When set, propagated to the openclaw container
     /// so memory scopes can be partitioned by cluster — preventing two
@@ -1631,12 +1642,50 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "name": "KARS_PROVIDER",
                 "value": &ctx.dev_provider,
             }));
+            // Also push KARS_PROVIDER onto the openclaw container.
+            // The OpenClaw plugin (runtimes/openclaw/src/index.ts
+            // ~line 2947) reads `process.env.KARS_PROVIDER` to decide
+            // whether to register the Foundry tool catalog. Without
+            // this push, local-k8s dev sub-agents in copilot/models
+            // mode still register the full Foundry catalog (~25k tokens
+            // of schemas), bloating sub-agent prompts and tempting
+            // models to call tools that 404 on a project they don't
+            // have. entrypoint.sh also branches on KARS_PROVIDER to
+            // pick the right system prompt and provider routing.
+            if is_openclaw {
+                openclaw_env.push(json!({
+                    "name": "KARS_PROVIDER",
+                    "value": &ctx.dev_provider,
+                }));
+            }
         }
         if !ctx.dev_copilot_github_token.is_empty() {
             router_env.push(json!({
                 "name": "COPILOT_GITHUB_TOKEN",
                 "value": &ctx.dev_copilot_github_token,
             }));
+        }
+        // Propagate the dev-profile marker to BOTH containers in every
+        // sandbox the controller reconciles. The router's spawn helper
+        // checks this env to relax sub-agent CRD defaults; the
+        // openclaw plugin / entrypoint can additionally branch on it
+        // (e.g. wider tool allowlist) without having to inspect
+        // KARS_PROVIDER (which is unset in the foundry-dev path).
+        //
+        // Additionally, push the same three governance-suppression
+        // flags the docker dev parent gets (cli/src/commands/dev.ts
+        // ~line 1410). These tame false-positive findings (citation
+        // URLs flagged as exfil; brand mentions flagged as `violence`)
+        // that would otherwise pollute dev sessions. Production AKS
+        // never sets KARS_DEV_PROFILE so the strict defaults stand.
+        if ctx.dev_profile {
+            router_env.push(json!({"name": "KARS_DEV_PROFILE", "value": "true"}));
+            router_env.push(json!({"name": "KARS_SUPPRESS_EXFIL_URL", "value": "1"}));
+            router_env.push(json!({"name": "KARS_SUPPRESS_CONTENT_FLAGS", "value": "violence"}));
+            router_env.push(json!({"name": "KARS_CONTENT_FLAG_MIN_SEVERITY", "value": "medium"}));
+            if is_openclaw {
+                openclaw_env.push(json!({"name": "KARS_DEV_PROFILE", "value": "true"}));
+            }
         }
 
         // ── Blocklist ConfigMap + env vars ──
@@ -3062,6 +3111,15 @@ pub async fn run(client: Client) -> Result<()> {
     let dev_openai_api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
     let dev_provider = std::env::var("KARS_PROVIDER").unwrap_or_default();
     let dev_copilot_github_token = std::env::var("COPILOT_GITHUB_TOKEN").unwrap_or_default();
+    let dev_profile = matches!(
+        std::env::var("KARS_DEV_PROFILE").as_deref(),
+        Ok("1" | "true" | "True" | "TRUE" | "yes")
+    );
+    if dev_profile {
+        tracing::info!(
+            "KARS_DEV_PROFILE enabled — relaxed defaults (egressMode=Learn, approvalRequired=false) will be applied to spawned sub-agent CRDs"
+        );
+    }
     if !dev_openai_api_key.is_empty() || !dev_provider.is_empty() {
         tracing::info!(
             provider = %if dev_provider.is_empty() { "azure-openai" } else { dev_provider.as_str() },
@@ -3129,6 +3187,7 @@ pub async fn run(client: Client) -> Result<()> {
         dev_openai_api_key,
         dev_provider,
         dev_copilot_github_token,
+        dev_profile,
         cluster_name: std::env::var("CLUSTER_NAME")
             .ok()
             .map(|v| v.trim().to_string())

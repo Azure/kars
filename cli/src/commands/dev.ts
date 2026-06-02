@@ -1402,6 +1402,7 @@ Notes:
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
           "-e", `SANDBOX_NAME=${options.name}`,
           "-e", "KARS_DEV_MODE=true",
+          "-e", "KARS_DEV_PROFILE=true",
           ...(isGithubModelsMode ? ["-e", "KARS_PROVIDER=github-models"] : []),
           ...(isCopilotMode ? ["-e", "KARS_PROVIDER=github-copilot"] : []),
           "-e", `DOCKER_NETWORK=${AGT_NETWORK}`,

@@ -908,6 +908,8 @@ async function provisionDevCreds(
     "  extraEnv:",
     "    - name: LEADER_ELECTION_ENABLED",
     '      value: "false"',
+    "    - name: KARS_DEV_PROFILE",
+    '      value: "true"',
     "    - name: AZURE_OPENAI_API_KEY",
     "      valueFrom:",
     "        secretKeyRef:",

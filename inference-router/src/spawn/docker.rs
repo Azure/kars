@@ -143,6 +143,14 @@ pub(super) fn docker_create_body(
         env.push(format!("KARS_PROVIDER={}", provider));
     }
 
+    // Mark docker sub-agents with the same dev-profile flag the parent
+    // received. The parent already runs `kars dev`, so by definition
+    // its children are dev too. The plugin and entrypoint can branch
+    // on this for relaxed defaults (wider tool allowlist, no
+    // approval-gated egress). Always-on for docker spawn since docker
+    // spawn is dev-only.
+    env.push("KARS_DEV_PROFILE=true".to_string());
+
     if !foundry_endpoint.is_empty() {
         env.push(format!("FOUNDRY_PROJECT_ENDPOINT={}", foundry_endpoint));
     }
