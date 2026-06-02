@@ -86,19 +86,26 @@ export function parseDid(did: string): ParsedDid | null {
 }
 
 /**
- * Normalize any recognized DID to the canonical `did:agentmesh:<fingerprint>` form.
- * For `did:mesh:*` identifiers that aren't hex fingerprints, returns the original
- * since lossless normalization isn't possible without the public key.
+ * Normalize any recognized DID to the canonical wire format.
+ *
+ * Canonical = the form the AGT mesh server stores and re-emits — which
+ * since 2026-05-23 (server PR #2533) is `did:mesh:<sha256(pk)[:32]>`.
+ * Earlier AGT releases used `did:agentmesh:<fingerprint>` which we
+ * preserve for back-compat: any input that already parses cleanly is
+ * returned in the same method+fingerprint form (we never silently
+ * convert between methods because the fingerprints encode different
+ * hash slices of different curves and aren't interchangeable).
  */
 export function normalizeDid(did: string): string {
   const parsed = parseDid(did);
   if (!parsed) return did;
 
+  if (parsed.method === "mesh") {
+    return `did:mesh:${parsed.fingerprint}`;
+  }
   if (parsed.method === "agentmesh") {
     return `did:agentmesh:${parsed.fingerprint}`;
   }
-
-  // did:mesh: identifiers may use a different derivation, return as-is
   return did;
 }
 
@@ -107,9 +114,16 @@ export function isDid(value: string): boolean {
   return parseDid(value) !== null;
 }
 
-/** Check if a string is the canonical `did:agentmesh:<fingerprint>` format. */
+/**
+ * Check if a string is the canonical wire DID.
+ *
+ * Both server-canonical `did:mesh:<32-hex>` (AGT main >= 2026-05-23)
+ * and legacy `did:agentmesh:<16-hex>` are recognised so kars can talk
+ * to either generation of relay without the caller having to branch.
+ */
 export function isCanonicalDid(value: string): boolean {
-  return /^did:agentmesh:[0-9a-f]{16}$/.test(value);
+  return /^did:mesh:[0-9a-f]{32}$/.test(value)
+    || /^did:agentmesh:[0-9a-f]{16}$/.test(value);
 }
 
 /** Check if a string looks like a legacy AMID (base58, typically 24-28 chars). */

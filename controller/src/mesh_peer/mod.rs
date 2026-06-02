@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use k8s_openapi::api::coordination::v1::Lease;
 use k8s_openapi::api::core::v1::Secret;
@@ -235,9 +235,30 @@ async fn register_with_registry(provider: Provider, identity: &MeshIdentity) -> 
     metadata.insert("display_name".to_string(), "kars-controller".to_string());
     metadata.insert("amid".to_string(), identity.amid.clone());
 
+    // POP-aware register body (server PR #2533, mandatory on AGT main
+    // since 2026-05-23). Sign `public_key_b64 || proof_timestamp_str`
+    // — the strings as transmitted, not the raw bytes; see
+    // `agent-mesh/.../registry/app.py:204`. The server verifies with
+    // pynacl `VerifyKey(public_key).verify(message, proof)` and
+    // derives the canonical DID as `did:mesh:<sha256(public_key)[:32]>`.
+    // The body's `did` field is gone from the schema entirely.
+    //
+    // Pre-2533 registries (e.g. our kars-built image still on the
+    // May-29 SHA) accept extra `proof`/`proof_timestamp` fields
+    // because Pydantic defaults to `extra="ignore"` — back-compat
+    // preserved both directions.
+    let proof_ts = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    let pop_msg = format!("{public_key}{proof_ts}");
+    let proof_sig: ed25519_dalek::Signature =
+        identity.signing_key.sign(pop_msg.as_bytes());
+    let proof = BASE64_URL.encode(proof_sig.to_bytes());
+
     let body = AgtRegisterAgentRequest {
-        did: agt_did_for_identity(identity),
         public_key,
+        proof,
+        proof_timestamp: proof_ts,
         capabilities: vec!["offload".into(), "pairing".into()],
         metadata,
     };
@@ -262,13 +283,31 @@ async fn register_with_registry(provider: Provider, identity: &MeshIdentity) -> 
     }
 }
 
-/// Build the AGT DID for the controller's mesh identity. The AGT spec
-/// uses `did:agentmesh:<base64url-of-public-key>`. Keeping it derived from
-/// the public key means every leader replica converges on the same DID
-/// without coordination.
+/// Build the AGT DID for the controller's mesh identity.
+///
+/// Format (server-canonical, AGT main `>=` 2026-05-23 — registry PR
+/// #2533 and relay PR #2632): `did:mesh:<sha256(public_key)[:32]>`.
+/// The registry derives this exact form server-side when registering
+/// the agent; the relay validates the connect frame's `from` against
+/// the same form. Every leader replica converges on the same DID
+/// because Ed25519 keys are persisted in a K8s Secret and shared
+/// across replicas.
+///
+/// Pre-2533 relays/registries ignored the format and just stored
+/// whatever the client sent; this function used to emit
+/// `did:agentmesh:<base64url-pub>`. That form is no longer accepted
+/// by any AGT main HEAD (or v4.0.0 release) — switched here so the
+/// controller can register against current AGT.
 pub(crate) fn agt_did_for_identity(identity: &MeshIdentity) -> String {
+    use sha2::{Digest, Sha256};
     let pk_bytes = identity.verifying_key.to_bytes();
-    format!("did:agentmesh:{}", BASE64_URL.encode(pk_bytes))
+    let hash = Sha256::digest(pk_bytes);
+    let hex = hash
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    format!("did:mesh:{hex}")
 }
 
 /// Register, retrying with bounded backoff if the registry is briefly
@@ -773,16 +812,46 @@ async fn connect_and_listen(
         .await
         .context("Failed to connect to relay")?;
 
-    // Authenticate with AGT: `from` + optional shared-secret `token`.
-    // Token is read from env so the same controller image works against
-    // authenticated or unauthenticated AGT relays. AGT relay sends NO
-    // `connected` ack; we mark the connection ready as soon as the frame
-    // is flushed (see below).
+    // POP-aware connect frame (AGT main `>=` 2026-05-28 PR #2632).
+    //
+    // Three signed fields are required and verified server-side:
+    //   - `public_key`  — standard-base64 (relay uses `b64decode`, NOT
+    //                     `urlsafe_b64decode` — confirmed inconsistency
+    //                     with the registry, see agt_wire.rs).
+    //   - `timestamp`   — ISO-8601 UTC, ±5 min replay window.
+    //   - `signature`   — standard-base64 Ed25519 over the **timestamp
+    //                     string only** (the registry POP signs
+    //                     `pub_b64||ts` instead — different domain
+    //                     separator chosen by upstream).
+    //
+    // `from` must equal `did:mesh:<sha256(public_key)[:32]>` — already
+    // emitted that way by `agt_did_for_identity` above.
+    //
+    // Pre-POP relays ignore the extra fields, so the same frame works
+    // against current AGT main, v4.0.0, and our older kars-built
+    // images (which is what `kars push --only relay` builds).
+    let pub_bytes = state.identity.verifying_key.to_bytes();
+    let pub_b64 = BASE64.encode(pub_bytes);
+    let ts_str = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    let sig: ed25519_dalek::Signature = state.identity.signing_key.sign(ts_str.as_bytes());
+    let sig_b64 = BASE64.encode(sig.to_bytes());
+
+    // Legacy shared-secret support (pre-2632 setups that flipped on
+    // AGENTMESH_RELAY_TOKEN). The POP path takes precedence on POP-aware
+    // relays — if both are set, the relay validates POP first and never
+    // looks at `token`. Keep the env-var path so tests against legacy
+    // images still pass.
     let token = std::env::var("AGENTMESH_RELAY_TOKEN")
         .ok()
         .filter(|s| !s.is_empty());
+
     let connect_msg = AgtFrame::Connect {
         from: agt_did_for_identity(&state.identity),
+        public_key: Some(pub_b64),
+        timestamp: Some(ts_str),
+        signature: Some(sig_b64),
         token,
     };
     ws_stream

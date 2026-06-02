@@ -101,17 +101,24 @@ lto = true
 codegen-units = 1
 strip = true
 
-# ─── Temporary git override for AGT unreleased main ───────────────
-# Pinned to microsoft/agent-governance-toolkit@bae5de3 (2026-06-01)
-# which contains the fixes we authored upstream (PR #2090, PR #2719
-# and follow-up CI stabilisation). crates.io 4.0.0 was published
-# 2026-05-29 — BEFORE these fixes merged — so the released version
-# is missing them.
+# ─── Temporary git override for AGT pre-release (POP-aware SDK) ───
+# Pinned to pallakatos/agent-governance-toolkit@bdea1097 — fork-branch
+# that adds the TypeScript SDK side of proof-of-possession registration
+# and connect-frame signing. Upstream PR:
+# https://github.com/microsoft/agent-governance-toolkit/pull/2772
 #
-# Remove this whole [patch.crates-io] block when a release that
-# includes commit bae5de3 (or later) hits crates.io. The
-# `ci/check-agt-released.sh` daily check files an issue when that
-# happens, so this pin is bounded in time.
+# The Rust agentmesh crate is unchanged between upstream `bae5de3` and
+# our `bdea1097` (only the TypeScript SDK was touched); we still point
+# the Rust [patch.crates-io] override at the fork SHA so the workspace
+# stays at one consistent toolkit revision and `ci/check-agt-released.sh`
+# can track a single SHA.
+#
+# Remove this whole [patch.crates-io] block when:
+#   1. PR #2772 merges to microsoft/agent-governance-toolkit main, AND
+#   2. AGT cuts a release containing it (track via the daily check).
+# At that point also drop the `vendor/agt/microsoft-agent-governance-sdk-*.tgz`
+# tarball + the file: dep in mesh-plugin/package.json and switch to the
+# published npm release.
 [patch.crates-io]
-agentmesh = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bae5de307731c399d9121489c4597577f120d040", package = "agentmesh" }
-agentmesh-mcp = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bae5de307731c399d9121489c4597577f120d040", package = "agentmesh-mcp" }
+agentmesh = { git = "https://github.com/pallakatos/agent-governance-toolkit", rev = "bdea10970f641fa695bb6dce7f8cee425f8aebd6", package = "agentmesh" }
+agentmesh-mcp = { git = "https://github.com/pallakatos/agent-governance-toolkit", rev = "bdea10970f641fa695bb6dce7f8cee425f8aebd6", package = "agentmesh-mcp" }

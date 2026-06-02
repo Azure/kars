@@ -72,10 +72,10 @@ Direct dependencies — see each package's `package.json`:
 
 ## Vendored TypeScript SDK build
 
-`vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-bae5de3.tgz`
+`vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-bdea1097.tgz`
 is a pre-built tarball of the AGT TypeScript SDK produced from
 [microsoft/agent-governance-toolkit](https://github.com/microsoft/agent-governance-toolkit)
-at commit `bae5de3`. License: MIT. See `docs/PUBLISHING.md` →
+at commit `bdea1097`. License: MIT. See `docs/PUBLISHING.md` →
 "Consuming AGT from upstream main" for why this is vendored and
 when it will be removed.
 

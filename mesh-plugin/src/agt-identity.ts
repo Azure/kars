@@ -5,9 +5,16 @@
  * AGT-compatible identity — Ed25519 keypair + DID derivation per
  * AgentMesh Wire Protocol v1.0 Section 4.
  *
- * Identity format: did:agentmesh:<base58btc(sha256(ed25519_pub)[0:20])>
- * The bare-base58 portion equals the legacy AMID, so registries that
- * index by AMID continue to resolve.
+ * Identity formats (kars uses both, depending on context):
+ *   - DID:  `did:mesh:<sha256(ed25519_pub)[0..32 hex chars]>` —
+ *           server-canonical form. Matches AGT main `>=` 2026-05-23
+ *           (registry PR #2533, relay PR #2632); the registry derives
+ *           this server-side and the relay's POP gate checks
+ *           `from == did:mesh:<hex32>`. Every wire frame must use
+ *           this form once the cluster runs a POP-aware server.
+ *   - AMID: `base58btc(sha256(ed25519_pub)[0..20 bytes])` —
+ *           kars-internal cache key, used for the AMID→name map the
+ *           plugin maintains (amid-cache.ts). Never sent on the wire.
  *
  * Persisted at $HOME/.kars/mesh-identity-agt.json. The file is
  * `chmod 0600` and contains the raw private key material — the
@@ -54,7 +61,15 @@ export function deriveAmid(signingPublicKey: Uint8Array): string {
 }
 
 export function deriveDid(signingPublicKey: Uint8Array): string {
-  return `did:agentmesh:${deriveAmid(signingPublicKey)}`;
+  // Server-canonical DID format (AGT main `>=` 2026-05-23). The
+  // registry derives this exact string from `sha256(public_key)` on
+  // POST /v1/agents, and the relay's POP gate verifies the connect
+  // frame's `from` against it. We compute it locally so kars can use
+  // the same DID in pre-register code paths (peer-roster cache,
+  // CRD logging, controller-bound trust scores) before the SDK has
+  // had a chance to round-trip with the server.
+  const hash = crypto.createHash("sha256").update(signingPublicKey).digest("hex");
+  return `did:mesh:${hash.slice(0, 32)}`;
 }
 
 function deriveEncryptionKey(): Buffer {

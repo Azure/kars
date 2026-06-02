@@ -11,6 +11,7 @@ import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants, type KarsConfig } from "../config.js";
 import { stageRustBinaries, archForDockerPlatform } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
+import { ensureAgtRepo } from "../lib/agt-bootstrap.js";
 
 /**
  * Pre-flight: verify every binary `kars dev` shells out to is on PATH.
@@ -622,12 +623,33 @@ Notes:
 
       const stepper = new Stepper({ totalSteps: 4 });
 
+      // Find the kars repo root up-front. The auto-clone path below
+      // reads vendor/agt/pin.json relative to this root, and various
+      // downstream steps already expect to be able to resolve repo-
+      // relative paths.
+      const fsSync = await import("fs");
+      const pathSync = await import("path");
+      let repoRoot = process.cwd();
+      while (repoRoot !== "/" && !fsSync.existsSync(pathSync.join(repoRoot, "Cargo.toml"))) {
+        repoRoot = pathSync.dirname(repoRoot);
+      }
+
       // Resolve mesh provider now that all interactive prompts have run.
       const meshProvider: MeshProvider = (options.meshProvider ?? "agt") as MeshProvider;
       const meshPorts = MESH_PORTS[meshProvider];
-      const agtRepo: string = options.agtRepo
-        ?? process.env.KARS_AGT_REPO
-        ?? DEFAULT_AGT_REPO;
+      // Auto-clone the pinned AGT fork (vendor/agt/pin.json) so fresh
+      // machines can `kars dev --build` without first cloning AGT by
+      // hand. Explicit --agt-repo / $KARS_AGT_REPO still win.
+      let agtRepo: string;
+      try {
+        agtRepo = await ensureAgtRepo(options.agtRepo, repoRoot);
+      } catch (e: unknown) {
+        agtRepo = options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO;
+        if (meshProvider === "agt" && options.build) {
+          console.error(chalk.red(`\n  Auto-cloning AGT failed:\n    ${(e as Error).message}\n`));
+          process.exit(1);
+        }
+      }
       if (meshProvider === "agt" && options.build) {
         if (!existsSync(path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile"))) {
           console.error(chalk.red(`\n  Error: --mesh-provider=agt --build requires the agent-governance-toolkit checkout.`));
@@ -654,11 +676,8 @@ Notes:
         const { execa } = await import("execa");
         const path = await import("path");
 
-        // Find repo root
-        let repoRoot = process.cwd();
-        while (repoRoot !== "/" && !existsSync(path.join(repoRoot, "Cargo.toml"))) {
-          repoRoot = path.dirname(repoRoot);
-        }
+        // repoRoot already computed at command entry; alias the local
+        // path import for downstream code that uses path.join.
 
         // ── Credentials (first — prompt before potentially long build) ──
         stepper.step("Checking credentials...");

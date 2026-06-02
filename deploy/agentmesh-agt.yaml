@@ -49,16 +49,13 @@ spec:
     spec:
       containers:
         - name: registry
-          # NOTE: blocked from switching to the official
-          # ghcr.io/microsoft/agentmesh/registry:4.0.0 image — verified
-          # 2026-06-02 on AKS, run 20260602T061744Z. Official 4.0.0
-          # REQUIRES proof-of-possession on /v1/agents/register
-          # ({public_key, proof, proof_timestamp}); AGT TypeScript SDK
-          # 4.0.0 still sends the legacy {did, public_key} shape, so
-          # every sandbox registration fails with 422, the auto-reconnect
-          # loop floods the inbox, and the agent never reaches the model.
-          # Re-test the swap once the SDK upstream adds POP-signing
-          # (track via ci/check-agt-released.sh).
+          # The kars-built image bundles AGT toolkit @bdea1097 (the
+          # pinned fork SHA at vendor/agt/pin.json that contains the
+          # SDK-side POP signing). Both the relay and the registry in
+          # this manifest must build from the same SHA so the wire
+          # protocol is consistent edge-to-edge — see the kars-side
+          # comment in vendor/agt/pin.json for the published-package
+          # transition criteria.
           image: karsacr.azurecr.io/agentmesh-registry-agt:latest
           ports:
             - containerPort: 8082
@@ -123,10 +120,9 @@ spec:
     spec:
       containers:
         - name: relay
-          # NOTE: Pairs with the registry above — both must match the
-          # same AGT schema. The SDK-vs-registry POP gap (see registry
-          # comment) means we can't take official 4.0.0 yet; keep the
-          # kars-built relay so the pair stays consistent.
+          # Same kars-built image bundle as the registry above — see
+          # `vendor/agt/pin.json` for the AGT SHA both are built from
+          # and the transition path to published images.
           image: karsacr.azurecr.io/agentmesh-relay-agt:latest
           ports:
             - containerPort: 8083
@@ -141,19 +137,6 @@ spec:
               value: "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"
             - name: REQUIRE_REGISTRATION
               value: "true"
-            # Temporary escape hatch — AGT relay commit 66918631 (May 28 2026)
-            # made DID proof-of-possession (public_key+timestamp+signature in
-            # the connect frame) MANDATORY by default. The AGT TypeScript SDK
-            # (the one we ship via vendor/agt/microsoft-agent-governance-sdk-
-            # 4.0.0-agt-bae5de3.tgz) does NOT yet sign the connect frame, so
-            # every WS connect is rejected and the SDK's auto-reconnect loop
-            # floods the agent's inbox with `security_event` entries (the
-            # "11,721 events / 40 min" incident, 2026-06-02).
-            # Re-enable POP HERE the moment the SDK upstream lands POP-signing
-            # in the connect frame — track in audit
-            # docs/internal/security-audits/2026-06-02-agt-relay-pop-flood.md
-            - name: AGENTMESH_RELAY_ALLOW_UNAUTHED_DID
-              value: "1"
           readinessProbe:
             httpGet:
               path: /health

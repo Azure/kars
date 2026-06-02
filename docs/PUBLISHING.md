@@ -202,7 +202,7 @@ upstream `main` (PR [#2090](https://github.com/microsoft/agent-governance-toolki
 CI-stabilisation follow-ups) but are NOT yet in any AGT release.
 
 While we wait for an AGT release that contains the fix, kars consumes AGT
-from a pinned commit (`bae5de3` on `microsoft/agent-governance-toolkit`).
+from a pinned commit (`bdea1097` on `microsoft/agent-governance-toolkit`).
 This is wired in two places:
 
 ### Rust — `[patch.crates-io]` in `Cargo.toml`
@@ -212,8 +212,8 @@ agentmesh = "4.0.0"          # floor — what we declare we want
 agentmesh-mcp = "4.0.0"
 
 [patch.crates-io]
-agentmesh = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bae5de3...", package = "agentmesh" }
-agentmesh-mcp = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bae5de3...", package = "agentmesh-mcp" }
+agentmesh = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bdea1097...", package = "agentmesh" }
+agentmesh-mcp = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "bdea1097...", package = "agentmesh-mcp" }
 ```
 
 When upstream cuts a release containing the pinned commit, drop the
@@ -250,7 +250,7 @@ NEW_SHA=$(gh api repos/microsoft/agent-governance-toolkit/commits/main --jq .sha
 SHORT=$(echo "$NEW_SHA" | cut -c1-7)
 
 # 2. Update Cargo.toml [patch.crates-io] rev fields
-sed -i.bak "s|bae5de3[0-9a-f]*|$NEW_SHA|g" Cargo.toml && rm Cargo.toml.bak
+sed -i.bak "s|bdea1097[0-9a-f]*|$NEW_SHA|g" Cargo.toml && rm Cargo.toml.bak
 cargo update -p agentmesh -p agentmesh-mcp
 
 # 3. Rebuild + repack the TS SDK

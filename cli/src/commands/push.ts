@@ -10,6 +10,7 @@ import os from "os";
 import { loadContext } from "../config.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
+import { ensureAgtRepo } from "../lib/agt-bootstrap.js";
 
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
 
@@ -52,9 +53,36 @@ export function pushCommand(): Command {
       const meshProvider = "agt" as const;
 
       // Resolve AGT repo path — required to (re)build relay/registry images
-      const agtRepo: string =
-        options.agtRepo || process.env.KARS_AGT_REPO || DEFAULT_AGT_REPO;
+      // Find repo root (look for deploy/helm directory). Done up-front
+      // because the auto-clone path below reads vendor/agt/pin.json
+      // relative to the root.
+      let repoRoot = process.cwd();
+      for (let i = 0; i < 5; i++) {
+        if (fs.existsSync(path.join(repoRoot, "deploy", "helm"))) break;
+        repoRoot = path.dirname(repoRoot);
+      }
+      if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
+        console.error(chalk.red("\n  Not in an kars repo. Run from the repo root.\n"));
+        process.exit(1);
+      }
+
+      let agtRepo: string;
       const agtDockerfileRel = "agent-governance-python/agent-mesh/docker/Dockerfile";
+      // Auto-clone the pinned AGT fork (vendor/agt/pin.json) when no
+      // local clone is available. Lets fresh-machine `kars push --apply`
+      // / `kars dev` work without the user having to know about the
+      // AGT-main-vs-released schema gap. Caller-supplied --agt-repo or
+      // $KARS_AGT_REPO still win. See cli/src/lib/agt-bootstrap.ts.
+      try {
+        agtRepo = await ensureAgtRepo(options.agtRepo, repoRoot);
+      } catch (e: unknown) {
+        agtRepo = options.agtRepo || process.env.KARS_AGT_REPO || DEFAULT_AGT_REPO;
+        if (!options.only || options.only === "relay" || options.only === "registry") {
+          console.error(chalk.red(`\n  Auto-cloning AGT failed:\n    ${(e as Error).message}\n`));
+          console.error(chalk.red(`  Pass --agt-repo <path> or set $KARS_AGT_REPO, or pass --only <image> to skip mesh.\n`));
+          process.exit(1);
+        }
+      }
       const agtRepoMissing = !fs.existsSync(path.join(agtRepo, agtDockerfileRel));
       if (agtRepoMissing && (!options.only || options.only === "relay" || options.only === "registry")) {
         console.error(chalk.red(`\n  Building relay/registry requires the AGT repo.`));
@@ -70,17 +98,6 @@ export function pushCommand(): Command {
 
       if (!acrName || !acrLoginServer) {
         console.error(chalk.red("\n  No ACR configured. Run 'kars up' first or pass --acr <name>.\n"));
-        process.exit(1);
-      }
-
-      // Find repo root (look for deploy/helm directory)
-      let repoRoot = process.cwd();
-      for (let i = 0; i < 5; i++) {
-        if (fs.existsSync(path.join(repoRoot, "deploy", "helm"))) break;
-        repoRoot = path.dirname(repoRoot);
-      }
-      if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
-        console.error(chalk.red("\n  Not in an kars repo. Run from the repo root.\n"));
         process.exit(1);
       }
 

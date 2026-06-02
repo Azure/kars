@@ -46,7 +46,7 @@ dependencies = [
 [[package]]
 name = "agentmesh"
 version = "4.0.0"
-source = "git+https://github.com/microsoft/agent-governance-toolkit?rev=bae5de307731c399d9121489c4597577f120d040#bae5de307731c399d9121489c4597577f120d040"
+source = "git+https://github.com/pallakatos/agent-governance-toolkit?rev=bdea10970f641fa695bb6dce7f8cee425f8aebd6#bdea10970f641fa695bb6dce7f8cee425f8aebd6"
 dependencies = [
  "aes-gcm",
  "agentmesh-mcp",
@@ -67,7 +67,7 @@ dependencies = [
 [[package]]
 name = "agentmesh-mcp"
 version = "4.0.0"
-source = "git+https://github.com/microsoft/agent-governance-toolkit?rev=bae5de307731c399d9121489c4597577f120d040#bae5de307731c399d9121489c4597577f120d040"
+source = "git+https://github.com/pallakatos/agent-governance-toolkit?rev=bdea10970f641fa695bb6dce7f8cee425f8aebd6#bdea10970f641fa695bb6dce7f8cee425f8aebd6"
 dependencies = [
  "base64 0.22.1",
  "hmac",
