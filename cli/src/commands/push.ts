@@ -162,19 +162,41 @@ export function pushCommand(): Command {
             process.exit(1);
           }
           tarballPath = options.agtSdkTarball;
-        } else if (!agtRepoMissing) {
-          // Auto-discover: a packed tarball next to the AGT TS workspace
+        } else {
+          // 1. Prefer the vendored tarball in `vendor/agt/` (single source of
+          //    truth pinned by `vendor/agt/pin.json`). This is the build the
+          //    Cargo `[patch.crates-io]` block + the file: deps in
+          //    mesh-plugin/runtimes/openclaw package.json all reference. If
+          //    we shipped a different SDK in the sandbox image we'd get a
+          //    DID-derivation mismatch between in-pod TS code and in-pod
+          //    Rust code (controller mesh peer registers as `did:mesh:<x>`,
+          //    sandbox-side code computes `did:mesh:<y>` from the same key).
+          const vendoredDir = path.join(repoRoot, "vendor", "agt");
           try {
-            const tsDir = path.join(agtRepo, "agent-governance-typescript");
-            const candidates = fs.readdirSync(tsDir).filter(
+            const vendored = fs.readdirSync(vendoredDir).filter(
               f => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"),
             );
-            if (candidates.length > 0) {
-              tarballPath = path.join(tsDir, candidates[0]);
-              console.log(chalk.dim(`  Auto-discovered AGT SDK tarball: ${candidates[0]}`));
+            if (vendored.length > 0) {
+              tarballPath = path.join(vendoredDir, vendored[0]);
+              console.log(chalk.dim(`  Vendored AGT SDK tarball: ${vendored[0]}`));
             }
-          } catch {
-            /* AGT repo missing TS dir — fall through to npm install */
+          } catch { /* no vendored dir */ }
+
+          // 2. Fall back to the AGT clone's packed output. Used when developers
+          //    re-pack the SDK locally (`npm pack`) without copying it back
+          //    into vendor/agt/ — keeps the inner-loop fast without forcing a
+          //    `git add` step.
+          if (!tarballPath && !agtRepoMissing) {
+            try {
+              const tsDir = path.join(agtRepo, "agent-governance-typescript");
+              const candidates = fs.readdirSync(tsDir).filter(
+                f => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"),
+              );
+              if (candidates.length > 0) {
+                tarballPath = path.join(tsDir, candidates[0]);
+                console.log(chalk.dim(`  Auto-discovered AGT SDK tarball from clone: ${candidates[0]}`));
+              }
+            } catch { /* AGT repo missing TS dir — fall through to npm install */ }
           }
         }
         if (tarballPath) {

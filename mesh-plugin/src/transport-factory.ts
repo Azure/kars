@@ -30,6 +30,16 @@ export interface MeshTransportFactoryConfig {
   plaintextPeers?: string[];
   capabilities?: string[];
   displayName?: string;
+  /**
+   * Custom WebSocket constructor. The openclaw plugin sets this to a
+   * wrapper that mutates the SDK's outgoing `connect` frame to inject
+   * the Entra OAuth token (when `AGT_OAUTH_TOKEN` is set). Without
+   * propagating it through to the SDK MeshClient the wrapper is never
+   * invoked and the relay rejects the connect with "no token presented"
+   * — see runtimes/openclaw/src/index.ts wsFactory + the AGT relay's
+   * `_ENTRA_VERIFY_ENABLED` gate in relay/app.py.
+   */
+  wsFactory?: (url: string) => unknown;
 }
 
 /** Re-export so legacy callers can `import type { MeshTransportConfig }`. */
@@ -63,6 +73,9 @@ export async function createMeshTransport(
     registryUrl: config.registryUrl,
     identity: agtIdentity,
     plaintextPeers: config.plaintextPeers,
+    capabilities: config.capabilities,
+    displayName: config.displayName,
+    wsFactory: config.wsFactory,
   });
 }
 

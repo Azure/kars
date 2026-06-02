@@ -23,6 +23,7 @@ import type {
   InboxDiagnostics,
 } from "./transport-interface.js";
 import { LocalInbox } from "./local-inbox.js";
+import { ed25519 } from "@noble/curves/ed25519.js";
 import * as crypto from "node:crypto";
 
 const MAX_FILE_SIZE = 30 * 1024 * 1024;
@@ -807,16 +808,45 @@ export class AgtTransport implements IMeshTransport {
    * Best-effort: 404 is treated as fatal-once (registry forgot us —
    * our register-on-reconnect path will fix it on next connect),
    * everything else is logged + swallowed.
+   *
+   * Uses the SDK's `currentDid` (server-canonical `did:mesh:<hex32>`)
+   * rather than the caller-supplied identity.agentId, because POP-aware
+   * registries (AGT main >= 2026-05-23 PR #2533) derive the DID
+   * server-side from sha256(public_key) and only keep prekeys/sessions
+   * under that canonical form. Sending heartbeats to the legacy
+   * `did:agentmesh:` AMID hits 404 forever.
+   *
+   * Sends `Authorization: Ed25519-Timestamp ...` because the registry's
+   * heartbeat endpoint (server PR #2733) requires Ed25519-Timestamp
+   * auth — same signer the SDK auto-wires for prekey uploads.
    */
   private async pingRegistryPresence(): Promise<void> {
     if (!this.client?.isConnected) return;
-    const did = this.options.identity.agentId;
+    // Prefer the canonical server-derived DID; fall back to caller hint
+    // only when the SDK hasn't surfaced one yet (pre-register or older
+    // SDK builds without currentDid).
+    const did = (this.client as unknown as { currentDid?: string }).currentDid
+      ?? this.options.identity.agentId;
     if (!did) return;
     const registryUrl = this.options.registryUrl.replace(/\/$/, "");
+    const headers: Record<string, string> = {};
+    // The SDK's authSigner produces an Ed25519-Timestamp header bound to
+    // currentDid; build the same header shape here. We can't reach into
+    // the SDK's private authSigner, so we sign directly using the
+    // identity key the kars-plugin owns.
+    try {
+      const ts = new Date().toISOString();
+      const sig = ed25519.sign(
+        new TextEncoder().encode(ts),
+        this.options.identity.signingPrivateKey,
+      );
+      const sigB64 = Buffer.from(sig).toString("base64url");
+      headers["authorization"] = `Ed25519-Timestamp ${did} ${ts} ${sigB64}`;
+    } catch { /* unsigned heartbeat — server will 401, which the catch below logs once */ }
     try {
       const resp = await fetch(
         `${registryUrl}/v1/agents/${encodeURIComponent(did)}/heartbeat`,
-        { method: "POST" },
+        { method: "POST", headers },
       );
       if (!resp.ok && resp.status !== 404) {
         // 404 is benign — happens during the small window between

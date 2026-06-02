@@ -378,6 +378,19 @@ async fn agt_registry_proxy(
         if let Some(ct) = headers.get("content-type") {
             req = req.header("content-type", ct);
         }
+        // Forward `Authorization` header — the AGT registry's authed
+        // endpoints (PUT /v1/agents/{did}/prekeys, POST .../heartbeat,
+        // POST .../reputation, DELETE .../) all require an
+        // `Ed25519-Timestamp` Authorization header. Stripping it here
+        // turns every authed call into a Pydantic 422 (the FastAPI
+        // `Header(...)` annotation defaults to required), and the SDK
+        // treats that as a connection failure and auto-reconnects in
+        // a tight loop. Forwarded as-is — the registry verifies the
+        // signature against the agent's registered public key, so the
+        // router does not need to validate or rewrite.
+        if let Some(auth) = headers.get("authorization") {
+            req = req.header("authorization", auth);
+        }
         if !body_clone.is_empty() {
             req = req.body(body_clone.clone());
         }

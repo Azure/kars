@@ -310,6 +310,116 @@ pub(crate) fn agt_did_for_identity(identity: &MeshIdentity) -> String {
     format!("did:mesh:{hex}")
 }
 
+/// Acquire an Entra access token for the AGT mesh audience.
+///
+/// Reads `AZURE_FEDERATED_TOKEN_FILE` (mounted by AKS Workload Identity
+/// webhook) and exchanges it for an Entra access token via the
+/// `client_credentials` flow. The token is cached in
+/// `state.entra_token_cache` for ~50 min (AAD issues 1-h tokens).
+///
+/// Returns:
+/// - `Ok(Some(token))` — token acquired (or returned from cache)
+/// - `Ok(None)` — WI not configured (local-k8s/docker, anonymous-tier
+///   mesh; the connect frame's `token` field is left unset and the
+///   relay accepts the connection if it's not in Entra-verify mode)
+/// - `Err(msg)` — WI configured but exchange failed; caller logs once
+///   and the relay rejects in Entra-verify mode (4003)
+///
+/// Mirrors the per-sandbox plugin's token acquisition in
+/// `sandbox-images/openclaw/entrypoint.sh` lines 236-291, but in-process
+/// in the Rust controller so the controller's mesh peer can pass the
+/// relay's Entra-JWT gate without needing the auth-sidecar (the sidecar
+/// is sandbox-pod-local and not reachable from controller pods).
+async fn acquire_entra_mesh_token(
+    cache: &Arc<tokio::sync::RwLock<Option<CachedEntraToken>>>,
+) -> Result<Option<String>, String> {
+    // Cache hit (refresh at 50 min, well before the AAD 1 h expiry).
+    {
+        let guard = cache.read().await;
+        if let Some(ref ct) = *guard
+            && ct.acquired_at.elapsed().as_secs() < 3000
+        {
+            return Ok(Some(ct.token.clone()));
+        }
+    }
+
+    let token_file = match std::env::var("AZURE_FEDERATED_TOKEN_FILE") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(None), // WI not configured — local-k8s/docker
+    };
+    let tenant_id = std::env::var("AZURE_TENANT_ID")
+        .map_err(|_| "AZURE_TENANT_ID unset".to_string())?;
+    let client_id = std::env::var("AZURE_CLIENT_ID")
+        .map_err(|_| "AZURE_CLIENT_ID unset".to_string())?;
+    // Override-able so operators can flip from the default
+    // `api://agentmesh/.default` to a per-deployment Entra app reg
+    // without rebuilding the controller. Matches the sandbox plugin's
+    // MESH_AUTH_AUDIENCE env (entrypoint.sh).
+    let scope = std::env::var("MESH_AUTH_AUDIENCE")
+        .unwrap_or_else(|_| "api://agentmesh/.default".to_string());
+    let authority = std::env::var("AZURE_AUTHORITY_HOST")
+        .unwrap_or_else(|_| "https://login.microsoftonline.com".to_string());
+
+    let federated_token = tokio::fs::read_to_string(&token_file)
+        .await
+        .map_err(|e| format!("read {token_file}: {e}"))?;
+
+    let url = format!(
+        "{}/{}/oauth2/v2.0/token",
+        authority.trim_end_matches('/'),
+        tenant_id,
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", &client_id),
+            (
+                "client_assertion_type",
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            ),
+            ("client_assertion", federated_token.trim()),
+            ("scope", &scope),
+        ])
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("AAD token request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        // AADSTS500011 == app registration not provisioned in tenant.
+        // Caller treats this the same as any other auth failure —
+        // dropping `token` from the connect frame is the correct
+        // behaviour (the relay rejects in Entra mode, accepts in open
+        // mode). The warn log fires once per backoff cycle, not once
+        // per second, because acquire_entra_mesh_token is only called
+        // from connect_and_listen and that function is bounded by the
+        // mesh peer reconnect backoff.
+        return Err(format!("AAD ({status}): {}", &body[..body.len().min(200)]));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TokenResp {
+        access_token: String,
+    }
+    let parsed: TokenResp = resp
+        .json()
+        .await
+        .map_err(|e| format!("AAD token parse: {e}"))?;
+    let token = parsed.access_token;
+
+    {
+        let mut guard = cache.write().await;
+        *guard = Some(CachedEntraToken {
+            token: token.clone(),
+            acquired_at: std::time::Instant::now(),
+        });
+    }
+    Ok(Some(token))
+}
+
 /// Register, retrying with bounded backoff if the registry is briefly
 /// unavailable. Failure after the budget is logged but does not abort
 /// the mesh peer — the relay-side rejection will keep us in the existing
@@ -496,6 +606,19 @@ struct MeshPeerState {
     /// epochs are dropped at the drain site so a stranded watcher from a
     /// previous leader tenure cannot corrupt peer state after failover.
     leader_epoch: AtomicU64,
+    /// Cached Entra access token for `api://agentmesh/.default` (override
+    /// via MESH_AUTH_AUDIENCE env). Used in the connect frame's `token`
+    /// field when the relay is in Entra-verify mode. Re-acquired ~50 min
+    /// before the AAD-issued 1-hour expiry. None = not yet acquired or
+    /// WI not configured (AKS opt-in only).
+    entra_token_cache: Arc<tokio::sync::RwLock<Option<CachedEntraToken>>>,
+}
+
+/// Cached Entra access token + acquisition time. Refreshed when the cached
+/// token is older than 50 min (AAD-issued tokens are valid for 1 h).
+struct CachedEntraToken {
+    token: String,
+    acquired_at: std::time::Instant,
 }
 
 /// A message queued for outbound delivery via the active relay connection.
@@ -670,6 +793,7 @@ pub async fn run(client: Client) -> Result<()> {
         provider,
         outbox_tx,
         leader_epoch: AtomicU64::new(0),
+        entra_token_cache: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
     // Reconnect-backoff state — preserved across iterations so successive
@@ -839,13 +963,60 @@ async fn connect_and_listen(
     let sig_b64 = BASE64.encode(sig.to_bytes());
 
     // Legacy shared-secret support (pre-2632 setups that flipped on
-    // AGENTMESH_RELAY_TOKEN). The POP path takes precedence on POP-aware
-    // relays — if both are set, the relay validates POP first and never
-    // looks at `token`. Keep the env-var path so tests against legacy
-    // images still pass.
-    let token = std::env::var("AGENTMESH_RELAY_TOKEN")
+    // The connect-frame `token` field is for **Entra-mode** validation
+    // (AGT relay PR #2719, opt-in via AGENTMESH_ENTRA_AUDIENCE env on
+    // the relay). When the relay is in Entra mode the connect frame
+    // MUST carry a JWT whose `aud` matches the relay's configured
+    // audience, *in addition to* the POP fields above.
+    //
+    // Priority order:
+    //   1. AGENTMESH_RELAY_TOKEN env override (legacy shared-secret;
+    //      lets ops bypass the auth path during cluster bringup before
+    //      the Entra app registration exists).
+    //   2. Workload Identity exchange: read AZURE_FEDERATED_TOKEN_FILE,
+    //      POST to AAD with `client_assertion = federated SA token`,
+    //      scope = MESH_AUTH_AUDIENCE (default `api://agentmesh/.default`),
+    //      cached for ~50 min via `state.entra_token_cache`.
+    //   3. Skip — only safe when the relay's Entra-verify is OFF (the
+    //      relay falls through to the open path). In Entra mode this
+    //      causes the relay to reject with code 4003 "Authentication
+    //      required (Entra)", which the SDK's auto-reconnect will
+    //      then loop on; surface a single warn rather than flood.
+    let token = if let Some(shared) = std::env::var("AGENTMESH_RELAY_TOKEN")
         .ok()
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+    {
+        tracing::debug!("Using AGENTMESH_RELAY_TOKEN shared secret for connect frame");
+        Some(shared)
+    } else {
+        match acquire_entra_mesh_token(&state.entra_token_cache).await {
+            Ok(Some(t)) => {
+                tracing::info!(
+                    token_len = t.len(),
+                    "Entra mesh token acquired (verified-tier)"
+                );
+                Some(t)
+            }
+            Ok(None) => {
+                tracing::info!(
+                    azure_federated_token_file_set = std::env::var("AZURE_FEDERATED_TOKEN_FILE").is_ok(),
+                    azure_tenant_id_set = std::env::var("AZURE_TENANT_ID").is_ok(),
+                    azure_client_id_set = std::env::var("AZURE_CLIENT_ID").is_ok(),
+                    "Entra mesh token not acquired (WI env incomplete); connecting as anonymous tier"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Entra token acquisition failed; controller will register \
+                     as anonymous tier (only safe when relay's \
+                     AGENTMESH_ENTRA_AUDIENCE is unset)"
+                );
+                None
+            }
+        }
+    };
 
     let connect_msg = AgtFrame::Connect {
         from: agt_did_for_identity(&state.identity),
