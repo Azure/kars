@@ -120,6 +120,10 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # docs/PUBLISHING.md "Consuming AGT from upstream main".
 allow-git = [
   "https://github.com/microsoft/agent-governance-toolkit",
+  # Temporary: kars-sdk-pop-signing fork while AGT PR #2772 is in
+  # review. Remove when the PR merges and vendor/agt/pin.json points
+  # back at the upstream microsoft/ commit.
+  "https://github.com/pallakatos/agent-governance-toolkit",
 ]
 
 [sources.allow-org]
