@@ -119,9 +119,26 @@ export class AgtMeshIdentity implements IMeshIdentity {
 
   static loadOrCreate(file: string = IDENTITY_FILE): AgtMeshIdentity {
     const kek = deriveEncryptionKey();
-    if (fs.existsSync(file)) {
+    // Atomic read: try-read-catch instead of existsSync→readFileSync (CWE-367
+    // TOCTOU). If the file vanishes between the existence check and the
+    // read, the second call would throw an unhelpful error and a future
+    // attacker (e.g. a sibling sandbox in the same UID) could swap the
+    // file mid-check.
+    let raw: string | null = null;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(
+          `Failed to read AGT mesh identity from ${file}: ${msg}.`,
+        );
+      }
+      // ENOENT → fall through to create a fresh identity.
+    }
+    if (raw !== null) {
       try {
-        const raw = fs.readFileSync(file, "utf8");
         const p = JSON.parse(raw) as PersistedIdentity;
         if (p.v !== 1) throw new Error(`unsupported identity version ${p.v}`);
         const seed = decryptSeed(p, kek);

@@ -273,5 +273,30 @@ except Exception:
         fi
     fi
 
+    # Final delivered artifact (parent's brief.md). See aks.sh:
+    # `platform_collect_artifacts` for the rationale (Foundry content_safety
+    # may truncate the parent's verbatim-echoed reply; the artifact in
+    # the parent's incoming/ dir is the ground truth).
+    if [ -n "${SCENARIO_FINAL_ARTIFACT_SANDBOX}" ] \
+       && [ -n "${SCENARIO_FINAL_ARTIFACT_PATH}" ]; then
+        local pcname
+        pcname=$(docker ps --format '{{.Names}}' \
+            | grep -E "(^${SCENARIO_FINAL_ARTIFACT_SANDBOX}$|-${SCENARIO_FINAL_ARTIFACT_SANDBOX}$)" \
+            | head -1 || true)
+        # If the parent uses DOCKER_CONTAINER_NAME, that wins over name-match.
+        if [ -z "${pcname}" ] && [ "${SCENARIO_FINAL_ARTIFACT_SANDBOX}" = "${SCENARIO_SANDBOX}" ]; then
+            pcname="${DOCKER_CONTAINER_NAME}"
+        fi
+        if [ -n "${pcname}" ]; then
+            local ext="${SCENARIO_FINAL_ARTIFACT_PATH##*.}"
+            [ "$ext" = "${SCENARIO_FINAL_ARTIFACT_PATH}" ] && ext="md"
+            docker exec "${pcname}" \
+                cat "${SCENARIO_FINAL_ARTIFACT_PATH}" 2>/dev/null \
+                >"${OUT_DIR}/final-artifact.${ext}" || true
+            [ -s "${OUT_DIR}/final-artifact.${ext}" ] \
+                || rm -f "${OUT_DIR}/final-artifact.${ext}"
+        fi
+    fi
+
     log "artifacts collected"
 }

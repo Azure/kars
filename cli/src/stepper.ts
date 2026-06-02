@@ -165,9 +165,15 @@ function sanitizeForLog(s: unknown): string {
  * Print a key-value pair in the summary.
  */
 export function kvLine(key: string, value: string, icon?: string): void {
-  const k = sanitizeForLog(key).padEnd(12);
-  const prefix = icon ? `  ${sanitizeForLog(icon)} ` : "  ";
-  console.log(`${prefix}${k} ${chalk.bold(sanitizeForLog(value))}`);
+  // Sanitize BEFORE handing to chalk so CodeQL's dataflow sees the sanitizer
+  // sit between the untrusted source and console.log. Wrapping `sanitizeForLog`
+  // inside `chalk.bold(...)` confuses the analyzer (the chalk call appears as
+  // a new sink to the dataflow engine).
+  const safeKey = sanitizeForLog(key).padEnd(12);
+  const safeValue = sanitizeForLog(value);
+  const safeIcon = icon ? sanitizeForLog(icon) : "";
+  const prefix = safeIcon ? `  ${safeIcon} ` : "  ";
+  console.log(`${prefix}${safeKey} ${chalk.bold(safeValue)}`);
 }
 
 /**
@@ -175,5 +181,6 @@ export function kvLine(key: string, value: string, icon?: string): void {
  */
 export function checkLine(ok: boolean, text: string): void {
   const icon = ok ? chalk.green("✓") : chalk.yellow("○");
-  console.log(`  ${icon} ${sanitizeForLog(text)}`);
+  const safeText = sanitizeForLog(text);
+  console.log(`  ${icon} ${safeText}`);
 }

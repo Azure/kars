@@ -52,7 +52,28 @@ class Context:
     transcript: str
     router_lines: list[str]
     relay_lines: list[str]
+    # Final delivered artifact (e.g. brief.md) collected by the platform's
+    # `platform_collect_artifacts`. Populated when the scenario sets
+    # SCENARIO_FINAL_ARTIFACT_PATH + SCENARIO_FINAL_ARTIFACT_SANDBOX in its
+    # config.sh. Use this when the parent's transcript may have been
+    # truncated by content-safety (Foundry can finish_reason=content_filter
+    # mid-stream when echoing a long brief) — the artifact is the ground
+    # truth of what the agent produced, the transcript is what the gateway
+    # surfaced to the caller.
+    final_artifact: str = ""
     extras: dict[str, Any] = field(default_factory=dict)
+
+    def best_brief_text(self) -> str:
+        """Return the most complete brief text available.
+
+        Prefer the final artifact when present and longer than the
+        transcript (signal that the transcript was truncated). Otherwise
+        fall back to the transcript so older runs without
+        `final-artifact.*` continue to work.
+        """
+        if self.final_artifact and len(self.final_artifact) > len(self.transcript):
+            return self.final_artifact
+        return self.transcript or self.final_artifact
 
     def lines_for(self, src: str) -> list[str]:
         """Pull every `msg` from the trace whose `src` matches `src`."""
@@ -117,6 +138,17 @@ def main() -> int:
     transcript = transcript_path.read_text(errors="replace") \
         if transcript_path.exists() else ""
 
+    # Optional ground-truth artifact. Platform-side collection writes it as
+    # `final-artifact.<ext>` so the extension is preserved. We accept either
+    # `.md` (markdown brief) or `.txt`; absent file ⇒ empty string and the
+    # checks fall back to the transcript.
+    final_artifact = ""
+    for cand in ("final-artifact.md", "final-artifact.txt"):
+        p = out_dir / cand
+        if p.exists():
+            final_artifact = p.read_text(errors="replace")
+            break
+
     ctx = Context(
         out_dir=out_dir,
         scenario=scenario,
@@ -124,6 +156,7 @@ def main() -> int:
         transcript=transcript,
         router_lines=[e.get("msg", "") for e in trace if e.get("src") == "ROUTER"],
         relay_lines=[e.get("msg", "") for e in trace if e.get("src") == "RELAY"],
+        final_artifact=final_artifact,
     )
 
     checks = load_scenario_checks(scenario_dir)

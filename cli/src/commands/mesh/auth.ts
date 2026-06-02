@@ -212,8 +212,11 @@ export function attachAuthSubcommand(cmd: Command): void {
             )
           );
         } else {
+          // Sanitize BEFORE handing to chalk — see stepper.ts:kvLine for the
+          // CodeQL dataflow rationale (CWE-117 log-forging guard).
+          const safeErr = sanitizeForLog(result.error ?? "Unknown error");
           console.error(
-            chalk.red(`  ✘ Verification failed: ${sanitizeForLog(result.error ?? "Unknown error")}`)
+            chalk.red(`  ✘ Verification failed: ${safeErr}`)
           );
           process.exit(1);
         }

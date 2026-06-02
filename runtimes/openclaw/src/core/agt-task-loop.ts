@@ -250,26 +250,52 @@ export async function processTaskWithTools(
               const resolved = path.resolve(filePath);
               if (!resolved.startsWith("/sandbox/") && !resolved.startsWith("/tmp/")) {
                 result = `file_read error: path must resolve under /sandbox/ or /tmp/ (got: ${resolved})`;
-              } else if (!fs.existsSync(resolved)) {
-                result = `file_read error: not found: ${resolved}`;
               } else {
-                const stat = fs.statSync(resolved);
-                if (!stat.isFile()) {
-                  result = `file_read error: not a regular file: ${resolved}`;
-                } else {
-                  const buf = fs.readFileSync(resolved);
-                  const totalBytes = buf.length;
-                  const sliced = buf.length > maxBytes ? buf.subarray(0, maxBytes) : buf;
-                  const truncated = buf.length > maxBytes;
-                  const text = sliced.toString("utf-8");
-                  log.info(`AGT sub-agent file_read: ${resolved} (${totalBytes} bytes${truncated ? `, truncated to ${maxBytes}` : ""})`);
-                  result = JSON.stringify({
-                    path: resolved,
-                    bytes: totalBytes,
-                    truncated,
-                    returned_bytes: sliced.length,
-                    content: text,
-                  });
+                // Atomic open+stat+read (CWE-367 TOCTOU): a path-check chain
+                // like existsSync→statSync→readFileSync lets an attacker
+                // swap the file (e.g. symlink the path under /tmp to a
+                // sensitive file outside the sandbox) between calls. Open
+                // the FD once with O_RDONLY|O_NOFOLLOW, fstat from the FD,
+                // then read from the same FD. Every operation acts on the
+                // exact same inode the open() resolved.
+                let fd: number;
+                try {
+                  fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+                } catch (e: unknown) {
+                  const code = (e as NodeJS.ErrnoException | undefined)?.code;
+                  if (code === "ENOENT") {
+                    result = `file_read error: not found: ${resolved}`;
+                  } else if (code === "ELOOP") {
+                    result = `file_read error: refusing to follow symlink: ${resolved}`;
+                  } else {
+                    result = `file_read error: ${(e as Error).message}`;
+                  }
+                  fd = -1;
+                }
+                if (fd !== -1) {
+                  try {
+                    const stat = fs.fstatSync(fd);
+                    if (!stat.isFile()) {
+                      result = `file_read error: not a regular file: ${resolved}`;
+                    } else {
+                      const totalBytes = Number(stat.size);
+                      const readBytes = Math.min(totalBytes, maxBytes);
+                      const buf = Buffer.alloc(readBytes);
+                      fs.readSync(fd, buf, 0, readBytes, 0);
+                      const truncated = totalBytes > maxBytes;
+                      const text = buf.toString("utf-8");
+                      log.info(`AGT sub-agent file_read: ${resolved} (${totalBytes} bytes${truncated ? `, truncated to ${maxBytes}` : ""})`);
+                      result = JSON.stringify({
+                        path: resolved,
+                        bytes: totalBytes,
+                        truncated,
+                        returned_bytes: readBytes,
+                        content: text,
+                      });
+                    }
+                  } finally {
+                    fs.closeSync(fd);
+                  }
                 }
               }
               // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -49,6 +49,16 @@ spec:
     spec:
       containers:
         - name: registry
+          # NOTE: blocked from switching to the official
+          # ghcr.io/microsoft/agentmesh/registry:4.0.0 image — verified
+          # 2026-06-02 on AKS, run 20260602T061744Z. Official 4.0.0
+          # REQUIRES proof-of-possession on /v1/agents/register
+          # ({public_key, proof, proof_timestamp}); AGT TypeScript SDK
+          # 4.0.0 still sends the legacy {did, public_key} shape, so
+          # every sandbox registration fails with 422, the auto-reconnect
+          # loop floods the inbox, and the agent never reaches the model.
+          # Re-test the swap once the SDK upstream adds POP-signing
+          # (track via ci/check-agt-released.sh).
           image: karsacr.azurecr.io/agentmesh-registry-agt:latest
           ports:
             - containerPort: 8082
@@ -113,6 +123,10 @@ spec:
     spec:
       containers:
         - name: relay
+          # NOTE: Pairs with the registry above — both must match the
+          # same AGT schema. The SDK-vs-registry POP gap (see registry
+          # comment) means we can't take official 4.0.0 yet; keep the
+          # kars-built relay so the pair stays consistent.
           image: karsacr.azurecr.io/agentmesh-relay-agt:latest
           ports:
             - containerPort: 8083

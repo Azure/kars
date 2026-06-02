@@ -276,6 +276,41 @@ platform_collect_artifacts() {
         fi
     fi
 
+    # ── Pull the final delivered artifact (e.g. parent's brief.md) ──
+    # The parent agent's transcript can be content_filter-truncated by
+    # Foundry on a long verbatim echo; the artifact in the parent's
+    # incoming/ dir is the ground truth of what was actually delivered
+    # over the mesh. Lands in OUT_DIR as `final-artifact.<ext>` so
+    # verify.py can pick it up regardless of scenario.
+    if [ -n "${SCENARIO_FINAL_ARTIFACT_SANDBOX}" ] \
+       && [ -n "${SCENARIO_FINAL_ARTIFACT_PATH}" ]; then
+        # Re-apply break-glass on the parent's namespace (it wasn't in
+        # the sub-loop above; the parent isn't a sub-agent).
+        kubectl label namespace "kars-${SCENARIO_FINAL_ARTIFACT_SANDBOX}" \
+            kars.azure.com/break-glass=true --overwrite \
+            >/dev/null 2>&1 || true
+        sleep 2
+        local parent_pod
+        parent_pod=$(kubectl get pod -n "kars-${SCENARIO_FINAL_ARTIFACT_SANDBOX}" \
+            -l "kars.azure.com/sandbox=${SCENARIO_FINAL_ARTIFACT_SANDBOX}" \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        if [ -n "$parent_pod" ]; then
+            local ext="${SCENARIO_FINAL_ARTIFACT_PATH##*.}"
+            [ "$ext" = "${SCENARIO_FINAL_ARTIFACT_PATH}" ] && ext="md"
+            kubectl exec -n "kars-${SCENARIO_FINAL_ARTIFACT_SANDBOX}" \
+                "$parent_pod" -c openclaw -- \
+                cat "${SCENARIO_FINAL_ARTIFACT_PATH}" 2>/dev/null \
+                >"${OUT_DIR}/final-artifact.${ext}" || true
+            # Empty file means the parent never received the artifact —
+            # remove it so verify.py falls back to the transcript cleanly.
+            [ -s "${OUT_DIR}/final-artifact.${ext}" ] \
+                || rm -f "${OUT_DIR}/final-artifact.${ext}"
+        fi
+        kubectl label namespace "kars-${SCENARIO_FINAL_ARTIFACT_SANDBOX}" \
+            kars.azure.com/break-glass- \
+            >/dev/null 2>&1 || true
+    fi
+
     for sub in "${SCENARIO_SUB_SANDBOXES[@]}" "${SCENARIO_INCOMING_SANDBOX}"; do
         [ -z "$sub" ] && continue
         kubectl label namespace "kars-${sub}" \

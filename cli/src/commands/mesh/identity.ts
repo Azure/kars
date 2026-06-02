@@ -123,10 +123,19 @@ export function base58Encode(buffer: Buffer): string {
 // ---------------------------------------------------------------------------
 
 export function loadIdentity(): MeshIdentity | null {
-  if (!fs.existsSync(IDENTITY_FILE)) return null;
+  // Atomic read: avoid TOCTOU (CWE-367) — try-read-catch instead of
+  // existsSync→readFileSync. The file may be created/destroyed by another
+  // process (e.g. concurrent `kars mesh login` invocations) in the gap.
+  let raw: string;
   try {
-    const data = JSON.parse(fs.readFileSync(IDENTITY_FILE, "utf-8"));
-    return data as MeshIdentity;
+    raw = fs.readFileSync(IDENTITY_FILE, "utf-8");
+  } catch (e: unknown) {
+    const code = (e as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") return null;
+    throw e;
+  }
+  try {
+    return JSON.parse(raw) as MeshIdentity;
   } catch {
     return null;
   }

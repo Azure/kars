@@ -141,8 +141,10 @@ if [ "${DEMO:-0}" = "1" ]; then
     # Render the final brief as a browser-openable HTML page so the
     # operator can showcase the actual deliverable (with hero +
     # scorecard images inline) at the end of the demo. Best-effort
-    # — never fails the run.
-    python3 "${SCRIPT_DIR}/render_html.py" "${OUT_DIR}" 2>/dev/null || true
+    # — never fails the run. `< /dev/null` so that running detached
+    # (no terminal stdin) doesn't trip Python's init_sys_streams check
+    # on macOS, which otherwise aborts the interpreter before main().
+    python3 "${SCRIPT_DIR}/render_html.py" "${OUT_DIR}" </dev/null 2>/dev/null || true
     if [ -f "${OUT_DIR}/brief.html" ]; then
         echo
         echo "  📄  Final brief rendered: ${OUT_DIR}/brief.html"
@@ -158,9 +160,11 @@ if [ "${DEMO:-0}" = "1" ]; then
 fi
 
 cleanup
-python3 "${SCRIPT_DIR}/verify.py"
+# `< /dev/null` for the same reason as the demo branch above — keeps
+# verify.py runnable when the harness is detached from a terminal.
+python3 "${SCRIPT_DIR}/verify.py" </dev/null
 VERIFY_RC=$?
-python3 "${SCRIPT_DIR}/render_html.py" "${OUT_DIR}" 2>/dev/null || true
+python3 "${SCRIPT_DIR}/render_html.py" "${OUT_DIR}" </dev/null 2>/dev/null || true
 if [ -f "${OUT_DIR}/brief.html" ]; then
     echo
     echo "  Final brief rendered: ${OUT_DIR}/brief.html"

@@ -32,9 +32,13 @@ if TYPE_CHECKING:
 
 # ─── Individual checks ────────────────────────────────────────────────────────
 def check_sources(ctx: "Context") -> tuple[bool, str]:
-    # Distinct URLs cited in the final reply that look like they reference 2026
-    # publications. Heuristic: count unique http(s) URLs in the transcript.
-    urls = set(re.findall(r"https?://[^\s)>\]]+", ctx.transcript))
+    # Distinct URLs cited in the final brief that look like they reference 2026
+    # publications. Heuristic: count unique http(s) URLs.
+    # Source: prefer the collected final artifact when present (the parent's
+    # echoed reply can get truncated by Foundry content_filter mid-stream;
+    # the artifact is what was actually delivered).
+    brief = ctx.best_brief_text()
+    urls = set(re.findall(r"https?://[^\s)>\]]+", brief))
     # Drop any obvious infra noise (registry/relay/telegram api)
     noise = ("api.telegram.org", "modelcontextprotocol.io",
              "ai.azure.com", "login.microsoftonline.com", "agentmesh")
@@ -46,10 +50,11 @@ def check_sources(ctx: "Context") -> tuple[bool, str]:
 def check_scorecard(ctx: "Context") -> tuple[bool, str]:
     # The analyst is asked for a 4×4 scorecard. We look for either a JSON
     # block with a "metrics" key OR a markdown table mentioning the four
-    # columns.
+    # columns. Use the artifact when present (transcript may be truncated).
     cols = ("isolation", "egress", "attestation", "governance")
-    found = sum(1 for c in cols if c in ctx.transcript.lower())
-    has_metrics = '"metrics"' in ctx.transcript or "scorecard" in ctx.transcript.lower()
+    brief = ctx.best_brief_text()
+    found = sum(1 for c in cols if c in brief.lower())
+    has_metrics = '"metrics"' in brief or "scorecard" in brief.lower()
     ok = has_metrics and found == 4
     return ok, f"metrics block present={has_metrics}, axis labels found={found}/4"
 
@@ -214,12 +219,14 @@ def check_telegram(ctx: "Context") -> tuple[bool, str]:
 
 
 def check_brief(ctx: "Context") -> tuple[bool, str]:
-    # Loose: the final reply should be ≥600 and ≤1500 words and mention both
-    # "hero" placement and a chart.
-    words = len(ctx.transcript.split())
-    has_chart = "chart" in ctx.transcript.lower() or "![" in ctx.transcript
-    has_hero = ("hero" in ctx.transcript.lower()
-                or ctx.transcript.lower().count("![") >= 2)
+    # Loose: the final brief should be ≥600 and ≤1500 words and mention both
+    # "hero" placement and a chart. Prefer the final artifact (the
+    # parent's echoed transcript can be content_filter-truncated mid-stream).
+    brief = ctx.best_brief_text()
+    words = len(brief.split())
+    has_chart = "chart" in brief.lower() or "![" in brief
+    has_hero = ("hero" in brief.lower()
+                or brief.lower().count("![") >= 2)
     ok = 600 <= words <= 1500 and has_chart and has_hero
     return ok, f"{words} words; chart_ref={has_chart}; hero_ref={has_hero}"
 
@@ -260,7 +267,11 @@ def check_mcp_traffic(ctx: "Context") -> tuple[bool, str]:
     mcp_tools_call = [l for l in mcp_lines
                       if '"method":"tools/call"' in l
                       or "method=tools/call" in l]
-    mentioned = "deepwiki" in ctx.transcript.lower()
+    # "deepwiki" citation: prefer the artifact (the parent's echoed reply
+    # gets truncated by Foundry content_filter on long briefs, dropping
+    # the footnotes section that contains the DeepWiki reference).
+    brief = ctx.best_brief_text()
+    mentioned = "deepwiki" in brief.lower()
     if platform == "docker":
         ok = mentioned
         return ok, (

@@ -40,3 +40,13 @@ SCENARIO_GREP_PATTERNS_analyst=("file_transfer_ack|mesh_transfer_file|foundry_we
 # scorecard.png and hero.png arrived. Set to "" to skip.
 SCENARIO_INCOMING_SANDBOX="writer"
 SCENARIO_INCOMING_PATH="/sandbox/.openclaw/workspace/incoming/"
+
+# Final delivered artifact: the parent agent's mesh-received brief.md.
+# The harness collects this into OUT_DIR/final-artifact.md so verify.py
+# can score against what was actually delivered instead of the parent's
+# echoed reply (which Foundry content_safety can finish_reason=content_filter
+# mid-stream when the agent verbatim-echoes a long brief). Without this,
+# every successful run risks a 4/9-down-to-9/9 swing on the same artifact
+# depending on whether the model's echo happened to trip a filter category.
+SCENARIO_FINAL_ARTIFACT_SANDBOX="execbrief"
+SCENARIO_FINAL_ARTIFACT_PATH="/sandbox/.openclaw/workspace/incoming/brief.md"
