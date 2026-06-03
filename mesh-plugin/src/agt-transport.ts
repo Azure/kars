@@ -783,12 +783,43 @@ export class AgtTransport implements IMeshTransport {
     const clamped = Math.max(0, Math.min(1, score > 1 ? score / 100 : score));
     const reason = tags.length > 0 ? `session=${sessionId} tags=${tags.join(",")}` : `session=${sessionId}`;
     const registryUrl = this.options.registryUrl.replace(/\/$/, "");
+    // AGT 4.0 registry (commit 66918631, May 28 2026) requires
+    // `Authorization: Ed25519-Timestamp <did> <iso8601> <base64url(sig)>`
+    // on every mutating registry POST — including reputation, heartbeat
+    // and prekeys. Without this every submission silently 401s on the
+    // server side and the operator UI shows `feedback_count: 0`
+    // forever (the comment at inference-router/src/routes/mesh.rs:431
+    // documents this exact symptom). Signature is over the timestamp
+    // string only — same shape `pingRegistryPresence` already uses.
+    //
+    // Prefer the canonical server-derived DID (post-PoP, the registry
+    // identifies us by `did:mesh:<hex32>(pk)`); fall back to the
+    // caller-supplied identity hint only when `currentDid` isn't set
+    // yet (pre-register, older SDK builds, or this.client is still
+    // null before connect()).
+    const did =
+      (this.client as unknown as { currentDid?: string } | null)?.currentDid
+      ?? this.options.identity.agentId;
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (did) {
+      try {
+        const ts = new Date().toISOString();
+        const sig = ed25519.sign(
+          new TextEncoder().encode(ts),
+          this.options.identity.signingPrivateKey,
+        );
+        const sigB64 = Buffer.from(sig).toString("base64url");
+        headers["authorization"] = `Ed25519-Timestamp ${did} ${ts} ${sigB64}`;
+      } catch {
+        /* unsigned request — server will 401 and the catch below logs it */
+      }
+    }
     try {
       const resp = await fetch(
         `${registryUrl}/v1/agents/${encodeURIComponent(toAmid)}/reputation`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers,
           body: JSON.stringify({ score: clamped, reason }),
         },
       );

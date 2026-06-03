@@ -187,5 +187,81 @@ describe("AgtTransport", () => {
     });
     expect(t.agentId).toBe("did:agentmesh:test-agent");
   });
+
+  describe("submitReputation Ed25519-Timestamp auth", () => {
+    let realIdentity: IMeshIdentity;
+
+    beforeEach(async () => {
+      // Real Ed25519 keys — the AGT 4.0 registry verifies the
+      // signature server-side, so a zero-filled key would let the test
+      // pass against our mock but fail in production. Using @noble's
+      // utility to generate a fresh keypair per test keeps the wire
+      // shape honest.
+      const { ed25519: e } = await import("@noble/curves/ed25519.js");
+      const priv = e.utils.randomSecretKey();
+      const pub = e.getPublicKey(priv);
+      realIdentity = {
+        agentId: "did:mesh:abcdef0123456789abcdef0123456789",
+        signingPrivateKey: priv,
+        signingPublicKey: pub,
+      };
+    });
+
+    it("attaches Ed25519-Timestamp authorization header on success", async () => {
+      const fetchMock = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              did: "did:mesh:peer",
+              reputation_score: 0.8,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const t = new AgtTransport({
+        relayUrl: "ws://r",
+        registryUrl: "http://reg",
+        identity: realIdentity,
+      });
+      const ok = await t.submitReputation("did:mesh:peer", "sess-1", 0.8, ["reliable"]);
+
+      expect(ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("http://reg/v1/agents/did%3Amesh%3Apeer/reputation");
+      expect(init.method).toBe("POST");
+
+      const auth = init.headers.authorization;
+      expect(auth).toBeDefined();
+      // Wire format: Ed25519-Timestamp <did> <iso8601> <base64url(sig)>
+      const parts = auth.split(" ");
+      expect(parts).toHaveLength(4);
+      expect(parts[0]).toBe("Ed25519-Timestamp");
+      expect(parts[1]).toBe(realIdentity.agentId);
+      expect(parts[2]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      expect(parts[3]).toMatch(/^[A-Za-z0-9_-]+$/); // base64url
+    });
+
+    it("returns false (not throw) when registry rejects with 401", async () => {
+      const fetchMock = vi.fn(
+        async () =>
+          new Response("unauthorized", {
+            status: 401,
+            statusText: "Unauthorized",
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const t = new AgtTransport({
+        relayUrl: "ws://r",
+        registryUrl: "http://reg",
+        identity: realIdentity,
+      });
+      const ok = await t.submitReputation("did:mesh:peer", "sess-1", 0.8);
+      expect(ok).toBe(false);
+    });
+  });
 });
 

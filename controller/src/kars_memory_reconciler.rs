@@ -314,15 +314,13 @@ async fn reconcile(memory: Arc<KarsMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
     };
 
     // Only emit the Warning while truly awaiting router-side
-    // confirmation (mirrors slice-1c ToolPolicy + slice-2a
-    // InferencePolicy). Once Confirmed fires we stop shouting — the
-    // loop is honestly closed.
-    let publish_warning = degraded.is_none()
-        && matches!(
-            enforcement_state,
-            RouterEnforcementState::Awaiting { .. }
-                | RouterEnforcementState::NoSandboxesReferencing
-        );
+    // confirmation. See
+    // `crate::status::router_confirmation::should_publish_warning`
+    // for the full rationale.
+    let publish_warning = crate::status::router_confirmation::should_publish_warning(
+        &enforcement_state,
+        degraded.is_some(),
+    );
     if publish_warning
         && let Err(e) = ctx
             .phase_reporter

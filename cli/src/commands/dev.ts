@@ -19,7 +19,11 @@ import { ensureAgtRepo } from "../lib/agt-bootstrap.js";
  * `kars dev` takes ~5–10 min on a cold first run; bailing halfway
  * through with "helm: command not found" is a bad first impression.
  */
-async function preflightTools(target: "docker" | "local-k8s", agtRepo: string): Promise<void> {
+export async function preflightTools(
+  target: "docker" | "local-k8s",
+  agtRepo: string,
+  opts: { build: boolean; noMesh: boolean },
+): Promise<void> {
   // Per-target tool requirements:
   //   docker     → just docker (single container, no kind/helm/kubectl)
   //   local-k8s  → docker + kind + kubectl + helm
@@ -46,12 +50,14 @@ async function preflightTools(target: "docker" | "local-k8s", agtRepo: string): 
     }
   }
 
-  // AGT toolkit checkout is required to build the mesh relay + registry
-  // images. Surface the missing clone HERE (before any other work) with
-  // a copy-pasteable command + env var hint, instead of failing 5
-  // minutes later inside the sandbox build step.
+  // AGT toolkit checkout is required ONLY when we're actually going to
+  // build mesh relay+registry images from source. Overlay-refresh
+  // re-runs (no --build) and --no-mesh skip-deploy modes don't touch
+  // the toolkit at all; surfacing the missing clone there is pure
+  // friction for the common "I just want to re-apply env vars" loop.
+  const needsAgtRepo = opts.build && !opts.noMesh;
   const agtDockerfile = path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile");
-  const agtMissing = !existsSync(agtDockerfile);
+  const agtMissing = needsAgtRepo && !existsSync(agtDockerfile);
 
   if (missing.length === 0 && !agtMissing) return;
 
@@ -306,6 +312,7 @@ Notes:
       await preflightTools(
         options.target as "docker" | "local-k8s",
         options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO,
+        { build: options.build === true, noMesh: options.noMesh === true },
       );
 
       // ── First-run common prompts (apply to BOTH targets) ──────────

@@ -215,6 +215,26 @@ pub enum RouterEnforcementState {
     Confirmed { total: usize },
 }
 
+/// Should the reconciler emit a `PolicyNotEnforced` Warning Event for
+/// this state? Returns `true` only when the controller is genuinely
+/// waiting for a router-side echo from an already-bound sandbox.
+///
+/// The previous shape also returned `true` for
+/// [`RouterEnforcementState::NoSandboxesReferencing`], which spammed
+/// the event log every reconcile for any chart-installed default CR
+/// nobody happens to reference (e.g. `kars-default` ToolPolicy on
+/// every cluster). Orphan state is still surfaced in the CR's
+/// `Ready=False / reason=NoSandboxesReferencing` condition so
+/// `kubectl get` shows it — just without periodic Warning Event
+/// noise that drowns out genuine `Awaiting` signals.
+///
+/// Shared by `tool_policy_reconciler`, `inference_policy_reconciler`,
+/// and `kars_memory_reconciler` so the three CRD kinds stay in lock-
+/// step on this decision.
+pub fn should_publish_warning(state: &RouterEnforcementState, degraded: bool) -> bool {
+    !degraded && matches!(state, RouterEnforcementState::Awaiting { .. })
+}
+
 /// Pure decision: aggregate per-sandbox poll outcomes into a
 /// [`RouterEnforcementState`]. Factored out of any specific
 /// reconciler so the promotion logic is unit-testable without K8s
@@ -303,6 +323,46 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn should_publish_warning_only_when_awaiting() {
+        // Truly waiting on a bound router → emit (the legit one-shot
+        // diagnostic operators want to see).
+        assert!(should_publish_warning(
+            &RouterEnforcementState::Awaiting {
+                total: 1,
+                matched: 0,
+                message: "router silent".into(),
+            },
+            false,
+        ));
+        // No referrers → suppress (orphan default policies otherwise
+        // re-fire every reconcile and flood the event log).
+        assert!(!should_publish_warning(
+            &RouterEnforcementState::NoSandboxesReferencing,
+            false,
+        ));
+        // Healthy → suppress (loop is closed; nothing to shout about).
+        assert!(!should_publish_warning(
+            &RouterEnforcementState::Confirmed { total: 3 },
+            false,
+        ));
+        // Back-compat NotApplicable → suppress.
+        assert!(!should_publish_warning(
+            &RouterEnforcementState::NotApplicable,
+            false,
+        ));
+        // Degraded short-circuits: the Degraded handler emits its own
+        // (different-reason) event; we must not double-fire.
+        assert!(!should_publish_warning(
+            &RouterEnforcementState::Awaiting {
+                total: 1,
+                matched: 0,
+                message: "router silent".into(),
+            },
+            true,
+        ));
+    }
 
     fn populated_response() -> serde_json::Value {
         serde_json::json!({

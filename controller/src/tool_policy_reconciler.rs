@@ -264,16 +264,14 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     };
 
     // Only emit a Warning event while we are *actually* awaiting
-    // router-side confirmation (or starved of consumers). Once the
-    // router echoes the digest, the Compiled→Ready transition fires
-    // and the loop has been honestly closed — no need to keep
-    // shouting.
-    let publish_warning = degraded.is_none()
-        && matches!(
-            enforcement_state,
-            RouterEnforcementState::Awaiting { .. }
-                | RouterEnforcementState::NoSandboxesReferencing
-        );
+    // router-side confirmation. See
+    // `crate::status::router_confirmation::should_publish_warning`
+    // for the full rationale (shared with InferencePolicy +
+    // KarsMemory reconcilers).
+    let publish_warning = crate::status::router_confirmation::should_publish_warning(
+        &enforcement_state,
+        degraded.is_some(),
+    );
     if publish_warning
         && let Err(e) = ctx
             .phase_reporter
@@ -324,10 +322,13 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             // Short cadence while awaiting confirmation so the
             // Compiled→Ready transition fires quickly once the
             // router catches up.
-            RouterEnforcementState::Awaiting { .. }
-            | RouterEnforcementState::NoSandboxesReferencing => {
-                Ok(Action::requeue(Duration::from_secs(15)))
-            }
+            RouterEnforcementState::Awaiting { .. } => Ok(Action::requeue(Duration::from_secs(15))),
+            // No consumers — there is nothing to wait for. Requeue at
+            // the normal slow cadence so a future sandbox that adopts
+            // this policy promotes Ready quickly enough, without
+            // re-running the (orphan-likely-for-life) reconcile every
+            // 15 s.
+            RouterEnforcementState::NoSandboxesReferencing => Ok(Action::requeue(REQUEUE_OK)),
         }
     }
 }
