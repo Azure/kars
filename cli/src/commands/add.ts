@@ -21,7 +21,7 @@ export function addCommand(): Command {
     .argument("<name>", "Name for the new sandbox agent")
 
     // ── Core (all runtimes) ────────────────────────────────────────────
-    .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | langgraph | anthropic | pydantic-ai | byo", "openclaw")
+    .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | langgraph | anthropic | pydantic-ai | hermes | byo", "openclaw")
     .option("--model <model>", "AI model deployment name in Foundry", "gpt-4.1")
     .option("--isolation <level>", "Isolation level: standard | enhanced | confidential", "enhanced")
     .option("--image <image>", "Custom sandbox image (default: from Helm values; OpenClaw runtime only)")

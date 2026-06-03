@@ -117,18 +117,59 @@ pub(super) fn docker_create_body(
     let registry_url = std::env::var("AGT_REGISTRY_URL").unwrap_or_default();
     let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT").unwrap_or_default();
     let foundry_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
-    let image = std::env::var("KARS_DEV_IMAGE").unwrap_or_else(|_| "kars-sandbox:dev".into());
+
+    // Runtime-aware image selection. The parent's runtime kind is
+    // propagated via `KARS_RUNTIME_KIND` env (controller sets this in
+    // A1.2; docker dev parent CLI sets it in dev.ts). When set, we
+    // honour it for the sub-agent's image so children inherit the
+    // parent's runtime by default. Falls back to the legacy
+    // `KARS_DEV_IMAGE` env then `kars-sandbox:dev` for back-compat
+    // with operators on older builds.
+    //
+    // Per-runtime image naming convention: kars-sandbox-<kind>:dev,
+    // matching `sandbox-images/<kind>/Dockerfile`.
+    let parent_runtime = std::env::var("KARS_RUNTIME_KIND").unwrap_or_else(|_| "OpenClaw".into());
+    let default_dev_image = match parent_runtime.as_str() {
+        "Hermes" => "kars-sandbox-hermes:dev".to_string(),
+        // Other runtimes (PydanticAi, Anthropic, LangGraph, ...) ship
+        // their own dev images on the same naming convention. We
+        // pre-register the lookup so future runtime additions only
+        // need to drop their image name here.
+        "PydanticAi" => "kars-sandbox-pydantic-ai:dev".to_string(),
+        "Anthropic" => "kars-sandbox-anthropic:dev".to_string(),
+        "LangGraph" => "kars-sandbox-langgraph:dev".to_string(),
+        _ => "kars-sandbox:dev".to_string(),
+    };
+    let image = std::env::var("KARS_DEV_IMAGE").unwrap_or(default_dev_image);
 
     let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
 
     let mut env = vec![
         format!("OPENCLAW_MODEL={}", model),
+        // Generic kars-runtime envelope: the runtime contract v1 names
+        // KARS_MODEL as the canonical model env (OPENCLAW_MODEL stays
+        // for back-compat with the OpenClaw entrypoint). New runtimes
+        // (Hermes, PydanticAi, ...) read KARS_MODEL.
+        format!("KARS_MODEL={}", model),
         format!("AZURE_OPENAI_ENDPOINT={}", endpoint),
         format!("AZURE_OPENAI_API_KEY={}", api_key),
         format!("SANDBOX_NAME={}", req.agent_id),
         "KARS_DEV_MODE=true".to_string(),
         format!("DOCKER_NETWORK={}", network),
         "EGRESS_LEARN_MODE=true".to_string(),
+        // Runtime contract version pin — child runtime must reject if
+        // it doesn't support v1. See docs/runtimes/CONTRACT.md.
+        "KARS_RUNTIME_CONTRACT_VERSION=v1".to_string(),
+        // Propagate the parent's runtime kind so the child knows what
+        // shape it's running in. The image already implies this (child
+        // gets parent's runtime image by default above), but the
+        // explicit env makes it discoverable from inside the
+        // container for diagnostics + the kars plugin's introspection.
+        format!("KARS_RUNTIME_KIND={}", parent_runtime),
+        // Parent runtime kind explicitly — even when the child
+        // overrides via kars_spawn(runtime=...), this records the
+        // family lineage for trust + telemetry.
+        format!("PARENT_RUNTIME_KIND={}", parent_runtime),
     ];
 
     // Propagate the model provider to the sub-agent so its entrypoint +

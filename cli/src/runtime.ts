@@ -24,6 +24,7 @@ export type RuntimeKind =
   | "LangGraph"
   | "Anthropic"
   | "PydanticAi"
+  | "Hermes"
   | "BYO";
 
 /** kebab-case CLI flag values (e.g. `--runtime openai-agents`). */
@@ -35,6 +36,7 @@ export type RuntimeFlag =
   | "lang-graph"
   | "anthropic"
   | "pydantic-ai"
+  | "hermes"
   | "byo";
 
 const FLAG_TO_KIND: Record<RuntimeFlag, RuntimeKind> = {
@@ -45,6 +47,7 @@ const FLAG_TO_KIND: Record<RuntimeFlag, RuntimeKind> = {
   "lang-graph": "LangGraph",
   "anthropic": "Anthropic",
   "pydantic-ai": "PydanticAi",
+  "hermes": "Hermes",
   "byo": "BYO",
 };
 
@@ -56,6 +59,7 @@ const WIRED_KINDS: RuntimeKind[] = [
   "LangGraph",
   "Anthropic",
   "PydanticAi",
+  "Hermes",
   "BYO",
 ];
 
@@ -176,6 +180,11 @@ export function buildRuntimeBlock(
       return {
         kind: "PydanticAi",
         pydanticAi: {},
+      };
+    case "Hermes":
+      return {
+        kind: "Hermes",
+        hermes: {},
       };
     case "MicrosoftAgentFramework": {
       const language = opts.mafLanguage ?? "python";
