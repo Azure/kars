@@ -1,0 +1,34 @@
+name: kars
+version: "0.1.0"
+description: "kars in-pod adapter — wires Hermes into AGT governance, sub-agent spawn, Foundry tools, MCP, channels"
+author: "Microsoft Corporation"
+
+provides_tools:
+  - kars_spawn
+  - kars_spawn_status
+  - kars_spawn_destroy
+  - kars_spawn_list
+  - kars_discover
+  - kars_handoff_request
+  - kars_handoff_confirm
+  - kars_handoff_status
+  - kars_mesh_send       # Act 1: stub — returns "requires Python MeshClient (Act 2)"
+  - kars_mesh_inbox      # Act 1: stub
+  - kars_mesh_await      # Act 1: stub
+  - kars_mesh_transfer_file  # Act 1: stub
+  - http_fetch
+  # Foundry tools — registered only when KARS_PROVIDER is not a slim mode
+  - foundry_code_execute
+  - foundry_download_file
+  - foundry_image_generation
+  - foundry_web_search
+  - foundry_file_search
+  - foundry_memory
+  - foundry_conversations
+  - foundry_evaluations
+  - foundry_deployments
+  - foundry_agents
+
+provides_hooks:
+  - pre_tool_call    # → POST /agt/evaluate; deny short-circuits the tool
+  - post_tool_call   # → telemetry push to /agt/trust + /agt/signing-counter

@@ -34,9 +34,9 @@
 use std::collections::BTreeMap;
 
 use crate::crd::{
-    AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, LangGraphLanguage,
-    MafLanguage, MicrosoftAgentFrameworkConfig, OpenAIAgentsConfig, OpenClawConfig,
-    PydanticAiConfig, RuntimeKind, RuntimeSpec,
+    AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, HermesConfig, LangGraphConfig,
+    LangGraphLanguage, MafLanguage, MicrosoftAgentFrameworkConfig, OpenAIAgentsConfig,
+    OpenClawConfig, PydanticAiConfig, RuntimeKind, RuntimeSpec,
 };
 
 /// Default container image for the OpenAI Agents Python runtime
@@ -159,6 +159,28 @@ pub fn pydantic_ai_default_image() -> String {
         .unwrap_or_else(|| DEFAULT_PYDANTIC_AI_IMAGE.to_string())
 }
 
+/// Default container image for the Hermes Agent (Nous Research) runtime
+/// — Phase Hermes-Act-1. Stays `:latest`; operators pin via the
+/// `KARS_HERMES_IMAGE` env var (helm value
+/// `inferenceRouter.images.hermes`).
+///
+/// Why a dedicated adapter (vs BYO): Hermes ships its own plugin system
+/// plus 20 channel adapters, 18 inference providers, and native MCP.
+/// Kars wraps this with the AGT policy gate, sub-agent spawn, Foundry
+/// tool wrappers, and CRD-driven configuration so Hermes users get the
+/// full kars governance and orchestration without writing per-runtime
+/// glue.
+pub const DEFAULT_HERMES_IMAGE: &str = "karsacr.azurecr.io/kars-runtime-hermes:latest";
+
+/// Resolve the Hermes adapter image, honouring an operator override
+/// via `KARS_HERMES_IMAGE`. Falls back to [`DEFAULT_HERMES_IMAGE`].
+pub fn hermes_default_image() -> String {
+    std::env::var("KARS_HERMES_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_HERMES_IMAGE.to_string())
+}
+
 /// Concrete deployment intent for a single reconcile pass.
 ///
 /// Owned by the reconciler for the duration of one reconcile; consumed by
@@ -250,6 +272,7 @@ pub fn kind_str(kind: &RuntimeKind) -> &'static str {
         RuntimeKind::LangGraph => "LangGraph",
         RuntimeKind::Anthropic => "Anthropic",
         RuntimeKind::PydanticAi => "PydanticAi",
+        RuntimeKind::Hermes => "Hermes",
         RuntimeKind::BYO => "BYO",
     }
 }
@@ -286,6 +309,7 @@ pub fn validate_runtime_shape(runtime: &RuntimeSpec) -> Result<(), RuntimePlanEr
         ("LangGraph", "langGraph", runtime.lang_graph.is_some()),
         ("Anthropic", "anthropic", runtime.anthropic.is_some()),
         ("PydanticAi", "pydanticAi", runtime.pydantic_ai.is_some()),
+        ("Hermes", "hermes", runtime.hermes.is_some()),
         ("BYO", "byo", runtime.byo.is_some()),
     ];
     for (cel_kind, field, present) in pairs {
@@ -395,6 +419,20 @@ pub fn build_runtime_plan(
             // base URLs to the router sidecar at bootstrap.
             let cfg = runtime.pydantic_ai.as_ref().expect("validated above");
             Ok(plan_pydantic_ai(cfg))
+        }
+        RuntimeKind::Hermes => {
+            // Phase Hermes-Act-1: Hermes Agent (Nous Research) wired
+            // end-to-end. Python 3.11+ harness. Plugin system, 20+
+            // channels, 18+ providers, native MCP — kars wraps with
+            // the AGT policy gate, sub-agent spawn, Foundry tool
+            // wrappers, KarsMemory binding via memory-<sandbox>
+            // convention, McpServer entrypoint translation.
+            //
+            // Act 1 limitation: kars_mesh_* tools are clear-error
+            // stubs. Act 2 ships the Python AGT MeshClient at TS
+            // parity, after which mesh is live.
+            let cfg = runtime.hermes.as_ref().expect("validated above");
+            Ok(plan_hermes(cfg))
         }
     }
 }
@@ -672,13 +710,55 @@ fn plan_pydantic_ai(cfg: &PydanticAiConfig) -> RuntimeDeploymentPlan {
     }
 }
 
+/// Produce the deployment plan for a Hermes Agent runtime.
+///
+/// Mirrors `plan_pydantic_ai` shape (Python adapter, agent code via
+/// `agent_code`, user extra_env carried through). Hermes-specific
+/// pieces — `HERMES_PROFILE`, `HERMES_DISABLED_BACKENDS`, `HERMES_HOME`
+/// — are set by the image's entrypoint script (not here), keeping the
+/// controller plan minimal and the env-shape contract owned by the
+/// runtime image. The controller-injected envs documented in
+/// `docs/runtimes/CONTRACT.md` (AGT_*, KARS_*, FOUNDRY_*) flow in
+/// via the standard reconciler env-injection path; they apply to
+/// every runtime in the same shape.
+fn plan_hermes(cfg: &HermesConfig) -> RuntimeDeploymentPlan {
+    let image = hermes_default_image();
+
+    let mut runtime_extra_env: BTreeMap<String, String> = BTreeMap::new();
+    // Pin Hermes version into the runtime env when the operator sets it
+    // — the image ARG-substitutes at build time, but exposing it at
+    // runtime lets the entrypoint log the pinned version in the boot
+    // banner and refuse to run mismatched plugins.
+    if let Some(v) = cfg.version.as_ref() {
+        runtime_extra_env.insert("HERMES_VERSION".to_string(), v.clone());
+    }
+    if let Some(user_env) = cfg.extra_env.as_ref() {
+        for (k, v) in user_env {
+            runtime_extra_env.insert(k.clone(), v.clone());
+        }
+    }
+
+    let command = cfg.entrypoint.clone();
+
+    RuntimeDeploymentPlan {
+        kind_str: "Hermes",
+        image,
+        command,
+        args: None,
+        runtime_extra_env,
+        raw_env: Vec::new(),
+        agent_code: cfg.agent_code.clone(),
+        byo_contract_version: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::{
-        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, LangGraphConfig, LangGraphLanguage,
-        MafLanguage, MicrosoftAgentFrameworkConfig, OciAgentCode, OpenAIAgentsConfig,
-        OpenClawConfig, PydanticAiConfig, SemanticKernelConfig,
+        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, HermesConfig, LangGraphConfig,
+        LangGraphLanguage, MafLanguage, MicrosoftAgentFrameworkConfig, OciAgentCode,
+        OpenAIAgentsConfig, OpenClawConfig, PydanticAiConfig, SemanticKernelConfig,
     };
     use std::sync::Mutex;
 
@@ -713,6 +793,7 @@ mod tests {
             lang_graph: None,
             anthropic: None,
             pydantic_ai: None,
+            hermes: None,
             byo: None,
         }
     }
@@ -1173,6 +1254,139 @@ mod tests {
         assert_eq!(
             plan.runtime_extra_env.get("RUNTIME_PYTHON_VERSION"),
             Some(&"3.11".to_string())
+        );
+    }
+
+    // ── plan_hermes() — Hermes Agent (Nous Research) ─────────────────
+
+    #[test]
+    fn hermes_default_image_falls_back_when_env_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("KARS_HERMES_IMAGE");
+        }
+        assert_eq!(hermes_default_image(), DEFAULT_HERMES_IMAGE);
+    }
+
+    #[test]
+    fn hermes_default_image_honours_operator_override() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("KARS_HERMES_IMAGE", "myacr.azurecr.io/hermes:pinned");
+        }
+        assert_eq!(hermes_default_image(), "myacr.azurecr.io/hermes:pinned");
+        unsafe {
+            std::env::remove_var("KARS_HERMES_IMAGE");
+        }
+    }
+
+    #[test]
+    fn plan_hermes_emits_hermes_kind_str_and_default_image() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::Hermes,
+            openclaw: None,
+            hermes: Some(HermesConfig::default()),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("hermes plan ok");
+        assert_eq!(plan.kind_str, "Hermes");
+        assert!(plan.image.contains("kars-runtime-hermes"));
+        // Producer must NOT leak KARS_* envs — those flow via the
+        // reconciler's controller-side env injection, not the runtime
+        // plan. Same invariant the other runtime planners enforce.
+        for k in plan.runtime_extra_env.keys() {
+            assert!(
+                !k.starts_with("KARS_"),
+                "producer must not emit KARS_* keys: {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_hermes_threads_version_and_user_extra_env() {
+        let mut user_env = BTreeMap::new();
+        user_env.insert("MY_FLAG".to_string(), "on".to_string());
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::Hermes,
+            openclaw: None,
+            hermes: Some(HermesConfig {
+                version: Some("0.5.1".into()),
+                extra_env: Some(user_env),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("ok");
+        assert_eq!(
+            plan.runtime_extra_env.get("HERMES_VERSION"),
+            Some(&"0.5.1".to_string())
+        );
+        assert_eq!(
+            plan.runtime_extra_env.get("MY_FLAG"),
+            Some(&"on".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_hermes_user_extra_env_overrides_producer_default() {
+        // User pinning HERMES_VERSION via extra_env beats the
+        // spec.runtime.hermes.version producer-default. Same merge
+        // order as every other Python adapter.
+        let mut user_env = BTreeMap::new();
+        user_env.insert("HERMES_VERSION".to_string(), "0.5.2".into());
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::Hermes,
+            openclaw: None,
+            hermes: Some(HermesConfig {
+                version: Some("0.5.0".into()),
+                extra_env: Some(user_env),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("ok");
+        assert_eq!(
+            plan.runtime_extra_env.get("HERMES_VERSION"),
+            Some(&"0.5.2".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_hermes_carries_agent_code_and_entrypoint_overrides() {
+        let rt = RuntimeSpec {
+            kind: RuntimeKind::Hermes,
+            openclaw: None,
+            hermes: Some(HermesConfig {
+                version: Some("0.5.1".into()),
+                agent_code: Some(AgentCodeRef {
+                    oci: Some(crate::crd::OciAgentCode {
+                        image: "myacr.azurecr.io/my-hermes-agent:1.0".into(),
+                    }),
+                    git: None,
+                }),
+                entrypoint: Some(vec!["python".into(), "/sandbox/agent/main.py".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = build_runtime_plan(&rt, "ignored").expect("ok");
+        assert_eq!(
+            plan.command.as_deref(),
+            Some(&["python".into(), "/sandbox/agent/main.py".into()][..])
+        );
+        let code = plan.agent_code.expect("agent_code threaded");
+        assert!(code.oci.is_some());
+    }
+
+    #[test]
+    fn plan_hermes_rejects_shape_invalid_input() {
+        // kind=Hermes with no hermes struct must fail
+        // validate_runtime_shape BEFORE plan_hermes is reached.
+        let rt = rt_only_kind(RuntimeKind::Hermes);
+        let err = build_runtime_plan(&rt, "x").expect_err("must reject");
+        assert!(
+            matches!(err, RuntimePlanError::ShapeInvalid(_)),
+            "expected ShapeInvalid, got: {err}"
         );
     }
 

@@ -518,6 +518,14 @@ pub enum RuntimeKind {
     LangGraph,
     Anthropic,
     PydanticAi,
+    /// Hermes Agent (Nous Research) — Python 3.11+ agent harness with
+    /// built-in plugin system, 20+ messaging channels, 70+ tools, 18+
+    /// inference providers. Tier-1 per `docs/runtimes/CONTRACT.md` v1.
+    /// Adapter image: `sandbox-images/hermes/Dockerfile`. Plugin:
+    /// `runtimes/hermes/src/kars_runtime_hermes/plugin/`. Act 1
+    /// limitation: mesh tools are stubs; Act 2 ships Python AGT
+    /// MeshClient at TS parity.
+    Hermes,
     BYO,
 }
 
@@ -568,6 +576,12 @@ pub struct RuntimeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pydantic_ai: Option<PydanticAiConfig>,
 
+    /// Hermes Agent runtime configuration. Required iff
+    /// `kind == Hermes`. Adapter ships in
+    /// `sandbox-images/hermes/Dockerfile` + `runtimes/hermes/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hermes: Option<HermesConfig>,
+
     /// Bring-your-own runtime. Required iff `kind == BYO`. Image must
     /// honor the BYO contract (UID 1000, inference via `127.0.0.1:8443`,
     /// `KARS_*` env, no privileged caps). Phase 2 enforcement is
@@ -588,6 +602,7 @@ impl Default for RuntimeSpec {
             lang_graph: None,
             anthropic: None,
             pydantic_ai: None,
+            hermes: None,
             byo: None,
         }
     }
@@ -730,6 +745,42 @@ pub struct PydanticAiConfig {
     pub agent_code: Option<AgentCodeRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Hermes Agent (Nous Research) runtime variant.
+///
+/// Python 3.11+ agent harness. Pluggable inference providers (18+),
+/// channels (20+), and tools (70+) — kars wires Hermes into AGT
+/// governance, sub-agent spawn, Foundry tools, and CRD orchestration
+/// via the in-pod plugin at `runtimes/hermes/src/kars_runtime_hermes/`.
+/// Wire field shape mirrors `PydanticAiConfig` / `AnthropicConfig`.
+///
+/// Act 1 (v0.5.2 of kars) ships Hermes WITHOUT mesh — `kars_mesh_*`
+/// tools are clear-error stubs. Act 2 (v0.5.3) ships a Python AGT
+/// MeshClient at TS parity, after which mesh is live.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesConfig {
+    /// Hermes Agent version pin (e.g. `"0.5.1"`). Adapter image
+    /// ARG-substitutes this at build time. Defaults to the adapter's
+    /// latest-supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// User-supplied agent code source (OCI image or git URL). When
+    /// absent the image's default smoke-test agent at
+    /// `/opt/kars-default-agent/main.py` runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<AgentCodeRef>,
+    /// Container entrypoint override. Defaults to the adapter's stock
+    /// `kars-hermes-entrypoint.sh` which then exec's `hermes` (TUI) or
+    /// `hermes gateway start --foreground` if channel tokens present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    /// Additional env passed to the runtime container. Same precedence
+    /// as `OpenClawConfig::extra_env` — kars-reserved keys are filtered
+    /// out by the reconciler.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_env: Option<std::collections::BTreeMap<String, String>>,
 }
@@ -1464,9 +1515,48 @@ mod tests {
             r#""Anthropic""#
         );
         assert_eq!(
+            serde_json::to_string(&RuntimeKind::PydanticAi).unwrap(),
+            r#""PydanticAi""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::Hermes).unwrap(),
+            r#""Hermes""#
+        );
+        assert_eq!(
             serde_json::to_string(&RuntimeKind::BYO).unwrap(),
             r#""BYO""#
         );
+    }
+
+    #[test]
+    fn hermes_runtime_spec_round_trips_through_yaml() {
+        // Operator-facing YAML shape — fields are camelCase, kind is
+        // PascalCase, agentCode allows oci/git polymorphism.
+        let yaml = r#"
+kind: Hermes
+hermes:
+  version: "0.5.1"
+  agentCode:
+    oci:
+      image: "myregistry.azurecr.io/my-hermes-agent:1.0"
+  extraEnv:
+    MY_KEY: "my-value"
+"#;
+        let spec: RuntimeSpec = serde_yaml::from_str(yaml).expect("parses");
+        assert_eq!(spec.kind, RuntimeKind::Hermes);
+        let h = spec.hermes.clone().expect("hermes block present");
+        assert_eq!(h.version.as_deref(), Some("0.5.1"));
+        let code = h.agent_code.expect("agent_code present");
+        assert!(code.oci.is_some());
+        assert!(code.git.is_none());
+        let env = h.extra_env.expect("extra_env present");
+        assert_eq!(env.get("MY_KEY").map(String::as_str), Some("my-value"));
+
+        // Round-trip through JSON keeps the camelCase wire shape
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""kind":"Hermes""#));
+        assert!(json.contains(r#""agentCode""#));
+        assert!(json.contains(r#""extraEnv""#));
     }
 
     #[test]
