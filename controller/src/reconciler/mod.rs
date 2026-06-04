@@ -983,10 +983,31 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // makes the second call drop the fields the first call owned — that
     // exact bug caused `policyTypes: [Ingress]` only to land in the
     // deployed object until this refactor.
+    // Operator-namespace policy-echo ingress on admin :8443. Needed
+    // UNCONDITIONALLY so the controller can call /internal/policy-status
+    // to confirm router-side digest enforcement of every InferencePolicy
+    // / ToolPolicy / KarsMemory / McpServer / EgressApproval that
+    // references this sandbox. Without this, those CRs sit forever in
+    // `Ready=False / AwaitingRouterEnforcement`. Three orthogonal gates
+    // (bearer token, constant-time compare, optional IP pinning) still
+    // protect the admin surface on top of this NP allow.
+    let operator_policy_echo_ingress = json!({
+        "from": [{
+            "namespaceSelector": {
+                "matchLabels": {
+                    "app.kubernetes.io/name": "kars",
+                    "app.kubernetes.io/component": "system"
+                }
+            }
+        }],
+        "ports": [{"port": 8443, "protocol": "TCP"}]
+    });
+    // Mesh + gateway peer-sandbox ingress is only meaningful when
+    // governance is on. Gateway ports 18789/18791 stay closed to the
+    // operator namespace either way.
     let ingress_rules: Vec<serde_json::Value> = if governance_config.enabled {
         vec![
             json!({
-                // Mesh + gateway ingress from peer sandbox namespaces.
                 "from": [{
                     "namespaceSelector": {
                         "matchLabels": {"kars.azure.com/role": "sandbox"}
@@ -998,29 +1019,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     {"port": 18791, "protocol": "TCP"}
                 ]
             }),
-            json!({
-                // Operator-namespace policy-echo ingress (router :8443).
-                // Three independent gates still apply on top of this NP
-                // allow: (1) bearer token in `router-admin-token` Secret,
-                // (2) constant-time comparison in the middleware,
-                // (3) optional `ROUTER_ADMIN_ALLOW_IPS` IP pinning.
-                // Gateway ports 18789/18791 are intentionally NOT opened
-                // to the operator namespace.
-                "from": [{
-                    "namespaceSelector": {
-                        "matchLabels": {
-                            "app.kubernetes.io/name": "kars",
-                            "app.kubernetes.io/component": "system"
-                        }
-                    }
-                }],
-                "ports": [
-                    {"port": 8443, "protocol": "TCP"}
-                ]
-            }),
+            operator_policy_echo_ingress,
         ]
     } else {
-        Vec::new()
+        vec![operator_policy_echo_ingress]
     };
 
     let netpol: NetworkPolicy = serde_json::from_value(json!({
