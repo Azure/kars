@@ -53,10 +53,14 @@ LABEL org.opencontainers.image.title="kars Hermes Sandbox" \
 # ---- System deps Hermes needs (minimal) ---------------------------------
 # - git: hermes installs some optional skills via git clone
 # - jq: entrypoint uses it to parse /etc/kars/mcp/*/meta.json
-# - curl: healthcheck + entrypoint diagnostics
-# - ripgrep: hermes file-search tool depends on it
+# - curl: already in base image; explicit listing keeps the intent clear
+# - ca-certificates: TLS to PyPI / Hermes' optional skill tap repos
+#
+# Note: Hermes' built-in `file_search` tool prefers ripgrep but falls back
+# to grep when absent. Azure Linux 3 tdnf doesn't ship ripgrep; we skip
+# the optional dep rather than pulling cargo just to build it.
 RUN tdnf install -y --refresh \
-        git jq curl ripgrep ca-certificates \
+        git jq ca-certificates \
     && tdnf clean all
 
 # ---- Install AGT-Python wheels (governance primitives only in Act 1) ----
@@ -74,7 +78,7 @@ RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
 # Pinned to a specific release tag for build reproducibility. Operators
 # bumping to a newer Hermes should also re-verify the kars runtime
 # contract is still honored (entrypoint env shape + plugin context API).
-ARG HERMES_VERSION=0.5.1
+ARG HERMES_VERSION=0.15.2
 RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
 
 # ---- Install the kars-runtime-hermes plugin -----------------------------
