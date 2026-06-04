@@ -1329,6 +1329,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         if is_openclaw {
             openclaw_env.push(json!({"name": "OPENCLAW_MODEL", "value": inference_model.clone()}));
         }
+        // Generic alias readable by any runtime — Hermes / OpenAIAgents
+        // / MAF / BYO all read `KARS_MODEL` so they don't need to know
+        // about runtime-specific env names.
+        openclaw_env.push(json!({"name": "KARS_MODEL", "value": inference_model.clone()}));
+        // Self-documenting marker: every container claiming to be a
+        // kars v1 runtime contract participant gets this. Lets
+        // operator tooling distinguish kars-managed pods from
+        // hand-crafted ones, and gives runtime authors a single
+        // string to assert against.
+        openclaw_env.push(json!({"name": "KARS_RUNTIME_CONTRACT_VERSION", "value": "v1"}));
+        // Runtime kind so child plugins can introspect what they're
+        // running as (Hermes' mesh.py already uses HERMES_VERSION but
+        // other runtimes want a uniform anchor).
+        openclaw_env.push(
+            json!({"name": "KARS_RUNTIME_KIND", "value": format!("{:?}", runtime_spec.kind)}),
+        );
         openclaw_env.push(json!({"name": "SANDBOX_NAME", "value": &name}));
         if let Some(ref cluster) = ctx.cluster_name {
             openclaw_env.push(json!({"name": "CLUSTER_NAME", "value": cluster}));

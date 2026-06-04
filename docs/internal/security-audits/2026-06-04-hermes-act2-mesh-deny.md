@@ -115,23 +115,33 @@ covered by unit tests (`runtimes/agt-mesh-python/tests/`).
 
 ## Residual risks
 
-1. **No KNOCK responder yet**: `MeshClient` accepts inbound traffic
-   but the auto-accept handler for incoming KNOCK frames is still a
-   logging stub. For the Act 2.1 release this is acceptable because
-   Hermes only ever initiates conversations; an attacker spamming
-   KNOCKs would consume CPU but not gain reply traffic. Tracked for
-   Act 2.2.
+1. **Persistent identity is per-pod-restart only**: the IdentityStore
+   writes to `/sandbox/.agt/identity.json` which the controller mounts
+   as an `emptyDir` by default. A pod restart that reuses the volume
+   keeps the DID; recreating the pod loses it. Operators wanting
+   cross-recreation identity should mount a PVC at `/sandbox/.agt`.
+   The Act 2.2 follow-up will plumb this through the `KarsSandbox`
+   CRD as an optional `meshIdentity.persistent: true` knob.
 2. **Multi-process Hermes**: Hermes' `lazy_install` worker is a
    subprocess, and would need its own MeshClient or a broker. With
-   `lazy_install` denied (effectively, because `delegate_task` is the
-   only thing that triggers it in practice) this isn't reachable. Re-
-   audit if Hermes ever ships a tool that spawns workers outside the
-   gateway.
+   `delegate_task` denied (effectively, because `delegate_task` is
+   the only thing that triggers it in practice) this isn't reachable.
+   Re-audit if Hermes ever ships a tool that spawns workers outside
+   the gateway.
 3. **Plugin-side deny is the only enforcement in non-AGT scenarios**.
    If a future scenario YAML forgets the `denied_actions:` block,
    only the plugin guard remains. Mitigated by both layers shipping
    in the same PR and the plugin guard being in the image (harder to
    accidentally bypass than a scenario YAML).
+4. **Stale registry entries**: When a sandbox is restarted with a
+   different identity (e.g. the emptyDir was wiped), the prior
+   registration remains in the registry until its TTL expires.
+   `MeshClient.discover()` now sorts by `last_seen` descending so
+   the freshest entry is picked first, but offline-then-reborn
+   sandboxes will receive traffic addressed to their old DID for
+   the TTL window. Not security-impacting (messages can't be
+   decrypted without the old private key) but worth knowing for
+   debugging.
 
 ## Sign-off
 

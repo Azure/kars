@@ -79,16 +79,22 @@ def _get_or_init_client() -> MeshClient:
         # Mesh routing through the loopback inference-router. The
         # egress-guard drops all UID-1000 TCP except DNS + loopback
         # + ESTABLISHED, so direct egress to the agentmesh service
-        # wouldn't work. The router has built-in proxies at
-        # `/agt/relay` (WebSocket) and `/agt/registry/*` (HTTP) that
-        # forward to the cluster-local relay+registry; every kars
-        # runtime uses these loopback URLs.
-        relay_url = os.environ.get(
-            "AGT_RELAY_URL", "ws://127.0.0.1:8443/agt/relay"
-        )
-        registry_url = os.environ.get(
-            "AGT_REGISTRY_URL", "http://127.0.0.1:8443/agt/registry"
-        )
+        # wouldn't work — UID 1000 is iptables-confined to localhost.
+        # The router has built-in proxies at `/agt/relay` (WebSocket)
+        # and `/agt/registry/*` (HTTP) that forward to the cluster
+        # services using the router's own AGT_RELAY_URL/AGT_REGISTRY_URL
+        # (which are the cluster-DNS targets, set on the *router*
+        # container by the controller).
+        #
+        # AGT_RELAY_URL / AGT_REGISTRY_URL on the AGENT container
+        # point at the upstream cluster services and would be unusable
+        # here (port 8765/8080 are blocked by the egress-guard). We
+        # deliberately do NOT honour them on the agent side — the
+        # OpenClaw runtime makes the same choice in
+        # ``runtimes/openclaw/src/core/mesh-registry.ts`` (always
+        # ``routerUrl("/agt/registry")``).
+        relay_url = "ws://127.0.0.1:8443/agt/relay"
+        registry_url = "http://127.0.0.1:8443/agt/registry"
         hermes_home = Path(os.environ.get("HERMES_HOME", "/sandbox/.hermes"))
         identity_path = hermes_home / ".agt" / "identity.json"
         trust_threshold = int(os.environ.get("AGT_TRUST_THRESHOLD", "0"))
