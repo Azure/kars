@@ -515,35 +515,41 @@ pub async fn forward_stream(
                     continue;
                 }
                 let json_str = &line[6..];
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str)
-                    && let Some(usage) = v.get("usage")
-                {
-                    // Record latency (stream complete)
-                    let latency = start.elapsed();
-                    metrics::INFERENCE_LATENCY
-                        .with_label_values(&[&sandbox_name, &model])
-                        .observe(latency.as_secs_f64());
-                    // Record token usage. OpenAI-shape uses prompt_tokens /
-                    // completion_tokens; Anthropic Messages-shape (e.g. native
-                    // /v1/messages SSE from Copilot) uses input_tokens /
-                    // output_tokens — accept either.
-                    let input_tokens = usage
-                        .get("prompt_tokens")
-                        .and_then(|v| v.as_i64())
-                        .or_else(|| usage.get("input_tokens").and_then(|v| v.as_i64()));
-                    let output_tokens = usage
-                        .get("completion_tokens")
-                        .and_then(|v| v.as_i64())
-                        .or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64()));
-                    if let Some(input) = input_tokens {
-                        metrics::TOKENS_USED
-                            .with_label_values(&[&sandbox_name, &model, &"input".to_string()])
-                            .inc_by(input as u64);
-                    }
-                    if let Some(output) = output_tokens {
-                        metrics::TOKENS_USED
-                            .with_label_values(&[&sandbox_name, &model, &"output".to_string()])
-                            .inc_by(output as u64);
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    // OpenAI Responses API SSE events nest usage under
+                    // `response.usage` on the final `response.completed`
+                    // event; Chat Completions SSE puts it at the top
+                    // level. Probe both shapes.
+                    let usage = v.get("usage").or_else(|| v.get("response")?.get("usage"));
+                    if let Some(usage) = usage {
+                        // Record latency (stream complete)
+                        let latency = start.elapsed();
+                        metrics::INFERENCE_LATENCY
+                            .with_label_values(&[&sandbox_name, &model])
+                            .observe(latency.as_secs_f64());
+                        // Token usage. OpenAI Chat Completions uses
+                        // prompt_tokens/completion_tokens; OpenAI
+                        // Responses uses input_tokens/output_tokens;
+                        // Anthropic Messages (native /v1/messages) also
+                        // uses input_tokens/output_tokens. Accept all.
+                        let input_tokens = usage
+                            .get("prompt_tokens")
+                            .and_then(|v| v.as_i64())
+                            .or_else(|| usage.get("input_tokens").and_then(|v| v.as_i64()));
+                        let output_tokens = usage
+                            .get("completion_tokens")
+                            .and_then(|v| v.as_i64())
+                            .or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64()));
+                        if let Some(input) = input_tokens {
+                            metrics::TOKENS_USED
+                                .with_label_values(&[&sandbox_name, &model, &"input".to_string()])
+                                .inc_by(input as u64);
+                        }
+                        if let Some(output) = output_tokens {
+                            metrics::TOKENS_USED
+                                .with_label_values(&[&sandbox_name, &model, &"output".to_string()])
+                                .inc_by(output as u64);
+                        }
                     }
                 }
             }

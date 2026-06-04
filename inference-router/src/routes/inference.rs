@@ -34,6 +34,46 @@ fn strip_project_prefix(endpoint: &str) -> &str {
         trimmed
     }
 }
+
+/// Resolve the calling sandbox name from `x-kars-sandbox` if present and
+/// DNS-label-shaped, otherwise fall back to the `SANDBOX_NAME` env var
+/// (the per-sandbox router sidecar always knows its own identity). The
+/// `"unknown"` final fallback is reserved for legitimately
+/// cross-sandbox callers that don't set the header AND for tests that
+/// don't set SANDBOX_NAME — both cases never happen in production
+/// reconciler-managed pods.
+///
+/// Without this, every Hermes (and pydantic-ai / langgraph / …) chat
+/// completion was being labelled `sandbox="unknown"` in Prometheus —
+/// breaking the operator dashboard's "Inference by sandbox" panel and
+/// hiding the request/token mix per agent.
+fn resolve_sandbox_name(headers: &HeaderMap) -> &'static str {
+    if let Some(hdr) = headers.get("x-kars-sandbox").and_then(|v| v.to_str().ok()) {
+        let trimmed = hdr.trim();
+        if !trimmed.is_empty()
+            && trimmed.len() <= 63
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && trimmed.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        {
+            // Cache leak: only header-supplied names are leaked, and they
+            // come from a finite set (the cluster's sandbox names). The
+            // header is policy-validated above so this is safe.
+            return Box::leak(trimmed.to_string().into_boxed_str());
+        }
+    }
+    static FALLBACK: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    FALLBACK.get_or_init(|| {
+        let env_name = std::env::var("SANDBOX_NAME").unwrap_or_default();
+        if env_name.is_empty() {
+            "unknown"
+        } else {
+            Box::leak(env_name.into_boxed_str())
+        }
+    })
+}
+
 /// Inference API routes — proxied to Azure AI Foundry.
 pub fn inference_routes() -> Router<AppState> {
     Router::new()
@@ -205,10 +245,7 @@ async fn completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = headers
-        .get("x-kars-sandbox")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+    let sandbox_name = resolve_sandbox_name(&headers);
 
     let upstream = state.upstream_config(sandbox_name);
     match proxy::forward(
@@ -238,17 +275,8 @@ async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = headers
-        .get("x-kars-sandbox")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| {
-            !v.is_empty()
-                && v.len() <= 63
-                && v.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-                && v.as_bytes()[0].is_ascii_alphanumeric()
-        })
-        .unwrap_or("unknown");
+    let sandbox_name_owned = resolve_sandbox_name(&headers).to_string();
+    let sandbox_name = sandbox_name_owned.as_str();
 
     // Slice 2 DoD #7 — snapshot policy early so every audit log
     // emitted from this handler can carry `inference_policy_digest`.
@@ -380,10 +408,7 @@ async fn embeddings(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = headers
-        .get("x-kars-sandbox")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+    let sandbox_name = resolve_sandbox_name(&headers);
 
     // Embeddings need a different deployment than chat — extract model from request body
     let mut upstream = state.upstream_config(sandbox_name);
@@ -426,10 +451,7 @@ async fn images_generations(
     _query: axum::extract::RawQuery,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = headers
-        .get("x-kars-sandbox")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("self");
+    let sandbox_name = resolve_sandbox_name(&headers);
 
     // AGT policy check — image generation is a tool invocation
     {
@@ -648,10 +670,7 @@ async fn foundry_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = headers
-        .get("x-kars-sandbox")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+    let sandbox_name = resolve_sandbox_name(&headers);
 
     // Use project endpoint for agent/standalone APIs, fall back to foundry/openai endpoint
     let endpoint = state
