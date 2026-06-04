@@ -129,17 +129,33 @@ def _get_or_init_client() -> MeshClient:
 
 
 def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
-    """``kars_mesh_send(to=<display_name>, payload=<base64-or-string>)``"""
+    """``kars_mesh_send(to_agent=<display_name>, content=<utf8-or-base64>)``
+
+    Accepts both the OpenClaw arg naming (``to_agent`` / ``content``) and
+    a shorter Hermes-native form (``to`` / ``payload``) so LLMs trained on
+    either convention can drive the tool without reading the schema."""
     try:
         client = _get_or_init_client()
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"Mesh client init failed: {exc}"})
 
-    peer = str(args.get("to", "")).strip()
+    # Accept OpenClaw-style (to_agent + content) and Hermes short form
+    # (to + payload). OpenClaw also accepts `name`; mirror that too so
+    # the AGT mesh-tool contract is uniform across runtimes.
+    peer = str(
+        args.get("to_agent")
+        or args.get("to")
+        or args.get("name")
+        or ""
+    ).strip()
     if not peer:
-        return json.dumps({"error": "missing required arg: to=<display_name>"})
+        return json.dumps(
+            {"error": "missing required arg: to_agent=<display_name>"}
+        )
 
-    payload_raw = args.get("payload", "")
+    payload_raw = args.get("content")
+    if payload_raw is None:
+        payload_raw = args.get("payload", "")
     payload = (
         payload_raw.encode("utf-8") if isinstance(payload_raw, str) else bytes(payload_raw)
     )
@@ -150,7 +166,7 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
             client.send_by_name(to=peer, payload=payload), loop
         )
         future.result(timeout=30.0)
-        return json.dumps({"ok": True, "to": peer, "bytes": len(payload)})
+        return json.dumps({"ok": True, "to_agent": peer, "bytes": len(payload)})
     except MeshPeerNotFoundError as exc:
         return json.dumps({"error": f"Peer {peer!r} not found: {exc}"})
     except MeshTransportError as exc:
@@ -289,8 +305,11 @@ def register(ctx: Any) -> None:  # noqa: ANN401
                 "type": "object",
                 "description": desc,
                 "properties": {
-                    "to": {"type": "string", "description": "Peer display name (send/transfer only)"},
-                    "payload": {"type": "string", "description": "Message bytes (UTF-8 string or base64)"},
+                    # Use OpenClaw-style names primarily for cross-runtime
+                    # consistency; the handler also accepts `to`/`payload`
+                    # as aliases.
+                    "to_agent": {"type": "string", "description": "Peer display name (send/transfer only)"},
+                    "content": {"type": "string", "description": "Message bytes (UTF-8 string or base64)"},
                     "senders": {"type": "array", "items": {"type": "string"}, "description": "Senders to await (await only)"},
                     "timeout_seconds": {"type": "number", "description": "Await timeout (await only, default 300)"},
                 },

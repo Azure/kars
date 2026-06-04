@@ -1672,6 +1672,18 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/kars/blocklist/domains.txt"}),
         );
 
+        // Runtime-contract markers on the router too. The router needs
+        // `KARS_RUNTIME_KIND` so its spawn endpoint can stamp every
+        // child CRD with the same runtime (Hermes parent → Hermes
+        // children); without this, every Hermes parent silently spawns
+        // OpenClaw children and the operator UX shows a broken tree.
+        // See inference-router/src/spawn/mod.rs build_sub_agent_crd_with_labels.
+        router_env.push(json!({"name": "KARS_RUNTIME_CONTRACT_VERSION", "value": "v1"}));
+        router_env.push(json!({
+            "name": "KARS_RUNTIME_KIND",
+            "value": format!("{:?}", runtime_spec.kind),
+        }));
+
         // Egress mode — Slice 5b: `spec.networkPolicy.egressMode` drives the
         // router's enforcement strategy. Default = `Learn` so manifests
         // without an explicit choice keep observing instead of denying.

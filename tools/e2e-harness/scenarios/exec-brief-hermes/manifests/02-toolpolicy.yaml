@@ -1,0 +1,51 @@
+# 02-toolpolicy.yaml — single AGT profile attached to the parent
+# sandbox. The kars_spawn helper points every child's CRD at
+# `<parent>-toolpolicy` so all sub-agents share this profile (same
+# pattern as exec-brief uses for the OpenClaw runtime).
+#
+# Profile: kars-default rules + the 6-tool Hermes Act 2 deny list
+# (mirrors exec-brief-hermes-single's 02-toolpolicy.yaml, but with the
+# multi-agent agent name).
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-hermes-multi-toolpolicy
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: execbrief-hermes-multi
+  annotations:
+    kars.azure.com/profile: default
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: execbrief-hermes-multi
+  agtProfile:
+    inline: |
+      # Multi-agent Hermes exec-brief AGT profile.
+      #
+      # Layer 2 deny of Hermes built-in sub-agent / direct-API tools —
+      # the kars plugin's register() also deregisters them client-side
+      # so the LLM never sees them; this profile catches anything that
+      # re-registers (defense in depth). Mirrors the OpenClaw posture
+      # which denies tool:session_send + tool:session_spawn.
+      #
+      # See docs/internal/security-audits/2026-06-04-hermes-act2-deny-list.md
+      # for the per-tool justification.
+      version: "1.0"
+      agent: execbrief-hermes-multi-default
+      policies:
+        - name: hermes-builtin-sub-agent-deny
+          type: capability
+          denied_actions:
+            - "tool:delegate_task"
+            - "tool:mixture_of_agents"
+            - "tool:cronjob"
+            - "tool:kanban_create"
+            - "tool:kanban_comment"
+            - "tool:send_message"
+          priority: 100
+        - name: default-allow
+          type: capability
+          allowed_actions: ["*"]
+          priority: 1

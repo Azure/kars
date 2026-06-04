@@ -72,6 +72,13 @@ pub struct SpawnRequest {
     pub trusted_peers: Option<String>,
     /// Handoff metadata — when present, spawn targets AKS even in dev mode.
     pub handoff: Option<HandoffMeta>,
+    /// Runtime kind override — `OpenClaw` (default), `Hermes`, etc.
+    /// When unset, the child inherits the parent's runtime by reading
+    /// the `KARS_RUNTIME_KIND` env var on the spawning router. This
+    /// lets a Hermes parent spawn Hermes children without the LLM
+    /// having to know the runtime kind explicitly. The accepted values
+    /// match the controller's `RuntimeKind` enum exactly.
+    pub runtime_kind: Option<String>,
 }
 
 /// Handoff metadata attached to a spawn request.
@@ -621,6 +628,13 @@ pub async fn collect_sub_agent_snapshots(
             token_budget_per_request,
             trusted_peers,
             handoff: None, // Not a handoff spawn — regular sub-agent re-spawn
+            // Restore the runtime kind from the captured CRD so re-spawn
+            // preserves it (a Hermes parent's snapshots stay Hermes).
+            runtime_kind: spec
+                .get("runtime")
+                .and_then(|r| r.get("kind"))
+                .and_then(|k| k.as_str())
+                .map(String::from),
         };
 
         snapshots.push(crate::handoff::SubAgentSnapshot {
@@ -718,10 +732,38 @@ pub(crate) fn build_sub_agent_crd_with_labels(
     );
     let learn_egress = req.learn_egress || dev_profile;
     let approval_required = !dev_profile;
+
+    // Determine the runtime kind for the child sandbox. Priority order:
+    //   1. Explicit `runtime_kind` field in the spawn request (overrides
+    //      everything — lets a Hermes parent request an OpenClaw child
+    //      or vice versa).
+    //   2. `KARS_RUNTIME_KIND` env on the parent (controller sets this
+    //      on every v1 runtime container as part of the runtime contract
+    //      — see controller/src/reconciler/mod.rs `KARS_RUNTIME_KIND`).
+    //      This is the common case: child inherits parent's runtime.
+    //   3. Hard-coded "OpenClaw" fallback for backward compat with
+    //      pre-multi-runtime tests + the original OpenClaw-only world.
+    //
+    // The runtime kind string MUST match the controller's `RuntimeKind`
+    // enum exactly (case-sensitive) or the CRD admission webhook will
+    // reject the spawn with a strict-decoding error.
+    let runtime_kind: String = req
+        .runtime_kind
+        .clone()
+        .or_else(|| std::env::var("KARS_RUNTIME_KIND").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "OpenClaw".to_string());
+    let runtime_variant_key: &str = match runtime_kind.as_str() {
+        "Hermes" => "hermes",
+        "OpenAIAgents" => "openaiAgents",
+        "MAF" => "maf",
+        _ => "openclaw",
+    };
+
     let mut spec = serde_json::json!({
         "runtime": {
-            "kind": "OpenClaw",
-            "openclaw": {}
+            "kind": runtime_kind,
+            runtime_variant_key: {},
         },
         "inferenceRef": {
             "name": format!("{parent_name}-inference")
@@ -884,6 +926,7 @@ mod tests {
             token_budget_per_request: None,
             trusted_peers: None,
             handoff: None,
+            runtime_kind: None,
         }
     }
 
@@ -895,6 +938,10 @@ mod tests {
         // `additionalProperties: false`, but rejected at admission on
         // strict clusters — surfacing as a 422 at spawn time. This test
         // catches reverts to the legacy shape at `cargo test` time.
+        //
+        // Take the env lock so parallel tests that set KARS_RUNTIME_KIND
+        // don't bleed into our assertion that the default is OpenClaw.
+        let (lock, prior_env) = lock_env_for_default_assertion();
         let crd = build_sub_agent_crd_with_labels(
             "azclaw2",
             "kars-system",
@@ -903,6 +950,8 @@ mod tests {
             &minimal_req("viz"),
             &BTreeMap::new(),
         );
+        drop(lock);
+        restore_env(prior_env);
 
         // 1. Top-level
         assert_eq!(crd["apiVersion"], "kars.azure.com/v1alpha1");
@@ -935,6 +984,113 @@ mod tests {
             spec["governance"].get("toolPolicy").is_none(),
             "legacy governance.toolPolicy (string field)"
         );
+    }
+
+    #[test]
+    fn sub_agent_inherits_parent_runtime_kind_from_env() {
+        // Hermes parent → Hermes child via KARS_RUNTIME_KIND env on the
+        // router. Without this, every Hermes parent silently spawns
+        // OpenClaw children, breaking the Hermes-only mesh assumption
+        // (different runtimes can still mesh, but the operator UX shows
+        // a mixed tree which is wrong for "all-Hermes" scenarios).
+        let _guard = serial_env_set("KARS_RUNTIME_KIND", "Hermes");
+        let req = minimal_req("hermes-child");
+        let crd = build_sub_agent_crd_with_labels(
+            "hermes-parent",
+            "kars-system",
+            "standard",
+            "gpt-5.4",
+            &req,
+            &BTreeMap::new(),
+        );
+        assert_eq!(crd["spec"]["runtime"]["kind"], "Hermes");
+        assert!(
+            crd["spec"]["runtime"]["hermes"].is_object(),
+            "expected runtime.hermes variant object, got: {}",
+            crd["spec"]["runtime"]
+        );
+        // Belt-and-braces: NO openclaw key on the runtime object for a
+        // Hermes child (would otherwise trip strict CRD admission).
+        assert!(
+            crd["spec"]["runtime"]["openclaw"].is_null(),
+            "runtime.openclaw must be absent for Hermes child"
+        );
+    }
+
+    #[test]
+    fn explicit_runtime_kind_request_overrides_env() {
+        // An explicit field on SpawnRequest always wins — lets a
+        // multi-runtime orchestrator override per child.
+        let _guard = serial_env_set("KARS_RUNTIME_KIND", "Hermes");
+        let mut req = minimal_req("oc-child");
+        req.runtime_kind = Some("OpenClaw".to_string());
+        let crd = build_sub_agent_crd_with_labels(
+            "hermes-parent",
+            "kars-system",
+            "standard",
+            "gpt-5.4",
+            &req,
+            &BTreeMap::new(),
+        );
+        assert_eq!(crd["spec"]["runtime"]["kind"], "OpenClaw");
+        assert!(crd["spec"]["runtime"]["openclaw"].is_object());
+    }
+
+    /// Tiny RAII helper: set an env var for the duration of one test
+    /// then restore the prior value. Necessary because the workspace
+    /// runs `cargo test` with multiple parallel threads.
+    ///
+    /// IMPORTANT: combine with `_ENV_TEST_LOCK` to serialize tests that
+    /// read/write `KARS_RUNTIME_KIND` — otherwise a parallel test can
+    /// observe an env value set by another test and produce false
+    /// negatives like `sub_agent_crd_uses_post_s10_s13_shape` seeing
+    /// `runtime.kind == "Hermes"` instead of the default `"OpenClaw"`.
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn serial_env_set(key: &'static str, val: &str) -> EnvGuard {
+        let lock = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prior = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, val) };
+        EnvGuard {
+            key,
+            prior,
+            _lock: lock,
+        }
+    }
+    /// Acquire the lock without changing any env — for tests that
+    /// must assert the DEFAULT (unset) behaviour while parallel tests
+    /// may otherwise have set the var.
+    fn lock_env_for_default_assertion() -> (
+        std::sync::MutexGuard<'static, ()>,
+        Option<String>,
+    ) {
+        let lock = ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prior = std::env::var("KARS_RUNTIME_KIND").ok();
+        unsafe { std::env::remove_var("KARS_RUNTIME_KIND") };
+        (lock, prior)
+    }
+    /// Restore env captured by `lock_env_for_default_assertion`.
+    fn restore_env(prior: Option<String>) {
+        match prior {
+            Some(v) => unsafe { std::env::set_var("KARS_RUNTIME_KIND", v) },
+            None => unsafe { std::env::remove_var("KARS_RUNTIME_KIND") },
+        }
     }
 
     #[test]

@@ -132,6 +132,43 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     handoff.register(ctx)
 
+    # Phase A2.1 — eagerly init the MeshClient at plugin load so the
+    # sub-agent is **discoverable** before its first tool call.
+    #
+    # Without this, MeshClient connects lazily on first kars_mesh_*
+    # call, which means a freshly-spawned sub-agent has zero presence
+    # in the registry until its LLM decides to call a mesh tool. When
+    # the parent tries `kars_mesh_send(to_agent=<child>)` immediately
+    # after spawn, find_by_display_name returns no peer → spawn-then-
+    # send breaks despite the pod being Running.
+    #
+    # We init on a background thread so a transient registry/relay
+    # outage doesn't block Hermes' gateway startup. Failure here only
+    # delays the first mesh exchange; the next tool call retries via
+    # the same singleton.
+    try:
+        from . import mesh as _mesh_module  # noqa: PLC0415
+
+        import threading as _threading  # noqa: PLC0415
+
+        def _eager_mesh_init() -> None:
+            try:
+                _mesh_module._get_or_init_client()  # noqa: SLF001
+                logger.info("MeshClient pre-connected at plugin load")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Eager MeshClient init failed (will retry on first tool call): %s",
+                    exc,
+                )
+
+        _threading.Thread(
+            target=_eager_mesh_init,
+            name="kars-mesh-eager-init",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not schedule eager MeshClient init: %s", exc)
+
     # Trust + signing-counter background pushes
     from . import telemetry  # noqa: PLC0415
 

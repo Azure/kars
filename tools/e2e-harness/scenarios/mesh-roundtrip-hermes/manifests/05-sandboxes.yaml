@@ -1,0 +1,51 @@
+# Two Hermes sandboxes. Both use the same image (kars-runtime-hermes:latest)
+# the controller picks via RuntimeKind::Hermes; the only difference is
+# which one is LLM-driven (mesh-ping-hermes) vs which one runs the
+# Python daemon as a sidecar process (mesh-pong-hermes — its Hermes
+# gateway still runs but is never asked to produce a turn).
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: mesh-ping-hermes
+  namespace: kars-system
+  labels:
+    kars.azure.com/channels: none
+spec:
+  runtime:
+    kind: Hermes
+    hermes:
+      version: "0.15.2"
+  sandbox:
+    isolation: standard
+  inferenceRef:
+    name: mesh-ping-hermes-inference
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: mesh-ping-hermes-toolpolicy
+    registryMode: local
+    trustThreshold: 0
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: mesh-pong-hermes
+  namespace: kars-system
+  labels:
+    kars.azure.com/channels: none
+spec:
+  runtime:
+    kind: Hermes
+    hermes:
+      version: "0.15.2"
+  sandbox:
+    isolation: standard
+  inferenceRef:
+    name: mesh-pong-hermes-inference
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: mesh-pong-hermes-toolpolicy
+    registryMode: local
+    trustThreshold: 0

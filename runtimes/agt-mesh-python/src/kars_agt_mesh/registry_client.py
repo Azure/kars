@@ -300,13 +300,19 @@ class RegistryClient:
 
     async def find_by_display_name(self, name: str) -> DiscoveredAgent | None:
         """Convenience wrapper around :meth:`discover`. Returns the
-        first agent whose ``metadata.display_name`` equals ``name``,
-        or ``None`` if no match."""
+        first agent whose advertised capabilities include ``name`` —
+        ``MeshClient.connect`` registers the display name as a
+        capability string (the TS SDK does the same), so this serves
+        as ``find_by_display_name`` without needing the registry to
+        return ``metadata`` (the AGT Python registry's ``/v1/discover``
+        endpoint returns ``did/capabilities/last_seen`` only — no
+        ``metadata`` field).
+        """
         candidates = await self.discover(name, limit=200)
         for c in candidates:
-            if c.display_name == name:
+            if name in c.capabilities:
                 return c
-        return None
+        return candidates[0] if candidates else None
 
     # ── Heartbeat ──────────────────────────────────────────────────────
 

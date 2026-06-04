@@ -1,0 +1,43 @@
+# 01-inferencepolicies.yaml — Foundry/AOAI provider for both sandboxes.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: mesh-ping-hermes-inference
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: mesh-ping-hermes
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: mesh-ping-hermes
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-5.4
+  contentSafety:
+    requirePromptShields: false
+  tokenBudget:
+    dailyTokens: 100000
+    perRequestTokens: 8000
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: mesh-pong-hermes-inference
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: mesh-pong-hermes
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: mesh-pong-hermes
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-5.4
+  contentSafety:
+    requirePromptShields: false
+  tokenBudget:
+    dailyTokens: 100000
+    perRequestTokens: 8000

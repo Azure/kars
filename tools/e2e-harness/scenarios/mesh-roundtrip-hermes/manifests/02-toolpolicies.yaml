@@ -1,0 +1,69 @@
+# 02-toolpolicies.yaml — minimal AGT profiles for both mesh sandboxes.
+#
+# Inlines the same Act 2 Hermes built-in deny list as
+# exec-brief-hermes-single (defense in depth on top of the plugin-side
+# deregister). The plugin auto-deregisters the 6 banned names in
+# runtimes/hermes/.../plugin/__init__.py; this profile is the
+# secondary guard.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: mesh-ping-hermes-toolpolicy
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: mesh-ping-hermes
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: mesh-ping-hermes
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: mesh-ping-hermes-default
+      policies:
+        - name: hermes-builtin-sub-agent-deny
+          type: capability
+          denied_actions:
+            - "tool:delegate_task"
+            - "tool:mixture_of_agents"
+            - "tool:cronjob"
+            - "tool:kanban_create"
+            - "tool:kanban_comment"
+            - "tool:send_message"
+          priority: 100
+        - name: default-allow
+          type: capability
+          allowed_actions: ["*"]
+          priority: 1
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: mesh-pong-hermes-toolpolicy
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: mesh-pong-hermes
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: mesh-pong-hermes
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: mesh-pong-hermes-default
+      policies:
+        - name: hermes-builtin-sub-agent-deny
+          type: capability
+          denied_actions:
+            - "tool:delegate_task"
+            - "tool:mixture_of_agents"
+            - "tool:cronjob"
+            - "tool:kanban_create"
+            - "tool:kanban_comment"
+            - "tool:send_message"
+          priority: 100
+        - name: default-allow
+          type: capability
+          allowed_actions: ["*"]
+          priority: 1

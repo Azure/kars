@@ -1,0 +1,20 @@
+# Two namespaces — one per sandbox. The controller creates the
+# per-sandbox namespaces as `kars-<sandbox-name>` so we pre-create
+# them here for any credentials Secrets the driver wants to land
+# before the controller reconciles.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kars-mesh-ping-hermes
+  labels:
+    kars.azure.com/sandbox: mesh-ping-hermes
+    kars.azure.com/managed-by: mesh-roundtrip-hermes-e2e
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kars-mesh-pong-hermes
+  labels:
+    kars.azure.com/sandbox: mesh-pong-hermes
+    kars.azure.com/managed-by: mesh-roundtrip-hermes-e2e

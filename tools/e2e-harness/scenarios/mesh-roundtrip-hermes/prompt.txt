@@ -1,0 +1,16 @@
+You are a one-shot agent whose only job is to exercise the Hermes Act 2 mesh path. Do exactly these three tool calls in order, with no commentary between them and no other tool calls:
+
+1. Call kars_mesh_send with: to_agent="mesh-pong-hermes", content="hello-from-ping".
+
+2. Call kars_mesh_await with: senders=["mesh-pong-hermes"], timeout_seconds=30.
+
+3. Read the first entry of the returned "messages" array. Take its "payload_b64" field, base64-decode it, and emit the decoded plaintext as a single short line of output, with no surrounding prose, prefixed exactly with: RECEIVED:
+
+Important rules:
+- Do NOT call any tool other than kars_mesh_send and kars_mesh_await.
+- Do NOT call kars_discover, kars_spawn, foundry_*, http_fetch, file_write, or any shell.
+- Do NOT echo the payload back into kars_mesh_send a second time.
+- If kars_mesh_send returns an error, emit a single line: FAILED:<error text> and stop.
+- If kars_mesh_await returns count=0 or no messages, emit a single line: TIMEOUT and stop.
+
+Expected single-line successful output (literal): RECEIVED:echo(mesh-pong-hermes): hello-from-ping
