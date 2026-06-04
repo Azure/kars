@@ -55,12 +55,21 @@ LABEL org.opencontainers.image.title="kars Hermes Sandbox" \
 # - jq: entrypoint uses it to parse /etc/kars/mcp/*/meta.json
 # - curl: already in base image; explicit listing keeps the intent clear
 # - ca-certificates: TLS to PyPI / Hermes' optional skill tap repos
+# - nodejs / npm: Hermes' built-in dep_ensure unconditionally probes for
+#   node/npm via shutil.which() for the TUI + browser-tools paths
+#   (`hermes_cli/dep_ensure.py::_DEP_CHECKS["node"]`). When absent inside
+#   a kars sandbox, it tries to fetch and run the upstream
+#   `scripts/install.sh` which downloads Node 22 from nodejs.org — that
+#   download stalls behind the egress-guard's HTTP-CONNECT proxy at UID
+#   1000 and blocks every `hermes -z` invocation for 60+ seconds before
+#   ultimately failing. Pre-installing the system nodejs makes the
+#   check pass and skips the install hook entirely.
 #
 # Note: Hermes' built-in `file_search` tool prefers ripgrep but falls back
 # to grep when absent. Azure Linux 3 tdnf doesn't ship ripgrep; we skip
 # the optional dep rather than pulling cargo just to build it.
 RUN tdnf install -y --refresh \
-        git jq ca-certificates \
+        git jq ca-certificates nodejs nodejs-npm \
     && tdnf clean all
 
 # ---- Install AGT-Python wheels (governance primitives only in Act 1) ----
