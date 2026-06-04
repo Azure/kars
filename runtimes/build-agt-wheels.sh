@@ -31,6 +31,7 @@ fi
 
 PACKAGES=(
     "agent-sandbox"
+    "agent-mesh"
     "agentmesh-integrations/a2a-protocol"
 )
 

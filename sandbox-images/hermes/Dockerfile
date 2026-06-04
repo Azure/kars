@@ -96,6 +96,15 @@ RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
 COPY runtimes/hermes/ /opt/kars-runtime-hermes/
 RUN pip install --no-cache-dir /opt/kars-runtime-hermes
 
+# ---- Install kars-agt-mesh (Python AGT MeshClient, Act 2.1) ------------
+# The mesh client is a separate package so non-Hermes Python runtimes
+# (pydantic-ai, anthropic, langgraph, …) can reuse the same TS-SDK-parity
+# E2E encrypted transport. The Hermes plugin's `mesh.py` adapter wraps
+# it. Install BEFORE the plugin stage so the package is importable when
+# Hermes' plugin discovery imports `kars_runtime_hermes.plugin.mesh`.
+COPY runtimes/agt-mesh-python/ /opt/kars-agt-mesh/
+RUN pip install --no-cache-dir /opt/kars-agt-mesh
+
 # ---- Pre-stage Hermes plugin into ~/.hermes/plugins/kars/ ---------------
 # Hermes discovers plugins from $HERMES_HOME/plugins/ at import time.
 # We pre-stage the kars plugin into the image so the entrypoint doesn't
