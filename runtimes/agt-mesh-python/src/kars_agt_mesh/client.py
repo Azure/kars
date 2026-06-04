@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import uuid
 from typing import AsyncIterator
@@ -26,13 +25,15 @@ from typing import AsyncIterator
 # The encryption primitives ARE the source of truth for byte-on-the-wire
 # compatibility with the TS SDK (both speak the same Signal Protocol
 # variant). We never re-implement these.
-from agentmesh.encryption.channel import SecureChannel
+from agentmesh.encryption.channel import ChannelEstablishment, SecureChannel
+from agentmesh.encryption.ratchet import EncryptedMessage
+from agentmesh.encryption.x3dh import PreKeyBundle, X3DHKeyManager
 
 from .config import MeshConfig
 from .errors import MeshPeerNotFoundError, MeshTransportError
 from .identity import Identity, IdentityStore
 from .messages import InboundMessage
-from .registry_client import RegistryClient
+from .registry_client import PeerBundle, RegistryClient
 
 logger = logging.getLogger("kars_agt_mesh.client")
 
@@ -85,6 +86,10 @@ class MeshClient:
         self._identity: Identity = IdentityStore.load_or_create(config.identity_path)
         self._registry: RegistryClient | None = None
         self._relay = None  # type: ignore[var-annotated]
+        # X3DH key manager (responder-side material lives here): owns
+        # the signed pre-key + one-time pre-keys, derives X25519
+        # identity key from Ed25519 identity. Built once at connect().
+        self._key_manager: X3DHKeyManager | None = None
         # Per-peer SecureChannel state. The upstream ``SecureChannel``
         # encapsulates X3DH + Double Ratchet, so we just keep one
         # channel per peer DID and let the channel own the state.
@@ -131,12 +136,47 @@ class MeshClient:
                 },
             )
 
+            # X3DH bootstrap: build key manager from our persistent
+            # Ed25519 identity, generate a signed pre-key + a small
+            # batch of one-time pre-keys, then publish them so peers
+            # can initiate sessions to us. The signed pre-key signature
+            # is over the X25519 public key with our Ed25519 identity
+            # — the upstream `generate_signed_pre_key` handles this.
+            seed = self._identity.ed25519_seed
+            full_ed_private = bytes(self._identity.signing_key) + self._identity.verify_key_bytes
+            self._key_manager = X3DHKeyManager.from_ed25519_keys(
+                full_ed_private if len(full_ed_private) == 64 else seed,
+                self._identity.verify_key_bytes,
+            )
+            self._key_manager.generate_signed_pre_key()
+            otks = self._key_manager.generate_one_time_pre_keys(count=10)
+            spk = self._key_manager.signed_pre_key
+            assert spk is not None  # just generated
+            await self._registry.upload_prekeys(
+                identity_key_x25519=self._key_manager.identity_key.public_key,
+                identity_key_ed25519=self._identity.verify_key_bytes,
+                signed_pre_key={
+                    "key_id": spk.key_id,
+                    "public_key": _b64url(spk.key_pair.public_key),
+                    "signature": _b64url(spk.signature),
+                },
+                one_time_pre_keys=[
+                    {
+                        "key_id": otk.key_id,
+                        "public_key": _b64url(otk.key_pair.public_key),
+                    }
+                    for otk in otks
+                ],
+            )
+
             # Lazy-import to keep transport optional in unit tests.
             from .relay_transport import RelayTransport
 
             self._relay = RelayTransport(
                 url=self._config.relay_url,
                 identity_did=self._identity.did,
+                identity_signing_key=self._identity.signing_key,
+                identity_public_key=self._identity.verify_key_bytes,
                 user_agent=self._config.user_agent,
                 heartbeat_interval_seconds=self._config.heartbeat_interval_seconds,
                 reconnect_initial_seconds=self._config.reconnect_initial_seconds,
@@ -190,34 +230,44 @@ class MeshClient:
     async def send_by_did(self, *, to: str, payload: bytes) -> None:
         """Encrypt ``payload`` for ``to`` and dispatch via the relay.
 
-        First call to a new peer performs the X3DH handshake +
-        KNOCK frame; subsequent calls reuse the established
-        :class:`SecureChannel`."""
+        First call to a new peer performs the X3DH handshake and
+        sends a fused KNOCK + first-message frame; subsequent calls
+        reuse the established :class:`SecureChannel`."""
         if not self._is_connected:
             raise MeshTransportError("Not connected — call connect() first")
         if self._relay is None or self._registry is None:
             raise MeshTransportError("Internal state corrupted: registry/relay missing")
 
         channel = self._channels.get(to)
+        knock_payload: dict | None = None
         if channel is None:
-            channel = await self._initiate_session(to)
+            channel, establishment = await self._initiate_session(to)
             self._channels[to] = channel
+            knock_payload = _establishment_to_wire(establishment)
 
-        # SecureChannel.encrypt returns the wire-ready EncryptedMessage
-        # (the same shape SecureChannel.decrypt accepts on the other
+        # SecureChannel.send returns the wire-ready EncryptedMessage
+        # (the same shape SecureChannel.receive accepts on the other
         # side). We wrap it in the relay frame envelope.
-        encrypted = channel.encrypt(payload)
-        frame = {
+        encrypted = channel.send(payload)
+        frame: dict = {
             "v": 1,
-            "type": "message",
+            "type": "knock" if knock_payload is not None else "message",
             "from": self._identity.did,
             "to": to,
             "id": str(uuid.uuid4()),
             "ts": _iso_utc(),
             "ciphertext": _encrypted_to_wire(encrypted),
         }
+        if knock_payload is not None:
+            frame["establishment"] = knock_payload
         await self._relay.send_frame(frame)
-        logger.debug("Sent %d bytes to %s (via %s)", len(payload), to, frame["id"])
+        logger.debug(
+            "Sent %s frame (%d bytes payload) to %s (id=%s)",
+            frame["type"],
+            len(payload),
+            to,
+            frame["id"],
+        )
 
     def inbox(self) -> AsyncIterator[InboundMessage]:
         """Async iterator over decrypted inbound messages.
@@ -230,23 +280,28 @@ class MeshClient:
 
     # ── Internals ───────────────────────────────────────────────────────
 
-    async def _initiate_session(self, peer_did: str) -> SecureChannel:
+    async def _initiate_session(
+        self, peer_did: str
+    ) -> tuple[SecureChannel, ChannelEstablishment]:
         """Run X3DH against the peer's published prekey bundle and
-        return a SecureChannel ready for encrypt/decrypt."""
+        return a SecureChannel + ChannelEstablishment. The
+        establishment data must be forwarded to the peer in the KNOCK
+        frame so they can rebuild their side."""
         assert self._registry is not None
+        assert self._key_manager is not None
         bundle = await self._registry.fetch_prekeys(peer_did)
-        # Domain-separator AAD mirrors the TS SDK:
-        # ``${selfDid}|${peerDid}`` (note: directionality matters —
-        # the AAD must match what the peer derives on its side).
+        # Domain-separator AAD mirrors the TS SDK convention
+        # ``${initiator}|${responder}``. The responder reconstructs
+        # the same AAD using ``${from_did}|${self_did}`` so both sides
+        # derive byte-identical inputs to the Double Ratchet.
         aad = f"{self._identity.did}|{peer_did}".encode("utf-8")
-        channel, _establishment = SecureChannel.create_sender(
-            self._identity.x25519_private,
-            self._identity.signing_key,
+        channel, establishment = SecureChannel.create_sender(
+            self._key_manager,
             _peer_bundle_to_upstream(bundle),
             aad,
         )
         logger.info("Established session with %s", peer_did)
-        return channel
+        return channel, establishment
 
     async def _handle_frame(self, frame: dict) -> None:
         ftype = frame.get("type")
@@ -268,34 +323,130 @@ class MeshClient:
             return
         channel = self._channels.get(from_did)
         if channel is None:
-            # We don't have a session for this peer yet — they probably
-            # KNOCK'd us first and we haven't accepted. Defer.
+            # We don't have a session for this peer yet — they should
+            # have sent a KNOCK first. Drop (the relay will not
+            # re-deliver, so this is fail-loud rather than fail-quiet).
             logger.warning(
                 "Dropping message from %s: no SecureChannel (KNOCK first)",
                 from_did,
             )
             return
         try:
-            plaintext = channel.decrypt(_wire_to_encrypted(frame["ciphertext"]))
+            plaintext = channel.receive(_wire_to_encrypted(frame["ciphertext"]))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Decrypt failed for %s: %s", from_did, exc)
             return
         await self._inbox.put(
             InboundMessage.new(
                 from_did=from_did,
-                from_display_name=None,  # TODO: cache + look up via registry
+                from_display_name=None,
                 payload=plaintext,
                 message_id=str(frame.get("id", "")),
             )
         )
 
     async def _handle_knock_frame(self, frame: dict) -> None:
-        # Accept logic (X3DH responder + trust-score gate) is implemented
-        # in Act 2.2 — for v0.1 we only handle the SENDER side of KNOCK
-        # (initiator). Inbound KNOCKs are logged and dropped.
-        logger.info(
-            "Received KNOCK from %s (responder path not implemented in v0.1)",
-            frame.get("from"),
+        """Auto-accept a KNOCK + decrypt the bundled first message.
+
+        The KNOCK carries the initiator's :class:`ChannelEstablishment`
+        which lets us rebuild the responder-side SecureChannel via
+        ``SecureChannel.create_receiver``. The same frame also carries
+        the first ciphertext so the round-trip latency is one RTT
+        (initiator → responder → reply), not two.
+        """
+        from_did = frame.get("from")
+        if not isinstance(from_did, str):
+            logger.warning("Dropping KNOCK frame: missing 'from'")
+            return
+        if self._key_manager is None:
+            logger.warning("Dropping KNOCK from %s: not connected yet", from_did)
+            return
+
+        est_raw = frame.get("establishment")
+        if not isinstance(est_raw, dict):
+            logger.warning(
+                "Dropping KNOCK from %s: missing 'establishment'", from_did
+            )
+            return
+        try:
+            establishment = _wire_to_establishment(est_raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Malformed KNOCK from %s: %s", from_did, exc)
+            return
+
+        # Responder AAD: initiator computed `${initiator_did}|${self_did}`;
+        # we mirror that exact byte string.
+        aad = f"{from_did}|{self._identity.did}".encode("utf-8")
+        try:
+            channel = SecureChannel.create_receiver(
+                self._key_manager, establishment, aad
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "KNOCK from %s rejected at X3DH responder: %s", from_did, exc
+            )
+            return
+
+        # Replenish the OTK pool eagerly so the next KNOCK doesn't
+        # have to wait for one. Fire-and-forget — failure here only
+        # affects future sessions, not this one.
+        try:
+            await self._top_up_otks()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OTK top-up failed: %s", exc)
+
+        self._channels[from_did] = channel
+        logger.info("Accepted KNOCK from %s", from_did)
+
+        # KNOCKs always carry the first message ciphertext (initiator
+        # never sends a bare KNOCK in our wire format).
+        cipher = frame.get("ciphertext")
+        if isinstance(cipher, str):
+            try:
+                plaintext = channel.receive(_wire_to_encrypted(cipher))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "First-message decrypt failed for %s: %s", from_did, exc
+                )
+                return
+            await self._inbox.put(
+                InboundMessage.new(
+                    from_did=from_did,
+                    from_display_name=None,
+                    payload=plaintext,
+                    message_id=str(frame.get("id", "")),
+                )
+            )
+
+    async def _top_up_otks(self, *, threshold: int = 3, batch: int = 10) -> None:
+        """Re-publish a fresh batch of OTKs when the unused pool is
+        getting low. AGT registry consumes one OTK per X3DH; running
+        out would force peers to skip the OPK step (weaker security)."""
+        assert self._registry is not None
+        assert self._key_manager is not None
+        # The X3DHKeyManager doesn't track which OTKs were consumed
+        # by remote peers — we just keep generating. The registry
+        # overwrites the bundle on PUT, so the latest call is what
+        # peers will fetch. Lightweight scheme: always top up to
+        # `batch` fresh keys whenever a new KNOCK lands.
+        otks = self._key_manager.generate_one_time_pre_keys(count=batch)
+        spk = self._key_manager.signed_pre_key
+        assert spk is not None
+        await self._registry.upload_prekeys(
+            identity_key_x25519=self._key_manager.identity_key.public_key,
+            identity_key_ed25519=self._identity.verify_key_bytes,
+            signed_pre_key={
+                "key_id": spk.key_id,
+                "public_key": _b64url(spk.key_pair.public_key),
+                "signature": _b64url(spk.signature),
+            },
+            one_time_pre_keys=[
+                {
+                    "key_id": otk.key_id,
+                    "public_key": _b64url(otk.key_pair.public_key),
+                }
+                for otk in otks
+            ],
         )
 
 
@@ -320,57 +471,56 @@ def _iso_utc() -> str:
     )
 
 
-def _encrypted_to_wire(em) -> str:  # noqa: ANN001
+def _encrypted_to_wire(em: EncryptedMessage) -> str:
     """Serialize an upstream :class:`EncryptedMessage` to the wire-format
-    string the relay accepts (base64url of the canonical JSON encoding
-    of the message header + ciphertext + auth tag)."""
-    return base64.urlsafe_b64encode(
-        json.dumps(em.to_dict() if hasattr(em, "to_dict") else em.__dict__).encode(
-            "utf-8"
-        )
-    ).rstrip(b"=").decode("ascii")
+    string the relay accepts (base64url of the binary serialization)."""
+    return _b64url(em.serialize())
 
 
-def _wire_to_encrypted(s: str):  # noqa: ANN201
+def _wire_to_encrypted(s: str) -> EncryptedMessage:
     """Inverse of :func:`_encrypted_to_wire` — used on the receive
     side. Returns the upstream ``EncryptedMessage`` instance ready
-    for :meth:`SecureChannel.decrypt`."""
-    from agentmesh.encryption.ratchet import EncryptedMessage
-
-    pad = "=" * (-len(s) % 4)
-    raw = base64.urlsafe_b64decode(s + pad)
-    data = json.loads(raw.decode("utf-8"))
-    if hasattr(EncryptedMessage, "from_dict"):
-        return EncryptedMessage.from_dict(data)
-    return EncryptedMessage(**data)
+    for :meth:`SecureChannel.receive`."""
+    return EncryptedMessage.deserialize(_b64url_decode(s))
 
 
-def _peer_bundle_to_upstream(bundle):  # noqa: ANN001
+def _establishment_to_wire(est: ChannelEstablishment) -> dict:
+    """Serialize a :class:`ChannelEstablishment` to a JSON-safe dict
+    suitable for embedding inside a relay frame's ``establishment``
+    field. Keys mirror the upstream dataclass fields."""
+    return {
+        "initiator_identity_key": _b64url(est.initiator_identity_key),
+        "ephemeral_public_key": _b64url(est.ephemeral_public_key),
+        "used_one_time_key_id": est.used_one_time_key_id,
+    }
+
+
+def _wire_to_establishment(d: dict) -> ChannelEstablishment:
+    return ChannelEstablishment(
+        initiator_identity_key=_b64url_decode(d["initiator_identity_key"]),
+        ephemeral_public_key=_b64url_decode(d["ephemeral_public_key"]),
+        used_one_time_key_id=d.get("used_one_time_key_id"),
+    )
+
+
+def _peer_bundle_to_upstream(bundle: PeerBundle) -> PreKeyBundle:
     """Translate our :class:`PeerBundle` into the
     ``agentmesh.encryption.x3dh.PreKeyBundle`` shape that
-    :meth:`SecureChannel.create_sender` accepts."""
-    from agentmesh.encryption.x3dh import (
-        OneTimePreKey,
-        PreKeyBundle,
-        SignedPreKey,
-    )
-
-    spk = bundle.signed_pre_key
-    signed = SignedPreKey(
-        key_id=spk["key_id"],
-        public_key=_b64url_decode(spk["public_key"]),
-        signature=_b64url_decode(spk["signature"]),
-    )
-    otps = [
-        OneTimePreKey(key_id=otp["key_id"], public_key=_b64url_decode(otp["public_key"]))
-        for otp in bundle.one_time_pre_keys
-    ]
+    :meth:`SecureChannel.create_sender` accepts. The upstream bundle
+    is FLAT — fields live directly on PreKeyBundle, not nested."""
     return PreKeyBundle(
         identity_key=bundle.identity_key_x25519,
         identity_key_ed=bundle.identity_key_ed25519,
-        signed_pre_key=signed,
-        one_time_pre_keys=otps,
+        signed_pre_key=bundle.signed_pre_key_public,
+        signed_pre_key_signature=bundle.signed_pre_key_signature,
+        signed_pre_key_id=bundle.signed_pre_key_id,
+        one_time_pre_key=bundle.one_time_pre_key_public,
+        one_time_pre_key_id=bundle.one_time_pre_key_id,
     )
+
+
+def _b64url(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
 
 def _b64url_decode(s: str) -> bytes:

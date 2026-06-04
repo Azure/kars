@@ -45,22 +45,39 @@ def _iso_utc() -> str:
 class PeerBundle:
     """A peer's prekey bundle, as returned by
     ``GET /v1/agents/{did}/prekeys``. Shape matches AGT Python's
-    ``PreKeyBundleResponse``."""
+    flat ``PreKeyBundle`` — the registry consumes ONE OTK per fetch
+    and returns it as a single ``one_time_pre_key`` dict (or None).
+    """
 
     did: str
     identity_key_x25519: bytes
     identity_key_ed25519: bytes
-    signed_pre_key: dict[str, Any]
-    one_time_pre_keys: list[dict[str, Any]]
+    signed_pre_key_public: bytes
+    signed_pre_key_signature: bytes
+    signed_pre_key_id: int
+    one_time_pre_key_public: bytes | None
+    one_time_pre_key_id: int | None
 
     @classmethod
     def from_response(cls, did: str, body: dict[str, Any]) -> PeerBundle:
+        spk = body["signed_pre_key"]
+        otp_raw = body.get("one_time_pre_key")
+        otp_pub: bytes | None = None
+        otp_id: int | None = None
+        if otp_raw:
+            otp_pub = _b64url_decode(otp_raw["public_key"])
+            otp_id = int(otp_raw["key_id"])
+
+        identity_ed_raw = body.get("identity_key_ed") or ""
         return cls(
             did=did,
             identity_key_x25519=_b64url_decode(body["identity_key"]),
-            identity_key_ed25519=_b64url_decode(body.get("identity_key_ed", "")),
-            signed_pre_key=body["signed_pre_key"],
-            one_time_pre_keys=body.get("one_time_pre_keys", []),
+            identity_key_ed25519=_b64url_decode(identity_ed_raw) if identity_ed_raw else b"",
+            signed_pre_key_public=_b64url_decode(spk["public_key"]),
+            signed_pre_key_signature=_b64url_decode(spk["signature"]),
+            signed_pre_key_id=int(spk["key_id"]),
+            one_time_pre_key_public=otp_pub,
+            one_time_pre_key_id=otp_id,
         )
 
 
@@ -71,6 +88,8 @@ class DiscoveredAgent:
     did: str
     capabilities: list[str]
     metadata: dict[str, str]
+    last_seen: str = ""
+    reputation_score: float = 0.0
 
     @property
     def display_name(self) -> str | None:
@@ -166,6 +185,17 @@ class RegistryClient:
                 capabilities,
             )
             return
+        if resp.status_code == 409:
+            # Already registered — happens on every restart when the
+            # identity file is persisted across pod recreations. The
+            # subsequent prekey PUT (which carries Ed25519-Timestamp
+            # auth proving we own the same key) is enough to refresh
+            # our session; we don't need to re-create the agent record.
+            logger.info(
+                "Registry already has did=%s — reusing existing record",
+                self._identity_did,
+            )
+            return
         if resp.status_code in {400, 401, 403}:
             raise MeshAuthError(
                 f"Registry rejected register_self: {resp.status_code} {resp.text[:200]}"
@@ -238,7 +268,14 @@ class RegistryClient:
         """``GET /v1/discover?capability=...`` — search agents.
 
         The AGT convention is to register display name as a capability
-        string, so this also serves as ``find_by_display_name``."""
+        string, so this also serves as ``find_by_display_name``.
+
+        Returns agents in **freshest-first** order (most recent
+        ``last_seen`` first) so callers picking the first hit get the
+        live peer when stale registry entries exist for the same
+        capability — a common situation when sandboxes restart and
+        the old registration hasn't aged out yet.
+        """
         resp = await self._client.get(
             "/v1/discover",
             params={"capability": capability, "limit": limit},
@@ -248,14 +285,18 @@ class RegistryClient:
                 f"discover({capability!r}) failed: HTTP {resp.status_code} {resp.text[:200]}"
             )
         results = resp.json().get("results", [])
-        return [
+        agents = [
             DiscoveredAgent(
                 did=r["did"],
                 capabilities=r.get("capabilities", []),
                 metadata=r.get("metadata", {}),
+                last_seen=r.get("last_seen", ""),
+                reputation_score=float(r.get("reputation_score", 0.0)),
             )
             for r in results
         ]
+        agents.sort(key=lambda a: a.last_seen, reverse=True)
+        return agents
 
     async def find_by_display_name(self, name: str) -> DiscoveredAgent | None:
         """Convenience wrapper around :meth:`discover`. Returns the
@@ -293,16 +334,19 @@ class RegistryClient:
 
     # ── Ed25519-Timestamp auth ─────────────────────────────────────────
 
-    def _auth_headers(self, method: str, path: str) -> dict[str, str]:
-        """Build the Ed25519-Timestamp auth headers for an authenticated
-        request. The signature input matches AGT registry's verifier:
-        ``f"{method}\n{path}\n{timestamp}"`` (newline-separated, ASCII).
+    def _auth_headers(self, _method: str, _path: str) -> dict[str, str]:
+        """Build the Ed25519-Timestamp Authorization header per AGT
+        spec (registry/app.py::verify_ed25519_timestamp_auth, AGENTMESH-WIRE
+        §13.1):
+
+        ``Authorization: Ed25519-Timestamp <did> <iso_ts> <b64url(sig)>``
+
+        The signature is over the **timestamp string only** (UTF-8
+        bytes), NOT method/path. The replay window is 5 minutes. We
+        keep the ``method`` and ``path`` parameters in the signature
+        for source compat / future extension but they're unused.
         """
         ts = _iso_utc()
-        payload = f"{method.upper()}\n{path}\n{ts}".encode("ascii")
-        sig = self._signing_key.sign(payload).signature
-        return {
-            "X-Agent-DID": self._identity_did,
-            "X-Agent-Timestamp": ts,
-            "X-Agent-Signature": _b64url(sig),
-        }
+        sig = self._signing_key.sign(ts.encode("utf-8")).signature
+        header = f"Ed25519-Timestamp {self._identity_did} {ts} {_b64url(sig)}"
+        return {"Authorization": header}

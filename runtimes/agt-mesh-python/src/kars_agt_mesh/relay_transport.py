@@ -25,11 +25,14 @@ backoff reconnect with auth bootstrap on every reconnect.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 import websockets
+from nacl import signing
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from .errors import MeshTransportError
@@ -63,6 +66,8 @@ class RelayTransport:
         *,
         url: str,
         identity_did: str,
+        identity_signing_key: signing.SigningKey,
+        identity_public_key: bytes,
         user_agent: str,
         heartbeat_interval_seconds: float,
         reconnect_initial_seconds: float,
@@ -71,6 +76,8 @@ class RelayTransport:
     ) -> None:
         self._url = url
         self._identity_did = identity_did
+        self._signing_key = identity_signing_key
+        self._public_key = identity_public_key
         self._user_agent = user_agent
         self._heartbeat_interval = heartbeat_interval_seconds
         self._reconnect_initial = reconnect_initial_seconds
@@ -184,15 +191,28 @@ class RelayTransport:
                 self._ws = None
 
     async def _send_connect_frame(self) -> None:
-        """First frame after the WS opens identifies the DID. The TS
-        SDK's relay server keys its in-memory routing table by DID."""
+        """First frame after the WS opens identifies the DID and
+        proves possession of the corresponding Ed25519 secret.
+
+        Required fields per AGT relay (relay/app.py::_verify_connect_pop,
+        AGENTMESH-WIRE §10.1):
+
+        - ``from``       — DID (did:mesh:<sha256(pub)[:32]>)
+        - ``public_key`` — standard (NOT urlsafe) base64 Ed25519 public key
+        - ``timestamp``  — ISO-8601 UTC within 5-minute replay window
+        - ``signature``  — standard base64 Ed25519 sig over ``timestamp``
+        """
+        ts = _iso_utc()
+        sig = self._signing_key.sign(ts.encode("utf-8")).signature
         await self._ws.send(  # type: ignore[union-attr]
             json.dumps(
                 {
                     "v": 1,
                     "type": "connect",
                     "from": self._identity_did,
-                    "ts": _iso_utc(),
+                    "public_key": base64.b64encode(self._public_key).decode("ascii"),
+                    "timestamp": ts,
+                    "signature": base64.b64encode(sig).decode("ascii"),
                 }
             )
         )

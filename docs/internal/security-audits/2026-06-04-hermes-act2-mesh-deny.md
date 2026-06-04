@@ -104,6 +104,14 @@ covered by unit tests (`runtimes/agt-mesh-python/tests/`).
     returns the agent's own DID.
   - Plugin loader logs the six deregistrations and the four mesh
     tools appear in `plugin_tool_names`.
+  - **Full bidirectional round-trip between two sandboxes**: from a
+    freshly-built image (no hot patches), pod A (`execbrief-hermes`)
+    discovers pod B (`smoke-hermes`) by name, runs X3DH, sends a
+    KNOCK + first ciphertext, pod B auto-accepts, decrypts the
+    plaintext `b"hello from execbrief-hermes"`, encrypts and replies
+    `b"pong from smoke-hermes"`, and pod A decrypts the reply — all
+    through the inference-router proxy (`127.0.0.1:8443/agt/...`)
+    with egress-guard iptables still in place.
 
 ## Residual risks
 
