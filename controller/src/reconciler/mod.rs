@@ -1288,9 +1288,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         let (runtime_class, pool_label) = isolation_scheduling(&sandbox_config.isolation);
 
-        // `:latest` images normally pull on every reconcile. In dev
-        // mode (KARS_DEV_PROFILE=true), kind only has the images we
-        // explicitly `kind load`'d, so Always → ImagePullBackOff.
         let pull_policy = if ctx.dev_profile || !image.ends_with(":latest") {
             "IfNotPresent"
         } else {

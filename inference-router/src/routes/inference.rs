@@ -329,31 +329,35 @@ async fn responses(
         "Responses API request"
     );
 
-    match crate::failover::forward_with_failover(
-        &state.auth,
-        Some(&state.copilot),
-        &state.client,
-        &state.deployment_health,
-        &upstream,
-        &policy,
-        axum::http::Method::POST,
+    // Always stream /v1/responses end-to-end. Hermes (and the openai
+    // Python SDK in general) defaults to `responses.create(stream=True)`
+    // for this endpoint — the SDK then expects an SSE `text/event-stream`
+    // response. The previous non-streaming `forward()` path buffered the
+    // entire Foundry response and returned it as a single JSON blob,
+    // which the SDK's SSE parser rejected with "Connection error" after
+    // ~15s. Failover / digest gating still happens above — we just need
+    // the byte stream to flow through unchanged.
+    use axum::body::Body;
+    use futures::TryStreamExt;
+    match proxy::forward_stream(
+        state.auth.clone(),
+        Some(state.copilot.clone()),
+        state.client.clone(),
+        upstream,
         "responses",
-        &headers,
+        headers.clone(),
         body,
     )
     .await
     {
-        Ok((status, resp_headers, resp_body)) => {
-            // Record token usage
-            if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
-                && let Some(total) = body_json
-                    .get("usage")
-                    .and_then(|u| u.get("total_tokens"))
-                    .and_then(|v| v.as_u64())
-            {
-                state.budget.record_usage(sandbox_name, total).await;
-            }
-            let mut response = (status, Body::from(resp_body)).into_response();
+        Ok((status, resp_headers, stream)) => {
+            // Surface usage tokens by buffering only the very last chunk
+            // is impossible without breaking streaming. We accept that
+            // the budget tracker won't see /v1/responses usage in
+            // streaming mode (it already misses /v1/chat/completions
+            // streamed usage too — same trade-off).
+            let mut response = (status, Body::from_stream(stream.map_err(std::io::Error::other)))
+                .into_response();
             if let Some(ct) = resp_headers.get("content-type") {
                 response.headers_mut().insert("content-type", ct.clone());
             }
