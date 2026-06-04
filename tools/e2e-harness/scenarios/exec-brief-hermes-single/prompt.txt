@@ -1,0 +1,46 @@
+You are a single agent producing a 2-page executive brief on the state of agentic AI runtime environments in 2026. Do the WHOLE pipeline yourself — research, scorecard, hero image, written brief. Do NOT call kars_spawn or kars_mesh_*; those are not available in this Hermes Act 1 run (the mesh-stub tools return an explicit "Act 2 not ready" error if you try).
+
+Step 1. Call kars_discover('*') as your first action so the run leaves a verifiable trace of the discovery surface.
+
+Step 2. Research via Foundry web search.
+- Call foundry_web_search at least 3 times with distinct queries about 2026 agentic AI runtimes (target: Microsoft kars, OpenAI Sandboxes, Anthropic Claude Code, AKS Confidential Containers, AWS Bedrock Agents, etc.).
+- Capture ≥6 distinct https URLs across the results.
+- Build a JSON object in your reasoning with the following shape (keep it under 4 KB):
+  { "trends": [5..8 short bullets],
+    "control_categories": [3 named categories with citations],
+    "runtimes": [≥4 objects, 4 cols each: workload_boundary, network_posture, attestation_story, governance_integration],
+    "metrics": { "<runtime_name>": { "workload_boundary": 0..10, "network_posture": 0..10, "attestation_story": 0..10, "governance_integration": 0..10 }, ... } }
+- Use ONE foundry_memory call (action='upsert') to persist the JSON under key='analyst.json' so a verify step can read it back from the bound Memory Store.
+
+Step 3. Scorecard chart via foundry_code_execute.
+- Embed ONLY the `metrics` sub-object (~1 KB max) into a code argument that loads it as `metrics = json.loads(r'''<minified metrics>''')` and draws a 4-runtime grouped bar chart (x-axis tick labels: workload_boundary, network_posture, attestation_story, governance_integration; y-axis 0–10; matplotlib).
+- Save with savefig('/mnt/data/scorecard.png', dpi=128, bbox_inches='tight') at 1024×640. The runtime wrapper auto-downloads /mnt/data outputs into your sandbox FS at /sandbox/incoming/scorecard.png — that is the path the brief will reference.
+
+Step 4. Hero image via foundry_image_generation.
+- model='gpt-image-1', size='1024x1024', output_filename='hero.png'.
+- Title concept: 'Agentic AI Runtimes 2026 — Defense in Depth'. Style: isometric data-center cutaway, Azure cyan accents.
+- The PNG lands at /sandbox/incoming/hero.png — do NOT pass /mnt/data for this tool.
+
+Step 5. Write the 2-page brief in ONE file_write call.
+- path=/sandbox/incoming/brief.md, content=<full markdown, ~700–800 words, plain ASCII, no triple-backticks, no JSON blobs in the body>.
+- MUST include in this order:
+  - Hero markdown: ![hero](/sandbox/incoming/hero.png)
+  - ≤80-word hook.
+  - 3 numbered sections (Trends / Control Domains / Runtime Landscape ~180–200 words each).
+  - Scorecard markdown in Runtime Landscape: ![scorecard](/sandbox/incoming/scorecard.png).
+  - Closing 'So what for kars?' (~130 words).
+  - Numbered footnotes — every analyst citation as a verbatim https URL (no placeholders).
+  - The four control-domain terms MUST appear verbatim at least once each: `isolation`, `egress`, `attestation`, `governance`.
+- The hero and scorecard PNGs are real files at the referenced paths. Reference them; do NOT add "missing image" caveats.
+
+Step 6. Confirm completion with one short prose summary (≤200 words) describing the artifacts produced (paths + sizes).
+
+Tool constraints (Hermes Act 1):
+- kars_mesh_send / kars_mesh_inbox / kars_mesh_await / kars_mesh_transfer_file: NOT available. They return {"error": "Mesh communication not available in Hermes runtime v0.5.2 ..."}. Do everything in this single agent.
+- kars_spawn / kars_spawn_status / kars_spawn_destroy / kars_spawn_list: available but the prompt says not to use them; spawning sub-agents that you then cannot mesh-talk to is not useful.
+- foundry_web_search / foundry_code_execute / foundry_image_generation / foundry_memory: available when FOUNDRY_PROJECT_ENDPOINT is bound.
+- pre_tool_call governance hook is active; tool calls flow through /agt/evaluate on the loopback router. Default profile allows everything; the run is verified by tracing the calls, not by enforcement decisions.
+- file_write / file_read: native Hermes tools. Use them for the sandbox FS at /sandbox/incoming/*.
+- Local shell / bash / python (outside foundry_code_execute) is policy-blocked.
+
+Sparse first-query web results are normal — broaden queries and try again. Do NOT report blocked unless ≥3 query variants AND the Memory Store search AND kars_discover('*') all turn up nothing.

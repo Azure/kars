@@ -1,0 +1,40 @@
+# 05-karssandbox.yaml — single-agent Hermes exec-brief sandbox.
+#
+# Runtime = Hermes (Nous Research). Same plugin contract as OpenClaw —
+# kars_spawn family, foundry_*, http_fetch, pre_tool_call governance
+# hook. Mesh tools are clear-error stubs (Act 1); this scenario does
+# NOT use them.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: execbrief-hermes
+  namespace: kars-system
+  labels:
+    kars.azure.com/channels: none
+spec:
+  runtime:
+    kind: Hermes
+    hermes:
+      # Pin the same version the local dev image bakes in. Operators
+      # bumping the runtime should also re-verify the kars contract
+      # is still honored (entrypoint env shape + plugin context API).
+      version: "0.15.2"
+
+  sandbox:
+    isolation: standard
+
+  inferenceRef:
+    name: execbrief-hermes-inference
+
+  memoryRef:
+    name: execbrief-hermes-memory
+
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: execbrief-hermes-toolpolicy
+    mcpServerRefs:
+      - name: execbrief-hermes-deepwiki
+    registryMode: local
+    trustThreshold: 0

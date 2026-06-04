@@ -1,0 +1,33 @@
+# 02-toolpolicy.yaml — ToolPolicy CR for the single-agent Hermes
+# exec-brief. Inlines the kars-default AGT profile (same source of
+# truth as cli/profiles/agt/kars-default.yaml) so the in-pod
+# pre_tool_call governance hook has rules to evaluate against.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-hermes-toolpolicy
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: execbrief-hermes
+  annotations:
+    kars.azure.com/profile: default
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: execbrief-hermes
+  agtProfile:
+    inline: |
+      # Minimal allow-all profile for the single-agent Hermes
+      # exec-brief. Same engine + schema as the canonical
+      # kars-default profile (cli/profiles/agt/kars-default.yaml),
+      # just without the per-action allow-lists — the scenario only
+      # needs the profile attachment for verification, not real
+      # enforcement decisions.
+      version: "1.0"
+      agent: execbrief-hermes-default
+      policies:
+        - name: default-allow
+          type: capability
+          allowed_actions: ["*"]
+          priority: 1
