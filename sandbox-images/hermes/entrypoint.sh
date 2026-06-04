@@ -111,11 +111,17 @@ case "${KARS_PROVIDER:-}" in
 esac
 export HERMES_DEFAULT_PROVIDER
 
-# ── /etc/kars/mcp/<server>/meta.json → hermes mcp_servers.* config ──────
+# ── KARS_MCP_SERVERS → hermes mcp_servers.* config ──────────────────────
 # Hermes' native MCP client reads $HERMES_HOME/config.yaml's mcp_servers
-# section. The controller materializes per-McpServer ConfigMaps into
-# /etc/kars/mcp/<server>/meta.json. We translate at every container start
-# so config updates (new McpServer CR applied) take effect on pod restart.
+# section. The controller projects the list of mirrored McpServer CR
+# names into the agent container as KARS_MCP_SERVERS (comma-separated;
+# see controller/src/reconciler/mod.rs ~line 2395). For each name we
+# emit one mcp_servers.<name> entry pointing at the loopback router
+# (`127.0.0.1:8443/mcp`) and tagging the request with the
+# `x-kars-mcp-server` header so the router can sign + resolve + forward
+# to the real upstream URL (with JWKS validation against the per-server
+# mounts at /etc/kars/mcp/<name>/jwks.json that go to the *router*, not
+# the agent — agents never see McpServer URLs or bearer tokens directly).
 #
 # Additionally: when FOUNDRY_PROJECT_ENDPOINT is set, we register the
 # kars-internal "platform" MCP server which exposes all 9 Foundry tools
@@ -125,7 +131,6 @@ export HERMES_DEFAULT_PROVIDER
 # serves these at POST /platform/mcp and they're already governed by
 # AGT policy + content safety + token budgets. Hermes' MCP client
 # discovers them automatically.
-MCP_BASE="${MCP_BASE:-/etc/kars/mcp}"
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 MCP_FRAGMENT="$HERMES_CONFIG.mcp-fragment"
 
@@ -151,45 +156,63 @@ echo "[kars-hermes] Building MCP server config in $HERMES_CONFIG"
     echo "    url: \"http://127.0.0.1:8443/platform/mcp\""
     echo "    description: \"kars Foundry tools (memory, web_search, image_gen, code_execute, file_search, conversations, evaluations, deployments, agents)\""
   fi
-  # Translate kars-published McpServer CRs (controller mounts each as
-  # /etc/kars/mcp/<server>/meta.json — see controller/src/mcp_server.rs).
-  if [ -d "$MCP_BASE" ] && [ -n "$(ls -A "$MCP_BASE" 2>/dev/null)" ]; then
-    for meta in "$MCP_BASE"/*/meta.json; do
-      [ -f "$meta" ] || continue
-      server_name=$(basename "$(dirname "$meta")")
+  # Translate kars-published McpServer CRs. Each name resolves to the
+  # loopback router with a routing header; the router does the rest.
+  if [ -n "${KARS_MCP_SERVERS:-}" ]; then
+    # Convert "name1,name2,name3" → space-separated for the loop.
+    SERVERS=$(echo "$KARS_MCP_SERVERS" | tr ',' ' ')
+    for server_name in $SERVERS; do
+      server_name=$(echo "$server_name" | tr -d ' ')
+      [ -z "$server_name" ] && continue
       # Skip the reserved 'platform' name to avoid colliding with the
-      # built-in we just registered above.
+      # built-in we register above.
       [ "$server_name" = "platform" ] && continue
-      url=$(jq -r '.url // empty' "$meta")
-      bearer_env=$(jq -r '.bearerFromEnv // empty' "$meta")
-      [ -z "$url" ] && continue
       echo "  $server_name:"
-      echo "    url: \"$url\""
-      if [ -n "$bearer_env" ]; then
-        # Hermes config supports env var substitution; ${ENV_VAR} expands
-        # at config-load time. We don't materialize the token here (avoids
-        # leaking it into a writable file in the container).
-        echo "    headers:"
-        echo "      Authorization: \"Bearer \${$bearer_env}\""
-      fi
-      allowed=$(jq -r '.allowedTools // [] | join(",")' "$meta" 2>/dev/null || true)
-      if [ -n "$allowed" ] && [ "$allowed" != "" ]; then
-        echo "    allowed_tools: [$allowed]"
-      fi
+      echo "    url: \"http://127.0.0.1:8443/mcp\""
+      echo "    headers:"
+      echo "      x-kars-mcp-server: \"$server_name\""
+      echo "      x-kars-sandbox: \"$SANDBOX_NAME\""
     done
   fi
 } > "$MCP_FRAGMENT"
 
-# Merge into config.yaml. If config.yaml exists, replace prior plugins
-# and mcp_servers blocks then append fresh ones. Else create.
+# Merge into config.yaml. The two blocks the entrypoint owns
+# (`plugins:` and `mcp_servers:`) are stripped from any existing
+# config and replaced with freshly-generated versions. Everything
+# else the user may have written via `hermes config set <other.key>`
+# is preserved across pod restarts.
+#
+# We use Python rather than awk because the Azure Linux 3 minimal
+# base image doesn't ship awk; sed alone can't do block-level
+# selection without fragile multi-line patterns. ruamel.yaml is
+# pulled in as a hermes-agent dep so this import is always available.
 if [ -f "$HERMES_CONFIG" ]; then
-  awk '
-    /^(plugins|mcp_servers):/ { skip=1 }
-    /^[a-z]/ && !/^(plugins|mcp_servers):/ { skip=0 }
-    !skip
-  ' "$HERMES_CONFIG" > "$HERMES_CONFIG.tmp"
-  cat "$MCP_FRAGMENT" >> "$HERMES_CONFIG.tmp"
-  mv "$HERMES_CONFIG.tmp" "$HERMES_CONFIG"
+  python3 - "$HERMES_CONFIG" "$MCP_FRAGMENT" <<'PY'
+import io, re, sys
+config_path, fragment_path = sys.argv[1], sys.argv[2]
+src = open(config_path).read()
+fragment = open(fragment_path).read()
+
+# Strip any prior top-level `plugins:` and `mcp_servers:` blocks
+# (a block ends at the next top-level key — start-of-line letter
+# followed by `:`). Comments and blank lines within are preserved.
+top_key = re.compile(r"^(plugins|mcp_servers):", re.M)
+out, idx, prev = io.StringIO(), 0, 0
+while True:
+    m = top_key.search(src, idx)
+    if not m:
+        out.write(src[prev:])
+        break
+    out.write(src[prev:m.start()])
+    # Skip lines until the next top-level key (not indented).
+    next_top = re.compile(r"^[A-Za-z_][\w-]*:", re.M)
+    nm = next_top.search(src, m.end())
+    prev = nm.start() if nm else len(src)
+    idx = prev
+
+merged = out.getvalue().rstrip() + "\n" + fragment.rstrip() + "\n"
+open(config_path, "w").write(merged)
+PY
 else
   mv "$MCP_FRAGMENT" "$HERMES_CONFIG"
 fi
@@ -217,7 +240,12 @@ set_hermes_config() {
   local key=$1
   local value=$2
   if [ -n "$value" ]; then
-    $AS_SANDBOX hermes config set "$key=$value" 2>/dev/null || true
+    # Hermes 0.15.x expects `hermes config set <key> <value>` (two
+    # positional args), NOT `key=value`. See `hermes config set
+    # --help`: examples include `hermes config set model
+    # anthropic/claude-sonnet-4` and `hermes config set
+    # terminal.backend docker`.
+    $AS_SANDBOX hermes config set "$key" "$value" >/dev/null 2>&1 || true
   fi
 }
 
@@ -303,25 +331,38 @@ echo "  dev profile    : ${KARS_DEV_PROFILE:-false}"
 echo "═══════════════════════════════════════════════════════════════════"
 
 # ── Exec hermes ──────────────────────────────────────────────────────────
-# If gateway tokens are present, start the gateway (background-friendly
-# for messaging platforms). Else start the standard hermes CLI / TUI.
-WANT_GATEWAY=false
-for t in TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN DISCORD_BOT_TOKEN; do
-  if [ -n "${!t:-}" ]; then
-    WANT_GATEWAY=true
-    break
-  fi
-done
-
+# K8s sandbox pods have no TTY, so the interactive `hermes` chat mode
+# would just exit immediately. We always boot `hermes gateway run`:
+#
+#   * with channels configured (TELEGRAM/SLACK/DISCORD), the gateway
+#     dispatches inbound messages to the agent;
+#   * with no channels yet, the gateway still stays alive as a daemon
+#     waiting for kars sub-agent spawn / mesh messages / future
+#     channel reconfiguration — i.e. the pod stays Running 2/2 even
+#     without an external trigger source.
+#
+# `gateway run` is the Docker/headless-recommended mode per
+# `hermes gateway --help`. The `start --foreground` variant we used
+# previously installs a systemd/launchd unit first, which fails in
+# K8s pods (no init system).
+#
 # CMD from Dockerfile is `hermes` by default. Operators override with
 # `docker run … kars-sandbox-hermes:dev python /sandbox/agent/main.py`
-# to run user-supplied agent code instead of the TUI.
-if [ "$WANT_GATEWAY" = "true" ] && [ "$1" = "hermes" ]; then
-  echo "[kars-hermes] Channels detected — starting hermes gateway"
-  exec $AS_SANDBOX hermes gateway start --foreground
-elif [ "$1" = "hermes" ]; then
-  echo "[kars-hermes] No channels — starting hermes (TUI mode)"
-  exec $AS_SANDBOX hermes
+# to run user-supplied agent code instead.
+if [ "$1" = "hermes" ]; then
+  WANT_GATEWAY=false
+  for t in TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN DISCORD_BOT_TOKEN; do
+    if [ -n "${!t:-}" ]; then
+      WANT_GATEWAY=true
+      break
+    fi
+  done
+  if [ "$WANT_GATEWAY" = "true" ]; then
+    echo "[kars-hermes] Channels detected — starting hermes gateway (foreground)"
+  else
+    echo "[kars-hermes] No channels — starting hermes gateway in idle daemon mode"
+  fi
+  exec $AS_SANDBOX hermes gateway run --accept-hooks
 else
   echo "[kars-hermes] Operator override: $*"
   exec $AS_SANDBOX "$@"

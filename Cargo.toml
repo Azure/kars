@@ -40,6 +40,13 @@ futures = "0.3"
 # HTTP
 axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "brotli", "deflate"] }
+# rustls 0.23 with aws-lc-rs is the only provider in our dep graph
+# (transitively via reqwest + oci-client). We declare it as a direct
+# workspace dep so the router's main() can install the provider
+# explicitly — otherwise kube-client's first TLS handshake panics
+# with "Could not automatically determine the process-level
+# CryptoProvider" when multiple feature flags resolve.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 hyper = "1"

@@ -11,6 +11,7 @@ rust-version.workspace = true
 # HTTP server + proxy
 axum.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 tower.workspace = true
 bytes = "1"
 

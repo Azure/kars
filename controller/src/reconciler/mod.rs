@@ -2384,18 +2384,24 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 governance_mounts::paths::MCP_JWKS_DIR,
             );
             // Project the list of mirrored MCP server names into the
-            // `openclaw` container so the entrypoint can render an
-            // `mcp.servers.<name>` block in `openclaw.json` pointing each
-            // server at the loopback router (`127.0.0.1:8443/mcp`). The
-            // router resolves the `x-kars-mcp-server` header to the
-            // registered McpServer, signs with the mounted key, filters
-            // by allowedTools, and forwards to the upstream URL.
-            //
-            // Comma-separated list; entrypoint splits on `,`.
+            // agent container so the entrypoint can render an
+            // `mcp.servers.<name>` block pointing each server at the
+            // loopback router (`127.0.0.1:8443/mcp`). Router resolves
+            // the `x-kars-mcp-server` header → registered McpServer,
+            // signs with the mounted key, filters by allowedTools,
+            // forwards to the upstream URL. Container name was
+            // hard-coded to "openclaw" which silently dropped
+            // KARS_MCP_SERVERS on hermes/pydantic-ai/anthropic/etc.
             let names_csv = mirrored_mcp_names.join(",");
+            let agent_container = if matches!(runtime_spec.kind, crate::crd::RuntimeKind::OpenClaw)
+            {
+                "openclaw"
+            } else {
+                "agent"
+            };
             governance_mounts::inject_container_env(
                 &mut pod_spec,
-                "openclaw",
+                agent_container,
                 "KARS_MCP_SERVERS",
                 &names_csv,
             );
