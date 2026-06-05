@@ -153,8 +153,18 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
         def _eager_mesh_init() -> None:
             try:
-                _mesh_module._get_or_init_client()  # noqa: SLF001
+                client = _mesh_module._get_or_init_client()  # noqa: SLF001
                 logger.info("MeshClient pre-connected at plugin load")
+                # Now start the auto-responder worker (no-op unless
+                # KARS_MESH_AUTO_RESPONDER=1, which the controller sets
+                # on sub-agent containers — parent is not enabled to
+                # avoid the parent looping on its own outbound).
+                try:
+                    from . import mesh_worker as _worker  # noqa: PLC0415
+
+                    _worker.start_worker(_mesh_module._get_or_init_client)  # noqa: SLF001
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not start mesh worker: %s", exc)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Eager MeshClient init failed (will retry on first tool call): %s",

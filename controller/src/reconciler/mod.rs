@@ -1351,6 +1351,35 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
         openclaw_env.push(json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}));
         openclaw_env.push(json!({"name": "KARS_AUTH_MODE", "value": "workload-identity"}));
+        // Hermes sub-agent auto-responder: when this sandbox was
+        // spawned by another (has the `kars.azure.com/parent` label
+        // set by the router's spawn endpoint), turn on the mesh
+        // worker loop so the child autonomously responds to inbound
+        // kars_mesh_send messages by invoking `hermes -z <payload>`
+        // and replying with the captured output. Without this, a
+        // Hermes sub-agent is a passive daemon: its LLM never runs
+        // until somebody hand-runs `hermes -z`, so the OpenClaw-style
+        // multi-agent fanout pattern (parent dispatches research
+        // brief to analyst, analyst does the work, replies to parent)
+        // doesn't work end-to-end. We do NOT enable this on the
+        // parent (the parent's LLM is human/external-driven; an
+        // auto-responder would re-invoke hermes on the children's
+        // replies and loop). OpenClaw doesn't need this because its
+        // plugin runs inside an always-on `openclaw agent --local`
+        // session.
+        if matches!(runtime_spec.kind, crate::crd::RuntimeKind::Hermes) {
+            let has_parent_label = sandbox
+                .metadata
+                .labels
+                .as_ref()
+                .is_some_and(|l| l.contains_key("kars.azure.com/parent"));
+            if has_parent_label {
+                openclaw_env.push(json!({
+                    "name": "KARS_MESH_AUTO_RESPONDER",
+                    "value": "1",
+                }));
+            }
+        }
         if is_openclaw {
             openclaw_env.push(json!({
                 "name": "OPENCLAW_GATEWAY_TOKEN",
