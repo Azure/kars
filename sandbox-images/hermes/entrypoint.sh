@@ -316,6 +316,114 @@ if [ "$IS_ROOT" = "true" ] && command -v iptables >/dev/null 2>&1; then
   iptables -A OUTPUT -m owner --uid-owner 1000 -j KARS_EGRESS 2>/dev/null || true
 fi
 
+# ── Workload Identity → Entra token exchange (opt-in) ────────────────────
+# Mirrors sandbox-images/openclaw/entrypoint.sh § "Workload Identity →
+# Entra token exchange". Without this block the Hermes plugin's
+# /agt/registry/v1/registry/verify call (in mesh.py) has no token to
+# present and the sandbox stays on the Anonymous tier in the operator
+# panel — even though the underlying Entra Agent ID is provisioned and
+# the workload identity binding is correct.
+#
+# Two paths (priority preserved from OpenClaw):
+#   1. MESH_AUTH_BACKEND=EntraAgentIdentity → ask the router's
+#      /v1/mesh-token endpoint for a sidecar-mediated mint (Phase 6.b).
+#   2. AGT_SKIP_ENTRA=1 → operator kill switch for dev clusters that
+#      don't have api://agentmesh provisioned. Skip the whole block.
+#   3. AZURE_FEDERATED_TOKEN_FILE set (default AKS WI path) → direct
+#      token exchange via the loopback forward proxy.
+#
+# Same fail-open trust-threshold rule as OpenClaw: when Entra fails,
+# AGT_TRUST_THRESHOLD is forced to 0 so anonymous-tier KNOCKs still go
+# through (the AGT SDK's X3DH proves cryptographic identity regardless).
+if [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
+  echo "[kars-hermes] MESH_AUTH_BACKEND=EntraAgentIdentity — acquiring mesh token via /v1/mesh-token"
+  _ROUTER_URL="${ROUTER_LOCAL_URL:-http://127.0.0.1:8443}"
+  _ACCESS_TOKEN=""
+  _DELAY=1
+  _ELAPSED=0
+  _MAX_WAIT="${MESH_TOKEN_MAX_WAIT:-60}"
+  _ATTEMPT=0
+  while [ "$_ELAPSED" -lt "$_MAX_WAIT" ]; do
+    _ATTEMPT=$((_ATTEMPT + 1))
+    _MESH_RESP=$(curl -s -4 --connect-timeout 3 --max-time 8 \
+      -w "\n__HTTP_STATUS__%{http_code}" \
+      "${_ROUTER_URL}/v1/mesh-token" 2>/dev/null || echo "")
+    _MESH_STATUS=$(printf '%s\n' "$_MESH_RESP" | grep -E '^__HTTP_STATUS__' | sed 's/^__HTTP_STATUS__//')
+    _MESH_BODY=$(printf '%s\n' "$_MESH_RESP" | sed '/^__HTTP_STATUS__/d')
+    if [ "$_MESH_STATUS" = "200" ]; then
+      _ACCESS_TOKEN=$(printf '%s' "$_MESH_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+      if [ -n "$_ACCESS_TOKEN" ]; then
+        echo "[kars-hermes] Mesh token acquired via auth-sidecar after ${_ATTEMPT} attempt(s) (${_ELAPSED}s) — verified-tier registration"
+        export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
+        break
+      fi
+    fi
+    if [ "$_MESH_STATUS" = "404" ]; then
+      echo "[kars-hermes] /v1/mesh-token returned 404 — router image too old for Phase 6.b"
+      break
+    fi
+    sleep "$_DELAY"
+    _ELAPSED=$((_ELAPSED + _DELAY))
+    if [ "$_DELAY" -lt 4 ]; then _DELAY=$((_DELAY * 2)); fi
+  done
+  if [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
+    echo "[kars-hermes] /v1/mesh-token failed after ${_ELAPSED}s (${_ATTEMPT} attempts, last status=${_MESH_STATUS:-network-error}); registering as anonymous tier"
+    export AGT_TRUST_THRESHOLD=0
+  fi
+  unset _MESH_RESP _MESH_STATUS _MESH_BODY _ROUTER_URL _ACCESS_TOKEN _DELAY _ELAPSED _MAX_WAIT _ATTEMPT
+elif [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
+  echo "[kars-hermes] AGT_SKIP_ENTRA=1 — Entra token exchange disabled, registering as anonymous tier"
+  if [ -n "${AGT_TRUST_THRESHOLD:-}" ] && [ "${AGT_TRUST_THRESHOLD}" != "0" ]; then
+    echo "[kars-hermes] AGT_SKIP_ENTRA=1 overrides AGT_TRUST_THRESHOLD=${AGT_TRUST_THRESHOLD} → 0 (anonymous-tier fail-open)"
+  fi
+  export AGT_TRUST_THRESHOLD=0
+elif [ -n "${AZURE_FEDERATED_TOKEN_FILE:-}" ] && [ -f "${AZURE_FEDERATED_TOKEN_FILE}" ] && \
+   [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ] && \
+   [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
+  echo "[kars-hermes] Exchanging Workload Identity token for Entra ID access token..."
+  _ACCESS_TOKEN=""
+  _DELAY=1
+  _ELAPSED=0
+  _MAX_WAIT="${ENTRA_TOKEN_MAX_WAIT:-120}"
+  _ATTEMPT=0
+  while [ "$_ELAPSED" -lt "$_MAX_WAIT" ]; do
+    _ATTEMPT=$((_ATTEMPT + 1))
+    _FED_TOKEN=$(cat "$AZURE_FEDERATED_TOKEN_FILE")
+    # UID 1000 is blocked from direct egress; route via the router's
+    # loopback forward proxy on 127.0.0.1:8444.
+    _TOKEN_RESP=$(curl -s -4 --connect-timeout 3 --max-time 10 \
+      -x "${ENTRA_PROXY:-http://127.0.0.1:8444}" \
+      "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token" \
+      -d "client_id=${AZURE_CLIENT_ID}" \
+      -d "scope=api://agentmesh/.default" \
+      -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+      -d "client_assertion=${_FED_TOKEN}" \
+      -d "grant_type=client_credentials" 2>/dev/null || echo "")
+    _ACCESS_TOKEN=$(echo "$_TOKEN_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+    if [ -n "$_ACCESS_TOKEN" ]; then
+      echo "[kars-hermes] Entra ID token acquired after ${_ATTEMPT} attempt(s) (${_ELAPSED}s) — Hermes will register as verified tier"
+      break
+    fi
+    if echo "$_TOKEN_RESP" | grep -q "AADSTS500011"; then
+      echo "[kars-hermes] Entra: api://agentmesh SP not provisioned in tenant — skipping retries, registering as anonymous tier"
+      break
+    fi
+    sleep "$_DELAY"
+    _ELAPSED=$((_ELAPSED + _DELAY))
+    if [ "$_DELAY" -lt 4 ]; then _DELAY=$((_DELAY * 2)); fi
+  done
+  if [ -n "$_ACCESS_TOKEN" ]; then
+    export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
+  else
+    echo "[kars-hermes] Entra token exchange failed after ${_ELAPSED}s (${_ATTEMPT} attempts) — Hermes will register as anonymous tier"
+    if [ -n "${AGT_TRUST_THRESHOLD:-}" ] && [ "${AGT_TRUST_THRESHOLD}" != "0" ]; then
+      echo "[kars-hermes] Entra exchange failed: overriding AGT_TRUST_THRESHOLD=${AGT_TRUST_THRESHOLD} → 0 (anonymous-tier fail-open)"
+    fi
+    export AGT_TRUST_THRESHOLD=0
+  fi
+  unset _FED_TOKEN _TOKEN_RESP _ACCESS_TOKEN _DELAY _ELAPSED _MAX_WAIT _ATTEMPT
+fi
+
 # ── Contract version assertion ───────────────────────────────────────────
 # Per docs/runtimes/CONTRACT.md, runtimes MUST error loudly on unknown
 # contract version. Controller injects KARS_RUNTIME_CONTRACT_VERSION=v1

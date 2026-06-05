@@ -122,6 +122,57 @@ def _get_or_init_client() -> MeshClient:
             relay_url,
             registry_url,
         )
+
+        # ── Entra OAuth identity verification (opt-in) ─────────────────
+        # Mirrors OpenClaw's `/registry/verify` call in
+        # runtimes/openclaw/src/index.ts: when AGT_OAUTH_TOKEN is set
+        # (the controller injects a token exchanged from the pod's
+        # workload identity), POST it to the registry so the operator
+        # panel can show "Verified (Entra <appId-prefix>…)" tier instead
+        # of "Anonymous". Without this call, every Hermes sandbox stays
+        # Anonymous in the operator view even though the underlying
+        # Entra Agent ID is correctly provisioned.
+        oauth_token = os.environ.get("AGT_OAUTH_TOKEN", "").strip()
+        if oauth_token:
+            try:
+                from . import router_client  # noqa: PLC0415
+
+                # Use the registry-canonical DID (the AGT registry
+                # stores agents under `did:mesh:<sha256[:32]>`; the
+                # local kars_agt_mesh.identity emits the same shape, so
+                # the two agree).
+                verify_id = client._identity.did  # noqa: SLF001
+                resp = router_client.call(
+                    "POST",
+                    "/agt/registry/v1/registry/verify",
+                    json={
+                        "amid": verify_id,
+                        "verification_token": oauth_token,
+                    },
+                )
+                if resp.status_code < 400:
+                    logger.info(
+                        "AGT identity verified via OAuth — tier upgraded "
+                        "to 'verified' (id=%s)",
+                        verify_id,
+                    )
+                else:
+                    logger.warning(
+                        "AGT OAuth verification HTTP %s (anonymous tier): %s",
+                        resp.status_code,
+                        resp.text[:200],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "AGT OAuth verification failed (anonymous tier): %s",
+                    exc,
+                )
+        else:
+            logger.debug(
+                "AGT_OAUTH_TOKEN unset — Hermes sandbox stays at "
+                "anonymous tier in operator view"
+            )
+
         return client
 
 
