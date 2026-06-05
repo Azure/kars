@@ -105,20 +105,25 @@ async def _handle_message(client: Any, msg: Any) -> None:
     # ── Publish peer to router trust store (operator panel feed) ──
     # Without this, the operator's per-sandbox AGT view stays empty
     # even after a successful KNOCK + decrypted MESSAGE, because the
-    # router only learns about peers from plugin pushes. OpenClaw
-    # does the equivalent inside its onKnock handler
-    # (runtimes/openclaw/src/index.ts: pushTrustToRouter(fromName,
-    # 0.0)). Resolve the sender's display_name first so the entry
-    # shows a human-readable peer (operator panel keys on name, not
-    # DID). Score 0.0 → router's baseline 500 = at-threshold trust;
-    # subsequent interactions adjust via the same submit_trust path.
+    # router only learns about peers from plugin pushes.
+    #
+    # Score convention: OpenClaw's TS plugin computes
+    # `Math.round(500 + scoreDelta * 500)` for its trust pushes
+    # (runtimes/openclaw/src/core/router-client.ts: pushTrustToRouter),
+    # so `pushTrustToRouter(name, 0.0)` produces score=500 (router
+    # baseline = at-threshold). The Python `submit_trust` helper
+    # uses a different scaling: a 0.0-1.0 score multiplies to
+    # 0-1000 directly. To match OpenClaw's "at-threshold-baseline"
+    # convention on the FIRST interaction we send score=0.5
+    # (=500 in scaled units), not score=0.0 (which would scale to 0
+    # and trigger the router's anonymous-tier minimum of 10).
     try:
         from . import telemetry as _telemetry  # noqa: PLC0415
 
         sender_name_for_trust = await _resolve_sender_name(client, msg.from_did)
         _telemetry.submit_trust(
             agent_id=sender_name_for_trust or msg.from_did,
-            score=0.0,
+            score=0.5,
             interactions=1,
         )
     except Exception as exc:  # noqa: BLE001
