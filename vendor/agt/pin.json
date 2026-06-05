@@ -1,7 +1,7 @@
 {
-  "url": "https://github.com/pallakatos/agent-governance-toolkit.git",
+  "url": "https://github.com/microsoft/agent-governance-toolkit.git",
   "branch": "kars-sdk-pop-signing",
-  "sha": "bdea10970f641fa695bb6dce7f8cee425f8aebd6",
-  "shortSha": "bdea1097",
-  "_comment": "Single source of truth for the AGT toolkit fork pin. Used by cli/src/lib/agt-bootstrap.ts to auto-clone when KARS_AGT_REPO is unset and ~/agent-governance-toolkit is missing. Update in lockstep with: Cargo.toml [patch.crates-io] rev, vendor/agt/microsoft-agent-governance-sdk-*.tgz tarball name, and {mesh-plugin,runtimes/openclaw}/package.json file: dep. When upstream PR #2772 merges to microsoft/agent-governance-toolkit main, repoint url+branch+sha to the upstream merge commit; when AGT cuts a release containing it, delete this file entirely and switch to the published npm/ghcr.io artifacts."
+  "sha": "3322175d88baf61e8ceab8e392e29fa2bf9b580a",
+  "shortSha": "3322175d",
+  "_comment": "Single source of truth for the AGT toolkit pin. Used by cli/src/lib/agt-bootstrap.ts to auto-clone when KARS_AGT_REPO is unset and ~/agent-governance-toolkit is missing. Update in lockstep with: Cargo.toml [patch.crates-io] rev, vendor/agt/microsoft-agent-governance-sdk-*.tgz tarball name, and {mesh-plugin,runtimes/openclaw}/package.json file: dep. Currently tracks microsoft/agent-governance-toolkit:kars-sdk-pop-signing, a feature branch on the upstream repo that carries TWO pre-release fixes kars depends on: (1) TypeScript SDK proof-of-possession registration + connect-frame signing (upstream PR #2772, in review); (2) X3DH KDF spec-compliance per Signal §2.2 (F prefix in IKM, zero salt — separate upstream PR pending). When both fixes merge to main and AGT cuts a release containing them, delete this file and switch to the published npm/ghcr.io artifacts."
 }

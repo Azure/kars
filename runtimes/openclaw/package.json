@@ -34,7 +34,7 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "@microsoft/agent-governance-sdk": "file:../../vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-bdea1097.tgz"
+    "@microsoft/agent-governance-sdk": "file:../../vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-3322175d.tgz"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
