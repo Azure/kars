@@ -230,43 +230,49 @@ class MeshClient:
     async def send_by_did(self, *, to: str, payload: bytes) -> None:
         """Encrypt ``payload`` for ``to`` and dispatch via the relay.
 
-        First call to a new peer performs the X3DH handshake and
-        sends a fused KNOCK + first-message frame; subsequent calls
-        reuse the established :class:`SecureChannel`."""
+        First call to a new peer sends TWO frames in succession:
+          1. ``type=knock`` with ``establishment={ik,ek,otk}`` (NO ciphertext)
+          2. ``type=message`` with the encrypted payload
+
+        This matches the TypeScript SDK (``@microsoft/agent-governance-sdk``)
+        wire convention exactly so a Python sender can interop with a TS
+        receiver and vice versa. An earlier draft fused KNOCK + first
+        ciphertext into a single frame which only Python receivers
+        understood — TS receivers ignored the bundled ciphertext and
+        the first message was lost on cross-runtime sends.
+        """
         if not self._is_connected:
             raise MeshTransportError("Not connected — call connect() first")
         if self._relay is None or self._registry is None:
             raise MeshTransportError("Internal state corrupted: registry/relay missing")
 
         channel = self._channels.get(to)
-        knock_payload: dict | None = None
         if channel is None:
             channel, establishment = await self._initiate_session(to)
             self._channels[to] = channel
-            knock_payload = _establishment_to_wire(establishment)
+            knock_frame = {
+                "v": 1,
+                "type": "knock",
+                "from": self._identity.did,
+                "to": to,
+                "id": str(uuid.uuid4()),
+                "ts": _iso_utc(),
+                "intent": {"action": "establish_session"},
+                "establishment": _establishment_to_wire(establishment),
+            }
+            await self._relay.send_frame(knock_frame)
+            logger.debug("Sent KNOCK to %s (id=%s)", to, knock_frame["id"])
 
-        # SecureChannel.send returns the wire-ready EncryptedMessage
-        # (the same shape SecureChannel.receive accepts on the other
-        # side). We wrap it in the relay frame envelope.
         encrypted = channel.send(payload)
-        frame: dict = {
-            "v": 1,
-            "type": "knock" if knock_payload is not None else "message",
-            "from": self._identity.did,
-            "to": to,
-            "id": str(uuid.uuid4()),
-            "ts": _iso_utc(),
-            "ciphertext": _encrypted_to_wire(encrypted),
-        }
-        if knock_payload is not None:
-            frame["establishment"] = knock_payload
-        await self._relay.send_frame(frame)
+        message_frame = _encrypted_to_message_frame(
+            encrypted, self._identity.did, to
+        )
+        await self._relay.send_frame(message_frame)
         logger.debug(
-            "Sent %s frame (%d bytes payload) to %s (id=%s)",
-            frame["type"],
+            "Sent MESSAGE frame (%d bytes payload) to %s (id=%s)",
             len(payload),
             to,
-            frame["id"],
+            message_frame["id"],
         )
 
     def inbox(self) -> AsyncIterator[InboundMessage]:
@@ -323,16 +329,18 @@ class MeshClient:
             return
         channel = self._channels.get(from_did)
         if channel is None:
-            # We don't have a session for this peer yet — they should
-            # have sent a KNOCK first. Drop (the relay will not
-            # re-deliver, so this is fail-loud rather than fail-quiet).
             logger.warning(
                 "Dropping message from %s: no SecureChannel (KNOCK first)",
                 from_did,
             )
             return
         try:
-            plaintext = channel.receive(_wire_to_encrypted(frame["ciphertext"]))
+            encrypted = _message_frame_to_encrypted(frame)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Malformed message from %s: %s", from_did, exc)
+            return
+        try:
+            plaintext = channel.receive(encrypted)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Decrypt failed for %s: %s", from_did, exc)
             return
@@ -346,13 +354,17 @@ class MeshClient:
         )
 
     async def _handle_knock_frame(self, frame: dict) -> None:
-        """Auto-accept a KNOCK + decrypt the bundled first message.
+        """Auto-accept a KNOCK frame.
 
         The KNOCK carries the initiator's :class:`ChannelEstablishment`
-        which lets us rebuild the responder-side SecureChannel via
-        ``SecureChannel.create_receiver``. The same frame also carries
-        the first ciphertext so the round-trip latency is one RTT
-        (initiator → responder → reply), not two.
+        in the ``establishment`` field, which lets us rebuild the
+        responder-side SecureChannel via
+        ``SecureChannel.create_receiver``. After this, the actual
+        first message arrives in a separate ``type=message`` frame
+        (TS SDK wire convention — `mesh-client.js` sends KNOCK and
+        first message as two distinct frames). Earlier Python builds
+        fused them into one frame; that was incompatible with TS
+        receivers and has been removed.
         """
         from_did = frame.get("from")
         if not isinstance(from_did, str):
@@ -375,7 +387,9 @@ class MeshClient:
             return
 
         # Responder AAD: initiator computed `${initiator_did}|${self_did}`;
-        # we mirror that exact byte string.
+        # we mirror that exact byte string. Matches TS
+        # `new TextEncoder().encode(\`${peerId}|${this.activeDid}\`)`
+        # in mesh-client.js::acceptSession.
         aad = f"{from_did}|{self._identity.did}".encode("utf-8")
         try:
             channel = SecureChannel.create_receiver(
@@ -387,9 +401,6 @@ class MeshClient:
             )
             return
 
-        # Replenish the OTK pool eagerly so the next KNOCK doesn't
-        # have to wait for one. Fire-and-forget — failure here only
-        # affects future sessions, not this one.
         try:
             await self._top_up_otks()
         except Exception as exc:  # noqa: BLE001
@@ -397,26 +408,6 @@ class MeshClient:
 
         self._channels[from_did] = channel
         logger.info("Accepted KNOCK from %s", from_did)
-
-        # KNOCKs always carry the first message ciphertext (initiator
-        # never sends a bare KNOCK in our wire format).
-        cipher = frame.get("ciphertext")
-        if isinstance(cipher, str):
-            try:
-                plaintext = channel.receive(_wire_to_encrypted(cipher))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "First-message decrypt failed for %s: %s", from_did, exc
-                )
-                return
-            await self._inbox.put(
-                InboundMessage.new(
-                    from_did=from_did,
-                    from_display_name=None,
-                    payload=plaintext,
-                    message_id=str(frame.get("id", "")),
-                )
-            )
 
     async def _top_up_otks(self, *, threshold: int = 3, batch: int = 10) -> None:
         """Re-publish a fresh batch of OTKs when the unused pool is
@@ -471,34 +462,116 @@ def _iso_utc() -> str:
     )
 
 
-def _encrypted_to_wire(em: EncryptedMessage) -> str:
-    """Serialize an upstream :class:`EncryptedMessage` to the wire-format
-    string the relay accepts (base64url of the binary serialization)."""
-    return _b64url(em.serialize())
+def _b64std(b: bytes) -> str:
+    """Standard (NOT urlsafe) base64 with padding — matches what JS's
+    ``btoa`` / Node's ``Buffer.toString('base64')`` produce on the
+    TS-side SDK. The relay envelope expects std-base64 for the
+    ``ciphertext`` + ``header.dh`` fields of a ``type=message`` frame
+    and for the ``establishment.{ik,ek}`` fields of a KNOCK frame.
+    """
+    return base64.b64encode(b).decode("ascii")
 
 
-def _wire_to_encrypted(s: str) -> EncryptedMessage:
-    """Inverse of :func:`_encrypted_to_wire` — used on the receive
-    side. Returns the upstream ``EncryptedMessage`` instance ready
-    for :meth:`SecureChannel.receive`."""
-    return EncryptedMessage.deserialize(_b64url_decode(s))
+def _b64std_decode(s: str) -> bytes:
+    """Tolerant std-base64 decode: accepts both urlsafe and standard
+    alphabets so we interop with senders that prefer either (Python
+    libraries default to urlsafe, browsers default to standard)."""
+    s = s.strip()
+    # Restore canonical alphabet (urlsafe → standard)
+    s = s.replace("-", "+").replace("_", "/")
+    pad = "=" * (-len(s) % 4)
+    return base64.b64decode(s + pad)
 
 
-def _establishment_to_wire(est: ChannelEstablishment) -> dict:
-    """Serialize a :class:`ChannelEstablishment` to a JSON-safe dict
-    suitable for embedding inside a relay frame's ``establishment``
-    field. Keys mirror the upstream dataclass fields."""
+def _encrypted_to_message_frame(
+    em: EncryptedMessage, from_did: str, to_did: str
+) -> dict:
+    """Build a ``type=message`` relay frame matching the TS SDK wire
+    convention (``mesh-client.js::send``).
+
+    The header is a structured object ``{dh, pn, n}`` with std-base64
+    ``dh``; the ciphertext is std-base64. An earlier Python build
+    packed the header+ciphertext into a single urlsafe-b64 blob in
+    the ``ciphertext`` field — only Python receivers understood that
+    shape and TS receivers dropped the message on the floor.
+    """
     return {
-        "initiator_identity_key": _b64url(est.initiator_identity_key),
-        "ephemeral_public_key": _b64url(est.ephemeral_public_key),
-        "used_one_time_key_id": est.used_one_time_key_id,
+        "v": 1,
+        "type": "message",
+        "from": from_did,
+        "to": to_did,
+        "id": str(uuid.uuid4()),
+        "ts": _iso_utc(),
+        "header": {
+            "dh": _b64std(em.header.dh_public_key),
+            "pn": em.header.previous_chain_length,
+            "n": em.header.message_number,
+        },
+        "ciphertext": _b64std(em.ciphertext),
     }
 
 
+def _message_frame_to_encrypted(frame: dict) -> EncryptedMessage:
+    """Inverse of :func:`_encrypted_to_message_frame`. Tolerates both
+    the TS shape (``header.{dh,pn,n}`` + ``ciphertext``) and an older
+    legacy shape (``ciphertext`` carrying everything b64url-packed)
+    for one release cycle so in-flight messages mid-upgrade aren't
+    lost.
+    """
+    from agentmesh.encryption.ratchet import MessageHeader
+
+    header = frame.get("header")
+    if isinstance(header, dict) and "dh" in header:
+        return EncryptedMessage(
+            header=MessageHeader(
+                dh_public_key=_b64std_decode(header["dh"]),
+                previous_chain_length=int(header.get("pn", 0)),
+                message_number=int(header.get("n", 0)),
+            ),
+            ciphertext=_b64std_decode(frame["ciphertext"]),
+        )
+    # Legacy fallback: header was packed into the ciphertext blob.
+    return EncryptedMessage.deserialize(_b64std_decode(frame["ciphertext"]))
+
+
+def _establishment_to_wire(est: ChannelEstablishment) -> dict:
+    """Serialize a :class:`ChannelEstablishment` to the TS-compatible
+    JSON shape (``mesh-client.js::serializeEstablishment``):
+
+    .. code-block:: json
+
+        {"ik": "<std-base64>", "ek": "<std-base64>", "otk": <int|missing>}
+
+    where ``ik`` is the initiator's X25519 identity public key, ``ek``
+    is the ephemeral X25519 public key, and ``otk`` is the consumed
+    one-time-prekey id (omitted if no OTK was used). Earlier Python
+    used long snake_case field names that the TS SDK didn't recognise.
+    """
+    out: dict = {
+        "ik": _b64std(est.initiator_identity_key),
+        "ek": _b64std(est.ephemeral_public_key),
+    }
+    if est.used_one_time_key_id is not None:
+        out["otk"] = int(est.used_one_time_key_id)
+    return out
+
+
 def _wire_to_establishment(d: dict) -> ChannelEstablishment:
+    """Inverse of :func:`_establishment_to_wire`. Accepts both the
+    TS short-key shape (``ik``/``ek``/``otk``) and the legacy Python
+    long-key shape (``initiator_identity_key``/...) for one release
+    cycle to bridge mid-upgrade fleets.
+    """
+    if "ik" in d:
+        otk_raw = d.get("otk")
+        return ChannelEstablishment(
+            initiator_identity_key=_b64std_decode(d["ik"]),
+            ephemeral_public_key=_b64std_decode(d["ek"]),
+            used_one_time_key_id=int(otk_raw) if otk_raw is not None else None,
+        )
     return ChannelEstablishment(
-        initiator_identity_key=_b64url_decode(d["initiator_identity_key"]),
-        ephemeral_public_key=_b64url_decode(d["ephemeral_public_key"]),
+        initiator_identity_key=_b64std_decode(d["initiator_identity_key"]),
+        ephemeral_public_key=_b64std_decode(d["ephemeral_public_key"]),
         used_one_time_key_id=d.get("used_one_time_key_id"),
     )
 
