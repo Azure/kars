@@ -253,6 +253,13 @@ export function pushCommand(): Command {
           dockerfile: "sandbox-images/langgraph-ts/Dockerfile" },
         { name: "runtime-pydantic-ai", tag: "kars-runtime-pydantic-ai:latest",
           dockerfile: "sandbox-images/pydantic-ai/Dockerfile" },
+        // Hermes runtime — ships the kars plugin (governance hook,
+        // kars_spawn family, Foundry tool wrappers) + the real Python
+        // AGT MeshClient (kars-agt-mesh). Controller default tag is
+        // `kars-runtime-hermes:latest` from reconciler/runtime.rs
+        // DEFAULT_HERMES_IMAGE.
+        { name: "runtime-hermes", tag: "kars-runtime-hermes:latest",
+          dockerfile: "sandbox-images/hermes/Dockerfile" },
       ];
 
       // Filter if --only specified; skip sandbox-base unless explicitly requested
