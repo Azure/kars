@@ -73,20 +73,22 @@ async def _resolve_sender_name(client: Any, did: str) -> str | None:
     """Reverse-lookup a peer DID → display name via the registry.
 
     Used so we reply with `to_agent=<name>` (the OpenClaw convention
-    other plugins also use) rather than the raw DID."""
+    other plugins also use), and so the operator's per-sandbox AGT
+    trust panel shows a human-readable peer name instead of the raw
+    `did:mesh:<hex>`. Prefer the direct `GET /v1/agents/<did>` path:
+    it's O(1) on the registry side and works for any registered DID,
+    versus the previous discover-and-scan loop which silently returned
+    nothing because the AGT registry rejects `discover("")` (empty
+    capability)."""
     if client._registry is None:  # noqa: SLF001 — internal but stable
         return None
     try:
-        # The registry doesn't index by DID. We fall back to scanning
-        # the most-recent discover hits and matching on did.
-        # This is best-effort; if we can't resolve, we still reply by DID.
-        agents = await client._registry.discover("", limit=200)  # noqa: SLF001
-        for a in agents:
-            if a.did == did:
-                return a.display_name or (a.capabilities[0] if a.capabilities else None)
+        agent = await client._registry.get_agent(did)  # noqa: SLF001
     except Exception:  # noqa: BLE001
         return None
-    return None
+    if agent is None:
+        return None
+    return agent.display_name or (agent.capabilities[0] if agent.capabilities else None)
 
 
 async def _handle_message(client: Any, msg: Any) -> None:
@@ -99,6 +101,29 @@ async def _handle_message(client: Any, msg: Any) -> None:
         msg.from_did,
         len(msg.payload),
     )
+
+    # ── Publish peer to router trust store (operator panel feed) ──
+    # Without this, the operator's per-sandbox AGT view stays empty
+    # even after a successful KNOCK + decrypted MESSAGE, because the
+    # router only learns about peers from plugin pushes. OpenClaw
+    # does the equivalent inside its onKnock handler
+    # (runtimes/openclaw/src/index.ts: pushTrustToRouter(fromName,
+    # 0.0)). Resolve the sender's display_name first so the entry
+    # shows a human-readable peer (operator panel keys on name, not
+    # DID). Score 0.0 → router's baseline 500 = at-threshold trust;
+    # subsequent interactions adjust via the same submit_trust path.
+    try:
+        from . import telemetry as _telemetry  # noqa: PLC0415
+
+        sender_name_for_trust = await _resolve_sender_name(client, msg.from_did)
+        _telemetry.submit_trust(
+            agent_id=sender_name_for_trust or msg.from_did,
+            score=0.0,
+            interactions=1,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("mesh_worker: trust publish failed (non-fatal): %s", exc)
+
     # Cap the per-prompt timeout so a misbehaving inbound can't pin a
     # worker forever. 25 min matches the parent's typical patience for
     # a sub-agent doing real Foundry work (research + code + image).

@@ -1845,12 +1845,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "sandbox-data", "mountPath": "/sandbox"}),
             json!({"name": "tmp", "mountPath": "/tmp"}),
         ];
-        if is_openclaw {
-            // OpenClaw plugin needs admin token to authenticate trust
-            // mutations after KNOCK handshakes (pushTrustToRouter).
-            // BYO does not run the plugin — mount is omitted to keep the
-            // attack surface narrow (defense-in-depth § the principle of
-            // least privilege).
+        // Runtimes that ship the kars governance plugin (OpenClaw via TS
+        // and Hermes via Python) push trust deltas to the router's
+        // `/agt/trust` endpoint after each successful KNOCK / decrypted
+        // mesh message. That endpoint requires a bearer admin token
+        // (see inference-router/src/routes/governance.rs::agt_trust_update)
+        // so the sandbox cannot forge peer scores via the localhost
+        // auth exemption. Both runtimes read the token from
+        // /etc/kars/secrets/admin-token (router-client.ts ADMIN_TOKEN_PATHS
+        // for OpenClaw and router_client.py ADMIN_TOKEN_PATH for Hermes).
+        // BYO does not run a kars plugin — omit the mount so the attack
+        // surface stays narrow (principle of least privilege).
+        let runs_kars_plugin = matches!(
+            runtime_spec.kind,
+            crate::crd::RuntimeKind::OpenClaw | crate::crd::RuntimeKind::Hermes
+        );
+        if runs_kars_plugin {
             agent_volume_mounts.push(json!({
                 "name": "admin-token",
                 "mountPath": "/etc/kars/secrets",
@@ -2069,19 +2079,26 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         governance_mounts::paths::TOOL_POLICY_DIR,
                         Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
                     );
-                    // Also mount into the openclaw container: its entrypoint
-                    // (`sandbox-images/openclaw/entrypoint.sh`) reads the
-                    // compiled `agt-profile.yaml` so the in-process
-                    // `@microsoft/agent-governance-sdk` engine has a
-                    // ToolPolicy to enforce on agent tool calls. Without
-                    // this mount the openclaw container warns
-                    // "AGT engine will start with an empty policy set and
-                    // fail closed". The volume itself was already added by
-                    // `inject_configmap_mount` above, so this only appends
-                    // the mount + env into the openclaw container.
+                    // Also mount into the agent container — both OpenClaw
+                    // and Hermes load the compiled `agt-profile.yaml` in
+                    // the in-process governance engine (TS:
+                    // `@microsoft/agent-governance-sdk`; Python:
+                    // `agent-governance-toolkit-core`). Without this
+                    // mount the agent container starts with an empty
+                    // policy set and the AGT engine fails closed on
+                    // every tool call. The volume itself was already
+                    // added by `inject_configmap_mount` above, so this
+                    // only appends the mount + env into whichever
+                    // container holds the agent runtime.
+                    //
+                    // Container name depends on the runtime kind:
+                    // OpenClaw uses "openclaw", every other runtime
+                    // (Hermes, OpenAIAgents, MAF, BYO, ...) uses the
+                    // generic "agent" name (see S10.A2.b — single
+                    // branch point keyed off `is_openclaw`).
                     governance_mounts::inject_container_mount_public(
                         &mut pod_spec,
-                        "openclaw",
+                        agent_container_name,
                         "agt-policy",
                         governance_mounts::paths::TOOL_POLICY_DIR,
                         Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),

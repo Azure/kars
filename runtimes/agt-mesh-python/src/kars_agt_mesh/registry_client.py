@@ -338,6 +338,34 @@ class RegistryClient:
             f"heartbeat failed: HTTP {resp.status_code} {resp.text[:200]}"
         )
 
+    # ── Direct DID lookup ──────────────────────────────────────────────
+
+    async def get_agent(self, did: str) -> DiscoveredAgent | None:
+        """``GET /v1/agents/{did}`` — fetch a single agent record by DID.
+
+        Returns ``None`` if the registry has no entry (404). Raises for
+        other HTTP errors. Used by callers that need to reverse-resolve
+        a peer's display name from an inbound message's ``from_did``
+        without scanning the full ``/v1/discover`` result set
+        (``discover("")`` returns nothing on the AGT registry — the
+        ``capability`` query parameter is mandatory).
+        """
+        resp = await self._client.get(f"/v1/agents/{did}")
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise MeshRegistryError(
+                f"get_agent({did!r}) failed: HTTP {resp.status_code} {resp.text[:200]}"
+            )
+        body = resp.json()
+        return DiscoveredAgent(
+            did=did,
+            capabilities=body.get("capabilities", []),
+            metadata=body.get("metadata", {}),
+            last_seen=body.get("last_seen", ""),
+            reputation_score=float(body.get("reputation_score", 0.0)),
+        )
+
     # ── Ed25519-Timestamp auth ─────────────────────────────────────────
 
     def _auth_headers(self, _method: str, _path: str) -> dict[str, str]:
