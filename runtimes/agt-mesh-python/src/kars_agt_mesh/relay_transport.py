@@ -73,6 +73,7 @@ class RelayTransport:
         reconnect_initial_seconds: float,
         reconnect_max_seconds: float,
         on_frame: FrameHandler,
+        entra_token: str | None = None,
     ) -> None:
         self._url = url
         self._identity_did = identity_did
@@ -83,6 +84,13 @@ class RelayTransport:
         self._reconnect_initial = reconnect_initial_seconds
         self._reconnect_max = reconnect_max_seconds
         self._on_frame = on_frame
+        # Entra-signed JWT presented on the WS connect frame when the
+        # AGT relay has Entra enforcement enabled
+        # (AGENTMESH_ENTRA_ENFORCE=true → relay/app.py rejects the
+        # connect with "Authentication required (Entra)" when this
+        # field is missing). The TS SDK includes the same token under
+        # the `token` key — Python parity here.
+        self._entra_token = entra_token
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._recv_task: asyncio.Task[None] | None = None
@@ -201,20 +209,30 @@ class RelayTransport:
         - ``public_key`` — standard (NOT urlsafe) base64 Ed25519 public key
         - ``timestamp``  — ISO-8601 UTC within 5-minute replay window
         - ``signature``  — standard base64 Ed25519 sig over ``timestamp``
+
+        Optional field used by Entra-enforcing relays
+        (AGENTMESH_ENTRA_ENFORCE=true on the relay deployment):
+
+        - ``token``      — Entra-signed JWT for this agent identity. The
+                           relay verifies the JWT against Entra JWKS,
+                           extracts ``appid`` to seed verified tier, and
+                           rejects the WS with code 4003
+                           "Authentication required (Entra)" if absent.
         """
         ts = _iso_utc()
         sig = self._signing_key.sign(ts.encode("utf-8")).signature
+        frame: dict[str, object] = {
+            "v": 1,
+            "type": "connect",
+            "from": self._identity_did,
+            "public_key": base64.b64encode(self._public_key).decode("ascii"),
+            "timestamp": ts,
+            "signature": base64.b64encode(sig).decode("ascii"),
+        }
+        if self._entra_token:
+            frame["token"] = self._entra_token
         await self._ws.send(  # type: ignore[union-attr]
-            json.dumps(
-                {
-                    "v": 1,
-                    "type": "connect",
-                    "from": self._identity_did,
-                    "public_key": base64.b64encode(self._public_key).decode("ascii"),
-                    "timestamp": ts,
-                    "signature": base64.b64encode(sig).decode("ascii"),
-                }
-            )
+            json.dumps(frame)
         )
 
     async def _heartbeat_loop(self) -> None:

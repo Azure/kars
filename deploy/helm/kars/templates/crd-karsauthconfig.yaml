@@ -125,6 +125,39 @@ spec:
                 # block carries operator-supplied downstream-API
                 # configuration that the sidecar passes through opaque.
                 x-kubernetes-preserve-unknown-fields: true
+              foundryRbac:
+                type: array
+                description: |
+                  Per-sandbox ARM RBAC role assignments the controller
+                  PUTs against each new per-sandbox agent identity SP at
+                  provisioning time (and DELETEs on deprovision).
+                  Eliminates the manual `az role assignment create` step
+                  operators would otherwise run for each new sandbox.
+                  Requires the controller MI to have
+                  `Microsoft.Authorization/roleAssignments/write` on
+                  each listed scope. See
+                  `controller/src/auth_config.rs::FoundryRbacAssignment`
+                  and `docs/architecture/entra-agent-id/05-security-alignment.md`.
+                items:
+                  type: object
+                  required: [scope, roleDefinitionIds]
+                  properties:
+                    scope:
+                      type: string
+                      description: |
+                        Full ARM scope to assign at. Typical values:
+                        - `/subscriptions/<sub>/resourceGroups/<rg>` for an entire RG
+                        - `/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<name>`
+                          for a single Foundry account.
+                    roleDefinitionIds:
+                      type: array
+                      description: |
+                        Built-in role definition GUIDs to grant at this scope.
+                        kars-recommended defaults:
+                        - `5e0bd9bd-7b93-4f28-af87-19fc36ad61bd` — Cognitive Services OpenAI User
+                        - `53ca6127-db72-4b80-b1b0-d745d6d5456d` — Azure AI User
+                      items:
+                        type: string
           status:
             type: object
             properties:

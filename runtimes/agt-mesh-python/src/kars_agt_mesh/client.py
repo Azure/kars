@@ -173,6 +173,18 @@ class MeshClient:
             # Lazy-import to keep transport optional in unit tests.
             from .relay_transport import RelayTransport
 
+            # Pass through the Entra-signed JWT so Entra-enforcing
+            # relays (AGENTMESH_ENTRA_ENFORCE=true) accept the WS
+            # connect frame. Mirror of the TS SDK's behaviour
+            # (mesh-client.ts passes the same token under the
+            # ``token`` key on the connect frame). The entrypoint
+            # script populates AGT_OAUTH_TOKEN via workload-identity
+            # exchange when the operator opts into Entra-verified mesh
+            # peers via `MESH_AUTH_BACKEND=EntraAgentIdentity` on the
+            # KarsAuthConfig.
+            import os as _os
+            _entra_token = _os.environ.get("AGT_OAUTH_TOKEN") or None
+
             self._relay = RelayTransport(
                 url=self._config.relay_url,
                 identity_did=self._identity.did,
@@ -183,6 +195,7 @@ class MeshClient:
                 reconnect_initial_seconds=self._config.reconnect_initial_seconds,
                 reconnect_max_seconds=self._config.reconnect_max_seconds,
                 on_frame=self._handle_frame,
+                entra_token=_entra_token,
             )
             await self._relay.connect()
             self._is_connected = True
