@@ -103,11 +103,29 @@ def _action_verb(tool_name: str, params: dict[str, Any]) -> str:
         return _canonicalize(f"memory:{op}")
 
     if tool_name == "kars_mesh_send":
-        target = str(params.get("target_agent", ""))
+        # Accept all three conventional arg names — the OpenClaw
+        # canonical (`to_agent`), the Hermes short form (`to`), and
+        # the legacy `target_agent` an earlier draft used.
+        target = str(
+            params.get("to_agent")
+            or params.get("to")
+            or params.get("target_agent")
+            or ""
+        )
         return _canonicalize(f"mesh:send:{target}")
     if tool_name == "kars_mesh_transfer_file":
-        target = str(params.get("to_agent", ""))
+        target = str(params.get("to_agent") or params.get("to") or "")
         return _canonicalize(f"mesh:transfer_file:{target}")
+    if tool_name in ("kars_mesh_inbox", "kars_mesh_await"):
+        # Drain / wait ops — capture the senders filter so audit shows
+        # "who the agent is listening for".
+        senders = params.get("senders") or []
+        if isinstance(senders, list):
+            tag = ",".join(str(s) for s in senders[:3])
+        else:
+            tag = str(senders)
+        op = "inbox" if tool_name == "kars_mesh_inbox" else "await"
+        return _canonicalize(f"mesh:{op}:{tag}")
 
     if tool_name == "kars_handoff_request":
         target = str(params.get("target", ""))
@@ -211,34 +229,47 @@ def evaluate(tool_name: str, params: dict[str, Any]) -> GovernanceDecision:
     )
 
 
-def _on_pre_tool_call(tool_name: str, params: dict[str, Any], **_kwargs: Any) -> Any:
+def _on_pre_tool_call(
+    tool_name: str = "",
+    args: dict[str, Any] | None = None,
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    **_kwargs: Any,
+) -> Any:
     """Hermes ``pre_tool_call`` hook implementation.
 
-    Hermes calls every registered hook before dispatching the tool. We
-    POST /agt/evaluate, and on deny return a JSON-string result that
-    Hermes interprets as short-circuiting the call.
+    Hermes invokes hooks with KEYWORD arguments matching the names in
+    its own VALID_HOOKS spec (plugins.py:1688): ``tool_name=``,
+    ``args=``, ``task_id=``, ``session_id=``, ``tool_call_id=``.
+    Earlier versions of this hook used ``params=`` which silently
+    captured nothing because Python rejected the mismatch via kwargs
+    and the hook crashed → Hermes swallowed the exception → no
+    audit entry was ever written for tool calls. Only the inference
+    gate (``/v1/responses``, audited by the router proxy itself)
+    showed up in the AGT audit log.
+
+    On deny we return a JSON-string result that Hermes interprets as
+    short-circuiting the call (returns ``{"action": "block",
+    "message": "..."}`` semantics expected by ``get_pre_tool_call_block_message``).
     """
+    params = args or {}
     decision = evaluate(tool_name, params)
     if decision.allowed:
         return None  # proceed to tool dispatch
 
     reason = decision.reason or "denied by AGT policy"
     rule = decision.matched_rule or "unspecified"
-    msg = f"⛔ Blocked by AGT policy: rule \"{rule}\" — {reason}"
+    msg = f'⛔ Blocked by AGT policy: rule "{rule}" — {reason}'
     logger.warning("AGT DENY %s: %s", tool_name, reason)
-    import json as _json
 
-    return _json.dumps(
-        {
-            "error": msg,
-            "kars_governance": {
-                "decision": decision.decision,
-                "rule": rule,
-                "reason": reason,
-                "rate_limited": decision.rate_limited,
-            },
-        }
-    )
+    # Hermes ≥0.15 wants {"action": "block", "message": "..."} from
+    # pre_tool_call hooks to short-circuit the tool. Earlier code
+    # returned a JSON string which Hermes' check
+    # (plugins.py::get_pre_tool_call_block_message) silently ignored
+    # — the deny decision was logged but the tool still ran. Returning
+    # the proper dict shape makes the block actually block.
+    return {"action": "block", "message": msg}
 
 
 def register(ctx: Any) -> None:  # noqa: ANN401
