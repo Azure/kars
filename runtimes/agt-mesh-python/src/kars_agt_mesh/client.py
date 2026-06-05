@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import uuid
 from typing import AsyncIterator
@@ -263,14 +264,16 @@ class MeshClient:
             await self._relay.send_frame(knock_frame)
             logger.debug("Sent KNOCK to %s (id=%s)", to, knock_frame["id"])
 
-        encrypted = channel.send(payload)
+        wire_payload = _payload_to_wire_bytes(payload)
+        encrypted = channel.send(wire_payload)
         message_frame = _encrypted_to_message_frame(
             encrypted, self._identity.did, to
         )
         await self._relay.send_frame(message_frame)
         logger.debug(
-            "Sent MESSAGE frame (%d bytes payload) to %s (id=%s)",
+            "Sent MESSAGE frame (%d bytes payload, %d bytes on wire) to %s (id=%s)",
             len(payload),
+            len(wire_payload),
             to,
             message_frame["id"],
         )
@@ -344,11 +347,15 @@ class MeshClient:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Decrypt failed for %s: %s", from_did, exc)
             return
+        # Mirror of _payload_to_wire_bytes — strip the JSON envelope the
+        # TS SDK puts on every message so callers see the original bytes
+        # they would have sent.
+        app_payload = _wire_bytes_to_payload(plaintext)
         await self._inbox.put(
             InboundMessage.new(
                 from_did=from_did,
                 from_display_name=None,
-                payload=plaintext,
+                payload=app_payload,
                 message_id=str(frame.get("id", "")),
             )
         )
@@ -481,6 +488,62 @@ def _b64std_decode(s: str) -> bytes:
     s = s.replace("-", "+").replace("_", "/")
     pad = "=" * (-len(s) % 4)
     return base64.b64decode(s + pad)
+
+
+def _payload_to_wire_bytes(payload: bytes) -> bytes:
+    """JSON-wrap ``payload`` so the TS SDK can decode it.
+
+    The AGT TypeScript SDK's ``MeshClient.handleMessage`` hardcodes a
+    ``JSON.parse(new TextDecoder().decode(plaintext))`` on every
+    successfully-decrypted frame (see
+    ``agent-governance-typescript/src/encryption/mesh-client.ts``
+    handleMessage, the line beginning ``payload = JSON.parse(...)``).
+    A Python sender that hands raw bytes straight to
+    ``SecureChannel.send()`` produces a perfectly-encrypted frame
+    that fails *silently* at the receiver's JSON.parse step: the
+    plaintext is recovered, but the SDK's message handlers are never
+    invoked because the parse throws before reaching them.
+
+    We mirror the TS SDK's outbound convention
+    (``mesh-client.ts::send`` line ``session.channel.send(new
+    TextEncoder().encode(JSON.stringify(payload)))``) by JSON-encoding
+    here. UTF-8 byte payloads become JSON strings; binary payloads
+    are wrapped in a ``{"raw_b64": "..."}`` envelope.
+    """
+    try:
+        text = payload.decode("utf-8")
+        return json.dumps(text).encode("utf-8")
+    except UnicodeDecodeError:
+        envelope = {"raw_b64": base64.b64encode(payload).decode("ascii")}
+        return json.dumps(envelope).encode("utf-8")
+
+
+def _wire_bytes_to_payload(wire_bytes: bytes) -> bytes:
+    """Inverse of :func:`_payload_to_wire_bytes`.
+
+    A Python receiver should hand the application the bytes the
+    sender originally passed to :meth:`MeshClient.send_by_did`, not
+    the JSON-encoded transport form. We try the inverse of both
+    encoding paths (UTF-8 string → bytes; ``{"raw_b64": ...}``
+    envelope → bytes) and fall back to the raw plaintext when the
+    payload didn't come from a TS-convention sender (other Python
+    senders pre-dating this wrapper, or future opt-out callers).
+    """
+    try:
+        decoded = json.loads(wire_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return wire_bytes
+    if isinstance(decoded, str):
+        return decoded.encode("utf-8")
+    if isinstance(decoded, dict) and isinstance(decoded.get("raw_b64"), str):
+        try:
+            return base64.b64decode(decoded["raw_b64"])
+        except Exception:  # noqa: BLE001
+            return wire_bytes
+    # Anything else is a structured JSON payload (object / array / number);
+    # callers that opted into structured payloads get the original bytes
+    # back so they can re-parse if they want.
+    return wire_bytes
 
 
 def _encrypted_to_message_frame(

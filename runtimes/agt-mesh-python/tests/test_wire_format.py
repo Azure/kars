@@ -25,6 +25,8 @@ from kars_agt_mesh.client import (
     _encrypted_to_message_frame,
     _establishment_to_wire,
     _message_frame_to_encrypted,
+    _payload_to_wire_bytes,
+    _wire_bytes_to_payload,
     _wire_to_establishment,
 )
 
@@ -157,3 +159,67 @@ def test_b64std_tolerates_urlsafe_alphabet_on_decode() -> None:
     urlsafe = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     decoded = _b64std_decode(urlsafe)
     assert decoded == raw
+
+
+# ── Payload envelope (TS-SDK JSON.parse compatibility) ───────────
+
+
+def test_payload_to_wire_wraps_utf8_bytes_as_json_string() -> None:
+    """The TS SDK's MeshClient.handleMessage hardcodes
+    `JSON.parse(new TextDecoder().decode(plaintext))` on every frame.
+    Raw bytes from a Python sender would throw silently. UTF-8
+    payloads must serialize as JSON strings so TS can parse them."""
+    import json
+
+    wire = _payload_to_wire_bytes(b"hello world")
+    decoded = json.loads(wire.decode("utf-8"))
+    assert decoded == "hello world"
+
+
+def test_payload_to_wire_wraps_binary_in_raw_b64_envelope() -> None:
+    """Non-UTF-8 byte payloads (e.g. images, msgpack) get a
+    `{raw_b64: ...}` envelope so they round-trip without lossy
+    re-encoding."""
+    import json
+
+    raw = bytes(range(256))  # all 256 byte values — not valid UTF-8
+    wire = _payload_to_wire_bytes(raw)
+    decoded = json.loads(wire.decode("utf-8"))
+    assert isinstance(decoded, dict)
+    assert "raw_b64" in decoded
+    assert base64.b64decode(decoded["raw_b64"]) == raw
+
+
+def test_wire_to_payload_unwraps_utf8_string() -> None:
+    """A wire payload that is a JSON-encoded string round-trips back
+    to the original UTF-8 bytes."""
+    wire = _payload_to_wire_bytes(b"round trip")
+    recovered = _wire_bytes_to_payload(wire)
+    assert recovered == b"round trip"
+
+
+def test_wire_to_payload_unwraps_raw_b64_envelope() -> None:
+    """Binary payloads round-trip via the {raw_b64: ...} envelope."""
+    raw = b"\xff\x00\x01\x02\xfe binary data"
+    wire = _payload_to_wire_bytes(raw)
+    recovered = _wire_bytes_to_payload(wire)
+    assert recovered == raw
+
+
+def test_wire_to_payload_passes_through_non_json_plaintext() -> None:
+    """Backwards compatibility: an inbound frame from a sender that
+    DIDN'T wrap (old Python builds, or future opt-out callers) gets
+    its plaintext bytes through untouched instead of being dropped."""
+    raw = b"not JSON at all"
+    recovered = _wire_bytes_to_payload(raw)
+    assert recovered == raw
+
+
+def test_wire_to_payload_passes_through_structured_json() -> None:
+    """JSON objects/arrays/numbers are NOT our envelope — return
+    the raw bytes so the caller can re-parse if they want."""
+    import json
+
+    wire = json.dumps({"hello": "world", "n": 42}).encode("utf-8")
+    recovered = _wire_bytes_to_payload(wire)
+    assert recovered == wire
