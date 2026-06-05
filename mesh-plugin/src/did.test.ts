@@ -13,10 +13,12 @@ import {
 } from "./did.js";
 
 describe("deriveCanonicalDid", () => {
-  it("produces did:agentmesh:<16-char-hex> from a 32-byte key", () => {
+  it("produces did:mesh:<32-char-hex> from a 32-byte key", () => {
     const key = crypto.randomBytes(32);
     const did = deriveCanonicalDid(key);
-    expect(did).toMatch(/^did:agentmesh:[0-9a-f]{16}$/);
+    // Modern AGT format (matches @microsoft/agent-governance-sdk ≥4.0.0
+    // and AGT Python registry post-PR #2533): did:mesh:<sha256[:32]>.
+    expect(did).toMatch(/^did:mesh:[0-9a-f]{32}$/);
   });
 
   it("is deterministic for the same key", () => {
@@ -33,7 +35,7 @@ describe("deriveCanonicalDid", () => {
   it("accepts Uint8Array input", () => {
     const key = new Uint8Array(crypto.randomBytes(32));
     const did = deriveCanonicalDid(key);
-    expect(did).toMatch(/^did:agentmesh:[0-9a-f]{16}$/);
+    expect(did).toMatch(/^did:mesh:[0-9a-f]{32}$/);
   });
 });
 

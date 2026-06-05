@@ -30,18 +30,28 @@ import * as crypto from "node:crypto";
 /**
  * Derive the canonical DID from a raw Ed25519 signing public key (32 bytes).
  *
- * Uses the same hash as AGT's TS SDK (`sha256(pubkey).hex[:16]`) but over
- * raw key bytes (not SPKI-wrapped), matching kars's existing identity
- * module. The fingerprint is self-verifying: anyone with the public key can
- * recompute it.
+ * Format: `did:mesh:<sha256(public_key)[:32]>` (32 hex chars = 16 bytes).
+ * Matches the upstream AGT TS SDK (`@microsoft/agent-governance-sdk`
+ * ≥4.0.0) and the AGT Python registry (post-PR #2533), so locally-
+ * derived DIDs round-trip cleanly through registry register/discover
+ * and connect-frame POP verification.
+ *
+ * Earlier kars builds emitted `did:agentmesh:<sha256[:16]>` — a kars-
+ * specific shorter fingerprint that pre-dated the AGT spec update.
+ * The registry post-2026-05-23 rejects connect frames that don't
+ * match `did:mesh:` + sha256(pub_b64).hex[:32], so the legacy
+ * `did:agentmesh:` form produces a tight WS-close loop on every
+ * mesh attempt. This function now emits the modern format
+ * unconditionally; legacy `did:agentmesh:` inputs are still
+ * accepted on parse for inbound DIDs from older peers.
  */
 export function deriveCanonicalDid(signingPublicKey: Buffer | Uint8Array): string {
   const fingerprint = crypto
     .createHash("sha256")
     .update(signingPublicKey)
     .digest("hex")
-    .slice(0, 16);
-  return `did:agentmesh:${fingerprint}`;
+    .slice(0, 32);
+  return `did:mesh:${fingerprint}`;
 }
 
 // ---------------------------------------------------------------------------
