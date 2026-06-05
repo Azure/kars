@@ -43,75 +43,159 @@ export async function connectToAgent(ctx: ConnectAgentContext): Promise<void> {
   const sb = sandboxes[idx];
   if (!sb) return;
 
-  // ── AKS sandboxes: port-forward + WebUI URL (do NOT exec into pod) ──
-  // The `kars-sandbox-exec-ban` ValidatingAdmissionPolicy denies
-  // exec/attach into the openclaw container. The legitimate flow (per
-  // the policy's own message and `kars connect`) is:
-  //   1. read the gateway-token Secret (RBAC-gated)
-  //   2. kubectl port-forward to 18789
-  //   3. open WebUI at http://localhost:18789/#token=...
-  // We don't take over stdin or alternate buffer here — we just start
-  // the port-forward in the background and surface the URL in the
-  // activity log so the operator can click it from their terminal.
+  // ── AKS sandboxes: split by runtime kind ───────────────────────────
+  // - OpenClaw: VAP (`kars-sandbox-exec-ban`) denies exec into the
+  //   `openclaw` container. Must use port-forward + WebUI.
+  // - Hermes (and future runtimes whose container is named `agent`):
+  //   the VAP's matchCondition only targets the literal container
+  //   name `openclaw`, so `kubectl exec -c agent ...` is admission-
+  //   compliant. We can take the PTY path directly — same UX as
+  //   local Docker, no port-forward dance.
   if (sb.runtime === "aks") {
     const isAks = !devMode;
     if (!isAks) {
-      // sb says aks but we're not pointed at AKS — refuse early.
       activityLog.log(`{red-fg}✗ ${sb.name}: AKS sandbox but operator started with --dev. Run 'kars connect ${sb.name}' from another terminal.{/}`);
       render(); screen.render();
       return;
     }
-    const localPort = "18789";
-    const { execa } = await import("execa");
 
-    activityLog.log(`{cyan-fg}⟩ ${sb.name}: reading gateway-token Secret...{/}`);
-    render(); screen.render();
-    let gatewayToken = "";
-    try {
-      const { stdout: tokenB64 } = await execa("kubectl", kctl([
-        "get", "secret", "-n", sb.namespace, "gateway-token",
-        "-o", "jsonpath={.data.token}",
-      ], kubeContext), { stdio: "pipe" });
-      if (tokenB64.trim()) {
-        gatewayToken = Buffer.from(tokenB64.trim(), "base64").toString("utf-8").trim();
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message.split("\n")[0] : String(e);
-      activityLog.log(`{red-fg}✗ ${sb.name}: gateway-token Secret not readable: ${msg}{/}`);
-      render(); screen.render();
-      return;
-    }
-    if (!gatewayToken) {
-      activityLog.log(`{red-fg}✗ ${sb.name}: gateway-token Secret empty. Sandbox running?{/}`);
-      render(); screen.render();
-      return;
+    const isHermes = (sb.runtimeKind || "OpenClaw") === "Hermes";
+
+    // OpenClaw on AKS: legacy port-forward + WebUI URL path.
+    if (!isHermes) {
+      return await _aksOpenClawConnect(ctx, sb);
     }
 
-    activityLog.log(`{cyan-fg}⟩ ${sb.name}: starting port-forward localhost:${localPort} → 18789...{/}`);
-    render(); screen.render();
-    const pf = execa("kubectl", kctl([
-      "port-forward", "-n", sb.namespace,
-      `deploy/${sb.name}`, `${localPort}:18789`,
-    ], kubeContext), { stdio: ["ignore", "pipe", "pipe"] });
-    pf.stderr?.on("data", (chunk: Buffer) => {
-      const line = chunk.toString().trim();
-      if (line && /error|denied|unable|forbidden|refused|reset|EOF|lost connection|address already in use/i.test(line)) {
-        activityLog.log(`{red-fg}  [kubectl] ${line}{/}`);
-        render(); screen.render();
-      }
+    // Hermes on AKS: take the same PTY path local Docker uses, but
+    // via `kubectl exec` instead of `docker exec`. The exec-ban VAP
+    // doesn't apply because Hermes' container name is `agent`, not
+    // `openclaw` — see deploy/helm/kars/templates/admission-pod-exec-ban.yaml
+    // matchConditions.
+    return await _spawnPtyConnect(ctx, sb, {
+      cmd: "kubectl",
+      args: [
+        ...kctl([
+          "exec", "-it", "-n", sb.namespace,
+          `deploy/${sb.name}`, "-c", "agent",
+          "--",
+          // HOME + HERMES_HOME must be set explicitly — kubectl exec
+          // doesn't inherit container ENV, so without these Hermes
+          // would fall back to /.hermes (read-only rootfs ENOENT).
+          "env", "HOME=/sandbox", "HERMES_HOME=/sandbox/.hermes",
+          "hermes", "chat", "--accept-hooks",
+        ], kubeContext),
+      ],
     });
-    pf.catch(() => {
-      activityLog.log(`{yellow-fg}⏏ ${sb.name}: port-forward ended.{/}`);
-      render(); screen.render();
-    });
+  }
 
-    await new Promise(r => setTimeout(r, 1500));
-    const url = `http://localhost:${localPort}/#token=${gatewayToken}`;
-    activityLog.log(`{green-fg}→ ${sb.name}: ${url}{/}`);
-    activityLog.log(`{dim}  (Ctrl-click the URL in your terminal; port-forward stays alive.){/}`);
+  // Local Docker sandboxes: select the right exec command based on
+  // runtime kind. OpenClaw containers run `openclaw tui`; Hermes
+  // containers run `hermes chat`. Same PTY plumbing for both.
+  const isHermesLocal = (sb.runtimeKind || "OpenClaw") === "Hermes";
+  const dockerArgs = isHermesLocal
+    ? [
+        "exec", "-it",
+        "-e", "HOME=/sandbox",
+        "-e", "HERMES_HOME=/sandbox/.hermes",
+        sb.podName!, "hermes", "chat", "--accept-hooks",
+      ]
+    : ["exec", "-it", sb.podName!, "openclaw", "tui"];
+  return await _spawnPtyConnect(ctx, sb, {
+    cmd: "docker",
+    args: dockerArgs,
+  });
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Helpers
+// ────────────────────────────────────────────────────────────────────
+
+/**
+ * AKS + OpenClaw: legacy port-forward + WebUI URL path. Pulled out of
+ * `connectToAgent` to make the dispatch in there readable.
+ *
+ * VAP (`kars-sandbox-exec-ban`) denies exec/attach into the `openclaw`
+ * container; the legitimate flow (per the policy's own message + the
+ * `kars connect` CLI) is:
+ *   1. read the gateway-token Secret (RBAC-gated)
+ *   2. kubectl port-forward to 18789
+ *   3. operator opens http://localhost:18789/#token=...
+ */
+async function _aksOpenClawConnect(
+  ctx: ConnectAgentContext,
+  sb: SandboxInfo,
+): Promise<void> {
+  const { activityLog, kctl, kubeContext, render, screen } = ctx;
+  const localPort = "18789";
+  const { execa } = await import("execa");
+
+  activityLog.log(`{cyan-fg}⟩ ${sb.name}: reading gateway-token Secret...{/}`);
+  render(); screen.render();
+  let gatewayToken = "";
+  try {
+    const { stdout: tokenB64 } = await execa("kubectl", kctl([
+      "get", "secret", "-n", sb.namespace, "gateway-token",
+      "-o", "jsonpath={.data.token}",
+    ], kubeContext), { stdio: "pipe" });
+    if (tokenB64.trim()) {
+      gatewayToken = Buffer.from(tokenB64.trim(), "base64").toString("utf-8").trim();
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message.split("\n")[0] : String(e);
+    activityLog.log(`{red-fg}✗ ${sb.name}: gateway-token Secret not readable: ${msg}{/}`);
     render(); screen.render();
     return;
   }
+  if (!gatewayToken) {
+    activityLog.log(`{red-fg}✗ ${sb.name}: gateway-token Secret empty. Sandbox running?{/}`);
+    render(); screen.render();
+    return;
+  }
+
+  activityLog.log(`{cyan-fg}⟩ ${sb.name}: starting port-forward localhost:${localPort} → 18789...{/}`);
+  render(); screen.render();
+  const pf = execa("kubectl", kctl([
+    "port-forward", "-n", sb.namespace,
+    `deploy/${sb.name}`, `${localPort}:18789`,
+  ], kubeContext), { stdio: ["ignore", "pipe", "pipe"] });
+  pf.stderr?.on("data", (chunk: Buffer) => {
+    const line = chunk.toString().trim();
+    if (line && /error|denied|unable|forbidden|refused|reset|EOF|lost connection|address already in use/i.test(line)) {
+      activityLog.log(`{red-fg}  [kubectl] ${line}{/}`);
+      render(); screen.render();
+    }
+  });
+  pf.catch(() => {
+    activityLog.log(`{yellow-fg}⏏ ${sb.name}: port-forward ended.{/}`);
+    render(); screen.render();
+  });
+
+  await new Promise(r => setTimeout(r, 1500));
+  const url = `http://localhost:${localPort}/#token=${gatewayToken}`;
+  activityLog.log(`{green-fg}→ ${sb.name}: ${url}{/}`);
+  activityLog.log(`{dim}  (Ctrl-click the URL in your terminal; port-forward stays alive.){/}`);
+  render(); screen.render();
+}
+
+/**
+ * Spawn a PTY-attached subprocess and wire blessed save/restore +
+ * stdin passthrough. Used by:
+ *   - local Docker (any runtime): `docker exec -it`
+ *   - AKS Hermes:                  `kubectl exec -it -c agent`
+ *
+ * AKS OpenClaw is NOT routed here — the exec-ban VAP would reject it.
+ * The `cmd`/`args` come from the caller so each runtime decides what
+ * interactive program to launch (openclaw tui, hermes chat, ...).
+ */
+async function _spawnPtyConnect(
+  ctx: ConnectAgentContext,
+  sb: SandboxInfo,
+  spec: { cmd: string; args: string[] },
+): Promise<void> {
+  const {
+    screen, activityLog, refreshInterval, refresh, render,
+    setDialogOpen, setConnectedToAgent, getRefreshTimer, setRefreshTimer,
+  } = ctx;
 
   setDialogOpen(true);
   setConnectedToAgent(true);
@@ -133,17 +217,10 @@ export async function connectToAgent(ctx: ConnectAgentContext): Promise<void> {
   process.stdin.removeAllListeners("data");
   process.stdin.removeAllListeners("keypress");
 
-  // Spawn PTY for proper TTY passthrough with colors. AKS path is
-  // handled above (port-forward); we only reach here for local Docker
-  // sandboxes where there is no admission policy to block exec.
   const nodePty = await import("node-pty");
-  const connectCmd = "docker";
-  const connectArgs = ["exec", "-it", sb.podName!, "openclaw", "tui"];
-  void kctl; void kubeContext; // referenced only by AKS branch above
-
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
-  const ptyProcess = nodePty.spawn(connectCmd, connectArgs, {
+  const ptyProcess = nodePty.spawn(spec.cmd, spec.args, {
     name: "xterm-256color",
     cols,
     rows,
