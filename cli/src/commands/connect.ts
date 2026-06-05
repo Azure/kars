@@ -151,6 +151,73 @@ export function connectCommand(): Command {
         return;
       }
 
+      // Runtime-specific connect path. OpenClaw exposes an HTTP WebUI on
+      // port 18789 (gateway daemon) + a `gateway-token` Secret for bearer
+      // auth. Hermes does not — its `hermes gateway run` daemon is for
+      // channel dispatch (Telegram/Slack/etc), not a browser UI. For
+      // Hermes (and future runtimes that don't ship a webui) we drop the
+      // operator into an interactive `hermes` REPL via `kubectl exec -it`.
+      // Same UX shape as `openclaw tui` for local Docker.
+      //
+      // The exec-ban VAP only targets the literal container name
+      // `openclaw`; Hermes' container is `agent` so this is admission-
+      // compliant (see deploy/helm/kars/templates/admission-pod-exec-ban.yaml
+      // matchConditions).
+      if (runtimeKind === "Hermes") {
+        if (options.reset) {
+          console.log(chalk.yellow("  Resetting Hermes pod (--reset)..."));
+          try {
+            await execa("kubectl", [
+              ...ctxArgs, "rollout", "restart", "-n", namespace, `deploy/${name}`,
+            ], { stdio: "pipe" });
+            await execa("kubectl", [
+              ...ctxArgs, "rollout", "status", "-n", namespace, `deploy/${name}`, "--timeout=120s",
+            ], { stdio: "inherit" });
+            console.log(chalk.green("  Pod restarted.\n"));
+          } catch (e) {
+            console.log(chalk.red(`  Reset failed: ${(e as Error).message}`));
+            return;
+          }
+        }
+        if (options.web) {
+          console.log(chalk.yellow(`\n  Note: Hermes does not ship a browser WebUI (only OpenClaw does).`));
+          console.log(chalk.dim(`  Falling back to interactive shell on the agent container...\n`));
+        } else {
+          console.log(chalk.hex("#0078D4")(`\n  Connecting to ${chalk.bold(name)} (Hermes). Interactive agent shell:\n`));
+        }
+        console.log(chalk.dim(`  Chat:    type your prompt + Enter`));
+        console.log(chalk.dim(`  Exit:    Ctrl-D or 'exit'`));
+        console.log(chalk.dim(`  Tools:   /tools, /help (hermes built-ins)\n`));
+        // Set HOME + HERMES_HOME explicitly — kubectl exec does NOT
+        // inherit container ENV, and the rootfs is read-only so
+        // hermes' default ensure_hermes_home() fallback to /.hermes
+        // would ENOENT. /sandbox is the writable emptyDir.
+        //
+        // `hermes chat` is the interactive REPL subcommand (`hermes`
+        // alone prints usage). --accept-hooks lets the AGT
+        // pre_tool_call hook run without per-tool confirmation
+        // prompts — operator already approved by running `kars connect`.
+        try {
+          await execa("kubectl", [
+            ...ctxArgs, "exec", "-it", "-n", namespace,
+            `deploy/${name}`, "-c", podContainer,
+            "--",
+            "env", "HOME=/sandbox", "HERMES_HOME=/sandbox/.hermes",
+            "hermes", "chat", "--accept-hooks",
+          ], { stdio: "inherit" });
+        } catch (e) {
+          // exit-code 130 (Ctrl-D / Ctrl-C) is normal for an
+          // interactive session — don't print a stack trace for it.
+          const code = (e as { exitCode?: number }).exitCode;
+          if (code !== 130 && code !== 0) {
+            console.log(chalk.dim(`\n  Disconnected (exit code ${code ?? "?"}).`));
+          } else {
+            console.log(chalk.dim("\n  Disconnected.\n"));
+          }
+        }
+        return;
+      }
+
       // --web or --shell?
       if (options.web || !options.shell) {
         // WebUI mode: extract token, port-forward, print link
