@@ -150,6 +150,7 @@ Enterprise teams often have existing agent code in Python or .NET. `spec.runtime
 | `kind` | Use case | Status |
 |---|---|---|
 | `OpenClaw` | Default. kars plugin + OpenClaw framework. | ✅ |
+| `Hermes` | [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research) — channels-first agent harness with 20+ channels, 70+ tools, native MCP. See [Hermes plugin](../hermes-plugin.md). | ✅ |
 | `OpenAIAgents` | Python teams on the OpenAI Agents SDK. | ✅ |
 | `MicrosoftAgentFramework` | Microsoft Agent Framework (Python). `.NET` is `ShapeInvalid` until the .NET AgentMesh SDK ships. | ✅ Python |
 | `LangGraph` | LangChain's stateful agent framework — Python or TypeScript via `language`. | ✅ |

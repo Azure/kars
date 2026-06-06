@@ -24,7 +24,7 @@ flowchart TB
         DevSecret["kars-dev-creds Secret<br/>(mounted creds + provider)"]
       end
       subgraph SandboxNs["kars-&lt;name&gt; ns"]
-        Pod["sandbox pod<br/>┌───────────────┐<br/>│ openclaw      │<br/>│ inference-router │<br/>└───────────────┘"]
+        Pod["sandbox pod<br/>┌─────────────────────┐<br/>│ agent (openclaw │<br/>│   or hermes …)      │<br/>│ inference-router    │<br/>└─────────────────────┘"]
       end
       subgraph HeadlampNs["headlamp ns"]
         Headlamp["headlamp<br/>+ kars plugin"]
