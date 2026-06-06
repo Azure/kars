@@ -1,0 +1,42 @@
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: aks-hermes-bidi-2-inference
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: aks-hermes-bidi-2
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: aks-hermes-bidi-2
+  contentSafety:
+    requirePromptShields: false
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-5.4
+  tokenBudget:
+    dailyTokens: 1000000
+    perRequestTokens: 50000
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: aks-hermes-bidi-2
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: aks-hermes-bidi-2
+spec:
+  runtime:
+    kind: Hermes
+    hermes:
+      version: "0.15.2"
+  inferenceRef:
+    name: aks-hermes-bidi-2-inference
+  governance:
+    enabled: true
+    trustThreshold: 0
+    toolPolicyRef:
+      name: kars-default
+  sandbox:
+    isolation: standard
