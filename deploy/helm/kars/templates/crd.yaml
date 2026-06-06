@@ -744,7 +744,7 @@ spec:
                   description: "Foundry Agent Service agent ID (created by controller)"
                 runtimeKind:
                   type: string
-                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "BYO"]
+                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "Hermes", "BYO"]
                   description: "Runtime kind the controller observed for the current observedGeneration (S10.A1)."
                 observedGeneration:
                   type: integer

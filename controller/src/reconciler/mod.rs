@@ -3026,9 +3026,24 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 runtime_kind_str,
                 &extras,
             );
-            let _ = sandbox_api
+            // Log failures instead of swallowing them. Silent failures
+            // here cause `kubectl get karssandbox` to show empty
+            // `.status` despite a fully-functional pod — confused
+            // the e2e harness for an entire debugging session before
+            // the root cause (kube-apiserver rejecting the patch
+            // shape for one runtime kind) became visible.
+            if let Err(e) = sandbox_api
                 .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    sandbox = %name,
+                    namespace = %sandbox.namespace().unwrap_or_default(),
+                    runtime_kind = %runtime_kind_str,
+                    error = %e,
+                    "KarsSandbox running-status patch failed; .status will remain stale until the next reconcile"
+                );
+            }
         } else {
             crate::metrics::record_status_patch_skip("KarsSandbox");
         }

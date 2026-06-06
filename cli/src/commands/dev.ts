@@ -1090,6 +1090,50 @@ Notes:
           // Local registry mode — deploy AGT relay/registry locally
           stepper.step("Starting mesh infrastructure (agt)...");
 
+          // Helper: check if a docker image exists locally
+          async function haveImage(tag: string): Promise<boolean> {
+            try {
+              await execa("docker", ["image", "inspect", tag], { stdio: "pipe" });
+              return true;
+            } catch { return false; }
+          }
+
+          // Build the AGT relay/registry images on-demand if not
+          // cached locally. The kind-cluster bringup path further up
+          // (around line ~1015) has its own copy of this build step;
+          // the docker-target path went straight to `docker run
+          // agentmesh-relay:dev` and failed with "Unable to find
+          // image agentmesh-relay:dev locally" the first time around
+          // because nothing in this codepath built it. Mirror the kind
+          // build to make `kars dev --target docker` work out of the
+          // box.
+          const agtDockerfile = path.join(
+            agtRepo,
+            "agent-governance-python/agent-mesh/docker/Dockerfile",
+          );
+          if (existsSync(agtDockerfile)) {
+            if (!(await haveImage("agentmesh-relay:dev"))) {
+              stepper.update("Building agt relay image (Python from local AGT)...");
+              await execa("docker", [
+                "build", "--platform", dockerPlatform,
+                "--build-arg", "COMPONENT=relay",
+                "-t", "agentmesh-relay:dev",
+                "-f", agtDockerfile,
+                agtRepo,
+              ], { stdio: "pipe" });
+            }
+            if (!(await haveImage("agentmesh-registry:dev"))) {
+              stepper.update("Building agt registry image (Python from local AGT)...");
+              await execa("docker", [
+                "build", "--platform", dockerPlatform,
+                "--build-arg", "COMPONENT=registry",
+                "-t", "agentmesh-registry:dev",
+                "-f", agtDockerfile,
+                agtRepo,
+              ], { stdio: "pipe" });
+            }
+          }
+
           // Helper: check if a container exists and is running
           async function isContainerRunning(name: string): Promise<boolean> {
             try {

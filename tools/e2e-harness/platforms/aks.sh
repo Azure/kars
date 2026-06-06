@@ -232,11 +232,28 @@ PY
 _platform_post_prompt_hermes_exec() {
     local parent_ns="kars-${SCENARIO_SANDBOX}"
     local parent_pod
-    parent_pod=$(kubectl get pod -n "${parent_ns}" \
-        -l "kars.azure.com/sandbox=${SCENARIO_SANDBOX}" \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    # Same Running+Ready guard as the sub-pod selection below — picks
+    # a fresh replicaset member after a rollout-restart instead of
+    # latching onto a Terminating pod that's about to disappear.
+    local parent_wait=0
+    while [ $parent_wait -lt 60 ]; do
+        parent_pod=$(kubectl get pod -n "${parent_ns}" \
+            -l "kars.azure.com/sandbox=${SCENARIO_SANDBOX}" \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -n "${parent_pod}" ]; then
+            local ready
+            ready=$(kubectl get pod -n "${parent_ns}" "${parent_pod}" \
+                -o jsonpath='{.status.containerStatuses[?(@.name=="agent")].ready}' 2>/dev/null)
+            if [ "${ready}" = "true" ]; then
+                break
+            fi
+        fi
+        sleep 1
+        parent_wait=$((parent_wait+1))
+    done
     if [ -z "${parent_pod}" ]; then
-        log "ERR parent pod not found in ${parent_ns}"; exit 4
+        log "ERR parent pod not found in ${parent_ns} (timed out after 60s waiting for Running+Ready)"; exit 4
     fi
 
     # ── Optional: start the echo / responder daemon on the sub-sandbox ──
@@ -244,11 +261,34 @@ _platform_post_prompt_hermes_exec() {
     if [ -n "${SCENARIO_DAEMON_SUB:-}" ] && [ -n "${SCENARIO_DAEMON_SCRIPT:-}" ]; then
         local sub_ns="kars-${SCENARIO_DAEMON_SUB}"
         local sub_pod
-        sub_pod=$(kubectl get pod -n "${sub_ns}" \
-            -l "kars.azure.com/sandbox=${SCENARIO_DAEMON_SUB}" \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        # Filter on field-selector=status.phase=Running so a rollout-
+        # restart-in-flight Terminating replica doesn't get picked as
+        # `.items[0]` — exec against a Terminating pod returns
+        # `container not found ("agent")` mid-cp and aborts the
+        # harness. Wait up to 60s for a fresh Running pod after the
+        # platform's rollout-restart.
+        local sub_wait=0
+        while [ $sub_wait -lt 60 ]; do
+            sub_pod=$(kubectl get pod -n "${sub_ns}" \
+                -l "kars.azure.com/sandbox=${SCENARIO_DAEMON_SUB}" \
+                --field-selector=status.phase=Running \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            if [ -n "${sub_pod}" ]; then
+                # Also confirm the agent container is reporting Ready,
+                # not just the pod phase. A pod can be phase=Running
+                # while its init/agent container is still spinning up.
+                local ready
+                ready=$(kubectl get pod -n "${sub_ns}" "${sub_pod}" \
+                    -o jsonpath='{.status.containerStatuses[?(@.name=="agent")].ready}' 2>/dev/null)
+                if [ "${ready}" = "true" ]; then
+                    break
+                fi
+            fi
+            sleep 1
+            sub_wait=$((sub_wait+1))
+        done
         if [ -z "${sub_pod}" ]; then
-            log "ERR daemon sub pod not found in ${sub_ns}"; exit 4
+            log "ERR daemon sub pod not found in ${sub_ns} (timed out after 60s waiting for Running+Ready)"; exit 4
         fi
         local script_path="${SCENARIO_DIR}/${SCENARIO_DAEMON_SCRIPT}"
         if [ ! -f "${script_path}" ]; then
@@ -430,8 +470,8 @@ platform_collect_artifacts() {
     # incoming/ dir is the ground truth of what was actually delivered
     # over the mesh. Lands in OUT_DIR as `final-artifact.<ext>` so
     # verify.py can pick it up regardless of scenario.
-    if [ -n "${SCENARIO_FINAL_ARTIFACT_SANDBOX}" ] \
-       && [ -n "${SCENARIO_FINAL_ARTIFACT_PATH}" ]; then
+    if [ -n "${SCENARIO_FINAL_ARTIFACT_SANDBOX:-}" ] \
+       && [ -n "${SCENARIO_FINAL_ARTIFACT_PATH:-}" ]; then
         # Re-apply break-glass on the parent's namespace (it wasn't in
         # the sub-loop above; the parent isn't a sub-agent).
         kubectl label namespace "kars-${SCENARIO_FINAL_ARTIFACT_SANDBOX}" \
