@@ -1,13 +1,13 @@
 # kars Hermes plugin (`runtimes/hermes/`)
 
-The **kars Hermes plugin** is the agent-side runtime surface for kars on top of the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT) — a Python 3.11+ agent harness with **20+ messaging channels**, **18+ inference providers**, **70+ built-in tools**, and a native MCP client. When a Hermes sandbox boots, the Hermes gateway auto-discovers the kars plugin from `$HERMES_HOME/plugins/kars/` and loads it; from that point on the agent's tool surface is the **11 governance-aware kars tools** the plugin registers plus the 6 Hermes built-ins kars explicitly denies.
+The **kars Hermes plugin** is the agent-side runtime surface for kars on top of the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT) — a Python 3.11+ agent harness with **20+ messaging channels**, **18+ inference providers**, **70+ built-in tools**, and a native MCP client. When a Hermes sandbox boots, the Hermes gateway auto-discovers the kars plugin from `$HERMES_HOME/plugins/kars/` and loads it; from that point on the agent's tool surface is the **17 governance-aware kars tools** (16 in local-registry mode) the plugin registers plus the 5 Hermes built-ins kars explicitly denies.
 
-> **Parity vs OpenClaw (current state, not yet at full parity).** OpenClaw's kars plugin registers 24 tools; Hermes registers 11. The deltas are real:
-> - **`kars_handoff_*` (request / confirm / status)** — NOT YET IMPLEMENTED. `handoff.py` is a stub. Tracked in `hermes-handoff-impl`.
-> - **`kars_mesh_transfer_file`** — registered but returns a stub error ("not yet implemented in mesh v0.1; use kars_mesh_send"). Tracked in `hermes-mesh-transfer-file`.
-> - **9 `foundry_*` tools** (`code_execute`, `image_generation`, `web_search`, `file_search`, `conversations`, `evaluations`, `deployments`, `agents`, `download_file`) — reach the agent through Hermes' native MCP client at `http://127.0.0.1:8443/platform/mcp` rather than as direct `ctx.register_tool(...)` calls. Functionally equivalent for tool invocation but the LLM sees them as `mcp__platform__foundry_X` instead of `foundry_X`. Tracked in `hermes-native-foundry-tools`.
-> - **Multi-agent peer roster auto-prepend** — OpenClaw auto-prepends `Peer roster: name — role` to every outbound mesh message when 2+ siblings exist. Hermes doesn't yet. Tracked in `hermes-peer-roster`.
-> - **`telegram_status` agent-side tool** — OpenClaw has it; Hermes uses the operator-side `channels.telegram` config flow instead.
+> **Parity vs OpenClaw — ~all major surfaces shipped.** OpenClaw's kars plugin registers 24 tools; Hermes registers 16 native + 5 via the platform MCP gateway = 21 LLM-reachable Foundry/kars tools. Surfaces:
+> - **`kars_handoff_*`** (status / request / confirm) — implemented (`handoff.py`). `kars_handoff_status` always-on; the two mutation tools register only when `AGT_REGISTRY_MODE=global` (same gate OpenClaw uses; in local mode the router refuses mutations).
+> - **`kars_mesh_transfer_file`** — implemented end-to-end (sender + receiver auto-save). File arrives at `/sandbox/incoming/<file_name>` and the LLM sees a short summary instead of the base64 blob.
+> - **Native Foundry tools**: `foundry_memory`, `foundry_web_search`, `foundry_code_execute`, `foundry_image_generation`, `foundry_file_search` register as native `foundry_*` names matching OpenClaw. The 5 operator-tier Foundry tools (`conversations`, `evaluations`, `deployments`, `agents`, `download_file`) reach the agent via the platform MCP server at `http://127.0.0.1:8443/platform/mcp` — LLM sees them as `mcp__platform__foundry_*`.
+> - **Multi-agent peer roster auto-prepend** — implemented (`mesh.py::_maybe_prepend_peer_roster`). When 2+ siblings are tracked in the spawn roster, every outbound mesh message gets an authoritative `Peer roster:` block (matching OpenClaw's behaviour at `agt-tools/agt.ts:545`).
+> - **`telegram_status` agent-side tool** — Hermes uses the operator-side `channels.telegram` config flow; documented divergence.
 
 | Property | Value |
 |---|---|

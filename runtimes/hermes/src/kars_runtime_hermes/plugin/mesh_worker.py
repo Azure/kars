@@ -91,9 +91,111 @@ async def _resolve_sender_name(client: Any, did: str) -> str | None:
     return agent.display_name or (agent.capabilities[0] if agent.capabilities else None)
 
 
+def _maybe_save_file_transfer(
+    payload_text: str, msg: Any, client: Any
+) -> str:
+    """If ``payload_text`` is a JSON ``file_transfer`` envelope (the
+    shape ``kars_mesh_transfer_file`` emits on both runtimes), decode
+    the base64 file_data and save it to ``/sandbox/incoming/<file_name>``.
+
+    Returns the prompt text to feed the LLM:
+      - on success: a short human-readable summary pointing at the
+        saved path (so the LLM sees what arrived without the 30 MiB
+        of base64 in its context window);
+      - on failure or non-file_transfer payloads: the original
+        ``payload_text`` unchanged.
+    """
+    import base64 as _base64
+    import json as _json
+    from pathlib import Path as _Path
+
+    try:
+        parsed = _json.loads(payload_text)
+    except (ValueError, TypeError):
+        return payload_text
+    if not isinstance(parsed, dict) or parsed.get("type") != "file_transfer":
+        return payload_text
+
+    file_name = str(parsed.get("file_name") or "").strip()
+    file_data_b64 = parsed.get("file_data")
+    if not file_name or not isinstance(file_data_b64, str):
+        logger.warning(
+            "mesh_worker: malformed file_transfer envelope from %s "
+            "(missing file_name/file_data)",
+            msg.from_did,
+        )
+        return payload_text
+
+    # Path-safety: only the basename — the sender does not control
+    # where we drop files on disk. Strip any ../ or absolute prefix.
+    safe_name = _Path(file_name).name
+    if not safe_name or safe_name in {".", ".."}:
+        logger.warning(
+            "mesh_worker: rejecting file_transfer with unsafe file_name=%r",
+            file_name,
+        )
+        return payload_text
+
+    incoming_dir = _Path(
+        os.environ.get("KARS_INCOMING_DIR", "/sandbox/incoming")
+    )
+    try:
+        incoming_dir.mkdir(parents=True, exist_ok=True)
+        file_bytes = _base64.b64decode(file_data_b64)
+        out_path = incoming_dir / safe_name
+        out_path.write_bytes(file_bytes)
+        logger.info(
+            "mesh_worker: saved file_transfer from %s → %s (%d bytes)",
+            msg.from_did,
+            out_path,
+            len(file_bytes),
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "mesh_worker: failed to save file_transfer from %s: %s",
+            msg.from_did,
+            exc,
+        )
+        return payload_text
+
+    # Fire-and-forget ack back to sender so the OpenClaw / Hermes
+    # sender's `kars_mesh_transfer_file` retry loop sees the success
+    # signal. Errors here are non-fatal — the file is saved either
+    # way; the ack is operator-side bookkeeping.
+    sender = parsed.get("from_agent") or ""
+    if sender and sender != "unknown":
+        ack = {
+            "type": "file_transfer_ack",
+            "file_name": safe_name,
+            "saved_to": str(out_path),
+            "size_bytes": len(file_bytes),
+        }
+        try:
+            asyncio.create_task(
+                client.send_by_name(
+                    to=sender, payload=_json.dumps(ack).encode("utf-8")
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "mesh_worker: file_transfer_ack send scheduling failed: %s",
+                exc,
+            )
+
+    # Hand the LLM a short human-readable summary, NOT the 30 MiB of
+    # base64 the sender shipped. The agent sees the description +
+    # absolute path and can pick the file up off disk.
+    desc = str(parsed.get("description") or "").strip()
+    summary = (
+        f"file_transfer received from {parsed.get('from_agent','unknown')}: "
+        f"{safe_name} ({len(file_bytes)} bytes) saved to {out_path}"
+    )
+    if desc:
+        summary += f"\nSender description: {desc}"
+    return summary
+
+
 async def _handle_message(client: Any, msg: Any) -> None:
-    """Run hermes -z with the inbound payload as prompt; reply with the
-    captured stdout via the same mesh."""
     payload_text = msg.payload.decode("utf-8", errors="replace")
     logger.info(
         "mesh_worker: invoking hermes -z for inbound msg "
@@ -101,6 +203,12 @@ async def _handle_message(client: Any, msg: Any) -> None:
         msg.from_did,
         len(msg.payload),
     )
+
+    # ── file_transfer auto-decode ─────────────────────────────────
+    # Try to detect the OpenClaw / Hermes file_transfer envelope
+    # before invoking the LLM — files arrive base64-encoded inside a
+    # JSON blob and are useless to the LLM until saved to disk.
+    payload_text = _maybe_save_file_transfer(payload_text, msg, client)
 
     # ── Publish peer to router trust store (operator panel feed) ──
     # Without this, the operator's per-sandbox AGT view stays empty

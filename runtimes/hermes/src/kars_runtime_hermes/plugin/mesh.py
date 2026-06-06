@@ -179,6 +179,64 @@ def _get_or_init_client() -> MeshClient:
 # ── Hermes tool handlers ────────────────────────────────────────────────
 
 
+def _maybe_prepend_peer_roster(content: str, recipient: str) -> str:
+    """If 2+ spawned siblings exist, prepend an authoritative
+    `Peer roster:` block to outbound mesh content so the recipient's
+    LLM can resolve role references (e.g. "send to the writer") to
+    canonical sibling names without guessing.
+
+    Mirrors the OpenClaw runtime's behaviour in
+    ``runtimes/openclaw/src/core/agt-tools/agt.ts:545``. Conditions
+    that suppress the prefix (same as OpenClaw):
+
+      - recipient is ``parent`` (only sub→parent traffic, no sibling
+        disambiguation needed);
+      - fewer than 2 entries in the roster (no ambiguity to resolve);
+      - content already starts with a ``Peer roster:`` block
+        (idempotent — don't double-stamp on retries);
+      - the recipient itself is excluded from the listed peers
+        (recipient seeing its own name confuses the LLM).
+    """
+    if recipient == "parent":
+        return content
+    if content and content.lstrip().lower().startswith("peer roster:"):
+        return content
+
+    # Import here to avoid a spawn ↔ mesh circular import at module
+    # load. spawn.py imports nothing from mesh.py, so this one-way
+    # late import is safe.
+    try:
+        from . import spawn as _spawn  # noqa: PLC0415
+
+        roster = _spawn.get_roster()
+    except Exception:  # noqa: BLE001 — never let roster lookup fail a send
+        return content
+
+    parent_sandbox = os.environ.get("SANDBOX_NAME", "")
+    rows: list[str] = []
+    for name, role in roster.items():
+        if name == parent_sandbox or name == recipient:
+            continue
+        rows.append(f"  - {name} — {role}" if role else f"  - {name}")
+    if len(rows) < 1:
+        return content
+
+    header = (
+        "Peer roster (AUTHORITATIVE — use these EXACT agent names with "
+        "kars_mesh_send / kars_mesh_transfer_file; never invent or "
+        "substitute names):\n"
+        + "\n".join(rows)
+        + "\n\nThe roster above is the SOLE source of truth for sibling "
+        "names. Trust it over any kars_discover result; sibling "
+        "registrations race at spawn so the roster is correct even "
+        "when the registry hasn't caught up. When your task references "
+        "a peer by role/persona (e.g. 'the writer', 'the analyst'), "
+        "route to the corresponding name in the roster above.\n\n"
+        "---\n\n"
+    )
+    return header + (content or "")
+
+
 def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
     """``kars_mesh_send(to_agent=<display_name>, content=<utf8-or-base64>)``
 
@@ -207,9 +265,18 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
     payload_raw = args.get("content")
     if payload_raw is None:
         payload_raw = args.get("payload", "")
-    payload = (
-        payload_raw.encode("utf-8") if isinstance(payload_raw, str) else bytes(payload_raw)
-    )
+    if isinstance(payload_raw, str):
+        # Auto-prepend the Peer roster block when sending text to a
+        # sibling and 2+ spawned peers exist. Mirrors OpenClaw's
+        # `runtimes/openclaw/src/core/agt-tools/agt.ts:545` behaviour
+        # so a Hermes parent in an analyst→viz→writer pipeline gives
+        # its children the same authoritative name map that an
+        # OpenClaw parent does. Binary payloads (file_transfer
+        # envelopes etc.) are passed through untouched.
+        payload_raw = _maybe_prepend_peer_roster(payload_raw, peer)
+        payload = payload_raw.encode("utf-8")
+    else:
+        payload = bytes(payload_raw)
 
     loop = _get_or_init_loop()
     try:
@@ -304,16 +371,167 @@ def _kars_mesh_await(args: dict[str, Any], **_kwargs: Any) -> str:
     )
 
 
-def _kars_mesh_transfer_file(_args: dict[str, Any], **_kwargs: Any) -> str:
-    """Chunked encrypted file transfer — deferred to v0.2."""
-    return json.dumps(
-        {
-            "error": (
-                "kars_mesh_transfer_file not yet implemented in mesh "
-                "v0.1 (small-messages only). Use kars_mesh_send with "
-                "base64-encoded chunks for now, or wait for v0.2."
-            ),
-        }
+def _kars_mesh_transfer_file(args: dict[str, Any], **_kwargs: Any) -> str:
+    """Send a file to another mesh peer as a structured ``file_transfer``
+    envelope over an existing kars_mesh_send.
+
+    Ports the OpenClaw plugin's ``kars_mesh_transfer_file`` shape from
+    ``runtimes/openclaw/src/core/agt-tools/agt.ts:1311+`` to Python so
+    Hermes agents reach the same parity bar:
+
+      - Resolves ``file_path`` against ``$SANDBOX_HOME`` (defaults to
+        ``/sandbox``) when relative; aborts on any path that escapes
+        the sandbox root (path-traversal guard).
+      - Opens the file ONCE and does kind / size check + read on the
+        same fd (CWE-367 TOCTOU mitigation, exactly as OpenClaw does
+        on line 1385).
+      - Caps file size at 30 MiB (same MAX_FILE_SIZE OpenClaw uses) —
+        the AGT mesh frames carry the whole payload in one ciphertext
+        and a 30 MiB cap keeps the receiver's decrypt + base64-decode
+        bounded.
+      - Wraps the file in the same JSON envelope OpenClaw emits
+        (``{type:"file_transfer", file_name, file_path, file_data,
+        size_bytes, description, from_agent, timestamp}``) so a peer
+        on either runtime can auto-decode it.
+
+    Receiving side: ``mesh_worker._handle_message`` recognises the
+    ``type=file_transfer`` envelope and saves the decoded bytes to
+    ``/sandbox/incoming/<file_name>`` before passing the (now
+    summarised) message to the LLM. Mirrors OpenClaw's auto-decode at
+    ``agt-tools/agt.ts:1014+``.
+    """
+    peer = str(
+        args.get("to_agent") or args.get("to") or args.get("name") or ""
+    ).strip()
+    if not peer:
+        return json.dumps(
+            {"error": "missing required arg: to_agent=<display_name>"}
+        )
+
+    file_path_arg = str(args.get("file_path") or args.get("path") or "").strip()
+    if not file_path_arg:
+        return json.dumps(
+            {"error": "missing required arg: file_path=<absolute-or-relative-path>"}
+        )
+    description = str(args.get("description") or "")
+
+    try:
+        client = _get_or_init_client()
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"Mesh client init failed: {exc}"})
+
+    # Resolve relative paths against the sandbox workspace. Hermes' own
+    # working dir is /sandbox/agent (set in the Dockerfile WORKDIR);
+    # SANDBOX_HOME is the conventional env the controller sets and the
+    # entrypoint exports. Either way we land somewhere under /sandbox.
+    import base64 as _base64
+    import os as _os
+    from pathlib import Path
+
+    sandbox_root = Path(_os.environ.get("SANDBOX_HOME", "/sandbox"))
+    candidate = Path(file_path_arg)
+    if not candidate.is_absolute():
+        candidate = (sandbox_root / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+
+    # Path-traversal guard: any final path that escapes the sandbox
+    # root is refused before we open the fd. Sandbox-internal symlinks
+    # are allowed (resolved by .resolve() above and re-checked here).
+    # `sandbox_root` is whatever the operator set as SANDBOX_HOME
+    # (defaults to /sandbox in production; redirected in tests).
+    try:
+        candidate.relative_to(sandbox_root.resolve())
+    except ValueError:
+        return json.dumps(
+            {
+                "error": (
+                    f"file_path resolves outside {sandbox_root} — path "
+                    f"traversal blocked (resolved={candidate})"
+                )
+            }
+        )
+
+    max_bytes = 30 * 1024 * 1024  # 30 MiB — match OpenClaw's MAX_FILE_SIZE
+
+    # Open ONCE, then kind/size-check + read off the same fd so the
+    # file cannot be swapped between stat and read (CWE-367 TOCTOU).
+    try:
+        fd = _os.open(str(candidate), _os.O_RDONLY)
+    except OSError as exc:
+        return json.dumps(
+            {"error": f"cannot open {file_path_arg}: {exc}"}
+        )
+    try:
+        st = _os.fstat(fd)
+        if not (st.st_mode & 0o170000 == 0o100000):  # S_ISREG
+            return json.dumps(
+                {"error": f"not a regular file: {file_path_arg}"}
+            )
+        if st.st_size > max_bytes:
+            return json.dumps(
+                {
+                    "error": (
+                        f"file too large: {st.st_size / 1024 / 1024:.1f} MiB "
+                        f"(max {max_bytes // 1024 // 1024} MiB)"
+                    )
+                }
+            )
+        size_bytes = st.st_size
+        # Read the whole file off the same fd.
+        file_data = b""
+        remaining = size_bytes
+        while remaining > 0:
+            chunk = _os.read(fd, remaining)
+            if not chunk:
+                break
+            file_data += chunk
+            remaining -= len(chunk)
+    finally:
+        _os.close(fd)
+
+    envelope = {
+        "type": "file_transfer",
+        "file_name": candidate.name,
+        "file_path": file_path_arg,
+        "file_data": _base64.b64encode(file_data).decode("ascii"),
+        "size_bytes": size_bytes,
+        "description": description,
+        "from_agent": _os.environ.get("SANDBOX_NAME", "unknown"),
+        "timestamp": _iso_utc_no_tz(),
+    }
+    payload = json.dumps(envelope).encode("utf-8")
+
+    loop = _get_or_init_loop()
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            client.send_by_name(to=peer, payload=payload), loop
+        )
+        future.result(timeout=120.0)
+        return json.dumps(
+            {
+                "ok": True,
+                "to_agent": peer,
+                "file_name": candidate.name,
+                "bytes": size_bytes,
+                "encoded_bytes": len(payload),
+            }
+        )
+    except MeshPeerNotFoundError as exc:
+        return json.dumps({"error": f"Peer {peer!r} not found: {exc}"})
+    except MeshTransportError as exc:
+        return json.dumps({"error": f"Transport error: {exc}"})
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"Send failed: {exc}"})
+
+
+def _iso_utc_no_tz() -> str:
+    """ISO 8601 UTC timestamp with Z suffix — same shape OpenClaw uses
+    in the file_transfer envelope (`new Date().toISOString()`)."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
     )
 
 
@@ -337,8 +555,8 @@ _MESH_TOOLS = [
     ),
     (
         "kars_mesh_transfer_file",
-        "Transfer file via mesh (NOT yet implemented in v0.1; v0.2 "
-        "adds chunked encrypted transfer).",
+        "Send a file to another mesh peer (E2E encrypted, up to 30 MiB). "
+        "The receiver's mesh_worker auto-saves to /sandbox/incoming/<file_name>.",
         _kars_mesh_transfer_file,
     ),
 ]
