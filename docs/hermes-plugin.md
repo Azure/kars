@@ -1,6 +1,13 @@
 # kars Hermes plugin (`runtimes/hermes/`)
 
-The **kars Hermes plugin** is the agent-side runtime surface for kars on top of the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT) — a Python 3.11+ agent harness with **20+ messaging channels**, **18+ inference providers**, **70+ built-in tools**, and a native MCP client. When a Hermes sandbox boots, the Hermes gateway auto-discovers the kars plugin from `$HERMES_HOME/plugins/kars/` and loads it; from that point on the agent's tool surface is the **9 governance-aware kars tools** the plugin registers plus the 6 Hermes built-ins kars explicitly denies.
+The **kars Hermes plugin** is the agent-side runtime surface for kars on top of the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT) — a Python 3.11+ agent harness with **20+ messaging channels**, **18+ inference providers**, **70+ built-in tools**, and a native MCP client. When a Hermes sandbox boots, the Hermes gateway auto-discovers the kars plugin from `$HERMES_HOME/plugins/kars/` and loads it; from that point on the agent's tool surface is the **11 governance-aware kars tools** the plugin registers plus the 6 Hermes built-ins kars explicitly denies.
+
+> **Parity vs OpenClaw (current state, not yet at full parity).** OpenClaw's kars plugin registers 24 tools; Hermes registers 11. The deltas are real:
+> - **`kars_handoff_*` (request / confirm / status)** — NOT YET IMPLEMENTED. `handoff.py` is a stub. Tracked in `hermes-handoff-impl`.
+> - **`kars_mesh_transfer_file`** — registered but returns a stub error ("not yet implemented in mesh v0.1; use kars_mesh_send"). Tracked in `hermes-mesh-transfer-file`.
+> - **9 `foundry_*` tools** (`code_execute`, `image_generation`, `web_search`, `file_search`, `conversations`, `evaluations`, `deployments`, `agents`, `download_file`) — reach the agent through Hermes' native MCP client at `http://127.0.0.1:8443/platform/mcp` rather than as direct `ctx.register_tool(...)` calls. Functionally equivalent for tool invocation but the LLM sees them as `mcp__platform__foundry_X` instead of `foundry_X`. Tracked in `hermes-native-foundry-tools`.
+> - **Multi-agent peer roster auto-prepend** — OpenClaw auto-prepends `Peer roster: name — role` to every outbound mesh message when 2+ siblings exist. Hermes doesn't yet. Tracked in `hermes-peer-roster`.
+> - **`telegram_status` agent-side tool** — OpenClaw has it; Hermes uses the operator-side `channels.telegram` config flow instead.
 
 | Property | Value |
 |---|---|
@@ -14,35 +21,46 @@ For the conceptual split between plugin-owned mesh and router-owned governance/a
 
 ---
 
-## Registered tools (9 total)
+## Registered tools (11 total) — NOT yet at OpenClaw parity
 
-Authoritative source: `runtimes/hermes/src/kars_runtime_hermes/plugin/plugin.yaml`. The plugin registers exactly these tools via Hermes' `register_tool()` API; every Hermes built-in that overlapped (e.g. Hermes' own `web_search`) is deregistered in the same plugin load pass so the agent never sees two competing implementations.
+Authoritative source: each `register()` call across `runtimes/hermes/src/kars_runtime_hermes/plugin/*.py`. Verified by `kubectl logs <hermes-pod> -c agent | grep "registered"` on any running Hermes sandbox.
 
-### Mesh + sub-agents (4)
+### Sub-agent spawn (4) — parity with OpenClaw
+
+| Tool | What it does |
+|---|---|
+| `kars_spawn` | Create a governed sub-agent (Hermes-runtime by default — controller stamps `runtime.kind=Hermes` when the parent is Hermes). |
+| `kars_spawn_list` | Enumerate currently-running sub-agents. |
+| `kars_spawn_status` | Pod / runtime / mesh status for one sub-agent. |
+| `kars_spawn_destroy` | Graceful tear-down of a sub-agent. |
+
+### Mesh (3 functional + 1 stub) — partial parity
+
+| Tool | What it does |
+|---|---|
+| `kars_mesh_send` | Send a message to a sibling. Encryption is via Double Ratchet inside the plugin; the router sees ciphertext only. Returns `delivered_via_agt_relay` (fire-and-forget) or `delivered_and_replied` (sync round-trip when the peer auto-responder is enabled). |
+| `kars_mesh_inbox` | Drain the local inbox (decrypted plugin-side) without blocking. |
+| `kars_mesh_await` | Block until a message arrives from a specific sender (with timeout). |
+| `kars_mesh_transfer_file` ⚠ **stub** | Returns `"kars_mesh_transfer_file not yet implemented in mesh v0.1 (small-messages only). Use kars_mesh_send with chunked content."` — see follow-up `hermes-mesh-transfer-file`. |
+
+The `mesh_worker` background loop (`KARS_MESH_AUTO_RESPONDER=1`, set by the controller on sub-agent containers) auto-decrypts every inbound and dispatches to the agent's LLM, publishing the resulting reply back through `kars_mesh_send`.
+
+### Discovery (1)
 
 | Tool | What it does |
 |---|---|
 | `kars_discover` | Look up sibling agents on the AGT registry by display name or capability. |
-| `kars_mesh_send` | Send a message to a sibling. Encryption is via Double Ratchet inside the plugin; the router sees ciphertext only. Returns `delivered_via_agt_relay` (fire-and-forget) or `delivered_and_replied` (sync round-trip when the peer auto-responder is enabled). |
-| `kars_mesh_inbox` | Drain the local inbox (decrypted plugin-side) without blocking. |
-| `kars_mesh_await` | Block until a message arrives from a specific sender (with timeout). |
 
-The `mesh_worker` background loop (`KARS_MESH_AUTO_RESPONDER=1`, set by the controller on sub-agent containers) auto-decrypts every inbound and dispatches to the agent's LLM, publishing the resulting reply back through `kars_mesh_send` — giving you the synchronous request/response pattern needed for `parent → child` pipelines.
+### Handoff (0) ❌ **NOT IMPLEMENTED**
 
-### Handoff (3)
+`runtimes/hermes/src/kars_runtime_hermes/plugin/handoff.py` is currently `def register(ctx): pass`. The three OpenClaw tools `kars_handoff_request / kars_handoff_confirm / kars_handoff_status` are missing on the Hermes side. Tracked: `hermes-handoff-impl`.
 
-| Tool | What it does |
+### Foundry data plane (1 native + 9 via MCP) — partial parity
+
+| Tool | Surface |
 |---|---|
-| `kars_handoff_request` | Ask another sandbox to take over the current session (escalation pattern). |
-| `kars_handoff_confirm` | Accept (or reject) an incoming handoff request. |
-| `kars_handoff_status` | Inspect the state of an in-flight handoff. |
-
-### Foundry data plane (1 native + 8 via MCP)
-
-| Tool | What it does |
-|---|---|
-| `foundry_memory` (native) | Per-agent long-term memory backed by Azure AI Foundry Memory Store. Scoped via `agent:${CLUSTER_NAME}/${SANDBOX_NAME}` so memory survives pod restart and is per-sandbox-isolated. |
-| `foundry_web_search`, `foundry_image_gen`, `foundry_code_execute`, `foundry_file_search`, `foundry_conversations`, `foundry_evaluations`, `foundry_deployments`, `foundry_agents` | Wired via the platform MCP server at `http://127.0.0.1:8443/platform/mcp` — Hermes' native MCP client connects on first use. |
+| `foundry_memory` (native) | `ctx.register_tool` direct — agent sees it as `foundry_memory`. Per-agent long-term memory backed by Azure AI Foundry Memory Store. Scoped via `agent:${CLUSTER_NAME}/${SANDBOX_NAME}` so memory survives pod restart and is per-sandbox-isolated. |
+| `foundry_web_search`, `foundry_image_gen`, `foundry_code_execute`, `foundry_file_search`, `foundry_conversations`, `foundry_evaluations`, `foundry_deployments`, `foundry_agents`, `foundry_download_file` | Wired via the platform MCP server at `http://127.0.0.1:8443/platform/mcp` — Hermes' native MCP client connects on first use. **Agent sees them as `mcp__platform__foundry_*` rather than `foundry_*`.** Tracked: `hermes-native-foundry-tools`. |
 
 ### Network (1)
 
@@ -50,12 +68,16 @@ The `mesh_worker` background loop (`KARS_MESH_AUTO_RESPONDER=1`, set by the cont
 |---|---|
 | `http_fetch` | Single outbound HTTP fetch, governance-gated. Subject to the L7 egress allowlist (`KarsSandbox.spec.networkPolicy.allowlistRef`) + the auto-refreshing OISD + URLhaus blocklist + any active `EgressApproval` overlay. Hermes' own `web_fetch` built-in is deregistered so this is the only path. |
 
-### Hooks (governance + telemetry)
+### Hooks (governance + telemetry) — parity with OpenClaw
 
 | Hook | What it does |
 |---|---|
 | `pre_tool_call` | AGT governance gate — every tool call is screened against the active policy profile (`developer` / `web` / `azure` / `minimal`) before the kernel executes it. Fail-closed with a 3-call grace window if the policy service is briefly unreachable. |
 | `post_tool_call` | Telemetry — emits the standard kars OTel spans (`kars.tool.invocation`) so the operator-CLI topology and Headlamp mesh dashboard pick up Hermes-side tool activity identically to OpenClaw. |
+
+### Multi-agent peer roster — ❌ NOT IMPLEMENTED
+
+OpenClaw auto-prepends `Peer roster: name — role` to every outbound `kars_mesh_send` / `kars_mesh_transfer_file` when 2+ siblings exist. Hermes does not yet. In multi-agent pipelines (`analyst → viz → writer`), Hermes agents must resolve sibling names themselves. Tracked: `hermes-peer-roster`.
 
 ### Denied Hermes built-ins (6)
 
@@ -63,7 +85,7 @@ The plugin actively deregisters the following Hermes built-ins so the agent cann
 
 `web_search` · `web_fetch` · `code_interpreter` (Python sandbox) · `image_generation` · `file_search` (Hermes' own RAG) · `chat_completion` (direct provider call)
 
-Each is replaced by its kars equivalent (`foundry_*` / `http_fetch`) that routes through the inference router and is therefore subject to Content Safety, the L7 egress allowlist, and AGT policy.
+Each is replaced by its kars equivalent (`foundry_*` via MCP or `http_fetch`) that routes through the inference router and is therefore subject to Content Safety, the L7 egress allowlist, and AGT policy.
 
 ---
 
