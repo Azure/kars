@@ -113,7 +113,23 @@ def _maybe_save_file_transfer(
         parsed = _json.loads(payload_text)
     except (ValueError, TypeError):
         return payload_text
-    if not isinstance(parsed, dict) or parsed.get("type") != "file_transfer":
+    if not isinstance(parsed, dict):
+        return payload_text
+    # OpenClaw's kars_mesh_send wraps the LLM-provided `content` in an
+    # outer `task_request` envelope (runtimes/openclaw/src/core/agt-
+    # tools/agt.ts). The actual file_transfer JSON is the (escaped)
+    # inner `content` field. Unwrap one level before pattern-matching
+    # so OC → Hermes file_transfer arrives parseable.
+    if parsed.get("type") == "task_request" and isinstance(
+        parsed.get("content"), str
+    ):
+        try:
+            inner = _json.loads(parsed["content"])
+        except (ValueError, TypeError):
+            inner = None
+        if isinstance(inner, dict) and inner.get("type") == "file_transfer":
+            parsed = inner
+    if parsed.get("type") != "file_transfer":
         return payload_text
 
     file_name = str(parsed.get("file_name") or "").strip()
@@ -198,16 +214,26 @@ def _maybe_save_file_transfer(
 async def _handle_message(client: Any, msg: Any) -> None:
     payload_text = msg.payload.decode("utf-8", errors="replace")
     logger.info(
-        "mesh_worker: invoking hermes -z for inbound msg "
-        "(from=%s bytes=%d)",
+        "mesh_worker: handling inbound msg (from=%s bytes=%d payload[:200]=%r)",
         msg.from_did,
         len(msg.payload),
+        payload_text[:200],
     )
 
     # ── file_transfer auto-decode ─────────────────────────────────
-    # Try to detect the OpenClaw / Hermes file_transfer envelope
-    # before invoking the LLM — files arrive base64-encoded inside a
-    # JSON blob and are useless to the LLM until saved to disk.
+    # Detect file_transfer envelopes before invoking the LLM. Runs
+    # UNCONDITIONALLY (no AUTO_RESPONDER gate) so a top-level Hermes
+    # pod still saves files peers ship to it — matches OpenClaw,
+    # whose always-on agent loop strips structural envelopes
+    # regardless of any opt-in env.
+    was_file_transfer = (
+        isinstance(payload_text, str)
+        and payload_text.startswith("{")
+        and (
+            '"type":"file_transfer"' in payload_text.replace(" ", "")
+            or '\\"type\\":\\"file_transfer\\"' in payload_text.replace(" ", "")
+        )
+    )
     payload_text = _maybe_save_file_transfer(payload_text, msg, client)
 
     # ── Publish peer to router trust store (operator panel feed) ──
@@ -236,6 +262,22 @@ async def _handle_message(client: Any, msg: Any) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("mesh_worker: trust publish failed (non-fatal): %s", exc)
+
+    # LLM-spawning is opt-in via KARS_MESH_AUTO_RESPONDER. A top-level
+    # (channel-driven) Hermes agent must NOT auto-spawn hermes -z on
+    # every inbound or it would infinite-loop on its own replies. The
+    # controller sets the env var on sub-agent containers (where the
+    # parent expects a synchronous round-trip).
+    auto_responder = os.environ.get(
+        "KARS_MESH_AUTO_RESPONDER", "0"
+    ) in {"1", "true", "True"}
+    if not auto_responder:
+        logger.info(
+            "mesh_worker: inbox drained from %s (AUTO_RESPONDER off; "
+            "structural envelopes saved, LLM response suppressed)",
+            msg.from_did,
+        )
+        return
 
     # Cap the per-prompt timeout so a misbehaving inbound can't pin a
     # worker forever. 25 min matches the parent's typical patience for
@@ -300,30 +342,34 @@ async def _worker_loop(get_client: Any) -> None:
 
 
 def start_worker(get_client: Any) -> None:
-    """Launch the auto-responder background loop. Idempotent.
-
-    ``get_client`` is a zero-arg callable that returns the
-    process-level ``MeshClient`` singleton (we call it lazily so the
-    plugin doesn't trigger client init unless the worker actually
-    starts)."""
+    # Launch the mesh inbox dispatcher (idempotent).
+    #
+    # Structural envelopes (file_transfer, future protocol acks)
+    # are auto-saved by _handle_message regardless of
+    # KARS_MESH_AUTO_RESPONDER -- infrastructure plumbing, not
+    # LLM business. The LLM-spawning branch (hermes -z per
+    # inbound) is gated by the env var inside _handle_message
+    # (per-message check), so the structural path runs even when
+    # the LLM path is suppressed.
+    #
+    # Without this split, a top-level Hermes agent (no
+    # AUTO_RESPONDER) never saves inbound files because the
+    # entire dispatcher was short-circuited -- discovered when
+    # validating kars_mesh_transfer_file end-to-end on AKS where
+    # the receiver was not a sub-agent.
     global _WORKER_TASK, _WORKER_LOOP
 
-    if os.environ.get("KARS_MESH_AUTO_RESPONDER", "0") not in {"1", "true", "True"}:
-        logger.info(
-            "mesh_worker: KARS_MESH_AUTO_RESPONDER not set — skipping worker"
-        )
-        return
-
     if _WORKER_TASK is not None and not _WORKER_TASK.done():
-        logger.debug("mesh_worker: worker already running, skipping")
+        logger.debug("mesh_worker: dispatcher already running, skipping")
         return
 
-    # Reuse the mesh module's background loop so the worker shares the
-    # same singleton MeshClient instance.
     from . import mesh as _mesh  # noqa: PLC0415
-
     _WORKER_LOOP = _mesh._get_or_init_loop()  # noqa: SLF001
     _WORKER_TASK = asyncio.run_coroutine_threadsafe(
         _worker_loop(get_client), _WORKER_LOOP
     )  # type: ignore[assignment]
-    logger.info("mesh_worker: auto-responder loop scheduled")
+    auto = os.environ.get("KARS_MESH_AUTO_RESPONDER", "0") in {"1", "true", "True"}
+    logger.info(
+        "mesh_worker: dispatcher started (auto_responder=%s)",
+        "on" if auto else "off (structural-envelope tap only)",
+    )
