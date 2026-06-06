@@ -34,6 +34,7 @@
 # Agent capabilities
 
 - [kars OpenClaw plugin](openclaw-plugin.md)
+- [kars Hermes plugin](hermes-plugin.md)
 - [`@kars/mesh` plugin (local OpenClaw)](mesh-plugin.md)
 - [Channels & external plugins](channels-plugins.md)
 - [Operator TUI](operator-tui.md)
@@ -41,6 +42,10 @@
 - [Per-sandbox identity (Entra Agent ID)](agent-identity.md)
 - [Demo script](demo-script.md)
 - [Examples catalogue](examples.md)
+
+# Runbooks
+
+- [Hermes runtime — troubleshooting](runbooks/hermes-troubleshooting.md)
 
 # Operations
 

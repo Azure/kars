@@ -1,0 +1,78 @@
+# kars Example: Basic Hermes Agent
+# Minimal Hermes-runtime sandbox — the kars plugin auto-loads, the agent
+# joins the AGT mesh (verified-tier when foundryRbac is set in the
+# namespace), and a smoke-test conversation answers a single
+# chat-completion at /v1/chat/completions on the inference router.
+
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: hermes-assistant-inference
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: hermes-assistant
+spec:
+  appliesTo:
+    sandboxName: hermes-assistant
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    dailyTokens: 500000
+    perRequestTokens: 128000
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: hermes-assistant
+  namespace: kars-system
+spec:
+  runtime:
+    kind: Hermes
+    hermes:
+      # `version` and `agentCode` are intentionally unset:
+      # - Image resolves to the controller default
+      #   (`karsacr.azurecr.io/kars-runtime-hermes:latest` or the
+      #   per-deployment override from HERMES_RUNTIME_IMAGE / Helm
+      #   `runtimes.hermes.image`). Pinning here breaks the example
+      #   for users on a different registry.
+      # - The Hermes Agent version defaults to the adapter image's
+      #   built-in (currently v0.15.2). Pin via `version: "X.Y.Z"`
+      #   to lock it.
+      # - Without `agentCode`, the image's smoke-test agent at
+      #   /opt/kars-default-agent/main.py runs. Provide your own
+      #   agent via `agentCode.oci.image` or `agentCode.git.url`.
+
+  sandbox:
+    isolation: "enhanced"
+    seccompProfile: "kars-strict"
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    writablePaths:
+      - /sandbox
+      - /tmp
+
+  inferenceRef:
+    name: hermes-assistant-inference
+
+  governance:
+    # AGT governance is on by default — kept explicit here for
+    # documentation. Hermes' kars plugin registers the pre_tool_call
+    # hook that consults this policy on every tool invocation.
+    enabled: true
+    trustThreshold: 500
+
+  networkPolicy:
+    defaultDeny: true
+    allowedEndpoints:
+      # The inference router brokers AAD + Content Safety + token
+      # budget for every outbound call; the agent itself goes nowhere.
+      - name: agentmesh-relay
+        host: agentmesh-relay.agentmesh.svc.cluster.local
+      - name: agentmesh-registry
+        host: agentmesh-registry.agentmesh.svc.cluster.local

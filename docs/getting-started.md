@@ -257,6 +257,21 @@ kars add another-agent --runtime LangGraph --model gpt-4.1
 
 `kars add` reuses the existing AKS cluster and Foundry project — only the pod is new. See **[CLI reference](cli-reference.md)** for the full surface.
 
+### 2.5a Try a Hermes-runtime sandbox instead
+
+The same `kars add` works for [Hermes](https://github.com/NousResearch/hermes-agent), a channels-first agent harness with native MCP support — useful when you want a Telegram or Slack-driven agent without writing the integration:
+
+```bash
+# Mesh-only Hermes agent (no channels — talks to other agents via the kars mesh).
+kars add hermes-helper --runtime Hermes --model gpt-4.1
+
+# Hermes agent fronted by a Telegram bot.
+kars add hermes-helper --runtime Hermes --model gpt-4.1 \
+  --channels telegram --telegram-token "$TELEGRAM_BOT_TOKEN"
+```
+
+The Hermes adapter ships its own plugin (mesh tools, governance hook, Foundry tool wrappers, sub-agent spawn) and joins the AGT mesh identically to OpenClaw — so `kars_mesh_send` works in either direction between OpenClaw and Hermes peers. Full reference: **[Hermes plugin](hermes-plugin.md)**.
+
 ### 2.6 Tear it down
 
 ```bash

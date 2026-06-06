@@ -178,7 +178,7 @@ metadata:
   namespace: kars-my-agent
 spec:
   runtime:
-    kind: OpenClaw                  # or OpenAIAgents | MicrosoftAgentFramework |
+    kind: OpenClaw                  # or Hermes | OpenAIAgents | MicrosoftAgentFramework |
                                     #    LangGraph | Anthropic | PydanticAi | BYO
     openclaw:                       # block name matches `kind` (CEL-validated)
       image: karsacr.azurecr.io/kars-runtime-openclaw:latest
@@ -215,7 +215,7 @@ status:
 
 | Field | Type | Notes |
 |---|---|---|
-| `spec.runtime.kind` | enum | `OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework`, `SemanticKernel` *(deferred)*, `LangGraph`, `Anthropic`, `PydanticAi`, `BYO`. |
+| `spec.runtime.kind` | enum | `OpenClaw`, `Hermes`, `OpenAIAgents`, `MicrosoftAgentFramework`, `SemanticKernel` *(deferred)*, `LangGraph`, `Anthropic`, `PydanticAi`, `BYO`. |
 | `spec.runtime.<kind>` | object | The kind-specific configuration block. CEL validation enforces that exactly one of these is set and that it matches `kind`. See [Runtime catalog](../runtimes.md). |
 | `spec.inferenceRef.name` | LocalObjectRef | Required reference to a sibling `InferencePolicy` (same namespace). Missing target → `Degraded` with `InferencePolicyNotFound`. There is no inline fallback. |
 
@@ -246,6 +246,44 @@ status:
 | `status.runtimeKind` | Runtime kind observed for the current `observedGeneration`. |
 | `status.observedGeneration` | `metadata.generation` that produced this status. Compare against `metadata.generation` to detect stale observations. |
 | `status.conditions[]` | The full condition chain — every reason emitted by the controller is enumerated in [`docs/api/conditions.md`](conditions.md). |
+
+### `spec.runtime.hermes` (`HermesConfig`) {#hermesconfig}
+
+Runtime-kind config block used when `spec.runtime.kind: Hermes`. All fields are optional — defaults give a working smoke-test agent on first boot.
+
+```yaml
+spec:
+  runtime:
+    kind: Hermes
+    hermes:
+      version: "0.15.2"               # optional — Hermes Agent version pin (entrypoint reads HERMES_VERSION)
+      agentCode:                      # optional — user-supplied agent code (mutually exclusive: oci | git)
+        oci:
+          image: myregistry.azurecr.io/my-hermes-agent:1.2.3
+        # — or —
+        git:
+          url: https://github.com/me/my-hermes-agent
+          ref: v1.2.3                 # branch | tag | SHA; defaults to repo default branch
+          path: src                   # optional subdirectory
+      entrypoint:                     # optional — override the adapter's stock entrypoint
+        - /usr/local/bin/kars-hermes-entrypoint.sh
+      extraEnv:                       # optional — extra env injected into the agent container
+        MY_KNOB: "value"
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `version` | string | Hermes Agent version pin (e.g. `"0.15.2"`). Stays opt-in — adapter image defaults to its latest-supported tag. Surfaces as `HERMES_VERSION` in the container env. |
+| `agentCode.oci.image` | string | Pull agent code from an OCI image. Production path. |
+| `agentCode.git.url` | string | Clone agent code from a git URL. Development-iteration path. |
+| `agentCode.git.ref` | string | Branch / tag / commit SHA. Defaults to repo HEAD. |
+| `agentCode.git.path` | string | Subdirectory inside the repo. Defaults to repo root. |
+| `entrypoint` | string[] | Override the adapter's stock `kars-hermes-entrypoint.sh`. Use the stock entrypoint unless you have a strong reason. |
+| `extraEnv` | map[string]string | Extra env vars injected into the agent container. Reserved prefixes (`KARS_*`, `AGT_*`, `MESH_*`, `FOUNDRY_*`, `AZURE_*`, `OTEL_*`, `HERMES_HOME`) are filtered to prevent operator confusion — set them via the per-channel CLI flags or the helm values instead. |
+
+CEL on the CRD enforces exactly-one of `agentCode.oci` or `agentCode.git`. When neither is set the image's default smoke-test agent at `/opt/kars-default-agent/main.py` runs.
+
+Operator-facing reference: **[Hermes plugin](../hermes-plugin.md)**.
 
 ---
 

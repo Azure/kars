@@ -106,4 +106,78 @@ export async function ensureAgtRepo(
   return agtRepo;
 }
 
+/**
+ * Build the AGT Python wheels into `runtimes/wheels/` so the seven
+ * Python sandbox-image Dockerfiles (anthropic, hermes, langgraph,
+ * maf-python, openai-agents, pydantic-ai, plus any future Python
+ * runtime) can `COPY runtimes/wheels/` into their build context.
+ *
+ * Why this exists: `runtimes/wheels/` is `.gitignored` and the
+ * Dockerfiles assume the wheels already exist on the host. Without
+ * an auto-trigger, a fresh `kars push --only runtime-hermes` (or any
+ * Python runtime) fails with `failed to compute cache key: "/runtimes
+ * /wheels" not found`. Calling this from `kars push`, `kars up`, and
+ * `kars dev` BEFORE the docker build step closes that out-of-the-box
+ * gap.
+ *
+ * Caching: skips the build if `runtimes/wheels/.agt-sha` matches the
+ * current pin SHA AND at least one `.whl` is present. Delete the
+ * sentinel or pass `force: true` to rebuild.
+ *
+ * @param agtRepo  Path returned by {@link ensureAgtRepo}.
+ * @param repoRoot kars repo root (for `runtimes/wheels/` path).
+ * @param force    When true, rebuild even if cache is valid.
+ */
+export async function ensureAgtWheels(
+  agtRepo: string,
+  repoRoot: string,
+  force = false,
+): Promise<void> {
+  const wheelDir = path.join(repoRoot, "runtimes", "wheels");
+  const buildScript = path.join(repoRoot, "runtimes", "build-agt-wheels.sh");
+  const pinPath = path.join(repoRoot, "vendor", "agt", "pin.json");
+  const cacheStamp = path.join(wheelDir, ".agt-sha");
+
+  if (!fs.existsSync(buildScript)) {
+    throw new Error(
+      `runtimes/build-agt-wheels.sh not found at ${buildScript}; ` +
+        `repo layout unexpected.`,
+    );
+  }
+
+  // Cache check: skip if the pin SHA matches what produced the
+  // current wheels.
+  const pinSha = fs.existsSync(pinPath)
+    ? (JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin).sha
+    : "no-pin";
+  if (!force && fs.existsSync(cacheStamp) && fs.existsSync(wheelDir)) {
+    const stamp = fs.readFileSync(cacheStamp, "utf-8").trim();
+    const hasWheels = fs
+      .readdirSync(wheelDir)
+      .some((f) => f.endsWith(".whl"));
+    if (stamp === pinSha && hasWheels) {
+      return;
+    }
+  }
+
+  const agtPython = path.join(agtRepo, "agent-governance-python");
+  if (!fs.existsSync(path.join(agtPython, "agent-mesh", "pyproject.toml"))) {
+    throw new Error(
+      `AGT Python tree not found at ${agtPython}. Re-run after ` +
+        `ensureAgtRepo(), or check the agent-governance-toolkit clone.`,
+    );
+  }
+
+  process.stderr.write(
+    `[kars] Building AGT Python wheels (pin: ${pinSha.slice(0, 8)})...\n`,
+  );
+  fs.mkdirSync(wheelDir, { recursive: true });
+  await execa("bash", [buildScript], {
+    cwd: repoRoot,
+    env: { ...process.env, AGT_PYTHON_DIR: agtPython },
+    stdio: "inherit",
+  });
+  fs.writeFileSync(cacheStamp, pinSha + "\n");
+}
+
 export { DEFAULT_AGT_REPO };

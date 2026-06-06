@@ -3,8 +3,11 @@
 Messaging channels (Telegram, Slack, Discord, WhatsApp) and **third-party** search/scrape API integrations (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI) extend your kars agent with external communication and search capabilities. Configuration is via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
 
 > **Looking for the kars-owned plugins?** This page is about **external** integrations. For the kars-owned components:
-> - **[kars OpenClaw plugin](openclaw-plugin.md)** — the in-sandbox plugin (24 governance-aware tools, 10 skills) shipped with every kars-managed agent.
+> - **[kars OpenClaw plugin](openclaw-plugin.md)** — the in-sandbox plugin (24 governance-aware tools, 10 skills) shipped with every OpenClaw-runtime sandbox.
+> - **[kars Hermes plugin](hermes-plugin.md)** — the in-sandbox plugin (9 governance-aware tools + hooks) shipped with every Hermes-runtime sandbox.
 > - **[`@kars/mesh` plugin](mesh-plugin.md)** — the companion npm package for pairing a **local** OpenClaw with a remote kars cluster (8 federation tools, 1 skill).
+
+The channels and plugins documented below work identically with both runtimes — same CLI flag, same secret name (`<sandbox>-credentials`), same auto-config flow inside the entrypoint. The only difference is the config-file shape inside the agent container: OpenClaw writes to `~/.openclaw-data/config.yaml`, Hermes writes to `$HERMES_HOME/config.yaml`. The CLI hides that detail.
 
 ---
 

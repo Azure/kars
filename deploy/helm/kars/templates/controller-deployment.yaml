@@ -85,6 +85,8 @@ spec:
               value: {{ .Values.runtimes.langgraphTs.image | default "" | quote }}
             - name: PYDANTIC_AI_RUNTIME_IMAGE
               value: {{ .Values.runtimes.pydanticAi.image | default "" | quote }}
+            - name: HERMES_RUNTIME_IMAGE
+              value: {{ .Values.runtimes.hermes.image | default "" | quote }}
             - name: AZURE_OPENAI_ENDPOINT
               value: {{ .Values.inferenceRouter.azure.openai.endpoint | quote }}
             - name: FOUNDRY_ENDPOINT

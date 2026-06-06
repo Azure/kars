@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import json
 import logging
+import os
 import uuid
+from pathlib import Path
 from typing import AsyncIterator
 
 # Upstream AGT Python crypto — built locally via runtimes/build-agt-wheels.sh.
@@ -98,6 +101,104 @@ class MeshClient:
         # Inbox queue — drained by `inbox()` async iterator.
         self._inbox: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self._is_connected = False
+        # Filesystem handle for the prekey-writer lock (acquired by
+        # ``_acquire_prekey_writer_lock``, released on ``disconnect``
+        # or process exit). Kept open for the lifetime of the client so
+        # the kernel-held flock stays valid.
+        self._prekey_lock_fd: int | None = None
+
+    def _acquire_prekey_writer_lock(self) -> None:
+        """Acquire an exclusive fcntl flock on the per-identity prekey
+        writer sentinel so only one process per pod can upload prekeys.
+
+        Why: ``register_self`` is idempotent — restart-safe — but
+        ``upload_prekeys`` clobbers whatever the registry has for our
+        DID, including the bundle a sibling Python process uploaded
+        moments ago from its own (fresh) ``X3DHKeyManager`` state. The
+        daemon's in-memory ``signed_pre_key.private`` then no longer
+        matches the public bytes any peer fetches from the registry,
+        every X3DH-derived shared secret diverges, every AEAD frame
+        fails ``InvalidTag`` on receive.
+
+        Fail-loud here is much cheaper than the silent corruption: the
+        operator immediately sees ``MeshTransportError: another mesh
+        client process holds <path>`` and stops the secondary process,
+        instead of spending hours hunting a ``Decrypt failed`` log that
+        gives no traceback. See
+        ``docs/internal/security-audits/2026-06-06-cross-runtime-mesh-aks.md``
+        for the full debugging post-mortem this guard prevents from
+        recurring.
+
+        Linux-only (``fcntl``). Best-effort on platforms without
+        ``fcntl`` (Windows): logs a warning and continues — the test
+        scenarios this protects against don't occur on Windows pods.
+        """
+        try:
+            import fcntl  # noqa: PLC0415  Linux-only
+        except ImportError:
+            logger.warning(
+                "fcntl unavailable on this platform — prekey-writer "
+                "lock disabled. The MeshClient will run unprotected; "
+                "if a second process starts a MeshClient for the same "
+                "identity it WILL silently corrupt registry state."
+            )
+            return
+
+        lock_path = (
+            Path(self._config.identity_path).parent / ".mesh-prekeys.lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno in {errno.EWOULDBLOCK, errno.EAGAIN}:
+                holder_pid = "<unknown>"
+                try:
+                    holder_pid = lock_path.read_text().strip() or "<empty>"
+                except OSError:
+                    pass
+                raise MeshTransportError(
+                    f"Another mesh-client process already holds "
+                    f"{lock_path} (pid={holder_pid}). Refusing to start "
+                    f"a second MeshClient for did={self._identity.did} — "
+                    f"would clobber the running daemon's prekey bundle "
+                    f"and break its ability to decrypt incoming frames. "
+                    f"If you ran `python3 -c 'mesh._get_or_init_client()'` "
+                    f"from `kubectl exec` for debugging, that is the "
+                    f"trap this guard protects against — query the daemon "
+                    f"via the gateway HTTP API or `kubectl logs` instead."
+                ) from None
+            raise
+        # Record our PID inside the lock file so a future operator
+        # `cat .mesh-prekeys.lock` reveals which process holds it.
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+        os.fsync(fd)
+        self._prekey_lock_fd = fd
+        logger.debug(
+            "Prekey-writer lock acquired: %s (pid=%d)",
+            lock_path,
+            os.getpid(),
+        )
+
+    def _release_prekey_writer_lock(self) -> None:
+        """Release the flock (no-op if never acquired). Called from
+        ``disconnect()``; the OS releases on process exit too."""
+        if self._prekey_lock_fd is None:
+            return
+        try:
+            import fcntl  # noqa: PLC0415
+
+            fcntl.flock(self._prekey_lock_fd, fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            pass
+        try:
+            os.close(self._prekey_lock_fd)
+        except OSError:
+            pass
+        self._prekey_lock_fd = None
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -113,10 +214,26 @@ class MeshClient:
 
         Idempotent — calling twice is a no-op. Raises on auth failure
         (operator needs to fix identity/clock/RBAC), transparent on
-        transient transport errors (retried internally)."""
+        transient transport errors (retried internally).
+
+        Single-writer guard: acquires an exclusive ``fcntl.flock`` on
+        ``<identity_dir>/.mesh-prekeys.lock`` before uploading prekeys.
+        If a second process tries to start a MeshClient for the same
+        identity (e.g. someone runs ``python3 -c "from
+        kars_runtime_hermes.plugin import mesh; mesh._get_or_init_client()"``
+        from ``kubectl exec`` while the daemon is running), this raises
+        :class:`MeshTransportError` instead of silently overwriting the
+        registry's prekey bundle and breaking the daemon's ability to
+        decrypt KNOCKs. Cost us hours of debugging before the guard —
+        documented in
+        ``docs/internal/security-audits/2026-06-06-cross-runtime-mesh-aks.md``.
+        """
         async with _SINGLETON_LOCK:
             if self._is_connected:
                 return
+
+            # ── Single-writer flock guard ────────────────────────────────
+            self._acquire_prekey_writer_lock()
             self._registry = RegistryClient(
                 base_url=self._config.registry_url,
                 identity_signing_key=self._identity.signing_key,
@@ -215,6 +332,7 @@ class MeshClient:
         if self._registry is not None:
             await self._registry.aclose()
             self._registry = None
+        self._release_prekey_writer_lock()
         self._is_connected = False
 
     # ── Public API: discovery + send ────────────────────────────────────

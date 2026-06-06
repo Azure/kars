@@ -4,8 +4,10 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
+import * as path from "path";
 import { Stepper, banner } from "../stepper.js";
 import { isValidAzureHost } from "./up/preflight.js";
+import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -38,7 +40,7 @@ export function upCommand(): Command {
     // ── Images ─────────────────────────────────────────────────────────
     .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "karsacr.azurecr.io")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
-    .option("--skip-runtime-images", "Skip building/importing the 6 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable)", false)
+    .option("--skip-runtime-images", "Skip building/importing the 7 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable)", false)
     // ── Foundry / Azure OpenAI ────────────────────────────────────────
     .option("--foundry-endpoint <url>", "Existing Azure AI Foundry project endpoint (services.ai.azure.com)")
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
@@ -605,6 +607,15 @@ Auto-resume:
           // DEFAULT_*_IMAGE constants in `reconciler/runtime.rs`. Skipped
           // when --skip-runtime-images is passed (faster first deploy).
           if (!options.skipRuntimeImages) {
+            // The six Python runtime Dockerfiles COPY runtimes/wheels/.
+            // ensureAgtWheels() (a) auto-clones the pinned AGT repo if
+            // missing and (b) builds the three Python wheels (agent-
+            // sandbox, agent-mesh, a2a-protocol) into runtimes/wheels/.
+            // No-op when the cache stamp matches the current pin SHA,
+            // so a re-run of `kars up` is fast.
+            stepper.update("Bootstrapping AGT toolkit + Python wheels...");
+            const agtRepo = await ensureAgtRepo(undefined, repoRoot);
+            await ensureAgtWheels(agtRepo, repoRoot);
             for (const rt of [
               { dir: "openai-agents", tag: "kars-runtime-openai-agents:latest" },
               { dir: "maf-python", tag: "kars-runtime-maf-python:latest" },
@@ -612,6 +623,10 @@ Auto-resume:
               { dir: "langgraph", tag: "kars-runtime-langgraph:latest" },
               { dir: "langgraph-ts", tag: "kars-runtime-langgraph-ts:latest" },
               { dir: "pydantic-ai", tag: "kars-runtime-pydantic-ai:latest" },
+              // Hermes (Nous Research) — first-class adapter; must be
+              // included so `kars up` followed by `kubectl apply
+              // KarsSandbox kind: Hermes` doesn't ImagePullBackOff.
+              { dir: "hermes", tag: "kars-runtime-hermes:latest" },
             ]) {
               await buildPush(`sandbox-images/${rt.dir}/Dockerfile`, rt.tag);
             }
@@ -657,6 +672,7 @@ Auto-resume:
             { source: `${sourceAcr}/kars-runtime-langgraph:latest`, target: "kars-runtime-langgraph:latest" },
             { source: `${sourceAcr}/kars-runtime-langgraph-ts:latest`, target: "kars-runtime-langgraph-ts:latest" },
             { source: `${sourceAcr}/kars-runtime-pydantic-ai:latest`, target: "kars-runtime-pydantic-ai:latest" },
+            { source: `${sourceAcr}/kars-runtime-hermes:latest`, target: "kars-runtime-hermes:latest" },
           ];
 
           for (const img of images) {
@@ -822,6 +838,7 @@ Auto-resume:
           "--set", `runtimes.langgraph.image=${acrLoginServer}/kars-runtime-langgraph:latest`,
           "--set", `runtimes.langgraphTs.image=${acrLoginServer}/kars-runtime-langgraph-ts:latest`,
           "--set", `runtimes.pydanticAi.image=${acrLoginServer}/kars-runtime-pydantic-ai:latest`,
+          "--set", `runtimes.hermes.image=${acrLoginServer}/kars-runtime-hermes:latest`,
           "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
           "--set", `mesh.provider=${(options.meshProvider as string | undefined) ?? "agt"}`,
