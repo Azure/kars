@@ -129,8 +129,8 @@ pub static AGT_MESH_MESSAGES_RECEIVED: LazyLock<prometheus::IntCounter> = LazyLo
 /// Total of all labelled values equals `kars_mesh_messages_sent_total`
 /// (kept for back-compat); subtract `type="heartbeat"` + `type="connect"`
 /// to get the app-frame count.
-pub static AGT_MESH_FRAMES_SENT_BY_TYPE: LazyLock<prometheus::IntCounterVec> = LazyLock::new(
-    || {
+pub static AGT_MESH_FRAMES_SENT_BY_TYPE: LazyLock<prometheus::IntCounterVec> =
+    LazyLock::new(|| {
         prometheus::register_int_counter_vec!(
             opts!(
                 "kars_mesh_frames_sent_total",
@@ -139,13 +139,12 @@ pub static AGT_MESH_FRAMES_SENT_BY_TYPE: LazyLock<prometheus::IntCounterVec> = L
             &["type"]
         )
         .unwrap()
-    },
-);
+    });
 
 /// Inbound mirror of `AGT_MESH_FRAMES_SENT_BY_TYPE`. Same total/label
 /// semantics — sums to `kars_mesh_messages_received_total`.
-pub static AGT_MESH_FRAMES_RECEIVED_BY_TYPE: LazyLock<prometheus::IntCounterVec> = LazyLock::new(
-    || {
+pub static AGT_MESH_FRAMES_RECEIVED_BY_TYPE: LazyLock<prometheus::IntCounterVec> =
+    LazyLock::new(|| {
         prometheus::register_int_counter_vec!(
             opts!(
                 "kars_mesh_frames_received_total",
@@ -154,8 +153,7 @@ pub static AGT_MESH_FRAMES_RECEIVED_BY_TYPE: LazyLock<prometheus::IntCounterVec>
             &["type"]
         )
         .unwrap()
-    },
-);
+    });
 
 /// Total TrustGraph-projection-driven trust bootstraps. Incremented
 /// once per peer whose initial AGT trust score was seeded from a

@@ -647,9 +647,8 @@ fn build_upstream_url(
             && let Some(obj) = body_json.as_object_mut()
         {
             if let Some(inputs) = obj.get_mut("input").and_then(|v| v.as_array_mut()) {
-                inputs.retain(|item| {
-                    item.get("type").and_then(|t| t.as_str()) != Some("reasoning")
-                });
+                inputs
+                    .retain(|item| item.get("type").and_then(|t| t.as_str()) != Some("reasoning"));
             }
             if let Some(include) = obj.get_mut("include").and_then(|v| v.as_array_mut()) {
                 include.retain(|s| s.as_str() != Some("reasoning.encrypted_content"));

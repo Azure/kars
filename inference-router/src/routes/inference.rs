@@ -55,7 +55,10 @@ fn resolve_sandbox_name(headers: &HeaderMap) -> &'static str {
             && trimmed
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            && trimmed.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+            && trimmed
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
         {
             // Cache leak: only header-supplied names are leaked, and they
             // come from a finite set (the cluster's sandbox names). The
@@ -384,7 +387,10 @@ async fn responses(
             // the budget tracker won't see /v1/responses usage in
             // streaming mode (it already misses /v1/chat/completions
             // streamed usage too — same trade-off).
-            let mut response = (status, Body::from_stream(stream.map_err(std::io::Error::other)))
+            let mut response = (
+                status,
+                Body::from_stream(stream.map_err(std::io::Error::other)),
+            )
                 .into_response();
             if let Some(ct) = resp_headers.get("content-type") {
                 response.headers_mut().insert("content-type", ct.clone());

@@ -1074,10 +1074,7 @@ mod tests {
     /// Acquire the lock without changing any env — for tests that
     /// must assert the DEFAULT (unset) behaviour while parallel tests
     /// may otherwise have set the var.
-    fn lock_env_for_default_assertion() -> (
-        std::sync::MutexGuard<'static, ()>,
-        Option<String>,
-    ) {
+    fn lock_env_for_default_assertion() -> (std::sync::MutexGuard<'static, ()>, Option<String>) {
         let lock = ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

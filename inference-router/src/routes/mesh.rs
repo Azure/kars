@@ -165,12 +165,11 @@ async fn relay_websocket_bridge(
             // dominate over real conversation when uptime is high
             // (every 30s); separating them out lets the operator UX
             // distinguish keepalives from app traffic without ambiguity.
-            let frame_type =
-                classify_frame_type(match &tung_msg {
-                    tungstenite::Message::Text(t) => t.as_bytes(),
-                    tungstenite::Message::Binary(b) => b.as_ref(),
-                    _ => &[],
-                });
+            let frame_type = classify_frame_type(match &tung_msg {
+                tungstenite::Message::Text(t) => t.as_bytes(),
+                tungstenite::Message::Binary(b) => b.as_ref(),
+                _ => &[],
+            });
             crate::metrics::AGT_MESH_FRAMES_SENT_BY_TYPE
                 .with_label_values(&[frame_type])
                 .inc();
@@ -247,12 +246,11 @@ async fn relay_websocket_bridge(
             crate::metrics::AGT_MESH_MESSAGES_RECEIVED.inc();
             // Mirror the SENT-side breakdown for RECEIVED. See the
             // SENT path's comment for the rationale.
-            let frame_type =
-                classify_frame_type(match &msg {
-                    tungstenite::Message::Text(t) => t.as_bytes(),
-                    tungstenite::Message::Binary(b) => b.as_ref(),
-                    _ => &[],
-                });
+            let frame_type = classify_frame_type(match &msg {
+                tungstenite::Message::Text(t) => t.as_bytes(),
+                tungstenite::Message::Binary(b) => b.as_ref(),
+                _ => &[],
+            });
             crate::metrics::AGT_MESH_FRAMES_RECEIVED_BY_TYPE
                 .with_label_values(&[frame_type])
                 .inc();
@@ -935,15 +933,21 @@ mod tests {
             "heartbeat"
         );
         assert_eq!(
-            classify_frame_type(br#"{"v":1,"type":"message","from":"did:mesh:...","ciphertext":"..."}"#),
+            classify_frame_type(
+                br#"{"v":1,"type":"message","from":"did:mesh:...","ciphertext":"..."}"#
+            ),
             "message"
         );
         assert_eq!(
-            classify_frame_type(br#"{"v":1,"type":"knock","from":"did:mesh:...","establishment":{...}}"#),
+            classify_frame_type(
+                br#"{"v":1,"type":"knock","from":"did:mesh:...","establishment":{...}}"#
+            ),
             "knock"
         );
         assert_eq!(
-            classify_frame_type(br#"{"v":1,"type":"connect","from":"did:mesh:...","signature":"..."}"#),
+            classify_frame_type(
+                br#"{"v":1,"type":"connect","from":"did:mesh:...","signature":"..."}"#
+            ),
             "connect"
         );
         assert_eq!(classify_frame_type(b"not json"), "unknown");
