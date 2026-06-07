@@ -41,6 +41,7 @@ test = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.23,<1.0",
     "respx>=0.21,<1.0",
+    "ruff>=0.6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -49,3 +50,15 @@ packages = ["src/kars_agt_mesh"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Default rule set (pyflakes + pycodestyle errors). Catches unused
+# imports/variables, undefined names, syntax errors. Style-only rules
+# (line length warnings, etc.) are intentionally NOT enabled to keep
+# the gate signal-only and reviewer-friendly. Matches the rule set
+# applied to runtimes/hermes.
+select = ["E", "F"]

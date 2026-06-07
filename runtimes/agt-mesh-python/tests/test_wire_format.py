@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import base64
 
-import pytest
 from agentmesh.encryption.channel import ChannelEstablishment
 from agentmesh.encryption.ratchet import EncryptedMessage, MessageHeader
 

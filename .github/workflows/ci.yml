@@ -310,6 +310,10 @@ jobs:
           # sandbox-images/hermes/Dockerfile.
           pip install -e runtimes/agt-mesh-python
           pip install -e "runtimes/hermes[dev]"
+      - name: Run hermes ruff lint
+        run: |
+          cd runtimes/hermes
+          python -m ruff check .
       - name: Run hermes pytest
         run: |
           cd runtimes/hermes
@@ -328,6 +332,10 @@ jobs:
           cd runtimes/agt-mesh-python
           python -m pip install --upgrade pip
           pip install -e ".[test]"
+      - name: Run kars_agt_mesh ruff lint
+        run: |
+          cd runtimes/agt-mesh-python
+          python -m ruff check .
       - name: Run kars_agt_mesh pytest
         run: |
           cd runtimes/agt-mesh-python

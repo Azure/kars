@@ -281,7 +281,6 @@ class RelayTransport:
 
 
 def _iso_utc() -> str:
-    from datetime import datetime, timezone
 
     return (
         datetime.now(timezone.utc)

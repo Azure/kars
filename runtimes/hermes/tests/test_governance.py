@@ -182,7 +182,7 @@ def test_evaluate_non_2xx_treated_as_failure() -> None:
         ),
     ):
         d1 = governance.evaluate("x", {})
-        d2 = governance.evaluate("x", {})
+        governance.evaluate("x", {})  # consumes one grace slot; result not asserted
         d3 = governance.evaluate("x", {})
 
     assert d1.allowed  # under grace

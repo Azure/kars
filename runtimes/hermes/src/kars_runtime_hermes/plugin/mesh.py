@@ -579,7 +579,11 @@ def register(ctx: Any) -> None:  # noqa: ANN401
                     # as aliases.
                     "to_agent": {"type": "string", "description": "Peer display name (send/transfer only)"},
                     "content": {"type": "string", "description": "Message bytes (UTF-8 string or base64)"},
-                    "senders": {"type": "array", "items": {"type": "string"}, "description": "Senders to await (await only)"},
+                    "senders": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Senders to await (await only)",
+                    },
                     "timeout_seconds": {"type": "number", "description": "Await timeout (await only, default 300)"},
                 },
             },

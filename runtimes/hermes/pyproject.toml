@@ -36,6 +36,7 @@ dev = [
   "pytest-asyncio>=0.23",
   "pytest-mock>=3.12",
   "respx>=0.21",
+  "ruff>=0.6.0",
 ]
 
 [project.urls]
@@ -57,3 +58,18 @@ packages = ["src/kars_runtime_hermes"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Default rule set (pyflakes + pycodestyle errors). Catches unused
+# imports/variables, undefined names, syntax errors. Style-only rules
+# (line length warnings, etc.) are intentionally NOT enabled — the
+# goal is to keep the gate signal-only and reviewer-friendly.
+select = ["E", "F"]
+# F841: unused-variable. Keep enabled — caught a real leftover from the
+# file_transfer refactor in mesh_worker.py. Suppress per-line with
+# `# noqa: F841` only when the binding is intentional (e.g., capturing
+# a context manager handle whose .__exit__ does the work).

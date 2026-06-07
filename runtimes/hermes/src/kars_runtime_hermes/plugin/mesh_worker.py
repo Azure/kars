@@ -37,12 +37,8 @@ in the inbox, it has already cleared both layers.
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 import os
-import subprocess
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("kars.hermes.mesh_worker")
@@ -226,14 +222,6 @@ async def _handle_message(client: Any, msg: Any) -> None:
     # pod still saves files peers ship to it — matches OpenClaw,
     # whose always-on agent loop strips structural envelopes
     # regardless of any opt-in env.
-    was_file_transfer = (
-        isinstance(payload_text, str)
-        and payload_text.startswith("{")
-        and (
-            '"type":"file_transfer"' in payload_text.replace(" ", "")
-            or '\\"type\\":\\"file_transfer\\"' in payload_text.replace(" ", "")
-        )
-    )
     payload_text = _maybe_save_file_transfer(payload_text, msg, client)
 
     # ── Publish peer to router trust store (operator panel feed) ──

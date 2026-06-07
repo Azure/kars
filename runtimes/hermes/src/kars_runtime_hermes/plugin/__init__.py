@@ -153,7 +153,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
         def _eager_mesh_init() -> None:
             try:
-                client = _mesh_module._get_or_init_client()  # noqa: SLF001
+                _mesh_module._get_or_init_client()  # noqa: SLF001
                 logger.info("MeshClient pre-connected at plugin load")
                 # Now start the auto-responder worker (no-op unless
                 # KARS_MESH_AUTO_RESPONDER=1, which the controller sets
