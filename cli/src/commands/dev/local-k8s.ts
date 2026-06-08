@@ -27,6 +27,7 @@ import { loadConfig, getSecret, type KarsConfig } from "../../config.js";
 import { loadAgtProfile } from "../../refs.js";
 import { stageRustBinaries, type RustArch } from "../../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
+import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -1100,7 +1101,7 @@ async function deployAgentMesh(
 }
 
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
-  const stepper = new Stepper({ totalSteps: 13 });
+  const stepper = new Stepper({ totalSteps: 14 });
 
   // Fail fast if the user is running outside the kars checkout.
   // `--target local-k8s` rebuilds the controller, router, and sandbox
@@ -1150,6 +1151,47 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         ? "GitHub Models"
         : "Azure Foundry / OpenAI";
   stepper.done(`creds: ${providerLabel} (${creds.endpoint})`);
+
+  // Auto-clone the pinned AGT toolkit fork into ~/agent-governance-toolkit
+  // (or $KARS_AGT_REPO if set) BEFORE we get to the kind/helm/relay
+  // steps. Without this, fresh-machine users hit
+  //   "AGT Dockerfile not found at .../agent-governance-toolkit/..."
+  // at the "Deploying agentmesh-agt" step — after a kind cluster has
+  // already been created, the chart applied, and several minutes of
+  // work done. The bootstrap is also what populates runtimes/wheels/
+  // (.gitignored) so the Hermes / Anthropic / Pydantic AI / etc.
+  // Python runtime image builds in rebuildDevImages() have their
+  // wheel context available.
+  //
+  // Mirrors the same pattern in cli/src/commands/dev.ts (line ~652)
+  // and cli/src/commands/up.ts (line ~617) — keep the three call sites
+  // consistent or fresh-machine OOTB breaks on whichever entry point
+  // is missing.
+  if (opts.noMesh !== true && !opts.globalRegistry) {
+    stepper.step("Bootstrapping AGT toolkit + Python wheels…");
+    try {
+      const repoRootForAgt = findRepoRoot(process.cwd());
+      const resolvedAgtRepo = await ensureAgtRepo(opts.agtRepo, repoRootForAgt);
+      // ensureAgtWheels is a no-op when the runtimes/wheels/.agt-sha
+      // cache stamp matches the current vendor/agt/pin.json SHA, so
+      // re-runs of `kars dev --target local-k8s` stay fast.
+      await ensureAgtWheels(resolvedAgtRepo, repoRootForAgt);
+      // Mutate opts so every downstream caller (rebuildDevImages,
+      // deployAgentMesh, …) sees the resolved path even when the
+      // user didn't pass --agt-repo or set $KARS_AGT_REPO.
+      opts.agtRepo = resolvedAgtRepo;
+      stepper.done(`AGT toolkit ready at ${resolvedAgtRepo}`);
+    } catch (e: unknown) {
+      stepper.stop();
+      throw new Error(
+        `Auto-cloning AGT toolkit failed: ${(e as Error).message}\n` +
+          `\nTo bypass auto-clone, either:\n` +
+          `  • pass --agt-repo /path/to/agent-governance-toolkit (existing checkout), or\n` +
+          `  • set KARS_AGT_REPO=/path/to/agent-governance-toolkit, or\n` +
+          `  • pass --no-mesh (controller-only smoke test; sandboxes won't KNOCK).`,
+      );
+    }
+  }
 
   // Optional: GitHub MCP wiring (Slice 4d.4.1). Asks the user whether to
   // attach the upstream `api.githubcopilot.com/mcp` server to this
