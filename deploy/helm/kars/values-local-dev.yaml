@@ -37,6 +37,23 @@ controller:
   extraEnv:
     - name: LEADER_ELECTION_ENABLED
       value: "false"
+    # Tells the reconciler this is a dev cluster: imagePullPolicy
+    # defaults to IfNotPresent for `:latest` tags (so kind-loaded
+    # images aren't blown away by a network pull attempt against
+    # karsacr.azurecr.io), plus a handful of other dev-relaxations
+    # (see controller/src/reconciler/dev_env.rs). Previously this
+    # was only added by `kars dev`'s dynamic per-run overlay
+    # (cli/src/commands/dev/local-k8s.ts:944), which meant any
+    # naked `helm template ... -f values-local-dev.yaml | kubectl
+    # apply` (e.g. an out-of-band CRD refresh) silently dropped
+    # this env from the controller — and every subsequent sandbox
+    # spawn would ErrImagePull against ACR because the kubelet was
+    # told to always re-pull. Pinning it here means anyone who
+    # applies the local-dev overlay gets the dev semantics, full
+    # stop. The CLI's dynamic overlay still re-emits the same key
+    # idempotently; helm/kubectl deduplicate on `name`.
+    - name: KARS_DEV_PROFILE
+      value: "true"
   resources:
     requests:
       cpu: "50m"
