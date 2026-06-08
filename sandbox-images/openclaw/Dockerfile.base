@@ -16,7 +16,7 @@ FROM ${AZURELINUX_BASE} AS builder
 ARG TARGETARCH
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
     tdnf install -y tar gzip ca-certificates curl git && tdnf clean all && \
-    curl -fsSL "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
 
@@ -190,7 +190,7 @@ RUN pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
 
 # Node.js (vendored binary) + update npm to fix tar/minimatch/glob CVEs
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    curl -fsSL "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz && \
     npm install -g npm@latest
@@ -220,13 +220,13 @@ RUN npm install -g clawhub mcporter @steipete/oracle
 
 # Install GitHub CLI (enables github skill)
 RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
-    curl -fsSL "https://github.com/cli/cli/releases/download/v2.89.0/gh_2.89.0_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://github.com/cli/cli/releases/download/v2.89.0/gh_2.89.0_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
     tar xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/gh.tar.gz
 
 # Install ripgrep (enables session-logs skill)
 RUN RG_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64-unknown-linux-gnu";; *) echo "x86_64-unknown-linux-musl";; esac) && \
-    curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-${RG_ARCH}.tar.gz" -o /tmp/rg.tar.gz && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-${RG_ARCH}.tar.gz" -o /tmp/rg.tar.gz && \
     tar xzf /tmp/rg.tar.gz -C /tmp && \
     cp /tmp/ripgrep-*/rg /usr/local/bin/ && \
     rm -rf /tmp/rg.tar.gz /tmp/ripgrep-*
@@ -234,13 +234,13 @@ RUN RG_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64-
 # Install 1Password CLI (enables 1password skill)
 RUN OP_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
     OP_VER="2.33.1" && \
-    curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VER}/op_linux_${OP_ARCH}_v${OP_VER}.zip" -o /tmp/op.zip && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VER}/op_linux_${OP_ARCH}_v${OP_VER}.zip" -o /tmp/op.zip && \
     unzip -qo /tmp/op.zip -d /usr/local/bin/ && \
     rm /tmp/op.zip
 
 # Install himalaya (enables himalaya email skill)
 RUN HIM_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64";; *) echo "x86_64";; esac) && \
-    curl -fsSL "https://github.com/pimalaya/himalaya/releases/download/v1.2.0/himalaya.${HIM_ARCH}-linux.tgz" -o /tmp/himalaya.tgz && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://github.com/pimalaya/himalaya/releases/download/v1.2.0/himalaya.${HIM_ARCH}-linux.tgz" -o /tmp/himalaya.tgz && \
     tar xzf /tmp/himalaya.tgz -C /usr/local/bin/ && \
     rm /tmp/himalaya.tgz
 
