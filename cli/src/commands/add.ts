@@ -604,6 +604,30 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         if (message.includes("karssandboxes.kars.azure.com")) { // lgtm[js/incomplete-url-substring-sanitization] — error message check, not URL validation
           console.error(chalk.red("\n  kars is not installed on this cluster."));
           console.error(chalk.red("  Run 'kars up' first to deploy the infrastructure.\n"));
+        } else if (
+          // Detect stale-CRD validation errors: when the user has built a
+          // newer CLI (with new runtime kinds like Hermes) but the cluster
+          // is still on the older CRD schema, kubectl apply rejects the
+          // bundle with "unknown field" or "Unsupported value". The fix is
+          // a one-shot chart re-apply — surface that command inline so the
+          // user doesn't have to dig through docs.
+          message.includes("unknown field") ||
+          message.includes("Unsupported value") ||
+          message.includes("ValidationError")
+        ) {
+          console.error(chalk.red(`\n  Error: ${message}\n`));
+          console.error(chalk.yellow(
+            "  This looks like a CRD schema mismatch — the cluster's KarsSandbox CRD\n" +
+            "  is older than your local CLI/sources. Refresh the chart:\n",
+          ));
+          console.error(chalk.cyan(
+            "    helm template kars deploy/helm/kars --namespace kars-system --include-crds \\\n" +
+            "      | kubectl apply -f - --server-side --force-conflicts\n",
+          ));
+          console.error(chalk.dim(
+            "  Or just re-run `kars dev --target local-k8s` — its chart-install step\n" +
+            "  always refreshes CRDs to the source-of-truth schema.\n",
+          ));
         } else {
           console.error(chalk.red(`\n  Error: ${message}\n`));
         }
