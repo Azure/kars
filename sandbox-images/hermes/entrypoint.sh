@@ -168,7 +168,14 @@ echo "[kars-hermes] Building MCP server config in $HERMES_CONFIG"
   # "operation unsupported" for those models — see
   # hermes_cli/runtime_provider.py::azure_foundry_model_api_mode).
   echo "model:"
-  echo "  default: \"${AZURE_OPENAI_DEPLOYMENT:-gpt-5.4}\""
+  # Model selection — read the kars runtime contract var KARS_MODEL
+  # first (set by controller from InferencePolicy.modelPreference.
+  # primary.deployment — see controller/src/reconciler/mod.rs:1335).
+  # AZURE_OPENAI_DEPLOYMENT is the legacy env name still set in
+  # router_env; honour it as a fallback so manually-crafted dev
+  # overlays keep working. Last-resort default keeps the boot
+  # banner sensible if nothing's configured at all.
+  echo "  default: \"${KARS_MODEL:-${AZURE_OPENAI_DEPLOYMENT:-gpt-5.4}}\""
   echo "  provider: azure-foundry"
   echo "  base_url: \"http://127.0.0.1:8443/v1\""
   echo "mcp_servers:"
