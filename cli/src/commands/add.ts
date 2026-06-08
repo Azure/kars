@@ -513,6 +513,76 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         if (ready) {
           spinner.succeed(`Sandbox '${name}' ready`);
         } else {
+          // Wait loop timed out — distinguish "still pulling/scheduling"
+          // (informational, exit 0) from "stuck container" (real failure,
+          // exit 1 so the caller — including the operator TUI's spawn
+          // dialog — surfaces the actual reason). Without this branch,
+          // a pod stuck in ImagePullBackOff / ErrImageNeverPull /
+          // CrashLoopBackOff would silently succeed with the misleading
+          // message "(may still be starting)" — the operator's activity
+          // log would then say "✓ Spawned" while the agent never came
+          // up.
+          let stuckReason: string | null = null;
+          let stuckContainer: string | null = null;
+          try {
+            const { stdout: stuckJson } = await execa("kubectl", [
+              "get", "pods", "-n", namespace,
+              "-o", "jsonpath=" +
+                "{range .items[*].status.containerStatuses[*]}" +
+                "{.name}={.state.waiting.reason}|{.lastState.terminated.reason}|{.restartCount}\\n" +
+                "{end}",
+            ], { stdio: "pipe", timeout: 5000 });
+            for (const line of stuckJson.split("\n").filter(Boolean)) {
+              const [cName, rest] = line.split("=");
+              const [waiting, terminated, restartStr] = (rest || "").split("|");
+              const restarts = Number(restartStr) || 0;
+              // ImagePullBackOff / ErrImageNeverPull / ErrImagePull /
+              // InvalidImageName / CreateContainerConfigError →
+              // unambiguous failure modes. CrashLoopBackOff +
+              // restarts>=2 is also fatal-enough to surface.
+              if (
+                waiting === "ImagePullBackOff" ||
+                waiting === "ErrImageNeverPull" ||
+                waiting === "ErrImagePull" ||
+                waiting === "InvalidImageName" ||
+                waiting === "CreateContainerConfigError" ||
+                (waiting === "CrashLoopBackOff" && restarts >= 2) ||
+                terminated === "OOMKilled" ||
+                terminated === "Error"
+              ) {
+                stuckReason = waiting || terminated;
+                stuckContainer = cName;
+                break;
+              }
+            }
+          } catch { /* best-effort diagnostic; fall through */ }
+
+          if (stuckReason) {
+            spinner.fail(
+              `Sandbox '${name}' failed to start: ${stuckContainer} → ${stuckReason}`,
+            );
+            console.error(chalk.red(
+              `\n  Container '${stuckContainer}' is stuck in '${stuckReason}'.\n` +
+              `  Inspect:  kubectl describe pod -n ${namespace} -l app.kubernetes.io/instance=${name}\n` +
+              `  Logs:     kubectl logs -n ${namespace} deploy/${name} -c ${stuckContainer}\n`,
+            ));
+            if (stuckReason === "ImagePullBackOff" ||
+                stuckReason === "ErrImageNeverPull" ||
+                stuckReason === "ErrImagePull") {
+              console.error(chalk.yellow(
+                `  Common cause on local-k8s: the runtime image isn't loaded into kind.\n` +
+                `  Build + load:\n` +
+                `    docker build -t karsacr.azurecr.io/kars-runtime-<rt>:latest \\\n` +
+                `                 -f sandbox-images/<rt>/Dockerfile .\n` +
+                `    kind load docker-image karsacr.azurecr.io/kars-runtime-<rt>:latest --name kars-dev\n`,
+              ));
+            }
+            process.exit(1);
+          }
+
+          // Genuinely still starting (e.g. image pull in progress but
+          // not yet failed). Keep the original informational success
+          // so existing scripts don't break.
           spinner.succeed(`Sandbox '${name}' created (may still be starting)`);
         }
         console.log(chalk.dim(`  Namespace:  ${namespace}`));
