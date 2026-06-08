@@ -1242,6 +1242,16 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // the chart references — sandbox, controller, inference-router.
   // Missing any of them turns the helm install into an ErrImageNeverPull
   // loop with no useful diagnostics.
+  //
+  // PLUS: runtime images. When the operator spawns a non-OpenClaw
+  // sandbox (`n` → cycle to Hermes / Anthropic / …), the controller
+  // resolves the pod image to `karsacr.azurecr.io/kars-runtime-<X>:latest`
+  // (see controller/src/reconciler/runtime.rs::DEFAULT_*_IMAGE). On
+  // local-k8s that image isn't in the cluster, so the pod
+  // ImagePullBackOffs. We load every runtime image that's been built
+  // locally — silently skipping any that aren't present (the controller
+  // will then ImagePullBackOff and the operator's pod-events display
+  // surfaces a clear error pointing at the missing build).
   stepper.step("Loading kars images into the kind cluster…");
   if (opts.noBuild) {
     stepper.done("skipped image load (--no-build)");
@@ -1269,7 +1279,29 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         ],
       },
     ];
+
+    // Runtime images — only Hermes is auto-loaded here because Hermes
+    // is the second-most-common runtime after OpenClaw and is the one
+    // the user just productized in this PR. Other runtimes (Anthropic,
+    // LangGraph, Pydantic AI, MAF Python, OpenAI Agents) build from
+    // sandbox-images/<dir>/Dockerfile too but stay opt-in to keep
+    // `kars dev` startup fast for the common case. Power users can
+    // `docker build` them by hand; this loop picks them up on the
+    // next `kars dev` run.
+    //
+    // The target is the controller's canonical default image string so
+    // the retag + `kind load` plumbing wires correctly with NO
+    // controller-side change needed.
+    const runtimeImages: { target: string; aliases: string[] }[] = [
+      {
+        target: "karsacr.azurecr.io/kars-runtime-hermes:latest",
+        aliases: ["kars-runtime-hermes:latest", "kars-runtime-hermes:dev"],
+      },
+    ];
+    images.push(...runtimeImages);
+
     const missing: string[] = [];
+    const missingRuntimes: string[] = [];
     for (const img of images) {
       const result = await loadImageIfPresent(
         tools.kind,
@@ -1280,7 +1312,14 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         img.aliases,
       );
       if (!result.loaded) {
-        missing.push(result.reason ?? img.target);
+        // Separate "runtime" misses from "core" misses — runtimes are
+        // opt-in (only block if the user actually spawns one), but the
+        // core 3 images are hard requirements.
+        if (img.target.includes("kars-runtime-")) {
+          missingRuntimes.push(img.target);
+        } else {
+          missing.push(result.reason ?? img.target);
+        }
       }
     }
     if (missing.length > 0) {
@@ -1290,7 +1329,26 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         ),
       );
     }
-    stepper.done(`loaded ${images.length - missing.length}/${images.length} images`);
+    if (missingRuntimes.length > 0) {
+      // Soft warning — the core deployment is fine; the user just can't
+      // spawn one of these runtimes from the operator UI until they
+      // build the image. Spell out the docker build command so the fix
+      // is one-shot copy-paste.
+      const runtimeHints = missingRuntimes.map((img) => {
+        const m = img.match(/kars-runtime-([a-z-]+):latest/);
+        const dir = m ? m[1] : "<runtime>";
+        return `       docker build -t ${img} -f sandbox-images/${dir}/Dockerfile .`;
+      });
+      console.warn(
+        chalk.dim(
+          `  ℹ runtime images not loaded into kind (operator 'n' → cycle will let you pick these,\n     but the pod will ImagePullBackOff until the image exists):\n${runtimeHints.join("\n")}`,
+        ),
+      );
+    }
+    stepper.done(
+      `loaded ${images.length - missing.length - missingRuntimes.length}/${images.length} images` +
+        (missingRuntimes.length > 0 ? ` (${missingRuntimes.length} runtime image(s) skipped)` : ""),
+    );
   }
 
   // Sandboxes are scheduled with `nodeSelector: kars.azure.com/pool=sandbox`.
