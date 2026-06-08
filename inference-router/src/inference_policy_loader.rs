@@ -344,9 +344,36 @@ pub fn load_inference_policy_from_dir(
         content_safety_active = content_safety.is_active(),
         primary_deployment = ?model_preference.as_ref().map(|m| m.primary.deployment.as_str()),
         fallback_count = model_preference.as_ref().map(|m| m.fallback.len()).unwrap_or(0),
+        // Surface the actual fallback chain (not just the count) so ops
+        // can correlate a 503-then-200 sequence in the audit log with
+        // the configured failover order. Empty when fallback_count=0
+        // (which itself is a noteworthy signal: a single overloaded
+        // primary will surface 503s to the user, since the router has
+        // nowhere to route per src/failover.rs::is_failover_trigger).
+        fallback_chain = ?model_preference
+            .as_ref()
+            .map(|m| m.fallback.iter().map(|r| r.deployment.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default(),
         digest = %digest,
         "InferencePolicy loaded"
     );
+
+    // Explicit warn when the policy has no fallback chain — surfaces
+    // the gap loudly in the router log so operators don't have to dig
+    // for "fallback_count":0 in a JSON line and realize what it means.
+    // Particularly important for GitHub Copilot pickups where per-model
+    // 503 throttling is common; without a chain the user sees verbatim
+    // "upstream model provider is currently experiencing high demand"
+    // and has to manually swap models in ~/.kars/config.json.
+    if model_preference
+        .as_ref()
+        .is_some_and(|m| m.fallback.is_empty())
+    {
+        tracing::warn!(
+            primary_deployment = %model_preference.as_ref().unwrap().primary.deployment,
+            "InferencePolicy has no fallback chain — 5xx/429 on the primary deployment will surface directly to the agent (no router-side failover). Add spec.modelPreference.fallback[] in the InferencePolicy CR."
+        );
+    }
 
     LoadOutcome::Loaded(LoadedInferencePolicy {
         digest,

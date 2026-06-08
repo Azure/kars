@@ -28,6 +28,7 @@ import { loadAgtProfile } from "../../refs.js";
 import { stageRustBinaries, type RustArch } from "../../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
+import { buildCopilotFallbackChain } from "../../github-copilot.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -2425,6 +2426,26 @@ async function autoCreateSandbox(
     "    primary:",
     "      provider: azure-openai",
     `      deployment: ${creds.model || "gpt-4.1"}`,
+    // GitHub Copilot enforces per-model quotas (claude-opus-4.7 in
+    // particular is the most throttled). The router already retries
+    // 5xx + 429 against the fallback chain (see
+    // inference-router/src/failover.rs::is_failover_trigger), but only
+    // if InferencePolicy actually emits a non-empty fallback[]. Without
+    // this block, one overloaded primary surfaces 503
+    // "upstream model provider is currently experiencing high demand"
+    // straight to the WebUI and the user has to manually edit
+    // ~/.kars/config.json and re-run kars dev. buildCopilotFallbackChain
+    // picks a same-Copilot, cross-family chain so at least one model
+    // almost always has quota. Foundry / GH-Models paths don't get an
+    // auto-chain because they're single-deployment by definition.
+    ...(creds.provider === "github-copilot"
+      ? [
+          "    fallback:",
+          ...buildCopilotFallbackChain(creds.model || "claude-opus-4.7").flatMap(
+            (m) => [`      - provider: azure-openai`, `        deployment: ${m}`],
+          ),
+        ]
+      : []),
     "  contentSafety:",
     "    requirePromptShields: false",
     "  tokenBudget:",
