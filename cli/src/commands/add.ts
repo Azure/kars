@@ -618,22 +618,18 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           console.error(chalk.red(`\n  Error: ${message}\n`));
           console.error(chalk.yellow(
             "  This looks like a CRD schema mismatch — the cluster's KarsSandbox CRD\n" +
-            "  is older than your local CLI/sources. Easiest fix:\n",
+            "  is older than your local CLI/sources. The ONLY safe fix on local-k8s:\n",
           ));
           console.error(chalk.cyan(
             "    kars dev --target local-k8s\n",
           ));
           console.error(chalk.dim(
-            "  Re-runs the chart-install step which always refreshes CRDs AND\n" +
-            "  preserves the local-dev values overlay (KARS_DEV_PROFILE, image\n" +
-            "  pull policies, dev secrets). If you must apply the CRD by hand\n" +
-            "  instead, include the local-dev overlay so the controller keeps\n" +
-            "  dev semantics:\n",
-          ));
-          console.error(chalk.dim(
-            "    helm template kars deploy/helm/kars --namespace kars-system \\\n" +
-            "         --include-crds -f deploy/helm/kars/values-local-dev.yaml \\\n" +
-            "      | kubectl apply -f - --server-side --force-conflicts\n",
+            "  Re-runs the chart-install step which refreshes CRDs AND rebuilds the\n" +
+            "  per-run dynamic overlay (KARS_DEV_PROFILE, inference creds, image\n" +
+            "  pull policies). DO NOT apply the chart by hand with a naked\n" +
+            "  `helm template | kubectl apply` — that nukes the dynamic overlay's\n" +
+            "  inference creds and leaves every subsequent reconcile failing with\n" +
+            "  \"No inference endpoint configured\".\n",
           ));
         } else {
           console.error(chalk.red(`\n  Error: ${message}\n`));
