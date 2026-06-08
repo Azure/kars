@@ -607,6 +607,13 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         } else {
           console.error(chalk.red(`\n  Error: ${message}\n`));
         }
+        // Exit non-zero so callers (operator TUI's spawn dialog, scripts,
+        // CI) see the failure. Previously this catch logged-then-returned,
+        // leaving Node to exit 0 — which surfaced as a misleading
+        // "✓ Spawned" in the operator activity log even though the CR
+        // was never created (kubectl apply failed, fedcred lookup raced,
+        // controller CRD not installed, etc.).
+        process.exit(1);
       }
     });
 

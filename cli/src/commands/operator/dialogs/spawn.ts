@@ -252,10 +252,31 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
       activityLog.log(`{cyan-fg}⏳ Spawning {bold}${state.name}{/bold} (${runtimeLabels[state.runtime]}, ${state.model}, ${state.isolation})...{/}`);
       screen.render();
       try {
-        await execa("kars", args, { stdio: "pipe" });
+        // Capture stdout+stderr (pipe) so the activity log can echo the
+        // actual error on failure. Previously we only got the execa
+        // exception message which omits the underlying kars-add output
+        // — masking real causes (kubectl apply errors, fedcred lookups
+        // failing on local-k8s, CRDs not installed, etc.).
+        const result = await execa("kars", args, { stdio: "pipe" });
         activityLog.log(`{green-fg}✓ Spawned{/} ${state.name}`);
+        // Surface any deferred warnings (e.g. "(may still be starting)")
+        // that the user might want to see — short ones only, to keep
+        // the activity log readable.
+        const tailStdout = (result.stdout || "").trim().split("\n").slice(-3).join(" ").slice(0, 200);
+        if (tailStdout) activityLog.log(`{gray-fg}  ${tailStdout}{/}`);
       } catch (e: any) {
-        activityLog.log(`{red-fg}✗ Spawn fail:{/} ${(e.stderr || e.message)?.substring(0, 200)}`);
+        // execa rejects with stderr + stdout populated on non-zero exit.
+        // Now that kars add does process.exit(1) on failure (vs the old
+        // log-then-exit-0 anti-pattern), we receive the real error text.
+        const errOut = ((e.stderr as string) || (e.stdout as string) || (e.message as string) || "")
+          .toString()
+          .replace(/\u001b\[[0-9;]*m/g, "")  // strip ANSI colour codes
+          .split("\n")
+          .filter((l: string) => l.trim().length > 0)
+          .slice(-4)                          // last 4 non-empty lines
+          .join(" | ")
+          .slice(0, 400);
+        activityLog.log(`{red-fg}✗ Spawn fail:{/} ${errOut || "no error output captured"}`);
       }
       await refresh();
     }
