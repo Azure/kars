@@ -57,6 +57,7 @@ fn req(agent_id: &str) -> SpawnRequest {
         trusted_peers: None,
         handoff: None,
         runtime_kind: None,
+        role: None,
     }
 }
 

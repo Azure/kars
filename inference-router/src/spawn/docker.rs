@@ -85,6 +85,10 @@ pub(super) async fn collect_sub_agent_snapshots_docker(
                 .and_then(|l| l.get("kars.runtime-kind"))
                 .and_then(|m| m.as_str())
                 .map(String::from),
+            role: labels
+                .and_then(|l| l.get("kars.role"))
+                .and_then(|m| m.as_str())
+                .map(String::from),
         };
 
         snapshots.push(crate::handoff::SubAgentSnapshot {

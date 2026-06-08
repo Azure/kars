@@ -79,6 +79,14 @@ pub struct SpawnRequest {
     /// having to know the runtime kind explicitly. The accepted values
     /// match the controller's `RuntimeKind` enum exactly.
     pub runtime_kind: Option<String>,
+    /// Optional persona/role descriptor for the sub-agent (e.g.
+    /// "data analyst", "technical writer", "auditor"). Surfaces in
+    /// the parent's local peer roster (Hermes plugin) and in the
+    /// child's AGT registry record's `capabilities` field so siblings
+    /// can find each other by role. Free-form string; not used by the
+    /// spawn-control plane itself. Currently consumed only by the
+    /// Hermes runtime; OpenClaw silently ignores it.
+    pub role: Option<String>,
 }
 
 /// Handoff metadata attached to a spawn request.
@@ -635,6 +643,16 @@ pub async fn collect_sub_agent_snapshots(
                 .and_then(|r| r.get("kind"))
                 .and_then(|k| k.as_str())
                 .map(String::from),
+            // Restore role from the captured CRD labels too — set at
+            // spawn time by build_sub_agent_crd (kars.azure.com/role
+            // label). None when the parent didn't pass a role.
+            role: obj
+                .data
+                .get("metadata")
+                .and_then(|m| m.get("labels"))
+                .and_then(|l| l.get("kars.azure.com/role"))
+                .and_then(|r| r.as_str())
+                .map(String::from),
         };
 
         snapshots.push(crate::handoff::SubAgentSnapshot {
@@ -831,6 +849,43 @@ pub(crate) fn build_sub_agent_crd_with_labels(
         labels.insert("kars.azure.com/spawned-by".to_string(), "agent".to_string());
     }
 
+    // Surface the optional persona/role on the CRD so:
+    //   1. The parent's local peer roster (Hermes plugin) can recover
+    //      it on restart by listing children with kars.azure.com/parent
+    //      and reading kars.azure.com/role.
+    //   2. Sibling discovery via `kubectl get karssandbox -l kars.azure.com/role=auditor`
+    //      works out of the box without an AGT registry round-trip.
+    //   3. The handoff snapshot path in this same file can restore
+    //      role: when a parent re-spawns its children after restart
+    //      (search "Restore role from the captured CRD labels too").
+    //
+    // The label is intentionally short (no kars.azure.com/persona-description
+    // or similar) — long descriptions go on the spec.governance.persona
+    // field if/when added, but the label-form is what RBAC and selectors
+    // operate on. Skipped when no role provided.
+    if let Some(role) = req.role.as_deref()
+        && !role.trim().is_empty()
+    {
+        labels.insert(
+            "kars.azure.com/role".to_string(),
+            // K8s labels must be ≤63 chars and match
+            // [a-z0-9A-Z]([-_.a-z0-9A-Z]{0,61}[a-z0-9A-Z])?  — apply a
+            // best-effort sanitizer rather than rejecting (the LLM's
+            // free-form persona shouldn't fail the spawn over a space).
+            role.trim()
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .take(63)
+                .collect::<String>(),
+        );
+    }
+
     let mut annotations = BTreeMap::new();
     annotations.insert("kars.azure.com/model".to_string(), model.to_string());
 
@@ -927,6 +982,7 @@ mod tests {
             trusted_peers: None,
             handoff: None,
             runtime_kind: None,
+            role: None,
         }
     }
 
