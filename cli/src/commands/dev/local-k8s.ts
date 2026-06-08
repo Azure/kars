@@ -700,17 +700,34 @@ async function rebuildDevImages(
   ];
 
   const built: string[] = [];
+  // Specs whose image is cheap to rebuild relative to the source-vs-image
+  // staleness risk. The controller + router builds bottom out at a tiny
+  // Rust binary COPY (the host already compiled the binary into a staged
+  // dir), so rebuild is ~5-30s with the docker layer cache vs the alternative:
+  // a stale image silently running pre-fix code (e.g. a controller compiled
+  // before the dev_profile pull-policy check at controller/src/reconciler/
+  // mod.rs:1291 was added — caused a full debug session this PR because
+  // the existing kars-controller:dev was never refreshed when the source
+  // changed). Sandbox + runtime images stay opt-in because their builds
+  // are minutes long; users can pass --force-build or `kars push` to
+  // refresh them deliberately.
+  const ALWAYS_REBUILD = new Set(["inference-router", "controller"]);
   for (const s of specs) {
     const arch = await imageArch(runtime, s.tag);
     const archMismatch = arch !== null && arch !== archToken;
     const missing = arch === null;
-    if (!forceAll && !missing && !archMismatch) continue;
+    const alwaysRebuild = ALWAYS_REBUILD.has(s.name);
+    if (!forceAll && !missing && !archMismatch && !alwaysRebuild) continue;
     if (archMismatch) {
       console.log(chalk.dim(
         `  ${s.tag} is ${arch}, host is ${archToken} — rebuilding for ${platform}.`,
       ));
     } else if (missing) {
       console.log(chalk.dim(`  ${s.tag} not present — building for ${platform}.`));
+    } else if (alwaysRebuild) {
+      console.log(chalk.dim(
+        `  Rebuilding ${s.tag} for ${platform} (cheap; ensures source-vs-image freshness).`,
+      ));
     } else {
       console.log(chalk.dim(`  Rebuilding ${s.tag} for ${platform} (--build).`));
     }

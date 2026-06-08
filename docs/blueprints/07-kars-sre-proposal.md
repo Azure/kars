@@ -65,22 +65,158 @@ Inherits every isolation guarantee from the existing sandbox posture:
 - read-only root FS + `runAsNonRoot` + drop ALL caps
 - Same dual-container layout (agent + inference-router sidecar)
 
-Plus SRE-specific scoping:
+### 6.1 Cluster access — Tier 1: local-k8s (kind) — MVP target
 
-- **ClusterRole `kars-sre-reader`** — read-only on `karssandboxes`,
-  `inferencepolicies`, `toolpolicies`, `mcpservers`, `karsmemories`,
-  `pods`, `deployments`, `services`, `events`, `configmaps`,
-  `secrets/metadata` (NOT `secrets/data` — agent never sees secret
-  values), `customresourcedefinitions`.
-- **No write access by default.** `sre_apply_fix` and
-  `sre_run_ootb_smoke` route through AGT approval: operator gets
-  a `kars sre approve <action-id>` prompt in their TUI before the
-  agent's proposed kubectl/helm call executes.
-- **Egress allowlist** (NetworkPolicy + router blocklist):
-  `kubernetes.default.svc.cluster.local`,
-  the configured inference endpoint (Foundry / Copilot),
-  `api.github.com` (read-only) for source lookups.
-  Nothing else.
+**Authentication:** in-cluster ServiceAccount token. The sandbox pod's
+`ServiceAccountName: kars-sre` (in namespace `kars-sre`) is projected
+to `/var/run/secrets/kubernetes.io/serviceaccount/token` by the kubelet,
+auto-rotated on the standard k8s schedule (default 1h). `kubectl` /
+`helm` inside the agent container use the in-cluster config path
+(`KUBERNETES_SERVICE_HOST` / `KUBERNETES_SERVICE_PORT`) — no kubeconfig
+file mounted, no static credential.
+
+Why this is right for local-k8s first:
+1. Works on a fresh kind cluster without any Entra / Azure dependency.
+2. Same auth substrate kars already uses elsewhere (the controller's
+   own ServiceAccount in `kars-system`, see
+   `deploy/helm/kars/templates/controller-rbac.yaml`).
+3. Single rotation point: `kubectl rollout restart deploy/kars-sre`
+   forces a new SA token; no out-of-band cert/key/PAT to revoke.
+4. RBAC is the ONLY authorization gate — the binding below is the
+   complete blast-radius definition.
+
+### 6.2 Cluster access — Tier 2: AKS (deferred, Phase 2)
+
+When the user is on AKS, the same `kars-sre` ServiceAccount federates
+to an Entra App via Workload Identity (the same pattern the kars
+controller already uses — see `controller/src/auth/wi.rs`). The
+Helm chart annotation set:
+
+```yaml
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: <SRE-app-client-id>
+```
+
+`kars sre install` runs `az identity federated-credential create` to
+wire the federation; otherwise everything else (RBAC, plugin code,
+deployment shape) is byte-identical to local-k8s. This means the
+MVP doesn't have to wait for AKS support to be useful — once it
+works against kind, the AKS wiring is purely additive operator
+glue, not a code-level change in the agent or its tools.
+
+### 6.3 RBAC — the complete authorization gate
+
+This ClusterRole IS the access model. There is no second authorization
+layer (no admission webhook, no policy engine) — the agent's blast
+radius is precisely what RBAC permits and nothing more:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-reader
+rules:
+  # Read kars-owned CRs (the only resources the agent reasons about).
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - karssandboxes
+      - inferencepolicies
+      - toolpolicies
+      - mcpservers
+      - karsmemories
+      - karsevals
+      - trustgraphs
+      - egressapprovals
+      - karspairings
+      - a2aagents
+      - karsauthconfigs
+    verbs: ["get","list","watch"]
+  # Core workload state.
+  - apiGroups: [""]
+    resources: ["pods","services","configmaps","events","namespaces"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments","statefulsets","daemonsets","replicasets"]
+    verbs: ["get","list","watch"]
+  # Pod logs — NOT pods/exec, NOT pods/portforward.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Secret METADATA only. The agent process never sees secret data
+  # because (a) the SA is granted only get/list on `secrets` itself
+  # (apiserver returns secret data only on get-by-name, which the
+  # router sidecar strips via field selector on forward — see §6.4),
+  # and (b) the router proxy filter masks the .data field on any
+  # /api/v1/.../secrets response before it reaches the agent
+  # container. Belt + suspenders.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get","list"]
+  # CRD schema introspection so the agent can spot stale CRDs
+  # (exactly the failure mode this session's debug arc hit).
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get","list"]
+```
+
+**Notably absent** (each is a deliberate ban, not an oversight):
+- `create` / `update` / `delete` / `patch` on anything
+- `pods/exec` — agent cannot shell into other sandbox pods
+- `pods/portforward` — agent cannot relay traffic
+- `secrets/data` field — see §6.4
+- `tokenrequests` — agent cannot mint other SA tokens
+- Anything outside `kars.azure.com`, core, apps, apiextensions
+
+### 6.4 Secrets handling
+
+The agent CAN list secrets and CAN call `kubectl get secret <name>`,
+but it CANNOT see the `data` field. Two-layer enforcement:
+
+1. **Router-side filter (primary):** the existing inference-router
+   sidecar is the network choke point for the agent (UID 1000
+   talks to UID 1001 over loopback; iptables blocks everything
+   else). Extend its existing apiserver-proxy with a `secrets`
+   filter that strips `.data` and `.stringData` from any response
+   body whose kind is `Secret`. ~30 LOC in
+   `inference-router/src/proxy.rs`.
+2. **RBAC-side defense in depth (secondary):** the standard k8s
+   `secrets` resource doesn't subdivide `data` from metadata, so
+   we can't gate it via verb. The router filter is the real
+   enforcement; RBAC `get` is the floor.
+
+### 6.5 Write actions — Phase 2 short-lived token approval
+
+`sre_apply_fix` and `sre_run_ootb_smoke` do NOT broaden the
+`kars-sre-reader` ClusterRole. Instead, every write proposal generates
+an action ID; the operator approves it in their TUI, at which point
+the controller mints a SHORT-LIVED ServiceAccount token scoped to
+JUST the verb+resource+namespace the agent proposed:
+
+```
+Agent → "Propose: kubectl rollout restart deploy/palhermes -n kars-palhermes"
+         rationale: "agent container stuck in CrashLoopBackOff for 5 minutes"
+  → action-id 'sre-action-7f3a' created in AGT trust store
+  → Operator notified in `kars operator` TUI: "kars sre approve sre-action-7f3a"
+  → Operator inspects proposed command + rationale; approves or rejects
+  → On approve: TokenRequest API mints a token for SA `kars-sre-writer`
+    bound to a one-shot ClusterRoleBinding `kars-sre-write-sre-action-7f3a`
+    granting JUST `apps/deployments` `update` on `kars-palhermes/palhermes`,
+    TTL 5 min
+  → Agent executes via that token, single-use
+  → ClusterRoleBinding + Secret torn down by the controller post-execution
+  → Full audit chain: AGT approval entry, k8s audit log entry, router
+    audit JSONL entry — all three correlated by action-id
+```
+
+This means the standing blast radius is ALWAYS read-only. Write
+permission is materialized per-approved-action, scoped to one verb +
+one resource, expires in 5 minutes, and is revoked immediately after
+the call. No long-lived write token exists in the cluster at any
+time.
+
+### 6.6 Egress
+
 
 ## CLI integration
 
