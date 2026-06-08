@@ -618,15 +618,22 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           console.error(chalk.red(`\n  Error: ${message}\n`));
           console.error(chalk.yellow(
             "  This looks like a CRD schema mismatch — the cluster's KarsSandbox CRD\n" +
-            "  is older than your local CLI/sources. Refresh the chart:\n",
+            "  is older than your local CLI/sources. Easiest fix:\n",
           ));
           console.error(chalk.cyan(
-            "    helm template kars deploy/helm/kars --namespace kars-system --include-crds \\\n" +
-            "      | kubectl apply -f - --server-side --force-conflicts\n",
+            "    kars dev --target local-k8s\n",
           ));
           console.error(chalk.dim(
-            "  Or just re-run `kars dev --target local-k8s` — its chart-install step\n" +
-            "  always refreshes CRDs to the source-of-truth schema.\n",
+            "  Re-runs the chart-install step which always refreshes CRDs AND\n" +
+            "  preserves the local-dev values overlay (KARS_DEV_PROFILE, image\n" +
+            "  pull policies, dev secrets). If you must apply the CRD by hand\n" +
+            "  instead, include the local-dev overlay so the controller keeps\n" +
+            "  dev semantics:\n",
+          ));
+          console.error(chalk.dim(
+            "    helm template kars deploy/helm/kars --namespace kars-system \\\n" +
+            "         --include-crds -f deploy/helm/kars/values-local-dev.yaml \\\n" +
+            "      | kubectl apply -f - --server-side --force-conflicts\n",
           ));
         } else {
           console.error(chalk.red(`\n  Error: ${message}\n`));
