@@ -54,6 +54,13 @@ ignore = [
     # Re-evaluate when the rustls maintainers publish a successor or
     # inline the parse path. Mirrors the ignore in `.cargo/audit.toml`.
     "RUSTSEC-2025-0134",
+    # RUSTSEC-2026-0173 — `proc-macro-error2` is unmaintained. Pulled
+    # transitively via oci-client (0.15 + 0.16) → oci-spec → getset
+    # 0.1.6. Build-time-only proc-macro; no runtime attack surface
+    # beyond the build toolchain. Mirrors the ignore in
+    # `.cargo/audit.toml`. Re-evaluate when `getset` switches off
+    # proc-macro-error2 or oci-client upgrades past getset 0.1.6.
+    "RUSTSEC-2026-0173",
 ]
 
 # ─── Licenses ───────────────────────────────────────────────────────────

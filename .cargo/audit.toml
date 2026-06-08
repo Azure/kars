@@ -65,4 +65,20 @@ ignore = [
     # behavior; no runtime/network exposure beyond what rustls itself provides.
     # TODO: drop this ignore once rustls-native-certs / tokio-rustls roll forward.
     "RUSTSEC-2025-0134",
+    # RUSTSEC-2026-0173 — `proc-macro-error2 2.0.1` is unmaintained
+    # https://rustsec.org/advisories/RUSTSEC-2026-0173
+    #
+    # Severity: informational ("unmaintained"), NOT a vulnerability.
+    # Source: transitive build-time chain (controller-only):
+    #   oci-client 0.16.1 / oci-client 0.15.0 → oci-spec → getset 0.1.6 (proc-macro)
+    #     → proc-macro-error2 2.0.1
+    # Same rationale as RUSTSEC-2024-0370 above — this is a proc-macro crate
+    # that runs at compile time inside rustc, not at runtime in the controller
+    # binary. There is no runtime attack surface from an unmaintained
+    # proc-macro crate beyond the build toolchain itself. The advisory was
+    # published 2026-06-07 (one day before this commit); no upstream
+    # replacement exists yet — `getset` would need to roll forward.
+    # TODO: drop this ignore when `getset` switches off `proc-macro-error2`
+    # or when oci-client upgrades past `getset 0.1.6`.
+    "RUSTSEC-2026-0173",
 ]
