@@ -666,6 +666,37 @@ async function rebuildDevImages(
         ], { stdio: "inherit" });
       },
     },
+    {
+      // Hermes runtime image. Built so the operator's `n` → spawn
+      // dialog can launch a Hermes sandbox without the user having
+      // to know about `docker build -t kars-runtime-hermes …`. The
+      // target tag matches DEFAULT_HERMES_IMAGE in
+      // controller/src/reconciler/runtime.rs so the controller's
+      // image string resolves cleanly to the kind-loaded image
+      // (no retag dance in the load step).
+      //
+      // The Dockerfile COPYs runtimes/wheels/ — ensureAgtWheels()
+      // already populated that at the top of runLocalK8s, so this
+      // step never blocks on wheel availability.
+      //
+      // Cost: ~3-5 min on first build (Python pip install + Hermes
+      // pip install + ripgrep/op binaries). Subsequent runs reuse
+      // the docker layer cache → <10s. Acceptable for OOTB; if
+      // you really want to skip, pass --no-build to kars dev.
+      name: "runtime-hermes",
+      tag: "karsacr.azurecr.io/kars-runtime-hermes:latest",
+      build: async () => {
+        const dockerfile = path.join(repoRoot, "sandbox-images/hermes/Dockerfile");
+        if (!existsSync(dockerfile)) return; // chart drift; skip silently
+        await execa(runtime, [
+          "build",
+          "--platform", platform,
+          "-t", "karsacr.azurecr.io/kars-runtime-hermes:latest",
+          "-f", dockerfile,
+          repoRoot,
+        ], { stdio: "inherit" });
+      },
+    },
   ];
 
   const built: string[] = [];
