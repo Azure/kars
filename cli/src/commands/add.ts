@@ -44,12 +44,13 @@ export function addCommand(): Command {
     .option("--agent-instructions <instructions>", "System prompt for the Foundry agent")
     .option("--agent-tools <tools>", "Foundry tools: file_search,web_search,code_interpreter (comma-separated)")
 
-    // ── Runtime-specific: OpenClaw only ────────────────────────────────
-    .option("--channels <channels>", "[OpenClaw only] Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
-    .option("--telegram-token <token>", "[OpenClaw only] Telegram bot token (from BotFather)")
-    .option("--telegram-allow-from <ids>", "[OpenClaw only] Telegram user IDs allowed to DM (comma-separated)")
-    .option("--slack-token <token>", "[OpenClaw only] Slack bot OAuth token")
-    .option("--discord-token <token>", "[OpenClaw only] Discord bot token")
+    // ── Runtime-specific: OpenClaw + Hermes (channel-capable runtimes) ─
+    .option("--channels <channels>", "[OpenClaw + Hermes] Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
+    .option("--telegram-token <token>", "[OpenClaw + Hermes] Telegram bot token (from BotFather)")
+    .option("--telegram-allow-from <ids>", "[OpenClaw + Hermes] Telegram user IDs allowed to DM (comma-separated)")
+    .option("--slack-token <token>", "[OpenClaw + Hermes] Slack bot OAuth token")
+    .option("--discord-token <token>", "[OpenClaw + Hermes] Discord bot token")
+    // ── Runtime-specific: OpenClaw only (skills + plugin API keys) ─────
     .option("--skills <skills>", "[OpenClaw only] Skills to activate: browser,github,summarize,weather (comma-separated)")
     .option("--brave-api-key <key>", "[OpenClaw only] Brave Search API key")
     .option("--tavily-api-key <key>", "[OpenClaw only] Tavily search API key")
@@ -73,7 +74,8 @@ Flag groups (see --help for details):
   Inference budget:    --token-budget-*
   Governance / net:    --governance, --trust-threshold, --policy-profile, --learn-egress
   Foundry agent:       --agent-instructions, --agent-tools
-  OpenClaw only:       --channels, --telegram-*, --slack-*, --discord-*, --skills, --*-api-key
+  Channels (OpenClaw + Hermes):  --channels, --telegram-*, --slack-*, --discord-*
+  OpenClaw only:       --skills, --*-api-key
   BYO only:            --byo-image, --byo-contract-version
   MAF only:            --maf-language
 

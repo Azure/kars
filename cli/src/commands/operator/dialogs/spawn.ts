@@ -10,6 +10,7 @@
 import blessed from "blessed";
 import { execa } from "execa";
 import { listSecretVariants } from "../../../config.js";
+import { wiredRuntimeFlags } from "../../../runtime.js";
 import type { SandboxInfo } from "../types.js";
 
 interface ActivityLog {
@@ -60,16 +61,14 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
     // Auto-fill allow-from if exactly one variant
     if (storedAllowFrom.length === 1) state.telegramAllowFrom = storedAllowFrom[0].value;
 
-    // Runtime kinds — kebab flag values, must match cli/src/runtime.ts WIRED_KINDS.
-    const runtimeOpts = [
-      "openclaw",
-      "openai-agents",
-      "microsoft-agent-framework",
-      "lang-graph",
-      "anthropic",
-      "pydantic-ai",
-      "byo",
-    ];
+    // Runtime kinds — kebab flag values, pulled from runtime.ts so the
+    // picker can't drift from WIRED_KINDS (which is what caused Hermes
+    // to be missing from the operator's `n`/spawn dialog after Hermes
+    // landed in WIRED_KINDS itself). Adding a new runtime to
+    // WIRED_KINDS in runtime.ts is now sufficient to make it show up
+    // here; the only per-runtime config left in this file is the
+    // display label + channel-capability set below.
+    const runtimeOpts = wiredRuntimeFlags();
     const runtimeLabels: Record<string, string> = {
       "openclaw":                   "OpenClaw",
       "openai-agents":              "OpenAI Agents",
@@ -77,15 +76,23 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
       "lang-graph":                 "LangGraph",
       "anthropic":                  "Anthropic Claude SDK",
       "pydantic-ai":                "Pydantic AI",
+      "hermes":                     "Hermes",
       "byo":                        "Bring-your-own image",
     };
     const isoOpts = ["enhanced", "standard", "confidential"];
     const chOpts = ["", "telegram", "slack", "discord"];
     const chLabels: Record<string, string> = { "": "(none)", telegram: "telegram", slack: "slack", discord: "discord" };
+    // Runtimes whose entrypoint.sh wires inbound channel tokens
+    // (TELEGRAM_BOT_TOKEN / SLACK_BOT_TOKEN / DISCORD_BOT_TOKEN) into
+    // the agent's gateway config. OpenClaw: sandbox-images/openclaw/
+    // entrypoint.sh lines ~915. Hermes: sandbox-images/hermes/
+    // entrypoint.sh lines ~266 (sets channels.telegram.token via
+    // `hermes config set`). Other runtimes have no inbound channel
+    // path yet; switching to them clears the channel selection below.
+    const channelCapableRuntimes = new Set(["openclaw", "hermes"]);
     const fields = () => {
       const f = ["name", "runtime", "model", "isolation"];
-      // Channels are an OpenClaw-only feature today (entrypoint.sh wires them).
-      if (state.runtime === "openclaw") {
+      if (channelCapableRuntimes.has(state.runtime)) {
         f.push("channel");
         if (state.channel && tokenStateKey[state.channel]) f.push("chtoken");
         if (state.channel === "telegram") f.push("challowfrom");
@@ -219,7 +226,7 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
         if (state.runtime !== "openclaw") {
           args.push("--runtime", state.runtime);
         }
-        if (state.runtime === "openclaw" && state.channel) {
+        if (channelCapableRuntimes.has(state.runtime) && state.channel) {
           args.push("--channels", state.channel);
           if (currentToken && tokenFlag[state.channel]) {
             args.push(tokenFlag[state.channel], currentToken);
@@ -232,7 +239,7 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
         args = ["add", state.name.trim(), "--runtime", state.runtime,
                 "--model", state.model, "--isolation", state.isolation];
         if (state.learnEgress) args.push("--learn-egress");
-        if (state.runtime === "openclaw" && state.channel) {
+        if (channelCapableRuntimes.has(state.runtime) && state.channel) {
           args.push("--channels", state.channel);
           if (currentToken && tokenFlag[state.channel]) {
             args.push(tokenFlag[state.channel], currentToken);
@@ -269,12 +276,17 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
       } else if (key.name === "left" || key.name === "right") {
         const d = key.name === "left" ? -1 : 1;
         if (f === "runtime") {
-          const i = runtimeOpts.indexOf(state.runtime);
+          // state.runtime is typed `string` (matches the broader picker
+          // state shape) but runtimeOpts.indexOf expects RuntimeFlag.
+          // Cast through unknown — at runtime state.runtime is always
+          // one of runtimeOpts because the picker only ever assigns
+          // from that list.
+          const i = runtimeOpts.indexOf(state.runtime as never);
           state.runtime = runtimeOpts[(i + d + runtimeOpts.length) % runtimeOpts.length];
-          // Switching away from openclaw clears channel selection (channels
-          // are wired into entrypoint.sh and only the OpenClaw runtime ships
-          // with that entrypoint).
-          if (state.runtime !== "openclaw") state.channel = "";
+          // Switching to a runtime without channel support clears the
+          // selection (channels are wired only by entrypoint.sh of
+          // OpenClaw + Hermes — see channelCapableRuntimes above).
+          if (!channelCapableRuntimes.has(state.runtime)) state.channel = "";
         } else if (f === "isolation") {
           const i = isoOpts.indexOf(state.isolation);
           state.isolation = isoOpts[(i + d + isoOpts.length) % isoOpts.length];

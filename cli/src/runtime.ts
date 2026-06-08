@@ -63,6 +63,39 @@ const WIRED_KINDS: RuntimeKind[] = [
   "BYO",
 ];
 
+/**
+ * Reverse map: `RuntimeKind` → `RuntimeFlag`. Built by inverting
+ * `FLAG_TO_KIND`. Single source of truth for any UI that needs to
+ * display wired runtimes as kebab-case picker entries (e.g. the
+ * operator TUI's `n`/spawn dialog).
+ */
+const KIND_TO_FLAG: Map<RuntimeKind, RuntimeFlag> = new Map(
+  (Object.entries(FLAG_TO_KIND) as [RuntimeFlag, RuntimeKind][]).map(
+    ([flag, kind]) => [kind, flag],
+  ),
+);
+
+/**
+ * Ordered list of kebab-case flag values for every wired runtime,
+ * preserving WIRED_KINDS ordering. Use this from operator/TUI pickers
+ * so a future runtime added to WIRED_KINDS automatically shows up in
+ * the picker without a separate edit (which is how the operator
+ * spawn dialog lost Hermes in the first place).
+ */
+export function wiredRuntimeFlags(): RuntimeFlag[] {
+  return WIRED_KINDS.map((kind) => {
+    const flag = KIND_TO_FLAG.get(kind);
+    if (!flag) {
+      throw new Error(
+        `wiredRuntimeFlags: missing FLAG_TO_KIND entry for wired kind '${kind}' — ` +
+          `runtime.ts internal inconsistency (likely added to WIRED_KINDS without ` +
+          `a matching FLAG_TO_KIND entry).`,
+      );
+    }
+    return flag;
+  });
+}
+
 export function flagToKind(flag: string): RuntimeKind {
   const k = FLAG_TO_KIND[flag.toLowerCase() as RuntimeFlag];
   if (!k) {
