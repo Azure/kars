@@ -280,13 +280,158 @@ let page = 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SLIDE 4: THE CORE — Controller / CRDs / Inference Router
+// SLIDE 4: HIGH-LEVEL ARCHITECTURE — one diagram, the whole shape
 // ─────────────────────────────────────────────────────────────────────────────
 {
   const s = light();
   page++;
   pageNum(s, page);
-  eyebrow(s, "§3 · architecture");
+  eyebrow(s, "§3 · architecture · the shape");
+  title(s, "How it fits together.", { fontSize: 40 });
+  lede(s,
+    "Two Rust binaries.  Eleven CRDs.  One pod shape.  The Kubernetes API server is the " +
+    "source of truth — the rest is reconciliation.",
+    { y: 2.5, h: 0.7 }
+  );
+
+  // ── kubectl apply line, top
+  const kx = M, ky = 3.3;
+  s.addText("kubectl apply  ▸", {
+    x: kx, y: ky, w: 2.2, h: 0.3,
+    fontFace: F_CODE, fontSize: 11, color: MUTED, margin: 0,
+  });
+
+  // ── Cluster boundary (rounded, dashed) ──
+  const cx = M, cy = 3.6, cw = W - 2 * M, ch = 2.6;
+  s.addShape(pres.shapes.ROUNDED_RECTANGLE, {
+    x: cx, y: cy, w: cw, h: ch,
+    rectRadius: 0.15,
+    fill: { color: PAPER }, line: { color: ACCENT, width: 1.5, dashType: "dash" },
+  });
+  s.addText("AKS / kind cluster", {
+    x: cx + 0.3, y: cy + 0.08, w: 3, h: 0.3,
+    fontFace: F_CODE, fontSize: 10, color: ACCENT, margin: 0,
+  });
+
+  // Three internal boxes
+  const bw = (cw - 0.6 - 2 * 0.3) / 3;
+  const by = cy + 0.5;
+  const bh = ch - 0.7;
+  const bx0 = cx + 0.3;
+
+  // ── Box 1: CRDs (left)
+  s.addShape(pres.shapes.RECTANGLE, {
+    x: bx0, y: by, w: bw, h: bh,
+    fill: { color: "F6F8FA" }, line: { color: ACCENT, width: 0.75 },
+  });
+  s.addText("kars CRDs", {
+    x: bx0 + 0.15, y: by + 0.1, w: bw - 0.3, h: 0.3,
+    fontFace: F_DISPLAY, fontSize: 13, bold: true, color: INK, margin: 0,
+  });
+  s.addText("(11 kinds · the API contract)", {
+    x: bx0 + 0.15, y: by + 0.42, w: bw - 0.3, h: 0.25,
+    fontFace: F_BODY, fontSize: 9.5, color: MUTED, margin: 0,
+  });
+  s.addText("KarsSandbox\nInferencePolicy\nToolPolicy · EgressApproval\nKarsMemory · TrustGraph\nA2AAgent · McpServer · …", {
+    x: bx0 + 0.15, y: by + 0.75, w: bw - 0.3, h: bh - 0.85,
+    fontFace: F_CODE, fontSize: 10, color: INK, margin: 0,
+    paraSpaceAfter: 2,
+  });
+
+  // ── Box 2: Controller (middle)
+  const bx1 = bx0 + bw + 0.3;
+  s.addShape(pres.shapes.RECTANGLE, {
+    x: bx1, y: by, w: bw, h: bh,
+    fill: { color: "F6F8FA" }, line: { color: ACCENT, width: 0.75 },
+  });
+  s.addText("kars-controller", {
+    x: bx1 + 0.15, y: by + 0.1, w: bw - 0.3, h: 0.3,
+    fontFace: F_DISPLAY, fontSize: 13, bold: true, color: INK, margin: 0,
+  });
+  s.addText("(Rust · kube-rs operator)", {
+    x: bx1 + 0.15, y: by + 0.42, w: bw - 0.3, h: 0.25,
+    fontFace: F_BODY, fontSize: 9.5, color: MUTED, margin: 0,
+  });
+  s.addText(
+    [
+      { text: "watches all 11 CRDs", options: { breakLine: true, paraSpaceAfter: 4 } },
+      { text: "compiles policy → ConfigMaps", options: { breakLine: true, paraSpaceAfter: 4 } },
+      { text: "reconciles desired state", options: { breakLine: true, paraSpaceAfter: 4 } },
+      { text: "stamps .status.phase + conditions", options: {} },
+    ],
+    {
+      x: bx1 + 0.15, y: by + 0.75, w: bw - 0.3, h: bh - 0.85,
+      fontFace: F_BODY, fontSize: 10.5, color: INK, margin: 0,
+    });
+
+  // ── Box 3: Sandbox pod (right)
+  const bx2 = bx1 + bw + 0.3;
+  s.addShape(pres.shapes.RECTANGLE, {
+    x: bx2, y: by, w: bw, h: bh,
+    fill: { color: "F6F8FA" }, line: { color: ACCENT, width: 0.75 },
+  });
+  s.addText("Sandbox pod", {
+    x: bx2 + 0.15, y: by + 0.1, w: bw - 0.3, h: 0.3,
+    fontFace: F_DISPLAY, fontSize: 13, bold: true, color: INK, margin: 0,
+  });
+  s.addText("(per KarsSandbox CR)", {
+    x: bx2 + 0.15, y: by + 0.42, w: bw - 0.3, h: 0.25,
+    fontFace: F_BODY, fontSize: 9.5, color: MUTED, margin: 0,
+  });
+  // Two container chips inside
+  const ccy = by + 0.78, cch = 0.42;
+  s.addShape(pres.shapes.RECTANGLE, {
+    x: bx2 + 0.15, y: ccy, w: bw - 0.3, h: cch,
+    fill: { color: PAPER }, line: { color: MUTED, width: 0.5 },
+  });
+  s.addText("agent  (UID 1000)", {
+    x: bx2 + 0.25, y: ccy, w: bw - 0.5, h: cch,
+    fontFace: F_CODE, fontSize: 10, color: INK, valign: "middle", margin: 0,
+  });
+  s.addShape(pres.shapes.RECTANGLE, {
+    x: bx2 + 0.15, y: ccy + cch + 0.06, w: bw - 0.3, h: cch,
+    fill: { color: PAPER }, line: { color: ACCENT, width: 0.75 },
+  });
+  s.addText("inference-router  (1001)", {
+    x: bx2 + 0.25, y: ccy + cch + 0.06, w: bw - 0.5, h: cch,
+    fontFace: F_CODE, fontSize: 10, color: ACCENT, valign: "middle", margin: 0,
+  });
+
+  // Egress label outside, bottom-right corner of cluster
+  s.addText("◀  only path out  ▶", {
+    x: W - M - 2.1, y: cy + ch + 0.05, w: 2.1, h: 0.3,
+    fontFace: F_CODE, fontSize: 10, color: ACCENT, align: "right", margin: 0,
+  });
+
+  // Bottom row: external services
+  const ey = cy + ch + 0.4;
+  const services = ["Azure OpenAI", "Anthropic", "OpenAI", "Bedrock", "MCP", "A2A peers", "AGT relay"];
+  const sgap = 0.12;
+  const stotal = W - 2 * M;
+  const sw = (stotal - (services.length - 1) * sgap) / services.length;
+  services.forEach((sv, i) => {
+    const x = M + i * (sw + sgap);
+    s.addShape(pres.shapes.ROUNDED_RECTANGLE, {
+      x, y: ey, w: sw, h: 0.4,
+      rectRadius: 0.05,
+      fill: { color: ACCENT_LIGHT }, line: { color: ACCENT, width: 0.5 },
+    });
+    s.addText(sv, {
+      x, y: ey, w: sw, h: 0.4,
+      fontFace: F_BODY, fontSize: 10, color: INK,
+      align: "center", valign: "middle", margin: 0,
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SLIDE 5: THE CORE — Controller / CRDs / Inference Router
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const s = light();
+  page++;
+  pageNum(s, page);
+  eyebrow(s, "§3.1 · architecture · the core");
   title(s, "Three components.  One contract.", { fontSize: 40 });
   lede(s,
     "Two Rust binaries and a set of CRDs do the work.  The controller turns desired " +
@@ -367,7 +512,7 @@ let page = 1;
   const s = light();
   page++;
   pageNum(s, page);
-  eyebrow(s, "§3.1 · architecture · request path");
+  eyebrow(s, "§3.2 · architecture · request path");
   title(s, "Every call:  one hop, one decision, one record.", { fontSize: 34 });
   lede(s,
     "The agent process never sees an API key, never sees an upstream URL, never knows " +
@@ -411,7 +556,7 @@ let page = 1;
   const s = light();
   page++;
   pageNum(s, page);
-  eyebrow(s, "§3.2 · architecture · router internals");
+  eyebrow(s, "§3.3 · architecture · router internals");
   title(s, "Inside the sidecar.", { fontSize: 38 });
   lede(s,
     "axum routes are mounted as merged sub-routers (inference, foundry, mesh, mcp, a2a, " +
@@ -485,7 +630,7 @@ let page = 1;
   const s = light();
   page++;
   pageNum(s, page);
-  eyebrow(s, "§3.3 · architecture · the controller loop");
+  eyebrow(s, "§3.4 · architecture · the controller loop");
   title(s, "KarsSandbox  →  nine Kubernetes primitives.", { fontSize: 30 });
   lede(s,
     "Reconciliation is idempotent.  Every apply walks nine steps under server-side apply " +
@@ -533,7 +678,7 @@ let page = 1;
   const s = light();
   page++;
   pageNum(s, page);
-  eyebrow(s, "§3.4 · architecture · status");
+  eyebrow(s, "§3.5 · architecture · status");
   title(s, "Status is the operator contract.", { fontSize: 32 });
   lede(s,
     "Every CRD carries `.status.phase` from a fixed taxonomy, generation-tracked conditions, " +
@@ -597,7 +742,7 @@ let page = 1;
   const s = light();
   page++;
   pageNum(s, page);
-  eyebrow(s, "§3.5 · architecture · the CRD set");
+  eyebrow(s, "§3.6 · architecture · the CRD set");
   title(s, "Eleven CRDs.", { fontSize: 42 });
   lede(s,
     "Nine namespaced (one per sandbox concern) plus two cluster-scoped (tenant-wide " +
@@ -869,7 +1014,120 @@ let page = 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SLIDE 14: MESH — Victor style, one named artefact (the KNOCK frame itself)
+// SLIDE 15: NETWORK EGRESS — Learn vs Strict + signed OCI allowlist pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const s = light();
+  page++;
+  pageNum(s, page);
+  eyebrow(s, "§5.2 · sandbox · the allowlist");
+  title(s, "Egress:  learn it, sign it, enforce it.", { fontSize: 32 });
+  lede(s,
+    "Two modes shipped, one more on deck.  Learn mode records every host the agent " +
+    "reaches — the operator turns that into a signed OCI bundle that the cluster pulls, " +
+    "cosign-verifies, and the router atomically hot-reloads as the L7 allowlist.",
+    { y: 2.45, h: 1.4 }
+  );
+
+  // ── TOP HALF: Learn vs Strict (two panels)
+  const ph = 1.6;
+  const py = 4.0;
+  const pwHalf = (W - 2 * M - 0.4) / 2;
+
+  // LEFT panel — Learn
+  s.addShape(pres.shapes.RECTANGLE, {
+    x: M, y: py, w: pwHalf, h: ph,
+    fill: { color: PAPER }, line: { color: ACCENT, width: 1 },
+  });
+  s.addText("Learn", {
+    x: M + 0.2, y: py + 0.12, w: 2, h: 0.35,
+    fontFace: F_DISPLAY, fontSize: 16, bold: true, color: INK, margin: 0,
+  });
+  s.addText("default", {
+    x: M + 1.4, y: py + 0.18, w: 1.0, h: 0.25,
+    fontFace: F_CODE, fontSize: 10, color: ACCENT, margin: 0,
+  });
+  s.addText(
+    "Every host the agent reaches is logged and folded into the next allowlist proposal. " +
+    "Blocklist still applied first. Discovery without a deploy step.",
+    {
+      x: M + 0.2, y: py + 0.5, w: pwHalf - 0.4, h: ph - 0.55,
+      fontFace: F_BODY, fontSize: 11, color: INK, margin: 0,
+    });
+
+  // RIGHT panel — Strict
+  const px2 = M + pwHalf + 0.4;
+  s.addShape(pres.shapes.RECTANGLE, {
+    x: px2, y: py, w: pwHalf, h: ph,
+    fill: { color: PAPER }, line: { color: ACCENT, width: 1 },
+  });
+  s.addText("Strict", {
+    x: px2 + 0.2, y: py + 0.12, w: 2, h: 0.35,
+    fontFace: F_DISPLAY, fontSize: 16, bold: true, color: INK, margin: 0,
+  });
+  s.addText("production", {
+    x: px2 + 1.4, y: py + 0.18, w: 1.4, h: 0.25,
+    fontFace: F_CODE, fontSize: 10, color: ACCENT, margin: 0,
+  });
+  s.addText(
+    "Anything outside the signed allowlist gets a 4xx with a precise error. Operator " +
+    "can layer time-boxed EgressApproval grants on top. Fails closed on verify failure.",
+    {
+      x: px2 + 0.2, y: py + 0.5, w: pwHalf - 0.4, h: ph - 0.55,
+      fontFace: F_BODY, fontSize: 11, color: INK, margin: 0,
+    });
+
+  // ── BOTTOM HALF: The signed allowlist pipeline
+  const fy = py + ph + 0.4;
+  s.addText("Signed OCI allowlist  ·  the pipeline", {
+    x: M, y: fy, w: W - 2 * M, h: 0.3,
+    fontFace: F_DISPLAY, fontSize: 13, bold: true, color: INK, charSpacing: 2, margin: 0,
+  });
+
+  // 5-stage pipeline as connected chips
+  const stages = [
+    "kars egress  --sign",
+    "OCI artifact  (ACR / ghcr)",
+    "cosign verify  (Fulcio + SAN)",
+    "ConfigMap  +  digest",
+    "router  ·  L7 hot-reload",
+  ];
+  const sy = fy + 0.45;
+  const sh = 0.55;
+  const sgap = 0.12;
+  const stotal = W - 2 * M;
+  const sw = (stotal - (stages.length - 1) * sgap) / stages.length;
+  stages.forEach((stage, i) => {
+    const x = M + i * (sw + sgap);
+    s.addShape(pres.shapes.ROUNDED_RECTANGLE, {
+      x, y: sy, w: sw, h: sh,
+      rectRadius: 0.06,
+      fill: { color: ACCENT_LIGHT }, line: { color: ACCENT, width: 0.75 },
+    });
+    s.addText(stage, {
+      x, y: sy, w: sw, h: sh,
+      fontFace: F_CODE, fontSize: 10, color: INK,
+      align: "center", valign: "middle", margin: 0,
+    });
+    // arrow between stages
+    if (i < stages.length - 1) {
+      const ax = x + sw + 0.005;
+      s.addShape(pres.shapes.LINE, {
+        x: ax, y: sy + sh / 2, w: sgap - 0.01, h: 0,
+        line: { color: ACCENT, width: 1, endArrowType: "triangle" },
+      });
+    }
+  });
+
+  // Source line at very bottom
+  s.addText("controller/src/policy_fetcher.rs  ·  egress_allowlist_compile.rs  ·  inference-router/src/egress_allowlist_loader.rs", {
+    x: M, y: sy + sh + 0.15, w: W - 2 * M, h: 0.25,
+    fontFace: F_CODE, fontSize: 8.5, color: QUIET, align: "left", margin: 0,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SLIDE 16: MESH — Victor style, one named artefact (the KNOCK frame itself)
 // ─────────────────────────────────────────────────────────────────────────────
 {
   const s = light();
