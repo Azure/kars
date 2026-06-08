@@ -70,7 +70,20 @@ KARS_PLUGIN_DST="$HERMES_HOME/plugins/kars"
 if [ -d /opt/kars-hermes-stage/plugins/kars ]; then
   rm -rf "$KARS_PLUGIN_DST" 2>/dev/null || true
   mkdir -p "$HERMES_HOME/plugins"
-  cp -a /opt/kars-hermes-stage/plugins/kars "$KARS_PLUGIN_DST"
+  # `cp -a` preserves owner+mode metadata, which fails as UID 1000
+  # on a readOnlyRootFilesystem pod (the source files were chown'd
+  # to root:root at image build time; preserving that ownership
+  # under a non-root user → EPERM, and `set -e` then kills the
+  # container with the cryptic
+  # `cp: preserving permissions ... Operation not permitted`
+  # spam that has zero context. Use `cp -r` (recursive but no
+  # metadata preservation) instead — every file ends up owned by
+  # whatever UID is doing the copy (sandbox=1000), which is what
+  # we want anyway because that's the UID hermes runs as.
+  cp -r /opt/kars-hermes-stage/plugins/kars "$KARS_PLUGIN_DST"
+  # Source files in the staged image have 0444 from the
+  # `chmod -R a+rX` in the Dockerfile, so they remain readable
+  # post-copy; no follow-up chmod needed.
   if [ "$IS_ROOT" = "true" ]; then
     chown -R sandbox:sandbox "$HERMES_HOME" 2>/dev/null || true
   fi
