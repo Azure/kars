@@ -435,13 +435,13 @@ def sre_propose_fix(
         "execution_status": "proposed (Slice 1 — not executed; awaiting Slice 3 sre_apply_fix)",
     }
 
-    # Slice 1 understands ONE proposal shape: DeleteResourceQuota.
-    # The full typed-action set lands in Slice 3 alongside the
-    # apply-fix execution path. This single understanding lets the
-    # demo's Act II flow complete end-to-end via the runbook
-    # (operator runs `bash tools/demo/act2/reset.sh` after seeing the
-    # proposal — autonomous apply lands in Slice 3).
-    if target.get("kind") == "ResourceQuota":
+    target_kind = target.get("kind")
+
+    # The typed-action set is the proposal §7.7.1 closed set. Slice 1+2
+    # codify the actions the demo flow needs; the rest land in Slice 3
+    # alongside the apply-fix execution path. Slice 1 returns the
+    # proposal envelope; the operator applies manually per the runbook.
+    if target_kind == "ResourceQuota":
         proposal["action"] = {
             "type": "DeleteResourceQuota",
             "namespace": target.get("namespace"),
@@ -454,13 +454,36 @@ def sre_propose_fix(
             "the namespace's pod admission and the controller will "
             "schedule a fresh sandbox pod."
         )
+    elif target_kind in {"Deployment", "StatefulSet", "DaemonSet"} and "image" in (
+        _kwargs or {}
+    ):
+        proposal["action"] = {
+            "type": "PatchDeploymentImage",
+            "namespace": target.get("namespace"),
+            "name": target.get("name"),
+            "container": _kwargs.get("container"),
+            "image": _kwargs.get("image"),
+        }
+        proposal["rationale"] = (
+            "Patch the container image to the proposed value. The target "
+            "namespace must not be in the protected denylist (kars-system, "
+            "kars-sre, kube-system, etc. — §7.7.1)."
+        )
+    elif target_kind in {"Deployment", "StatefulSet"} and "replicas" in (_kwargs or {}):
+        proposal["action"] = {
+            "type": "ScaleDeployment",
+            "namespace": target.get("namespace"),
+            "name": target.get("name"),
+            "replicas": _kwargs.get("replicas"),
+        }
+        proposal["rationale"] = "Scale the workload's replica count."
     else:
         # Generic envelope for unknown target kinds — Slice 1 returns
         # the proposal text without a typed action; Slice 3 widens
         # the typed-action set.
         proposal["rationale"] = (
-            "No typed action codified yet for this target kind in Slice 1. "
-            "The proposal text alone is returned; the operator can apply "
+            "No typed action codified yet for this target kind. The "
+            "proposal text alone is returned; the operator can apply "
             "manually per the demo runbook."
         )
 
@@ -600,4 +623,10 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         handler=sre_propose_fix,
     )
 
-    logger.info("kars-sre plugin registered (5 tools, read-only)")
+    # Slice 2 — register the K8s diagnostic toolset alongside the Slice 1
+    # tools. sre_k8s.register() handles its own ctx wiring.
+    from . import sre_k8s  # noqa: PLC0415 — lazy import
+
+    sre_k8s.register(ctx)
+
+    logger.info("kars-sre plugin registered (Slice 1: 5 read-only kars-CR tools; Slice 2: 5 K8s diag tools)")
