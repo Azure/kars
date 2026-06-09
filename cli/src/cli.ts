@@ -33,6 +33,7 @@ import { memoryCommand } from "./commands/memory.js";
 import { inspectCommand } from "./commands/inspect.js";
 import { auditCommand } from "./commands/audit.js";
 import { headlampCommand } from "./commands/headlamp.js";
+import { sreCommand } from "./commands/sre.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -57,6 +58,7 @@ export function createCli(): Command {
   program.addCommand(listCommand());
   program.addCommand(logsCommand());
   program.addCommand(inspectCommand());
+  program.addCommand(sreCommand());
 
   // Configuration
   program.addCommand(credentialsCommand());
