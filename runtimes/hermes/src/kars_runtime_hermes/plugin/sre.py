@@ -529,6 +529,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     register_tool(
         name="sre_describe_state",
+        toolset="sre",
         description=(
             "Return a structured snapshot of every kars-owned CR in every "
             "namespace (KarsSandbox, InferencePolicy, ToolPolicy, "
@@ -538,18 +539,19 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
             "conditions. Use this as the first call when starting an "
             "incident investigation."
         ),
-        parameters={"type": "object", "properties": {}, "required": []},
+        schema={"type": "object", "properties": {}, "required": []},
         handler=sre_describe_state,
     )
 
     register_tool(
         name="sre_logs",
+        toolset="sre",
         description=(
             "Tail logs from a pod's container via the apiserver. Returns the "
             "last N lines (max 500). Use for diagnosing CrashLoopBackOff or "
             "for inspecting an agent's behaviour."
         ),
-        parameters={
+        schema={
             "type": "object",
             "properties": {
                 "namespace": {"type": "string", "description": "Pod's namespace"},
@@ -571,6 +573,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     register_tool(
         name="sre_diagnose",
+        toolset="sre",
         description=(
             "Walk the kars-CR health checklist: controller deployment Ready, "
             "every kars CRD installed, no Degraded/Failed sandboxes or "
@@ -578,19 +581,20 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
             "report + a one-line summary suitable for an operator-facing "
             "message."
         ),
-        parameters={"type": "object", "properties": {}, "required": []},
+        schema={"type": "object", "properties": {}, "required": []},
         handler=sre_diagnose,
     )
 
     register_tool(
         name="sre_explain_error",
+        toolset="sre",
         description=(
             "Given an error string (pod event reason, controller log line, "
             "etc.), return a root-cause hypothesis from the kars OOTB-blocker "
             "corpus. The hypothesis is a HINT — the agent should then use "
             "the other diagnostic tools to confirm or refute it."
         ),
-        parameters={
+        schema={
             "type": "object",
             "properties": {
                 "error": {
@@ -605,13 +609,14 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     register_tool(
         name="sre_propose_fix",
+        toolset="sre",
         description=(
             "Return a typed-action proposal for the operator to approve. "
             "READ-ONLY in Slice 1 — Slice 3 adds sre_apply_fix to execute "
             "approved proposals. Use after diagnosing a problem to surface "
             "the recommended remediation."
         ),
-        parameters={
+        schema={
             "type": "object",
             "properties": {
                 "diagnosis": {
