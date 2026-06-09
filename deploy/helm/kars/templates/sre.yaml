@@ -199,19 +199,28 @@ spec:
         # All 10 sre_* tools allowed without approval — the diagnostic
         # surface is fully read-only in this build (apply lands in Slice 3
         # with its own per-tool approval policy).
+        #
+        # NOTE on action shape: the Hermes plugin governance hook emits
+        # `tool:<name>:<first-significant-param>` for every tool call (see
+        # runtimes/hermes/.../plugin/governance.py _action_verb). Tools
+        # like sre_describe_state take no args → action is exactly
+        # `tool:sre_describe_state:` (trailing colon). Tools like
+        # sre_describe_resource take a `name` arg → action is
+        # `tool:sre_describe_resource:<resource-name>`. So allowed_actions
+        # use the `tool:sre_*:` prefix glob to match both shapes.
         - name: sre-diagnostic-tools-allow
           type: capability
           allowed_actions:
-            - "tool:sre_describe_state"
-            - "tool:sre_logs"
-            - "tool:sre_diagnose"
-            - "tool:sre_explain_error"
-            - "tool:sre_propose_fix"
-            - "tool:sre_describe_resource"
-            - "tool:sre_what_changed"
-            - "tool:sre_endpoints_inspect"
-            - "tool:sre_image_probe"
-            - "tool:sre_top"
+            - "tool:sre_describe_state:*"
+            - "tool:sre_logs:*"
+            - "tool:sre_diagnose:*"
+            - "tool:sre_explain_error:*"
+            - "tool:sre_propose_fix:*"
+            - "tool:sre_describe_resource:*"
+            - "tool:sre_what_changed:*"
+            - "tool:sre_endpoints_inspect:*"
+            - "tool:sre_image_probe:*"
+            - "tool:sre_top:*"
           priority: 100
 
         # Inference traffic: the SRE agent reasons over the diagnostic
