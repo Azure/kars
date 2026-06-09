@@ -1434,7 +1434,141 @@ let page = 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SLIDE 21: CLOSE (dark, big mark, three-word tagline)
+// SLIDE 21: ACT I — Secure runtime, in motion (live demo agenda card)
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const s = light();
+  page++;
+  pageNum(s, page);
+  eyebrow(s, "§12 · live demo · act i");
+  title(s, "Secure runtime, in motion.", { fontSize: 38 });
+  lede(s,
+    "A normal agent on the cluster.  Watch a governed research-agent come up, " +
+    "answer a question, get its tool call approval-gated via Telegram, and land " +
+    "every step in the audit log.",
+    { y: 2.5, h: 1.3 }
+  );
+
+  // Five-step timeline — each step a row: number + command/event + outcome
+  const steps = [
+    ["1", "kars dev",
+      "kind cluster up · controller / relay / registry installed · ready in ~60 s"],
+    ["2", "kubectl get karssandbox",
+      "nothing yet — the cluster is healthy but unused"],
+    ["3", "kars add research-agent --blueprint governed",
+      "KarsSandbox CR applied · Namespace + NetworkPolicy + Deployment created · pod Running 2/2"],
+    ["4", "kars connect research-agent",
+      "WebUI on :18789 · ask:  \"summarise github.com/Azure/kars\""],
+    ["5", "tool web.fetch is gated",
+      "ToolPolicy → Telegram approval prompt → approve → fetch → answer + audit row in /audit/events"],
+  ];
+  const sy = 3.95;
+  const sh = 0.6;
+  steps.forEach(([n, cmd, outcome], i) => {
+    const y = sy + i * sh;
+    s.addText(n, {
+      x: M, y, w: 0.45, h: sh,
+      fontFace: F_CODE, fontSize: 18, bold: true, color: ACCENT, margin: 0, valign: "top",
+    });
+    s.addText(cmd, {
+      x: M + 0.55, y, w: 5.4, h: 0.32,
+      fontFace: F_CODE, fontSize: 12, color: INK, margin: 0,
+    });
+    s.addText(outcome, {
+      x: M + 0.55, y: y + 0.3, w: W - M - 0.55 - M, h: 0.32,
+      fontFace: F_BODY, fontSize: 11, color: MUTED, margin: 0,
+    });
+    if (i < steps.length - 1) {
+      s.addShape(pres.shapes.LINE, {
+        x: M, y: y + sh - 0.04, w: W - 2 * M, h: 0,
+        line: { color: "E1E4E8", width: 0.5 },
+      });
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SLIDE 22: INTERMISSION — same cluster, second agent (dark, like a chapter break)
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const s = dark();
+  page++;
+  eyebrow(s, "§12.1 · between acts", QUIET);
+  s.addText("Same cluster.  Second agent.", {
+    x: M, y: 1.6, w: W - 2 * M, h: 1.6,
+    fontFace: F_DISPLAY, fontSize: 56, bold: true, color: PAPER,
+    align: "left", valign: "top", margin: 0,
+  });
+  s.addText(
+    "If you can run a research agent on kars, you can run an SRE one.  Same isolation, " +
+    "same policy plane, same audit log — just different tools.",
+    {
+      x: M, y: 3.6, w: W - 2 * M, h: 1.6,
+      fontFace: F_DISPLAY, fontSize: 26, color: ACCENT_LIGHT,
+      align: "left", valign: "top", margin: 0,
+      paraSpaceAfter: 8,
+    });
+  s.addText("And — with your approval — it can fix things for you.", {
+    x: M, y: 5.6, w: W - 2 * M, h: 0.6,
+    fontFace: F_BODY, fontSize: 18, color: QUIET, align: "left", margin: 0,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SLIDE 23: ACT II — kars-sre on the same cluster (live demo agenda card)
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const s = light();
+  page++;
+  pageNum(s, page);
+  eyebrow(s, "§12.2 · live demo · act ii");
+  title(s, "The cluster fixes itself.  With your nod.", { fontSize: 32 });
+  lede(s,
+    "Drop an SRE agent onto the same cluster.  Break something on purpose.  Watch the " +
+    "agent ping Telegram, diagnose the cause, propose a fix, wait for the operator's " +
+    "approval — then apply it and confirm the recovery.",
+    { y: 2.45, h: 1.5 }
+  );
+
+  const steps = [
+    ["1", "kars install sre",
+      "kars-sre sandbox up · 5 read-only kubectl tools · 2 approval-gated mutators (patch / scale)"],
+    ["2", "( something breaks )",
+      "NetworkPolicy 'kars-mesh-egress' loses the :8083 allow → research-agent goes Pending"],
+    ["3", "telegram ping  ◀  kars-sre",
+      "\"research-agent has been Pending for 3 min.  Likely cause:  NP kars-mesh-egress denying TCP/8083 to agentmesh-relay.\""],
+    ["4", "kars connect sre  →  \"give me the health overview\"",
+      "3 sandboxes · 1 Pending · proposed fix:  patch NetworkPolicy egress rule (port 8083)  ·  awaiting approval"],
+    ["5", "approve via telegram  →  fix applied",
+      "controller observes ConfigMap drift → reconciles → research-agent back to Running 2/2 · 🟢"],
+  ];
+  const sy = 4.05;
+  const sh = 0.55;
+  steps.forEach(([n, cmd, outcome], i) => {
+    const y = sy + i * sh;
+    s.addText(n, {
+      x: M, y, w: 0.45, h: sh,
+      fontFace: F_CODE, fontSize: 18, bold: true, color: ACCENT, margin: 0, valign: "top",
+    });
+    s.addText(cmd, {
+      x: M + 0.55, y, w: W - M - 0.55 - M, h: 0.3,
+      fontFace: F_CODE, fontSize: 12, color: INK, margin: 0,
+    });
+    s.addText(outcome, {
+      x: M + 0.55, y: y + 0.28, w: W - M - 0.55 - M, h: 0.3,
+      fontFace: F_BODY, fontSize: 10.5, color: MUTED, margin: 0,
+    });
+    if (i < steps.length - 1) {
+      s.addShape(pres.shapes.LINE, {
+        x: M, y: y + sh - 0.04, w: W - 2 * M, h: 0,
+        line: { color: "E1E4E8", width: 0.5 },
+      });
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SLIDE 24: CLOSE (dark, big mark, three-word tagline)
 // ─────────────────────────────────────────────────────────────────────────────
 {
   const s = dark();
