@@ -52,12 +52,12 @@ def test_register_skips_when_disabled() -> None:
         # so calling register() directly DOES register tools. That's
         # fine for now (we're testing the __init__.py path elsewhere).
         sre.register(ctx)
-        # 5 tool registrations expected
-        assert ctx.register_tool.call_count == 5
+        # 5 Slice-1 + 5 Slice-2 = 10 tool registrations expected
+        assert ctx.register_tool.call_count == 10
 
 
-def test_register_registers_five_tools() -> None:
-    """register(ctx) registers exactly the five Slice 1 tools."""
+def test_register_registers_all_ten_tools() -> None:
+    """register(ctx) registers exactly the Slice 1 + Slice 2 tools."""
     from kars_runtime_hermes.plugin import sre
 
     ctx = MagicMock()
@@ -65,11 +65,18 @@ def test_register_registers_five_tools() -> None:
 
     tool_names = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
     expected = {
+        # Slice 1 — read-only kars-CR tools
         "sre_describe_state",
         "sre_logs",
         "sre_diagnose",
         "sre_explain_error",
         "sre_propose_fix",
+        # Slice 2 — K8s diagnostic toolset
+        "sre_describe_resource",
+        "sre_what_changed",
+        "sre_endpoints_inspect",
+        "sre_image_probe",
+        "sre_top",
     }
     assert tool_names == expected, f"got {tool_names}, expected {expected}"
 

@@ -150,7 +150,7 @@ spec:
     inline: |
       version: 1
       rules:
-        # Read-only kars-CR diagnostic tools — no approval needed.
+        # Read-only kars-CR diagnostic tools (Slice 1) — no approval.
         - match: { tool: "sre_describe_state" }
           decision: allow
         - match: { tool: "sre_logs" }
@@ -160,6 +160,17 @@ spec:
         - match: { tool: "sre_explain_error" }
           decision: allow
         - match: { tool: "sre_propose_fix" }
+          decision: allow
+        # Read-only K8s diagnostic toolset (Slice 2) — no approval.
+        - match: { tool: "sre_describe_resource" }
+          decision: allow
+        - match: { tool: "sre_what_changed" }
+          decision: allow
+        - match: { tool: "sre_endpoints_inspect" }
+          decision: allow
+        - match: { tool: "sre_image_probe" }
+          decision: allow
+        - match: { tool: "sre_top" }
           decision: allow
 ---
 # kars-sre-reader ClusterRole — Slice 1 RBAC.
@@ -203,7 +214,7 @@ rules:
   # composition below; cluster-wide read on workloads is the Slice 2
   # opt-in.
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "services", "configmaps", "events", "namespaces", "serviceaccounts"]
+    resources: ["pods", "pods/log", "services", "configmaps", "events", "namespaces", "serviceaccounts", "nodes", "endpoints", "resourcequotas"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
@@ -211,6 +222,17 @@ rules:
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
+  # Slice 2 — EndpointSlices (the modern endpoints API) for
+  # sre_endpoints_inspect.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Slice 2 — metrics.k8s.io for sre_top. If metrics-server isn't
+  # installed, the SubjectAccessReview path returns no-op and the
+  # tool degrades gracefully per §7.5 Q4.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
   # Secrets metadata ONLY (the .data field is stripped by the
   # inference-router proxy filter per proposal §6.4). The RBAC verb
   # `get` returns full secret data; the router-side filter is the
