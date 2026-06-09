@@ -188,30 +188,54 @@ spec:
       kars.azure.com/role: sre
   agtProfile:
     inline: |
-      version: 1
-      rules:
-        # Read-only kars-CR diagnostic tools (Slice 1) — no approval.
-        - match: { tool: "sre_describe_state" }
-          decision: allow
-        - match: { tool: "sre_logs" }
-          decision: allow
-        - match: { tool: "sre_diagnose" }
-          decision: allow
-        - match: { tool: "sre_explain_error" }
-          decision: allow
-        - match: { tool: "sre_propose_fix" }
-          decision: allow
-        # Read-only K8s diagnostic toolset (Slice 2) — no approval.
-        - match: { tool: "sre_describe_resource" }
-          decision: allow
-        - match: { tool: "sre_what_changed" }
-          decision: allow
-        - match: { tool: "sre_endpoints_inspect" }
-          decision: allow
-        - match: { tool: "sre_image_probe" }
-          decision: allow
-        - match: { tool: "sre_top" }
-          decision: allow
+      # kars-sre AGT profile — allows the 10 sre_* tools, plus the
+      # inference + content-safety actions the agent needs to use the
+      # model. Same schema as kars-default-agt-profile.yaml.
+      version: "1.0"
+      agent: kars-sre
+
+      policies:
+        # Slice 1 (read-only kars-CR diagnostics) + Slice 2 (K8s diag toolset).
+        # All 10 sre_* tools allowed without approval — the diagnostic
+        # surface is fully read-only in this build (apply lands in Slice 3
+        # with its own per-tool approval policy).
+        - name: sre-diagnostic-tools-allow
+          type: capability
+          allowed_actions:
+            - "tool:sre_describe_state"
+            - "tool:sre_logs"
+            - "tool:sre_diagnose"
+            - "tool:sre_explain_error"
+            - "tool:sre_propose_fix"
+            - "tool:sre_describe_resource"
+            - "tool:sre_what_changed"
+            - "tool:sre_endpoints_inspect"
+            - "tool:sre_image_probe"
+            - "tool:sre_top"
+          priority: 100
+
+        # Inference traffic: the SRE agent reasons over the diagnostic
+        # results using its configured model. The inference action shape
+        # matches what the router emits — see kars-default-agt-profile.yaml
+        # for the inference: prefix convention.
+        - name: sre-inference-allow
+          type: capability
+          allowed_actions:
+            - "inference:chat_completions:*"
+            - "inference:responses:*"
+            - "inference:content_safety:*"
+          priority: 90
+
+        # Spawn + mesh are not just denied — they are not even registered
+        # by the plugin (§7.8.5 + §7.8.6 containment). The deny rule below
+        # is defense in depth in case a future runtime accidentally
+        # registers them.
+        - name: sre-spawn-and-mesh-deny
+          type: capability
+          denied_actions:
+            - "spawn:*"
+            - "mesh:*"
+          priority: 110
 ---
 # kars-sre-reader ClusterRole — Slice 1 RBAC.
 #
