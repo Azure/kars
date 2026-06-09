@@ -1524,23 +1524,23 @@ let page = 1;
   eyebrow(s, "§12.2 · live demo · act ii");
   title(s, "The cluster fixes itself.  With your nod.", { fontSize: 32 });
   lede(s,
-    "Drop an SRE agent onto the same cluster.  Break something on purpose.  Watch the " +
-    "agent ping Telegram, diagnose the cause, propose a fix, wait for the operator's " +
-    "approval — then apply it and confirm the recovery.",
+    "Drop an SRE agent onto the same cluster.  Roll out a workload with a classic " +
+    "Kubernetes mistake.  Watch the agent ping Telegram, diagnose the cause, propose " +
+    "the fix, wait for the operator's approval — then apply it and confirm recovery.",
     { y: 2.45, h: 1.5 }
   );
 
   const steps = [
     ["1", "kars install sre",
-      "kars-sre sandbox up · 5 read-only kubectl tools · 2 approval-gated mutators (patch / scale)"],
-    ["2", "( something breaks )",
-      "NetworkPolicy 'kars-mesh-egress' loses the :8083 allow → research-agent goes Pending"],
+      "kars-sre sandbox up · read-only kubectl tools (get / describe / logs / top / events) · 2 approval-gated mutators (patch / set image)"],
+    ["2", "kubectl apply -f webshop.yaml",
+      "deployment 'webshop' in ns 'webshop' · image: nginx:1.27-typo  ←  pods stuck ImagePullBackOff"],
     ["3", "telegram ping  ◀  kars-sre",
-      "\"research-agent has been Pending for 3 min.  Likely cause:  NP kars-mesh-egress denying TCP/8083 to agentmesh-relay.\""],
+      "\"webshop/webshop  3/3 pods ImagePullBackOff for 90 s.  Image 'nginx:1.27-typo' not found.  Closest in-use tag in the cluster:  nginx:1.27.3 (4 pods).\""],
     ["4", "kars connect sre  →  \"give me the health overview\"",
-      "3 sandboxes · 1 Pending · proposed fix:  patch NetworkPolicy egress rule (port 8083)  ·  awaiting approval"],
-    ["5", "approve via telegram  →  fix applied",
-      "controller observes ConfigMap drift → reconciles → research-agent back to Running 2/2 · 🟢"],
+      "1 unhealthy workload · proposed fix:  kubectl set image deploy/webshop web=nginx:1.27.3  ·  awaiting approval"],
+    ["5", "approve via telegram  →  patch applied",
+      "rollout completes · pods Running 3/3 · audit row written · 🟢"],
   ];
   const sy = 4.05;
   const sh = 0.55;
