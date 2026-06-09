@@ -43,7 +43,7 @@ kubectl apply -f "${SCRIPT_DIR}/platform-hardening-quota.yaml"
 
 echo ""
 echo "▸ force-deleting the running pod to surface the failure..."
-POD=$(kubectl -n "${NS}" get pod -l app.kubernetes.io/component=sandbox \
+POD=$(kubectl -n "${NS}" get pod -l kars.azure.com/component=sandbox \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 if [[ -z "${POD}" ]]; then
   echo "⚠ no sandbox pod found to evict; quota will only manifest on next natural restart" >&2
