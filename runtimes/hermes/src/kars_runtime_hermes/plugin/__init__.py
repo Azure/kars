@@ -30,7 +30,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     tool wrappers, http_fetch via egress proxy, and stubs for kars_mesh_*.
 
     SRE-mode containment (per docs/blueprints/07-kars-sre-proposal.md §7.8):
-    when ``KARS_SRE_ENABLED=true`` is set on the sandbox pod (the env is
+    when ``SRE_ENABLED=true`` is set on the sandbox pod (the env is
     written exclusively by deploy/helm/kars/templates/sre.yaml on the
     ``sre`` KarsSandbox), this entry point:
 
@@ -48,7 +48,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     sre_mode = sre.is_enabled()
     if sre_mode:
         logger.info(
-            "KARS_SRE_ENABLED=true detected — entering SRE-mode plugin "
+            "SRE_ENABLED=true detected — entering SRE-mode plugin "
             "registration (no kars_spawn, no kars_mesh_*, sre_* tools "
             "active)"
         )

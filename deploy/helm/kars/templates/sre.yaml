@@ -98,7 +98,7 @@ spec:
   runtime:
     kind: Hermes
     hermes:
-      # The KARS_SRE_ENABLED gate. The Hermes plugin __init__.py
+      # The SRE_ENABLED gate. The Hermes plugin __init__.py
       # checks this and:
       #   - registers the sre_* tools (sre.py)
       #   - DEREGISTERS kars_spawn family   (§7.8.5)
@@ -106,8 +106,16 @@ spec:
       # so this single env var carries the whole "you are the SRE agent"
       # configuration. Standard Hermes sandboxes don't get this env and
       # therefore don't get the SRE tools.
+      #
+      # NOTE: env is SRE_ENABLED rather than KARS_SRE_ENABLED because
+      # the controller strips KARS_-prefixed user extraEnv (the prefix is
+      # reserved for controller-side injection — see
+      # controller/src/reconciler/mod.rs:1583). The right long-term fix
+      # is for the controller to recognise the
+      # `kars.azure.com/role: sre` label below and inject
+      # KARS_SRE_ENABLED itself; tracked as a follow-up.
       extraEnv:
-        KARS_SRE_ENABLED: "true"
+        SRE_ENABLED: "true"
 
   sandbox:
     isolation: standard

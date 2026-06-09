@@ -25,7 +25,7 @@ ones needed to diagnose the Act II ResourceQuota incident end-to-end:
                            metrics-server absent (§7.5 Q4)
 
 Registered alongside the Slice 1 tools by ``sre.register(ctx)`` when
-``KARS_SRE_ENABLED=true``. The Helm chart's ClusterRole grants the
+``SRE_ENABLED=true``. The Helm chart's ClusterRole grants the
 RBAC required for everything here at install time (Slice 2 is
 strictly read-only).
 
@@ -912,7 +912,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     """Register the Slice 2 K8s diagnostic tools.
 
     Called from ``sre.register()`` alongside the Slice 1 tools when
-    ``KARS_SRE_ENABLED=true``.
+    ``SRE_ENABLED=true``.
     """
     register_tool = getattr(ctx, "register_tool", None)
     if not callable(register_tool):
