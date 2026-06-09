@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars showcase — pitch deck v2 (practitioner-grade)
 //
 // Visual language:
