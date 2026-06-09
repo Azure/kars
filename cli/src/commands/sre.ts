@@ -4,6 +4,45 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { execa } from "execa";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Resolve the kars repo root.
+ *
+ * Strategy mirrors `cli/src/commands/up.ts`: first try the
+ * three-levels-up-from-the-installed-CLI-file path (works for
+ * `npm link` installs), then fall back to walking up from CWD
+ * looking for `deploy/helm`.
+ */
+function resolveRepoRoot(): string {
+  // Strategy 1: from the file's own location (works for npm link
+  // since the link points back into the repo's cli/dist/ tree)
+  try {
+    const thisFile = fileURLToPath(import.meta.url);
+    const cliDir = path.dirname(path.dirname(thisFile)); // .../cli/dist
+    const candidate = path.resolve(cliDir, "..", "..");  // .../<repo>
+    if (fs.existsSync(path.join(candidate, "deploy", "helm", "kars"))) {
+      return candidate;
+    }
+  } catch {
+    // import.meta.url may not be a file URL in some test contexts
+  }
+  // Strategy 2: walk up from CWD looking for deploy/helm
+  let cur = process.cwd();
+  for (let i = 0; i < 8; i++) {
+    if (fs.existsSync(path.join(cur, "deploy", "helm", "kars"))) return cur;
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  throw new Error(
+    "Could not resolve the kars repo root (looked for deploy/helm/kars). " +
+    "Run `kars sre install` from inside an kars checkout, or set the working " +
+    "directory to the repo root first.",
+  );
+}
 
 /**
  * `kars sre` — manage the built-in kars-sre agent.
@@ -42,9 +81,8 @@ export function sreCommand(): Command {
       "Azure OpenAI deployment / model name for the SRE agent (defaults to gpt-4.1)",
     )
     .option(
-      "--wait",
-      "Wait for the sre sandbox to reach Running (default true)",
-      true,
+      "--no-wait",
+      "Don't wait for the sre sandbox to reach Running (default: wait)",
     )
     .action(async (options: {
       release: string;
@@ -53,10 +91,18 @@ export function sreCommand(): Command {
       model?: string;
       wait: boolean;
     }) => {
+      let chartPath: string;
+      try {
+        chartPath = path.join(resolveRepoRoot(), "deploy", "helm", "kars");
+      } catch (err: any) {
+        console.error(chalk.red(`✗ ${err.message}`));
+        process.exit(1);
+      }
+
       const helmArgs = [
         "upgrade",
         options.release,
-        "deploy/helm/kars",
+        chartPath,
         "--namespace", options.namespace,
         "--reuse-values",
         "--set", "sre.enabled=true",
@@ -68,7 +114,7 @@ export function sreCommand(): Command {
       console.log(chalk.gray(`  helm ${helmArgs.join(" ")}`));
       try {
         await execa("helm", helmArgs, { stdio: "inherit" });
-      } catch (err) {
+      } catch {
         console.error(chalk.red("✗ helm upgrade failed"));
         process.exit(1);
       }
@@ -86,7 +132,7 @@ export function sreCommand(): Command {
             await new Promise((r) => setTimeout(r, 1000));
           }
         }
-        console.log(chalk.cyan("▸ waiting for sre sandbox to reach Running (up to 180s)…"));
+        console.log(chalk.cyan("▸ waiting for sre sandbox to reach Available (up to 180s)…"));
         try {
           await execa(
             "kubectl",
@@ -119,10 +165,18 @@ export function sreCommand(): Command {
     .option("--namespace <ns>", "Helm release namespace", "kars-system")
     .option("--context <name>", "kubectl context to use")
     .action(async (options: { release: string; namespace: string; context?: string }) => {
+      let chartPath: string;
+      try {
+        chartPath = path.join(resolveRepoRoot(), "deploy", "helm", "kars");
+      } catch (err: any) {
+        console.error(chalk.red(`✗ ${err.message}`));
+        process.exit(1);
+      }
+
       const helmArgs = [
         "upgrade",
         options.release,
-        "deploy/helm/kars",
+        chartPath,
         "--namespace", options.namespace,
         "--reuse-values",
         "--set", "sre.enabled=false",
