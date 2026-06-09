@@ -110,6 +110,13 @@ export function sreCommand(): Command {
         // release values predate fields like runtimes.hermes — a plain
         // --reuse-values would carry the gap forward and fail templating.
         "--reset-then-reuse-values",
+        // --force-conflicts: helm 4 uses server-side apply by default,
+        // which conflicts with field managers from prior `kubectl set
+        // image` / `kars push --apply` runs that touched the same
+        // fields. This flag tells SSA to take ownership on conflict,
+        // matching the operator's intent (helm-managed chart is the
+        // source of truth).
+        "--force-conflicts",
         "--set", "sre.enabled=true",
       ];
       if (options.model) helmArgs.push("--set", `sre.model=${options.model}`);
@@ -184,6 +191,7 @@ export function sreCommand(): Command {
         chartPath,
         "--namespace", options.namespace,
         "--reset-then-reuse-values",
+        "--force-conflicts",
         "--set", "sre.enabled=false",
       ];
       if (options.context) helmArgs.push("--kube-context", options.context);
