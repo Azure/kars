@@ -28,6 +28,25 @@ provides_tools:
   - foundry_evaluations
   - foundry_deployments
   - foundry_agents
+  # kars-sre tools — declared here so Hermes accepts the register_tool
+  # calls. Conditionally registered at runtime ONLY when SRE_ENABLED=true
+  # is set on the sandbox pod (set exclusively by the chart's sre.yaml on
+  # the `sre` KarsSandbox per docs/blueprints/07-kars-sre-proposal.md §7.8).
+  # Standard Hermes sandboxes don't see SRE_ENABLED → __init__.py skips
+  # sre.register(ctx) → the tools are declared-but-not-callable, which
+  # matches the manifest contract.
+  # Slice 1 (read-only kars-CR tools):
+  - sre_describe_state
+  - sre_logs
+  - sre_diagnose
+  - sre_explain_error
+  - sre_propose_fix
+  # Slice 2 (K8s diagnostic toolset):
+  - sre_describe_resource
+  - sre_what_changed
+  - sre_endpoints_inspect
+  - sre_image_probe
+  - sre_top
 
 provides_hooks:
   - pre_tool_call    # → POST /agt/evaluate; deny short-circuits the tool
