@@ -217,6 +217,25 @@ time.
 
 ### 6.6 Egress
 
+The SRE sandbox inherits the standard kars egress posture, with
+explicit dev-vs-production lifecycle:
+
+- Default-deny NetworkPolicy
+- **Dev / demo installs**: may start in `egressMode: Learn` (records
+  every host the agent reaches into the next allowlist proposal),
+  then operator promotes to `Strict` with a signed allowlist
+- **Production installs**: default `egressMode: Strict` from day 1,
+  with a pre-declared allowlist (or layered `EgressApproval` for
+  ad-hoc grants)
+- Allowed by default: in-cluster `kubernetes.default.svc` (apiserver),
+  `agentmesh-relay.agentmesh.svc` (for mesh), `agentmesh-registry.agentmesh.svc`,
+  IMDS (Workload Identity), and the cluster DNS resolver
+- Optional grants (operator opt-in): `api.github.com` (source-code
+  grounding), `api.telegram.org` / `slack.com` (channel posts),
+  `<registry>` for the `sre_image_probe` tool
+- No outbound to user-workload registries or third-party services
+  unless the operator explicitly extends the allowlist
+
 
 ## CLI integration
 
@@ -270,21 +289,637 @@ diagnoses pods that ImagePullBackOff or CrashLoopBackOff > 2x in
 human invocation. Requires the channel-token plumbing that already
 ships with Hermes.
 
-## Design open questions
+---
 
-1. **Multi-cluster?** Should one `kars-sre` agent on AKS see all
-   blueprints (single-cluster) or be deployed per-cluster?
-   MVP: per-cluster.
-2. **Kubeconfig mount vs Workload Identity?** AKS + WI is cleaner
-   long-term but kind needs a kubeconfig mount. MVP: kubeconfig
-   mount, with WI as Phase 2 enhancement.
-3. **Source-code access scope?** `api.github.com` read-only against
-   `Azure/kars` only, or also against the AGT toolkit + sandbox-image
-   dependencies? MVP: kars + AGT.
-4. **History / corpus.** Should the agent ship with a pre-seeded
-   knowledge base of known issues (e.g. exported from this
-   session's commit messages)? MVP: no — agent reads the source
-   live and reasons from there. Reduces drift.
+## 7 — Re-slicing for production (2026-06-09 addendum)
+
+The "MVP / Phase 2 / Phase 3" carving above describes the *implementation
+order*. For productisation, we additionally need a slicing that maps
+each capability to (a) one independently shippable PR, (b) one
+observable user-facing capability, and (c) the demo flow that requires
+it. This section supersedes the Phasing block above as the planning
+breakdown; the implementation tables in §§4-6 still apply.
+
+### 7.1 Slice catalog
+
+Each slice is a **mergeable PR slice** with explicit upstream
+dependencies (not "independently shippable from cold" — there is
+ordering). Each adds one observable user-facing capability.
+
+| Slice | Ships | Depends on | Demoable as | Effort |
+|---|---|---|---|---|
+| **S0 · Demo harness**     | `tools/demo/act2/` — broken `webshop` deployment (nginx:1.27-typo) · expected-fix script · reset script · presenter runbook · idempotent re-run | — | Presenter can walk Act II by hand end-to-end before any SRE code exists | ~0.5d |
+| **S1 · MVP**              | Helm template (KarsSandbox + sandbox-name `sre` ⇒ namespace `kars-sre` + SA `sandbox` — see §7.9) · 5 read-only kars-CR tools (`sre_describe_state`, `sre_logs`, `sre_diagnose`, `sre_explain_error`, `sre_propose_fix`) · regression corpus | — | `kars sre install && kars connect sre → "health overview"` returns a kars-CR snapshot | ~1d |
+| **S2 · K8s diag toolset** | Cluster-wide read RBAC (opt-in, three install modes — see §7.5 Q3) · workload-owner-graph tool (`sre_describe_resource`) · `sre_image_probe` · `sre_endpoints_inspect` · `sre_what_changed` (informer-cache backed) · `sre_top` (graceful degrade) · per-tool RBAC manifest | S1 | Operator describes a broken user workload by name, agent returns root cause | ~1d |
+| **S3 · Typed apply-fix** | Typed action store (no shell exec) · protected-resource policy (§7.7) · SelfSubjectAccessReview + server-side dry-run pre-flight · TokenRequest mint with one-shot ClusterRoleBinding · admission policy backstop · operator approve UI (`kars sre approve`) | S1 + action store | `kars sre approve <id>` mints token, agent applies one typed action, CRB torn down | ~1.5d |
+| **S4 · Proactive watcher** | `sre_continuous` informer loop · governed `kars_notify_human` tool (NOT Hermes' deregistered `send_message` — see §7.3) · per-symptom dedupe + 10-min throttle · prompt-injection containment for events/logs/annotations (§7.7.2) | S2; uses S3 only when posting fix proposals that need approval | Agent posts to Telegram/Slack on its own when a workload misbehaves | ~1d |
+| **S5 · Source-code grounding** | Optional `--gh-token` install flag · GitHub MCP wiring · cached source-snapshot ConfigMap (size-bounded) · `api.github.com` egress grant | S1 (egress story) | "Why is the controller doing X?" → agent quotes file:line | ~0.5d |
+| **S6 · Sovereign / hardening variant** | Install variant: AGT-only approval (no channel dep) · `sre_image_probe` external probe disabled · all egress denied except in-cluster | S1-S4 (it's a hardening pass, not a new capability) | Works in Blueprint 06 deployments | ~0.5d |
+
+**For the showcase demo (Act II — ImagePullBackOff)** the demo flow
+requires S0 + S1 + S2 + S3 + S4. S5 is a multiplier on diagnostic
+quality but not required for the demo. S6 is post-launch hardening.
+
+### 7.2 K8s diagnostic toolset (Slice 2 detail)
+
+The MVP tool surface is kars-CR-centric (the agent's first job was
+diagnosing kars OOTB blockers). For Slice 2 we add the tools needed
+for arbitrary Kubernetes workload triage. **All write capabilities
+remain in S3 — every tool here is read-only.**
+
+| Tool | What it does | RBAC required | Notes |
+|---|---|---|---|
+| `sre_describe_resource`  | Structured equivalent of `kubectl describe`. Returns spec + status + recent events as one JSON document. For a workload (Deployment / StatefulSet / DaemonSet), automatically walks the **owner graph**: workload → ReplicaSet → Pods → Events → ServiceAccount + imagePullSecret names (metadata only) → Node summary. This is the single tool that handles ImagePullBackOff *and* DNS failures *and* admission denials *and* rollout stalls — one call, one document. | cluster-wide read on the requested kind + cascade (see §7.2.1) | The agent's first call after `sre_describe_state` |
+| `sre_image_probe`        | Given an image reference, probe the registry (HEAD on the manifest endpoint) and return: exists / not, digest, age, closest tags by edit distance, **closest tag in use on THIS cluster** (de-duplicated across all workloads). | (out-of-cluster: `<registry>:443`) + cluster-wide read on workloads | Disabled by §7.1 S6 in sovereign mode |
+| `sre_endpoints_inspect`  | For a given Service, walks selector → matching pods → `EndpointSlice` subset → endpoint-not-ready reasons. Returns the missing labels / failing readiness probes that drop pods from the EndpointSlice. | cluster-wide read on `services`, `discovery.k8s.io/endpointslices`, `pods` | The "0 endpoints" detective tool |
+| `sre_what_changed`       | Incident-framing tool. Returns: (a) events of `reason∈{Failed, FailedScheduling, BackOff, FailedCreate, FailedKillPod, Unhealthy, ScalingReplicaSet, SuccessfulCreate, SuccessfulDelete, Killing}` in last N min from BOTH `core/events` AND `events.k8s.io/events` (the new API has different retention); (b) workload `metadata.generation` jumps observed by the SRE agent's informer cache since startup. The informer cache (~50MB max) is what makes "since N minutes ago" diff-able — Events alone are lossy. | cluster-wide read on `events`, `events.k8s.io/events`, `deployments`, `replicasets`, `statefulsets` | Informer cache is S2's only persistent state |
+| `sre_top`                | Wrapper around `metrics.k8s.io/v1beta1` — CPU/memory per pod and per node. If metrics-server is absent (no API registration), returns `{"unavailable": "metrics-server not installed"}` and the agent's planner routes around it (§7.5 Q4). | `metrics.k8s.io/v1beta1` get/list on `pods` and `nodes`; `core` get on `nodes` | OOMKilled / pressure triage |
+
+#### 7.2.1 RBAC manifest (exact)
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-reader
+rules:
+  # Core workloads (read-only, cluster-wide when --with-cluster-wide-read)
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "namespaces", "events", "serviceaccounts", "nodes", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  # Secrets METADATA only — data field redacted by the inference-router proxy filter (§6.4)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  # CRD introspection
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  # kars-owned CRs
+  - apiGroups: ["kars.azure.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+```
+
+**Notably absent** (each is a deliberate ban — see §7.7 for the write-action threat model):
+`create/update/delete/patch on anything`, `pods/exec`, `pods/portforward`,
+`tokenrequests`, RBAC kinds (`roles`, `rolebindings`, `clusterroles`,
+`clusterrolebindings`), `serviceaccounts/token`, `validatingwebhookconfigurations`,
+`mutatingwebhookconfigurations`.
+
+#### 7.2.2 The agent's reasoning loop for an incident
+
+1. `sre_describe_state` — kars CRs (keep our own house in order first)
+2. `sre_what_changed` (15-min window) — frame the incident in time
+3. `sre_describe_resource` — the unhealthy thing, with full owner graph
+4. **specialised tool for the symptom:** `sre_image_probe` for `ImagePullBackOff`, `sre_endpoints_inspect` for "0 endpoints", `sre_top` for OOMKilled
+5. `sre_propose_fix` — single typed action (§7.7), with rationale
+6. (if S3 enabled) `sre_apply_fix` — via short-lived TokenRequest, on approval
+
+
+### 7.3 Notification — the `kars_notify_human` tool (Slice 4 detail)
+
+Hermes' built-in `send_message` is explicitly deregistered by the
+kars Hermes plugin because it bypasses kars governance / egress /
+audit. The SRE agent's notification path therefore uses a
+**governed wrapper**:
+
+- **Tool name:** `kars_notify_human`
+- **Implementation:** new tool in `runtimes/hermes/.../plugin/sre.py`
+  that goes through the inference-router (so policy + egress + audit
+  apply uniformly), then dispatches to the configured channel
+  adapter (Telegram / Slack / Discord / Teams) via the existing
+  Hermes channel plumbing.
+- **ToolPolicy gate:** `ToolPolicy.approval.channel` is honored for
+  the *approval* prompt; the *notification itself* is unapproved
+  (it's outbound, low-risk). Approval applies only to the inner
+  `sre_apply_fix` that the notification announces.
+- **Credentials:** standard kars convention — `--telegram-token`
+  /  `--slack-token` install flags write to `<sandbox>-credentials`
+  Secret in `kars-sre`; the Hermes entrypoint reads from `envFrom`.
+  No new credential infrastructure.
+- **Throttle:** at most one notification per affected workload per
+  10 minutes; per-symptom dedupe (don't re-post the same
+  `ImagePullBackOff` on the same `deployment/<ns>/<name>` twice).
+- **Air-gap (S6):** if no channel is configured, `sre_continuous`
+  posts to the AGT trust store only; operators check the agent's
+  inbox via `kars sre inbox` (a tiny new CLI command).
+
+### 7.4 Productisation gaps closed by this addendum
+
+Items hinted at in the original proposal that this section makes
+concrete:
+
+| Gap in original | Closed by |
+|---|---|
+| "reads source live" — but how? | §7.1 S5: GitHub MCP wiring + optional `--gh-token`, with a fallback cached-snapshot ConfigMap |
+| Approval channel pluggability | §7.3 + §7.5 Q6: explicit reuse of `ToolPolicy.approval.channel`; install-mode UX |
+| K8s-native debugging beyond kars CRs | §7.2: workload owner graph + ImagePullBackOff/endpoint/OOMKilled patterns + exact RBAC |
+| Privilege escalation via "approved kubectl command" | **§7.7 (new): typed action store + protected-resource policy + admission backstop** |
+| Channel notification path | §7.3: `kars_notify_human` (NOT Hermes' deregistered `send_message`) |
+| Demo dependency on Phase 3 | §7.1: S4 (proactive watcher) elevated; S0 (demo harness) added |
+| Air-gap (Blueprint 06) compatibility | §7.1 S6: AGT-only approval mode; sre_image_probe disabled |
+| Observability of the agent itself | §7.10 (new): expanded metric shape + latency histograms + audit correlation |
+| Naming inconsistency (`kars-kars-sre`) | §7.9 (new): sandbox name `sre`, namespace `kars-sre`, SA `sandbox` |
+| **Privilege containment — no inheritance to other agents** | **§7.8 (new): 8 boundaries — plugin packaging, sandbox uniqueness VAP, RBAC subject pinning VAP, writer-SA token containment (boundObjectRef + 5-min TTL + no auto-mount), spawn disabled in SRE image, mesh `tool.invoke` rejected, NetworkPolicy scoped admin port, audit on every privilege use** |
+| Prompt injection via cluster events/logs | §7.7.2 (new): containment for untrusted strings |
+
+### 7.5 Open decisions (must answer before any code lands)
+
+Five (now six) decisions extended from §6:
+
+**Q1.** **Top-level command vs CRD?** S1 ships as a chart sub-action
+(idempotent helm upgrade) that creates standard first-class kars
+resources: `KarsSandbox`, `ToolPolicy`, `InferencePolicy`, RBAC,
+credentials secret. A dedicated `runtime.kind: SRE` is the **wrong**
+abstraction (SRE isn't a runtime; it's a governed Hermes profile
+with special tools/RBAC). If lifecycle/config grows, the right shape
+is a future `KarsSREProfile` CRD that *wraps* a `KarsSandbox`, not a
+new runtime kind.
+- **Resolution:** chart sub-action for S1. Re-evaluate `KarsSREProfile`
+  CRD only if config sprawl demands it. No new runtime kind.
+
+**Q2.** **In-cluster SA vs mounted kubeconfig?** In-cluster SA
+everywhere. Kind exposes the same in-cluster SA path AKS does
+(it's a kubelet feature, not a cloud feature). WI on AKS is a
+Phase 2 enhancement that adds federated-credential annotations on
+top of the same SA — not a different code path.
+- **Resolution:** in-cluster SA everywhere; drop kubeconfig mount
+  from the plan entirely.
+
+**Q3.** **Cluster-wide read blast radius — opt-in?** Yes, with three
+install modes (a useful middle ground beyond binary kars-scoped /
+cluster-wide):
+- `kars sre install` — kars-scoped only (just `kars.azure.com/*` + its
+  own ns). Demoable as kars-CR-only diagnose.
+- `kars sre install --watch-namespace <ns>` — adds the K8s diag toolset
+  scoped to one namespace.
+- `kars sre install --with-cluster-wide-read` — full S2 RBAC (the
+  Act II demo install).
+- **Resolution:** ship all three modes in S2. Default is the most
+  restrictive; the operator opts in to wider scope.
+
+**Q4.** **What happens if metrics-server is absent?** Tool returns
+`{"unavailable": "metrics-server not installed"}` and the agent's
+planner routes around it. No hard error.
+- **Resolution:** graceful degrade.
+
+**Q5.** **How do we measure the SRE agent's own quality?** Multi-
+dimensional metric — see §7.10 for the full shape. Single counter
+isn't enough; we need outcome × symptom × resource_kind plus four
+latency histograms (detection → proposal → approval → apply →
+recovery).
+- **Resolution:** see §7.10.
+
+**Q6.** **Install-mode UX clarity** (raised by critique). When the
+operator runs `kars sre install` without flags and then asks the
+agent to diagnose `webshop/webshop`, the agent gets `forbidden`.
+- **Resolution:** the agent's tool layer SelfSubjectAccessReview-
+  checks at startup and surfaces "I can only diagnose resources in
+  `kars-*` namespaces — re-run install with `--with-cluster-wide-read`
+  or `--watch-namespace <ns>` to broaden". No silent failures.
+
+### 7.6 Mapping to existing kars subsystems
+
+Per first-class status, the SRE agent should reuse — not parallel —
+the kars subsystems already in production:
+
+| Concern | Reuse / extend |
+|---|---|
+| Sandbox primitive | `KarsSandbox` (one CR for the SRE sandbox; runtime.kind = Hermes) |
+| Policy gating | `ToolPolicy` per `sre_*` tool name |
+| Approval channel | `ToolPolicy.approval.channel` (Telegram/Slack/Discord/Teams) |
+| Egress | `KarsSandbox.spec.networkPolicy` + signed allowlist. Production default `Strict`; dev/demo installs may start in `Learn` (see §6.6 lifecycle clarification) |
+| Audit | inference-router's hash-chained JSONL audit (existing) |
+| Status | `.status.phase` taxonomy (Pending → Compiled → Ready → Running → Degraded) |
+| Identity | controller-issued FedCred (AKS) / in-cluster SA (kind) — see §7.9 |
+| Notification | `kars_notify_human` governed tool (§7.3) — NOT Hermes' raw `send_message` |
+| Mesh | none in S1-S4; potentially in S5+ for federated multi-cluster |
+
+The SRE agent is, intentionally, just another kars sandbox with a
+specialised tool surface and a wider RBAC. It does not introduce new
+governance primitives; it uses the existing ones.
+
+### 7.7 Threat model — write actions, protected resources, prompt injection
+
+The original proposal said "agent proposes a kubectl command; operator
+approves; controller mints a short-lived token". That model has two
+fatal gaps:
+
+1. **Privilege escalation via a single approved patch.** A single
+   approved `patch` on RBAC, KarsSandbox, ToolPolicy, NetworkPolicy,
+   ServiceAccount, Secret, CRD, or webhook config can escalate or
+   persist privileges. Approving "kubectl patch" is the wrong unit.
+2. **Prompt injection via cluster state.** Pod annotations, event
+   messages, and pod logs are operator-untrusted strings that flow
+   into the LLM context. An attacker (or an unwitting workload owner)
+   can embed instructions in them.
+
+This section closes both.
+
+#### 7.7.1 Typed actions, not shell commands
+
+`sre_apply_fix` does **not** take a kubectl/helm command string. It
+takes a **typed action** from a closed set, schema-validated, with
+a hard protected-resource denylist enforced in three places (defense
+in depth):
+
+| Typed action | Schema | Protected against |
+|---|---|---|
+| `PatchDeploymentImage` | `{namespace, name, container, image}` | image must NOT reference RBAC/SA/Secret-mount paths; namespace ∉ denylist |
+| `RolloutRestart` | `{namespace, kind∈{Deployment,StatefulSet,DaemonSet}, name}` | namespace ∉ denylist |
+| `ScaleDeployment` | `{namespace, name, replicas ∈ [0, 50]}` | namespace ∉ denylist; replicas clamped |
+| `DeletePod` (= forced restart of one pod) | `{namespace, name}` | namespace ∉ denylist |
+| `PatchConfigMapKey` | `{namespace, name, key, value}` | name ∉ kars-controlled CMs (allowlist of OPERATOR-managed CMs only) |
+
+**Protected-resource denylist** (enforced at all three layers below):
+RBAC kinds (`roles`, `rolebindings`, `clusterroles`, `clusterrolebindings`),
+`serviceaccounts`, `serviceaccounts/token`, `secrets`,
+`customresourcedefinitions`, `validatingwebhookconfigurations`,
+`mutatingwebhookconfigurations`, `validatingadmissionpolicies`,
+`validatingadmissionpolicybindings`, anything in
+namespaces `kars-system`, `kars-sre`, `kube-system`, `kube-public`,
+`kube-node-lease`, `agentmesh`, and any `kars.azure.com/*` CR
+(`KarsSandbox`, `ToolPolicy`, `InferencePolicy`, `EgressApproval`,
+`NetworkPolicy` of kars sandboxes, etc.). The SRE agent cannot
+mutate kars governance state via this path.
+
+**Three enforcement layers** (any one rejects → action denied):
+1. **Plugin-side compiler** — `sre_apply_fix` rejects anything not
+   in the typed-action set; rejects any action whose target hits
+   the denylist.
+2. **Controller pre-flight** — before minting the token, the
+   controller runs `SelfSubjectAccessReview` (would the writer SA
+   even be allowed?) AND **server-side dry-run** (does the action
+   parse and pass admission?). Both must succeed.
+3. **Admission backstop** — a `ValidatingAdmissionPolicy` that
+   targets the `kars-sre-writer-*` user (kubelet client identity
+   prefix is stable) and denies any verb on the denylist kinds /
+   namespaces. So even a controller bug (e.g., wrong CRB scope)
+   cannot let the SRE writer touch governance state.
+
+#### 7.7.2 Prompt-injection containment for untrusted cluster strings
+
+Pod logs, event messages, annotations, ConfigMap values are operator-
+untrusted strings. Two defenses:
+
+- **Quote-and-fence:** the SRE plugin wraps every block of cluster-
+  sourced text in `<<<UNTRUSTED_CLUSTER_DATA>>> ... <<<END>>>` with a
+  system-prompt directive that any instructions inside the fence are
+  data, not commands.
+- **Action-must-target-the-described-resource:** `sre_apply_fix` will
+  reject any typed action whose `{kind, namespace, name}` does not
+  match a resource the agent inspected in this turn (via
+  `sre_describe_resource`). An attacker who injects "patch
+  deployment/elevated-thing in kube-system" through a log line can't
+  succeed because the agent never inspected that resource → action
+  is rejected at the plugin layer.
+
+The combination is not a full prompt-injection defense (no defense is),
+but it makes the obvious exploits non-functional without operator
+explicit complicity.
+
+### 7.8 Privilege containment — no inheritance, no other consumers
+
+**Requirement:** the elevated capabilities granted to `kars-sre`
+(cluster-wide read RBAC, the writer SA, TokenRequest minting, the
+typed-action store, the `sre_*` tool surface, the channel notification
+path) must be **uniquely held by the one nominated SRE sandbox**.
+No other agent, sub-agent, or workload in the cluster can inherit,
+re-use, or fall heir to any of these capabilities.
+
+Six containment boundaries, each defended at the layer where it
+naturally enforces:
+
+#### 7.8.1 Plugin packaging — the `sre_*` tools don't exist outside the SRE image
+
+The SRE tool module (`sre_describe_state`, `sre_apply_fix`, etc.)
+**does not ship** in the standard Hermes runtime image. It lives in
+a **separate Python package** (`kars-sre-plugin`) that is installed
+**only** in a dedicated `kars/sre-sandbox:<tag>` image. Standard
+`kars/hermes-sandbox:<tag>` images have no awareness of the SRE
+tool names, no code to invoke them, and no `register_tool` calls
+that would expose them.
+
+```
+sandbox-images/
+  hermes/             # ships kars-hermes-plugin (no SRE tools)
+  sre/                # ships kars-hermes-plugin + kars-sre-plugin
+```
+
+Even if an attacker convinces a user-facing Hermes sandbox to ask
+for `sre_apply_fix`, the LLM can ask but the tool is not registered,
+so the call returns "tool not found" at the runtime, not at the policy
+layer. **The tools simply do not exist in any other pod.**
+
+#### 7.8.2 Sandbox uniqueness — only one KarsSandbox cluster-wide may be the SRE agent
+
+A `ValidatingAdmissionPolicy` enforces that at most one `KarsSandbox`
+in the cluster can carry the label
+`kars.azure.com/role: sre`. Any subsequent CR with that label is
+admission-rejected. The label is the only thing the controller's
+SRE-aware reconciler looks at when deciding "is this the SRE
+sandbox?" — so an operator cannot bypass uniqueness by naming
+the second sandbox differently.
+
+```yaml
+# deploy/helm/kars/templates/admission/vap-sre-uniqueness.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-uniqueness
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kars.azure.com"]
+        resources: ["karssandboxes"]
+        operations: ["CREATE","UPDATE"]
+  validations:
+    - expression: |
+        !(object.metadata.labels["kars.azure.com/role"] == "sre") ||
+        size(variables.existing_sre) == 0 ||
+        (size(variables.existing_sre) == 1 && variables.existing_sre[0].metadata.name == object.metadata.name)
+      message: "Only one KarsSandbox per cluster may carry the kars.azure.com/role=sre label."
+```
+
+#### 7.8.3 RBAC subject pinning — no wildcard, no group binding
+
+Every `ClusterRoleBinding` and `RoleBinding` that references
+`kars-sre-reader`, `kars-sre-writer`, or any `kars-sre-write-*`
+ClusterRole MUST name an explicit `(kind: ServiceAccount, namespace,
+name)` subject. No subjects of kind `Group`, no `system:serviceaccounts`
+group binding, no `*` name. A second VAP enforces this:
+
+```yaml
+# deploy/helm/kars/templates/admission/vap-sre-rbac-pinning.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-rbac-pinning
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        resources: ["clusterrolebindings","rolebindings"]
+        operations: ["CREATE","UPDATE"]
+  validations:
+    - expression: |
+        !object.roleRef.name.startsWith("kars-sre-") ||
+        object.subjects.all(s,
+          s.kind == "ServiceAccount" &&
+          s.namespace == "kars-sre" &&
+          (s.name == "sandbox" || s.name == "sre-writer"))
+      message: |
+        Bindings to kars-sre-* ClusterRoles may target only the
+        ServiceAccounts 'sandbox' or 'sre-writer' in namespace
+        'kars-sre'. Group bindings and wildcard subjects are denied.
+```
+
+#### 7.8.4 Writer SA token containment
+
+The `sre-writer` ServiceAccount is **NOT auto-mounted**
+(`automountServiceAccountToken: false` on the SA and on every pod
+in `kars-sre`). The agent's primary pod uses the `sandbox` SA
+(read-only). The writer SA exists only as an identity that the
+**controller** mints TokenRequest tokens against — the agent's
+container never sees a long-lived `sre-writer` token.
+
+Each per-action token has:
+- `audiences: ["api"]` (default Kubernetes audience; rejected by any
+  non-apiserver consumer)
+- `expirationSeconds: 300` (5-min TTL — cannot be extended without a
+  new TokenRequest)
+- `boundObjectRef: {kind: Pod, name: <sre-pod>, uid: <current pod UID>}`
+  — the token is invalidated the moment the SRE pod is deleted or
+  restarted, so a stolen token from a crashed pod is dead
+- A one-shot `ClusterRoleBinding` of the form `kars-sre-write-<action-id>`
+  that grants only the typed action's (verb, resource, namespace) —
+  torn down by the controller after the action completes or after
+  the 5-min TTL, whichever first
+
+The token is passed to the agent process via an **in-memory env var**
+on the typed-action subprocess, never written to disk, never logged.
+The kars-strict seccomp profile blocks `ptrace`, so a hostile
+sidecar cannot read the env from `/proc/<pid>/environ`.
+
+#### 7.8.5 Spawn isolation — SRE cannot create sub-agents
+
+The SRE sandbox **disables `kars_spawn`** entirely (the spawn plugin
+is not registered in the SRE image). This prevents an attacker who
+compromises the agent from spawning a sub-sandbox in `kars-sre` that
+would inherit the namespace's RBAC. As an additional defence, the
+controller's spawn reconciler rejects any sub-sandbox whose parent
+namespace is `kars-sre`.
+
+#### 7.8.6 Mesh isolation — SRE does not accept commands from peers
+
+The SRE agent's mesh tool surface is reduced:
+- It **can send** inbox messages (so it can report status to a
+  human-facing agent on request).
+- It **cannot accept** any `tool.invoke` intent on its KNOCK frames.
+  `sre_apply_fix` is callable only by the local agent process driven
+  by the operator's WebUI or `kars sre approve <id>` CLI flow — never
+  by a remote peer over the mesh.
+
+The plugin enforces this in two places: (a) the SRE plugin's mesh
+handler rejects `intent ∈ {tool.invoke, function_call}` with a 403
+audit row, and (b) the SRE sandbox's `ToolPolicy` for `sre_apply_fix`
+sets `appliesTo.callerKind: local-only`, which the router enforces
+by rejecting tool calls whose origin is the mesh path.
+
+#### 7.8.7 NetworkPolicy — admin port only reachable from cluster operators
+
+The SRE sandbox's NetworkPolicy ingress on `:8443` (router admin) is
+restricted to:
+- Pods in `kars-system` with label `app.kubernetes.io/name=kars-controller`
+- Pods in `monitoring` with label `app.kubernetes.io/component=prometheus`
+- (NOT other sandbox namespaces, NOT `default`, NOT `kube-system`
+  beyond the standard probes)
+
+So even if another sandbox somehow obtained a kars-sre admin token,
+the network path to use it does not exist.
+
+#### 7.8.8 Audit — every SRE privilege use is observable
+
+All eight containment boundaries above are **observable**:
+- The VAPs in §7.8.2 and §7.8.3 emit Warning Events on every
+  rejected admission attempt (visible in `kubectl events`)
+- The controller-side TokenRequest in §7.8.4 emits a structured
+  log line `"sre.token.minted action=<id> binding=<crb-name> ttl=300s"`
+- The k8s audit log captures every TokenRequest call and every
+  one-shot CRB creation/deletion
+- The inference-router audit JSONL captures every `sre_apply_fix`
+  invocation with its action_id
+
+If any of these surfaces shows activity not correlated with an
+operator-initiated `kars sre approve` flow, the cluster is
+compromised — operator triage can immediately revoke the SRE
+sandbox by `kubectl delete karssandbox sre`, which the controller's
+ownerRef tree garbage-collects atomically (writer SA, all CRBs,
+namespace, the lot).
+
+#### 7.8.9 What an attacker who fully compromises the SRE agent CANNOT do
+
+Stacking the above:
+- Cannot create or delegate the `sre_*` tools to any other agent
+  (§7.8.1 — they don't exist outside this image)
+- Cannot install a second SRE agent (§7.8.2)
+- Cannot bind the kars-sre ClusterRoles to any other SA, user, or
+  group (§7.8.3)
+- Cannot persist a writer token beyond 5 min, beyond pod lifetime,
+  or across a controller restart (§7.8.4)
+- Cannot spawn a sub-sandbox that inherits namespace RBAC (§7.8.5)
+- Cannot be commanded by any remote agent over the mesh (§7.8.6)
+- Cannot be reached on its admin port by user-facing sandbox pods
+  (§7.8.7)
+- Cannot escape audit (§7.8.8)
+- Cannot mutate kars governance state, RBAC, secrets, webhooks, or
+  CRDs (§7.7 typed-action denylist + admission backstop)
+
+The maximal blast radius of a fully-compromised SRE agent is:
+**read-only inspection of cluster state, plus one typed action against
+non-governance workload state per operator approval, plus channel
+posts to the configured Telegram/Slack channel**. Nothing else.
+
+### 7.9 Identity & naming
+
+Resolves the `kars-kars-sre` gotcha raised in critique:
+
+- **Sandbox name:** `sre` (NOT `kars-sre`). The controller derives the
+  namespace as `kars-<name>` per the standard convention, so:
+  - Namespace: `kars-sre`
+  - ServiceAccount: `sandbox` (the controller-created default — NOT a
+    custom name)
+  - SA token mount: `/var/run/secrets/kubernetes.io/serviceaccount/token`
+    (standard projected SA volume)
+- **Writer SA (S3 only):** `sre-writer`, lives in `kars-sre`, no
+  permissions by default. One-shot ClusterRoleBindings of the form
+  `kars-sre-write-<action-id>` are created by the controller on
+  approval and TTL'd by the controller's grant-lifecycle reconciler
+  after 5 min OR after the action completes (whichever first).
+- **Controller RBAC delta for S3 (must add):**
+  ```yaml
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["create", "delete"]
+    resourceNames: ["kars-sre-write-*"]
+  ```
+  The controller's existing RBAC does not include `serviceaccounts/token`;
+  this is required for the S3 TokenRequest path.
+
+### 7.10 Observability — metrics, audit, recovery confirmation
+
+The single counter from the original §7.5 Q5 is too coarse. The
+production shape:
+
+**Counters:**
+```
+kars_sre_proposals_total{
+  outcome ∈ {proposed, rejected, expired, amended, apply_failed,
+             applied_recovered, applied_no_recovery},
+  symptom ∈ {ImagePullBackOff, CrashLoopBackOff, OOMKilled,
+             ZeroEndpoints, RolloutStalled, FailedScheduling, Other},
+  proposal_type ∈ {PatchDeploymentImage, RolloutRestart, ScaleDeployment,
+                   DeletePod, PatchConfigMapKey},
+  resource_kind ∈ {Deployment, StatefulSet, DaemonSet, ConfigMap, Pod},
+  cluster_scope ∈ {kars-only, namespace, cluster-wide},
+}
+```
+
+(Avoid `namespace`, `name`, image tag, action_id as Prometheus labels —
+they go in the audit row.)
+
+**Histograms:**
+```
+kars_sre_detection_to_proposal_seconds   # informer event → sre_propose_fix call
+kars_sre_proposal_to_approval_seconds    # propose → operator approve (or reject/expire)
+kars_sre_approval_to_apply_seconds       # approve → typed action executed
+kars_sre_apply_to_recovery_seconds       # apply → observed recovery (or timeout)
+```
+
+**Audit correlation:** every proposal carries a stable `action_id`
+that links five rows across the audit stack:
+1. AGT trust-store proposal entry
+2. K8s audit log event (controller minted the writer token)
+3. K8s audit log event (sre-writer SA executed the action)
+4. inference-router audit JSONL row (the agent's tool call)
+5. recovery-or-timeout entry (informer observed the workload back to
+   healthy, OR timed out)
+
+`kars sre report --last 7d` aggregates these for human review.
+
+**Recovery semantics:** "recovered" means the observed workload condition
+transitions from the symptom that triggered the proposal back to
+`Available=True` AND `Progressing=True` (workload-kind-appropriate)
+within a configurable window (default 5 min). Otherwise → `applied_no_recovery`.
+
+### 7.11 What's NOT yet specified (work needed before PR slicing)
+
+These are the design artefacts a PR-slicing kickoff should produce.
+None blocks the showcase demo, but all block "kars-sre is GA":
+
+1. **Threat model document** — prompt injection vectors enumerated;
+   protected-resource policy formalised; failure modes for the typed-
+   action compiler.
+2. **Tool JSON schemas** — exact JSON Schema for every `sre_*` tool's
+   input + output. The agent's tool-calling reliability depends on this.
+3. **Action / incident persistent data model** — where does an
+   `action_id` live? Suggestion: a new `KarsSREAction` CRD (Phase 2)
+   with `.status.phase ∈ {Proposed, Approved, Applied, Recovered,
+   Failed, Expired, Rejected}`. Until then, AGT trust store + audit JSONL.
+4. **e2e test matrix:**
+   - kind (default substrate)
+   - AKS (Workload Identity path)
+   - metrics-server absent (graceful degrade)
+   - private registry (image_probe failure modes)
+   - egress Strict (no `api.github.com` available)
+   - RBAC negative tests (cluster-wide read off, --watch-namespace
+     wrong ns)
+   - prompt-injection corpus (annotations / events containing the
+     "ignore previous instructions" classic, plus k8s-flavoured
+     variants like "patch deployment kube-system/kube-proxy …")
+5. **Source-grounding privacy + ConfigMap size** — what's the upper
+   bound on the cached source snapshot? Strategy: cap at 1MB; if the
+   repo is larger, snapshot only the controller + plugin + chart
+   templates (the parts the agent actually quotes).
+6. **Upgrade / uninstall / GC behavior** — `kars sre uninstall` must
+   tear down: the sandbox + its namespace, the ClusterRole + binding,
+   the controller-side action store, any pending action grants, the
+   credentials secret. Verify no orphan CRBs after kill-and-reapply.
+7. **Backpressure on the informer loop** — when 50 workloads break
+   simultaneously (cluster-wide outage), we cannot post 50 Telegram
+   messages. Symptom-aggregation: batch by ns within 60 s; one
+   notification per ns per symptom.
+
+
+## Design open questions (carried over from §6 — answered in §7.5)
+
+The original design open questions are answered in **§7.5** above.
+For traceability they are echoed here with their resolutions:
+
+1. **Multi-cluster?** Per-cluster install. MVP unchanged.
+2. **Kubeconfig mount vs Workload Identity?** **Changed — see §7.5 Q2.** In-cluster SA everywhere; kubeconfig mount dropped from the plan.
+3. **Source-code access scope?** kars + AGT, gated by optional `--gh-token` install flag (see §7.1 S5).
+4. **History / corpus.** Agent reads source live (no pre-seeded corpus). Drift-free.
+
+Additional decisions raised in §7.5: top-level command vs CRD (Q1),
+cluster-wide read scope as opt-in (Q3), metrics-server graceful
+degrade (Q4), agent quality metric (Q5).
 
 ## Validation gate
 
