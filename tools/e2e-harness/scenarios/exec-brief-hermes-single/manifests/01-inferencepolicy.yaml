@@ -1,0 +1,31 @@
+# 01-inferencepolicy.yaml — Foundry / Azure-OpenAI provider for the
+# single-agent Hermes exec-brief. Same provider requirement as the
+# canonical exec-brief: Foundry data-plane (web search, image gen,
+# code execute) is gated on azure-openai or foundry providers; the
+# github-copilot / github-models providers return 501 for those
+# routes.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: execbrief-hermes-inference
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: execbrief-hermes
+spec:
+  appliesTo:
+    sandboxName: execbrief-hermes
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-5.4
+  contentSafety:
+    # Prompt Shields off — same reasoning as the canonical scenario:
+    # the Foundry data-plane stream doesn't emit prompt_filter_results,
+    # which the strict Prompt Shields gate needs.
+    requirePromptShields: false
+  tokenBudget:
+    # Single agent does the whole pipeline → can spike to ~150 KB
+    # context for the final brief. Generous per-request cap.
+    dailyTokens: 2000000
+    perRequestTokens: 200000

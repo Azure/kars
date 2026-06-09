@@ -31,6 +31,7 @@ fi
 
 PACKAGES=(
     "agent-sandbox"
+    "agent-mesh"
     "agentmesh-integrations/a2a-protocol"
 )
 
@@ -39,7 +40,19 @@ mkdir -p "${WHEEL_DIR}"
 find "${WHEEL_DIR}" -maxdepth 1 -type f \( -name '*.whl' -o -name '*.tar.gz' \) -delete
 
 PY="${PYTHON:-python3}"
-"${PY}" -m pip install --quiet --upgrade build >/dev/null
+
+# Hermetic build: PEP 668 blocks `pip install build` against the
+# system Python on modern macOS Homebrew / many Linux distros. Spin
+# up a per-invocation venv so we never touch the host site-packages,
+# and re-use the same venv across the loop (caches `build`). The
+# venv lives OUTSIDE WHEEL_DIR so docker `COPY runtimes/wheels/`
+# from the sandbox-image Dockerfiles never picks it up.
+VENV_DIR="${HERE}/.builder-venv"
+if [ ! -x "${VENV_DIR}/bin/python" ]; then
+    "${PY}" -m venv "${VENV_DIR}"
+fi
+VENV_PY="${VENV_DIR}/bin/python"
+"${VENV_PY}" -m pip install --quiet --upgrade pip build >/dev/null
 
 for pkg in "${PACKAGES[@]}"; do
     src="${AGT_PYTHON_DIR}/${pkg}"
@@ -48,7 +61,7 @@ for pkg in "${PACKAGES[@]}"; do
         exit 1
     fi
     echo "building wheel for ${pkg} from ${src}"
-    "${PY}" -m build --wheel --outdir "${WHEEL_DIR}" "${src}" >/dev/null
+    "${VENV_PY}" -m build --wheel --outdir "${WHEEL_DIR}" "${src}" >/dev/null
 done
 
 echo

@@ -1,0 +1,47 @@
+# 02-toolpolicy.yaml — ToolPolicy CR for the single-agent Hermes
+# exec-brief. Inlines the kars-default AGT profile (same source of
+# truth as cli/profiles/agt/kars-default.yaml) so the in-pod
+# pre_tool_call governance hook has rules to evaluate against.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: execbrief-hermes-toolpolicy
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: execbrief-hermes
+  annotations:
+    kars.azure.com/profile: default
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: execbrief-hermes
+  agtProfile:
+    inline: |
+      # Single-agent Hermes exec-brief AGT profile.
+      #
+      # Layer 2 deny of Hermes built-in sub-agent / direct-API tools —
+      # the kars plugin's register() also deregisters them client-side
+      # so the LLM never sees them; this profile catches anything that
+      # re-registers (defense in depth). Mirrors the OpenClaw posture
+      # which denies tool:session_send + tool:session_spawn.
+      #
+      # See docs/internal/security-audits/2026-06-04-hermes-act2-deny-list.md
+      # for the per-tool justification.
+      version: "1.0"
+      agent: execbrief-hermes-default
+      policies:
+        - name: hermes-builtin-sub-agent-deny
+          type: capability
+          denied_actions:
+            - "tool:delegate_task"
+            - "tool:mixture_of_agents"
+            - "tool:cronjob"
+            - "tool:kanban_create"
+            - "tool:kanban_comment"
+            - "tool:send_message"
+          priority: 100
+        - name: default-allow
+          type: capability
+          allowed_actions: ["*"]
+          priority: 1

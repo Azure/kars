@@ -11,6 +11,7 @@ The same router, the same governance profile, the same audit chain, the same Net
 | Kind | Language | Image dir | Adapter source | Status |
 |---|---|---|---|---|
 | `OpenClaw` | Python 3.12 | `sandbox-images/openclaw/` | `runtimes/openclaw/` | Shipping |
+| `Hermes` | Python 3.12 | `sandbox-images/hermes/` | `runtimes/hermes/` | Shipping |
 | `OpenAIAgents` | Python 3.12 | `sandbox-images/openai-agents/` | `runtimes/openai-agents/` | Shipping |
 | `MicrosoftAgentFramework` (Python) | Python 3.12 | `sandbox-images/maf-python/` | `runtimes/maf-python/` | Shipping |
 | `MicrosoftAgentFramework` (.NET) | — | — | — | **Deferred** — `language: dotnet` returns `ShapeInvalid` until the .NET AgentMesh SDK is available. |
@@ -31,6 +32,7 @@ When you `kubectl apply` a `KarsSandbox`, the reconciler reads `spec.runtime.kin
 flowchart LR
   CR["KarsSandbox<br/>spec.runtime.kind"] --> D{dispatch}
   D -->|OpenClaw| P1["openclaw producer<br/>image: sandbox-images/openclaw"]
+  D -->|Hermes| P1H["hermes producer<br/>image: sandbox-images/hermes"]
   D -->|OpenAIAgents| P2["openai-agents producer"]
   D -->|MicrosoftAgentFramework<br/>language: python| P3["maf-python producer"]
   D -->|MicrosoftAgentFramework<br/>language: dotnet| P3X[("ShapeInvalid<br/>🚧 deferred")]
@@ -40,7 +42,7 @@ flowchart LR
   D -->|PydanticAi| P6["pydantic-ai producer"]
   D -->|SemanticKernel| P7X[("AdapterMissing<br/>🚧 deferred")]
   D -->|BYO| P8["BYO contract validation<br/>(image + ports + env)"]
-  P1 & P2 & P3 & P4 & P4T & P5 & P6 & P8 --> COMMON["Common shell:<br/>· inference-router sidecar<br/>· egress-guard init<br/>· NetworkPolicy<br/>· WI federated credential<br/>· governance ConfigMap"]
+  P1 & P1H & P2 & P3 & P4 & P4T & P5 & P6 & P8 --> COMMON["Common shell:<br/>· inference-router sidecar<br/>· egress-guard init<br/>· NetworkPolicy<br/>· WI federated credential<br/>· governance ConfigMap"]
   COMMON --> POD[("Sandbox Pod")]
 
   classDef deferred fill:#f0f0f0,stroke:#999,stroke-dasharray:4 3,color:#666
@@ -69,6 +71,18 @@ The OpenClaw adapter ships two multi-agent helpers on top of the platform mesh:
 
 - **Sub-agent inheritance.** `kars_spawn` propagates the parent's provider, model, upstream endpoint, and credential into the child container — siblings run on the same backend with no per-spawn wiring (see [architecture.md → data path](architecture.md#the-data-path-of-one-external-call)).
 - **Peer roster.** Every spawn takes a `role` (e.g. `"data analyst"`, `"technical writer"`). Once two or more siblings exist the runtime auto-prepends a `Peer roster: name — role` block to every outbound `mesh_send` / `mesh_transfer_file`. Sub-agents resolve role references ("send the chart to the viz agent") against the roster instead of inventing names. Critical for `analyst → viz → writer`-style pipelines; agent-facing contract documented in `runtimes/openclaw/skills/kars-spawn/SKILL.md`.
+
+### `Hermes`
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT). Python 3.11+ agent harness pinned to v0.15.2 by default. Ships **20+ messaging channels** (Telegram, Slack, Discord, WhatsApp, …), **18+ inference providers**, **70+ built-in tools**, and a native MCP client out-of-the-box. The kars Hermes plugin wires Hermes into AGT governance, the kars mesh (Python AGT MeshClient via `runtimes/agt-mesh-python/`), Foundry data-plane tools, and the same CRD-driven `agentCode` mounting story as OpenClaw.
+
+What makes Hermes a useful counterpart to OpenClaw:
+
+- **Channels-first.** Drop a Telegram bot token into a secret and Hermes is a Telegram-driven agent — no glue code. OpenClaw is more code-first; Hermes is more chat-first.
+- **MCP client built-in.** Hermes' native `mcp_servers` config lets the agent reach the kars platform MCP server (Foundry tools) without writing the bridge yourself.
+- **Bidi mesh peer.** Hermes participates in the AGT mesh identically to OpenClaw — `OpenClaw → Hermes`, `Hermes → OpenClaw`, and `Hermes → Hermes` are all proven end-to-end on AKS (see [`tests/e2e/interop/hermes_openclaw_bidi.sh`](../tests/e2e/interop/hermes_openclaw_bidi.sh) and [`tests/e2e/interop/aks_full_suite.sh`](../tests/e2e/interop/aks_full_suite.sh)).
+
+Full operator-facing reference: **[Hermes plugin](hermes-plugin.md)**.
 
 ### `OpenAIAgents`
 
@@ -142,6 +156,7 @@ Eight end-to-end examples ship under [`examples/`](../examples/README.md) — on
 | Example | Runtime | Shows |
 |---|---|---|
 | [`basic-agent`](../examples/basic-agent/) | OpenClaw | Minimal sandbox with default isolation |
+| [`hermes-quickstart`](../examples/hermes-quickstart/) | Hermes | Minimal Hermes sandbox — kars plugin auto-loads, joins the mesh |
 | [`telegram-agent`](../examples/telegram-agent/) | OpenClaw | Channel-plugin wiring (Telegram bot) |
 | [`confidential-agent`](../examples/confidential-agent/) | OpenClaw + Confidential Containers | CVM workers + attested boot |
 | [`openai-agents-quickstart`](../examples/openai-agents-quickstart/) | OpenAIAgents | Unmodified OpenAI Agents SDK app |

@@ -182,7 +182,7 @@ def test_evaluate_non_2xx_treated_as_failure() -> None:
         ),
     ):
         d1 = governance.evaluate("x", {})
-        d2 = governance.evaluate("x", {})
+        governance.evaluate("x", {})  # consumes one grace slot; result not asserted
         d3 = governance.evaluate("x", {})
 
     assert d1.allowed  # under grace
@@ -198,11 +198,15 @@ def test_hook_returns_none_on_allow_to_proceed() -> None:
         "call",
         return_value=_mock_response(200, {"allowed": True, "decision": "allow"}),
     ):
-        result = governance._on_pre_tool_call("http_fetch", {"url": "https://example.com"})
+        # Match Hermes' actual hook invocation contract: kwargs only.
+        result = governance._on_pre_tool_call(
+            tool_name="http_fetch",
+            args={"url": "https://example.com"},
+        )
     assert result is None
 
 
-def test_hook_returns_json_error_on_deny() -> None:
+def test_hook_returns_block_directive_on_deny() -> None:
     with mock.patch.object(
         governance.router_client,
         "call",
@@ -216,15 +220,45 @@ def test_hook_returns_json_error_on_deny() -> None:
             },
         ),
     ):
-        result = governance._on_pre_tool_call("http_fetch", {"url": "https://example.com"})
+        result = governance._on_pre_tool_call(
+            tool_name="http_fetch",
+            args={"url": "https://example.com"},
+        )
 
-    import json
+    # Hermes' get_pre_tool_call_block_message looks for
+    # {"action": "block", "message": <str>}. Earlier code returned a
+    # JSON string which Hermes silently ignored (no block actually
+    # happened). This test enforces the new contract — see
+    # plugins.py:1685-1707 in hermes_cli 0.15.2 for the exact shape.
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "Blocked by AGT policy" in result["message"]
+    assert "rule-42" in result["message"]
+    assert "blocked" in result["message"]
 
-    assert isinstance(result, str)
-    parsed = json.loads(result)
-    assert "Blocked by AGT policy" in parsed["error"]
-    assert parsed["kars_governance"]["rule"] == "rule-42"
-    assert parsed["kars_governance"]["reason"] == "blocked"
+
+def test_hook_accepts_full_hermes_kwargs() -> None:
+    """Regression guard: Hermes invokes pre_tool_call with EXACTLY
+    these kwargs (tool_name, args, task_id, session_id, tool_call_id).
+    The earlier signature `_on_pre_tool_call(tool_name, params, **kw)`
+    silently captured nothing into `params` because Hermes passes
+    `args=` not `params=` — every hook invocation raised TypeError,
+    Hermes swallowed it, no AGT audit entry was ever written for tool
+    calls. This test guards against re-introducing that bug."""
+    with mock.patch.object(
+        governance.router_client,
+        "call",
+        return_value=_mock_response(200, {"allowed": True, "decision": "allow"}),
+    ):
+        # All five kwargs that Hermes will pass:
+        result = governance._on_pre_tool_call(
+            tool_name="kars_mesh_send",
+            args={"to_agent": "analyst", "content": "hello"},
+            task_id="task-1",
+            session_id="sess-1",
+            tool_call_id="tc-1",
+        )
+    assert result is None
 
 
 def test_register_wires_pre_tool_call_hook() -> None:

@@ -159,6 +159,20 @@ async fn relay_websocket_bridge(
             out_bytes.fetch_add(size as u64, Ordering::Relaxed);
             sent_metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
             crate::metrics::AGT_MESH_MESSAGES_SENT.inc();
+            // Break the SENT counter down by frame type. The relay
+            // protocol envelope is JSON-with-a-`"type"`-field, so we
+            // peek the first few bytes to classify. Heartbeats vastly
+            // dominate over real conversation when uptime is high
+            // (every 30s); separating them out lets the operator UX
+            // distinguish keepalives from app traffic without ambiguity.
+            let frame_type = classify_frame_type(match &tung_msg {
+                tungstenite::Message::Text(t) => t.as_bytes(),
+                tungstenite::Message::Binary(b) => b.as_ref(),
+                _ => &[],
+            });
+            crate::metrics::AGT_MESH_FRAMES_SENT_BY_TYPE
+                .with_label_values(&[frame_type])
+                .inc();
             // Hex-dump first 128 bytes for traffic capture / E2E encryption proof.
             // The relay only ever sees ciphertext — readable plaintext here means encryption failed.
             let raw_bytes: Vec<u8> = match &tung_msg {
@@ -230,6 +244,16 @@ async fn relay_websocket_bridge(
                 .messages_received
                 .fetch_add(1, Ordering::Relaxed);
             crate::metrics::AGT_MESH_MESSAGES_RECEIVED.inc();
+            // Mirror the SENT-side breakdown for RECEIVED. See the
+            // SENT path's comment for the rationale.
+            let frame_type = classify_frame_type(match &msg {
+                tungstenite::Message::Text(t) => t.as_bytes(),
+                tungstenite::Message::Binary(b) => b.as_ref(),
+                _ => &[],
+            });
+            crate::metrics::AGT_MESH_FRAMES_RECEIVED_BY_TYPE
+                .with_label_values(&[frame_type])
+                .inc();
             // Hex-dump first 128 bytes of each inbound frame for traffic capture.
             let raw_bytes: Vec<u8> = match &msg {
                 tungstenite::Message::Text(t) => t.as_bytes().to_vec(),
@@ -707,6 +731,64 @@ async fn blocklist_check(
     }
 }
 
+/// Classify a raw outbound/inbound relay frame by its JSON "type" field.
+///
+/// The wire protocol envelope is `{"type": "<kind>", ...}` (see
+/// `runtimes/agt-mesh-python/.../relay_transport.py` and
+/// `mesh-plugin/src/agt-transport.ts` for the TS-side equivalent).
+/// Cheap classification — only the first ~80 bytes are inspected;
+/// non-JSON bodies (binary, malformed) bucket into `"unknown"`.
+///
+/// Buckets aligned with the operator UX:
+///   - `message`   — application payload (the count operators want to track)
+///   - `knock`     — KNOCK frame (X3DH session-establishment + first ciphertext)
+///   - `heartbeat` — 30-second keepalive; dominates total over long uptime
+///   - `connect`   — first frame after WS open (POP / identity claim)
+///   - `ack`       — KNOCK / heartbeat acks
+///   - `unknown`   — anything we can't classify (shouldn't happen on a healthy bus)
+pub(crate) fn classify_frame_type(raw: &[u8]) -> &'static str {
+    // Cheap: scan first 80 bytes for `"type":"<kind>"` substring. The
+    // alternative (full json parse) is wasteful on the hot path —
+    // every message + every heartbeat goes through here.
+    let prefix_len = raw.len().min(80);
+    let prefix = &raw[..prefix_len];
+    let needle = b"\"type\"";
+    let mut i = 0;
+    while i + needle.len() < prefix_len {
+        if &prefix[i..i + needle.len()] == needle {
+            // Found "type" key; scan for next quoted string value.
+            let mut j = i + needle.len();
+            while j < prefix_len && prefix[j] != b'"' {
+                j += 1;
+            }
+            if j >= prefix_len {
+                return "unknown";
+            }
+            j += 1; // skip opening quote
+            let mut end = j;
+            while end < prefix_len && prefix[end] != b'"' {
+                end += 1;
+            }
+            let value = &prefix[j..end];
+            return match value {
+                b"message" => "message",
+                b"knock" => "knock",
+                b"knock_accept" => "knock_accept",
+                b"knock_reject" => "knock_reject",
+                b"heartbeat" => "heartbeat",
+                b"heartbeat_ack" => "heartbeat_ack",
+                b"connect" => "connect",
+                b"connect_ack" => "connect_ack",
+                b"ack" => "ack",
+                b"disconnect" => "disconnect",
+                _ => "unknown",
+            };
+        }
+        i += 1;
+    }
+    "unknown"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,5 +921,45 @@ mod tests {
             let body = Bytes::from_static(b"not json");
             assert!(enforce_identity_claim("v1/agents", &body).is_ok());
         });
+    }
+
+    #[test]
+    fn classify_frame_type_buckets_known_kinds() {
+        // The wire envelope is JSON `{"v":1, "type":"<kind>", ...}` for
+        // every frame the MeshClient produces. Verifying the classifier
+        // catches at least the four buckets the operator UX cares about.
+        assert_eq!(
+            classify_frame_type(br#"{"v":1,"type":"heartbeat","ts":"2026-06-04T20:00Z"}"#),
+            "heartbeat"
+        );
+        assert_eq!(
+            classify_frame_type(
+                br#"{"v":1,"type":"message","from":"did:mesh:...","ciphertext":"..."}"#
+            ),
+            "message"
+        );
+        assert_eq!(
+            classify_frame_type(
+                br#"{"v":1,"type":"knock","from":"did:mesh:...","establishment":{...}}"#
+            ),
+            "knock"
+        );
+        assert_eq!(
+            classify_frame_type(
+                br#"{"v":1,"type":"connect","from":"did:mesh:...","signature":"..."}"#
+            ),
+            "connect"
+        );
+        assert_eq!(classify_frame_type(b"not json"), "unknown");
+        assert_eq!(classify_frame_type(b""), "unknown");
+    }
+
+    #[test]
+    fn classify_frame_type_handles_short_input() {
+        // Defensive: don't index past end on tiny frames.
+        for n in 0..16 {
+            let buf = vec![b'{'; n];
+            assert_eq!(classify_frame_type(&buf), "unknown");
+        }
     }
 }

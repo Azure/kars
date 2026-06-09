@@ -413,12 +413,15 @@ pub async fn forward_stream(
 )> {
     // Inject stream_options.include_usage into request body so the final
     // SSE chunk contains a `usage` object with token counts. ONLY for
-    // OpenAI-shape paths — Anthropic Messages API (/v1/messages) rejects
-    // unknown top-level fields with `stream_options: Extra inputs are not
-    // permitted` (req_vrtx_*). Anthropic streams already include usage in
-    // their `message_delta` events.
-    let is_anthropic_shape = path.contains("messages");
-    let body_with_usage = if is_anthropic_shape {
+    // chat/completions — Anthropic Messages API (/v1/messages) rejects
+    // `stream_options: Extra inputs are not permitted` (req_vrtx_*),
+    // and the OpenAI Responses API (/v1/responses) also rejects
+    // `Unknown parameter: 'stream_options.include_usage'` on Azure
+    // Foundry (chat/completions accepts it, responses does not).
+    // Anthropic streams already include usage in their `message_delta`
+    // events; Responses streams include usage in the terminating event.
+    let skip_usage_injection = path.contains("messages") || path.contains("responses");
+    let body_with_usage = if skip_usage_injection {
         request_body
     } else {
         inject_stream_usage(request_body)
@@ -512,35 +515,41 @@ pub async fn forward_stream(
                     continue;
                 }
                 let json_str = &line[6..];
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str)
-                    && let Some(usage) = v.get("usage")
-                {
-                    // Record latency (stream complete)
-                    let latency = start.elapsed();
-                    metrics::INFERENCE_LATENCY
-                        .with_label_values(&[&sandbox_name, &model])
-                        .observe(latency.as_secs_f64());
-                    // Record token usage. OpenAI-shape uses prompt_tokens /
-                    // completion_tokens; Anthropic Messages-shape (e.g. native
-                    // /v1/messages SSE from Copilot) uses input_tokens /
-                    // output_tokens — accept either.
-                    let input_tokens = usage
-                        .get("prompt_tokens")
-                        .and_then(|v| v.as_i64())
-                        .or_else(|| usage.get("input_tokens").and_then(|v| v.as_i64()));
-                    let output_tokens = usage
-                        .get("completion_tokens")
-                        .and_then(|v| v.as_i64())
-                        .or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64()));
-                    if let Some(input) = input_tokens {
-                        metrics::TOKENS_USED
-                            .with_label_values(&[&sandbox_name, &model, &"input".to_string()])
-                            .inc_by(input as u64);
-                    }
-                    if let Some(output) = output_tokens {
-                        metrics::TOKENS_USED
-                            .with_label_values(&[&sandbox_name, &model, &"output".to_string()])
-                            .inc_by(output as u64);
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    // OpenAI Responses API SSE events nest usage under
+                    // `response.usage` on the final `response.completed`
+                    // event; Chat Completions SSE puts it at the top
+                    // level. Probe both shapes.
+                    let usage = v.get("usage").or_else(|| v.get("response")?.get("usage"));
+                    if let Some(usage) = usage {
+                        // Record latency (stream complete)
+                        let latency = start.elapsed();
+                        metrics::INFERENCE_LATENCY
+                            .with_label_values(&[&sandbox_name, &model])
+                            .observe(latency.as_secs_f64());
+                        // Token usage. OpenAI Chat Completions uses
+                        // prompt_tokens/completion_tokens; OpenAI
+                        // Responses uses input_tokens/output_tokens;
+                        // Anthropic Messages (native /v1/messages) also
+                        // uses input_tokens/output_tokens. Accept all.
+                        let input_tokens = usage
+                            .get("prompt_tokens")
+                            .and_then(|v| v.as_i64())
+                            .or_else(|| usage.get("input_tokens").and_then(|v| v.as_i64()));
+                        let output_tokens = usage
+                            .get("completion_tokens")
+                            .and_then(|v| v.as_i64())
+                            .or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64()));
+                        if let Some(input) = input_tokens {
+                            metrics::TOKENS_USED
+                                .with_label_values(&[&sandbox_name, &model, &"input".to_string()])
+                                .inc_by(input as u64);
+                        }
+                        if let Some(output) = output_tokens {
+                            metrics::TOKENS_USED
+                                .with_label_values(&[&sandbox_name, &model, &"output".to_string()])
+                                .inc_by(output as u64);
+                        }
                     }
                 }
             }
@@ -615,6 +624,35 @@ fn build_upstream_url(
                 "model".into(),
                 serde_json::Value::String(upstream.deployment.clone()),
             );
+        }
+        // Azure Foundry's /v1/responses strict schema validator rejects
+        // requests whose `input[]` contains items of `{type: "reasoning",
+        // encrypted_content: "..."}` from a prior turn (returns 400
+        // `invalid_payload` "data does not match the expected schema").
+        // OpenAI's own Responses API accepts these — Azure tightened the
+        // schema. Hermes (and any OpenAI Codex Responses client) replays
+        // the reasoning blob by default for stateless continuity, then
+        // only learns to disable it when the upstream returns
+        // `invalid_encrypted_content`. Azure's `invalid_payload` doesn't
+        // trigger that retry, so the client hangs in a loop. Strip the
+        // reasoning items pre-emptively so the request schema is valid
+        // and tool-calling continues without Hermes ever having to retry.
+        //
+        // `include: ["reasoning.encrypted_content"]` is also dropped —
+        // requesting reasoning encryption on a stripped input is a no-op
+        // for output and Azure rejects it on the input side anyway.
+        if path.trim_start_matches('/').starts_with("responses")
+            && !is_github_models_endpoint(&upstream.endpoint)
+            && !is_copilot_endpoint(&upstream.endpoint)
+            && let Some(obj) = body_json.as_object_mut()
+        {
+            if let Some(inputs) = obj.get_mut("input").and_then(|v| v.as_array_mut()) {
+                inputs
+                    .retain(|item| item.get("type").and_then(|t| t.as_str()) != Some("reasoning"));
+            }
+            if let Some(include) = obj.get_mut("include").and_then(|v| v.as_array_mut()) {
+                include.retain(|s| s.as_str() != Some("reasoning.encrypted_content"));
+            }
         }
         serde_json::to_vec(&body_json)?.into()
     } else {

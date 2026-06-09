@@ -1,0 +1,10 @@
+# 00-namespace.yaml — dedicated namespace for the multi-agent
+# exec-brief-hermes e2e sandbox.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kars-execbrief-hermes-multi
+  labels:
+    kars.azure.com/sandbox: execbrief-hermes-multi
+    kars.azure.com/managed-by: exec-brief-hermes-e2e

@@ -420,6 +420,10 @@ FodyWeavers.xsd
 # Rust
 target/
 target-linux-*/
+# Cross-compile artifacts produced by docker run -v $PWD:/work …
+# (e.g. `docker run … rust:1.89 cargo build` with CARGO_HOME=/work/.cargo-docker
+# to keep the host's ~/.cargo cache unpolluted by container-arch builds).
+.cargo-docker/
 Cargo.lock
 # Vendor lockfiles needed for reproducible Docker builds
 !vendor/*/Cargo.lock

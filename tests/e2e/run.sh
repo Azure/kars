@@ -1070,6 +1070,55 @@ EOF
     kubectl delete karssandbox e2e-anthropic -n kars-system 2>/dev/null || true
 }
 
+test_runtime_hermes() {
+    # KarsSandbox of kind Hermes should be processed by the controller:
+    # plan_hermes dispatches, namespace is created, and the agent
+    # container's image carries the hermes runtime tag (kars-runtime-hermes)
+    # rather than the OpenClaw default. Mirrors test_runtime_anthropic and
+    # follows the same tolerance pattern: Deployment may not materialize
+    # if there's no real InferencePolicy provider in this lane, so the
+    # image-tag assertion is diag-only when no Deployment is present.
+    cat <<EOF | kubectl apply -f - 2>&1 | head -3
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: e2e-hermes
+  namespace: kars-system
+spec:
+  inferenceRef:
+    name: e2e-test-inference
+  runtime:
+    kind: Hermes
+    hermes:
+      version: "0.15.2"
+  sandbox:
+    isolation: standard
+EOF
+    sleep 5
+    if kubectl get ns kars-e2e-hermes &>/dev/null; then
+        pass "Hermes runtime processed (namespace present)"
+    else
+        echo "  [diag] CR status:"
+        kubectl get karssandbox e2e-hermes -n kars-system -o jsonpath='{.status}' 2>/dev/null | head -c 500 || true
+        echo ""
+        fail "Hermes runtime: no namespace"
+    fi
+    local image
+    image=$(kubectl get deploy -n kars-e2e-hermes e2e-hermes -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
+    if [ -n "$image" ]; then
+        if echo "$image" | grep -qE "hermes|kars-runtime-hermes"; then
+            pass "Hermes Deployment uses hermes runtime image ($image)"
+        else
+            echo "  [diag] container image: $image"
+            fail "Hermes Deployment image does not reference hermes runtime"
+        fi
+    else
+        echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
+    fi
+    kubectl delete karssandbox e2e-hermes -n kars-system 2>/dev/null || true
+}
+
 test_runtime_langgraph() {
     # Phase H#2: KarsSandbox of kind LangGraph should be processed by
     # the controller. Like other runtime tests, namespace creation is
@@ -2793,6 +2842,7 @@ main() {
         oai-agents)      test_runtime_oai_agents ;;
         maf-python)      test_runtime_maf_python ;;
         anthropic)       test_runtime_anthropic ;;
+        hermes)          test_runtime_hermes ;;
         langgraph)       test_runtime_langgraph ; test_runtime_langgraph_typescript ;;
         pydantic-ai)     test_runtime_pydantic_ai ;;
         byo)             test_runtime_byo ;;
@@ -2801,6 +2851,7 @@ main() {
             test_runtime_oai_agents || true
             test_runtime_maf_python || true
             test_runtime_anthropic || true
+            test_runtime_hermes || true
             test_runtime_langgraph || true
             test_runtime_langgraph_typescript || true
             test_runtime_pydantic_ai || true

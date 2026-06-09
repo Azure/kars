@@ -46,7 +46,7 @@ It is built for three audiences:
 - **A prompt-injected agent cannot leak your Azure credentials** — because the agent process runs under a different UID than the Rust router that holds them, on a different network, and never sees the bearer token. (iptables + NetworkPolicy back this up; they are not the primary control.)
 - **Your security and platform teams review YAML, not Python.** Approval gates, rate limits, tool allowlists, content-safety floors, token budgets, and trust topology are declarative Kubernetes resources — commit them to a repo, reconcile with Argo / Flux, audit with `git log`. No out-of-band config store, no per-agent code review for policy.
 - **Two agents that talk cannot be eavesdropped by you, by us, or by the relay.** Agent-to-agent messaging is end-to-end encrypted with Signal Protocol (X3DH + Double Ratchet) and KNOCK trust gating. The relay sees only ciphertext.
-- **You are not locked to one runtime or one model provider.** Seven first-class runtimes (OpenClaw, OpenAI Agents SDK, Microsoft Agent Framework, LangGraph in Python and TypeScript, Anthropic, Pydantic-AI) plus BYO. GitHub Copilot, Azure AI Foundry, Azure OpenAI, and GitHub Models as backends — switching is a one-field CRD change, not a re-architecture. Native Anthropic-shape passthrough for Claude.
+- **You are not locked to one runtime or one model provider.** Eight first-class runtimes (OpenClaw, Hermes, OpenAI Agents SDK, Microsoft Agent Framework, LangGraph in Python and TypeScript, Anthropic, Pydantic-AI) plus BYO. GitHub Copilot, Azure AI Foundry, Azure OpenAI, and GitHub Models as backends — switching is a one-field CRD change, not a re-architecture. Native Anthropic-shape passthrough for Claude.
 - **What runs on your laptop is what runs in production.** `kars dev` and `kars up` share the same router binary, the same audit chain, the same governance profile. The dev-to-prod jump is one CLI command — no separate stack to learn or debug.
 
 ---
@@ -258,6 +258,7 @@ You pick the runtime via `KarsSandbox.spec.runtime.kind`. The router, governance
 | Runtime | Language | Image dir | Status |
 |---|---|---|---|
 | **OpenClaw** (default) | Python | `sandbox-images/openclaw/` | ✅ |
+| **Hermes** (Nous Research) | Python | `sandbox-images/hermes/` | ✅ |
 | **OpenAI Agents SDK** | Python | `sandbox-images/openai-agents/` | ✅ |
 | **Microsoft Agent Framework** | Python | `sandbox-images/maf-python/` | ✅ (`.NET` deferred) |
 | **LangGraph** | Python | `sandbox-images/langgraph/` | ✅ |

@@ -60,8 +60,18 @@ struct CopilotTokenResponse {
 
 struct CachedJwt {
     token: String,
-    /// When we should swap it out for a fresh one.
+    /// When we should swap it out for a fresh one (driven by GitHub's
+    /// `refresh_in` hint, typically ~25 min before `expires_at`).
     refresh_at: Instant,
+    /// When Copilot itself stops accepting this JWT (driven by GitHub's
+    /// `expires_at` field, typically ~30 min after issue). We MUST NOT
+    /// serve past this minus a small safety buffer — Copilot will then
+    /// return 401 "IDE token expired: unauthorized: token expired" on
+    /// every chat-completions call. Tracked separately from `refresh_at`
+    /// because (rarely) GitHub returns refresh_in > (expires_at - now),
+    /// in which case the old logic would serve a stale JWT until
+    /// refresh_at elapsed even though Copilot had already invalidated it.
+    expires_at: Instant,
 }
 
 /// In-process cache + exchanger for Copilot JWTs.
@@ -142,13 +152,19 @@ impl CopilotTokenCache {
     /// Same as [`get_jwt`] but allows overriding the exchange endpoint.
     /// Internal — exposed for tests; production code should call `get_jwt`.
     pub async fn get_jwt_with_base(&self, exchange_url: &str) -> Result<String> {
-        // Fast path: cached JWT still has runway.
+        // Fast path: cached JWT still has runway. Serve only when BOTH
+        // (a) GitHub's refresh window hasn't elapsed AND
+        // (b) Copilot's hard expiry hasn't passed (minus a safety buffer).
+        // The expires_at check is what fixes the "IDE token expired"
+        // 401s a user hit after ~30 min on long-lived sandbox pods.
         {
             let guard = self.cached.read().await;
-            if let Some(c) = guard.as_ref()
-                && c.refresh_at > Instant::now()
-            {
-                return Ok(c.token.clone());
+            if let Some(c) = guard.as_ref() {
+                let now = Instant::now();
+                let expiry_safe = c.expires_at > now + REFRESH_BUFFER;
+                if c.refresh_at > now && expiry_safe {
+                    return Ok(c.token.clone());
+                }
             }
         }
 
@@ -193,9 +209,14 @@ impl CopilotTokenCache {
             (ttl_secs - REFRESH_BUFFER.as_secs() as i64).max(30)
         };
 
+        let now_instant = Instant::now();
         let cached = CachedJwt {
             token: parsed.token.clone(),
-            refresh_at: Instant::now() + Duration::from_secs(refresh_secs as u64),
+            refresh_at: now_instant + Duration::from_secs(refresh_secs as u64),
+            // Track Copilot's hard expiry independently so the cache
+            // can refuse to serve past it even when refresh_in is
+            // (mis)reported larger than the actual TTL.
+            expires_at: now_instant + Duration::from_secs(ttl_secs as u64),
         };
 
         tracing::debug!(
@@ -278,5 +299,70 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("401"), "expected 401 in error, got: {msg}");
+    }
+
+    /// Regression: when GitHub returns `refresh_in` LARGER than the actual
+    /// TTL (`expires_at - now`), the cache MUST NOT serve the JWT past
+    /// `expires_at - REFRESH_BUFFER`. Pre-fix, the cache served past
+    /// expiry until `refresh_in` elapsed, causing Copilot to return
+    /// 401 "IDE token expired: unauthorized: token expired" on chat
+    /// completions ~30 min into a long-lived sandbox pod.
+    #[tokio::test]
+    async fn refreshes_when_expires_at_passes_even_if_refresh_in_is_longer() {
+        let server = MockServer::start().await;
+        // First exchange returns: expires_in = 30s, refresh_in = 1500s.
+        // Pre-fix: cache would serve the first token for 1500s.
+        // Post-fix: cache refreshes immediately on the next call past
+        //          (expires_at - REFRESH_BUFFER), i.e. within ~30s.
+        Mock::given(method("GET"))
+            .and(path("/copilot_internal/v2/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "first-token",
+                "expires_at": now_secs() + 30,
+                "refresh_in": 1500
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = CopilotTokenCache::with_token("gh_test_pat");
+        let url = format!("{}/copilot_internal/v2/token", server.uri());
+
+        // First call: exchange happens, "first-token" is cached.
+        let jwt = c.get_jwt_with_base(&url).await.unwrap();
+        assert_eq!(jwt, "first-token");
+
+        // Forcibly age the cache so `expires_at - REFRESH_BUFFER` has
+        // already passed. (We can't easily make 30s elapse in a test
+        // without sleeping; mutating the cached Instants directly
+        // proves the cache logic without a flaky time-based wait.)
+        {
+            let mut guard = c.cached.write().await;
+            let entry = guard.as_mut().expect("cache populated");
+            // Push both timestamps into the past.
+            entry.expires_at = Instant::now() - Duration::from_secs(1);
+            entry.refresh_at = Instant::now() + Duration::from_secs(1200);
+        }
+
+        // The next call should NOT serve from cache (because expires_at
+        // has passed even though refresh_at hasn't) — it should re-exchange.
+        // Reset the mock to return a fresh token on the SECOND exchange.
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/copilot_internal/v2/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "second-token",
+                "expires_at": now_secs() + 1800,
+                "refresh_in": 1500
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let jwt2 = c.get_jwt_with_base(&url).await.unwrap();
+        assert_eq!(
+            jwt2, "second-token",
+            "cache served the stale token past its expires_at — would cause Copilot 401"
+        );
     }
 }

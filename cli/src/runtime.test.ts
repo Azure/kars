@@ -11,6 +11,7 @@ import {
   buildRuntimeBlock,
   flagToKind,
   runtimeKindFromCr,
+  wiredRuntimeFlags,
 } from "./runtime.js";
 
 describe("flagToKind", () => {
@@ -40,6 +41,7 @@ describe("assertRuntimeWired", () => {
     expect(() => assertRuntimeWired("LangGraph")).not.toThrow();
     expect(() => assertRuntimeWired("Anthropic")).not.toThrow();
     expect(() => assertRuntimeWired("PydanticAi")).not.toThrow();
+    expect(() => assertRuntimeWired("Hermes")).not.toThrow();
     expect(() => assertRuntimeWired("BYO")).not.toThrow();
   });
 
@@ -178,5 +180,54 @@ describe("buildRuntimeBlock", () => {
       byoContractVersion: "v2",
     }) as Record<string, unknown>;
     expect((block.byo as Record<string, string>).contractVersion).toBe("v2");
+  });
+});
+
+describe("wiredRuntimeFlags", () => {
+  // Regression for the "operator `n` (spawn agent) doesn't list Hermes"
+  // bug. The operator TUI's runtime picker MUST mirror WIRED_KINDS or
+  // users can't actually spawn a wired runtime they read about in the
+  // docs. This contract test pins both directions:
+  //   (a) every entry returned is a valid RuntimeFlag that round-trips
+  //       through flagToKind() to a wired RuntimeKind, AND
+  //   (b) the list covers every wired runtime (none missing).
+
+  it("returns kebab-case flags that all round-trip through flagToKind to wired kinds", () => {
+    const flags = wiredRuntimeFlags();
+    expect(flags.length).toBeGreaterThan(0);
+    for (const flag of flags) {
+      // Round-trip: flag → kind → flag. Should not throw at either step.
+      const kind = flagToKind(flag);
+      expect(() => assertRuntimeWired(kind)).not.toThrow();
+    }
+  });
+
+  it("includes every known wired runtime", () => {
+    const flags = new Set(wiredRuntimeFlags());
+    // Hand-listed expected set — if a new runtime is wired in
+    // runtime.ts WIRED_KINDS without a matching FLAG_TO_KIND entry,
+    // wiredRuntimeFlags() will THROW at runtime; this test instead
+    // catches the inverse drift (an existing wired runtime quietly
+    // dropping out of the picker because of a refactor regression).
+    const expected = [
+      "openclaw",
+      "openai-agents",
+      "microsoft-agent-framework",
+      "lang-graph",
+      "anthropic",
+      "pydantic-ai",
+      "hermes",
+      "byo",
+    ];
+    for (const flag of expected) {
+      expect(flags, `wiredRuntimeFlags() must include '${flag}'`).toContain(flag);
+    }
+  });
+
+  it("preserves WIRED_KINDS ordering (deterministic for picker UX)", () => {
+    // Two consecutive calls must return byte-identical arrays so the
+    // operator's left/right cursor cycling stays predictable between
+    // re-renders.
+    expect(wiredRuntimeFlags()).toEqual(wiredRuntimeFlags());
   });
 });

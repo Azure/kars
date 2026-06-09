@@ -10,7 +10,7 @@ import os from "os";
 import { loadContext } from "../config.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
-import { ensureAgtRepo } from "../lib/agt-bootstrap.js";
+import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
 
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
 
@@ -253,7 +253,27 @@ export function pushCommand(): Command {
           dockerfile: "sandbox-images/langgraph-ts/Dockerfile" },
         { name: "runtime-pydantic-ai", tag: "kars-runtime-pydantic-ai:latest",
           dockerfile: "sandbox-images/pydantic-ai/Dockerfile" },
+        // Hermes runtime — ships the kars plugin (governance hook,
+        // kars_spawn family, Foundry tool wrappers) + the real Python
+        // AGT MeshClient (kars-agt-mesh). Controller default tag is
+        // `kars-runtime-hermes:latest` from reconciler/runtime.rs
+        // DEFAULT_HERMES_IMAGE.
+        { name: "runtime-hermes", tag: "kars-runtime-hermes:latest",
+          dockerfile: "sandbox-images/hermes/Dockerfile" },
       ];
+
+      // Sandbox images whose Dockerfile `COPY runtimes/wheels/` and
+      // therefore require `ensureAgtWheels()` to have run before
+      // `docker build`. Keep in lockstep with the `COPY runtimes/wheels/`
+      // grep results across sandbox-images/*/Dockerfile.
+      const PYTHON_RUNTIMES = new Set([
+        "runtime-openai-agents",
+        "runtime-maf-python",
+        "runtime-anthropic",
+        "runtime-langgraph",
+        "runtime-pydantic-ai",
+        "runtime-hermes",
+      ]);
 
       // Filter if --only specified; skip sandbox-base unless explicitly requested
       let targets = options.only
@@ -303,6 +323,15 @@ export function pushCommand(): Command {
           if (img.name === "sandbox") {
             spin.text = `Building mesh-plugin (TypeScript) for ${img.tag}...`;
             await stageMeshPlugin(repoRoot);
+          }
+          // Python runtime sandbox images COPY runtimes/wheels/*.whl
+          // into their build context. The wheel directory is .gitignored
+          // and only this auto-build keeps `kars push --only runtime-<X>`
+          // working on a fresh checkout. ensureAgtWheels() is a no-op
+          // when the cache stamp matches the current AGT pin SHA.
+          if (PYTHON_RUNTIMES.has(img.name) && !agtRepoMissing) {
+            spin.text = `Building AGT Python wheels for ${img.tag}...`;
+            await ensureAgtWheels(agtRepo, repoRoot);
           }
           spin.text = `Building ${img.tag}...`;
           // Dockerfile path: absolute if provided absolute (AGT case), else relative to repoRoot

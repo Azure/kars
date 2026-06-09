@@ -983,10 +983,31 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // makes the second call drop the fields the first call owned — that
     // exact bug caused `policyTypes: [Ingress]` only to land in the
     // deployed object until this refactor.
+    // Operator-namespace policy-echo ingress on admin :8443. Needed
+    // UNCONDITIONALLY so the controller can call /internal/policy-status
+    // to confirm router-side digest enforcement of every InferencePolicy
+    // / ToolPolicy / KarsMemory / McpServer / EgressApproval that
+    // references this sandbox. Without this, those CRs sit forever in
+    // `Ready=False / AwaitingRouterEnforcement`. Three orthogonal gates
+    // (bearer token, constant-time compare, optional IP pinning) still
+    // protect the admin surface on top of this NP allow.
+    let operator_policy_echo_ingress = json!({
+        "from": [{
+            "namespaceSelector": {
+                "matchLabels": {
+                    "app.kubernetes.io/name": "kars",
+                    "app.kubernetes.io/component": "system"
+                }
+            }
+        }],
+        "ports": [{"port": 8443, "protocol": "TCP"}]
+    });
+    // Mesh + gateway peer-sandbox ingress is only meaningful when
+    // governance is on. Gateway ports 18789/18791 stay closed to the
+    // operator namespace either way.
     let ingress_rules: Vec<serde_json::Value> = if governance_config.enabled {
         vec![
             json!({
-                // Mesh + gateway ingress from peer sandbox namespaces.
                 "from": [{
                     "namespaceSelector": {
                         "matchLabels": {"kars.azure.com/role": "sandbox"}
@@ -998,29 +1019,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     {"port": 18791, "protocol": "TCP"}
                 ]
             }),
-            json!({
-                // Operator-namespace policy-echo ingress (router :8443).
-                // Three independent gates still apply on top of this NP
-                // allow: (1) bearer token in `router-admin-token` Secret,
-                // (2) constant-time comparison in the middleware,
-                // (3) optional `ROUTER_ADMIN_ALLOW_IPS` IP pinning.
-                // Gateway ports 18789/18791 are intentionally NOT opened
-                // to the operator namespace.
-                "from": [{
-                    "namespaceSelector": {
-                        "matchLabels": {
-                            "app.kubernetes.io/name": "kars",
-                            "app.kubernetes.io/component": "system"
-                        }
-                    }
-                }],
-                "ports": [
-                    {"port": 8443, "protocol": "TCP"}
-                ]
-            }),
+            operator_policy_echo_ingress,
         ]
     } else {
-        Vec::new()
+        vec![operator_policy_echo_ingress]
     };
 
     let netpol: NetworkPolicy = serde_json::from_value(json!({
@@ -1286,10 +1288,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         let (runtime_class, pool_label) = isolation_scheduling(&sandbox_config.isolation);
 
-        let pull_policy = if image.ends_with(":latest") {
-            "Always"
-        } else {
+        let pull_policy = if ctx.dev_profile || !image.ends_with(":latest") {
             "IfNotPresent"
+        } else {
+            "Always"
         };
 
         let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
@@ -1327,12 +1329,57 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         if is_openclaw {
             openclaw_env.push(json!({"name": "OPENCLAW_MODEL", "value": inference_model.clone()}));
         }
+        // Generic alias readable by any runtime — Hermes / OpenAIAgents
+        // / MAF / BYO all read `KARS_MODEL` so they don't need to know
+        // about runtime-specific env names.
+        openclaw_env.push(json!({"name": "KARS_MODEL", "value": inference_model.clone()}));
+        // Self-documenting marker: every container claiming to be a
+        // kars v1 runtime contract participant gets this. Lets
+        // operator tooling distinguish kars-managed pods from
+        // hand-crafted ones, and gives runtime authors a single
+        // string to assert against.
+        openclaw_env.push(json!({"name": "KARS_RUNTIME_CONTRACT_VERSION", "value": "v1"}));
+        // Runtime kind so child plugins can introspect what they're
+        // running as (Hermes' mesh.py already uses HERMES_VERSION but
+        // other runtimes want a uniform anchor).
+        openclaw_env.push(
+            json!({"name": "KARS_RUNTIME_KIND", "value": format!("{:?}", runtime_spec.kind)}),
+        );
         openclaw_env.push(json!({"name": "SANDBOX_NAME", "value": &name}));
         if let Some(ref cluster) = ctx.cluster_name {
             openclaw_env.push(json!({"name": "CLUSTER_NAME", "value": cluster}));
         }
         openclaw_env.push(json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}));
         openclaw_env.push(json!({"name": "KARS_AUTH_MODE", "value": "workload-identity"}));
+        // Hermes sub-agent auto-responder: when this sandbox was
+        // spawned by another (has the `kars.azure.com/parent` label
+        // set by the router's spawn endpoint), turn on the mesh
+        // worker loop so the child autonomously responds to inbound
+        // kars_mesh_send messages by invoking `hermes -z <payload>`
+        // and replying with the captured output. Without this, a
+        // Hermes sub-agent is a passive daemon: its LLM never runs
+        // until somebody hand-runs `hermes -z`, so the OpenClaw-style
+        // multi-agent fanout pattern (parent dispatches research
+        // brief to analyst, analyst does the work, replies to parent)
+        // doesn't work end-to-end. We do NOT enable this on the
+        // parent (the parent's LLM is human/external-driven; an
+        // auto-responder would re-invoke hermes on the children's
+        // replies and loop). OpenClaw doesn't need this because its
+        // plugin runs inside an always-on `openclaw agent --local`
+        // session.
+        if matches!(runtime_spec.kind, crate::crd::RuntimeKind::Hermes) {
+            let has_parent_label = sandbox
+                .metadata
+                .labels
+                .as_ref()
+                .is_some_and(|l| l.contains_key("kars.azure.com/parent"));
+            if has_parent_label {
+                openclaw_env.push(json!({
+                    "name": "KARS_MESH_AUTO_RESPONDER",
+                    "value": "1",
+                }));
+            }
+        }
         if is_openclaw {
             openclaw_env.push(json!({
                 "name": "OPENCLAW_GATEWAY_TOKEN",
@@ -1654,6 +1701,18 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "BLOCKLIST_SEED_PATH", "value": "/etc/kars/blocklist/domains.txt"}),
         );
 
+        // Runtime-contract markers on the router too. The router needs
+        // `KARS_RUNTIME_KIND` so its spawn endpoint can stamp every
+        // child CRD with the same runtime (Hermes parent → Hermes
+        // children); without this, every Hermes parent silently spawns
+        // OpenClaw children and the operator UX shows a broken tree.
+        // See inference-router/src/spawn/mod.rs build_sub_agent_crd_with_labels.
+        router_env.push(json!({"name": "KARS_RUNTIME_CONTRACT_VERSION", "value": "v1"}));
+        router_env.push(json!({
+            "name": "KARS_RUNTIME_KIND",
+            "value": format!("{:?}", runtime_spec.kind),
+        }));
+
         // Egress mode — Slice 5b: `spec.networkPolicy.egressMode` drives the
         // router's enforcement strategy. Default = `Learn` so manifests
         // without an explicit choice keep observing instead of denying.
@@ -1786,12 +1845,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "sandbox-data", "mountPath": "/sandbox"}),
             json!({"name": "tmp", "mountPath": "/tmp"}),
         ];
-        if is_openclaw {
-            // OpenClaw plugin needs admin token to authenticate trust
-            // mutations after KNOCK handshakes (pushTrustToRouter).
-            // BYO does not run the plugin — mount is omitted to keep the
-            // attack surface narrow (defense-in-depth § the principle of
-            // least privilege).
+        // Runtimes that ship the kars governance plugin (OpenClaw via TS
+        // and Hermes via Python) push trust deltas to the router's
+        // `/agt/trust` endpoint after each successful KNOCK / decrypted
+        // mesh message. That endpoint requires a bearer admin token
+        // (see inference-router/src/routes/governance.rs::agt_trust_update)
+        // so the sandbox cannot forge peer scores via the localhost
+        // auth exemption. Both runtimes read the token from
+        // /etc/kars/secrets/admin-token (router-client.ts ADMIN_TOKEN_PATHS
+        // for OpenClaw and router_client.py ADMIN_TOKEN_PATH for Hermes).
+        // BYO does not run a kars plugin — omit the mount so the attack
+        // surface stays narrow (principle of least privilege).
+        let runs_kars_plugin = matches!(
+            runtime_spec.kind,
+            crate::crd::RuntimeKind::OpenClaw | crate::crd::RuntimeKind::Hermes
+        );
+        if runs_kars_plugin {
             agent_volume_mounts.push(json!({
                 "name": "admin-token",
                 "mountPath": "/etc/kars/secrets",
@@ -2010,19 +2079,26 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         governance_mounts::paths::TOOL_POLICY_DIR,
                         Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
                     );
-                    // Also mount into the openclaw container: its entrypoint
-                    // (`sandbox-images/openclaw/entrypoint.sh`) reads the
-                    // compiled `agt-profile.yaml` so the in-process
-                    // `@microsoft/agent-governance-sdk` engine has a
-                    // ToolPolicy to enforce on agent tool calls. Without
-                    // this mount the openclaw container warns
-                    // "AGT engine will start with an empty policy set and
-                    // fail closed". The volume itself was already added by
-                    // `inject_configmap_mount` above, so this only appends
-                    // the mount + env into the openclaw container.
+                    // Also mount into the agent container — both OpenClaw
+                    // and Hermes load the compiled `agt-profile.yaml` in
+                    // the in-process governance engine (TS:
+                    // `@microsoft/agent-governance-sdk`; Python:
+                    // `agent-governance-toolkit-core`). Without this
+                    // mount the agent container starts with an empty
+                    // policy set and the AGT engine fails closed on
+                    // every tool call. The volume itself was already
+                    // added by `inject_configmap_mount` above, so this
+                    // only appends the mount + env into whichever
+                    // container holds the agent runtime.
+                    //
+                    // Container name depends on the runtime kind:
+                    // OpenClaw uses "openclaw", every other runtime
+                    // (Hermes, OpenAIAgents, MAF, BYO, ...) uses the
+                    // generic "agent" name (see S10.A2.b — single
+                    // branch point keyed off `is_openclaw`).
                     governance_mounts::inject_container_mount_public(
                         &mut pod_spec,
-                        "openclaw",
+                        agent_container_name,
                         "agt-policy",
                         governance_mounts::paths::TOOL_POLICY_DIR,
                         Some(("AGT_POLICY_DIR", governance_mounts::paths::TOOL_POLICY_DIR)),
@@ -2384,18 +2460,24 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 governance_mounts::paths::MCP_JWKS_DIR,
             );
             // Project the list of mirrored MCP server names into the
-            // `openclaw` container so the entrypoint can render an
-            // `mcp.servers.<name>` block in `openclaw.json` pointing each
-            // server at the loopback router (`127.0.0.1:8443/mcp`). The
-            // router resolves the `x-kars-mcp-server` header to the
-            // registered McpServer, signs with the mounted key, filters
-            // by allowedTools, and forwards to the upstream URL.
-            //
-            // Comma-separated list; entrypoint splits on `,`.
+            // agent container so the entrypoint can render an
+            // `mcp.servers.<name>` block pointing each server at the
+            // loopback router (`127.0.0.1:8443/mcp`). Router resolves
+            // the `x-kars-mcp-server` header → registered McpServer,
+            // signs with the mounted key, filters by allowedTools,
+            // forwards to the upstream URL. Container name was
+            // hard-coded to "openclaw" which silently dropped
+            // KARS_MCP_SERVERS on hermes/pydantic-ai/anthropic/etc.
             let names_csv = mirrored_mcp_names.join(",");
+            let agent_container = if matches!(runtime_spec.kind, crate::crd::RuntimeKind::OpenClaw)
+            {
+                "openclaw"
+            } else {
+                "agent"
+            };
             governance_mounts::inject_container_env(
                 &mut pod_spec,
-                "openclaw",
+                agent_container,
                 "KARS_MCP_SERVERS",
                 &names_csv,
             );
@@ -2944,9 +3026,24 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 runtime_kind_str,
                 &extras,
             );
-            let _ = sandbox_api
+            // Log failures instead of swallowing them. Silent failures
+            // here cause `kubectl get karssandbox` to show empty
+            // `.status` despite a fully-functional pod — confused
+            // the e2e harness for an entire debugging session before
+            // the root cause (kube-apiserver rejecting the patch
+            // shape for one runtime kind) became visible.
+            if let Err(e) = sandbox_api
                 .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    sandbox = %name,
+                    namespace = %sandbox.namespace().unwrap_or_default(),
+                    runtime_kind = %runtime_kind_str,
+                    error = %e,
+                    "KarsSandbox running-status patch failed; .status will remain stale until the next reconcile"
+                );
+            }
         } else {
             crate::metrics::record_status_patch_skip("KarsSandbox");
         }

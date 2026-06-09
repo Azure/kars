@@ -113,7 +113,7 @@ kars up [options]
 | `--force-infra` | `false` | Force Bicep deployment even if AKS cluster already exists |
 | `--source-acr <server>` | `karsacr.azurecr.io` | Source ACR for pre-built images (customer deployments) |
 | `--build` | `false` | Build images locally and push to ACR (developer mode) |
-| `--skip-runtime-images` | `false` | Skip building/importing the 6 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
+| `--skip-runtime-images` | `false` | Skip building/importing the 7 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
 | `--foundry-endpoint <url>` | — | Existing Azure AI Foundry project endpoint (`services.ai.azure.com`) |
 | `--openai-endpoint <url>` | — | Existing Azure OpenAI endpoint (`openai.azure.com`; derived from Foundry if omitted) |
 | `--service-tree <guid>` | — | ServiceTree / `serviceManagementReference` GUID for the Entra blueprint. Required only in Microsoft-style enterprise tenants. Falls back to `KARS_SERVICE_TREE` env var. |
@@ -262,7 +262,7 @@ kars dev down
 
 Adds a new sandboxed agent to an **existing** kars cluster. Creates a
 `KarsSandbox` CR which the controller reconciles into an isolated namespace,
-NetworkPolicy, and inference-router deployment. Supports all 7 wired runtime
+NetworkPolicy, and inference-router deployment. Supports all 8 wired runtime
 kinds (openclaw, openai-agents, microsoft-agent-framework, langgraph,
 anthropic, pydantic-ai, byo).
 
@@ -303,7 +303,7 @@ kars add <name> [options]
 | `--perplexity-api-key <key>` | — | Perplexity API key |
 | `--openai-api-key <key>` | — | OpenAI API key (for dual-provider setups) |
 | `--learn-egress` | `false` | Enable egress learn mode: observe all domains, then review with `kars egress` |
-| `--runtime <kind>` | `openclaw` | Runtime: `openclaw`, `openai-agents`, `microsoft-agent-framework`, `langgraph`, `anthropic`, `pydantic-ai`, `byo` |
+| `--runtime <kind>` | `openclaw` | Runtime: `openclaw`, `hermes`, `openai-agents`, `microsoft-agent-framework`, `langgraph`, `anthropic`, `pydantic-ai`, `byo` |
 | `--byo-image <image>` | — | Container image for `--runtime byo` (must declare `org.kars.runtime.contract=v1`) |
 | `--byo-contract-version <version>` | `v1` | BYO contract version |
 | `--maf-language <lang>` | `python` | Microsoft Agent Framework language (`python`; `dotnet` is tracked in the [roadmap](roadmap.md)) |

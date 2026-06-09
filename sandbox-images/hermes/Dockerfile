@@ -53,10 +53,23 @@ LABEL org.opencontainers.image.title="kars Hermes Sandbox" \
 # ---- System deps Hermes needs (minimal) ---------------------------------
 # - git: hermes installs some optional skills via git clone
 # - jq: entrypoint uses it to parse /etc/kars/mcp/*/meta.json
-# - curl: healthcheck + entrypoint diagnostics
-# - ripgrep: hermes file-search tool depends on it
+# - curl: already in base image; explicit listing keeps the intent clear
+# - ca-certificates: TLS to PyPI / Hermes' optional skill tap repos
+# - nodejs / npm: Hermes' built-in dep_ensure unconditionally probes for
+#   node/npm via shutil.which() for the TUI + browser-tools paths
+#   (`hermes_cli/dep_ensure.py::_DEP_CHECKS["node"]`). When absent inside
+#   a kars sandbox, it tries to fetch and run the upstream
+#   `scripts/install.sh` which downloads Node 22 from nodejs.org — that
+#   download stalls behind the egress-guard's HTTP-CONNECT proxy at UID
+#   1000 and blocks every `hermes -z` invocation for 60+ seconds before
+#   ultimately failing. Pre-installing the system nodejs makes the
+#   check pass and skips the install hook entirely.
+#
+# Note: Hermes' built-in `file_search` tool prefers ripgrep but falls back
+# to grep when absent. Azure Linux 3 tdnf doesn't ship ripgrep; we skip
+# the optional dep rather than pulling cargo just to build it.
 RUN tdnf install -y --refresh \
-        git jq curl ripgrep ca-certificates \
+        git jq ca-certificates nodejs nodejs-npm \
     && tdnf clean all
 
 # ---- Install AGT-Python wheels (governance primitives only in Act 1) ----
@@ -74,7 +87,7 @@ RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
 # Pinned to a specific release tag for build reproducibility. Operators
 # bumping to a newer Hermes should also re-verify the kars runtime
 # contract is still honored (entrypoint env shape + plugin context API).
-ARG HERMES_VERSION=0.5.1
+ARG HERMES_VERSION=0.15.2
 RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
 
 # ---- Install the kars-runtime-hermes plugin -----------------------------
@@ -82,6 +95,15 @@ RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
 # governance pre_tool_call hook, channel translation, etc.
 COPY runtimes/hermes/ /opt/kars-runtime-hermes/
 RUN pip install --no-cache-dir /opt/kars-runtime-hermes
+
+# ---- Install kars-agt-mesh (Python AGT MeshClient, Act 2.1) ------------
+# The mesh client is a separate package so non-Hermes Python runtimes
+# (pydantic-ai, anthropic, langgraph, …) can reuse the same TS-SDK-parity
+# E2E encrypted transport. The Hermes plugin's `mesh.py` adapter wraps
+# it. Install BEFORE the plugin stage so the package is importable when
+# Hermes' plugin discovery imports `kars_runtime_hermes.plugin.mesh`.
+COPY runtimes/agt-mesh-python/ /opt/kars-agt-mesh/
+RUN pip install --no-cache-dir /opt/kars-agt-mesh
 
 # ---- Pre-stage Hermes plugin into ~/.hermes/plugins/kars/ ---------------
 # Hermes discovers plugins from $HERMES_HOME/plugins/ at import time.

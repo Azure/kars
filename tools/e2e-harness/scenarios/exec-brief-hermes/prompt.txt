@@ -1,0 +1,29 @@
+You orchestrate three sub-agents to produce a 2-page executive brief on the state of agentic AI runtime environments in 2026. Your role is orchestration only — do NOT call foundry tools yourself.
+
+Step 1. Call kars_discover with capability="*" as your first action so the run leaves a verifiable trace of the discovery surface.
+
+Step 2. For each of analyst, viz, writer (in that order) call kars_spawn with name=<that name> and governance=true. Do NOT pass a runtime kind — the router inherits your runtime (Hermes) automatically. Wait for each kars_spawn to return phase="Running" before issuing the next one.
+
+Step 3. Dispatch task briefs to each sub-agent with kars_mesh_send. Send them back to back — do NOT await between dispatches.
+
+  3a. kars_mesh_send with to_agent="analyst" content=
+"Research brief: state of agentic AI runtime environments in 2026. Use foundry_web_search with at least 3 distinct queries to gather >=6 https URLs covering leading agentic AI runtimes from major cloud and AI providers (Microsoft kars, OpenAI Sandboxes, Anthropic Claude Code, AKS Confidential Containers, AWS Bedrock Agents, etc.). Build a JSON object with these top-level keys: trends (5-8 short bullets), control_categories (3 named categories with citations), runtimes (>=4 entries each with workload_boundary, network_posture, attestation_story, governance_integration), metrics (4-runtime 0-10 scorecard across those 4 columns). Use ONE file_write call to path /sandbox/incoming/analyst.json with the COMPLETE minified JSON (<=4 KB). Then kars_mesh_send back to to_agent='execbrief-hermes-multi' content='ANALYST_DONE' to signal completion. Do NOT use foundry_code_execute for writing analyst.json — that file lives in an ephemeral container; the parent cannot mesh-transfer it back. Use file_write directly to the sandbox FS path."
+
+  3b. kars_mesh_send with to_agent="viz" content=
+"Visualisation task: wait for ANALYST_DONE from execbrief-hermes-multi via kars_mesh_await(senders=['execbrief-hermes-multi'], timeout_seconds=300). When it arrives, call foundry_code_execute with a Python snippet that constructs a 4-runtime grouped-bar matplotlib chart from this hard-coded skeleton (it is OK if your bars are illustrative — exact numbers come from analyst): metrics = {'kars': {'workload_boundary': 9, 'network_posture': 9, 'attestation_story': 8, 'governance_integration': 9}, 'OpenAI Sandboxes': {'workload_boundary': 7, 'network_posture': 6, 'attestation_story': 5, 'governance_integration': 6}, 'Bedrock Agents': {'workload_boundary': 6, 'network_posture': 7, 'attestation_story': 6, 'governance_integration': 7}, 'Claude Code': {'workload_boundary': 5, 'network_posture': 4, 'attestation_story': 3, 'governance_integration': 5}}. Save to /mnt/data/scorecard.png at 1024x640. The runtime auto-downloads /mnt/data/* into /sandbox/incoming/scorecard.png. Then kars_mesh_send back to to_agent='execbrief-hermes-multi' content='VIZ_DONE'."
+
+  3c. kars_mesh_send with to_agent="writer" content=
+"Writer task: wait for VIZ_DONE from execbrief-hermes-multi via kars_mesh_await(senders=['execbrief-hermes-multi'], timeout_seconds=600). When it arrives, write the 2-page brief in ONE file_write call to /sandbox/incoming/brief.md (~600-700 words). Include in this order: 80-word hook; numbered sections Trends / Control Domains / Runtime Landscape; reference ![scorecard](/sandbox/incoming/scorecard.png) inside Runtime Landscape; closing 'So what for kars?' (~130 words); ASCII only, no triple backticks. The four control-domain terms MUST appear verbatim at least once each: isolation, egress, attestation, governance. Then kars_mesh_send back to to_agent='execbrief-hermes-multi' content='WRITER_DONE'."
+
+Step 4. Call kars_mesh_await with senders=["analyst","viz","writer"] and timeout_seconds=600 until ALL three completion signals (ANALYST_DONE, VIZ_DONE, WRITER_DONE) have arrived. After the analyst signal, broadcast to viz with kars_mesh_send to_agent="viz" content="ANALYST_DONE so you can start" and similarly fan out to writer once viz is done. This ensures sub-agents see the dependency signals you forwarded as the parent.
+
+Step 5. Emit one final single-line summary prefixed with EXEC_BRIEF_DONE: listing the paths produced (the brief writer wrote brief.md to /sandbox/incoming on the writer pod; do not check files on YOUR sandbox FS — they live on each sub-agent's separate disk).
+
+Constraints:
+- Do NOT call foundry_* yourself. Sub-agents do the real work.
+- Do NOT call kars_mesh_transfer_file — v0.1 returns 'not implemented'; mesh sends carry small payloads and signals only.
+- Do NOT spawn any agents other than the three named above.
+- If any kars_spawn returns an error, emit FAILED:<error> and stop.
+- If kars_mesh_await ever returns count=0 across the full timeout, emit TIMEOUT:<which-senders-missing> and stop.
+
+Expected final-line format (literal prefix): EXEC_BRIEF_DONE: ...

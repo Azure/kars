@@ -114,6 +114,47 @@ pub static AGT_MESH_MESSAGES_RECEIVED: LazyLock<prometheus::IntCounter> = LazyLo
     .unwrap()
 });
 
+/// Breakdown counter for outbound mesh frames by frame type. Lets the
+/// operator UX (Headlamp Mesh Topology + `kars operator`) separate
+/// app-level traffic (`type="message"` / `"knock"`) from connection
+/// keepalives (`type="heartbeat"` / `"connect"`).
+///
+/// Sent ≫ received asymmetry was a recurring source of operator
+/// confusion because the parent counter would show e.g. 2000+ sends
+/// against 3-4 receives after a few hours of uptime — that's the
+/// 30-second relay heartbeat dominating the wire when actual peer
+/// conversation is sparse. Splitting by type makes it obvious at a
+/// glance what fraction is application vs keepalive.
+///
+/// Total of all labelled values equals `kars_mesh_messages_sent_total`
+/// (kept for back-compat); subtract `type="heartbeat"` + `type="connect"`
+/// to get the app-frame count.
+pub static AGT_MESH_FRAMES_SENT_BY_TYPE: LazyLock<prometheus::IntCounterVec> =
+    LazyLock::new(|| {
+        prometheus::register_int_counter_vec!(
+            opts!(
+                "kars_mesh_frames_sent_total",
+                "AGT mesh frames sent, broken down by frame type"
+            ),
+            &["type"]
+        )
+        .unwrap()
+    });
+
+/// Inbound mirror of `AGT_MESH_FRAMES_SENT_BY_TYPE`. Same total/label
+/// semantics — sums to `kars_mesh_messages_received_total`.
+pub static AGT_MESH_FRAMES_RECEIVED_BY_TYPE: LazyLock<prometheus::IntCounterVec> =
+    LazyLock::new(|| {
+        prometheus::register_int_counter_vec!(
+            opts!(
+                "kars_mesh_frames_received_total",
+                "AGT mesh frames received, broken down by frame type"
+            ),
+            &["type"]
+        )
+        .unwrap()
+    });
+
 /// Total TrustGraph-projection-driven trust bootstraps. Incremented
 /// once per peer whose initial AGT trust score was seeded from a
 /// controller-verified TrustGraph edge (Phase F2). Never incremented

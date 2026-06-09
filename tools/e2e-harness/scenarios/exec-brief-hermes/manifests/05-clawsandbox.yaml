@@ -1,0 +1,34 @@
+# 05-clawsandbox.yaml — parent Hermes sandbox for multi-agent
+# exec-brief. Three sub-agents (analyst, viz, writer) are spawned at
+# runtime by the parent via kars_spawn; the router's spawn endpoint
+# reads KARS_RUNTIME_KIND from the parent's env (controller injects
+# this on every v1 runtime container) and stamps every child CRD
+# with runtime.kind=Hermes. So all four agents are Hermes pods, each
+# with the kars plugin + kars-agt-mesh wheel.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: execbrief-hermes-multi
+  namespace: kars-system
+  labels:
+    kars.azure.com/channels: none
+spec:
+  runtime:
+    kind: Hermes
+    hermes:
+      version: "0.15.2"
+  sandbox:
+    isolation: standard
+  inferenceRef:
+    name: execbrief-hermes-multi-inference
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: execbrief-hermes-multi-toolpolicy
+    # Anonymous tier (no Entra app reg) → trustThreshold=0 keeps KNOCK
+    # accept-all so the demo runs without operator setup-trust steps.
+    trustThreshold: 0
+    # Local registry mode is sufficient for in-cluster mesh — the AGT
+    # relay/registry are co-deployed via `kars dev --target local-k8s`.
+    registryMode: local

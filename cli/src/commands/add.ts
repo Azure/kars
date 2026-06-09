@@ -44,12 +44,13 @@ export function addCommand(): Command {
     .option("--agent-instructions <instructions>", "System prompt for the Foundry agent")
     .option("--agent-tools <tools>", "Foundry tools: file_search,web_search,code_interpreter (comma-separated)")
 
-    // ── Runtime-specific: OpenClaw only ────────────────────────────────
-    .option("--channels <channels>", "[OpenClaw only] Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
-    .option("--telegram-token <token>", "[OpenClaw only] Telegram bot token (from BotFather)")
-    .option("--telegram-allow-from <ids>", "[OpenClaw only] Telegram user IDs allowed to DM (comma-separated)")
-    .option("--slack-token <token>", "[OpenClaw only] Slack bot OAuth token")
-    .option("--discord-token <token>", "[OpenClaw only] Discord bot token")
+    // ── Runtime-specific: OpenClaw + Hermes (channel-capable runtimes) ─
+    .option("--channels <channels>", "[OpenClaw + Hermes] Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
+    .option("--telegram-token <token>", "[OpenClaw + Hermes] Telegram bot token (from BotFather)")
+    .option("--telegram-allow-from <ids>", "[OpenClaw + Hermes] Telegram user IDs allowed to DM (comma-separated)")
+    .option("--slack-token <token>", "[OpenClaw + Hermes] Slack bot OAuth token")
+    .option("--discord-token <token>", "[OpenClaw + Hermes] Discord bot token")
+    // ── Runtime-specific: OpenClaw only (skills + plugin API keys) ─────
     .option("--skills <skills>", "[OpenClaw only] Skills to activate: browser,github,summarize,weather (comma-separated)")
     .option("--brave-api-key <key>", "[OpenClaw only] Brave Search API key")
     .option("--tavily-api-key <key>", "[OpenClaw only] Tavily search API key")
@@ -73,7 +74,8 @@ Flag groups (see --help for details):
   Inference budget:    --token-budget-*
   Governance / net:    --governance, --trust-threshold, --policy-profile, --learn-egress
   Foundry agent:       --agent-instructions, --agent-tools
-  OpenClaw only:       --channels, --telegram-*, --slack-*, --discord-*, --skills, --*-api-key
+  Channels (OpenClaw + Hermes):  --channels, --telegram-*, --slack-*, --discord-*
+  OpenClaw only:       --skills, --*-api-key
   BYO only:            --byo-image, --byo-contract-version
   MAF only:            --maf-language
 
@@ -511,6 +513,76 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         if (ready) {
           spinner.succeed(`Sandbox '${name}' ready`);
         } else {
+          // Wait loop timed out — distinguish "still pulling/scheduling"
+          // (informational, exit 0) from "stuck container" (real failure,
+          // exit 1 so the caller — including the operator TUI's spawn
+          // dialog — surfaces the actual reason). Without this branch,
+          // a pod stuck in ImagePullBackOff / ErrImageNeverPull /
+          // CrashLoopBackOff would silently succeed with the misleading
+          // message "(may still be starting)" — the operator's activity
+          // log would then say "✓ Spawned" while the agent never came
+          // up.
+          let stuckReason: string | null = null;
+          let stuckContainer: string | null = null;
+          try {
+            const { stdout: stuckJson } = await execa("kubectl", [
+              "get", "pods", "-n", namespace,
+              "-o", "jsonpath=" +
+                "{range .items[*].status.containerStatuses[*]}" +
+                "{.name}={.state.waiting.reason}|{.lastState.terminated.reason}|{.restartCount}\\n" +
+                "{end}",
+            ], { stdio: "pipe", timeout: 5000 });
+            for (const line of stuckJson.split("\n").filter(Boolean)) {
+              const [cName, rest] = line.split("=");
+              const [waiting, terminated, restartStr] = (rest || "").split("|");
+              const restarts = Number(restartStr) || 0;
+              // ImagePullBackOff / ErrImageNeverPull / ErrImagePull /
+              // InvalidImageName / CreateContainerConfigError →
+              // unambiguous failure modes. CrashLoopBackOff +
+              // restarts>=2 is also fatal-enough to surface.
+              if (
+                waiting === "ImagePullBackOff" ||
+                waiting === "ErrImageNeverPull" ||
+                waiting === "ErrImagePull" ||
+                waiting === "InvalidImageName" ||
+                waiting === "CreateContainerConfigError" ||
+                (waiting === "CrashLoopBackOff" && restarts >= 2) ||
+                terminated === "OOMKilled" ||
+                terminated === "Error"
+              ) {
+                stuckReason = waiting || terminated;
+                stuckContainer = cName;
+                break;
+              }
+            }
+          } catch { /* best-effort diagnostic; fall through */ }
+
+          if (stuckReason) {
+            spinner.fail(
+              `Sandbox '${name}' failed to start: ${stuckContainer} → ${stuckReason}`,
+            );
+            console.error(chalk.red(
+              `\n  Container '${stuckContainer}' is stuck in '${stuckReason}'.\n` +
+              `  Inspect:  kubectl describe pod -n ${namespace} -l app.kubernetes.io/instance=${name}\n` +
+              `  Logs:     kubectl logs -n ${namespace} deploy/${name} -c ${stuckContainer}\n`,
+            ));
+            if (stuckReason === "ImagePullBackOff" ||
+                stuckReason === "ErrImageNeverPull" ||
+                stuckReason === "ErrImagePull") {
+              console.error(chalk.yellow(
+                `  Common cause on local-k8s: the runtime image isn't loaded into kind.\n` +
+                `  Build + load:\n` +
+                `    docker build -t karsacr.azurecr.io/kars-runtime-<rt>:latest \\\n` +
+                `                 -f sandbox-images/<rt>/Dockerfile .\n` +
+                `    kind load docker-image karsacr.azurecr.io/kars-runtime-<rt>:latest --name kars-dev\n`,
+              ));
+            }
+            process.exit(1);
+          }
+
+          // Genuinely still starting (e.g. image pull in progress but
+          // not yet failed). Keep the original informational success
+          // so existing scripts don't break.
           spinner.succeed(`Sandbox '${name}' created (may still be starting)`);
         }
         console.log(chalk.dim(`  Namespace:  ${namespace}`));
@@ -532,9 +604,43 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         if (message.includes("karssandboxes.kars.azure.com")) { // lgtm[js/incomplete-url-substring-sanitization] — error message check, not URL validation
           console.error(chalk.red("\n  kars is not installed on this cluster."));
           console.error(chalk.red("  Run 'kars up' first to deploy the infrastructure.\n"));
+        } else if (
+          // Detect stale-CRD validation errors: when the user has built a
+          // newer CLI (with new runtime kinds like Hermes) but the cluster
+          // is still on the older CRD schema, kubectl apply rejects the
+          // bundle with "unknown field" or "Unsupported value". The fix is
+          // a one-shot chart re-apply — surface that command inline so the
+          // user doesn't have to dig through docs.
+          message.includes("unknown field") ||
+          message.includes("Unsupported value") ||
+          message.includes("ValidationError")
+        ) {
+          console.error(chalk.red(`\n  Error: ${message}\n`));
+          console.error(chalk.yellow(
+            "  This looks like a CRD schema mismatch — the cluster's KarsSandbox CRD\n" +
+            "  is older than your local CLI/sources. The ONLY safe fix on local-k8s:\n",
+          ));
+          console.error(chalk.cyan(
+            "    kars dev --target local-k8s\n",
+          ));
+          console.error(chalk.dim(
+            "  Re-runs the chart-install step which refreshes CRDs AND rebuilds the\n" +
+            "  per-run dynamic overlay (KARS_DEV_PROFILE, inference creds, image\n" +
+            "  pull policies). DO NOT apply the chart by hand with a naked\n" +
+            "  `helm template | kubectl apply` — that nukes the dynamic overlay's\n" +
+            "  inference creds and leaves every subsequent reconcile failing with\n" +
+            "  \"No inference endpoint configured\".\n",
+          ));
         } else {
           console.error(chalk.red(`\n  Error: ${message}\n`));
         }
+        // Exit non-zero so callers (operator TUI's spawn dialog, scripts,
+        // CI) see the failure. Previously this catch logged-then-returned,
+        // leaving Node to exit 0 — which surfaced as a misleading
+        // "✓ Spawned" in the operator activity log even though the CR
+        // was never created (kubectl apply failed, fedcred lookup raced,
+        // controller CRD not installed, etc.).
+        process.exit(1);
       }
     });
 

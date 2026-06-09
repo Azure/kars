@@ -53,7 +53,7 @@ spec:
                     The `kind` discriminator selects which sibling struct
                     (`openclaw` / `openaiAgents` / `microsoftAgentFramework`
                     / `semanticKernel` / `langGraph` / `anthropic`
-                    / `pydanticAi` / `byo`)
+                    /                     `pydanticAi` / `hermes` / `byo`)
                     is required; the others must be absent.
                     Replaces the legacy `spec.openclaw` field — the
                     kars v1alpha1 schema is in-place edited (no
@@ -77,12 +77,14 @@ spec:
                       message: "spec.runtime.anthropic must be set iff kind is Anthropic"
                     - rule: "(self.kind == 'PydanticAi') == has(self.pydanticAi)"
                       message: "spec.runtime.pydanticAi must be set iff kind is PydanticAi"
+                    - rule: "(self.kind == 'Hermes') == has(self.hermes)"
+                      message: "spec.runtime.hermes must be set iff kind is Hermes"
                     - rule: "(self.kind == 'BYO') == has(self.byo)"
                       message: "spec.runtime.byo must be set iff kind is BYO"
                   properties:
                     kind:
                       type: string
-                      enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "BYO"]
+                      enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "Hermes", "BYO"]
                       description: "Variant discriminator. PascalCase wire values."
                     openclaw:
                       type: object
@@ -325,6 +327,42 @@ spec:
                         extraEnv:
                           type: object
                           x-kubernetes-preserve-unknown-fields: true
+                    hermes:
+                     type: object
+                     description: "Hermes Agent (Nous Research) runtime variant (S10.A1). Python 3.11+ self-improving agent harness with 20+ channels and 70+ tools. kars wires it into AGT governance, sub-agent spawn, Foundry tools, MCP, and channels via the runtime contract v1."
+                     properties:
+                       version:
+                         type: string
+                         description: "hermes-agent PyPI version pin (e.g. '0.15.2'). Defaults to the image's baked-in version when unset."
+                       agentCode:
+                         type: object
+                         x-kubernetes-validations:
+                           - rule: "has(self.oci) != has(self.git)"
+                             message: "spec.runtime.hermes.agentCode must set exactly one of `oci` or `git`"
+                         properties:
+                           oci:
+                             type: object
+                             required: ["image"]
+                             properties:
+                               image:
+                                 type: string
+                           git:
+                             type: object
+                             required: ["url"]
+                             properties:
+                               url:
+                                 type: string
+                               ref:
+                                 type: string
+                               path:
+                                 type: string
+                       entrypoint:
+                         type: array
+                         items:
+                           type: string
+                       extraEnv:
+                         type: object
+                         x-kubernetes-preserve-unknown-fields: true
                     byo:
                       type: object
                       required: ["image", "contractVersion"]
@@ -706,7 +744,7 @@ spec:
                   description: "Foundry Agent Service agent ID (created by controller)"
                 runtimeKind:
                   type: string
-                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "BYO"]
+                  enum: ["OpenClaw", "OpenAIAgents", "MicrosoftAgentFramework", "SemanticKernel", "LangGraph", "Anthropic", "PydanticAi", "Hermes", "BYO"]
                   description: "Runtime kind the controller observed for the current observedGeneration (S10.A1)."
                 observedGeneration:
                   type: integer

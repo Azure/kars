@@ -1,0 +1,25 @@
+# 03-karsmemory.yaml — Foundry Memory Store binding for the
+# single-agent Hermes exec-brief. The agent persists the analyst JSON
+# under key='analyst.json' via foundry_memory upsert so a follow-up
+# run could pick it up without re-doing the web search.
+#
+# storeName MUST equal `memory-<sandbox>` so the Hermes plugin's
+# foundry_memory tool routes to the right Memory Store (the plugin
+# computes the name from $SANDBOX_NAME — see
+# runtimes/hermes/.../plugin/foundry.py::_store_name).
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsMemory
+metadata:
+  name: execbrief-hermes-memory
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: execbrief-hermes
+spec:
+  storeName: memory-execbrief-hermes
+  sandboxRef:
+    name: execbrief-hermes
+  scope: agent:execbrief-hermes
+  retentionDays: 7
+  deleteOnSandboxDelete: true
+  displayName: "Exec-brief Hermes single-agent memory"

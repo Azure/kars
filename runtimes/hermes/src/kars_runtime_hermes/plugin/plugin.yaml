@@ -12,10 +12,10 @@ provides_tools:
   - kars_handoff_request
   - kars_handoff_confirm
   - kars_handoff_status
-  - kars_mesh_send       # Act 1: stub — returns "requires Python MeshClient (Act 2)"
-  - kars_mesh_inbox      # Act 1: stub
-  - kars_mesh_await      # Act 1: stub
-  - kars_mesh_transfer_file  # Act 1: stub
+  - kars_mesh_send       # Act 2.1: real (Python AGT MeshClient via kars-agt-mesh)
+  - kars_mesh_inbox      # Act 2.1: real
+  - kars_mesh_await      # Act 2.1: real
+  - kars_mesh_transfer_file  # Act 2.1: stub (chunked transfer ships in v0.2)
   - http_fetch
   # Foundry tools — registered only when KARS_PROVIDER is not a slim mode
   - foundry_code_execute

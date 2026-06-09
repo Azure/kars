@@ -11,7 +11,7 @@ import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants, type KarsConfig } from "../config.js";
 import { stageRustBinaries, archForDockerPlatform } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
-import { ensureAgtRepo } from "../lib/agt-bootstrap.js";
+import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
 
 /**
  * Pre-flight: verify every binary `kars dev` shells out to is on PATH.
@@ -666,6 +666,16 @@ Notes:
           console.error(chalk.dim(`  Or pass --agt-repo <path> / set $KARS_AGT_REPO if you already have it elsewhere.\n`));
           process.exit(1);
         }
+        // Build the AGT Python wheels into runtimes/wheels/ now so any
+        // subsequent docker build of a Python runtime image (anthropic,
+        // hermes, langgraph, maf-python, openai-agents, pydantic-ai)
+        // has them in the build context. No-op when cached.
+        try {
+          await ensureAgtWheels(agtRepo, repoRoot);
+        } catch (e: unknown) {
+          console.error(chalk.red(`\n  Error building AGT Python wheels: ${(e as Error).message}\n`));
+          process.exit(1);
+        }
       }
       if (options.agtSdkTarball) {
         if (meshProvider !== "agt") {
@@ -1079,6 +1089,50 @@ Notes:
         if (!useGlobalRegistry) {
           // Local registry mode — deploy AGT relay/registry locally
           stepper.step("Starting mesh infrastructure (agt)...");
+
+          // Helper: check if a docker image exists locally
+          async function haveImage(tag: string): Promise<boolean> {
+            try {
+              await execa("docker", ["image", "inspect", tag], { stdio: "pipe" });
+              return true;
+            } catch { return false; }
+          }
+
+          // Build the AGT relay/registry images on-demand if not
+          // cached locally. The kind-cluster bringup path further up
+          // (around line ~1015) has its own copy of this build step;
+          // the docker-target path went straight to `docker run
+          // agentmesh-relay:dev` and failed with "Unable to find
+          // image agentmesh-relay:dev locally" the first time around
+          // because nothing in this codepath built it. Mirror the kind
+          // build to make `kars dev --target docker` work out of the
+          // box.
+          const agtDockerfile = path.join(
+            agtRepo,
+            "agent-governance-python/agent-mesh/docker/Dockerfile",
+          );
+          if (existsSync(agtDockerfile)) {
+            if (!(await haveImage("agentmesh-relay:dev"))) {
+              stepper.update("Building agt relay image (Python from local AGT)...");
+              await execa("docker", [
+                "build", "--platform", dockerPlatform,
+                "--build-arg", "COMPONENT=relay",
+                "-t", "agentmesh-relay:dev",
+                "-f", agtDockerfile,
+                agtRepo,
+              ], { stdio: "pipe" });
+            }
+            if (!(await haveImage("agentmesh-registry:dev"))) {
+              stepper.update("Building agt registry image (Python from local AGT)...");
+              await execa("docker", [
+                "build", "--platform", dockerPlatform,
+                "--build-arg", "COMPONENT=registry",
+                "-t", "agentmesh-registry:dev",
+                "-f", agtDockerfile,
+                agtRepo,
+              ], { stdio: "pipe" });
+            }
+          }
 
           // Helper: check if a container exists and is running
           async function isContainerRunning(name: string): Promise<boolean> {

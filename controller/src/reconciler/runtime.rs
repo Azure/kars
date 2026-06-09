@@ -161,8 +161,7 @@ pub fn pydantic_ai_default_image() -> String {
 
 /// Default container image for the Hermes Agent (Nous Research) runtime
 /// — Phase Hermes-Act-1. Stays `:latest`; operators pin via the
-/// `KARS_HERMES_IMAGE` env var (helm value
-/// `inferenceRouter.images.hermes`).
+/// `HERMES_RUNTIME_IMAGE` env var (helm value `runtimes.hermes.image`).
 ///
 /// Why a dedicated adapter (vs BYO): Hermes ships its own plugin system
 /// plus 20 channel adapters, 18 inference providers, and native MCP.
@@ -173,10 +172,13 @@ pub fn pydantic_ai_default_image() -> String {
 pub const DEFAULT_HERMES_IMAGE: &str = "karsacr.azurecr.io/kars-runtime-hermes:latest";
 
 /// Resolve the Hermes adapter image, honouring an operator override
-/// via `KARS_HERMES_IMAGE`. Falls back to [`DEFAULT_HERMES_IMAGE`].
+/// via `HERMES_RUNTIME_IMAGE` (preferred — matches the other adapters)
+/// or `KARS_HERMES_IMAGE` (legacy alias, kept for one release cycle).
+/// Falls back to [`DEFAULT_HERMES_IMAGE`].
 pub fn hermes_default_image() -> String {
-    std::env::var("KARS_HERMES_IMAGE")
+    std::env::var("HERMES_RUNTIME_IMAGE")
         .ok()
+        .or_else(|| std::env::var("KARS_HERMES_IMAGE").ok())
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_HERMES_IMAGE.to_string())
 }
@@ -1264,6 +1266,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             std::env::remove_var("KARS_HERMES_IMAGE");
+            std::env::remove_var("HERMES_RUNTIME_IMAGE");
         }
         assert_eq!(hermes_default_image(), DEFAULT_HERMES_IMAGE);
     }
@@ -1272,9 +1275,23 @@ mod tests {
     fn hermes_default_image_honours_operator_override() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
-            std::env::set_var("KARS_HERMES_IMAGE", "myacr.azurecr.io/hermes:pinned");
+            std::env::remove_var("KARS_HERMES_IMAGE");
+            std::env::set_var("HERMES_RUNTIME_IMAGE", "myacr.azurecr.io/hermes:pinned");
         }
         assert_eq!(hermes_default_image(), "myacr.azurecr.io/hermes:pinned");
+        unsafe {
+            std::env::remove_var("HERMES_RUNTIME_IMAGE");
+        }
+    }
+
+    #[test]
+    fn hermes_default_image_honours_legacy_alias_for_one_release() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("HERMES_RUNTIME_IMAGE");
+            std::env::set_var("KARS_HERMES_IMAGE", "myacr.azurecr.io/hermes:legacy");
+        }
+        assert_eq!(hermes_default_image(), "myacr.azurecr.io/hermes:legacy");
         unsafe {
             std::env::remove_var("KARS_HERMES_IMAGE");
         }
@@ -1282,6 +1299,11 @@ mod tests {
 
     #[test]
     fn plan_hermes_emits_hermes_kind_str_and_default_image() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("KARS_HERMES_IMAGE");
+            std::env::remove_var("HERMES_RUNTIME_IMAGE");
+        }
         let rt = RuntimeSpec {
             kind: RuntimeKind::Hermes,
             openclaw: None,

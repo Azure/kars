@@ -26,16 +26,23 @@ def test_plugin_entry_callable() -> None:
     assert callable(register)
 
 
-def test_mesh_stubs_have_act2_message() -> None:
-    """Mesh stubs must contain the canonical Act 2 message so the LLM and
-    operators know mesh isn't available yet."""
-    from kars_runtime_hermes.plugin.mesh_stubs import _ACT2_ERROR
+def test_mesh_module_is_real_not_stub() -> None:
+    """Act 2.1 — the mesh tools are backed by the real Python AGT
+    MeshClient (via kars-agt-mesh). The old Act-1 stub module is gone
+    and the new mesh.py exports `register` + the four tool handlers."""
+    from kars_runtime_hermes.plugin import mesh
 
-    msg = _ACT2_ERROR["error"]
-    assert "Mesh" in msg
-    assert "v0.5.2" in msg
-    assert "Act 2" in msg
-    assert "Foundry Memory Store" in msg or "Foundry Conversations" in msg
+    # Real module — not the stub
+    assert hasattr(mesh, "_get_or_init_client")
+    assert hasattr(mesh, "_kars_mesh_send")
+    assert hasattr(mesh, "register")
+    # _MESH_TOOLS table lists all four mesh tools we register
+    assert len(mesh._MESH_TOOLS) == 4
+    tool_names = [t[0] for t in mesh._MESH_TOOLS]
+    assert "kars_mesh_send" in tool_names
+    assert "kars_mesh_inbox" in tool_names
+    assert "kars_mesh_await" in tool_names
+    assert "kars_mesh_transfer_file" in tool_names
 
 
 def test_plugin_manifest_lists_required_tools() -> None:

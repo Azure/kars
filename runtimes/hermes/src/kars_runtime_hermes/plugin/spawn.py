@@ -25,6 +25,36 @@ from . import router_client
 
 logger = logging.getLogger("kars.hermes.spawn")
 
+# Process-local peer roster: name → role. Populated by `_kars_spawn`
+# when the LLM passes a `role` arg, drained by `mesh.peer_roster()` to
+# auto-prepend a `Peer roster:` block to outbound kars_mesh_send /
+# kars_mesh_transfer_file. Mirrors OpenClaw's `spawnedRoster` Map in
+# `runtimes/openclaw/src/core/agt-tools/agt.ts:545`.
+#
+# Module-level so a single Hermes daemon process sees the same roster
+# across every plugin context that imports this module.
+_SPAWNED_ROSTER: dict[str, str] = {}
+
+
+def get_roster() -> dict[str, str]:
+    """Return a defensive copy of the spawn roster. Used by
+    ``mesh.py::_kars_mesh_send`` to compute the per-message
+    `Peer roster:` prefix without sharing mutable state across
+    plugin modules."""
+    return dict(_SPAWNED_ROSTER)
+
+
+def _record_in_roster(name: str, role: str | None) -> None:
+    """Idempotent upsert. Empty / whitespace role is recorded as ''."""
+    _SPAWNED_ROSTER[name] = (role or "").strip()
+
+
+def _remove_from_roster(name: str) -> None:
+    """Drop a name from the roster — called from kars_spawn_destroy so
+    a sibling that was torn down doesn't leak into future roster
+    headers."""
+    _SPAWNED_ROSTER.pop(name, None)
+
 # DNS-label rules — same as K8s metadata.name constraint
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$")
 _NAME_MAX_LEN = 63
@@ -61,6 +91,9 @@ def _kars_spawn(args: dict[str, Any], **_kwargs: Any) -> str:
     # and picks the matching image).
     if runtime := args.get("runtime"):
         body["runtime_kind"] = str(runtime)
+    role = args.get("role")
+    if role:
+        body["role"] = str(role)
     # KARS_DEV_PROFILE → relaxed sub-agent defaults
     if os.environ.get("KARS_DEV_PROFILE") == "true":
         body["learn_egress"] = True
@@ -69,6 +102,13 @@ def _kars_spawn(args: dict[str, Any], **_kwargs: Any) -> str:
         result = router_client.call_json("POST", "/sandbox/spawn", json=body)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"spawn failed: {exc}"})
+
+    # Track the freshly spawned sibling in the process-local roster
+    # so kars_mesh_send can prepend a `Peer roster:` block to subsequent
+    # outbound tasks. Recorded BEFORE the status poll so a "Pending"
+    # child still appears in the roster (the parent's next mesh_send
+    # is what gives the child its task).
+    _record_in_roster(name, str(role) if role else None)
 
     # Poll status until Running or 45s timeout. Phase 'Pending' or
     # 'Provisioning' is normal during pod startup.
@@ -134,6 +174,10 @@ def _kars_spawn_destroy(args: dict[str, Any], **_kwargs: Any) -> str:
         resp = router_client.call("DELETE", f"/sandbox/{name}")
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"destroy failed: {exc}"})
+
+    # Drop the torn-down sibling from the roster so the next outbound
+    # kars_mesh_send doesn't list it as a reachable peer.
+    _remove_from_roster(name)
 
     if resp.status_code == 404:
         return json.dumps({"warning": f"sub-agent '{name}' was already gone"})

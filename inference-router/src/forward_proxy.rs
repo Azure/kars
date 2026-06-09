@@ -27,6 +27,38 @@ const MAX_CONCURRENT_TUNNELS: usize = 256;
 /// Maximum lifetime for a single tunnel (1 hour hard cap).
 const MAX_TUNNEL_LIFETIME_SECS: u64 = 3600;
 
+/// TCP connect timeout for outbound upstream connections.
+///
+/// Without this, `TcpStream::connect()` can hang indefinitely against a
+/// blackhole IP / SYN-dropping firewall / overloaded upstream — the
+/// sandbox agent then reports "Egress proxy is still timing out" with
+/// no log line on the router side (because we never returned anything
+/// to the client to log). 10s is generous enough for real upstreams
+/// (TCP handshake to GitHub from a kind cluster on a Mac laptop is
+/// typically < 1s) without leaving the user waiting a full minute on
+/// every dead destination.
+const UPSTREAM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Connect to a resolved socket address with a fixed timeout.
+///
+/// Wraps `TcpStream::connect()` in `tokio::time::timeout()` so a stuck
+/// SYN can never block the proxy task indefinitely. Returns:
+///   * `Ok(stream)` on success
+///   * `Err(...)` on connect error
+///   * `Err("connect timeout after 10s")` if the timeout elapsed
+async fn connect_with_timeout(addr: &str) -> std::io::Result<TcpStream> {
+    match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+        Ok(res) => res,
+        Err(_elapsed) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "connect timeout after {}s",
+                UPSTREAM_CONNECT_TIMEOUT.as_secs()
+            ),
+        )),
+    }
+}
+
 /// Start the transparent forward proxy on the given address.
 /// Returns a CancellationToken that triggers graceful shutdown when cancelled.
 pub async fn start(
@@ -304,10 +336,15 @@ async fn handle_connect(
     };
 
     // Connect to the resolved IP (not the domain string) to prevent DNS rebinding
-    let upstream = match TcpStream::connect(&resolved).await {
+    let upstream = match connect_with_timeout(&resolved).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(target = %resolved, error = %e, "CONNECT upstream failed");
+            tracing::warn!(
+                domain = %log_dom,
+                target = %resolved,
+                error = %e,
+                "CONNECT upstream failed"
+            );
             send_response(&mut stream, 502, "Bad Gateway").await?;
             return Ok(());
         }
@@ -391,10 +428,15 @@ async fn handle_http(
         }
     };
 
-    let mut upstream = match TcpStream::connect(&resolved).await {
+    let mut upstream = match connect_with_timeout(&resolved).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(dest = %resolved, error = %e, "HTTP upstream failed");
+            tracing::warn!(
+                domain = %log_dom,
+                dest = %resolved,
+                error = %e,
+                "HTTP upstream failed"
+            );
             send_response(&mut stream, 502, "Bad Gateway").await?;
             return Ok(());
         }
@@ -463,10 +505,15 @@ async fn handle_tls_redirect(
         }
     };
 
-    let mut upstream = match TcpStream::connect(&resolved).await {
+    let mut upstream = match connect_with_timeout(&resolved).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(dest = %resolved, error = %e, "TLS upstream failed");
+            tracing::warn!(
+                domain = %log_dom,
+                dest = %resolved,
+                error = %e,
+                "TLS upstream failed"
+            );
             return Ok(());
         }
     };
@@ -706,4 +753,73 @@ async fn send_response(stream: &mut TcpStream, status: u16, body: &str) -> anyho
     );
     stream.write_all(response.as_bytes()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Regression for the "Egress proxy is still timing out" user report.
+    /// Before this guard, `TcpStream::connect()` on a blackhole IP would
+    /// block the proxy task for the full kernel SYN-retransmit window
+    /// (~60-180s depending on Linux retries config), making it look like
+    /// the router itself had hung. The wrapper caps that at 10s.
+    ///
+    /// We use `198.51.100.1:65000` — TEST-NET-2 (RFC 5737) — which is
+    /// guaranteed-unroutable. A successful connect would itself be a
+    /// network configuration bug to report; under normal conditions the
+    /// SYN is silently dropped and we observe the connect_with_timeout
+    /// elapsed branch.
+    #[tokio::test]
+    async fn connect_with_timeout_aborts_on_blackhole_ip() {
+        let start = Instant::now();
+        let result = connect_with_timeout("198.51.100.1:65000").await;
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_err(),
+            "expected blackhole connect to fail, got Ok"
+        );
+        // Allow up to 12s of slack on heavily-loaded CI runners; the
+        // guard is 10s, so anything past ~15s indicates the timeout
+        // isn't actually engaging.
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "connect_with_timeout did not abort within 15s (took {:?}); \
+             the timeout guard is not engaging",
+            elapsed
+        );
+        let err = result.unwrap_err();
+        // Either the wrapper's timeout branch fired (kind=TimedOut), or
+        // the host has explicit network unreachability and the OS
+        // returned a different error fast — both are acceptable; the
+        // assert above is what really matters.
+        let kind = err.kind();
+        assert!(
+            matches!(
+                kind,
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+            ),
+            "unexpected error kind: {kind:?} ({err})"
+        );
+    }
+
+    /// Sanity check: connecting to a known-good local listener succeeds
+    /// quickly and the wrapper doesn't add measurable overhead.
+    #[tokio::test]
+    async fn connect_with_timeout_succeeds_on_local_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept side: just hold the socket open.
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let result = connect_with_timeout(&addr.to_string()).await;
+        assert!(result.is_ok(), "local connect should succeed: {result:?}");
+    }
 }

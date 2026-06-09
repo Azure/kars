@@ -96,6 +96,8 @@ runtimes:
     image: ""
   pydanticAi:
     image: ""
+  hermes:
+    image: ""
 
 # Network policy defaults
 networkPolicy:

@@ -118,6 +118,18 @@ platform_wait_for_sandbox() {
 
 platform_post_prompt() {
     log "posting ${SCENARIO} prompt to ${SCENARIO_SANDBOX} gateway"
+
+    # Hermes runtime has no HTTP gateway on port 18789 — the daemon
+    # only accepts inputs through messaging channels (telegram etc.).
+    # Scenarios targeting Hermes set SCENARIO_PROMPT_DRIVER=hermes-exec
+    # to invoke `hermes -z` (one-shot agent mode) via `kubectl exec
+    # -c agent`. The exec-ban VAP only targets the literal container
+    # name `openclaw`, so this is policy-compliant.
+    if [ "${SCENARIO_PROMPT_DRIVER:-port-forward}" = "hermes-exec" ]; then
+        _platform_post_prompt_hermes_exec
+        return $?
+    fi
+
     # Operator-mode delivery, matching `kars connect`'s security model:
     #   1. Read the gateway-token Secret (RBAC-gated, namespaced).
     #   2. `kubectl port-forward` deploy/<name> :18789.
@@ -212,6 +224,164 @@ PY
     log "prompt completed — transcript at ${OUT_DIR}/transcript.log"
 }
 
+# Hermes-aware prompt driver. Used when SCENARIO_PROMPT_DRIVER=hermes-exec.
+# Pre-step: if SCENARIO_DAEMON_SUB / SCENARIO_DAEMON_SCRIPT are set, copy
+# the daemon source into the sub-sandbox, start it in the background,
+# and wait for SCENARIO_DAEMON_READY_MARKER on its stdout before posting
+# the parent prompt.
+_platform_post_prompt_hermes_exec() {
+    local parent_ns="kars-${SCENARIO_SANDBOX}"
+    local parent_pod
+    # Same Running+Ready guard as the sub-pod selection below — picks
+    # a fresh replicaset member after a rollout-restart instead of
+    # latching onto a Terminating pod that's about to disappear.
+    local parent_wait=0
+    while [ $parent_wait -lt 60 ]; do
+        parent_pod=$(kubectl get pod -n "${parent_ns}" \
+            -l "kars.azure.com/sandbox=${SCENARIO_SANDBOX}" \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -n "${parent_pod}" ]; then
+            local ready
+            ready=$(kubectl get pod -n "${parent_ns}" "${parent_pod}" \
+                -o jsonpath='{.status.containerStatuses[?(@.name=="agent")].ready}' 2>/dev/null)
+            if [ "${ready}" = "true" ]; then
+                break
+            fi
+        fi
+        sleep 1
+        parent_wait=$((parent_wait+1))
+    done
+    if [ -z "${parent_pod}" ]; then
+        log "ERR parent pod not found in ${parent_ns} (timed out after 60s waiting for Running+Ready)"; exit 4
+    fi
+
+    # ── Optional: start the echo / responder daemon on the sub-sandbox ──
+    local daemon_pid=""
+    if [ -n "${SCENARIO_DAEMON_SUB:-}" ] && [ -n "${SCENARIO_DAEMON_SCRIPT:-}" ]; then
+        local sub_ns="kars-${SCENARIO_DAEMON_SUB}"
+        local sub_pod
+        # Filter on field-selector=status.phase=Running so a rollout-
+        # restart-in-flight Terminating replica doesn't get picked as
+        # `.items[0]` — exec against a Terminating pod returns
+        # `container not found ("agent")` mid-cp and aborts the
+        # harness. Wait up to 60s for a fresh Running pod after the
+        # platform's rollout-restart.
+        local sub_wait=0
+        while [ $sub_wait -lt 60 ]; do
+            sub_pod=$(kubectl get pod -n "${sub_ns}" \
+                -l "kars.azure.com/sandbox=${SCENARIO_DAEMON_SUB}" \
+                --field-selector=status.phase=Running \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            if [ -n "${sub_pod}" ]; then
+                # Also confirm the agent container is reporting Ready,
+                # not just the pod phase. A pod can be phase=Running
+                # while its init/agent container is still spinning up.
+                local ready
+                ready=$(kubectl get pod -n "${sub_ns}" "${sub_pod}" \
+                    -o jsonpath='{.status.containerStatuses[?(@.name=="agent")].ready}' 2>/dev/null)
+                if [ "${ready}" = "true" ]; then
+                    break
+                fi
+            fi
+            sleep 1
+            sub_wait=$((sub_wait+1))
+        done
+        if [ -z "${sub_pod}" ]; then
+            log "ERR daemon sub pod not found in ${sub_ns} (timed out after 60s waiting for Running+Ready)"; exit 4
+        fi
+        local script_path="${SCENARIO_DIR}/${SCENARIO_DAEMON_SCRIPT}"
+        if [ ! -f "${script_path}" ]; then
+            log "ERR daemon script not found: ${script_path}"; exit 4
+        fi
+        log "copying ${SCENARIO_DAEMON_SCRIPT} → ${sub_ns}/${sub_pod}"
+        local b64
+        b64=$(base64 -i "${script_path}" | tr -d '\n')
+        # The agent container has no /tmp/tar; push via python3 + base64.
+        kubectl exec -n "${sub_ns}" "${sub_pod}" -c agent -- python3 -c \
+            "import base64; open('/tmp/scenario_daemon.py','wb').write(base64.b64decode('${b64}'))" \
+            >/dev/null
+        # Wipe any stale identity from a previous run so DID derives fresh.
+        kubectl exec -n "${sub_ns}" "${sub_pod}" -c agent -- \
+            rm -f /sandbox/.agt/identity.json /sandbox/.hermes/.agt/identity.json \
+            >/dev/null 2>&1 || true
+        local daemon_log="${OUT_DIR}/daemon-${SCENARIO_DAEMON_SUB}.log"
+        log "starting daemon on ${sub_ns}/${sub_pod} → ${daemon_log}"
+        (
+            kubectl exec -n "${sub_ns}" "${sub_pod}" -c agent -- \
+                env "NAME=${SCENARIO_DAEMON_SUB}" python3 /tmp/scenario_daemon.py
+        ) >"${daemon_log}" 2>&1 &
+        daemon_pid=$!
+        # shellcheck disable=SC2064
+        trap "kill ${daemon_pid} 2>/dev/null || true" EXIT INT TERM
+
+        local marker="${SCENARIO_DAEMON_READY_MARKER:-READY}"
+        log "waiting for daemon marker '${marker}' (max 60s)"
+        local i=0
+        while [ $i -lt 60 ]; do
+            if grep -qE "${marker}" "${daemon_log}" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+            i=$((i+1))
+        done
+        if [ $i -ge 60 ]; then
+            log "ERR daemon never produced '${marker}' marker"
+            tail -20 "${daemon_log}" >&2 || true
+            exit 4
+        fi
+        log "daemon ready"
+
+        # Also wipe parent's stale identity so its fresh hermes -z run
+        # derives a fresh DID and avoids the 409-already-registered path
+        # being the FIRST request the harness sees.
+        kubectl exec -n "${parent_ns}" "${parent_pod}" -c agent -- \
+            rm -f /sandbox/.agt/identity.json /sandbox/.hermes/.agt/identity.json \
+            >/dev/null 2>&1 || true
+    fi
+
+    # ── Drive the parent with `hermes -z <prompt>` ──
+    log "running hermes -z on ${parent_ns}/${parent_pod}"
+    local transcript="${OUT_DIR}/transcript.log"
+    : >"${transcript}"
+    local prompt_text
+    prompt_text=$(cat "${PROMPT_FILE}")
+    # HERMES_HOME and HOME must both be set explicitly — kubectl exec
+    # does NOT inherit the container's image-level ENV by default, so
+    # the entrypoint's HERMES_HOME=/sandbox/.hermes export is gone.
+    # Hermes' ensure_hermes_home() falls back to ``$HOME/.hermes`` and
+    # the running container's HOME defaults to `/` (rootfs is read-only,
+    # so mkdir of `/.hermes` ENOENTs). Setting HOME=/sandbox and
+    # HERMES_HOME=/sandbox/.hermes routes Hermes into the writable
+    # sandbox volume — same path the long-running gateway daemon uses
+    # under PID 1.
+    run_with_watchdog "${WATCHDOG_SECS}" \
+        kubectl exec -n "${parent_ns}" "${parent_pod}" -c agent -- \
+            env HOME=/sandbox \
+                HERMES_HOME=/sandbox/.hermes \
+                HERMES_PROFILE="${SCENARIO_SANDBOX}" \
+            hermes -z "${prompt_text}" \
+        | tee -a "${transcript}"
+    local rc=${PIPESTATUS[0]}
+
+    if [ "${rc}" -eq 124 ]; then
+        log "ERR hermes -z timed out after ${WATCHDOG_SECS}s"
+        [ -n "${daemon_pid}" ] && kill "${daemon_pid}" 2>/dev/null
+        exit 4
+    elif [ "${rc}" -ne 0 ]; then
+        log "ERR hermes -z exited rc=${rc}"
+        [ -n "${daemon_pid}" ] && kill "${daemon_pid}" 2>/dev/null
+        exit 4
+    fi
+
+    if [ -n "${daemon_pid}" ]; then
+        log "stopping daemon (pid=${daemon_pid})"
+        kill "${daemon_pid}" 2>/dev/null || true
+        wait "${daemon_pid}" 2>/dev/null || true
+    fi
+    log "prompt completed — transcript at ${transcript}"
+}
+
 platform_collect_artifacts() {
     # Capture sub-agent gateway logs and writer's incoming/ directory listing.
     # The interesting plugin chatter (mesh_transfer_file, file_transfer_ack,
@@ -245,8 +415,26 @@ platform_collect_artifacts() {
         local arr_name="SCENARIO_GREP_PATTERNS_${sub}"
         local -n patterns_ref="${arr_name}" 2>/dev/null || patterns_ref=()
         local pat="${patterns_ref[0]:-mesh_transfer_file|file_transfer_ack}"
-        kubectl exec -n "kars-${sub}" "$pod" -c openclaw -- \
-            sh -c "grep -E '${pat}' /tmp/gateway.log 2>/dev/null || true" \
+
+        # Container name and gateway-log path differ across runtimes:
+        #   - OpenClaw: container=openclaw, log=/tmp/gateway.log
+        #   - Hermes:   container=agent,    log=/sandbox/.hermes/logs/gateway.log
+        # The scenario's SCENARIO_RUNTIME hint (set in config.sh) tells
+        # us which to use; absent it, default to the OpenClaw layout so
+        # pre-Hermes scenarios are unaffected.
+        local sub_container sub_log_path
+        case "${SCENARIO_RUNTIME:-openclaw}" in
+            hermes)
+                sub_container="agent"
+                sub_log_path="/sandbox/.hermes/logs/gateway.log"
+                ;;
+            *)
+                sub_container="openclaw"
+                sub_log_path="/tmp/gateway.log"
+                ;;
+        esac
+        kubectl exec -n "kars-${sub}" "$pod" -c "${sub_container}" -- \
+            sh -c "grep -E '${pat}' '${sub_log_path}' 2>/dev/null || true" \
             >"${OUT_DIR}/${sub}-gateway.log" || true
     done
 
@@ -282,8 +470,8 @@ platform_collect_artifacts() {
     # incoming/ dir is the ground truth of what was actually delivered
     # over the mesh. Lands in OUT_DIR as `final-artifact.<ext>` so
     # verify.py can pick it up regardless of scenario.
-    if [ -n "${SCENARIO_FINAL_ARTIFACT_SANDBOX}" ] \
-       && [ -n "${SCENARIO_FINAL_ARTIFACT_PATH}" ]; then
+    if [ -n "${SCENARIO_FINAL_ARTIFACT_SANDBOX:-}" ] \
+       && [ -n "${SCENARIO_FINAL_ARTIFACT_PATH:-}" ]; then
         # Re-apply break-glass on the parent's namespace (it wasn't in
         # the sub-loop above; the parent isn't a sub-agent).
         kubectl label namespace "kars-${SCENARIO_FINAL_ARTIFACT_SANDBOX}" \

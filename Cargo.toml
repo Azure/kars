@@ -40,6 +40,13 @@ futures = "0.3"
 # HTTP
 axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "brotli", "deflate"] }
+# rustls 0.23 with aws-lc-rs is the only provider in our dep graph
+# (transitively via reqwest + oci-client). We declare it as a direct
+# workspace dep so the router's main() can install the provider
+# explicitly — otherwise kube-client's first TLS handshake panics
+# with "Could not automatically determine the process-level
+# CryptoProvider" when multiple feature flags resolve.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 hyper = "1"
@@ -101,24 +108,27 @@ lto = true
 codegen-units = 1
 strip = true
 
-# ─── Temporary git override for AGT pre-release (POP-aware SDK) ───
-# Pinned to pallakatos/agent-governance-toolkit@bdea1097 — fork-branch
-# that adds the TypeScript SDK side of proof-of-possession registration
-# and connect-frame signing. Upstream PR:
-# https://github.com/microsoft/agent-governance-toolkit/pull/2772
+# ─── Temporary git override for AGT pre-release fixes ───
+# Pinned to microsoft/agent-governance-toolkit@3322175d on the
+# `kars-sdk-pop-signing` feature branch (upstream repo, not a fork).
+# This branch carries two pre-release fixes kars depends on:
+#   1. TypeScript SDK proof-of-possession registration + connect-frame
+#      signing (upstream PR #2772, in review).
+#   2. X3DH KDF spec-compliance per Signal §2.2 (F prefix in IKM,
+#      zero salt — separate upstream PR pending).
 #
-# The Rust agentmesh crate is unchanged between upstream `bae5de3` and
-# our `bdea1097` (only the TypeScript SDK was touched); we still point
-# the Rust [patch.crates-io] override at the fork SHA so the workspace
-# stays at one consistent toolkit revision and `ci/check-agt-released.sh`
+# The Rust agentmesh crate is unchanged between upstream main and our
+# pin (only the TypeScript SDK was touched); we still point the Rust
+# [patch.crates-io] override at the branch SHA so the workspace stays
+# at one consistent toolkit revision and `ci/check-agt-released.sh`
 # can track a single SHA.
 #
 # Remove this whole [patch.crates-io] block when:
-#   1. PR #2772 merges to microsoft/agent-governance-toolkit main, AND
-#   2. AGT cuts a release containing it (track via the daily check).
+#   1. Both PRs merge to microsoft/agent-governance-toolkit main, AND
+#   2. AGT cuts a release containing them (track via the daily check).
 # At that point also drop the `vendor/agt/microsoft-agent-governance-sdk-*.tgz`
 # tarball + the file: dep in mesh-plugin/package.json and switch to the
 # published npm release.
 [patch.crates-io]
-agentmesh = { git = "https://github.com/pallakatos/agent-governance-toolkit", rev = "bdea10970f641fa695bb6dce7f8cee425f8aebd6", package = "agentmesh" }
-agentmesh-mcp = { git = "https://github.com/pallakatos/agent-governance-toolkit", rev = "bdea10970f641fa695bb6dce7f8cee425f8aebd6", package = "agentmesh-mcp" }
+agentmesh = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "3322175d88baf61e8ceab8e392e29fa2bf9b580a", package = "agentmesh" }
+agentmesh-mcp = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "3322175d88baf61e8ceab8e392e29fa2bf9b580a", package = "agentmesh-mcp" }

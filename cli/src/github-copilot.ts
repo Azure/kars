@@ -255,3 +255,52 @@ export function validateCopilotModel(modelId: string): { ok: boolean; message?: 
     message: `'${modelId}' is not in the Copilot catalog. Known: ${COPILOT_MODELS.map((m) => m.id).join(", ")}`,
   };
 }
+
+/**
+ * Pick a sensible same-provider fallback chain for an InferencePolicy
+ * primary on GitHub Copilot.
+ *
+ * GitHub Copilot enforces per-model quotas — `claude-opus-4.7` in
+ * particular is the most throttled (Anthropic + GitHub keep its budget
+ * tight). When the primary returns 503 "upstream model provider is
+ * currently experiencing high demand", the router's failover walk
+ * (`inference-router/src/failover.rs::is_failover_trigger`) ALREADY
+ * retries 5xx and 429 against the next deployment in the chain — but
+ * only if the InferencePolicy actually emits a non-empty `fallback[]`.
+ * Without this helper, kars dev/up wrote `modelPreference.primary` only
+ * and the chain was empty, so one overloaded primary killed the whole
+ * session.
+ *
+ * Ordering rationale (model picked first survives, then we cycle
+ * through other families to maximize "at least one is healthy" odds):
+ *   1. The user's pick (always first; we never silently override).
+ *   2. A cross-family alternative (OpenAI ↔ Anthropic), because both
+ *      families almost never throttle simultaneously.
+ *   3. A cheap/fast model from yet another family as the last resort
+ *      (Gemini Pro is usually the least loaded).
+ *   4. A small Anthropic + small OpenAI variant for breadth.
+ *
+ * Deduplicates while preserving order.
+ */
+export function buildCopilotFallbackChain(picked: string): string[] {
+  // Preferred fallback sequence (least correlated quota groupings first).
+  // Built statically rather than randomly so the user gets the SAME
+  // experience between `kars dev` invocations — debuggable.
+  const preferred = [
+    "gpt-5",                // OpenAI flagship, separate quota pool from Anthropic
+    "claude-sonnet-4.5",    // Anthropic mid-tier, separate pool from opus
+    "gemini-2.5-pro",       // Google — third family for diversity
+    "gpt-5-mini",           // cheap OpenAI fallback
+    "claude-haiku-4.5",     // cheap Anthropic fallback
+    "gpt-4.1",              // last-resort stable model
+  ];
+  const seen = new Set<string>([picked]);
+  const out: string[] = [];
+  for (const m of preferred) {
+    if (!seen.has(m)) {
+      seen.add(m);
+      out.push(m);
+    }
+  }
+  return out;
+}

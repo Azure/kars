@@ -1,0 +1,25 @@
+# 04-mcpserver.yaml — DeepWiki MCP for the Hermes scenario. Same
+# public unauthenticated endpoint as the canonical exec-brief.
+# Hermes' native MCP client picks it up from
+# mcp_servers.execbrief-hermes-deepwiki in the auto-generated
+# config.yaml (the entrypoint translates KARS_MCP_SERVERS env into
+# loopback-router URLs with x-kars-mcp-server headers).
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: McpServer
+metadata:
+  name: execbrief-hermes-deepwiki
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: execbrief-hermes
+spec:
+  url: "https://mcp.deepwiki.com/mcp"
+  allowedTools:
+    - read_wiki_structure
+    - read_wiki_contents
+    - ask_question
+  allowedSandboxes:
+    matchLabels:
+      kars.azure.com/sandbox: execbrief-hermes
+  productionMode: false
+  displayName: "DeepWiki (exec-brief-hermes-single)"

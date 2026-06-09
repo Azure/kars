@@ -27,6 +27,8 @@ import { loadConfig, getSecret, type KarsConfig } from "../../config.js";
 import { loadAgtProfile } from "../../refs.js";
 import { stageRustBinaries, type RustArch } from "../../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
+import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
+import { buildCopilotFallbackChain } from "../../github-copilot.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -664,20 +666,68 @@ async function rebuildDevImages(
         ], { stdio: "inherit" });
       },
     },
+    {
+      // Hermes runtime image. Built so the operator's `n` → spawn
+      // dialog can launch a Hermes sandbox without the user having
+      // to know about `docker build -t kars-runtime-hermes …`. The
+      // target tag matches DEFAULT_HERMES_IMAGE in
+      // controller/src/reconciler/runtime.rs so the controller's
+      // image string resolves cleanly to the kind-loaded image
+      // (no retag dance in the load step).
+      //
+      // The Dockerfile COPYs runtimes/wheels/ — ensureAgtWheels()
+      // already populated that at the top of runLocalK8s, so this
+      // step never blocks on wheel availability.
+      //
+      // Cost: ~3-5 min on first build (Python pip install + Hermes
+      // pip install + ripgrep/op binaries). Subsequent runs reuse
+      // the docker layer cache → <10s. Acceptable for OOTB; if
+      // you really want to skip, pass --no-build to kars dev.
+      name: "runtime-hermes",
+      tag: "karsacr.azurecr.io/kars-runtime-hermes:latest",
+      build: async () => {
+        const dockerfile = path.join(repoRoot, "sandbox-images/hermes/Dockerfile");
+        if (!existsSync(dockerfile)) return; // chart drift; skip silently
+        await execa(runtime, [
+          "build",
+          "--platform", platform,
+          "-t", "karsacr.azurecr.io/kars-runtime-hermes:latest",
+          "-f", dockerfile,
+          repoRoot,
+        ], { stdio: "inherit" });
+      },
+    },
   ];
 
   const built: string[] = [];
+  // Specs whose image is cheap to rebuild relative to the source-vs-image
+  // staleness risk. The controller + router builds bottom out at a tiny
+  // Rust binary COPY (the host already compiled the binary into a staged
+  // dir), so rebuild is ~5-30s with the docker layer cache vs the alternative:
+  // a stale image silently running pre-fix code (e.g. a controller compiled
+  // before the dev_profile pull-policy check at controller/src/reconciler/
+  // mod.rs:1291 was added — caused a full debug session this PR because
+  // the existing kars-controller:dev was never refreshed when the source
+  // changed). Sandbox + runtime images stay opt-in because their builds
+  // are minutes long; users can pass --force-build or `kars push` to
+  // refresh them deliberately.
+  const ALWAYS_REBUILD = new Set(["inference-router", "controller"]);
   for (const s of specs) {
     const arch = await imageArch(runtime, s.tag);
     const archMismatch = arch !== null && arch !== archToken;
     const missing = arch === null;
-    if (!forceAll && !missing && !archMismatch) continue;
+    const alwaysRebuild = ALWAYS_REBUILD.has(s.name);
+    if (!forceAll && !missing && !archMismatch && !alwaysRebuild) continue;
     if (archMismatch) {
       console.log(chalk.dim(
         `  ${s.tag} is ${arch}, host is ${archToken} — rebuilding for ${platform}.`,
       ));
     } else if (missing) {
       console.log(chalk.dim(`  ${s.tag} not present — building for ${platform}.`));
+    } else if (alwaysRebuild) {
+      console.log(chalk.dim(
+        `  Rebuilding ${s.tag} for ${platform} (cheap; ensures source-vs-image freshness).`,
+      ));
     } else {
       console.log(chalk.dim(`  Rebuilding ${s.tag} for ${platform} (--build).`));
     }
@@ -1100,7 +1150,7 @@ async function deployAgentMesh(
 }
 
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
-  const stepper = new Stepper({ totalSteps: 13 });
+  const stepper = new Stepper({ totalSteps: 14 });
 
   // Fail fast if the user is running outside the kars checkout.
   // `--target local-k8s` rebuilds the controller, router, and sandbox
@@ -1151,6 +1201,47 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         : "Azure Foundry / OpenAI";
   stepper.done(`creds: ${providerLabel} (${creds.endpoint})`);
 
+  // Auto-clone the pinned AGT toolkit fork into ~/agent-governance-toolkit
+  // (or $KARS_AGT_REPO if set) BEFORE we get to the kind/helm/relay
+  // steps. Without this, fresh-machine users hit
+  //   "AGT Dockerfile not found at .../agent-governance-toolkit/..."
+  // at the "Deploying agentmesh-agt" step — after a kind cluster has
+  // already been created, the chart applied, and several minutes of
+  // work done. The bootstrap is also what populates runtimes/wheels/
+  // (.gitignored) so the Hermes / Anthropic / Pydantic AI / etc.
+  // Python runtime image builds in rebuildDevImages() have their
+  // wheel context available.
+  //
+  // Mirrors the same pattern in cli/src/commands/dev.ts (line ~652)
+  // and cli/src/commands/up.ts (line ~617) — keep the three call sites
+  // consistent or fresh-machine OOTB breaks on whichever entry point
+  // is missing.
+  if (opts.noMesh !== true && !opts.globalRegistry) {
+    stepper.step("Bootstrapping AGT toolkit + Python wheels…");
+    try {
+      const repoRootForAgt = findRepoRoot(process.cwd());
+      const resolvedAgtRepo = await ensureAgtRepo(opts.agtRepo, repoRootForAgt);
+      // ensureAgtWheels is a no-op when the runtimes/wheels/.agt-sha
+      // cache stamp matches the current vendor/agt/pin.json SHA, so
+      // re-runs of `kars dev --target local-k8s` stay fast.
+      await ensureAgtWheels(resolvedAgtRepo, repoRootForAgt);
+      // Mutate opts so every downstream caller (rebuildDevImages,
+      // deployAgentMesh, …) sees the resolved path even when the
+      // user didn't pass --agt-repo or set $KARS_AGT_REPO.
+      opts.agtRepo = resolvedAgtRepo;
+      stepper.done(`AGT toolkit ready at ${resolvedAgtRepo}`);
+    } catch (e: unknown) {
+      stepper.stop();
+      throw new Error(
+        `Auto-cloning AGT toolkit failed: ${(e as Error).message}\n` +
+          `\nTo bypass auto-clone, either:\n` +
+          `  • pass --agt-repo /path/to/agent-governance-toolkit (existing checkout), or\n` +
+          `  • set KARS_AGT_REPO=/path/to/agent-governance-toolkit, or\n` +
+          `  • pass --no-mesh (controller-only smoke test; sandboxes won't KNOCK).`,
+      );
+    }
+  }
+
   // Optional: GitHub MCP wiring (Slice 4d.4.1). Asks the user whether to
   // attach the upstream `api.githubcopilot.com/mcp` server to this
   // sandbox. The decision modulates BOTH `provisionDevCreds` (env+secret
@@ -1199,6 +1290,16 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // the chart references — sandbox, controller, inference-router.
   // Missing any of them turns the helm install into an ErrImageNeverPull
   // loop with no useful diagnostics.
+  //
+  // PLUS: runtime images. When the operator spawns a non-OpenClaw
+  // sandbox (`n` → cycle to Hermes / Anthropic / …), the controller
+  // resolves the pod image to `karsacr.azurecr.io/kars-runtime-<X>:latest`
+  // (see controller/src/reconciler/runtime.rs::DEFAULT_*_IMAGE). On
+  // local-k8s that image isn't in the cluster, so the pod
+  // ImagePullBackOffs. We load every runtime image that's been built
+  // locally — silently skipping any that aren't present (the controller
+  // will then ImagePullBackOff and the operator's pod-events display
+  // surfaces a clear error pointing at the missing build).
   stepper.step("Loading kars images into the kind cluster…");
   if (opts.noBuild) {
     stepper.done("skipped image load (--no-build)");
@@ -1226,7 +1327,29 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         ],
       },
     ];
+
+    // Runtime images — only Hermes is auto-loaded here because Hermes
+    // is the second-most-common runtime after OpenClaw and is the one
+    // the user just productized in this PR. Other runtimes (Anthropic,
+    // LangGraph, Pydantic AI, MAF Python, OpenAI Agents) build from
+    // sandbox-images/<dir>/Dockerfile too but stay opt-in to keep
+    // `kars dev` startup fast for the common case. Power users can
+    // `docker build` them by hand; this loop picks them up on the
+    // next `kars dev` run.
+    //
+    // The target is the controller's canonical default image string so
+    // the retag + `kind load` plumbing wires correctly with NO
+    // controller-side change needed.
+    const runtimeImages: { target: string; aliases: string[] }[] = [
+      {
+        target: "karsacr.azurecr.io/kars-runtime-hermes:latest",
+        aliases: ["kars-runtime-hermes:latest", "kars-runtime-hermes:dev"],
+      },
+    ];
+    images.push(...runtimeImages);
+
     const missing: string[] = [];
+    const missingRuntimes: string[] = [];
     for (const img of images) {
       const result = await loadImageIfPresent(
         tools.kind,
@@ -1237,7 +1360,14 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         img.aliases,
       );
       if (!result.loaded) {
-        missing.push(result.reason ?? img.target);
+        // Separate "runtime" misses from "core" misses — runtimes are
+        // opt-in (only block if the user actually spawns one), but the
+        // core 3 images are hard requirements.
+        if (img.target.includes("kars-runtime-")) {
+          missingRuntimes.push(img.target);
+        } else {
+          missing.push(result.reason ?? img.target);
+        }
       }
     }
     if (missing.length > 0) {
@@ -1247,7 +1377,26 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         ),
       );
     }
-    stepper.done(`loaded ${images.length - missing.length}/${images.length} images`);
+    if (missingRuntimes.length > 0) {
+      // Soft warning — the core deployment is fine; the user just can't
+      // spawn one of these runtimes from the operator UI until they
+      // build the image. Spell out the docker build command so the fix
+      // is one-shot copy-paste.
+      const runtimeHints = missingRuntimes.map((img) => {
+        const m = img.match(/kars-runtime-([a-z-]+):latest/);
+        const dir = m ? m[1] : "<runtime>";
+        return `       docker build -t ${img} -f sandbox-images/${dir}/Dockerfile .`;
+      });
+      console.warn(
+        chalk.dim(
+          `  ℹ runtime images not loaded into kind (operator 'n' → cycle will let you pick these,\n     but the pod will ImagePullBackOff until the image exists):\n${runtimeHints.join("\n")}`,
+        ),
+      );
+    }
+    stepper.done(
+      `loaded ${images.length - missing.length - missingRuntimes.length}/${images.length} images` +
+        (missingRuntimes.length > 0 ? ` (${missingRuntimes.length} runtime image(s) skipped)` : ""),
+    );
   }
 
   // Sandboxes are scheduled with `nodeSelector: kars.azure.com/pool=sandbox`.
@@ -2383,6 +2532,26 @@ async function autoCreateSandbox(
     "    primary:",
     "      provider: azure-openai",
     `      deployment: ${creds.model || "gpt-4.1"}`,
+    // GitHub Copilot enforces per-model quotas (claude-opus-4.7 in
+    // particular is the most throttled). The router already retries
+    // 5xx + 429 against the fallback chain (see
+    // inference-router/src/failover.rs::is_failover_trigger), but only
+    // if InferencePolicy actually emits a non-empty fallback[]. Without
+    // this block, one overloaded primary surfaces 503
+    // "upstream model provider is currently experiencing high demand"
+    // straight to the WebUI and the user has to manually edit
+    // ~/.kars/config.json and re-run kars dev. buildCopilotFallbackChain
+    // picks a same-Copilot, cross-family chain so at least one model
+    // almost always has quota. Foundry / GH-Models paths don't get an
+    // auto-chain because they're single-deployment by definition.
+    ...(creds.provider === "github-copilot"
+      ? [
+          "    fallback:",
+          ...buildCopilotFallbackChain(creds.model || "claude-opus-4.7").flatMap(
+            (m) => [`      - provider: azure-openai`, `        deployment: ${m}`],
+          ),
+        ]
+      : []),
     "  contentSafety:",
     "    requirePromptShields: false",
     "  tokenBudget:",

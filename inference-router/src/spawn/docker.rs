@@ -79,6 +79,16 @@ pub(super) async fn collect_sub_agent_snapshots_docker(
             token_budget_per_request: None,
             trusted_peers: None,
             handoff: None,
+            // Docker snapshots don't have a runtime kind label yet —
+            // controller-side spawn restores from inheritance fallback.
+            runtime_kind: labels
+                .and_then(|l| l.get("kars.runtime-kind"))
+                .and_then(|m| m.as_str())
+                .map(String::from),
+            role: labels
+                .and_then(|l| l.get("kars.role"))
+                .and_then(|m| m.as_str())
+                .map(String::from),
         };
 
         snapshots.push(crate::handoff::SubAgentSnapshot {

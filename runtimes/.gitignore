@@ -8,3 +8,8 @@ wheels/*.tar.gz
 **/.pytest_cache/
 **/build/
 **/dist/
+
+# Per-invocation venv used by build-agt-wheels.sh to install the
+# `build` package without touching the host site-packages (PEP 668).
+.builder-venv/
+.agt-sha

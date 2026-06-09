@@ -15,7 +15,9 @@
 | **Required environment** | OpenClaw (vanilla or `nemoclaw`); Node.js 22+ |
 | **No Azure account required on the laptop** | Pairing token comes from the kars cluster's operator. |
 
-This is **not** the same as the [kars OpenClaw plugin](openclaw-plugin.md), which lives **inside** every kars-managed sandbox. `@kars/mesh` lives **outside** kars, on the user's local OpenClaw.
+This is **not** the same as the [kars OpenClaw plugin](openclaw-plugin.md) (which lives **inside** every OpenClaw-runtime kars sandbox) or the [kars Hermes plugin](hermes-plugin.md) (inside every Hermes-runtime sandbox). `@kars/mesh` lives **outside** kars, on the user's local OpenClaw.
+
+> **Symmetric Python counterpart:** the in-sandbox mesh for Hermes uses [`runtimes/agt-mesh-python/`](https://github.com/Azure/kars/tree/main/runtimes/agt-mesh-python) (`kars-agt-mesh`), a Python AGT MeshClient at byte-for-byte wire-format parity with `@microsoft/agent-governance-sdk`. The two interoperate: a local OpenClaw with `@kars/mesh` installed can `mesh_send` to an AKS Hermes sandbox and vice versa. End-to-end harness: [`tests/e2e/interop/hermes_openclaw_bidi.sh`](../tests/e2e/interop/hermes_openclaw_bidi.sh) (local) and [`tests/e2e/interop/aks_full_suite.sh`](../tests/e2e/interop/aks_full_suite.sh) (AKS production sandboxes).
 
 ---
 
