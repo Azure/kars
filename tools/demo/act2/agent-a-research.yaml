@@ -32,11 +32,53 @@ spec:
   modelPreference:
     primary:
       provider: azure-openai
-      deployment: gpt-4.1
+      deployment: gpt-5.4
   contentSafety:
-    requirePromptShields: true
+    requirePromptShields: false
   tokenBudget:
     perRequestTokens: 32000
+---
+# ToolPolicy required because spec.governance.enabled=true requires
+# spec.governance.toolPolicyRef.name. The kars-default profile applies
+# (allow inference + standard tools); operators wanting tighter gates
+# can swap in their own ToolPolicy.
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: research-tools
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: research
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: research
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: research-default
+      policies:
+        # Allow inference + the standard kars plugin tools (http_fetch,
+        # foundry_*). Same shape as kars-default-agt-profile.yaml.
+        - name: research-allow-defaults
+          type: capability
+          allowed_actions:
+            - "inference:chat_completions:*"
+            - "inference:responses:*"
+            - "inference:content_safety:*"
+            - "tool:http_fetch:*"
+            - "tool:foundry_memory:*"
+            - "tool:foundry_web_search:*"
+            - "tool:foundry_code_execute:*"
+            - "tool:foundry_file_search:*"
+            - "tool:foundry_image_generation:*"
+            - "tool:foundry_conversations:*"
+            - "tool:foundry_evaluations:*"
+            - "tool:foundry_deployments:*"
+            - "tool:foundry_agents:*"
+            - "tool:foundry_download_file:*"
+          priority: 100
 ---
 apiVersion: kars.azure.com/v1alpha1
 kind: KarsSandbox
@@ -49,9 +91,11 @@ metadata:
 spec:
   runtime:
     kind: Hermes
-    hermes:
-      # Use the image's baked-in Hermes version (don't pin) so this
-      # demo manifest doesn't drift against runtime image bumps.
+    # `hermes: {}` must be set even when no fields are pinned — the CRD's
+    # CEL guard requires `runtime.hermes` to be present (any non-null
+    # value) iff `runtime.kind=Hermes`. Empty object honours the image's
+    # baked-in Hermes version + entrypoint without drift.
+    hermes: {}
 
   sandbox:
     isolation: standard
@@ -61,6 +105,8 @@ spec:
 
   governance:
     enabled: true
+    toolPolicyRef:
+      name: research-tools
     registryMode: local
     trustThreshold: 0
 
