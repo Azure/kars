@@ -921,6 +921,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     register_tool(
         name="sre_describe_resource",
+        toolset="sre",
         description=(
             "Structured-describe for any K8s resource (Pod, Deployment, "
             "Service, ResourceQuota, ConfigMap, Secret metadata only, "
@@ -929,7 +930,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
             "workload → ReplicaSet → Pods → events on every level. This "
             "is THE single-call diagnostic for most workload incidents."
         ),
-        parameters={
+        schema={
             "type": "object",
             "properties": {
                 "kind": {
@@ -949,12 +950,13 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     register_tool(
         name="sre_what_changed",
+        toolset="sre",
         description=(
             "Events of failure-relevant reasons in the last N minutes "
             "across core/v1 + events.k8s.io/v1. Use FIRST in an incident "
             "to frame the time-window: what broke when?"
         ),
-        parameters={
+        schema={
             "type": "object",
             "properties": {
                 "namespace": {
@@ -974,13 +976,14 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     register_tool(
         name="sre_endpoints_inspect",
+        toolset="sre",
         description=(
             "Service → selector → matching pods → EndpointSlice readiness. "
             "Diagnoses 'service has no endpoints' incidents: are there pods "
             "matching the selector? are they Ready? are they in the "
             "EndpointSlice? Returns a finding summary the agent can quote."
         ),
-        parameters={
+        schema={
             "type": "object",
             "properties": {
                 "namespace": {"type": "string"},
@@ -993,13 +996,14 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     register_tool(
         name="sre_image_probe",
+        toolset="sre",
         description=(
             "Given an image reference, return: (a) what tags of the same "
             "repo are CURRENTLY IN USE on this cluster, (b) the closest "
             "match by edit-distance to the requested tag. Use after "
             "sre_describe_resource shows ImagePullBackOff."
         ),
-        parameters={
+        schema={
             "type": "object",
             "properties": {
                 "image": {
@@ -1014,13 +1018,14 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     register_tool(
         name="sre_top",
+        toolset="sre",
         description=(
             "CPU + memory usage per pod or per node (metrics.k8s.io). "
             "Returns {unavailable: 'metrics-server not installed'} if "
             "the metrics API isn't registered — the agent's planner "
             "routes around it."
         ),
-        parameters={
+        schema={
             "type": "object",
             "properties": {
                 "scope": {
