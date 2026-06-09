@@ -228,8 +228,11 @@ explicit dev-vs-production lifecycle:
   with a pre-declared allowlist (or layered `EgressApproval` for
   ad-hoc grants)
 - Allowed by default: in-cluster `kubernetes.default.svc` (apiserver),
-  `agentmesh-relay.agentmesh.svc` (for mesh), `agentmesh-registry.agentmesh.svc`,
-  IMDS (Workload Identity), and the cluster DNS resolver
+  IMDS (Workload Identity), and the cluster DNS resolver. **Mesh
+  endpoints (`agentmesh-relay.agentmesh.svc`,
+  `agentmesh-registry.agentmesh.svc`) are intentionally NOT in the
+  default allowlist** — the SRE agent does not use the mesh
+  (see §7.8.6).
 - Optional grants (operator opt-in): `api.github.com` (source-code
   grounding), `api.telegram.org` / `slack.com` (channel posts),
   `<registry>` for the `sre_image_probe` tool
@@ -433,7 +436,7 @@ concrete:
 | Air-gap (Blueprint 06) compatibility | §7.1 S6: AGT-only approval mode; sre_image_probe disabled |
 | Observability of the agent itself | §7.10 (new): expanded metric shape + latency histograms + audit correlation |
 | Naming inconsistency (`kars-kars-sre`) | §7.9 (new): sandbox name `sre`, namespace `kars-sre`, SA `sandbox` |
-| **Privilege containment — no inheritance to other agents** | **§7.8 (new): 8 boundaries — plugin packaging, sandbox uniqueness VAP, RBAC subject pinning VAP, writer-SA token containment (boundObjectRef + 5-min TTL + no auto-mount), spawn disabled in SRE image, mesh `tool.invoke` rejected, NetworkPolicy scoped admin port, audit on every privilege use** |
+| **Privilege containment — no inheritance to other agents** | **§7.8 (new): 9 boundaries — plugin packaging, sandbox uniqueness VAP, RBAC subject pinning VAP, writer-SA token containment (boundObjectRef + 5-min TTL + no auto-mount), spawn disabled in SRE image, mesh disabled at the source (no relay socket, no DID, not in registry), NetworkPolicy scoped admin port, audit on every privilege use** |
 | Prompt injection via cluster events/logs | §7.7.2 (new): containment for untrusted strings |
 
 ### 7.5 Open decisions (must answer before any code lands)
@@ -506,7 +509,7 @@ the kars subsystems already in production:
 | Status | `.status.phase` taxonomy (Pending → Compiled → Ready → Running → Degraded) |
 | Identity | controller-issued FedCred (AKS) / in-cluster SA (kind) — see §7.9 |
 | Notification | `kars_notify_human` governed tool (§7.3) — NOT Hermes' raw `send_message` |
-| Mesh | none in S1-S4; potentially in S5+ for federated multi-cluster |
+| Mesh | **never** — the SRE agent is not on the mesh (§7.8.6); its only counterparties are the operator (channels + CLI) and the apiserver |
 
 The SRE agent is, intentionally, just another kars sandbox with a
 specialised tool surface and a wider RBAC. It does not introduce new
@@ -723,21 +726,37 @@ would inherit the namespace's RBAC. As an additional defence, the
 controller's spawn reconciler rejects any sub-sandbox whose parent
 namespace is `kars-sre`.
 
-#### 7.8.6 Mesh isolation — SRE does not accept commands from peers
+#### 7.8.6 Mesh disabled at the source — there is no relay path to abuse
 
-The SRE agent's mesh tool surface is reduced:
-- It **can send** inbox messages (so it can report status to a
-  human-facing agent on request).
-- It **cannot accept** any `tool.invoke` intent on its KNOCK frames.
-  `sre_apply_fix` is callable only by the local agent process driven
-  by the operator's WebUI or `kars sre approve <id>` CLI flow — never
-  by a remote peer over the mesh.
+**The SRE agent does not connect to the mesh.** Mesh is for inter-agent
+collaboration; the SRE agent's only counterparties are (a) the operator
+(via Telegram/Slack channel + the `kars sre` CLI + WebUI) and (b) the
+Kubernetes apiserver. There is no use case that calls for sending or
+receiving KNOCK frames, and disabling mesh removes a substantial
+attack surface (Signal Protocol handshake parser, X3DH state, Double
+Ratchet session state, the relay WebSocket connection, the mesh
+authorization layer).
 
-The plugin enforces this in two places: (a) the SRE plugin's mesh
-handler rejects `intent ∈ {tool.invoke, function_call}` with a 403
-audit row, and (b) the SRE sandbox's `ToolPolicy` for `sre_apply_fix`
-sets `appliesTo.callerKind: local-only`, which the router enforces
-by rejecting tool calls whose origin is the mesh path.
+Enforced at three layers:
+
+1. **KarsSandbox spec:** `spec.mesh.enabled: false` (new field) — the
+   controller does not provision mesh credentials, does not mint a
+   mesh identity, does not annotate the pod for the relay-connect
+   init, and does not open the egress allowance to
+   `agentmesh-relay.agentmesh.svc`.
+2. **Image-level:** the dedicated `kars/sre-sandbox` image (§7.8.1)
+   does not include the mesh Python package and does not register any
+   `kars_mesh_*` tools. The mesh plugin module is absent from
+   `runtimes/hermes/.../plugin/` in this image build.
+3. **NetworkPolicy:** the SRE sandbox's egress NetworkPolicy does not
+   include the `agentmesh` namespace in its allowlist. Even if a
+   future bug accidentally tried to dial the relay, the network path
+   does not exist.
+
+If a remote agent on the cluster mesh somehow assembled a KNOCK frame
+addressed to the SRE agent, it has nowhere to deliver it — the SRE
+agent is not registered in the AGT registry, has no DID, and is not
+holding a relay socket. The frame is dropped at the registry lookup.
 
 #### 7.8.7 NetworkPolicy — admin port only reachable from cluster operators
 
@@ -781,7 +800,8 @@ Stacking the above:
 - Cannot persist a writer token beyond 5 min, beyond pod lifetime,
   or across a controller restart (§7.8.4)
 - Cannot spawn a sub-sandbox that inherits namespace RBAC (§7.8.5)
-- Cannot be commanded by any remote agent over the mesh (§7.8.6)
+- Cannot be commanded by any remote agent over the mesh (§7.8.6 —
+  the SRE agent is not on the mesh at all)
 - Cannot be reached on its admin port by user-facing sandbox pods
   (§7.8.7)
 - Cannot escape audit (§7.8.8)
