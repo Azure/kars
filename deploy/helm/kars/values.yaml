@@ -451,6 +451,14 @@ sre:
   # if your cluster has very large CRD inventories.
   tokenBudget: 32000
 
+  # Require Azure Content Safety Prompt Shields on every response. ONLY
+  # set true if your Azure OpenAI deployment has an attached Content
+  # Filter policy that emits `prompt_filter_results` in responses.
+  # Bare local-dev deployments (Foundry quickstart, gpt-4.1 without an
+  # explicit Content Filter) DON'T emit those annotations and every
+  # response gets blocked at the router. Default is false.
+  requirePromptShields: false
+
   # Additional egress hosts the SRE sandbox may reach beyond the in-
   # cluster apiserver. Empty by default — the agent only talks to
   # `kubernetes.default.svc` out of the box. Add api.telegram.org +

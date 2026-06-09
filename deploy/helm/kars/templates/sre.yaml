@@ -75,7 +75,16 @@ spec:
       provider: {{ (.Values.sre | default dict).provider | default "azure-openai" | quote }}
       deployment: {{ (.Values.sre | default dict).model | default "gpt-4.1" | quote }}
   contentSafety:
-    requirePromptShields: true
+    # SRE-agent default: do NOT require Prompt Shields. The Azure OpenAI
+    # response only carries prompt_filter_results when the deployment has
+    # an Azure Content Safety Content Filter policy attached; on bare
+    # local-dev deployments (Foundry quickstart, gpt-4.1 without an
+    # explicit filter), every response gets blocked at the router with
+    # "InferencePolicy requires Prompt Shields but the upstream response
+    # carried no prompt_filter_results annotations". Operators wiring
+    # Content Safety in production can override via:
+    #   --set sre.requirePromptShields=true
+    requirePromptShields: {{ (.Values.sre | default dict).requirePromptShields | default false }}
   tokenBudget:
     perRequestTokens: {{ (.Values.sre | default dict).tokenBudget | default 32000 }}
 ---
