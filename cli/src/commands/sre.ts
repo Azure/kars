@@ -104,7 +104,12 @@ export function sreCommand(): Command {
         options.release,
         chartPath,
         "--namespace", options.namespace,
-        "--reuse-values",
+        // --reset-then-reuse-values: re-load defaults from values.yaml
+        // THEN overlay the previously-set --set values. Critical for
+        // operators upgrading from older chart versions whose stored
+        // release values predate fields like runtimes.hermes — a plain
+        // --reuse-values would carry the gap forward and fail templating.
+        "--reset-then-reuse-values",
         "--set", "sre.enabled=true",
       ];
       if (options.model) helmArgs.push("--set", `sre.model=${options.model}`);
@@ -178,7 +183,7 @@ export function sreCommand(): Command {
         options.release,
         chartPath,
         "--namespace", options.namespace,
-        "--reuse-values",
+        "--reset-then-reuse-values",
         "--set", "sre.enabled=false",
       ];
       if (options.context) helmArgs.push("--kube-context", options.context);
