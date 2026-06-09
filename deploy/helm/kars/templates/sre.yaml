@@ -144,15 +144,18 @@ spec:
 ---
 # kars-sre ToolPolicy — gates the sre_* tool surface.
 #
-# Lives in the namespace the controller will create for the sre sandbox
-# (kars-<sandbox-name> = kars-sre per the standard naming convention).
-# A no-op once Slice 3 lands the per-tool ToolPolicy split, but for
-# Slice 1 every read-only tool is allow-without-approval.
+# Lives in the SAME namespace as the KarsSandbox `sre` itself
+# ({{ .Release.Namespace }} = kars-system) because kars
+# governance refs are namespace-local — the controller looks up
+# `governance.toolPolicyRef.name: sre-tools` in the KarsSandbox's
+# own namespace, NOT in the per-sandbox runtime namespace
+# (kars-sre).  Cross-namespace ToolPolicy refs are intentionally
+# unsupported per principles.md §3.
 apiVersion: kars.azure.com/v1alpha1
 kind: ToolPolicy
 metadata:
   name: sre-tools
-  namespace: kars-sre
+  namespace: {{ .Release.Namespace }}
   labels:
     kars.azure.com/sandbox: sre
     kars.azure.com/role: sre
