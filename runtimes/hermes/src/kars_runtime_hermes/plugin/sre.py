@@ -501,8 +501,18 @@ def is_enabled() -> bool:
     The env is set exclusively by ``deploy/helm/kars/templates/sre.yaml``
     on the ``sre`` KarsSandbox's ``spec.runtime.hermes.extraEnv``.
     Standard sandboxes don't see it.
+
+    NOTE on naming: the env is ``SRE_ENABLED`` rather than
+    ``KARS_SRE_ENABLED`` because the controller's deployment builder
+    silently strips user-supplied ``extraEnv`` keys with the reserved
+    ``KARS_`` prefix (controller/src/reconciler/mod.rs:1583). The right
+    long-term fix is for the controller to detect
+    ``kars.azure.com/role: sre`` on the KarsSandbox label and inject
+    ``KARS_SRE_ENABLED=true`` itself (controller-side injection bypasses
+    the prefix filter). Tracked as a follow-up; for now ``SRE_ENABLED``
+    is the gate.
     """
-    return os.environ.get("KARS_SRE_ENABLED", "").lower() in {"true", "1", "yes"}
+    return os.environ.get("SRE_ENABLED", "").lower() in {"true", "1", "yes"}
 
 
 def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic

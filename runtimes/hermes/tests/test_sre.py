@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 
 def test_is_enabled_default_false() -> None:
-    """Without KARS_SRE_ENABLED, the plugin must be disabled."""
+    """Without SRE_ENABLED, the plugin must be disabled."""
     from kars_runtime_hermes.plugin import sre
 
     with patch.dict(os.environ, {}, clear=True):
@@ -24,7 +24,7 @@ def test_is_enabled_accepts_truthy_values() -> None:
     from kars_runtime_hermes.plugin import sre
 
     for v in ("true", "True", "TRUE", "1", "yes", "YES"):
-        with patch.dict(os.environ, {"KARS_SRE_ENABLED": v}, clear=True):
+        with patch.dict(os.environ, {"SRE_ENABLED": v}, clear=True):
             assert sre.is_enabled(), f"value {v!r} should be truthy"
 
 
@@ -32,7 +32,7 @@ def test_is_enabled_rejects_falsy_values() -> None:
     from kars_runtime_hermes.plugin import sre
 
     for v in ("false", "0", "no", "", "anything-else"):
-        with patch.dict(os.environ, {"KARS_SRE_ENABLED": v}, clear=True):
+        with patch.dict(os.environ, {"SRE_ENABLED": v}, clear=True):
             assert not sre.is_enabled(), f"value {v!r} should be falsy"
 
 
