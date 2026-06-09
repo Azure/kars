@@ -439,11 +439,11 @@ sre:
   enabled: false
 
   # The Azure OpenAI deployment / model name the SRE agent reasons with.
-  # Defaults to gpt-4.1; override for cost/perf tuning. The model must be
+  # Defaults to gpt-5.4; override for cost/perf tuning. The model must be
   # available in the project the kars controller is configured with —
   # the InferencePolicy compiles against the standard router failover
   # chain so an unavailable model surfaces as Degraded on the sandbox.
-  model: "gpt-4.1"
+  model: "gpt-5.4"
   provider: "azure-openai"
 
   # Per-request token ceiling. The SRE agent's typical request shape

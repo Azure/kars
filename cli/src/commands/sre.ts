@@ -78,7 +78,7 @@ export function sreCommand(): Command {
     )
     .option(
       "--model <name>",
-      "Azure OpenAI deployment / model name for the SRE agent (defaults to gpt-4.1)",
+      "Azure OpenAI deployment / model name for the SRE agent (defaults to gpt-5.4)",
     )
     .option(
       "--no-wait",
