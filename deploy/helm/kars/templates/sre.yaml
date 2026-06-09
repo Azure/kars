@@ -33,6 +33,26 @@ containment):
 */}}
 {{- if (.Values.sre | default dict).enabled }}
 ---
+# kars-sre Namespace — created by the chart so the ToolPolicy below
+# (which lives in this ns by design — see proposal §7.6 + the
+# ToolPolicy "cross-namespace refs deliberately not supported" rule)
+# has a namespace to land in BEFORE the controller has reconciled
+# the KarsSandbox.
+#
+# The controller's own namespace reconcile path uses server-side
+# apply with field manager `kars-controller`, so it will harmlessly
+# co-own this namespace (adding its labels + annotations) once it
+# reaches step 1 of reconcile/mod.rs. No conflict.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kars-sre
+  labels:
+    kars.azure.com/role: sre
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+---
 # kars-sre InferencePolicy — the model the SRE agent uses for diagnosis.
 # Default model is configurable via .Values.sre.model; the policy applies
 # only to the `sre` sandbox by name.
