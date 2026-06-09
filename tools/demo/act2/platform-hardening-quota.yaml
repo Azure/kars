@@ -1,0 +1,43 @@
+# Act II — the infrastructure break.
+#
+# Scenario: "the platform team's GitOps refactor lands a hardening
+# ResourceQuota across every workload namespace. The quota's
+# requests.memory ceiling (50Mi) is lower than the sum of what the
+# research sandbox actually requests (the inference-router sidecar
+# alone asks for more). Next time the agent pod restarts — or the
+# operator triggers a rollout — the new pod cannot be admitted into
+# the namespace and stays Pending forever."
+#
+# This is a textbook K8s incident: the running pod keeps running,
+# but the moment anything tries to schedule a fresh pod (rollout,
+# eviction, voluntary or involuntary restart) — quota blocks it.
+#
+# Applied by tools/demo/act2/break.sh, which also force-deletes the
+# running research pod to surface the failure immediately rather
+# than waiting for a natural restart event.
+#
+# The kars-sre agent's job: notice the Pending pod, read the
+# ReplicaSet's events ("Error creating: pods ... is forbidden:
+# exceeded quota"), list ResourceQuotas in kars-research, identify
+# the over-tight one, propose DeleteResourceQuota.
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: platform-hardening-quota
+  namespace: kars-research
+  labels:
+    # Crucial: NOT labeled as kars-managed. The SRE agent's typed
+    # action `DeleteResourceQuota` is permitted ONLY for ResourceQuotas
+    # without the `kars.azure.com/managed-by=controller` label, so
+    # the SRE agent can clean up operator-applied quotas but cannot
+    # remove any kars-managed governance ResourceQuota.
+    app.kubernetes.io/part-of: platform-hardening
+    app.kubernetes.io/managed-by: gitops-platform
+spec:
+  hard:
+    # Deliberately tight. The Hermes sandbox pod requests ~256Mi
+    # across its containers (openclaw + inference-router); 50Mi is
+    # impossible.
+    requests.memory: "50Mi"
+    requests.cpu: "100m"

@@ -545,6 +545,7 @@ in depth):
 | `RolloutRestart` | `{namespace, kind∈{Deployment,StatefulSet,DaemonSet}, name}` | namespace ∉ denylist |
 | `ScaleDeployment` | `{namespace, name, replicas ∈ [0, 50]}` | namespace ∉ denylist; replicas clamped |
 | `DeletePod` (= forced restart of one pod) | `{namespace, name}` | namespace ∉ denylist |
+| `DeleteResourceQuota` | `{namespace, name}` | namespace ∉ denylist; ResourceQuota MUST NOT carry the label `kars.azure.com/managed-by=controller` (kars-owned governance quotas stay protected; operator-applied platform quotas are deletable) |
 | `PatchConfigMapKey` | `{namespace, name, key, value}` | name ∉ kars-controlled CMs (allowlist of OPERATOR-managed CMs only) |
 
 **Protected-resource denylist** (enforced at all three layers below):
