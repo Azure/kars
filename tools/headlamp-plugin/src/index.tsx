@@ -2554,12 +2554,45 @@ function SREConsole() {
 // has a clear next step, and links over to the SRE Console for the
 // approval queue + cluster health.
 
+
+// ──────────────────────────────────────────────────────────────────────
+// SRE Chat — embedded Hermes Dashboard PTY chat
+// ──────────────────────────────────────────────────────────────────────
+//
+// Routes through the apiserver service proxy to the kars-sre sandbox's
+// :9119 port, where `hermes dashboard --tui` serves a FastAPI + xterm.js
+// in-browser PTY chat. The dashboard renders a full Hermes REPL inside
+// the iframe — same commands you'd type in `kars sre talk`, but
+// without leaving Headlamp.
+//
+// The apiserver-proxy URL:
+//   /clusters/<cluster>/api/v1/namespaces/kars-sre/services/sre:9119/proxy/
+//
+// Headlamp's Link/router lets us discover <cluster> at runtime by
+// parsing the current URL (every Headlamp page is under /c/<cluster>/...).
+//
+// If the iframe can't load (asset paths in Hermes' web bundle may use
+// absolute /web/... that don't survive a sub-path proxy), we always
+// offer an "Open in new tab" escape hatch.
+
+const HERMES_DASHBOARD_PORT = 9119;
+
 function SREChat() {
+  // Show the install CTA when the kars-sre sandbox isn't deployed —
+  // otherwise the iframe would just spin against a missing service.
   const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
   const installed = isSREInstalled(sandboxes);
+
+  // Cluster name comes from the URL. Headlamp routes are
+  // /c/<cluster>/... — parse it once on mount.
+  const inferredCluster = React.useMemo(() => {
+    const m = window.location.pathname.match(/^\/c\/([^/]+)\//);
+    return m?.[1] ?? "";
+  }, []);
+
   if (installed === null) {
     return (
-      <SectionBox title="💬 Talk to kars-sre">
+      <SectionBox title="💬 Chat with kars-sre">
         <div style={{ padding: 16, fontSize: 13 }}>Loading cluster state…</div>
       </SectionBox>
     );
@@ -2568,79 +2601,70 @@ function SREChat() {
     return <SREInstallCTA />;
   }
 
-  const codeBlock: React.CSSProperties = {
-    background: "var(--mui-palette-action-hover)",
-    padding: 12,
-    borderRadius: 4,
-    fontSize: 13,
-    overflowX: "auto",
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-    margin: 0,
-  };
-  const card: React.CSSProperties = {
-    border: "1px solid var(--mui-palette-divider)",
-    borderRadius: 6,
-    padding: 16,
-    marginBottom: 16,
-  };
-  const muted: React.CSSProperties = {
-    color: "var(--mui-palette-text-secondary)",
-    fontSize: 13,
-    margin: "8px 0 12px",
-  };
+  const proxyUrl = inferredCluster
+    ? `/clusters/${inferredCluster}/api/v1/namespaces/kars-sre/services/sre:${HERMES_DASHBOARD_PORT}/proxy/`
+    : "";
 
   return (
-    <SectionBox title="💬 Talk to kars-sre">
+    <SectionBox title="💬 Chat with kars-sre">
       <div style={{ padding: 8 }}>
-        <p style={{ fontSize: 14, marginTop: 0 }}>
-          kars-sre is a Hermes CLI/TUI agent — there&apos;s no embedded WebUI.
-          Pick the channel that fits your workflow:
-        </p>
-
-        <div style={card}>
-          <h3 style={{ marginTop: 0, fontSize: 15 }}>1. Interactive REPL</h3>
-          <p style={muted}>
-            Drops you into a chat session inside the sre sandbox container
-            via <code>kubectl exec</code>. Best for live triage.
-          </p>
-          <pre style={codeBlock}>kars sre talk</pre>
-        </div>
-
-        <div style={card}>
-          <h3 style={{ marginTop: 0, fontSize: 15 }}>2. Telegram / Slack / Discord</h3>
-          <p style={muted}>
-            Wire a channel once; the agent will accept your messages on
-            the bot and the proactive watcher will push incident alerts
-            with one-click approve commands. You never need the
-            terminal.
-          </p>
-          <pre style={codeBlock}>
-{`kars credentials update sre \\
-  --telegram-token   <BotFather token> \\
-  --telegram-allow-from <your-tg-user-id>`}
-          </pre>
-        </div>
-
-        <div style={card}>
-          <h3 style={{ marginTop: 0, fontSize: 15 }}>3. Non-interactive status</h3>
-          <p style={muted}>
-            Snapshot of the SRE sandbox + KarsSREAction queue. Same data
-            this dashboard renders, but in a terminal-friendly format.
-          </p>
-          <pre style={codeBlock}>
-{`kars sre status
-kars sre actions
-kars sre show <action-id>`}
-          </pre>
-        </div>
-
-        <div style={{ marginTop: 20 }}>
-          <p style={{ fontSize: 13, color: "var(--mui-palette-text-secondary)" }}>
-            Looking for pending approvals? Head to&nbsp;
-            <a href="#/c/kind-kars-dev/kars/sre">SRE → Console</a>
-            &nbsp;— it lives-updates as the watcher creates KarsSREAction
-            CRs, with inline Approve / Reject buttons.
-          </p>
+        <Stack
+          direction="row"
+          spacing={2}
+          alignItems="center"
+          sx={{ mb: 1, flexWrap: "wrap" }}
+        >
+          <span style={{ fontSize: 13, color: "var(--mui-palette-text-secondary)" }}>
+            Routed via the cluster apiserver →&nbsp;
+            <code>kars-sre/sre:{HERMES_DASHBOARD_PORT}</code> (hermes dashboard).
+          </span>
+          <Button
+            size="small"
+            href={proxyUrl || "#"}
+            target="_blank"
+            rel="noreferrer noopener"
+            variant="outlined"
+            disabled={!proxyUrl}
+          >
+            Open in new tab
+          </Button>
+        </Stack>
+        {!proxyUrl ? (
+          <div
+            style={{
+              padding: 24,
+              border: "1px dashed var(--mui-palette-divider)",
+              borderRadius: 4,
+              textAlign: "center",
+              color: "var(--mui-palette-text-secondary)",
+              fontSize: 13,
+            }}
+          >
+            Cluster name could not be inferred from the current URL.
+            Open SRE → Console from the sidebar to load the cluster
+            context first.
+          </div>
+        ) : (
+          <iframe
+            src={proxyUrl}
+            title="kars-sre Chat"
+            // Sandbox attribute: same-origin so cookies work, scripts
+            // so xterm.js loads, allow-forms for the REPL submit, and
+            // allow-modals so confirm()/alert() popups render.
+            sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups"
+            style={{
+              width: "100%",
+              minHeight: "calc(100vh - 220px)",
+              border: "1px solid var(--mui-palette-divider)",
+              borderRadius: 4,
+              background: "var(--mui-palette-background-default)",
+            }}
+          />
+        )}
+        <div style={{ marginTop: 8, fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
+          The chat is a live PTY into the kars-sre sandbox. If the iframe
+          stays blank, click <em>Open in new tab</em> — Hermes&apos; web
+          bundle asset paths sometimes don&apos;t survive a sub-path proxy.
         </div>
       </div>
     </SectionBox>
