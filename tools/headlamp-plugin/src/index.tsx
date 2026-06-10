@@ -38,6 +38,7 @@ import {
 import { makeCustomResourceClass } from "@kinvolk/headlamp-plugin/lib/lib/k8s/crd";
 import type { KubeObject, KubeObjectClass } from "@kinvolk/headlamp-plugin/lib/lib/k8s/KubeObject";
 import Secret from "@kinvolk/headlamp-plugin/lib/K8s/secret";
+import { K8s } from "@kinvolk/headlamp-plugin/lib";
 import {
   Link,
   SectionBox,
@@ -2395,11 +2396,12 @@ const PROTECTED_NAMESPACES = new Set([
 ]);
 
 function SREActiveIncidentsCard() {
-  // Use the v1 Event API class. Headlamp ships it as part of its
-  // core K8s classes — we resolve via require to avoid a top-of-file
-  // import cycle with the rest of the plugin (Event is heavy).
-  const Event = require("@kinvolk/headlamp-plugin/lib/K8s/event").default;
-  const [events] = (Event as any).useList() as [KubeObject[] | null];
+  // v1 Event API via the K8s namespace re-export (browser ESM-safe).
+  // Using `require()` here would crash the plugin with
+  // `ReferenceError: require is not defined` because Headlamp ships
+  // the plugin bundle as a pure browser ESM module.
+  const EventCls: any = (K8s as any).event?.default ?? (K8s as any).event;
+  const [events] = EventCls.useList() as [KubeObject[] | null];
   if (!events) {
     return (
       <SectionBox title="🚨 Active Incidents (last 15 min)">
@@ -2500,9 +2502,92 @@ function SREActiveIncidentsCard() {
   );
 }
 
+function SREInstallCTA() {
+  // Empty-state landing when the kars-sre sandbox isn't deployed yet.
+  // Operator-facing — shows the exact one-liner that wires up the SRE
+  // sandbox + the optional Telegram channel. Idempotent so a copy-
+  // paste user who's already partway through gets a no-op.
+  return (
+    <SectionBox title="🩺 kars-sre is not deployed yet">
+      <div style={{ padding: 16, lineHeight: 1.6, fontSize: 14 }}>
+        <p style={{ marginTop: 0 }}>
+          The kars-sre agent provides on-call triage + typed apply-fix +
+          proactive incident detection for this cluster. It is gated by
+          a Helm value (<code>sre.enabled=true</code>) and ships with
+          its own KarsSandbox, ToolPolicy, InferencePolicy, RBAC, and
+          the KarsSREAction CRD.
+        </p>
+        <p>
+          <strong>Install in one command</strong> (uses the chart that
+          deployed this cluster — no extra credentials needed):
+        </p>
+        <pre
+          style={{
+            background: "var(--mui-palette-action-hover)",
+            padding: 12,
+            borderRadius: 4,
+            fontSize: 13,
+            overflowX: "auto",
+          }}
+        >
+          kars sre install
+        </pre>
+        <p>
+          <strong>Add Telegram</strong> (optional — drives the Slice 4
+          proactive watcher alerts):
+        </p>
+        <pre
+          style={{
+            background: "var(--mui-palette-action-hover)",
+            padding: 12,
+            borderRadius: 4,
+            fontSize: 13,
+            overflowX: "auto",
+          }}
+        >
+{`kars credentials update sre \\
+  --telegram-token  <BotFather token> \\
+  --telegram-allow-from <your-tg-user-id>`}
+        </pre>
+        <p style={{ marginBottom: 0 }}>
+          This console will light up as soon as the controller has the
+          sre sandbox <code>Running</code> and the KarsSREAction CRD
+          installed — no page refresh needed.
+        </p>
+      </div>
+    </SectionBox>
+  );
+}
+
+function isSREInstalled(sandboxes: KubeObject[] | null): boolean | null {
+  // `null` = still loading. Avoids a flash-of-empty-state during
+  // the first list call.
+  if (sandboxes === null) return null;
+  return sandboxes.some(
+    s => (s.metadata?.name ?? "") === "sre" && (s.metadata?.namespace ?? "") === "kars-system",
+  );
+}
+
 function SREConsole() {
   const [actions] = (KarsSREActionClass as any).useList() as [KubeObject[] | null];
   const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
+  const installed = isSREInstalled(sandboxes);
+
+  // Still loading sandbox list — show nothing rather than the empty
+  // state, to avoid a flicker.
+  if (installed === null) {
+    return (
+      <SectionBox title="🩺 SRE Console">
+        <div style={{ padding: 16, fontSize: 13 }}>Loading cluster state…</div>
+      </SectionBox>
+    );
+  }
+  // SRE not deployed → show install CTA, skip the data cards
+  // (most would render empty and look broken).
+  if (!installed) {
+    return <SREInstallCTA />;
+  }
+
   const safeActions = actions ?? [];
   const now = Date.now();
   const recentCutoff = now - 60 * 60 * 1000; // 1 hour
@@ -2584,6 +2669,20 @@ function SREConsole() {
 const HERMES_GATEWAY_PORT = 18789;
 
 function SREChat() {
+  // Show the install CTA when the kars-sre sandbox isn't deployed —
+  // otherwise the iframe would just spin against a missing service.
+  const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
+  const installed = isSREInstalled(sandboxes);
+  if (installed === null) {
+    return (
+      <SectionBox title="💬 Chat with kars-sre">
+        <div style={{ padding: 16, fontSize: 13 }}>Loading cluster state…</div>
+      </SectionBox>
+    );
+  }
+  if (!installed) {
+    return <SREInstallCTA />;
+  }
   // Try localhost first (port-forward path), then the apiserver
   // service proxy fallback. Headlamp itself runs in the operator's
   // browser; the apiserver proxy URL only resolves when Headlamp's
