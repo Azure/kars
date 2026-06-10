@@ -1,7 +1,7 @@
 # kars Headlamp Plugin
 
 Adds an **kars** sidebar to the [Headlamp](https://headlamp.dev/) Kubernetes
-dashboard with list + detail views for the 9 kars custom resources:
+dashboard with list + detail views for the 11 kars custom resources:
 
 - KarsSandbox
 - InferencePolicy
@@ -12,6 +12,33 @@ dashboard with list + detail views for the 9 kars custom resources:
 - TrustGraph
 - KarsPairing
 - KarsEval
+- EgressApproval
+- **KarsSREAction** (Slice 3 — operator-approved typed apply-fix)
+
+## SRE Console (Slice 4 primary UX)
+
+`/kars/sre` is the dedicated console for the kars-sre operator —
+the page a new shift opens to triage cluster health. It bundles:
+
+- 🔴 **Pending Approval** — KarsSREActions awaiting the operator's
+  decision, with inline **Approve** / **Reject** buttons that
+  PATCH `.spec.approval.state` directly (no terminal hop).
+- 🔄 **In-flight** — actions the controller is currently
+  executing or watching for recovery.
+- 📊 **Cluster Health** — sandbox phase + degraded count summary.
+- 🚨 **Active Incidents** — failure-class events from `kars-*`
+  namespaces in the last 15 min (same filter the proactive
+  watcher uses).
+- ✅ **Recent** — terminal-phase actions (Recovered / Failed /
+  Expired / Rejected) from the last hour for post-incident review.
+
+Live-updates via Headlamp's `useList()` (watch + long-poll) so the
+Proposed → Approved → Applied → Recovered walk is visible without F5.
+
+The sibling **`/kars/sre/chat`** page embeds the Hermes WebUI in
+an iframe (local port-forward by default, apiserver service-proxy
+fallback). Run `kars connect sre --web --port 18789` in another
+terminal to populate the iframe.
 
 Detail panes show `.spec`, `.status`, and a typed Conditions table with
 status colouring (Ready / Provisioned → green, Degraded / Failed → red,

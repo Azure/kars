@@ -152,6 +152,18 @@ spec:
       # In-cluster apiserver — the SRE agent's primary counterparty.
       - host: kubernetes.default.svc.cluster.local
         port: 443
+      # Telegram Bot API — required when the operator configures
+      # TELEGRAM_BOT_TOKEN via `kars credentials update sre
+      # --telegram-token <T>` for Slice 4 channel + watcher alerts.
+      # Always allowed (Hermes only opens the channel when the token
+      # is present, so this is dormant otherwise — no extra exposure
+      # for clusters that don't use Telegram). NetworkPolicy egress is
+      # safe-by-default because the inference-router forward-proxy
+      # still enforces blocklist + audit on every connection.
+      - host: api.telegram.org
+        port: 443
+      - host: core.telegram.org
+        port: 443
 {{- if (.Values.sre | default dict).extraAllowedEndpoints }}
 {{- range (.Values.sre | default dict).extraAllowedEndpoints }}
       - host: {{ .host | quote }}
