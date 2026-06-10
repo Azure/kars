@@ -52,6 +52,8 @@ rules:
       - "egressapprovals/finalizers"
       - "karsauthconfigs"
       - "karsauthconfigs/status"
+      - "karssreactions"
+      - "karssreactions/status"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Create and manage sandbox namespaces
   - apiGroups: [""]
@@ -69,6 +71,16 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Slice 3 of kars-sre — typed actions RolloutRestart targets
+  # StatefulSet / DaemonSet as well. Read+patch is sufficient (we
+  # only ever rollout-restart, never create/delete those kinds).
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Slice 3 of kars-sre — DeleteResourceQuota typed action.
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list", "watch", "delete"]
   # KarsEval runs jobs and cronjobs to invoke the conformance runner
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
@@ -83,16 +95,31 @@ rules:
   # defaults to it on newer Kubernetes versions), so both groups
   # need the create/patch verb or the recorder log-spams
   # `events.events.k8s.io is forbidden` warnings on every reconcile.
+  # The kars-sre-action reconciler ALSO needs get/list/watch on
+  # events to observe workload recovery after applying a typed action
+  # (Slice 3 of kars-sre — recovery observer scans the target namespace
+  # for absence of FailedCreate / BackOff / FailedScheduling).
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
-    verbs: ["create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
   # Manage spawner role bindings for sandbox sub-agent creation
+  # AND the one-shot writer CRBs the kars-sre-action reconciler mints
+  # on Approved typed-action proposals (Slice 3 of kars-sre).
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterrolebindings"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Slice 3 of kars-sre — TokenRequest for the sre-writer SA
+  # (controller mints short-lived tokens when executing an approved
+  # KarsSREAction). Currently the structure ships but the execution
+  # path uses the controller's own SA — the §7.8.4 hardening uses the
+  # token. This rule lands the RBAC upfront so the hardening pass is
+  # a code-only change.
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
   # Leader election for mesh peer (only one replica connects to relay)
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]

@@ -347,7 +347,7 @@ def _walk_owner_graph(
     return out
 
 
-def sre_describe_resource(
+def _impl_sre_describe_resource(
     *,
     kind: str,
     namespace: str | None = None,
@@ -454,7 +454,7 @@ def sre_describe_resource(
 # --------------------------------------------------------------------------
 
 
-def sre_what_changed(
+def _impl_sre_what_changed(
     *,
     namespace: str | None = None,
     minutes: int = 15,
@@ -548,7 +548,7 @@ def sre_what_changed(
 # --------------------------------------------------------------------------
 
 
-def sre_endpoints_inspect(
+def _impl_sre_endpoints_inspect(
     *,
     namespace: str,
     service: str,
@@ -749,7 +749,7 @@ def _edit_distance(a: str, b: str) -> int:
     return prev[-1]
 
 
-def sre_image_probe(*, image: str, **_kwargs: Any) -> dict[str, Any]:
+def _impl_sre_image_probe(*, image: str, **_kwargs: Any) -> dict[str, Any]:
     """Tool: probe an image reference and suggest closest in-use tags.
 
     Slice 2 implementation: does NOT actually reach out to a registry
@@ -831,7 +831,7 @@ def sre_image_probe(*, image: str, **_kwargs: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def sre_top(
+def _impl_sre_top(
     *,
     scope: str = "pods",
     namespace: str | None = None,
@@ -1044,3 +1044,34 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     )
 
     logger.info("kars-sre Slice 2 (K8s diagnostic toolset) registered — 5 tools")
+
+
+# ─── Hermes-shape adapters ────────────────────────────────────────────
+# Hermes invokes tool handlers as `handler(args: dict, **ctx)`. Our
+# impl functions take **kwargs so they're easy to unit-test; these
+# adapters bridge the two surfaces.
+
+def sre_image_probe(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_image_probe(**args)
+
+def sre_what_changed(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_what_changed(**args)
+
+def sre_describe_resource(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_describe_resource(**args)
+
+def sre_top(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_top(**args)
+
+def sre_endpoints_inspect(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_endpoints_inspect(**args)

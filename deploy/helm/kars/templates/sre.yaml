@@ -343,4 +343,132 @@ subjects:
   - kind: ServiceAccount
     name: sandbox
     namespace: kars-sre
+---
+# ---------------------------------------------------------------------
+# Slice 3 — Typed apply-fix path (KarsSREAction CRD + writer SA)
+# ---------------------------------------------------------------------
+#
+# Per proposal §7.7 + §7.8.4. When the SRE agent diagnoses an incident
+# and identifies a typed fix (e.g. "delete this ResourceQuota that's
+# blocking the deployment"), it emits a KarsSREAction CR. The operator
+# approves (CLI / Telegram), the controller mints a short-lived token
+# scoped to JUST the (verb, resource, namespace) the action needs,
+# executes via that token, and tears down the binding.
+#
+# The pieces below provide:
+#   1. SA `sre-writer` (kars-sre) — the identity the controller mints
+#      tokens for. No auto-mount; controller-only path.
+#   2. Two narrow writer ClusterRoles — one for `resourcequotas`, one
+#      for the workload kinds the typed actions cover. The one-shot
+#      ClusterRoleBinding the controller mints binds the RIGHT one
+#      for the action's kind, keeping blast radius small.
+#   3. ClusterRole `kars-sre-action-author` — bound to the SRE
+#      sandbox SA so the agent can CREATE KarsSREAction CRs.
+#   4. ClusterRole `kars:sre-approver` — for human / group
+#      bindings (operator-facing). Cluster admin binds it manually.
+# ---------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-writer
+  namespace: kars-sre
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    kars.azure.com/role: sre-writer
+  annotations:
+    # No auto-mount. The controller mints tokens via TokenRequest
+    # (in a future hardening pass — Slice 3 today uses the
+    # controller's own SA for the action execution; the writer SA
+    # structure lands the §7.8.4 architecture).
+    kars.azure.com/no-automount: "true"
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-writer-quotas
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-writer-workloads
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+---
+# Bound to the SRE sandbox SA so the agent can CREATE / GET / LIST /
+# WATCH its own KarsSREAction CRs. The agent CANNOT update
+# `.spec.approval` — that's the operator's prerogative, gated by the
+# `kars:sre-approver` ClusterRole below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-action-author
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreactions"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreactions/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-sre-action-author
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kars-sre-action-author
+subjects:
+  - kind: ServiceAccount
+    name: sandbox
+    namespace: kars-sre
+---
+# Operator-facing role. Cluster admin binds humans / groups to
+# this manually (e.g.
+#   kubectl create clusterrolebinding sre-approvers \
+#       --clusterrole=kars:sre-approver --group=oncall@example.com).
+# We intentionally do NOT pre-bind any subjects from the chart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars:sre-approver
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreactions"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreactions/status"]
+    verbs: ["get"]
 {{- end }}

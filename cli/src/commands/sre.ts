@@ -245,5 +245,232 @@ export function sreCommand(): Command {
       }
     });
 
+  // ──────────────────────────────────────────────────────────────────
+  // Slice 3 — Typed apply-fix approval surface (KarsSREAction)
+  //
+  // The SRE agent diagnoses, then EMITS a KarsSREAction CR in
+  // `kars-sre`. Phase=Proposed, approval.state=Pending. The operator
+  // uses these subcommands to approve / reject / list. On approve, the
+  // kars-controller's kars_sre_action reconciler mints a one-shot
+  // ClusterRoleBinding, executes the typed action, and tears the
+  // binding down. The whole flow is one CR per incident.
+  // ──────────────────────────────────────────────────────────────────
+  cmd
+    .command("approve <action-id>")
+    .description("Approve a pending KarsSREAction proposal — authorises the controller to execute")
+    .option("--context <name>", "kubectl context to use")
+    .option("--note <text>", "Optional human-readable note attached to the decision (surfaces in audit)")
+    .action(async (actionId: string, options: { context?: string; note?: string }) => {
+      const kctxArgs = options.context ? ["--context", options.context] : [];
+      const patch: { spec: { approval: { state: string; note?: string } } } = {
+        spec: { approval: { state: "Approved" } },
+      };
+      if (options.note) patch.spec.approval.note = options.note;
+      console.log(chalk.cyan(`▸ approving KarsSREAction ${actionId}…`));
+      try {
+        await execa(
+          "kubectl",
+          [
+            ...kctxArgs,
+            "-n",
+            "kars-sre",
+            "patch",
+            "karssreaction",
+            actionId,
+            "--type=merge",
+            "-p",
+            JSON.stringify(patch),
+          ],
+          { stdio: "inherit" },
+        );
+        console.log(chalk.green(`✓ approved — controller will execute on next reconcile`));
+        console.log(chalk.dim(`  watch:  kubectl -n kars-sre get karssreaction ${actionId} -w`));
+      } catch {
+        console.error(chalk.red(`✗ approve failed — does ${actionId} exist in kars-sre?`));
+        process.exit(1);
+      }
+    });
+
+  cmd
+    .command("reject <action-id>")
+    .description("Reject a pending KarsSREAction proposal — controller will NOT execute")
+    .option("--context <name>", "kubectl context to use")
+    .option("--reason <text>", "Optional reason for the rejection (surfaces in audit)")
+    .action(async (actionId: string, options: { context?: string; reason?: string }) => {
+      const kctxArgs = options.context ? ["--context", options.context] : [];
+      const patch: { spec: { approval: { state: string; note?: string } } } = {
+        spec: { approval: { state: "Rejected" } },
+      };
+      if (options.reason) patch.spec.approval.note = options.reason;
+      console.log(chalk.cyan(`▸ rejecting KarsSREAction ${actionId}…`));
+      try {
+        await execa(
+          "kubectl",
+          [
+            ...kctxArgs,
+            "-n",
+            "kars-sre",
+            "patch",
+            "karssreaction",
+            actionId,
+            "--type=merge",
+            "-p",
+            JSON.stringify(patch),
+          ],
+          { stdio: "inherit" },
+        );
+        console.log(chalk.green(`✓ rejected`));
+      } catch {
+        console.error(chalk.red(`✗ reject failed — does ${actionId} exist in kars-sre?`));
+        process.exit(1);
+      }
+    });
+
+  cmd
+    .command("actions")
+    .description("List recent KarsSREAction proposals (alias: `kubectl get karssreactions -n kars-sre`)")
+    .option("--context <name>", "kubectl context to use")
+    .option("--all-namespaces", "List from every namespace (operator may have created elsewhere)")
+    .action(async (options: { context?: string; allNamespaces?: boolean }) => {
+      const kctxArgs = options.context ? ["--context", options.context] : [];
+      const scopeArgs = options.allNamespaces ? ["-A"] : ["-n", "kars-sre"];
+      try {
+        await execa(
+          "kubectl",
+          [...kctxArgs, ...scopeArgs, "get", "karssreactions"],
+          { stdio: "inherit" },
+        );
+      } catch {
+        console.error(chalk.yellow("⚠ no KarsSREActions yet — agent emits these on `sre_propose_fix`"));
+      }
+    });
+
+  cmd
+    .command("show <action-id>")
+    .description("Show the full details of a KarsSREAction proposal — diagnosis, rationale, action target, approval state, status conditions. Use this before `kars sre approve` to review what you're authorising.")
+    .option("--context <name>", "kubectl context to use")
+    .option("--yaml", "Print raw YAML instead of the pretty summary")
+    .action(async (actionId: string, options: { context?: string; yaml?: boolean }) => {
+      const kctxArgs = options.context ? ["--context", options.context] : [];
+      if (options.yaml) {
+        try {
+          await execa(
+            "kubectl",
+            [...kctxArgs, "-n", "kars-sre", "get", "karssreaction", actionId, "-o", "yaml"],
+            { stdio: "inherit" },
+          );
+        } catch {
+          console.error(chalk.red(`✗ ${actionId} not found in kars-sre`));
+          process.exit(1);
+        }
+        return;
+      }
+      // Pretty-print: fetch JSON and format key fields.
+      let cr: {
+        metadata?: { name?: string; namespace?: string; creationTimestamp?: string };
+        spec?: {
+          action?: { type?: string; params?: Record<string, unknown> };
+          approval?: { state?: string; note?: string };
+          diagnosis?: string;
+          rationale?: string;
+          ttlMinutes?: number;
+        };
+        status?: {
+          phase?: string;
+          appliedAt?: string;
+          writerCrbName?: string;
+          conditions?: Array<{ type: string; status: string; reason?: string; message?: string }>;
+        };
+      };
+      try {
+        const { stdout } = await execa(
+          "kubectl",
+          [...kctxArgs, "-n", "kars-sre", "get", "karssreaction", actionId, "-o", "json"],
+          { stdio: "pipe" },
+        );
+        cr = JSON.parse(stdout);
+      } catch {
+        console.error(chalk.red(`✗ ${actionId} not found in kars-sre`));
+        process.exit(1);
+        return;
+      }
+      const spec = cr.spec ?? {};
+      const status = cr.status ?? {};
+      const action = spec.action ?? {};
+      const approval = spec.approval ?? {};
+      const phase = status.phase ?? chalk.dim("(not yet reconciled)");
+      const approvalState = approval.state ?? chalk.dim("(unset)");
+      const phaseColour =
+        status.phase === "Recovered"
+          ? chalk.green
+          : status.phase === "Applied"
+          ? chalk.cyan
+          : status.phase === "Failed" || status.phase === "Rejected" || status.phase === "Expired"
+          ? chalk.red
+          : chalk.yellow;
+      const approvalColour =
+        approval.state === "Approved"
+          ? chalk.green
+          : approval.state === "Rejected"
+          ? chalk.red
+          : chalk.yellow;
+
+      console.log("");
+      console.log(chalk.bold.cyan(`── KarsSREAction ${actionId} ──`));
+      console.log(`  ${chalk.bold("Namespace:")}     ${cr.metadata?.namespace ?? "?"}`);
+      console.log(`  ${chalk.bold("Created:")}       ${cr.metadata?.creationTimestamp ?? "?"}`);
+      console.log(`  ${chalk.bold("Phase:")}         ${phaseColour(phase)}`);
+      console.log(`  ${chalk.bold("Approval:")}      ${approvalColour(approvalState)}`);
+      if (approval.note) {
+        console.log(`  ${chalk.bold("Approver note:")} ${approval.note}`);
+      }
+      if (spec.ttlMinutes) {
+        console.log(`  ${chalk.bold("TTL minutes:")}   ${spec.ttlMinutes}`);
+      }
+      console.log("");
+      console.log(chalk.bold.cyan("── Proposed action ──"));
+      console.log(`  ${chalk.bold("Type:")}          ${chalk.magenta(action.type ?? "?")}`);
+      if (action.params) {
+        for (const [k, v] of Object.entries(action.params)) {
+          console.log(`  ${chalk.bold(k.padEnd(13) + ":")} ${typeof v === "string" ? v : JSON.stringify(v)}`);
+        }
+      }
+      if (spec.diagnosis) {
+        console.log("");
+        console.log(chalk.bold.cyan("── Diagnosis ──"));
+        console.log(`  ${spec.diagnosis}`);
+      }
+      if (spec.rationale) {
+        console.log("");
+        console.log(chalk.bold.cyan("── Rationale ──"));
+        // Wrap at ~88 cols for readable terminal output
+        const wrapped = spec.rationale.match(/.{1,88}(\s|$)|\S+/g) ?? [spec.rationale];
+        for (const line of wrapped) console.log(`  ${line.trim()}`);
+      }
+      if (status.appliedAt || status.writerCrbName) {
+        console.log("");
+        console.log(chalk.bold.cyan("── Execution ──"));
+        if (status.appliedAt) console.log(`  ${chalk.bold("Applied at:")}   ${status.appliedAt}`);
+        if (status.writerCrbName)
+          console.log(`  ${chalk.bold("Writer CRB:")}   ${status.writerCrbName}`);
+      }
+      if (status.conditions && status.conditions.length) {
+        console.log("");
+        console.log(chalk.bold.cyan("── Conditions ──"));
+        for (const c of status.conditions) {
+          const sym = c.status === "True" ? chalk.green("✓") : chalk.yellow("·");
+          const reason = c.reason ? chalk.dim(`(${c.reason})`) : "";
+          console.log(`  ${sym} ${chalk.bold(c.type.padEnd(10))} ${c.status}  ${reason}`);
+          if (c.message) console.log(`     ${chalk.dim(c.message)}`);
+        }
+      }
+      console.log("");
+      if (approval.state !== "Approved" && approval.state !== "Rejected") {
+        console.log(chalk.dim(`  approve:  kars sre approve ${actionId}`));
+        console.log(chalk.dim(`  reject:   kars sre reject ${actionId} --reason "..."`));
+      }
+      console.log("");
+    });
+
   return cmd;
 }

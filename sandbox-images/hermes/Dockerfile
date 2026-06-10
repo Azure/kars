@@ -90,6 +90,23 @@ RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
 ARG HERMES_VERSION=0.15.2
 RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
 
+# ---- Channel adapter libraries -----------------------------------------
+# Hermes auto-detects channels (Telegram / Slack / Discord) from env
+# vars (TELEGRAM_BOT_TOKEN, SLACK_BOT_TOKEN, DISCORD_BOT_TOKEN) and
+# tries to instantiate an adapter per channel. Each adapter is a
+# soft-optional dep — Hermes itself doesn't pull them — so we install
+# them here so the kars runtime image is "channels work out of the box"
+# when a credentials secret carries the token. Pinned to the
+# adapter-stable major:
+#   - python-telegram-bot 21.x   (Bot API 7.x, async-first)
+#   - slack-sdk 3.x              (Web + Socket Mode)
+#   - discord.py 2.x             (gateway client)
+# Bumping these requires re-verifying the Hermes channel adapters.
+RUN pip install --no-cache-dir \
+    "python-telegram-bot>=21,<22" \
+    "slack-sdk>=3,<4" \
+    "discord.py>=2,<3"
+
 # ---- Install the kars-runtime-hermes plugin -----------------------------
 # This is the in-pod adapter that registers kars_spawn, foundry_*,
 # governance pre_tool_call hook, channel translation, etc.

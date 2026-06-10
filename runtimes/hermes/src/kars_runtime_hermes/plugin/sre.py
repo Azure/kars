@@ -236,7 +236,7 @@ def _summarise_cr(item: dict[str, Any], kind: str) -> dict[str, Any]:
     }
 
 
-def sre_describe_state(**_kwargs: Any) -> dict[str, Any]:
+def _impl_sre_describe_state(**_kwargs: Any) -> dict[str, Any]:
     """Tool: structured snapshot of every kars-owned CR in the cluster.
 
     Returns a dict keyed by CR kind whose values are lists of summarised
@@ -264,7 +264,7 @@ def sre_describe_state(**_kwargs: Any) -> dict[str, Any]:
     return out
 
 
-def sre_logs(
+def _impl_sre_logs(
     *,
     namespace: str,
     pod: str,
@@ -309,7 +309,7 @@ def sre_logs(
         return {"namespace": namespace, "pod": pod, "container": container, "error": str(exc)}
 
 
-def sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
+def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
     """Tool: walk the kars-CR health checklist.
 
     Returns a structured report:
@@ -380,7 +380,7 @@ def sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
     return report
 
 
-def sre_explain_error(*, error: str, **_kwargs: Any) -> dict[str, Any]:
+def _impl_sre_explain_error(*, error: str, **_kwargs: Any) -> dict[str, Any]:
     """Tool: match an error string against the OOTB-blocker corpus.
 
     Returns the first matching entry's hypothesis + next_steps, or
@@ -404,58 +404,98 @@ def sre_explain_error(*, error: str, **_kwargs: Any) -> dict[str, Any]:
     }
 
 
-def sre_propose_fix(
+def _impl_sre_propose_fix(
     *,
     diagnosis: str,
     target: dict[str, Any] | None = None,
+    rationale: str | None = None,
+    ttl_minutes: int | None = None,
+    action_type: str | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
-    """Tool: propose a typed action (read-only — no execution).
+    """Tool: propose a typed action AND create a KarsSREAction CR (Slice 3).
+
+    Slice 1 returned a proposal envelope only. Slice 3 EXTENDS the same
+    tool: when the proposal carries a typed action, the tool also POSTs
+    a ``KarsSREAction`` CR to ``kars-sre`` namespace with phase
+    ``Proposed`` and ``approval.state=Pending``. The CR is the
+    operator's approval surface — they flip
+    ``.spec.approval.state="Approved"`` via ``kars sre approve <id>``
+    (or directly in ``kubectl edit``) to authorise execution.
+
+    On approval, the controller mints a one-shot ClusterRoleBinding,
+    executes the typed action, tears the binding down, and watches the
+    target workload for recovery. The whole flow is one CR per
+    incident; the agent never executes anything directly.
 
     Args:
-        diagnosis: short string describing what the agent has concluded
-                   (e.g. "ResourceQuota platform-hardening-quota in
-                   kars-research is blocking pod admission").
-        target:    optional dict carrying the resource the proposal acts on,
-                   e.g. {"kind": "ResourceQuota", "namespace": "kars-research",
-                         "name": "platform-hardening-quota"}.
+        diagnosis: short string describing what the agent concluded.
+        target:    {"kind", "namespace", "name"} of the resource the
+                   proposal acts on. ``kind`` determines the typed action.
+        action_type: optional explicit override for the typed action
+                   (one of ``DeleteResourceQuota``, ``PatchDeploymentImage``,
+                   ``ScaleDeployment``, ``RolloutRestart``, ``DeletePod``).
+                   When set, takes precedence over the kind inferred
+                   from ``target.kind``.
+        rationale: optional one-paragraph operator-facing rationale
+                   (audit-grade). When unset, a sensible default is
+                   used per action kind.
+        ttl_minutes: optional proposal TTL (default 15, max 60).
 
-    Returns a proposal envelope with the typed-action payload. Slice 1
-    is read-only: the proposal is returned to the agent (who relays it
-    to the operator); Slice 3 (`sre_apply_fix`) adds the execution
-    path with TokenRequest + admission gate.
+    Returns the proposal envelope. When a CR was successfully created,
+    the envelope includes ``action_id`` (the CR name) and ``cr_created=True``;
+    the operator copy-pastes that ID into ``kars sre approve``.
     """
     target = target or {}
+    # Tolerant key lookup — accept several spellings the agent may use.
+    target_kind = (
+        target.get("kind")
+        or target.get("type")
+        or _kwargs.get("kind")
+        or _kwargs.get("target_kind")
+    )
+    # Infer kind from explicit action_type override if still unknown.
+    if not target_kind and action_type:
+        target_kind = {
+            "DeleteResourceQuota": "ResourceQuota",
+            "DeletePod": "Pod",
+            "ScaleDeployment": "Deployment",
+            "PatchDeploymentImage": "Deployment",
+            "RolloutRestart": "Deployment",
+        }.get(action_type)
+
     proposal: dict[str, Any] = {
         "kind": "FixProposal",
         "diagnosis": diagnosis,
-        "target": target,
+        "target": {**target, "kind": target_kind} if target_kind else target,
         "action": None,
-        "rationale": None,
-        "execution_status": "proposed (Slice 1 — not executed; awaiting Slice 3 sre_apply_fix)",
+        "rationale": rationale,
+        "execution_status": "proposed (awaiting operator approval — run `kars sre approve <action_id>`)",
+        "cr_created": False,
+        "action_id": None,
     }
 
-    target_kind = target.get("kind")
-
-    # The typed-action set is the proposal §7.7.1 closed set. Slice 1+2
-    # codify the actions the demo flow needs; the rest land in Slice 3
-    # alongside the apply-fix execution path. Slice 1 returns the
-    # proposal envelope; the operator applies manually per the runbook.
-    if target_kind == "ResourceQuota":
+    # Explicit action_type overrides kind-based inference.
+    if action_type == "DeleteResourceQuota" or (
+        action_type is None and target_kind == "ResourceQuota"
+    ):
         proposal["action"] = {
             "type": "DeleteResourceQuota",
             "namespace": target.get("namespace"),
             "name": target.get("name"),
         }
-        proposal["rationale"] = (
-            "Operator-applied ResourceQuotas without the "
-            "kars.azure.com/managed-by=controller label are safely deletable "
-            "by the SRE agent (per §7.7.1). Removing this quota restores "
-            "the namespace's pod admission and the controller will "
-            "schedule a fresh sandbox pod."
-        )
-    elif target_kind in {"Deployment", "StatefulSet", "DaemonSet"} and "image" in (
-        _kwargs or {}
+        if not proposal["rationale"]:
+            proposal["rationale"] = (
+                "Operator-applied ResourceQuotas without the "
+                "kars.azure.com/managed-by=controller label are safely deletable "
+                "by the SRE agent (per §7.7.1). Removing this quota restores "
+                "the namespace's pod admission and the controller will "
+                "schedule a fresh sandbox pod."
+            )
+    elif action_type == "PatchDeploymentImage" or (
+        action_type is None
+        and target_kind in {"Deployment", "StatefulSet", "DaemonSet"}
+        and "image" in _kwargs
     ):
         proposal["action"] = {
             "type": "PatchDeploymentImage",
@@ -464,30 +504,151 @@ def sre_propose_fix(
             "container": _kwargs.get("container"),
             "image": _kwargs.get("image"),
         }
-        proposal["rationale"] = (
-            "Patch the container image to the proposed value. The target "
-            "namespace must not be in the protected denylist (kars-system, "
-            "kars-sre, kube-system, etc. — §7.7.1)."
-        )
-    elif target_kind in {"Deployment", "StatefulSet"} and "replicas" in (_kwargs or {}):
+        if not proposal["rationale"]:
+            proposal["rationale"] = (
+                "Patch the container image to the proposed value. The target "
+                "namespace must not be in the protected denylist (kars-system, "
+                "kars-sre, kube-system, etc. — §7.7.1)."
+            )
+    elif action_type == "ScaleDeployment" or (
+        action_type is None
+        and target_kind in {"Deployment", "StatefulSet"}
+        and "replicas" in _kwargs
+    ):
         proposal["action"] = {
             "type": "ScaleDeployment",
             "namespace": target.get("namespace"),
             "name": target.get("name"),
             "replicas": _kwargs.get("replicas"),
         }
-        proposal["rationale"] = "Scale the workload's replica count."
+        if not proposal["rationale"]:
+            proposal["rationale"] = "Scale the workload's replica count."
+    elif action_type == "RolloutRestart" or (
+        action_type is None
+        and target_kind in {"Deployment", "StatefulSet", "DaemonSet"}
+        and _kwargs.get("rollout_restart")
+    ):
+        proposal["action"] = {
+            "type": "RolloutRestart",
+            "namespace": target.get("namespace"),
+            "name": target.get("name"),
+            "kind": target_kind or "Deployment",
+        }
+        if not proposal["rationale"]:
+            proposal["rationale"] = (
+                "Trigger a rolling restart by patching the pod template's "
+                "kubectl.kubernetes.io/restartedAt annotation. Useful for "
+                "config-map / secret reloads or transient pod-level wedges."
+            )
+    elif action_type == "DeletePod" or (action_type is None and target_kind == "Pod"):
+        proposal["action"] = {
+            "type": "DeletePod",
+            "namespace": target.get("namespace"),
+            "name": target.get("name"),
+        }
+        if not proposal["rationale"]:
+            proposal["rationale"] = (
+                "Delete the pod so its owning controller (ReplicaSet, "
+                "StatefulSet, DaemonSet, Job) reconciles a fresh instance. "
+                "Use sparingly — only when the workload is stuck in a "
+                "state a restart would clear."
+            )
     else:
-        # Generic envelope for unknown target kinds — Slice 1 returns
-        # the proposal text without a typed action; Slice 3 widens
-        # the typed-action set.
-        proposal["rationale"] = (
-            "No typed action codified yet for this target kind. The "
-            "proposal text alone is returned; the operator can apply "
-            "manually per the demo runbook."
+        # No action could be inferred — tell the agent what's missing
+        # so it can retry with the right shape rather than silently
+        # falling back to "manual fix".
+        missing = []
+        if not target_kind:
+            missing.append("target.kind (or action_type)")
+        if not target.get("namespace"):
+            missing.append("target.namespace")
+        if not target.get("name"):
+            missing.append("target.name")
+        proposal["cr_error"] = (
+            "Could not infer typed action from arguments. "
+            f"Provide {', '.join(missing) if missing else 'a supported target.kind: ResourceQuota / Pod / Deployment / StatefulSet / DaemonSet'}. "
+            "Alternatively, pass action_type explicitly "
+            "(DeleteResourceQuota, DeletePod, ScaleDeployment, PatchDeploymentImage, RolloutRestart)."
         )
+        if not proposal["rationale"]:
+            proposal["rationale"] = proposal["cr_error"]
+
+    # Slice 3 — if we have a typed action, create the KarsSREAction CR
+    # so the operator has an approve surface. Failures here are
+    # non-fatal: the agent still returns the proposal text and the
+    # operator can fall back to the manual runbook.
+    if proposal["action"] is not None:
+        try:
+            action_id = _create_karssreaction_cr(
+                action=proposal["action"],
+                diagnosis=diagnosis,
+                rationale=proposal["rationale"],
+                ttl_minutes=ttl_minutes,
+            )
+            proposal["action_id"] = action_id
+            proposal["cr_created"] = True
+            proposal["approve_command"] = f"kars sre approve {action_id}"
+            proposal["reject_command"] = f"kars sre reject {action_id}"
+        except Exception as e:  # noqa: BLE001 — surface the error in the envelope
+            proposal["cr_created"] = False
+            proposal["cr_error"] = str(e)
+            logger.warning("sre_propose_fix: KarsSREAction CR create failed: %s", e)
 
     return proposal
+
+
+def _create_karssreaction_cr(
+    *,
+    action: dict[str, Any],
+    diagnosis: str,
+    rationale: str | None,
+    ttl_minutes: int | None,
+) -> str:
+    """POST a KarsSREAction CR to ``kars-sre`` and return its name.
+
+    The CR is generated with the K8s-side ``generateName`` mechanism so
+    the apiserver picks a unique name (``sre-action-<5-char-suffix>``)
+    on every call — no agent-side name collision risk.
+
+    Schema is per ``controller/src/kars_sre_action.rs``: flat action
+    payload from the proposal is reshaped into
+    ``{type, params: {...}}`` to match the CRD.
+    """
+    kube = sre_kube.client()
+    # Reshape the flat proposal action → CRD `{type, params}` shape.
+    action_type = action.get("type")
+    params = {k: v for k, v in action.items() if k != "type"}
+    body: dict[str, Any] = {
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsSREAction",
+        "metadata": {
+            "generateName": "sre-action-",
+            "namespace": "kars-sre",
+            "labels": {
+                "app.kubernetes.io/component": "sre",
+                "kars.azure.com/sre-action-type": str(action_type or "unknown"),
+            },
+        },
+        "spec": {
+            "action": {
+                "type": action_type,
+                "params": params,
+            },
+            "approval": {"state": "Pending"},
+            "diagnosis": diagnosis[:512] if diagnosis else None,
+            "rationale": rationale[:2048] if rationale else None,
+        },
+    }
+    if ttl_minutes is not None:
+        body["spec"]["ttlMinutes"] = max(1, min(60, int(ttl_minutes)))
+    # Drop None spec fields — the CRD treats them as unset, not null.
+    body["spec"] = {k: v for k, v in body["spec"].items() if v is not None}
+
+    created = kube.post(
+        "/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions",
+        json=body,
+    )
+    return str(created.get("metadata", {}).get("name", "<unknown>"))
 
 
 # --------------------------------------------------------------------------
@@ -611,10 +772,12 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
         name="sre_propose_fix",
         toolset="sre",
         description=(
-            "Return a typed-action proposal for the operator to approve. "
-            "READ-ONLY in Slice 1 — Slice 3 adds sre_apply_fix to execute "
-            "approved proposals. Use after diagnosing a problem to surface "
-            "the recommended remediation."
+            "Propose a typed-action fix AND create the KarsSREAction CR "
+            "the operator approves to authorise execution. Returns an "
+            "action_id the operator pastes into `kars sre approve <id>`. "
+            "Always called AFTER diagnosis. REQUIRES target.kind (or "
+            "explicit action_type) — without it no CR is created and "
+            "the envelope's cr_error field tells you what's missing."
         ),
         schema={
             "type": "object",
@@ -625,15 +788,60 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
                 },
                 "target": {
                     "type": "object",
-                    "description": "Resource the proposal acts on (kind/namespace/name)",
+                    "description": (
+                        "Resource the proposal acts on. `kind` is REQUIRED "
+                        "(one of ResourceQuota / Pod / Deployment / StatefulSet / "
+                        "DaemonSet) so the right typed action can be inferred."
+                    ),
                     "properties": {
-                        "kind": {"type": "string"},
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "ResourceQuota",
+                                "Pod",
+                                "Deployment",
+                                "StatefulSet",
+                                "DaemonSet",
+                            ],
+                            "description": "Kubernetes Kind of the target — REQUIRED",
+                        },
                         "namespace": {"type": "string"},
                         "name": {"type": "string"},
                     },
+                    "required": ["kind", "namespace", "name"],
+                },
+                "action_type": {
+                    "type": "string",
+                    "enum": [
+                        "DeleteResourceQuota",
+                        "PatchDeploymentImage",
+                        "ScaleDeployment",
+                        "RolloutRestart",
+                        "DeletePod",
+                    ],
+                    "description": (
+                        "Optional explicit override — when set, takes precedence "
+                        "over the kind inferred from target.kind. Use this when "
+                        "the same target.kind maps to multiple actions "
+                        "(e.g. Deployment → Scale vs PatchImage vs RolloutRestart)."
+                    ),
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": (
+                        "Optional operator-facing rationale (≤ 2048 chars). "
+                        "Falls back to a per-action default if unset."
+                    ),
+                },
+                "ttl_minutes": {
+                    "type": "integer",
+                    "description": (
+                        "Optional CR auto-expire window in minutes (default 15, max 60). "
+                        "Beyond this, the proposal lapses to Expired without operator action."
+                    ),
                 },
             },
-            "required": ["diagnosis"],
+            "required": ["diagnosis", "target"],
         },
         handler=sre_propose_fix,
     )
@@ -645,3 +853,34 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     sre_k8s.register(ctx)
 
     logger.info("kars-sre plugin registered (Slice 1: 5 read-only kars-CR tools; Slice 2: 5 K8s diag tools)")
+
+
+# ─── Hermes-shape adapters ────────────────────────────────────────────
+# Hermes invokes tool handlers as `handler(args: dict, **ctx)`. Our
+# impl functions take **kwargs so they're easy to unit-test; these
+# adapters bridge the two surfaces.
+
+def sre_explain_error(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_explain_error(**args)
+
+def sre_describe_state(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_describe_state(**args)
+
+def sre_diagnose(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_diagnose(**args)
+
+def sre_propose_fix(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_propose_fix(**args)
+
+def sre_logs(args=None, **_ctx):  # noqa: ANN001 — Hermes call shape
+    if args is None:
+        args = {}
+    return _impl_sre_logs(**args)

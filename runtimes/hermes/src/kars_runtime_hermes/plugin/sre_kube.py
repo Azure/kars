@@ -114,6 +114,19 @@ class KubeClient:
         resp.raise_for_status()
         return resp.json()
 
+    def post(self, path: str, *, json: dict[str, Any]) -> dict[str, Any]:
+        """POST ``json`` to ``path`` on the apiserver, return parsed JSON.
+
+        Used by the SRE plugin to CREATE KarsSREAction CRs (Slice 3 of
+        kars-sre — typed apply-fix proposals). The SRE sandbox SA has
+        ``create`` on ``karssreactions.kars.azure.com`` via the chart-
+        shipped ``kars-sre-action-author`` ClusterRole.
+        """
+        client = self._ensure_client()
+        resp = client.post(path, json=json)
+        resp.raise_for_status()
+        return resp.json()
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
