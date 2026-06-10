@@ -45,6 +45,18 @@ import {
   StatusLabel,
 } from "@kinvolk/headlamp-plugin/lib/CommonComponents";
 import { useTheme } from "@mui/material/styles";
+import {
+  Button,
+  Chip,
+  Stack,
+  Tab,
+  Tabs,
+  TextField,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+} from "@mui/material";
 import * as React from "react";
 
 const GROUP = "kars.azure.com";
@@ -69,6 +81,7 @@ const KARS_CRDS: CrdDescriptor[] = [
   { plural: "karspairings",     singular: "karspairing",    kind: "KarsPairing",     label: "Pairings" },
   { plural: "karsevals",        singular: "karseval",       kind: "KarsEval",        label: "Evals",             phaseField: "phase" },
   { plural: "egressapprovals",  singular: "egressapproval", kind: "EgressApproval",  label: "Egress Approvals",  phaseField: "phase" },
+  { plural: "karssreactions",   singular: "karssreaction",  kind: "KarsSREAction",   label: "SRE Actions",       phaseField: "phase" },
 ];
 
 const CRD_CLASSES: Record<string, KubeObjectClass> = Object.fromEntries(
@@ -153,6 +166,65 @@ for (const crd of KARS_CRDS) {
     component: () => <CrdDetail crd={crd} />,
   });
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// SRE Console — primary UX for the kars-sre operator
+// ──────────────────────────────────────────────────────────────────────
+//
+// Pinned to its own top-level sidebar branch so the SRE engineer has
+// a dedicated landing page rather than browsing through the 11 CRD
+// list pages every shift. Three sub-entries:
+//
+//   /kars/sre         — Console (pending approvals + in-flight + recent)
+//   /kars/sre/chat    — Embedded Hermes WebUI iframe for the sre sandbox
+//   /kars/sre/actions — Filtered KarsSREAction list (same as
+//                       /kars/karssreactions, but reached via the SRE
+//                       navigation tree)
+
+registerSidebarEntry({
+  parent: "kars",
+  name: "kars-sre-root",
+  label: "SRE",
+  icon: "mdi:stethoscope",
+  url: "/kars/sre",
+});
+
+registerSidebarEntry({
+  parent: "kars-sre-root",
+  name: "kars-sre-console",
+  label: "Console",
+  url: "/kars/sre",
+});
+
+registerRoute({
+  path: "/kars/sre",
+  sidebar: "kars-sre-console",
+  name: "kars-sre-console",
+  exact: true,
+  component: () => <SREConsole />,
+});
+
+registerSidebarEntry({
+  parent: "kars-sre-root",
+  name: "kars-sre-chat",
+  label: "Chat",
+  url: "/kars/sre/chat",
+});
+
+registerRoute({
+  path: "/kars/sre/chat",
+  sidebar: "kars-sre-chat",
+  name: "kars-sre-chat",
+  exact: true,
+  component: () => <SREChat />,
+});
+
+registerSidebarEntry({
+  parent: "kars-sre-root",
+  name: "kars-sre-actions",
+  label: "Actions",
+  url: "/kars/karssreactions",
+});
 
 // ──────────────────────────────────────────────────────────────────────
 // Helpers
@@ -2030,6 +2102,561 @@ function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxName: str
           </Link>
         </div>
       )}
+    </SectionBox>
+  );
+}
+// ──────────────────────────────────────────────────────────────────────
+// SRE Console
+// ──────────────────────────────────────────────────────────────────────
+//
+// Primary landing page for the kars-sre operator. Mirrors what a
+// human SRE engineer wants on shift open:
+//
+//   1. 🔴 Pending — KarsSREActions awaiting their decision. Inline
+//      Approve / Reject buttons PATCH the CR's .spec.approval.state
+//      so the operator never leaves the page to drive the apply path.
+//   2. 🔄 In-flight — actions the controller is currently executing
+//      or watching for recovery. Visible phase + age so a stuck
+//      Applied (waiting for Recovered) is obvious.
+//   3. ✅ Recent — terminal-phase actions from the last hour for
+//      post-incident review.
+//   4. 📊 Cluster health — sandbox phase counts + controller status
+//      (same data the `kars sre diagnose` tool returns).
+//   5. 🚨 Active incidents — failure-class events from kars-*
+//      namespaces in the last 15 min (same filter the proactive
+//      watcher uses).
+//
+// All cards live-update via the standard headlamp useList() hook
+// (which long-polls + watches), so phase walks Proposed → Approved
+// → Applied → Recovered visibly without F5.
+
+const KarsSREActionClass = CRD_CLASSES.karssreactions!;
+
+function srePhaseChip(phase: string | undefined, approval: string | undefined) {
+  // Combined phase+approval rendering. Phase wins, but a Pending
+  // phase with Approved=true is highlighted because the controller
+  // is in the middle of executing.
+  let label = phase || "Proposed";
+  let kind: StatusKind = "warning";
+  switch (phase) {
+    case "Recovered":
+      kind = "success";
+      break;
+    case "Applied":
+      kind = approval === "Approved" ? "" : "warning";
+      label = "Applied · waiting recovery";
+      break;
+    case "Failed":
+    case "Rejected":
+    case "Expired":
+      kind = "error";
+      break;
+    case undefined:
+    case "":
+    case "Proposed":
+      // Operator hasn't acted yet → highlight pending state
+      kind = approval === "Approved" ? "" : "warning";
+      label = approval === "Approved" ? "Approved · queued" : "Proposed";
+      break;
+  }
+  return <StatusLabel status={kind}>{label}</StatusLabel>;
+}
+
+function ApproveRejectButtons({
+  item,
+  busy,
+  setBusy,
+}: {
+  item: KubeObject;
+  busy: boolean;
+  setBusy: (b: boolean) => void;
+}) {
+  const [error, setError] = React.useState<string | null>(null);
+
+  const patch = async (state: "Approved" | "Rejected", note?: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      // Server-side merge patch. The CR's .spec.approval is a
+      // small object (state + optional note); a partial merge
+      // patch overwrites it cleanly.
+      await (item as any).patch({
+        spec: { approval: { state, ...(note ? { note } : {}) } },
+      });
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Stack direction="row" spacing={1} alignItems="center">
+      <Button
+        variant="contained"
+        color="success"
+        size="small"
+        disabled={busy}
+        onClick={() => patch("Approved")}
+      >
+        Approve
+      </Button>
+      <Button
+        variant="outlined"
+        color="error"
+        size="small"
+        disabled={busy}
+        onClick={() => {
+          const reason = window.prompt("Optional reason (audit-visible)") ?? undefined;
+          patch("Rejected", reason || undefined);
+        }}
+      >
+        Reject
+      </Button>
+      {error && (
+        <span style={{ color: "var(--mui-palette-error-main)", fontSize: 12 }}>
+          ✗ {error}
+        </span>
+      )}
+    </Stack>
+  );
+}
+
+function ActionTargetCell({ item }: { item: KubeObject }) {
+  const spec = getSpec(item);
+  const action = spec.action ?? {};
+  const params = action.params ?? {};
+  return (
+    <div style={{ fontSize: 13 }}>
+      <div style={{ fontWeight: 600 }}>{action.type ?? "?"}</div>
+      <div style={{ color: "var(--mui-palette-text-secondary)" }}>
+        {params.namespace ?? "?"} / {params.name ?? "?"}
+      </div>
+    </div>
+  );
+}
+
+function ActionDiagnosisCell({ item }: { item: KubeObject }) {
+  const spec = getSpec(item);
+  const diag = spec.diagnosis ?? spec.rationale ?? "—";
+  return (
+    <div style={{ fontSize: 13, maxWidth: 400, color: "var(--mui-palette-text-secondary)" }}>
+      {String(diag).slice(0, 200)}
+      {String(diag).length > 200 ? "…" : ""}
+    </div>
+  );
+}
+
+function SREActionRow({ item }: { item: KubeObject }) {
+  const spec = getSpec(item);
+  const status = getStatus(item);
+  const approval = spec.approval?.state as string | undefined;
+  const phase = status.phase as string | undefined;
+  const [busy, setBusy] = React.useState(false);
+  const isPending =
+    (!phase || phase === "Proposed") &&
+    (!approval || approval === "Pending");
+  const isInFlight =
+    phase === "Applied" || (phase === "Proposed" && approval === "Approved");
+  return (
+    <tr style={{ borderTop: "1px solid var(--mui-palette-divider)" }}>
+      <td style={{ padding: 8 }}>
+        <Link
+          routeName="karssreactions-detail"
+          params={{
+            namespace: item.metadata?.namespace ?? "kars-sre",
+            name: item.metadata?.name ?? "",
+          }}
+        >
+          {item.metadata?.name}
+        </Link>
+        <div style={{ fontSize: 11, color: "var(--mui-palette-text-secondary)" }}>
+          {formatAge(item.metadata?.creationTimestamp)}
+        </div>
+      </td>
+      <td style={{ padding: 8 }}>
+        <ActionTargetCell item={item} />
+      </td>
+      <td style={{ padding: 8 }}>
+        <ActionDiagnosisCell item={item} />
+      </td>
+      <td style={{ padding: 8 }}>{srePhaseChip(phase, approval)}</td>
+      <td style={{ padding: 8 }}>
+        {isPending ? (
+          <ApproveRejectButtons item={item} busy={busy} setBusy={setBusy} />
+        ) : isInFlight ? (
+          <span style={{ fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
+            executing…
+          </span>
+        ) : (
+          <span style={{ fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
+            —
+          </span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function SREActionCard({
+  title,
+  emoji,
+  items,
+  emptyText,
+}: {
+  title: string;
+  emoji: string;
+  items: KubeObject[];
+  emptyText: string;
+}) {
+  return (
+    <SectionBox title={`${emoji} ${title} (${items.length})`}>
+      {items.length === 0 ? (
+        <div style={{ padding: 16, color: "var(--mui-palette-text-secondary)", fontSize: 13 }}>
+          {emptyText}
+        </div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
+              <th style={{ padding: 8, textAlign: "left" }}>Action ID</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Target</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Diagnosis</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Phase</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map(item => (
+              <SREActionRow key={item.metadata?.uid ?? item.metadata?.name} item={item} />
+            ))}
+          </tbody>
+        </table>
+      )}
+    </SectionBox>
+  );
+}
+
+function SREClusterHealthCard({ sandboxes }: { sandboxes: KubeObject[] | null }) {
+  if (!sandboxes) {
+    return (
+      <SectionBox title="📊 Cluster Health">
+        <div style={{ padding: 16, fontSize: 13 }}>Loading…</div>
+      </SectionBox>
+    );
+  }
+  const byPhase: Record<string, number> = {};
+  let degraded = 0;
+  for (const s of sandboxes) {
+    const phase = getStatus(s).phase ?? "Unknown";
+    byPhase[phase] = (byPhase[phase] ?? 0) + 1;
+    const conds = (getStatus(s).conditions ?? []) as any[];
+    if (conds.some(c => c.type === "Degraded" && c.status === "True")) degraded += 1;
+  }
+  const total = sandboxes.length;
+  const running = byPhase.Running ?? 0;
+  return (
+    <SectionBox title="📊 Cluster Health">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, padding: 8 }}>
+        <Stat label="Sandboxes total" value={total} />
+        <Stat label="Running" value={running} tone={running === total ? "success" : "warning"} />
+        <Stat label="Degraded" value={degraded} tone={degraded === 0 ? "success" : "error"} />
+        <Stat
+          label="Other phases"
+          value={total - running - degraded}
+          tone={total - running - degraded === 0 ? "success" : "warning"}
+        />
+      </div>
+    </SectionBox>
+  );
+}
+
+const INCIDENT_REASONS = new Set([
+  "FailedCreate",
+  "BackOff",
+  "FailedScheduling",
+  "Failed",
+  "ImagePullBackOff",
+  "ErrImagePull",
+  "CrashLoopBackOff",
+  "OOMKilling",
+  "Evicted",
+  "FailedMount",
+]);
+
+const PROTECTED_NAMESPACES = new Set([
+  "kube-system",
+  "kube-public",
+  "kube-node-lease",
+  "kars-system",
+  "kars-sre",
+  "agentmesh",
+  "default",
+]);
+
+function SREActiveIncidentsCard() {
+  // Use the v1 Event API class. Headlamp ships it as part of its
+  // core K8s classes — we resolve via require to avoid a top-of-file
+  // import cycle with the rest of the plugin (Event is heavy).
+  const Event = require("@kinvolk/headlamp-plugin/lib/K8s/event").default;
+  const [events] = (Event as any).useList() as [KubeObject[] | null];
+  if (!events) {
+    return (
+      <SectionBox title="🚨 Active Incidents (last 15 min)">
+        <div style={{ padding: 16, fontSize: 13 }}>Loading events…</div>
+      </SectionBox>
+    );
+  }
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  const filtered = events
+    .filter((e: any) => e.jsonData?.type === "Warning")
+    .filter((e: any) => INCIDENT_REASONS.has(e.jsonData?.reason ?? ""))
+    .filter((e: any) => {
+      const ns = e.metadata?.namespace ?? "";
+      return ns.startsWith("kars-") && !PROTECTED_NAMESPACES.has(ns);
+    })
+    .filter((e: any) => {
+      const ts = e.jsonData?.lastTimestamp || e.jsonData?.eventTime;
+      if (!ts) return false;
+      try {
+        return new Date(ts).getTime() >= cutoff;
+      } catch {
+        return false;
+      }
+    })
+    .sort((a: any, b: any) => {
+      const at = new Date(a.jsonData?.lastTimestamp || a.jsonData?.eventTime || 0).getTime();
+      const bt = new Date(b.jsonData?.lastTimestamp || b.jsonData?.eventTime || 0).getTime();
+      return bt - at;
+    })
+    .slice(0, 25);
+  return (
+    <SectionBox title={`🚨 Active Incidents · last 15 min (${filtered.length})`}>
+      {filtered.length === 0 ? (
+        <div style={{ padding: 16, color: "var(--mui-palette-text-secondary)", fontSize: 13 }}>
+          No recent failure-class events in kars-* user namespaces.
+        </div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
+              <th style={{ padding: 8, textAlign: "left" }}>Reason</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Target</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Message</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Age</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((e: any) => {
+              const ns = e.metadata?.namespace ?? "?";
+              const obj = e.jsonData?.involvedObject ?? {};
+              const ts =
+                e.jsonData?.lastTimestamp || e.jsonData?.eventTime || "";
+              return (
+                <tr
+                  key={e.metadata?.uid}
+                  style={{ borderTop: "1px solid var(--mui-palette-divider)" }}
+                >
+                  <td style={{ padding: 8 }}>
+                    <Chip
+                      label={e.jsonData?.reason ?? "?"}
+                      size="small"
+                      color="warning"
+                      variant="outlined"
+                    />
+                  </td>
+                  <td style={{ padding: 8, fontSize: 12 }}>
+                    <div style={{ fontWeight: 600 }}>
+                      {obj.kind}/{obj.name}
+                    </div>
+                    <div style={{ color: "var(--mui-palette-text-secondary)" }}>{ns}</div>
+                  </td>
+                  <td
+                    style={{
+                      padding: 8,
+                      fontSize: 12,
+                      maxWidth: 480,
+                      color: "var(--mui-palette-text-secondary)",
+                    }}
+                  >
+                    {String(e.jsonData?.message ?? "").slice(0, 240)}
+                  </td>
+                  <td
+                    style={{
+                      padding: 8,
+                      fontSize: 11,
+                      color: "var(--mui-palette-text-secondary)",
+                    }}
+                  >
+                    {formatAge(ts)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </SectionBox>
+  );
+}
+
+function SREConsole() {
+  const [actions] = (KarsSREActionClass as any).useList() as [KubeObject[] | null];
+  const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
+  const safeActions = actions ?? [];
+  const now = Date.now();
+  const recentCutoff = now - 60 * 60 * 1000; // 1 hour
+
+  const pending = safeActions.filter((a: any) => {
+    const phase = getStatus(a).phase;
+    const approval = getSpec(a).approval?.state;
+    return (!phase || phase === "Proposed") && (!approval || approval === "Pending");
+  });
+
+  const inflight = safeActions.filter((a: any) => {
+    const phase = getStatus(a).phase;
+    const approval = getSpec(a).approval?.state;
+    return phase === "Applied" || (phase === "Proposed" && approval === "Approved");
+  });
+
+  const recent = safeActions
+    .filter((a: any) => {
+      const phase = getStatus(a).phase;
+      const ts = a.metadata?.creationTimestamp;
+      if (!phase || !["Recovered", "Failed", "Rejected", "Expired"].includes(phase)) return false;
+      if (!ts) return true;
+      try {
+        return new Date(ts).getTime() >= recentCutoff;
+      } catch {
+        return false;
+      }
+    })
+    .sort(
+      (a: any, b: any) =>
+        new Date(b.metadata?.creationTimestamp ?? 0).getTime() -
+        new Date(a.metadata?.creationTimestamp ?? 0).getTime(),
+    )
+    .slice(0, 10);
+
+  return (
+    <>
+      <SREActionCard
+        title="Pending Approval"
+        emoji="🔴"
+        items={pending}
+        emptyText="No actions awaiting your approval — the cluster is quiet right now."
+      />
+      <SREActionCard
+        title="In-flight"
+        emoji="🔄"
+        items={inflight}
+        emptyText="No actions currently executing."
+      />
+      <SREClusterHealthCard sandboxes={sandboxes} />
+      <SREActiveIncidentsCard />
+      <SREActionCard
+        title="Recent (last hour)"
+        emoji="✅"
+        items={recent}
+        emptyText="No actions completed in the last hour."
+      />
+    </>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// SRE Chat — embedded Hermes WebUI for the sre sandbox
+// ──────────────────────────────────────────────────────────────────────
+//
+// Routes through the apiserver service proxy:
+//   /api/v1/namespaces/kars-sre/services/sre:18789/proxy/
+//
+// Caveat: Hermes' WebUI was authored for direct port-forward access
+// and may use absolute paths for its bundle assets. When the iframe
+// blank-loads, the page shows a fallback hint with the canonical
+// `kars connect sre --web` command + a "Open in new tab" link.
+//
+// In the local-k8s demo path the operator runs `kars sre talk` (which
+// shells `kars connect sre --web --port 18790`). That sets up a
+// port-forward on localhost; the iframe attempts that target first,
+// then falls back to the apiserver-proxy URL.
+
+const HERMES_GATEWAY_PORT = 18789;
+
+function SREChat() {
+  // Try localhost first (port-forward path), then the apiserver
+  // service proxy fallback. Headlamp itself runs in the operator's
+  // browser; the apiserver proxy URL only resolves when Headlamp's
+  // own backend has cluster connectivity (true for both Docker
+  // Desktop kind cluster and the in-cluster Headlamp deployment).
+  const [mode, setMode] = React.useState<"local" | "proxy">("local");
+  const localUrl = `http://localhost:${HERMES_GATEWAY_PORT}`;
+  const proxyUrl = `/clusters/kind-kars-dev/api/v1/namespaces/kars-sre/services/sre:${HERMES_GATEWAY_PORT}/proxy/`;
+  const src = mode === "local" ? localUrl : proxyUrl;
+
+  return (
+    <SectionBox title="💬 Chat with kars-sre">
+      <div style={{ padding: 8 }}>
+        <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 1 }}>
+          <Tabs
+            value={mode}
+            onChange={(_, v) => setMode(v)}
+            sx={{ minHeight: 32 }}
+          >
+            <Tab
+              value="local"
+              label={`Local port-forward (${HERMES_GATEWAY_PORT})`}
+              sx={{ minHeight: 32, fontSize: 12 }}
+            />
+            <Tab
+              value="proxy"
+              label="Apiserver service proxy"
+              sx={{ minHeight: 32, fontSize: 12 }}
+            />
+          </Tabs>
+          <Button
+            size="small"
+            href={src}
+            target="_blank"
+            rel="noreferrer noopener"
+            variant="outlined"
+          >
+            Open in new tab
+          </Button>
+        </Stack>
+        <div
+          style={{
+            fontSize: 12,
+            color: "var(--mui-palette-text-secondary)",
+            marginBottom: 8,
+          }}
+        >
+          {mode === "local" ? (
+            <>
+              Requires:&nbsp;
+              <code>kars connect sre --web --port {HERMES_GATEWAY_PORT}</code>
+              &nbsp;in another terminal. Hermes&apos; WebUI binds to
+              <code>localhost</code> on the operator&apos;s laptop.
+            </>
+          ) : (
+            <>
+              Routes through the cluster apiserver service proxy. Works without
+              port-forward, but Hermes asset paths may need extra config.
+            </>
+          )}
+        </div>
+        <iframe
+          src={src}
+          title="kars-sre WebUI"
+          style={{
+            width: "100%",
+            minHeight: "calc(100vh - 320px)",
+            border: "1px solid var(--mui-palette-divider)",
+            borderRadius: 4,
+            background: "var(--mui-palette-background-default)",
+          }}
+        />
+      </div>
     </SectionBox>
   );
 }
