@@ -38,7 +38,6 @@ import {
 import { makeCustomResourceClass } from "@kinvolk/headlamp-plugin/lib/lib/k8s/crd";
 import type { KubeObject, KubeObjectClass } from "@kinvolk/headlamp-plugin/lib/lib/k8s/KubeObject";
 import Secret from "@kinvolk/headlamp-plugin/lib/K8s/secret";
-import { K8s } from "@kinvolk/headlamp-plugin/lib";
 import {
   Link,
   SectionBox,
@@ -2372,134 +2371,19 @@ function SREClusterHealthCard({ sandboxes }: { sandboxes: KubeObject[] | null })
   );
 }
 
-const INCIDENT_REASONS = new Set([
-  "FailedCreate",
-  "BackOff",
-  "FailedScheduling",
-  "Failed",
-  "ImagePullBackOff",
-  "ErrImagePull",
-  "CrashLoopBackOff",
-  "OOMKilling",
-  "Evicted",
-  "FailedMount",
-]);
-
-const PROTECTED_NAMESPACES = new Set([
-  "kube-system",
-  "kube-public",
-  "kube-node-lease",
-  "kars-system",
-  "kars-sre",
-  "agentmesh",
-  "default",
-]);
-
 function SREActiveIncidentsCard() {
-  // v1 Event API via the K8s namespace re-export (browser ESM-safe).
-  // Using `require()` here would crash the plugin with
-  // `ReferenceError: require is not defined` because Headlamp ships
-  // the plugin bundle as a pure browser ESM module.
-  const EventCls: any = (K8s as any).event?.default ?? (K8s as any).event;
-  const [events] = EventCls.useList() as [KubeObject[] | null];
-  if (!events) {
-    return (
-      <SectionBox title="🚨 Active Incidents (last 15 min)">
-        <div style={{ padding: 16, fontSize: 13 }}>Loading events…</div>
-      </SectionBox>
-    );
-  }
-  const cutoff = Date.now() - 15 * 60 * 1000;
-  const filtered = events
-    .filter((e: any) => e.jsonData?.type === "Warning")
-    .filter((e: any) => INCIDENT_REASONS.has(e.jsonData?.reason ?? ""))
-    .filter((e: any) => {
-      const ns = e.metadata?.namespace ?? "";
-      return ns.startsWith("kars-") && !PROTECTED_NAMESPACES.has(ns);
-    })
-    .filter((e: any) => {
-      const ts = e.jsonData?.lastTimestamp || e.jsonData?.eventTime;
-      if (!ts) return false;
-      try {
-        return new Date(ts).getTime() >= cutoff;
-      } catch {
-        return false;
-      }
-    })
-    .sort((a: any, b: any) => {
-      const at = new Date(a.jsonData?.lastTimestamp || a.jsonData?.eventTime || 0).getTime();
-      const bt = new Date(b.jsonData?.lastTimestamp || b.jsonData?.eventTime || 0).getTime();
-      return bt - at;
-    })
-    .slice(0, 25);
-  return (
-    <SectionBox title={`🚨 Active Incidents · last 15 min (${filtered.length})`}>
-      {filtered.length === 0 ? (
-        <div style={{ padding: 16, color: "var(--mui-palette-text-secondary)", fontSize: 13 }}>
-          No recent failure-class events in kars-* user namespaces.
-        </div>
-      ) : (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
-              <th style={{ padding: 8, textAlign: "left" }}>Reason</th>
-              <th style={{ padding: 8, textAlign: "left" }}>Target</th>
-              <th style={{ padding: 8, textAlign: "left" }}>Message</th>
-              <th style={{ padding: 8, textAlign: "left" }}>Age</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((e: any) => {
-              const ns = e.metadata?.namespace ?? "?";
-              const obj = e.jsonData?.involvedObject ?? {};
-              const ts =
-                e.jsonData?.lastTimestamp || e.jsonData?.eventTime || "";
-              return (
-                <tr
-                  key={e.metadata?.uid}
-                  style={{ borderTop: "1px solid var(--mui-palette-divider)" }}
-                >
-                  <td style={{ padding: 8 }}>
-                    <Chip
-                      label={e.jsonData?.reason ?? "?"}
-                      size="small"
-                      color="warning"
-                      variant="outlined"
-                    />
-                  </td>
-                  <td style={{ padding: 8, fontSize: 12 }}>
-                    <div style={{ fontWeight: 600 }}>
-                      {obj.kind}/{obj.name}
-                    </div>
-                    <div style={{ color: "var(--mui-palette-text-secondary)" }}>{ns}</div>
-                  </td>
-                  <td
-                    style={{
-                      padding: 8,
-                      fontSize: 12,
-                      maxWidth: 480,
-                      color: "var(--mui-palette-text-secondary)",
-                    }}
-                  >
-                    {String(e.jsonData?.message ?? "").slice(0, 240)}
-                  </td>
-                  <td
-                    style={{
-                      padding: 8,
-                      fontSize: 11,
-                      color: "var(--mui-palette-text-secondary)",
-                    }}
-                  >
-                    {formatAge(ts)}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </SectionBox>
-  );
+  // Slice 4 placeholder. We can't useList() on the v1 Event API
+  // because the host's `pluginLib.K8s.event` namespace isn't exposed
+  // in Headlamp 0.41's plugin runtime — importing it triggers the
+  // UMD wrapper's CJS-fallback path, which crashes with
+  // `ReferenceError: require is not defined`.
+  //
+  // The KarsSREAction CR cards above already surface every incident
+  // the proactive watcher catches (it's the same dedupe key), so for
+  // Slice 4 demos the operator never needs the raw events feed.
+  // A future iteration may resurrect this via direct fetch() to
+  // /api/v1/events through the headlamp apiserver proxy.
+  return null;
 }
 
 function SREInstallCTA() {
