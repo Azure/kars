@@ -2590,51 +2590,51 @@ function SREChat() {
     return m?.[1] ?? "";
   }, []);
 
-  // The dashboard HTML is served with asset URLs prefixed
-  // /api/v1/namespaces/kars-sre/services/sre:<port>/proxy/assets/...
-  // (the in-pod kars-runtime-hermes dashboard_proxy wrapper injects
-  // X-Forwarded-Prefix to bake this in). But Headlamp's apiserver
-  // proxy adds its own /clusters/<cluster> prefix, so the browser
-  // would fetch /api/v1/... at the Headlamp root and 404.
+  // The in-pod kars_runtime_hermes.dashboard_proxy wrapper installs
+  // an X-Forwarded-Prefix middleware that:
+  //   (a) injects the prefix on every request so the SPA's
+  //       index.html ships asset URLs absolute-prefixed under
+  //       /api/v1/namespaces/kars-sre/services/sre:9119/proxy/...
+  //   (b) STRIPS the same prefix from the request path before
+  //       FastAPI routes it, so the static-file mount + API gate
+  //       see the original paths (`/assets/...`, `/api/...`).
   //
-  // We fetch the HTML up front via the Headlamp proxy, rewrite asset
-  // URLs to include the /clusters/<cluster> prefix, and inject via
-  // `srcdoc`. That way every <script src=...> and <link href=...>
-  // request hits the right path.
-  const proxyBase = inferredCluster
-    ? `/clusters/${inferredCluster}/api/v1/namespaces/kars-sre/services/sre:${HERMES_DASHBOARD_PORT}/proxy`
+  // Headlamp's apiserver proxy adds /clusters/<cluster> on top.
+  // We use srcDoc to fetch the HTML, rewrite the in-pod prefix to
+  // ALSO include /clusters/<cluster>, then let the browser hit the
+  // double-prefixed URL — which Headlamp strips one prefix, the
+  // wrapper strips the other.
+  const inPrefix = `/api/v1/namespaces/kars-sre/services/sre:${HERMES_DASHBOARD_PORT}/proxy`;
+  const fullPrefix = inferredCluster
+    ? `/clusters/${inferredCluster}${inPrefix}`
     : "";
 
   const [srcDoc, setSrcDoc] = React.useState<string | null>(null);
   const [loadErr, setLoadErr] = React.useState<string | null>(null);
 
   React.useEffect(() => {
-    if (!proxyBase) return;
+    if (!fullPrefix) return;
     let cancelled = false;
     setLoadErr(null);
     setSrcDoc(null);
     (async () => {
       try {
-        const resp = await fetch(`${proxyBase}/`, { credentials: "include" });
+        const resp = await fetch(`${fullPrefix}/`, { credentials: "include" });
         if (!resp.ok) {
           throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
         }
         let html = await resp.text();
-        // The in-pod wrapper bakes in the K8s proxy suffix; the
-        // Headlamp host adds /clusters/<cluster>. Prepend the
-        // missing chunk to every absolute asset path the SPA
-        // emits. Match the prefix the dashboard already injected.
-        const inPrefix = `/api/v1/namespaces/kars-sre/services/sre:${HERMES_DASHBOARD_PORT}/proxy`;
-        const fullPrefix = `/clusters/${inferredCluster}${inPrefix}`;
+        // Replace the in-pod prefix (what the wrapper baked) with
+        // the FULL Headlamp-rooted prefix so every <script src=...>
+        // and <link href=...> the browser fetches lands at the
+        // right apiserver-proxy URL.
         const re = new RegExp(
           inPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
           "g",
         );
         html = html.replace(re, fullPrefix);
-        // Also inject a <base> so any relative URLs in the SPA
-        // (e.g. fetch("/api/dashboard/...")) resolve under the
-        // proxy. <base> must go in <head>; the SPA's existing
-        // bootstrap script lives at the end of <head>.
+        // Add <base> so any SPA-generated relative URLs (XHR fetches
+        // to "/api/dashboard/...") resolve under the proxy.
         html = html.replace(
           /<head>/i,
           `<head>\n  <base href="${fullPrefix}/">`,
@@ -2647,7 +2647,7 @@ function SREChat() {
     return () => {
       cancelled = true;
     };
-  }, [proxyBase, inferredCluster]);
+  }, [fullPrefix, inPrefix]);
 
   if (installed === null) {
     return (
@@ -2675,16 +2675,16 @@ function SREChat() {
           </span>
           <Button
             size="small"
-            href={proxyBase ? `${proxyBase}/` : "#"}
+            href={fullPrefix ? `${fullPrefix}/` : "#"}
             target="_blank"
             rel="noreferrer noopener"
             variant="outlined"
-            disabled={!proxyBase}
+            disabled={!fullPrefix}
           >
             Open in new tab
           </Button>
         </Stack>
-        {!proxyBase ? (
+        {!fullPrefix ? (
           <div
             style={{
               padding: 24,
