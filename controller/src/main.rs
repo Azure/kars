@@ -43,6 +43,8 @@ mod kars_eval_reconciler;
 mod kars_memory;
 mod kars_memory_compile;
 mod kars_memory_reconciler;
+mod kars_sre_action;
+mod kars_sre_action_reconciler;
 mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
@@ -214,6 +216,15 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { egress_approval_reconciler::run(client).await })
     };
+    let kars_sre_action_handle = {
+        // KarsSREAction reconciler — Slice 3 of the kars-sre series.
+        // Drives operator-approved typed-action proposals from the SRE
+        // agent through Approved → Applied → Recovered. Active iff the
+        // operator installs SRE (chart sre.enabled=true creates the
+        // controller RBAC + the CRD); idle otherwise.
+        let client = client.clone();
+        tokio::spawn(async move { kars_sre_action_reconciler::run(client).await })
+    };
     let auth_config_handle = {
         // KarsAuthConfig reconciler — materialises the sidecar env
         // ConfigMap when an operator installs the tenant trust anchor
@@ -369,6 +380,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = egress_approval_handle => {
+            res??;
+        }
+        res = kars_sre_action_handle => {
             res??;
         }
         res = auth_config_handle => {

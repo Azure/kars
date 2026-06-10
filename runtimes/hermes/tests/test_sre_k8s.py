@@ -29,7 +29,7 @@ def test_register_registers_five_slice2_tools() -> None:
 def test_describe_resource_unknown_kind() -> None:
     from kars_runtime_hermes.plugin import sre_k8s
 
-    result = sre_k8s.sre_describe_resource(kind="UnknownKind", name="x")
+    result = sre_k8s._impl_sre_describe_resource(kind="UnknownKind", name="x")
     assert "error" in result
     assert "supported_kinds" in result
 
@@ -52,7 +52,7 @@ def test_describe_resource_resource_quota() -> None:
     mock_client = MagicMock()
     mock_client.get.side_effect = [quota_doc, {"items": []}]  # quota + events
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_describe_resource(
+        result = sre_k8s._impl_sre_describe_resource(
             kind="ResourceQuota",
             namespace="kars-research",
             name="platform-hardening-quota",
@@ -82,7 +82,7 @@ def test_describe_resource_resource_quota_kars_managed() -> None:
     mock_client = MagicMock()
     mock_client.get.side_effect = [quota_doc, {"items": []}]
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_describe_resource(
+        result = sre_k8s._impl_sre_describe_resource(
             kind="ResourceQuota", namespace="kars-sre", name="sre-quota"
         )
     assert result["isKarsManaged"] is True
@@ -136,7 +136,7 @@ def test_describe_resource_deployment_owner_graph() -> None:
         {"items": []}, {"items": []}, {"items": []},
     ]
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_describe_resource(
+        result = sre_k8s._impl_sre_describe_resource(
             kind="Deployment", namespace="kars-research", name="research"
         )
     assert "workload" in result
@@ -155,7 +155,7 @@ def test_describe_resource_handles_404_gracefully() -> None:
     response = MagicMock(status_code=404, reason_phrase="Not Found")
     mock_client.get.side_effect = httpx.HTTPStatusError("404", request=MagicMock(), response=response)
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_describe_resource(
+        result = sre_k8s._impl_sre_describe_resource(
             kind="Pod", namespace="kars-research", name="missing"
         )
     assert "error" in result
@@ -188,7 +188,7 @@ def test_what_changed_filters_to_failure_reasons() -> None:
     mock_client = MagicMock()
     mock_client.get.side_effect = [core_doc, new_doc]
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_what_changed(namespace="kars-research", minutes=15)
+        result = sre_k8s._impl_sre_what_changed(namespace="kars-research", minutes=15)
     assert len(result["events_core"]) == 1
     assert result["events_core"][0]["reason"] == "FailedCreate"
     assert "exceeded quota" in result["events_core"][0]["message"]
@@ -225,7 +225,7 @@ def test_endpoints_inspect_zero_endpoints_finding() -> None:
     mock_client = MagicMock()
     mock_client.get.side_effect = [svc_doc, pod_doc, es_doc]
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_endpoints_inspect(namespace="kars-research", service="research")
+        result = sre_k8s._impl_sre_endpoints_inspect(namespace="kars-research", service="research")
     assert result["selector"] == {"app": "research"}
     assert len(result["matching_pods"]) == 2
     # Both pods are NotReady → finding should call that out
@@ -242,7 +242,7 @@ def test_endpoints_inspect_pod_selector_mismatch() -> None:
     mock_client = MagicMock()
     mock_client.get.side_effect = [svc_doc, pod_doc, es_doc]
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_endpoints_inspect(namespace="kars-research", service="research")
+        result = sre_k8s._impl_sre_endpoints_inspect(namespace="kars-research", service="research")
     assert "No pods match" in result["finding"]
 
 
@@ -273,7 +273,7 @@ def test_image_probe_finds_closest_tag_in_use() -> None:
     mock_client = MagicMock()
     mock_client.get.return_value = pod_doc
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_image_probe(image="nginx:1.27-typo")
+        result = sre_k8s._impl_sre_image_probe(image="nginx:1.27-typo")
     # The closest in-use match for nginx:1.27-typo is nginx:1.27.3
     assert result["closest_in_use"] == "nginx:1.27.3"
     assert "typo" in result["advice"].lower() or "edit-distance" in result["advice"]
@@ -287,7 +287,7 @@ def test_image_probe_no_pods_use_repo() -> None:
     mock_client = MagicMock()
     mock_client.get.return_value = pod_doc
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_image_probe(image="newrepo:v1")
+        result = sre_k8s._impl_sre_image_probe(image="newrepo:v1")
     assert result["in_use_on_cluster"] == []
     assert "No pod on this cluster" in result["advice"]
 
@@ -301,7 +301,7 @@ def test_top_unavailable_when_metrics_server_missing() -> None:
         "404", request=MagicMock(), response=response
     )
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_top(scope="nodes")
+        result = sre_k8s._impl_sre_top(scope="nodes")
     assert "unavailable" in result
     assert "metrics-server" in result["unavailable"]
 
@@ -309,7 +309,7 @@ def test_top_unavailable_when_metrics_server_missing() -> None:
 def test_top_invalid_scope() -> None:
     from kars_runtime_hermes.plugin import sre_k8s
 
-    result = sre_k8s.sre_top(scope="invalid")
+    result = sre_k8s._impl_sre_top(scope="invalid")
     assert "error" in result
     assert "valid_scopes" in result
 
@@ -332,7 +332,7 @@ def test_top_pods_returns_per_container() -> None:
     mock_client = MagicMock()
     mock_client.get.return_value = doc
     with patch.object(sre_k8s.sre_kube, "client", return_value=mock_client):
-        result = sre_k8s.sre_top(scope="pods", namespace="kars-research")
+        result = sre_k8s._impl_sre_top(scope="pods", namespace="kars-research")
     assert result["scope"] == "pods"
     assert len(result["items"]) == 1
     assert len(result["items"][0]["containers"]) == 2

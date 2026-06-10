@@ -52,6 +52,50 @@ fi
 export HERMES_HOME="${HERMES_HOME:-/sandbox/.hermes}"
 mkdir -p "$HERMES_HOME"
 
+# ── HOME (writable for libraries that ignore HERMES_HOME) ──────────────
+# Distroless base sets HOME=/ (read-only). Several Hermes deps —
+# notably the gateway's per-platform lock dir (~/.local/state/hermes/
+# gateway-locks) and python-telegram-bot's internal state — assume
+# HOME is writable. Without this override, Telegram / Slack / Discord
+# channels fail at boot with `[Errno 30] Read-only file system: '/.local'`.
+# /sandbox is the per-pod writable emptyDir owned by the sandbox UID.
+export HOME="${HOME:-/sandbox}"
+if [ "$HOME" = "/" ] || [ ! -w "$HOME" ]; then
+  export HOME=/sandbox
+fi
+mkdir -p "$HOME/.local/state"
+
+# ── Outbound HTTPS proxy ───────────────────────────────────────────
+# UID 1000 in a kars sandbox cannot reach the internet directly:
+# egress-guard's iptables rules transparent-redirect port 443 to
+# the inference-router's forward proxy on 127.0.0.1:8444. In Docker
+# Desktop kind clusters the redirect doesn't always apply (CAP_NET_ADMIN
+# semantics), so we ALSO export HTTPS_PROXY so libraries that honour
+# the standard env (httpx, python-telegram-bot, slack-sdk, discord.py,
+# requests, openai…) reach the router explicitly. The router then
+# enforces the egress allowlist + Learn-mode logging exactly like the
+# transparent path.
+#
+# Inference calls bypass this (Hermes sends them to OPENAI_BASE_URL=
+# http://127.0.0.1:8443/v1, the router's HTTP API), so HTTPS_PROXY
+# only affects code that tries direct external HTTPS — which is the
+# exact scope we want to route.
+#
+# NO_PROXY covers loopback + cluster-internal services so the router
+# itself, the apiserver, and intra-pod calls don't loop back through
+# the proxy. CRITICALLY this includes the LITERAL apiserver IP
+# ($KUBERNETES_SERVICE_HOST), not just the FQDN, because kubectl-style
+# clients connect via the IP from the pod's service env — the FQDN
+# variant only matches when explicitly used.
+_NP_BASE="127.0.0.1,localhost,kubernetes.default.svc.cluster.local,.svc.cluster.local,.cluster.local"
+if [ -n "${KUBERNETES_SERVICE_HOST:-}" ]; then
+  _NP_BASE="$KUBERNETES_SERVICE_HOST,$_NP_BASE"
+fi
+export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:8444}"
+export https_proxy="${https_proxy:-$HTTPS_PROXY}"
+export NO_PROXY="${NO_PROXY:-$_NP_BASE}"
+export no_proxy="${no_proxy:-$NO_PROXY}"
+
 # Hermes' multi-profile support — pin to SANDBOX_NAME so multi-sandbox
 # concurrent runs don't share session state.
 export HERMES_PROFILE="${HERMES_PROFILE:-$SANDBOX_NAME}"
@@ -289,6 +333,22 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
 fi
 if [ -n "${TELEGRAM_ALLOW_FROM:-}" ]; then
   set_hermes_config "channels.telegram.allowed_users" "$TELEGRAM_ALLOW_FROM"
+  # Export TELEGRAM_ALLOWED_USERS so the gateway's Telegram platform
+  # skips the pairing-code dance for these IDs. Hermes' telegram.py
+  # reads this env at boot (not the config key); without it the bot
+  # responds to every incoming message with a "pairing code" challenge
+  # even when the sender is already in the configured allowlist.
+  export TELEGRAM_ALLOWED_USERS="$TELEGRAM_ALLOW_FROM"
+  # Set the home channel = first allowed user ID. This is the chat
+  # the `hermes send --to telegram` (no chat suffix) targets, used
+  # by the kars-sre proactive watcher to push incident alerts to the
+  # operator. If multiple IDs are configured, the watcher uses the
+  # first; operators with multi-user setups can override per-call
+  # via `--to telegram:<chat_id>` or set SRE_WATCHER_NOTIFY_TARGET.
+  TG_HOME=$(echo "$TELEGRAM_ALLOW_FROM" | tr ',' '\n' | head -1 | tr -d ' ')
+  if [ -n "$TG_HOME" ]; then
+    set_hermes_config "TELEGRAM_HOME_CHANNEL" "$TG_HOME"
+  fi
 fi
 if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
   set_hermes_config "channels.slack.token" "$SLACK_BOT_TOKEN"
@@ -564,7 +624,7 @@ Read-only kars-CR diagnostics (Slice 1):
 | \`sre_logs\` | Tail any pod's any container via the apiserver. Capped 500 lines. Use after \`sre_describe_resource\` shows CrashLoopBackOff or an error message you need to see in full. |
 | \`sre_diagnose\` | Walks the kars-CR health checklist (controller Ready, CRDs installed, no Degraded sandboxes, no stale reconciles). Use for the operator's "give me a cluster health overview" question. |
 | \`sre_explain_error\` | Given an error string, returns a hypothesis from the kars OOTB-blocker corpus (ImagePullBackOff, exceeded quota, OOMKilled, CrashLoopBackOff, FailedScheduling, ContainerCreating). The hypothesis is a HINT — confirm with other tools before quoting it. |
-| \`sre_propose_fix\` | Returns a typed-action proposal for the operator to approve. Read-only in this build; the actual apply path lands in Slice 3. |
+| \`sre_propose_fix\` | Returns a typed-action proposal AND auto-creates a KarsSREAction CR in \`kars-sre\` (phase=Proposed, approval.state=Pending). Returns an \`action_id\` you quote to the operator. Operator approves via \`kars sre approve <action_id>\` → controller mints a one-shot CRB, executes the typed action, tears the binding down, watches recovery. You never execute; you propose. |
 
 K8s diagnostic toolset (Slice 2):
 
@@ -582,7 +642,7 @@ You are intentionally not equipped with:
 
 * **\`kars_spawn\` family** — you cannot spawn sub-agents (§7.8.5 containment: sub-agents would inherit the kars-sre namespace's elevated RBAC).
 * **\`kars_mesh_*\` family** — you are not on the inter-agent mesh (§7.8.6: you have no DID, are not registered, and your NetworkPolicy blocks the relay).
-* **Shell, file, or terminal tools** — you cannot exec into other pods, port-forward, write to disk, or run arbitrary commands. The only writes a future Slice 3 will allow are *typed actions* through \`sre_apply_fix\` — never free-form shell.
+* **Shell, file, or terminal tools** — you cannot exec into other pods, port-forward, write to disk, or run arbitrary commands. The only writes happen indirectly: \`sre_propose_fix\` creates a KarsSREAction CR (a *proposal*, no execution); the controller executes it ONLY after the operator runs \`kars sre approve <action_id>\`. Even then, you never run free-form shell — only the typed action you proposed.
 * **Network tools beyond the apiserver** — your NetworkPolicy allows only \`kubernetes.default.svc\`. No DNS lookups against the internet, no external HTTP, no registry calls.
 
 If the operator asks you to do something that requires a tool you don't have, say so explicitly and (when possible) suggest the kubectl command they could run themselves.
@@ -599,11 +659,18 @@ When an operator says "X is broken" — even informally — walk this loop:
    * Service has 0 endpoints → \`sre_endpoints_inspect\` on the Service
    * \`OOMKilled\` / \`Evicted\` → \`sre_top\` on the pod and its node
    * Stuck \`Pending\` with \`0/N nodes available\` → \`sre_describe_resource\` on the candidate Nodes
-5. **\`sre_propose_fix\`** — once you've identified the root cause, return a typed-action proposal naming the resource and the change. The current proposal types include:
-   * \`DeleteResourceQuota {namespace, name}\` — for over-tight platform-applied quotas (the resource must NOT be labeled \`kars.azure.com/managed-by=controller\` — that's the safety gate).
-   * \`PatchDeploymentImage\`, \`ScaleDeployment\`, \`RolloutRestart\`, \`DeletePod\`, \`PatchConfigMapKey\` — Slice 3 will execute these via short-lived TokenRequest tokens once the operator approves.
+5. **\`sre_propose_fix\`** — once you've identified the root cause, call this with a \`diagnosis\` + \`target\` payload. **\`target.kind\` is REQUIRED** (one of \`ResourceQuota\`, \`Pod\`, \`Deployment\`, \`StatefulSet\`, \`DaemonSet\`) — without it no CR is created and the response's \`cr_error\` field tells you what's missing. Always include \`target.kind\`, \`target.namespace\`, and \`target.name\`. The tool returns a proposal AND creates a KarsSREAction CR (phase=Proposed). Quote the returned \`action_id\` to the operator with the exact approve command. The current proposal types are:
+   * \`DeleteResourceQuota {namespace, name}\` — for over-tight platform-applied quotas (the controller refuses to delete quotas labelled \`kars.azure.com/managed-by=controller\` — that's the safety gate, enforced in the reconciler, not just policy).
+   * \`PatchDeploymentImage {namespace, name, container, image}\` — patch a container image.
+   * \`ScaleDeployment {namespace, name, replicas}\` — scale a deployment (clamp 0-50).
+   * \`RolloutRestart {namespace, kind, name}\` — rolling restart on Deployment / StatefulSet / DaemonSet.
+   * \`DeletePod {namespace, name}\` — delete a pod so its owning controller reconciles a fresh one.
 
-Slice 1+2 = **diagnose and propose only.** You never execute the fix. Tell the operator what to apply and link the proposal id; the operator runs the typed action manually until Slice 3 lands.
+   When target.kind alone is ambiguous (e.g. Deployment → Scale vs PatchImage vs RolloutRestart), pass an explicit \`action_type\` argument to disambiguate.
+
+   When the operator runs \`kars sre approve <action_id>\` (or \`kars sre reject\`), the controller's kars_sre_action reconciler picks it up, mints a short-lived ClusterRoleBinding scoped to just that action, executes via that binding, tears the binding down, and observes recovery in the affected namespace.
+
+You PROPOSE; the operator AUTHORISES; the controller EXECUTES. You never invoke the apply path directly — the proposal flow is the apply path.
 
 ## Output structure when you propose a fix
 
@@ -690,6 +757,27 @@ if [ "$1" = "hermes" ]; then
   else
     echo "[kars-hermes] No channels — starting hermes gateway in idle daemon mode"
   fi
+
+  # ── kars-sre proactive watcher (Slice 4) ──────────────────────────
+  # When SRE_ENABLED=true AND at least one channel is configured, spawn
+  # the watcher as a background process. It polls K8s events for
+  # failure-class reasons in kars-* namespaces, dedupes per
+  # (ns, kind, name, reason) in a 10-min window, and on each new
+  # incident creates a KarsSREAction CR + pushes a Telegram alert with
+  # the action_id + `kars sre approve` command. Operator opt-out:
+  # SRE_WATCHER_ENABLED=false. Failures inside the watcher are
+  # contained (it logs to stderr and continues) so it cannot crash the
+  # gateway.
+  if [ "${SRE_ENABLED:-}" = "true" ] \
+      && [ "$WANT_GATEWAY" = "true" ] \
+      && [ "${SRE_WATCHER_ENABLED:-true}" != "false" ]; then
+    echo "[kars-hermes] SRE_ENABLED + channels detected — starting proactive watcher"
+    # Use sandbox UID via $AS_SANDBOX so the watcher uses the same SA
+    # token + httpx singleton as the agent. stderr→pod stdout for
+    # debuggability via `kubectl logs`.
+    $AS_SANDBOX python3 -m kars_runtime_hermes.plugin.sre_watcher &
+  fi
+
   exec $AS_SANDBOX hermes gateway run --accept-hooks
 else
   echo "[kars-hermes] Operator override: $*"

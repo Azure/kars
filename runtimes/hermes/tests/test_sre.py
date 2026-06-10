@@ -94,7 +94,7 @@ def test_register_handles_missing_register_tool_gracefully() -> None:
 def test_explain_error_matches_imagepullbackoff() -> None:
     from kars_runtime_hermes.plugin import sre
 
-    result = sre.sre_explain_error(error="Failed to pull image: ImagePullBackOff")
+    result = sre._impl_sre_explain_error(error="Failed to pull image: ImagePullBackOff")
     assert result["matched"] is True
     assert result["hypotheses"][0]["pattern"] == "ImagePullBackOff"
 
@@ -102,7 +102,7 @@ def test_explain_error_matches_imagepullbackoff() -> None:
 def test_explain_error_matches_exceeded_quota() -> None:
     from kars_runtime_hermes.plugin import sre
 
-    result = sre.sre_explain_error(error="pods 'foo' is forbidden: exceeded quota: tight-quota")
+    result = sre._impl_sre_explain_error(error="pods 'foo' is forbidden: exceeded quota: tight-quota")
     assert result["matched"] is True
     assert result["hypotheses"][0]["pattern"] == "exceeded quota"
 
@@ -110,7 +110,7 @@ def test_explain_error_matches_exceeded_quota() -> None:
 def test_explain_error_no_match() -> None:
     from kars_runtime_hermes.plugin import sre
 
-    result = sre.sre_explain_error(error="totally-unknown-thing")
+    result = sre._impl_sre_explain_error(error="totally-unknown-thing")
     assert result["matched"] is False
     assert result["error"] == "totally-unknown-thing"
 
@@ -118,16 +118,22 @@ def test_explain_error_no_match() -> None:
 def test_explain_error_empty_string() -> None:
     from kars_runtime_hermes.plugin import sre
 
-    result = sre.sre_explain_error(error="")
+    result = sre._impl_sre_explain_error(error="")
     assert result["matched"] is False
     assert "reason" in result
 
 
 def test_propose_fix_for_resourcequota() -> None:
-    """The Slice 1 demo target — DeleteResourceQuota typed action."""
+    """Slice 3 demo target — DeleteResourceQuota typed action.
+
+    The proposal envelope must carry the typed action; whether the
+    KarsSREAction CR was created depends on whether we're running in
+    a pod with a projected SA token. Both pod (CR created) and unit-
+    test (cr_error captured) paths return the same action shape.
+    """
     from kars_runtime_hermes.plugin import sre
 
-    result = sre.sre_propose_fix(
+    result = sre._impl_sre_propose_fix(
         diagnosis="ResourceQuota platform-hardening-quota in kars-research is blocking pod admission",
         target={
             "kind": "ResourceQuota",
@@ -140,23 +146,32 @@ def test_propose_fix_for_resourcequota() -> None:
     assert result["action"]["type"] == "DeleteResourceQuota"
     assert result["action"]["namespace"] == "kars-research"
     assert result["action"]["name"] == "platform-hardening-quota"
-    # Slice 1 returns "proposed" — execution lands in Slice 3
-    assert "proposed" in result["execution_status"]
-    assert "not executed" in result["execution_status"]
+    # Slice 3 + watcher: when the proposal carries a typed action the
+    # tool tries to create a KarsSREAction CR. Outside a pod (unit
+    # test) the SA-token read fails and surfaces in cr_error; inside a
+    # pod cr_created=True and action_id is set. Either way the
+    # operator-facing execution_status announces awaiting-approval.
+    assert "operator approval" in result["execution_status"]
 
 
 def test_propose_fix_unknown_target_kind() -> None:
-    """For target kinds Slice 1 doesn't codify, return envelope with no action."""
+    """For target kinds the watcher doesn't codify, return envelope with no action.
+
+    Slice 3 adds Pod / Deployment / StatefulSet / DaemonSet handling,
+    so we use ConfigMap here as the genuine "unknown" case.
+    """
     from kars_runtime_hermes.plugin import sre
 
-    result = sre.sre_propose_fix(
-        diagnosis="pod ImagePullBackOff",
-        target={"kind": "Pod", "namespace": "default", "name": "broken"},
+    result = sre._impl_sre_propose_fix(
+        diagnosis="config drift on a ConfigMap",
+        target={"kind": "ConfigMap", "namespace": "default", "name": "drifted"},
     )
     assert result["kind"] == "FixProposal"
     assert result["action"] is None
     # Still returns rationale for the operator
     assert "rationale" in result and result["rationale"]
+    # And the cr_error explains what was missing.
+    assert result.get("cr_error") is not None
 
 
 def test_kars_cr_kinds_covers_all_eleven_crds() -> None:
@@ -193,7 +208,7 @@ def test_describe_state_with_mocked_kube() -> None:
     mock_client.get.return_value = fake_doc
 
     with patch.object(sre.sre_kube, "client", return_value=mock_client):
-        result = sre.sre_describe_state()
+        result = sre._impl_sre_describe_state()
 
     # Every kind got summarised
     assert set(result.keys()) == {k for _p, k in sre.KARS_CR_KINDS}
@@ -218,7 +233,7 @@ def test_describe_state_handles_apiserver_errors_per_kind() -> None:
     )
 
     with patch.object(sre.sre_kube, "client", return_value=mock_client):
-        result = sre.sre_describe_state()
+        result = sre._impl_sre_describe_state()
 
     # Every kind got an error entry, but no exception bubbled up
     for kind in result:
