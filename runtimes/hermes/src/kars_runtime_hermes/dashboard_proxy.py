@@ -63,6 +63,21 @@ def _install_prefix_middleware(prefix: str) -> None:
     """Add a Starlette HTTP middleware that injects X-Forwarded-Prefix.
 
     Idempotent — calling twice replaces the previous middleware.
+
+    Two things happen on every request:
+
+    1. The raw path is REWRITTEN to strip the proxy prefix. Hermes'
+       FastAPI app has its own ``/api/*`` route namespace, and our K8s
+       apiserver-proxy prefix starts with ``/api/v1/...`` — without
+       stripping, every asset fetch like
+       ``/api/v1/namespaces/.../proxy/assets/index.js`` would land in
+       Hermes' API router (401 or 404), not the static-file mount.
+
+    2. ``X-Forwarded-Prefix`` is injected so the SPA's
+       ``index.html`` is rewritten with absolute asset URLs that
+       include the prefix. The browser then asks back via those
+       prefixed URLs, which the middleware strips again before
+       routing — closing the loop.
     """
     # Lazy import: Starlette ships with FastAPI; importing at top would
     # double-load it.
@@ -70,15 +85,25 @@ def _install_prefix_middleware(prefix: str) -> None:
 
     class _ForwardedPrefixMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):  # type: ignore[override]
-            # Inject the header by mutating the raw scope. Starlette's
-            # request.headers is read-only; the scope's raw header
-            # list (`scope["headers"]`) is the source of truth.
-            headers = list(request.scope.get("headers", []))
+            scope = request.scope
+            raw_path = scope.get("path", "")
+            # Strip prefix from the path that FastAPI matches against.
+            # The K8s apiserver proxy delivers the full prefixed path
+            # straight to our backend (it doesn't strip /api/v1/.../proxy);
+            # Hermes' routes are defined relative to root.
+            if prefix and raw_path.startswith(prefix):
+                stripped = raw_path[len(prefix):]
+                if not stripped.startswith("/"):
+                    stripped = "/" + stripped
+                scope["path"] = stripped
+                scope["raw_path"] = stripped.encode("ascii")
+            # Inject the header so the SPA's index.html bootstrap
+            # rewrites asset URLs with the prefix.
+            headers = list(scope.get("headers", []))
             key = b"x-forwarded-prefix"
-            # Drop any existing entry so we always win.
             headers = [(k, v) for (k, v) in headers if k != key]
             headers.append((key, prefix.encode("ascii")))
-            request.scope["headers"] = headers
+            scope["headers"] = headers
             return await call_next(request)
 
     app.add_middleware(_ForwardedPrefixMiddleware)
