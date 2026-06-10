@@ -2567,14 +2567,23 @@ function SREChat() {
   if (!installed) {
     return <SREInstallCTA />;
   }
-  // Try localhost first (port-forward path), then the apiserver
-  // service proxy fallback. Headlamp itself runs in the operator's
-  // browser; the apiserver proxy URL only resolves when Headlamp's
-  // own backend has cluster connectivity (true for both Docker
-  // Desktop kind cluster and the in-cluster Headlamp deployment).
+  // Resolve the cluster name from the current URL — Headlamp routes
+  // every cluster-scoped view under /c/:cluster/... and the
+  // apiserver-proxy URL under /clusters/:cluster/api/v1/.... We can
+  // grab :cluster from the location pathname without importing the
+  // K8s namespace (which triggers the host's UMD-fallback require()
+  // and crashes the bundle).
+  const inferredCluster = React.useMemo(() => {
+    const m = window.location.pathname.match(/^\/c\/([^/]+)\//);
+    return m?.[1] ?? "";
+  }, []);
+
   const [mode, setMode] = React.useState<"local" | "proxy">("local");
   const localUrl = `http://localhost:${HERMES_GATEWAY_PORT}`;
-  const proxyUrl = `/clusters/kind-kars-dev/api/v1/namespaces/kars-sre/services/sre:${HERMES_GATEWAY_PORT}/proxy/`;
+  const proxyUrl = inferredCluster
+    ? `/clusters/${inferredCluster}/api/v1/namespaces/kars-sre/services/sre:${HERMES_GATEWAY_PORT}/proxy/`
+    : "";
+  const proxyDisabled = mode === "proxy" && !inferredCluster;
   const src = mode === "local" ? localUrl : proxyUrl;
 
   return (
@@ -2593,16 +2602,22 @@ function SREChat() {
             />
             <Tab
               value="proxy"
-              label="Apiserver service proxy"
+              label={
+                inferredCluster
+                  ? `Apiserver proxy (${inferredCluster})`
+                  : "Apiserver proxy"
+              }
+              disabled={!inferredCluster}
               sx={{ minHeight: 32, fontSize: 12 }}
             />
           </Tabs>
           <Button
             size="small"
-            href={src}
+            href={src || "#"}
             target="_blank"
             rel="noreferrer noopener"
             variant="outlined"
+            disabled={!src}
           >
             Open in new tab
           </Button>
@@ -2621,24 +2636,48 @@ function SREChat() {
               &nbsp;in another terminal. Hermes&apos; WebUI binds to
               <code>localhost</code> on the operator&apos;s laptop.
             </>
+          ) : proxyDisabled ? (
+            <>
+              Cluster name could not be inferred from the current URL
+              (Headlamp routes are <code>/c/&lt;cluster&gt;/...</code>).
+              Switch back to the Local tab and run&nbsp;
+              <code>kars connect sre --web</code>.
+            </>
           ) : (
             <>
-              Routes through the cluster apiserver service proxy. Works without
-              port-forward, but Hermes asset paths may need extra config.
+              Routes through the cluster apiserver service proxy
+              (<code>{src}</code>). Works without port-forward, but Hermes
+              asset paths may need extra config. If the iframe stays
+              blank, click <em>Open in new tab</em>.
             </>
           )}
         </div>
-        <iframe
-          src={src}
-          title="kars-sre WebUI"
-          style={{
-            width: "100%",
-            minHeight: "calc(100vh - 320px)",
-            border: "1px solid var(--mui-palette-divider)",
-            borderRadius: 4,
-            background: "var(--mui-palette-background-default)",
-          }}
-        />
+        {proxyDisabled ? (
+          <div
+            style={{
+              padding: 24,
+              border: "1px dashed var(--mui-palette-divider)",
+              borderRadius: 4,
+              textAlign: "center",
+              color: "var(--mui-palette-text-secondary)",
+              fontSize: 13,
+            }}
+          >
+            No cluster context in URL — switch to the Local tab.
+          </div>
+        ) : (
+          <iframe
+            src={src}
+            title="kars-sre WebUI"
+            style={{
+              width: "100%",
+              minHeight: "calc(100vh - 320px)",
+              border: "1px solid var(--mui-palette-divider)",
+              borderRadius: 4,
+              background: "var(--mui-palette-background-default)",
+            }}
+          />
+        )}
       </div>
     </SectionBox>
   );
