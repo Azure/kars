@@ -2124,6 +2124,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         if is_openclaw {
             // OpenClaw gateway port (used by `kars connect` port-forward).
             agent_container["ports"] = json!([{"containerPort": 18789, "name": "gateway"}]);
+        } else if matches!(runtime_spec.kind, crate::crd::RuntimeKind::Hermes) {
+            // Hermes ports:
+            //   18789 — gateway admin port (kars connect compatibility)
+            //   9119  — `hermes dashboard --tui` in-browser PTY chat,
+            //           consumed by the Headlamp SRE Console iframe.
+            agent_container["ports"] = json!([
+                {"containerPort": 18789, "name": "gateway"},
+                {"containerPort": 9119, "name": "dashboard"}
+            ]);
         }
         if let Some(cmd) = &runtime_plan.command {
             agent_container["command"] = json!(cmd);
@@ -2952,7 +2961,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     // exposed so a Headlamp-embedded chat iframe (or any
                     // operator using `kubectl port-forward svc/<name>`)
                     // can reach the WebUI without the controller
-                    // needing per-sandbox port discovery.
+                    // needing per-sandbox port discovery. The
+                    // `dashboard` port (9119) exposes the in-browser
+                    // `hermes dashboard --tui` PTY chat that the
+                    // Headlamp SRE Console embeds via apiserver proxy.
                     let mut ports = vec![json!({
                         "name": "inference",
                         "port": 8443,
@@ -2964,6 +2976,12 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "name": "gateway",
                             "port": 18789,
                             "targetPort": 18789,
+                            "protocol": "TCP"
+                        }));
+                        ports.push(json!({
+                            "name": "dashboard",
+                            "port": 9119,
+                            "targetPort": 9119,
                             "protocol": "TCP"
                         }));
                     }

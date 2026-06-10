@@ -778,6 +778,37 @@ if [ "$1" = "hermes" ]; then
     $AS_SANDBOX python3 -m kars_runtime_hermes.plugin.sre_watcher &
   fi
 
+  # ── Hermes Dashboard (in-browser chat) ────────────────────────────
+  # Hermes ships an in-browser PTY chat at `hermes dashboard --tui`.
+  # We always run it inside the sandbox bound to 0.0.0.0:9119 so the
+  # cluster apiserver-proxy (and the Headlamp SRE Console iframe) can
+  # reach it without a port-forward. Opt out by setting
+  # HERMES_DASHBOARD_ENABLED=false. The dashboard is firewall-safe
+  # because the per-sandbox NetworkPolicy only allows ingress from
+  # the kars apiserver path; external clients can't reach it.
+  #
+  # --insecure: required when --host != 127.0.0.1 (Hermes refuses to
+  #             bind to a non-loopback address without it). Inside a
+  #             K8s pod the only way clients reach the port is via
+  #             the apiserver proxy or a peer sandbox, both of which
+  #             are gated by RBAC + NetworkPolicy — the "insecure"
+  #             label refers to laptop-host exposure that doesn't
+  #             apply here.
+  # --skip-build: the Hermes upstream image pre-builds the web bundle.
+  #               In our pip-install image we don't, but the dashboard
+  #               serves a pre-built dist when one exists; building
+  #               from source needs npm which we don't ship.
+  if [ "${HERMES_DASHBOARD_ENABLED:-true}" != "false" ]; then
+    DASHBOARD_PORT="${HERMES_DASHBOARD_PORT:-9119}"
+    echo "[kars-hermes] Starting hermes dashboard on 0.0.0.0:${DASHBOARD_PORT}"
+    HERMES_DASHBOARD_TUI=1 $AS_SANDBOX hermes dashboard \
+      --host 0.0.0.0 \
+      --port "$DASHBOARD_PORT" \
+      --no-open \
+      --insecure \
+      --skip-build > /tmp/hermes-dashboard.log 2>&1 &
+  fi
+
   exec $AS_SANDBOX hermes gateway run --accept-hooks
 else
   echo "[kars-hermes] Operator override: $*"

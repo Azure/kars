@@ -87,7 +87,7 @@ RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
 # Pinned to a specific release tag for build reproducibility. Operators
 # bumping to a newer Hermes should also re-verify the kars runtime
 # contract is still honored (entrypoint env shape + plugin context API).
-ARG HERMES_VERSION=0.15.2
+ARG HERMES_VERSION=0.16.0
 RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
 
 # ---- Channel adapter libraries -----------------------------------------
@@ -106,6 +106,21 @@ RUN pip install --no-cache-dir \
     "python-telegram-bot>=21,<22" \
     "slack-sdk>=3,<4" \
     "discord.py>=2,<3"
+
+# ---- Hermes dashboard web UI deps ---------------------------------------
+# `hermes dashboard` (the in-browser PTY chat the Headlamp SRE Console
+# embeds) needs FastAPI + Uvicorn + WebSockets + Jinja2 to start. These
+# are soft-optional in hermes-agent itself, so we pull them here so the
+# dashboard is "Just Works" inside every kars sandbox without an
+# operator having to pip-install at runtime. Pins follow Hermes 0.15.x
+# upstream's tested matrix.
+RUN pip install --no-cache-dir \
+    "fastapi>=0.110,<1" \
+    "uvicorn[standard]>=0.30,<1" \
+    "websockets>=12,<14" \
+    "jinja2>=3.1,<4" \
+    "python-multipart>=0.0.9,<1" \
+    "ptyprocess>=0.7,<1"
 
 # ---- Install the kars-runtime-hermes plugin -----------------------------
 # This is the in-pod adapter that registers kars_spawn, foundry_*,
