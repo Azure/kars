@@ -2946,12 +2946,29 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "selector": {
                     "kars.azure.com/sandbox": &name
                 },
-                "ports": [{
-                    "name": "inference",
-                    "port": 8443,
-                    "targetPort": 8443,
-                    "protocol": "TCP"
-                }]
+                "ports": ({
+                    // Always expose the inference-router (8443). For
+                    // Hermes runtimes the gateway port (18789) is also
+                    // exposed so a Headlamp-embedded chat iframe (or any
+                    // operator using `kubectl port-forward svc/<name>`)
+                    // can reach the WebUI without the controller
+                    // needing per-sandbox port discovery.
+                    let mut ports = vec![json!({
+                        "name": "inference",
+                        "port": 8443,
+                        "targetPort": 8443,
+                        "protocol": "TCP"
+                    })];
+                    if matches!(runtime_spec.kind, crate::crd::RuntimeKind::Hermes) {
+                        ports.push(json!({
+                            "name": "gateway",
+                            "port": 18789,
+                            "targetPort": 18789,
+                            "protocol": "TCP"
+                        }));
+                    }
+                    ports
+                })
             }
         }))?;
         svc_api
