@@ -2637,7 +2637,7 @@ kars sre show <action-id>`}
         <div style={{ marginTop: 20 }}>
           <p style={{ fontSize: 13, color: "var(--mui-palette-text-secondary)" }}>
             Looking for pending approvals? Head to&nbsp;
-            <Link routeName="kars-sre-console">SRE → Console</Link>
+            <a href="#/c/kind-kars-dev/kars/sre">SRE → Console</a>
             &nbsp;— it lives-updates as the watcher creates KarsSREAction
             CRs, with inline Approve / Reject buttons.
           </p>
