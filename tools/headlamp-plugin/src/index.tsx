@@ -2590,6 +2590,65 @@ function SREChat() {
     return m?.[1] ?? "";
   }, []);
 
+  // The dashboard HTML is served with asset URLs prefixed
+  // /api/v1/namespaces/kars-sre/services/sre:<port>/proxy/assets/...
+  // (the in-pod kars-runtime-hermes dashboard_proxy wrapper injects
+  // X-Forwarded-Prefix to bake this in). But Headlamp's apiserver
+  // proxy adds its own /clusters/<cluster> prefix, so the browser
+  // would fetch /api/v1/... at the Headlamp root and 404.
+  //
+  // We fetch the HTML up front via the Headlamp proxy, rewrite asset
+  // URLs to include the /clusters/<cluster> prefix, and inject via
+  // `srcdoc`. That way every <script src=...> and <link href=...>
+  // request hits the right path.
+  const proxyBase = inferredCluster
+    ? `/clusters/${inferredCluster}/api/v1/namespaces/kars-sre/services/sre:${HERMES_DASHBOARD_PORT}/proxy`
+    : "";
+
+  const [srcDoc, setSrcDoc] = React.useState<string | null>(null);
+  const [loadErr, setLoadErr] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!proxyBase) return;
+    let cancelled = false;
+    setLoadErr(null);
+    setSrcDoc(null);
+    (async () => {
+      try {
+        const resp = await fetch(`${proxyBase}/`, { credentials: "include" });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+        }
+        let html = await resp.text();
+        // The in-pod wrapper bakes in the K8s proxy suffix; the
+        // Headlamp host adds /clusters/<cluster>. Prepend the
+        // missing chunk to every absolute asset path the SPA
+        // emits. Match the prefix the dashboard already injected.
+        const inPrefix = `/api/v1/namespaces/kars-sre/services/sre:${HERMES_DASHBOARD_PORT}/proxy`;
+        const fullPrefix = `/clusters/${inferredCluster}${inPrefix}`;
+        const re = new RegExp(
+          inPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+          "g",
+        );
+        html = html.replace(re, fullPrefix);
+        // Also inject a <base> so any relative URLs in the SPA
+        // (e.g. fetch("/api/dashboard/...")) resolve under the
+        // proxy. <base> must go in <head>; the SPA's existing
+        // bootstrap script lives at the end of <head>.
+        html = html.replace(
+          /<head>/i,
+          `<head>\n  <base href="${fullPrefix}/">`,
+        );
+        if (!cancelled) setSrcDoc(html);
+      } catch (e: any) {
+        if (!cancelled) setLoadErr(e?.message ?? String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [proxyBase, inferredCluster]);
+
   if (installed === null) {
     return (
       <SectionBox title="💬 Chat with kars-sre">
@@ -2600,10 +2659,6 @@ function SREChat() {
   if (!installed) {
     return <SREInstallCTA />;
   }
-
-  const proxyUrl = inferredCluster
-    ? `/clusters/${inferredCluster}/api/v1/namespaces/kars-sre/services/sre:${HERMES_DASHBOARD_PORT}/proxy/`
-    : "";
 
   return (
     <SectionBox title="💬 Chat with kars-sre">
@@ -2620,16 +2675,16 @@ function SREChat() {
           </span>
           <Button
             size="small"
-            href={proxyUrl || "#"}
+            href={proxyBase ? `${proxyBase}/` : "#"}
             target="_blank"
             rel="noreferrer noopener"
             variant="outlined"
-            disabled={!proxyUrl}
+            disabled={!proxyBase}
           >
             Open in new tab
           </Button>
         </Stack>
-        {!proxyUrl ? (
+        {!proxyBase ? (
           <div
             style={{
               padding: 24,
@@ -2644,13 +2699,29 @@ function SREChat() {
             Open SRE → Console from the sidebar to load the cluster
             context first.
           </div>
+        ) : loadErr ? (
+          <div
+            style={{
+              padding: 24,
+              border: "1px solid var(--mui-palette-error-main)",
+              borderRadius: 4,
+              color: "var(--mui-palette-error-main)",
+              fontSize: 13,
+            }}
+          >
+            <strong>Could not load the dashboard:</strong> {loadErr}
+            <br />
+            <span style={{ fontSize: 12, opacity: 0.8 }}>
+              Try “Open in new tab” above, or run&nbsp;
+              <code>kars connect sre</code>.
+            </span>
+          </div>
+        ) : srcDoc === null ? (
+          <div style={{ padding: 24, fontSize: 13 }}>Loading chat…</div>
         ) : (
           <iframe
-            src={proxyUrl}
+            srcDoc={srcDoc}
             title="kars-sre Chat"
-            // Sandbox attribute: same-origin so cookies work, scripts
-            // so xterm.js loads, allow-forms for the REPL submit, and
-            // allow-modals so confirm()/alert() popups render.
             sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups"
             style={{
               width: "100%",
