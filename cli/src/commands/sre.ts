@@ -99,35 +99,147 @@ export function sreCommand(): Command {
         process.exit(1);
       }
 
-      const helmArgs = [
-        "upgrade",
-        options.release,
-        chartPath,
-        "--namespace", options.namespace,
-        // --reset-then-reuse-values: re-load defaults from values.yaml
-        // THEN overlay the previously-set --set values. Critical for
-        // operators upgrading from older chart versions whose stored
-        // release values predate fields like runtimes.hermes — a plain
-        // --reuse-values would carry the gap forward and fail templating.
-        "--reset-then-reuse-values",
-        // --force-conflicts: helm 4 uses server-side apply by default,
-        // which conflicts with field managers from prior `kubectl set
-        // image` / `kars push --apply` runs that touched the same
-        // fields. This flag tells SSA to take ownership on conflict,
-        // matching the operator's intent (helm-managed chart is the
-        // source of truth).
-        "--force-conflicts",
-        "--set", "sre.enabled=true",
-      ];
+      // Detect deployment shape:
+      //   A. operator deployed via `helm install` (release tracked) →
+      //      use `helm upgrade --reuse-values`
+      //   B. operator deployed via `kars dev --target local-k8s`
+      //      (which renders `helm template | kubectl apply` and so
+      //      never creates a helm release record) → use `helm template
+      //      | kubectl apply --server-side --force-conflicts` with
+      //      `sre.enabled=true` baked in. The chart is already in
+      //      the cluster; this just adds the SRE bits idempotently.
+      //   C. no chart at all → `helm install` with --take-ownership +
+      //      a placeholder workload-identity client-id (local dev).
+      let mode: "upgrade" | "template" | "install" = "install";
+      const listArgs = ["list", "-n", options.namespace, "-q"];
+      if (options.context) listArgs.push("--kube-context", options.context);
+      try {
+        const { stdout } = await execa("helm", listArgs, { stdio: "pipe" });
+        if (
+          stdout
+            .split(/\r?\n/)
+            .map(s => s.trim())
+            .includes(options.release)
+        ) {
+          mode = "upgrade";
+        }
+      } catch {
+        // helm list errored — treat as "not installed"
+      }
+      if (mode === "install") {
+        // Check whether the controller already runs in the namespace.
+        // Presence implies `kars dev` deployed it via `helm template
+        // | kubectl apply` — adopting via plain `helm install` would
+        // fail on every pre-existing resource. Take the template path.
+        try {
+          await execa(
+            "kubectl",
+            [
+              ...(options.context ? ["--context", options.context] : []),
+              "-n", options.namespace,
+              "get", "deploy/kars-controller",
+            ],
+            { stdio: "ignore" },
+          );
+          mode = "template";
+        } catch {
+          // Controller missing → fresh cluster → safe to helm install.
+        }
+      }
+
+      const helmArgs =
+        mode === "upgrade"
+          ? [
+              "upgrade",
+              options.release,
+              chartPath,
+              "--namespace", options.namespace,
+              // --reset-then-reuse-values: re-load defaults from values.yaml
+              // THEN overlay the previously-set --set values. Critical for
+              // operators upgrading from older chart versions whose stored
+              // release values predate fields like runtimes.hermes — a plain
+              // --reuse-values would carry the gap forward and fail templating.
+              "--reset-then-reuse-values",
+              // --force-conflicts: helm 4 uses server-side apply by default,
+              // which conflicts with field managers from prior `kubectl set
+              // image` / `kars push --apply` runs that touched the same
+              // fields. This flag tells SSA to take ownership on conflict,
+              // matching the operator's intent (helm-managed chart is the
+              // source of truth).
+              "--force-conflicts",
+              "--set", "sre.enabled=true",
+            ]
+          : mode === "template"
+          ? [
+              "template",
+              options.release,
+              chartPath,
+              "--namespace", options.namespace,
+              "--include-crds",
+              "--set", "sre.enabled=true",
+              // Placeholder client-id — same default kars dev uses.
+              // Local-k8s clusters never federate to Entra so this
+              // value is purely a template-completeness shim.
+              "--set", "azure.workloadIdentity.clientId=dummy",
+            ]
+          : [
+              "install",
+              options.release,
+              chartPath,
+              "--namespace", options.namespace,
+              "--create-namespace",
+              "--force-conflicts",
+              // --take-ownership: adopt resources that already exist in the
+              // cluster but don't carry helm metadata (the kars-system
+              // namespace, default-deny NetworkPolicy, etc. created
+              // out-of-band by a prior `kars dev` or partial helm
+              // install). Without this, install dies on the first such
+              // resource with a "cannot be imported" error. Requires
+              // helm >= 3.17 (`kars dev` pins helm 4 — safe).
+              "--take-ownership",
+              "--set", "sre.enabled=true",
+              // Brand-new chart install on a fresh cluster has no prior
+              // azure.workloadIdentity.clientId — use a placeholder for
+              // local-k8s dev. Real AKS installs come through `kars up`
+              // which sets this properly.
+              "--set", "azure.workloadIdentity.clientId=dummy",
+            ];
       if (options.model) helmArgs.push("--set", `sre.model=${options.model}`);
       if (options.context) helmArgs.push("--kube-context", options.context);
 
-      console.log(chalk.cyan("▸ enabling kars-sre via helm upgrade --reuse-values…"));
+      const verbHuman =
+        mode === "upgrade" ? "upgrade"
+        : mode === "template" ? "template | kubectl apply"
+        : "install";
+      console.log(chalk.cyan(`▸ enabling kars-sre via helm ${verbHuman}…`));
       console.log(chalk.gray(`  helm ${helmArgs.join(" ")}`));
       try {
-        await execa("helm", helmArgs, { stdio: "inherit" });
+        if (mode === "template") {
+          // Render the chart, then apply via kubectl SSA — same flow
+          // kars dev --target local-k8s uses. We pipe stdout → kubectl
+          // apply to avoid a tempfile and to inherit kubectl's own
+          // diff/error formatting.
+          const { stdout } = await execa("helm", helmArgs, { stdio: "pipe" });
+          const kctxArgs = options.context ? ["--context", options.context] : [];
+          await execa(
+            "kubectl",
+            [
+              ...kctxArgs,
+              "apply",
+              "-f", "-",
+              "--server-side",
+              "--force-conflicts",
+            ],
+            {
+              input: stdout,
+              stdio: ["pipe", "inherit", "inherit"],
+            },
+          );
+        } else {
+          await execa("helm", helmArgs, { stdio: "inherit" });
+        }
       } catch {
-        console.error(chalk.red("✗ helm upgrade failed"));
+        console.error(chalk.red(`✗ helm ${verbHuman} failed`));
         process.exit(1);
       }
       console.log(chalk.green("✓ chart patched"));
