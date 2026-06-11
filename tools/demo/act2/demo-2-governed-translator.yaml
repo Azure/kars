@@ -1,0 +1,159 @@
+# ════════════════════════════════════════════════════════════════════
+#  DEMO SANDBOX #2 — OpenClaw "translator" with FULL GOVERNANCE
+# ════════════════════════════════════════════════════════════════════
+#
+#  THE STORY
+#  ─────────
+#  Real production shape: OpenClaw runtime + Content Safety on +
+#  Foundry tools (memory, web_search, image_gen) explicitly allowed
+#  + per-tool rate limits + cost-tier metadata + dual approval
+#  required for any "spend money" action.
+#
+#  Show in the demo:
+#    • Same 3 CRs as demo #1, but the ToolPolicy is a real allowlist
+#      with rate limits + approval requirements — the AGT profile is
+#      the place to encode "this agent can spend up to $X / day,
+#      anything above $Y/call needs human approval"
+#    • Content Safety is wired in (Prompt Shields ON) — every prompt
+#      gets analysed for jailbreak / prompt-injection / harmful content
+#      BEFORE the router forwards it to the model. The agent cannot
+#      bypass this because the egress-guard forces ALL outbound through
+#      the router.
+#    • Egress is in Strict mode — only explicitly allowed hostnames
+#      are reachable; everything else gets dropped at the egress-guard
+#      iptables layer.
+#
+#  COMMANDS
+#  ─────────
+#    apply:   kubectl apply -f tools/demo/act2/demo-2-governed-translator.yaml
+#    connect: kars connect translator
+#    inspect: kubectl describe karssandbox translator -n kars-system
+#    tear:    kubectl delete -f tools/demo/act2/demo-2-governed-translator.yaml
+# ════════════════════════════════════════════════════════════════════
+
+---
+# ─── CR #1 — InferencePolicy (with Content Safety + tighter budget) ─
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: translator-inference
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxName: translator
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-5.4              # primary model
+    # `fallback:` block is supported here too — if primary returns
+    # 429/5xx the router silently retries on the fallback deployment.
+    # Omitted in this demo for clarity.
+  contentSafety:
+    requirePromptShields: true         # ON — every prompt goes through Prompt Shields
+                                       # before forwarding to the model. Detects
+                                       # jailbreak attempts, prompt injection,
+                                       # harmful content. Router fails CLOSED if
+                                       # Prompt Shields is unreachable.
+  tokenBudget:
+    perRequestTokens: 16000            # tighter than demo #1 (translation = short prompts)
+    dailyTokens: 1000000               # 1M/day — enough for ~30k short translations
+
+---
+# ─── CR #2 — ToolPolicy (real allowlist + rate limits) ─────────────
+# Production-shape AGT profile. The profile language supports:
+#   - capability rules    (allow / deny specific tool actions)
+#   - rate_limit rules    (per-action rate caps)
+#   - approval rules      (force a human-in-the-loop)
+#   - cost_tier metadata  (audit + downstream FinOps reporting)
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: translator-tools
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: translator
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: translator-default
+      policies:
+        # ── Rule 1: explicit allowlist — anything not listed is denied
+        - name: translator-allow-translation-tools
+          type: capability
+          allowed_actions:
+            - "inference:chat_completions:*"
+            - "inference:responses:*"
+            - "inference:content_safety:*"
+            - "tool:foundry_memory:*"               # persist user glossary/preferences
+            - "tool:foundry_web_search:*"           # look up domain terms
+            - "tool:http_fetch:*"                   # read public reference URLs
+          priority: 100
+
+        # ── Rule 2: hard-deny anything that costs serious money
+        - name: translator-deny-expensive-ops
+          type: capability
+          denied_actions:
+            - "tool:foundry_image_generation:*"     # image gen = ~$0.04/call
+            - "tool:foundry_code_execute:*"         # sandbox spin-up cost
+            - "tool:foundry_agents:*"               # spawning more agents
+          priority: 200                              # higher than allow rule above
+                                                     # (higher priority = evaluated first)
+
+        # ── Rule 3: rate-limit the LLM itself
+        - name: translator-rate-limit
+          type: rate_limit
+          action_pattern: "inference:chat_completions:*"
+          limit: 60                                  # max calls per window
+          window_seconds: 60                         # 1-minute window
+          priority: 50
+
+---
+# ─── CR #3 — KarsSandbox (OpenClaw + Strict egress) ────────────────
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: translator
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+    kars.azure.com/sandbox: translator
+    kars.azure.com/channels: none
+spec:
+  runtime:
+    kind: OpenClaw                     # the kars-native flagship runtime
+    openclaw:
+      config:
+        agent:
+          model: gpt-5.4               # OpenClaw accepts model inline; InferencePolicy
+                                       #   above is still the source of truth for budget
+  sandbox:
+    isolation: enhanced                # ENHANCED = strict custom seccomp profile
+                                       #   (kars-strict). Narrower syscall surface.
+  inferenceRef:
+    name: translator-inference
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: translator-tools
+    registryMode: local
+    trustThreshold: 0
+  networkPolicy:
+    defaultDeny: true
+    egressMode: Strict                 # STRICT = deny anything not in allowedEndpoints
+                                       #   (vs Learn which logs misses but allows them).
+                                       #   Egress-guard iptables enforce this in-pod.
+    allowedEndpoints:
+      - host: "*.cognitiveservices.azure.com"   # Azure OpenAI / Content Safety
+        port: 443
+      - host: "*.openai.azure.com"
+        port: 443
+      - host: "*.search.azure.com"              # Foundry web_search backend
+        port: 443
+      - host: "*.blob.core.windows.net"         # Foundry file artifacts
+        port: 443

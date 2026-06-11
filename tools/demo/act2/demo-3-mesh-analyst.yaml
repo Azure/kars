@@ -1,0 +1,166 @@
+# ════════════════════════════════════════════════════════════════════
+#  DEMO SANDBOX #3 — Hermes "analyst" with MESH + MEMORY
+# ════════════════════════════════════════════════════════════════════
+#
+#  THE STORY
+#  ─────────
+#  The "platform" shape: a stateful Hermes agent that PERSISTS
+#  memory across restarts (KarsMemory), is DISCOVERABLE on the AGT
+#  mesh (other agents can find + send to it), and can be REACHED
+#  via Telegram for human-in-the-loop oversight.
+#
+#  This is the kind of sandbox you'd run when an agent is meant to
+#  collaborate with other agents (e.g. dev-agent → analyst → sre)
+#  AND remember context across pod restarts (so a long-running
+#  research thread survives a node drain).
+#
+#  Show in the demo:
+#    • 4 CRs now (we added KarsMemory). Same governance contract
+#      as demo #2, but now there's a persisted memory store the
+#      controller mirrors into the sandbox at
+#      /etc/kars/memory/binding.json and the agent reads via the
+#      foundry_memory tool surface.
+#    • The mesh keepalive (entrypoint.sh) auto-registers this agent
+#      on the AGT registry, so from dev-agent's chat you can
+#      "Kars Mesh Send to analyst" and the auto-responder replies.
+#    • Channels: Telegram wired in via a Secret (kars credentials
+#      update analyst --telegram-token <token>) — the agent's
+#      Hermes gateway then listens for messages on Telegram in
+#      addition to the in-cluster mesh.
+#
+#  COMMANDS
+#  ─────────
+#    apply:   kubectl apply -f tools/demo/act2/demo-3-mesh-analyst.yaml
+#    wire telegram (optional):
+#             kars credentials update analyst \\
+#                 --telegram-token <BotFather token> \\
+#                 --telegram-allow-from <your-tg-user-id>
+#    connect: kars connect analyst
+#    mesh ping (from dev-agent's chat):
+#             "Kars Mesh Send to analyst : hi from dev-agent"
+#    tear:    kubectl delete -f tools/demo/act2/demo-3-mesh-analyst.yaml
+# ════════════════════════════════════════════════════════════════════
+
+---
+# ─── CR #1 — InferencePolicy ──────────────────────────────────────
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: analyst-inference
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxName: analyst
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-5.4
+  contentSafety:
+    requirePromptShields: true         # ON — same as demo #2 (production posture)
+  tokenBudget:
+    perRequestTokens: 64000            # bigger window — analyst does long-form reasoning
+    dailyTokens: 3000000               # 3M/day — accommodates multi-turn investigations
+
+---
+# ─── CR #2 — ToolPolicy (broad allowlist + mesh tools) ─────────────
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: analyst-tools
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: analyst
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: analyst-default
+      policies:
+        - name: analyst-allow-broad-toolset
+          type: capability
+          allowed_actions:
+            # Inference + safety
+            - "inference:chat_completions:*"
+            - "inference:responses:*"
+            - "inference:content_safety:*"
+            # Foundry tool surface (analyst uses memory + research tools heavily)
+            - "tool:foundry_memory:*"               # READ/WRITE long-term memory
+            - "tool:foundry_web_search:*"
+            - "tool:foundry_file_search:*"
+            - "tool:foundry_code_execute:*"         # ad-hoc analysis snippets
+            - "tool:foundry_conversations:*"
+            # http_fetch for general URL reads
+            - "tool:http_fetch:*"
+            # MESH tools — what makes this agent reachable from peers
+            - "tool:kars_mesh_send:*"               # send messages to other agents
+            - "tool:kars_mesh_directory:*"          # discover live peers
+            - "tool:kars_mesh_inbox:*"              # read inbound messages
+            - "tool:kars_handoff_status:*"          # check handoff state
+          priority: 100
+
+---
+# ─── CR #3 — KarsMemory (persistent memory binding) ────────────────
+# Persists state across pod restarts. The controller compiles this
+# CR into a binding JSON, mirrors it to /etc/kars/memory/binding.json
+# inside the sandbox, and the inference-router routes
+# foundry_memory.* tool calls to the bound store.
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsMemory
+metadata:
+  name: analyst-memory
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  sandboxRef:
+    name: analyst                        # the sandbox this memory binds to (required)
+  storeName: memory-analyst              # MUST equal `memory-<sandboxname>` — the
+                                         #   Hermes plugin hardcodes this prefix in its
+                                         #   foundry_memory.* tool calls
+  scope: "agent:kars-dev/analyst"        # all reads/writes stamped with this scope;
+                                         #   cross-sandbox memory access impossible
+                                         #   without an explicit binding
+  retentionDays: 30                      # auto-purge memory rows older than 30 days
+  deleteOnSandboxDelete: true            # GC memory when sandbox is deleted
+                                         #   (false keeps it for forensic / audit)
+  displayName: "Analyst long-term memory"
+
+---
+# ─── CR #4 — KarsSandbox (Hermes + mesh + memory binding) ──────────
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: analyst
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+    kars.azure.com/sandbox: analyst
+    kars.azure.com/channels: telegram      # advertises Telegram is wired in
+spec:
+  runtime:
+    kind: Hermes                           # Hermes runtime
+    hermes: {}
+  sandbox:
+    isolation: enhanced                    # ENHANCED seccomp — production posture
+  inferenceRef:
+    name: analyst-inference
+  memoryRef:
+    name: analyst-memory                   # binds the KarsMemory CR above —
+                                           # mounts /etc/kars/memory/binding.json
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: analyst-tools
+    registryMode: local                    # cluster-local AGT registry
+    trustThreshold: 0                      # accept any peer reputation in dev
+  networkPolicy:
+    defaultDeny: true
+    egressMode: Learn                      # Learn-mode for dev so unknown hosts
+                                           # surface in the operator UX (promote
+                                           # to Strict for production with an
+                                           # explicit allowedEndpoints list)
