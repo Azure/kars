@@ -37,6 +37,12 @@ spec:
     requirePromptShields: false
   tokenBudget:
     perRequestTokens: 32000
+    # Daily lifetime budget across all sessions. 500K is enough for a
+    # quick smoke test but trivially blown by an active demo (one
+    # 175K-context conversation through a couple of turns already
+    # passes it). 2M keeps the demo on rails without hiding the
+    # token-budget enforcement signal in the Headlamp plugin.
+    dailyTokens: 2000000
 ---
 # ToolPolicy required because spec.governance.enabled=true requires
 # spec.governance.toolPolicyRef.name. The kars-default profile applies

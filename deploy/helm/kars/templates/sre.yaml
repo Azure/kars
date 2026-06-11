@@ -87,6 +87,13 @@ spec:
     requirePromptShields: {{ (.Values.sre | default dict).requirePromptShields | default false }}
   tokenBudget:
     perRequestTokens: {{ (.Values.sre | default dict).tokenBudget | default 32000 }}
+    # Daily lifetime budget across all sessions. A handful of SRE
+    # diagnose-then-propose cycles burn ~100K tokens each (the agent
+    # makes 8-10 tool calls per incident + assembles a long-form
+    # rationale). 500K is exhausted by day-one demos; 2M gives ~20
+    # incident cycles before the router throttles. Override via
+    # --set sre.dailyTokens=N if your install has stricter quotas.
+    dailyTokens: {{ (.Values.sre | default dict).dailyTokens | default 2000000 }}
 ---
 # kars-sre KarsSandbox — Hermes runtime, SRE plugin gated on env.
 apiVersion: kars.azure.com/v1alpha1
