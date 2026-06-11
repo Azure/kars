@@ -848,28 +848,48 @@ if [ "$1" = "hermes" ]; then
         > /tmp/hermes-dashboard.log 2>&1 &
   fi
 
-  # ── Pre-warm mesh registration ────────────────────────────────────
+  # ── Pre-warm mesh registration (persistent) ───────────────────────
   # `hermes gateway run` in idle-daemon mode (no Telegram/Slack/Discord
   # channels) only runs the cron ticker — it never imports the kars
-  # Hermes plugin, so the mesh client is never initialised and the
-  # sandbox is invisible on `kars_mesh_directory` listings until
-  # something else triggers a plugin load (e.g. an interactive
-  # `hermes chat` invocation). Pre-warm by running the eager init in
-  # a short-lived Python process at boot — register_self is
-  # idempotent + restart-safe, so re-runs are cheap.
-  # SRE-mode sandboxes opt out: the SRE agent is intentionally off
-  # the mesh (no kars_mesh_* tools, no relay egress allowlisted).
+  # Hermes plugin, so the Phase A2.1 eager MeshClient init never
+  # fires. Result: the sandbox is invisible on `kars_mesh_directory`
+  # listings until something else triggers a plugin load (e.g. an
+  # interactive `hermes chat` invocation, which registers + exits).
+  #
+  # We spawn a **long-lived** Python process that calls the same
+  # `_get_or_init_client()` the in-process eager init would, then
+  # parks on Event.wait() so the MeshClient stays connected and
+  # keeps the relay heartbeat going (without a live connection, the
+  # AGT registry marks the agent stale after ~90s of no heartbeat
+  # and discovery tools hide it). Also starts the auto-responder
+  # worker so the sandbox can REPLY to inbound mesh messages, not
+  # just appear in directory listings.
+  # SRE-mode sandboxes opt out: the SRE agent is intentionally
+  # off-mesh (no kars_mesh_* tools, no relay egress allowlisted).
   if [ "${SRE_ENABLED:-}" != "true" ] && [ "${KARS_MESH_PROVIDER:-}" = "agt" ]; then
-    echo "[kars-hermes] pre-warming mesh registration (background)"
+    echo "[kars-hermes] starting persistent mesh-keepalive (background)"
     $AS_SANDBOX env HOME="$HOME" HERMES_HOME="$HERMES_HOME" \
       python3 -c "
-from kars_runtime_hermes.plugin import mesh as _m
+import sys, threading, time
+print('[kars-mesh-keepalive] starting', flush=True)
 try:
-    _m._get_or_init_client()
-    print('[kars-hermes] mesh pre-warm: registered', flush=True)
+    from kars_runtime_hermes.plugin import mesh as _m
+    client = _m._get_or_init_client()
+    print('[kars-mesh-keepalive] mesh client registered + connected', flush=True)
+    try:
+        from kars_runtime_hermes.plugin import mesh_worker as _w
+        _w.start_worker(_m._get_or_init_client)
+        print('[kars-mesh-keepalive] auto-responder worker started', flush=True)
+    except Exception as e:
+        print(f'[kars-mesh-keepalive] worker skipped: {e!r}', flush=True)
+    # Park indefinitely — the MeshClient + worker live in our
+    # process; if we exit, the relay drops our socket and the
+    # registry marks us stale within ~90s.
+    threading.Event().wait()
 except Exception as e:
-    print(f'[kars-hermes] mesh pre-warm failed: {e!r}', flush=True)
-" > /tmp/hermes-mesh-prewarm.log 2>&1 &
+    print(f'[kars-mesh-keepalive] FATAL: {e!r}', flush=True)
+    sys.exit(1)
+" > /tmp/hermes-mesh-keepalive.log 2>&1 &
   fi
 
   exec $AS_SANDBOX hermes gateway run --accept-hooks
