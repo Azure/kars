@@ -1,0 +1,123 @@
+# ════════════════════════════════════════════════════════════════════
+#  DEMO SANDBOX #1 — minimal Hermes "summarizer"
+# ════════════════════════════════════════════════════════════════════
+#
+#  THE STORY
+#  ─────────
+#  The SMALLEST possible kars sandbox: 3 CRs, ~90 lines of YAML, and
+#  you have a governed Hermes agent running in a sandboxed pod with
+#  its own per-pod inference router. No mesh, no memory, no channels.
+#
+#  Show in the demo:
+#    • How little YAML it takes to land an agent in production
+#    • Why kars REQUIRES two peer CRs per sandbox —
+#      InferencePolicy (which model + how much budget) and
+#      ToolPolicy (what actions are allowed). Both are enforced by
+#      the per-pod inference-router, server-side. The agent cannot
+#      bypass them even if the LLM tries to dial a model API
+#      directly (egress-guard forces all outbound through the router).
+#
+#  COMMANDS
+#  ─────────
+#    apply:    kubectl apply -f tools/demo/act2/demo-1-minimal-summarizer.yaml
+#    connect:  kars connect summarizer       # interactive hermes chat
+#    inspect:  kubectl describe karssandbox summarizer -n kars-system
+#    tear:     kubectl delete -f tools/demo/act2/demo-1-minimal-summarizer.yaml
+# ════════════════════════════════════════════════════════════════════
+
+---
+# ─── CR #1 — InferencePolicy ──────────────────────────────────────
+# WHICH model the agent calls + how much it can spend per request
+# and per day. The per-pod inference-router reads this and enforces
+# server-side — agent cannot bypass it.
+apiVersion: kars.azure.com/v1alpha1    # all kars CRs share this group
+kind: InferencePolicy                  # 1 of 4 governance CRs
+metadata:
+  name: summarizer-inference           # referenced by KarsSandbox.spec.inferenceRef.name
+  namespace: kars-system               # operator namespace; cross-ns refs not supported
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxName: summarizer            # 1:1 binding to the sandbox below
+  modelPreference:
+    primary:
+      provider: azure-openai           # routed via per-pod inference router
+      deployment: gpt-5.4              # Azure Foundry deployment name
+  contentSafety:
+    requirePromptShields: false        # off for the simplest demo path
+  tokenBudget:
+    perRequestTokens: 32000            # single prompt+response cap
+    dailyTokens: 2000000               # lifetime cap across sessions in 24h window
+
+---
+# ─── CR #2 — ToolPolicy ───────────────────────────────────────────
+# WHAT the agent is allowed to do. Required when governance is
+# enabled. The inline AGT profile loads into the per-pod inference
+# router and gates EVERY tool call.
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: summarizer-tools               # referenced by KarsSandbox.governance.toolPolicyRef
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: summarizer
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: summarizer-default
+      policies:
+        # Allow ONLY inference + a tiny set of read-only tools.
+        # Everything else (foundry_image_generation, http_fetch with
+        # write semantics, exec, etc.) is implicitly denied.
+        - name: summarizer-allow-minimal
+          type: capability
+          allowed_actions:
+            - "inference:chat_completions:*"
+            - "inference:responses:*"
+            - "inference:content_safety:*"
+            - "tool:http_fetch:*"           # read-only web fetches (router still proxies)
+          priority: 100
+
+---
+# ─── CR #3 — KarsSandbox ──────────────────────────────────────────
+# The actual workload. The controller turns this into a Namespace
+# (kars-summarizer) + Deployment + Service + NetworkPolicy + per-pod
+# inference router. The 2 containers in the pod are:
+#   • agent           (Hermes, UID 1000, only path out is loopback)
+#   • inference-router (per-pod proxy, UID 1001, enforces both policies above)
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: summarizer                     # also becomes the Deployment + Service name
+  namespace: kars-system               # CR lives here; pod lives in kars-summarizer
+  labels:
+    app.kubernetes.io/part-of: kars-demo
+    kars.azure.com/sandbox: summarizer # ToolPolicy selector matches this label
+    kars.azure.com/channels: none      # no messaging channels (Telegram/Slack/Discord)
+spec:
+  runtime:
+    kind: Hermes                       # one of: OpenClaw | Hermes | OpenAIAgents | MAF | Anthropic | LangGraph | PydanticAI | BYO
+    hermes: {}                         # empty object required by CRD CEL guard (image
+                                       #   default settings — Hermes version baked into image)
+  sandbox:
+    isolation: standard                # standard | enhanced | confidential
+                                       #   standard     = RuntimeDefault seccomp, normal node
+                                       #   enhanced     = strict custom seccomp (kars-strict)
+                                       #   confidential = Kata VM (KVM-isolated, separate node pool)
+  inferenceRef:
+    name: summarizer-inference         # points at InferencePolicy above (required)
+  governance:
+    enabled: true                      # turns on the AGT pre-tool-call hook
+    toolPolicyRef:
+      name: summarizer-tools           # points at ToolPolicy above (required when enabled)
+    registryMode: local                # local-only mesh registry (no Entra)
+    trustThreshold: 0                  # accept any peer reputation (demo only)
+  networkPolicy:
+    defaultDeny: true                  # NetworkPolicy DROPs all egress except allowlist
+    egressMode: Learn                  # Learn = log allowlist hits; Strict = deny on miss
+                                       #   (start in Learn, promote to Strict after observing)
