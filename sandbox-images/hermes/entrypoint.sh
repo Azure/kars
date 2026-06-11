@@ -65,6 +65,19 @@ if [ "$HOME" = "/" ] || [ ! -w "$HOME" ]; then
 fi
 mkdir -p "$HOME/.local/state"
 
+# ── Pin Hermes TUI to Node 22 ─────────────────────────────────────────
+# The bundled Hermes UI-TUI (used by the dashboard's Chat tab + the
+# `hermes chat --tui` CLI path) was esbuild-targeted at Node 22. Azure
+# Linux 3 ships Node 24 — invoking the TUI under Node 24 reproducibly
+# SIGSEGVs (~380MB core dump) immediately after `resetTerminalModes()`.
+# Hermes' `_node_bin('node')` in main.py honours the HERMES_NODE env var
+# as an override, so we point it at /opt/node22/bin/node which the
+# Dockerfile installs alongside the system Node. Everything else
+# (build-time `dep_ensure`, npm probes) keeps using system Node 24.
+if [ -x /opt/node22/bin/node ]; then
+  export HERMES_NODE=/opt/node22/bin/node
+fi
+
 # ── Outbound HTTPS proxy ───────────────────────────────────────────
 # UID 1000 in a kars sandbox cannot reach the internet directly:
 # egress-guard's iptables rules transparent-redirect port 443 to
@@ -222,6 +235,15 @@ echo "[kars-hermes] Building MCP server config in $HERMES_CONFIG"
   echo "  default: \"${KARS_MODEL:-${AZURE_OPENAI_DEPLOYMENT:-gpt-5.4}}\""
   echo "  provider: azure-foundry"
   echo "  base_url: \"http://127.0.0.1:8443/v1\""
+  # Pin context_length so Hermes skips its /v1/models probe on every
+  # agent cold-start. The probe targets the loopback inference router,
+  # which doesn't (and shouldn't) implement that model-introspection
+  # endpoint — so it always falls back after a 5s timeout. Pre-baking
+  # the value here saves ~5s on every new chat session and stops the
+  # dashboard SPA from timing-out its initial JSON-RPC call (the WS
+  # would otherwise close mid-init with code=1006). 200k is the
+  # safe-default Hermes itself uses for gpt-5.x family.
+  echo "  context_length: ${HERMES_MODEL_CONTEXT_LENGTH:-200000}"
   echo "mcp_servers:"
   # Built-in platform MCP — exposes the 9 Foundry tools when a Foundry
   # project is bound to this sandbox. Hermes' MCP client + governance
@@ -807,12 +829,22 @@ if [ "$1" = "hermes" ]; then
     SANDBOX_NS="${POD_NAMESPACE:-kars-${SANDBOX_NAME}}"
     SANDBOX_SVC="${SANDBOX_NAME}"
     DASHBOARD_PREFIX="${HERMES_DASHBOARD_PREFIX:-/api/v1/namespaces/${SANDBOX_NS}/services/${SANDBOX_SVC}:${DASHBOARD_PORT}/proxy}"
-    echo "[kars-hermes] Starting hermes dashboard on 0.0.0.0:${DASHBOARD_PORT} (prefix=${DASHBOARD_PREFIX})"
-    HERMES_DASHBOARD_TUI=1 \
+    echo "[kars-hermes] Starting hermes dashboard on 127.0.0.1:${DASHBOARD_PORT} (prefix=${DASHBOARD_PREFIX})"
+    # `runuser -u sandbox --` resets the environment to the sandbox user's
+    # /etc/passwd defaults, which sets HOME=/. The TUI subprocess that the
+    # dashboard spawns (`hermes --tui` Node bundle) then segfaults on
+    # startup trying to write its session state to a read-only root.
+    # Pass HOME + HERMES_HOME explicitly via `env` so the sandbox user
+    # inherits the writable /sandbox dir we already created above.
     HERMES_DASHBOARD_PREFIX="$DASHBOARD_PREFIX" \
-    HERMES_DASHBOARD_HOST=0.0.0.0 \
+    HERMES_DASHBOARD_HOST=127.0.0.1 \
     HERMES_DASHBOARD_PORT="$DASHBOARD_PORT" \
-      $AS_SANDBOX python3 -m kars_runtime_hermes.dashboard_proxy \
+      $AS_SANDBOX env HOME="$HOME" HERMES_HOME="$HERMES_HOME" \
+        HERMES_NODE="$HERMES_NODE" \
+        HERMES_DASHBOARD_PREFIX="$DASHBOARD_PREFIX" \
+        HERMES_DASHBOARD_HOST=127.0.0.1 \
+        HERMES_DASHBOARD_PORT="$DASHBOARD_PORT" \
+        python3 -m kars_runtime_hermes.dashboard_proxy \
         > /tmp/hermes-dashboard.log 2>&1 &
   fi
 

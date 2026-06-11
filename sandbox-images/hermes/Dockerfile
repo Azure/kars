@@ -69,8 +69,30 @@ LABEL org.opencontainers.image.title="kars Hermes Sandbox" \
 # to grep when absent. Azure Linux 3 tdnf doesn't ship ripgrep; we skip
 # the optional dep rather than pulling cargo just to build it.
 RUN tdnf install -y --refresh \
-        git jq ca-certificates nodejs nodejs-npm \
+        git jq ca-certificates nodejs nodejs-npm tar xz \
     && tdnf clean all
+
+# ---- Pin Node 22 for the Hermes TUI ------------------------------------
+# Azure Linux 3 ships Node 24, but the Hermes ui-tui bundle ships a
+# pre-built JS that crashes (SIGSEGV, ~380MB core dump) on Node 24 —
+# its esbuild pre-build target is Node 22. The TUI is what backs the
+# dashboard's in-browser "Chat" tab (and `hermes chat --tui` on the
+# CLI), so a SIGSEGV here = the web chat renders, opens its WS, then
+# the spawned TUI child dies silently and the operator can't type.
+#
+# We install a vendor-supplied Node 22 binary at /opt/node22/ and
+# point Hermes' TUI launcher at it via the upstream-supported
+# HERMES_TUI_NODE env var. System Node 24 stays in place so
+# `dep_ensure` and other build-time tools that don't care about
+# bundle compat keep working.
+ARG NODE22_VERSION=22.20.0
+RUN ARCH="$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/')" \
+    && curl -fsSL -o /tmp/node22.tar.xz \
+       "https://nodejs.org/dist/v${NODE22_VERSION}/node-v${NODE22_VERSION}-linux-${ARCH}.tar.xz" \
+    && mkdir -p /opt/node22 \
+    && tar -xJf /tmp/node22.tar.xz -C /opt/node22 --strip-components=1 \
+    && rm -f /tmp/node22.tar.xz \
+    && /opt/node22/bin/node --version
 
 # ---- Install AGT-Python wheels (governance primitives only in Act 1) ----
 # The wheels directory rides in the build context via

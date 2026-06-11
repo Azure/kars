@@ -125,6 +125,17 @@ spec:
       # KARS_SRE_ENABLED itself; tracked as a follow-up.
       extraEnv:
         SRE_ENABLED: "true"
+        # Hermes' gateway defaults to closed (no channels = nothing
+        # gets through). For the embedded dashboard chat we ARE the
+        # operator — there's no separate identity to allowlist — so
+        # flip the gate open. Safe here because:
+        #   1. The dashboard is reached via `kubectl port-forward` (no
+        #      external network exposure)
+        #   2. Anyone with `kubectl exec`/port-forward on this pod
+        #      already has full sandbox-pod auth — the gate adds nothing
+        # The SRE agent's tool surface is still gated by the
+        # sre-tools ToolPolicy + AGT governance hook above.
+        GATEWAY_ALLOW_ALL_USERS: "true"
 
   sandbox:
     isolation: standard

@@ -2559,23 +2559,25 @@ function SREConsole() {
 // SRE Chat — embedded Hermes Dashboard PTY chat
 // ──────────────────────────────────────────────────────────────────────
 //
-// Routes through the apiserver service proxy to the kars-sre sandbox's
-// :9119 port, where `hermes dashboard --tui` serves a FastAPI + xterm.js
-// in-browser PTY chat. The dashboard renders a full Hermes REPL inside
-// the iframe — same commands you'd type in `kars sre talk`, but
-// without leaving Headlamp.
+// We can't iframe Hermes through Headlamp's apiserver proxy because
+// Headlamp's SPA fetch wrapper attaches the user's bearer token to
+// API calls, but iframe / asset loads are handled by the raw browser
+// which doesn't attach that header → apiserver sees system:anonymous
+// → 403 on every static asset and the iframe stays blank.
 //
-// The apiserver-proxy URL:
-//   /clusters/<cluster>/api/v1/namespaces/kars-sre/services/sre:9119/proxy/
+// The reliable path: kubectl port-forward. The user runs ONE command
+// to expose Hermes on a fixed localhost port and the iframe loads it
+// like any other local web app. Cross-port = cross-origin for parent/
+// child JS, but iframe DOCUMENT loads aren't gated by same-origin so
+// the chat UI works.
 //
-// Headlamp's Link/router lets us discover <cluster> at runtime by
-// parsing the current URL (every Headlamp page is under /c/<cluster>/...).
-//
-// If the iframe can't load (asset paths in Hermes' web bundle may use
-// absolute /web/... that don't survive a sub-path proxy), we always
-// offer an "Open in new tab" escape hatch.
+// We probe the port on mount to give the user a clear "iframe-ready"
+// vs "run this command" state instead of a silently-blank rectangle.
 
 const HERMES_DASHBOARD_PORT = 9119;
+const HERMES_LOCAL_PORT = 19119;
+const HERMES_LOCAL_URL = `http://localhost:${HERMES_LOCAL_PORT}/`;
+const HERMES_PORT_FORWARD_CMD = `kubectl port-forward -n kars-sre svc/sre ${HERMES_LOCAL_PORT}:${HERMES_DASHBOARD_PORT}`;
 
 function SREChat() {
   // Show the install CTA when the kars-sre sandbox isn't deployed —
@@ -2583,71 +2585,29 @@ function SREChat() {
   const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
   const installed = isSREInstalled(sandboxes);
 
-  // Cluster name comes from the URL. Headlamp routes are
-  // /c/<cluster>/... — parse it once on mount.
-  const inferredCluster = React.useMemo(() => {
-    const m = window.location.pathname.match(/^\/c\/([^/]+)\//);
-    return m?.[1] ?? "";
+  // Probe the local port-forward target. We can't `fetch()` it from
+  // here because of CORS — but an <img> load to /favicon.ico will
+  // resolve (success or error) regardless of CORS, which is the only
+  // signal we need. Polled every 3s so the iframe lights up the
+  // moment the user starts the port-forward.
+  const [reachable, setReachable] = React.useState<boolean | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    const probe = () => {
+      const img = new Image();
+      img.onload = () => { if (!cancelled) setReachable(true); };
+      img.onerror = () => { if (!cancelled) setReachable(prev => prev === true ? true : false); };
+      // cache-bust so the browser actually re-probes each tick
+      img.src = `${HERMES_LOCAL_URL}favicon.ico?t=${Date.now()}`;
+    };
+    probe();
+    const id = window.setInterval(probe, 3000);
+    return () => { cancelled = true; window.clearInterval(id); };
   }, []);
 
-  // The in-pod kars_runtime_hermes.dashboard_proxy wrapper installs
-  // an X-Forwarded-Prefix middleware that:
-  //   (a) injects the prefix on every request so the SPA's
-  //       index.html ships asset URLs absolute-prefixed under
-  //       /api/v1/namespaces/kars-sre/services/sre:9119/proxy/...
-  //   (b) STRIPS the same prefix from the request path before
-  //       FastAPI routes it, so the static-file mount + API gate
-  //       see the original paths (`/assets/...`, `/api/...`).
-  //
-  // Headlamp's apiserver proxy adds /clusters/<cluster> on top.
-  // We use srcDoc to fetch the HTML, rewrite the in-pod prefix to
-  // ALSO include /clusters/<cluster>, then let the browser hit the
-  // double-prefixed URL — which Headlamp strips one prefix, the
-  // wrapper strips the other.
-  const inPrefix = `/api/v1/namespaces/kars-sre/services/sre:${HERMES_DASHBOARD_PORT}/proxy`;
-  const fullPrefix = inferredCluster
-    ? `/clusters/${inferredCluster}${inPrefix}`
-    : "";
-
-  const [srcDoc, setSrcDoc] = React.useState<string | null>(null);
-  const [loadErr, setLoadErr] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    if (!fullPrefix) return;
-    let cancelled = false;
-    setLoadErr(null);
-    setSrcDoc(null);
-    (async () => {
-      try {
-        const resp = await fetch(`${fullPrefix}/`, { credentials: "include" });
-        if (!resp.ok) {
-          throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-        }
-        let html = await resp.text();
-        // Replace the in-pod prefix (what the wrapper baked) with
-        // the FULL Headlamp-rooted prefix so every <script src=...>
-        // and <link href=...> the browser fetches lands at the
-        // right apiserver-proxy URL.
-        const re = new RegExp(
-          inPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
-          "g",
-        );
-        html = html.replace(re, fullPrefix);
-        // Add <base> so any SPA-generated relative URLs (XHR fetches
-        // to "/api/dashboard/...") resolve under the proxy.
-        html = html.replace(
-          /<head>/i,
-          `<head>\n  <base href="${fullPrefix}/">`,
-        );
-        if (!cancelled) setSrcDoc(html);
-      } catch (e: any) {
-        if (!cancelled) setLoadErr(e?.message ?? String(e));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [fullPrefix, inPrefix]);
+  const copyCmd = React.useCallback(() => {
+    navigator.clipboard?.writeText(HERMES_PORT_FORWARD_CMD).catch(() => {});
+  }, []);
 
   if (installed === null) {
     return (
@@ -2670,59 +2630,26 @@ function SREChat() {
           sx={{ mb: 1, flexWrap: "wrap" }}
         >
           <span style={{ fontSize: 13, color: "var(--mui-palette-text-secondary)" }}>
-            Routed via the cluster apiserver →&nbsp;
-            <code>kars-sre/sre:{HERMES_DASHBOARD_PORT}</code> (hermes dashboard).
+            Live PTY into the kars-sre sandbox, served via Hermes&apos;
+            dashboard on{" "}
+            <code>localhost:{HERMES_LOCAL_PORT}</code>.
           </span>
           <Button
             size="small"
-            href={fullPrefix ? `${fullPrefix}/` : "#"}
+            href={HERMES_LOCAL_URL}
             target="_blank"
             rel="noreferrer noopener"
             variant="outlined"
-            disabled={!fullPrefix}
+            disabled={!reachable}
           >
             Open in new tab
           </Button>
         </Stack>
-        {!fullPrefix ? (
-          <div
-            style={{
-              padding: 24,
-              border: "1px dashed var(--mui-palette-divider)",
-              borderRadius: 4,
-              textAlign: "center",
-              color: "var(--mui-palette-text-secondary)",
-              fontSize: 13,
-            }}
-          >
-            Cluster name could not be inferred from the current URL.
-            Open SRE → Console from the sidebar to load the cluster
-            context first.
-          </div>
-        ) : loadErr ? (
-          <div
-            style={{
-              padding: 24,
-              border: "1px solid var(--mui-palette-error-main)",
-              borderRadius: 4,
-              color: "var(--mui-palette-error-main)",
-              fontSize: 13,
-            }}
-          >
-            <strong>Could not load the dashboard:</strong> {loadErr}
-            <br />
-            <span style={{ fontSize: 12, opacity: 0.8 }}>
-              Try “Open in new tab” above, or run&nbsp;
-              <code>kars connect sre</code>.
-            </span>
-          </div>
-        ) : srcDoc === null ? (
-          <div style={{ padding: 24, fontSize: 13 }}>Loading chat…</div>
-        ) : (
+
+        {reachable ? (
           <iframe
-            srcDoc={srcDoc}
+            src={HERMES_LOCAL_URL}
             title="kars-sre Chat"
-            sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups"
             style={{
               width: "100%",
               minHeight: "calc(100vh - 220px)",
@@ -2731,12 +2658,57 @@ function SREChat() {
               background: "var(--mui-palette-background-default)",
             }}
           />
+        ) : (
+          <div
+            style={{
+              padding: 24,
+              border: "1px dashed var(--mui-palette-divider)",
+              borderRadius: 4,
+              fontSize: 13,
+              lineHeight: 1.6,
+            }}
+          >
+            <p style={{ marginTop: 0 }}>
+              <strong>Start the chat port-forward</strong> in your
+              terminal — the iframe below will pop in automatically the
+              moment it&apos;s reachable:
+            </p>
+            <pre
+              style={{
+                background: "var(--mui-palette-action-hover)",
+                padding: 12,
+                borderRadius: 4,
+                fontSize: 13,
+                overflowX: "auto",
+                margin: "8px 0",
+              }}
+            >
+              {HERMES_PORT_FORWARD_CMD}
+            </pre>
+            <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+              <Button size="small" variant="outlined" onClick={copyCmd}>
+                Copy command
+              </Button>
+              <span
+                style={{
+                  alignSelf: "center",
+                  fontSize: 12,
+                  color: "var(--mui-palette-text-secondary)",
+                }}
+              >
+                {reachable === null
+                  ? "Probing localhost:" + HERMES_LOCAL_PORT + "…"
+                  : "Waiting for localhost:" + HERMES_LOCAL_PORT + " to come up…"}
+              </span>
+            </Stack>
+            <p style={{ marginBottom: 0, marginTop: 16, fontSize: 12, opacity: 0.8 }}>
+              Why a port-forward? Headlamp&apos;s apiserver proxy attaches
+              your bearer token only to its own SPA fetches, not to iframe
+              asset loads — so without this hop the Hermes static bundle
+              would 403. Same-origin port-forward sidesteps that entirely.
+            </p>
+          </div>
         )}
-        <div style={{ marginTop: 8, fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
-          The chat is a live PTY into the kars-sre sandbox. If the iframe
-          stays blank, click <em>Open in new tab</em> — Hermes&apos; web
-          bundle asset paths sometimes don&apos;t survive a sub-path proxy.
-        </div>
       </div>
     </SectionBox>
   );
