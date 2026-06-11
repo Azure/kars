@@ -37,6 +37,7 @@ import {
 } from "@kinvolk/headlamp-plugin/lib";
 import { makeCustomResourceClass } from "@kinvolk/headlamp-plugin/lib/lib/k8s/crd";
 import type { KubeObject, KubeObjectClass } from "@kinvolk/headlamp-plugin/lib/lib/k8s/KubeObject";
+import Deployment from "@kinvolk/headlamp-plugin/lib/K8s/deployment";
 import Secret from "@kinvolk/headlamp-plugin/lib/K8s/secret";
 import {
   Link,
@@ -2338,6 +2339,16 @@ function SREActionCard({
 }
 
 function SREClusterHealthCard({ sandboxes }: { sandboxes: KubeObject[] | null }) {
+  // Pull every Deployment in the cluster so we can cross-check pod-level
+  // health against the KarsSandbox CR phase. The CR alone reports
+  // `phase=Running` the moment the controller successfully reconciled
+  // the Deployment spec — it knows nothing about whether the pods
+  // inside actually pulled their images, passed readiness probes,
+  // or got evicted. A sandbox with phase=Running + ImagePullBackOff
+  // pods would otherwise show as green on this card, hiding the
+  // exact failure mode the SRE Console is meant to surface.
+  const [deployments] = (Deployment as any).useList() as [KubeObject[] | null];
+
   if (!sandboxes) {
     return (
       <SectionBox title="📊 Cluster Health">
@@ -2345,28 +2356,105 @@ function SREClusterHealthCard({ sandboxes }: { sandboxes: KubeObject[] | null })
       </SectionBox>
     );
   }
-  const byPhase: Record<string, number> = {};
+
+  // Build a quick "sandbox-name → workload-healthy?" lookup. Each
+  // KarsSandbox creates a Deployment of the same name in namespace
+  // `kars-<name>` (controller convention — see reconciler/mod.rs
+  // build_deployment). A workload is "healthy" iff the Deployment
+  // exists AND availableReplicas >= spec.replicas (≥1 when replicas
+  // is unset).
+  const workloadHealthy = (sandboxName: string): "healthy" | "degraded" | "unknown" => {
+    if (!deployments) return "unknown";
+    const ns = `kars-${sandboxName}`;
+    const d = deployments.find(
+      d => (d.metadata?.name ?? "") === sandboxName && (d.metadata?.namespace ?? "") === ns,
+    );
+    if (!d) return "unknown";
+    const spec = (d as any).spec ?? {};
+    const status = (d as any).status ?? {};
+    const desired = typeof spec.replicas === "number" ? spec.replicas : 1;
+    const available = typeof status.availableReplicas === "number" ? status.availableReplicas : 0;
+    return available >= desired && desired > 0 ? "healthy" : "degraded";
+  };
+
+  let running = 0;
   let degraded = 0;
+  let workloadDown = 0;
+  let unknown = 0;
   for (const s of sandboxes) {
     const phase = getStatus(s).phase ?? "Unknown";
-    byPhase[phase] = (byPhase[phase] ?? 0) + 1;
     const conds = (getStatus(s).conditions ?? []) as any[];
-    if (conds.some(c => c.type === "Degraded" && c.status === "True")) degraded += 1;
+    const crDegraded = conds.some(c => c.type === "Degraded" && c.status === "True");
+    const wl = workloadHealthy(s.metadata?.name ?? "");
+
+    if (crDegraded) {
+      degraded += 1;
+    } else if (wl === "degraded") {
+      // CR says Running but underlying Deployment has unavailable
+      // replicas — exactly the "phase=Running + ImagePullBackOff" case
+      // the operator needs to see in red.
+      workloadDown += 1;
+    } else if (phase === "Running" && wl === "healthy") {
+      running += 1;
+    } else if (wl === "unknown") {
+      unknown += 1;
+    } else {
+      unknown += 1;
+    }
   }
   const total = sandboxes.length;
-  const running = byPhase.Running ?? 0;
   return (
     <SectionBox title="📊 Cluster Health">
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, padding: 8 }}>
         <Stat label="Sandboxes total" value={total} />
-        <Stat label="Running" value={running} tone={running === total ? "success" : "warning"} />
-        <Stat label="Degraded" value={degraded} tone={degraded === 0 ? "success" : "error"} />
         <Stat
-          label="Other phases"
-          value={total - running - degraded}
-          tone={total - running - degraded === 0 ? "success" : "warning"}
+          label="Healthy"
+          value={running}
+          tone={running === total ? "success" : "warning"}
+        />
+        <Stat
+          label="Workload down"
+          value={workloadDown}
+          tone={workloadDown === 0 ? "success" : "error"}
+        />
+        <Stat
+          label="CR-Degraded"
+          value={degraded}
+          tone={degraded === 0 ? "success" : "error"}
         />
       </div>
+      {(workloadDown > 0 || degraded > 0) && (
+        <div
+          style={{
+            margin: "0 8px 8px 8px",
+            padding: "8px 12px",
+            border: "1px solid var(--mui-palette-warning-main)",
+            borderRadius: 4,
+            fontSize: 12,
+            color: "var(--mui-palette-warning-main)",
+          }}
+        >
+          {sandboxes
+            .map(s => {
+              const name = s.metadata?.name ?? "?";
+              const wl = workloadHealthy(name);
+              const conds = (getStatus(s).conditions ?? []) as any[];
+              const crDegraded = conds.some(c => c.type === "Degraded" && c.status === "True");
+              if (crDegraded) return `${name} → CR Degraded`;
+              if (wl === "degraded") return `${name} → workload unavailable (check pods in kars-${name})`;
+              return null;
+            })
+            .filter((x): x is string => x !== null)
+            .map((line, i) => (
+              <div key={i}>• {line}</div>
+            ))}
+        </div>
+      )}
+      {unknown > 0 && deployments === null && (
+        <div style={{ padding: "0 16px 8px", fontSize: 12, opacity: 0.7 }}>
+          Cross-checking workloads…
+        </div>
+      )}
     </SectionBox>
   );
 }

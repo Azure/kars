@@ -5,7 +5,7 @@
 # Controller configuration
 controller:
   image:
-    repository: kars.azurecr.io/kars-controller
+    repository: karsacr.azurecr.io/kars-controller
     tag: "latest"  # Pin to digest in production
     pullPolicy: Always
   replicas: 2
@@ -31,7 +31,7 @@ controller:
 # Inference router configuration
 inferenceRouter:
   image:
-    repository: kars.azurecr.io/kars-inference-router
+    repository: karsacr.azurecr.io/kars-inference-router
     tag: "latest"
     pullPolicy: Always
   replicas: 2
@@ -54,7 +54,7 @@ inferenceRouter:
 # Default sandbox configuration
 sandbox:
   image:
-    repository: kars.azurecr.io/openclaw-sandbox
+    repository: karsacr.azurecr.io/openclaw-sandbox
     tag: "latest"
     pullPolicy: Always
   isolation: "enhanced"  # standard | enhanced | confidential
@@ -326,7 +326,7 @@ a2aGateway:
   # default — fail-closed against unauthenticated traffic.
   anonymousOk: false
   image:
-    repository: kars.azurecr.io/kars-a2a-gateway
+    repository: karsacr.azurecr.io/kars-a2a-gateway
     tag: "latest"
     pullPolicy: Always
   replicas: 2
