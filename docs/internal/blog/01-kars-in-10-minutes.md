@@ -92,9 +92,18 @@ Kars's `spec.upstreamCompatibility.sigsAgentSandbox` field (defined in `controll
 - **`observe` — Observe mode (scaffolded).** Mirror status from an upstream `Sandbox` CR without driving the Pod. Schema is accepted; no reconciler behavior wired yet.
 - **`translate` — Translate mode (scaffolded).** Accept SIG-style `SandboxClaim` semantics on a kars CR and translate them to the canonical kars runtime contracts. Schema only; runtime translation deferred to a future slice.
 
-In practice today this means: adopters who have already standardized on the SIG `Sandbox` primitive can flip on `overlay` and keep kars purely as the policy/governance plane on top of their existing Pod-shape decisions; everyone else uses `off` (Native). The roadmap to `observe` + `translate` exists so we can support a richer set of upstream-driven workflows as the SIG's surface matures.
+In practice today this means: adopters who have already standardized on the SIG `Sandbox` primitive can flip on `overlay` and keep kars as the **governance** plane (compiled policy ConfigMaps, NetworkPolicy, ServiceAccount + Workload Identity, namespace) on top of their existing Pod-shape decisions; everyone else uses `off` (Native).
 
-We are deliberately shipping ahead of a finalized SIG contract because the users we serve need a hardened runtime now. Where the SIG primitives evolve, kars's overlay path translates rather than blocks; existing `KarsSandbox` CRs migrate without redeployment.
+**Caveat we don't want to hide:** today's overlay mode is a *governance* overlay, **not a hardening overlay**. The compiled policy ConfigMaps land in the namespace, but kars's enforcement primitives — the inference-router sidecar and the egress-guard init container — are only injected when kars owns the Pod (Native mode). In overlay mode, the upstream `Sandbox` controller renders the Pod from its `spec.podTemplate`, which does not include the kars sidecars unless the operator adds them. The trust-boundary properties from Claim 1 above (no upstream credentials in the agent process, iptables egress confinement) do not hold in overlay mode unless the operator manually includes the kars router + egress-guard in their `podTemplate`.
+
+We see four integration paths and we are pursuing them in this order:
+
+1. **Document a hardened `podTemplate` snippet** that operators copy into their `Sandbox.spec.podTemplate`. Lowest-friction starting point; available now via the [overlay-mode guide](../../runbooks/overlay-mode.md).
+2. **Ship a kars-hardened `SandboxTemplate`** that uses the SIG's own `SandboxTemplate` extension primitive. Users `SandboxClaim` from it; the template carries router + egress-guard baked in. Plays inside the SIG's existing extension model, no new admission machinery. Tracked on the roadmap.
+3. **Optional `MutatingAdmissionWebhook`** that injects router + egress-guard into any `Sandbox` annotated with `kars.azure.com/governance=enabled` — the Istio-injection pattern, for operators who want to keep their own templates. Opt-in to avoid the webhook becoming a hard dependency.
+4. **Propose an upstream SIG sidecar-profile primitive** (e.g. a `SandboxSidecarProfile` CR a `Sandbox` can reference) so any conforming sandbox controller can honor a portable sidecar contract. Long horizon; this is the clean architectural answer for the whole sandbox ecosystem, not just kars.
+
+We are shipping ahead of a finalized SIG contract because the users we serve need a hardened runtime now. Where the SIG primitives evolve, kars's overlay path translates rather than blocks; existing `KarsSandbox` CRs migrate without redeployment.
 
 ### Managed agent platforms
 
