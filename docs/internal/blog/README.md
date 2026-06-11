@@ -6,8 +6,8 @@ Tone: short paragraphs, no marketing words ("revolutionize", "empower"), real co
 
 ## Series order
 
-1. **[Kars in 10 minutes — what it is, why it exists, what it isn't](01-kars-in-10-minutes.md)** *(lead post)*
-   The 30,000-foot view: agents are adversarial code; the router is the trust boundary; one namespace per agent; mesh is E2E encrypted. Read this before any of the others.
+1. **[Announcing kars — a position paper on running agents on Kubernetes](01-kars-in-10-minutes.md)** *(lead post)*
+   Part announcement, part position paper. Why we built this instead of using Istio agent gateway / A2A / a serverless function. Where we stand vs. the agent-sandbox SIG. Where AGT fits. Why the router is the right place for governance. Read this before any of the others.
 
 2. **[AgentMesh — Signal Protocol between agents, and why we did this](02-agentmesh-deep-dive.md)**
    Why X3DH + Double Ratchet for inter-agent messaging, what the relay and registry actually see (DIDs and ciphertext, never plaintext), how trust scores progress, and what we contributed back to Microsoft AGT.
