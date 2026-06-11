@@ -638,13 +638,44 @@ def _dispatch_batch(candidates: list[dict[str, Any]]) -> int:
     return sent_count
 
 
-def _phase_change_loop() -> None:
-    """Phase-change-only watch mode — alerts ONLY on KarsSandbox CR
-    status.phase transitions. Engaged via SRE_WATCHER_MODE=phase-changes-only.
+def _workload_state(name: str) -> str | None:
+    """Return a workload-availability label for sandbox ``name`` or
+    None if no Deployment is found / state is unknown.
 
-    KarsSandbox is cluster-scoped, so we list at the cluster level. Uses the
-    same httpx singleton the event-mode watcher uses — the distroless sandbox
-    image has no kubectl binary.
+    The Deployment lives in ``kars-<name>`` (per the controller's
+    namespace-per-sandbox convention). We surface a "WorkloadDown"
+    synthetic phase whenever ``available < desired`` AND desired > 0,
+    so an evicted pod that can't re-admit (e.g. quota violation,
+    image pull error, NodeAffinity unmet) fires a transition even
+    though the CR ``status.phase`` itself stays Running.
+    """
+    try:
+        d = sre_kube.client().get(
+            f"/apis/apps/v1/namespaces/kars-{name}/deployments/{name}"
+        )
+    except Exception:  # noqa: BLE001 — best-effort augmentation
+        return None
+    spec_replicas = (d.get("spec") or {}).get("replicas")
+    if spec_replicas is None or spec_replicas == 0:
+        return None
+    available = ((d.get("status") or {}).get("availableReplicas") or 0)
+    if available < spec_replicas:
+        return f"WorkloadDown({available}/{spec_replicas})"
+    return None
+
+
+def _phase_change_loop() -> None:
+    """Phase-change-only watch mode — alerts ONLY on KarsSandbox state
+    transitions. Engaged via SRE_WATCHER_MODE=phase-changes-only.
+
+    "State" here = CR ``status.phase`` overlaid with workload
+    availability from the per-sandbox Deployment. The overlay catches
+    pod-level failures (evicted, quota violation, image-pull-back-off,
+    OOM-loop) that the controller doesn't reflect into CR phase —
+    without descending into the chatty event firehose of `events` mode.
+
+    Uses the same httpx singleton the event-mode watcher uses — the
+    distroless sandbox image has no kubectl binary.
     """
     poll = WATCH_INTERVAL_SECONDS
     logger.info("phase-changes-only mode (poll=%ds, notify_target=%r)",
@@ -664,6 +695,14 @@ def _phase_change_loop() -> None:
                 if not name:
                     continue
                 ph = (item.get("status") or {}).get("phase") or "Unknown"
+                # Overlay workload availability — controller doesn't
+                # reflect pod-level breakage into CR.status.phase, so
+                # without this an evicted pod stuck Pending on a tight
+                # ResourceQuota would never fire a transition.
+                if ph in ("Running", "Ready"):
+                    wd = _workload_state(name)
+                    if wd:
+                        ph = wd
                 now_phase[name] = ph
 
             if not primed:

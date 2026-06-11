@@ -367,6 +367,34 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
                 )
                 report[bucket].append(it)
 
+    # 3b) Workload-availability cross-check — KarsSandbox.status.phase
+    # reflects controller reconcile state, not actual pod readiness.
+    # A namespace-level ResourceQuota or image-pull failure can leave
+    # `available < desired` on the Deployment while the CR still says
+    # Running. We surface those as `WorkloadDown(<avail>/<desired>)`
+    # so the agent (and the operator reading sre_diagnose output)
+    # actually sees the incident.
+    sandbox_items = state.get("KarsSandbox", [])
+    if isinstance(sandbox_items, list):
+        for sb in sandbox_items:
+            name = sb.get("name")
+            if not name:
+                continue
+            try:
+                d = kube.get(
+                    f"/apis/apps/v1/namespaces/kars-{name}/deployments/{name}"
+                )
+            except Exception:  # noqa: BLE001 — best-effort
+                continue
+            desired = (d.get("spec") or {}).get("replicas") or 0
+            available = ((d.get("status") or {}).get("availableReplicas") or 0)
+            if desired > 0 and available < desired:
+                synthetic = dict(sb)
+                synthetic["phase"] = f"WorkloadDown({available}/{desired})"
+                synthetic["workload_namespace"] = f"kars-{name}"
+                synthetic["workload_deployment"] = name
+                report["degraded_sandboxes"].append(synthetic)
+
     # 4) Summary string the LLM can quote verbatim
     n_deg_sb = len(report["degraded_sandboxes"])
     n_deg_pol = len(report["degraded_policies"])
