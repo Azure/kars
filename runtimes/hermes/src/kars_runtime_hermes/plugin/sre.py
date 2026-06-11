@@ -592,9 +592,11 @@ def _impl_sre_propose_fix(
             missing.append("target.namespace")
         if not target.get("name"):
             missing.append("target.name")
+        _kinds = "ResourceQuota / Pod / Deployment / StatefulSet / DaemonSet"
+        _hint = ", ".join(missing) if missing else f"a supported target.kind: {_kinds}"
         proposal["cr_error"] = (
             "Could not infer typed action from arguments. "
-            f"Provide {', '.join(missing) if missing else 'a supported target.kind: ResourceQuota / Pod / Deployment / StatefulSet / DaemonSet'}. "
+            f"Provide {_hint}. "
             "Alternatively, pass action_type explicitly "
             "(DeleteResourceQuota, DeletePod, ScaleDeployment, PatchDeploymentImage, RolloutRestart)."
         )

@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re as _re
 import subprocess
 import sys
 import time
@@ -185,7 +186,7 @@ def _event_ts(ev: dict[str, Any]) -> float:
             continue
         try:
             # Strip trailing Z + fractional seconds for stdlib parsing
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             ts_clean = ts.replace("Z", "+00:00")
             return datetime.fromisoformat(ts_clean).timestamp()
@@ -202,8 +203,6 @@ def _event_ts(ev: dict[str, Any]) -> float:
             pass
     return 0.0
 
-
-import re as _re
 
 # Strip trailing rollout / pod-template hashes so each rollout of the
 # SAME workload deduplicates against itself. K8s ReplicaSet names are
@@ -710,7 +709,8 @@ def _phase_change_loop() -> None:
                 primed = True
                 logger.info("primed with %d sandboxes; watching for transitions",
                             len(last_phase))
-                time.sleep(poll); continue
+                time.sleep(poll)
+                continue
 
             transitions: list[str] = []
             for name, ph in now_phase.items():
