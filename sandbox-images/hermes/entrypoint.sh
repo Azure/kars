@@ -848,6 +848,30 @@ if [ "$1" = "hermes" ]; then
         > /tmp/hermes-dashboard.log 2>&1 &
   fi
 
+  # ── Pre-warm mesh registration ────────────────────────────────────
+  # `hermes gateway run` in idle-daemon mode (no Telegram/Slack/Discord
+  # channels) only runs the cron ticker — it never imports the kars
+  # Hermes plugin, so the mesh client is never initialised and the
+  # sandbox is invisible on `kars_mesh_directory` listings until
+  # something else triggers a plugin load (e.g. an interactive
+  # `hermes chat` invocation). Pre-warm by running the eager init in
+  # a short-lived Python process at boot — register_self is
+  # idempotent + restart-safe, so re-runs are cheap.
+  # SRE-mode sandboxes opt out: the SRE agent is intentionally off
+  # the mesh (no kars_mesh_* tools, no relay egress allowlisted).
+  if [ "${SRE_ENABLED:-}" != "true" ] && [ "${KARS_MESH_PROVIDER:-}" = "agt" ]; then
+    echo "[kars-hermes] pre-warming mesh registration (background)"
+    $AS_SANDBOX env HOME="$HOME" HERMES_HOME="$HERMES_HOME" \
+      python3 -c "
+from kars_runtime_hermes.plugin import mesh as _m
+try:
+    _m._get_or_init_client()
+    print('[kars-hermes] mesh pre-warm: registered', flush=True)
+except Exception as e:
+    print(f'[kars-hermes] mesh pre-warm failed: {e!r}', flush=True)
+" > /tmp/hermes-mesh-prewarm.log 2>&1 &
+  fi
+
   exec $AS_SANDBOX hermes gateway run --accept-hooks
 else
   echo "[kars-hermes] Operator override: $*"
