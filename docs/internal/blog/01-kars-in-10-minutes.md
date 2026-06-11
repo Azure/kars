@@ -1,224 +1,212 @@
 # Announcing kars — a position paper on running agents on Kubernetes
 
-**Read first.** This is the lead post for the [kars blog series](README.md). It's part announcement, part position paper. If after reading it you want depth on a specific surface, the [series index](README.md) points you at the right deep-dive.
+This is the lead post for the [kars blog series](README.md). It announces kars and lays out the reasoning behind the design choices we expect to be challenged on. If you want depth on a specific surface after reading it, the [series index](README.md) points you at the right deep-dive.
 
 ---
 
-## Why bother announcing yet another Kubernetes thing?
+## What we're announcing
 
-Reasonable question. In June 2026 there are at least a dozen "platform for AI agents" projects, half of them open source, half of them in the OSS-but-actually-driven-by-one-vendor zone. There's the [agent-sandbox SIG](https://github.com/agent-sandbox-sig) figuring out a workload-shape standard. There's [Istio agent gateway](https://istio.io/latest/blog/2025/agent-gateway/) extending the service mesh with LLM-aware policy. There's Google's [A2A protocol](https://github.com/google/a2a) for cross-vendor agent interop. There's [Orka](https://github.com/sozercan/orka), [Dapr-AgentRuntime](https://github.com/dapr/dapr-agents), [LangGraph Platform](https://www.langchain.com/langgraph), [OpenAI's Agents SDK](https://github.com/openai/openai-agents-python), and three or four more we're losing track of.
+Kars (Agent Reference Stack for Kubernetes) is a hardened, opinionated runtime for AI agents on Kubernetes. Each agent runs in its own namespace. Each agent's network egress is confined by an iptables-based egress-guard and redirected through a per-pod policy enforcer (the *inference router*) the agent cannot bypass — and from which the agent cannot read the upstream credentials. Eleven CRDs compose into a complete governance picture — model budget, tool allow-list, memory binding, mesh trust topology, egress allowlist, eval runs. Inter-agent messaging is end-to-end encrypted using Signal Protocol. Eight agent frameworks are supported via runtime adapters that all sit behind the same trust boundary.
 
-Our pitch for adding one more thing to the pile is not "ours is better". It's:
+Kars ships as a Helm chart plus a small CLI. Source is at [github.com/Azure/kars](https://github.com/Azure/kars). It runs on stock Kubernetes; install is `helm install`.
 
-> **The thing the industry needs in 2026 isn't another agent framework or another model-routing gateway. It's a hardened, opinionated runtime where the agent's code is treated as adversarial and the policy enforcer is the only network path out — applied uniformly across every agent framework, every model provider, every team. That's the gap kars is closing.**
-
-What follows is the rationale. If you finish it and disagree, that's fine — we'd rather argue the design than have you adopt it on vibes.
-
----
-
-## What kars is, in two sentences
-
-Kars is a Kubernetes operator that gives every AI agent its own namespace, locks the agent's egress to a per-pod policy enforcer (the *inference router*) that the agent cannot reach, and exposes 11 CRDs that compose into a complete governance picture — model budget, tool allow-list, memory binding, mesh trust topology, egress allowlist, eval runs.
-
-The router is the trust boundary. The agent never holds a model API key. Inter-agent messaging is end-to-end encrypted with Signal Protocol. The whole thing runs on stock Kubernetes; install is `helm install`.
+This post explains the design choices behind those one-line claims and the alternatives we considered.
 
 ---
 
 ## The opinion behind the design
 
-These are the four claims kars is built on. If you agree with all four, kars is for you. If you disagree with any, we'd genuinely like to hear why.
+These are the four claims kars is built on. If you agree with them, kars fits. If you disagree with one, we'd like to hear which one and why.
 
 ### Claim 1 — The agent's code is adversarial
 
-The LLM's output is untrusted input. A tool the LLM writes a payload for could execute that payload. A sub-agent your agent spawned could be hostile. A plugin loaded at runtime could be malicious.
+The LLM's output is untrusted input. A tool the LLM writes a payload for may execute that payload. A sub-agent the agent spawned may be hostile. A plugin loaded at runtime may be malicious. Prompt injection works in practice; indirect prompt injection (via tool-response content the agent treats as instruction) works in practice. We have seen both on production agents.
 
-This is not a hypothetical. Prompt injection works. Indirect prompt injection (via a tool's response content) works. We have seen it on production agents.
+The implication: **don't put credentials in the agent's process**. Don't trust the agent runtime to do its own egress policy enforcement; it can be tricked, patched, or replaced. Don't trust the framework to do governance; frameworks change quarterly while security primitives shouldn't. Put the trust boundary in a process the agent's user-space cannot reach.
 
-The implication: **don't put credentials in the agent's process**. Don't trust the agent runtime to do its own egress policy enforcement (it can be tricked, patched, or replaced). Don't trust the framework to do governance (frameworks change quarterly; security primitives shouldn't). Put the trust boundary in a sidecar that the agent cannot reach.
+*Therefore kars puts an iptables egress-guard around the agent's UID and an out-of-process Rust router (separate UID, separate memory) on the only path out — both before the agent has a chance to act on the LLM's output.*
 
-### Claim 2 — Governance lives at the call surface, not the network surface
+### Claim 2 — Governance applies uniformly across call types
 
-Token budgets, content safety, tool allow-lists, model-region pinning, sub-agent spawn validation — these are *semantic* policies. They depend on what the agent is *asking for*, not what bytes it's sending.
+Token budgets, content safety, tool allow-lists, model-region pinning, sub-agent spawn validation, memory store access, mesh peer admission — these are *semantic* policies. They depend on what the agent is *asking for*, and the right enforcement point is the boundary between the agent's code and the upstream surface, because that's where the policy can hold the upstream credential and observe every external action consistently.
 
-A service mesh (Istio, Linkerd, Cilium) governs the network. It can enforce TLS, mTLS between pods, L7 HTTP rules. It cannot enforce "this agent has used 1.8M of its 2M daily token budget so reject the next chat completion". It can't, because it sees encrypted TLS bytes — by design.
+A single enforcement point also gives operators one audit trail to read, one budget to manage, one allowlist to update — across model calls, tool calls, mesh messages, MCP backends, and sub-agent spawns. With per-call-type enforcement spread across multiple components, attribution and consistency suffer.
 
-The right place to enforce semantic policy is **between the agent code and the upstream API**, in a process that holds the upstream credential. That process is the *inference router*. It sees the request body. It mints the upstream token. It enforces the policy. It writes the audit record.
+*Therefore kars routes all six surfaces (model, tool, MCP, memory, mesh, spawn) through the same router with one policy-bundle schema, one OpenTelemetry shape, one budget ledger.*
 
-A service mesh is complementary, not competitive. Run Istio for pod-to-pod network policy. Run kars's router for agent-call semantic policy. They sit at different layers.
+### Claim 3 — Inter-agent messaging benefits from end-to-end secrecy
 
-### Claim 3 — Inter-agent messaging needs E2E secrecy, not broker secrecy
+Two agents need to talk to each other. They may live in different namespaces, clusters, or organizations. There is a broker in the middle.
 
-Two agents need to talk. They run in different namespaces, possibly different clusters, possibly different orgs. There's a broker in the middle that routes messages.
+The conventional approach — TLS to the broker, broker forwards, TLS to the recipient — leaves the broker in the trust set: it sees every message body. That is fine when the broker is fully trusted, and increasingly hard to defend when the broker is run by a different team, a different organization, or under cluster-admin authority you cannot prove will never be abused.
 
-The conventional answer is "TLS to the broker, broker forwards, TLS to the recipient". The broker — by construction — sees every message body. This is fine if the broker is fully trusted. It is **not** fine when:
+Signal Protocol (X3DH key agreement + Double Ratchet for forward secrecy) reduces the broker to a ciphertext-routing role. The broker sees DIDs and ciphertext, nothing else. Forward secrecy is per-message — even if the receiver is compromised today, traffic from prior ratchet steps cannot be decrypted. Post-compromise security restores secrecy after the attacker loses live access to the session state and a fresh DH ratchet step occurs.
 
-- The broker is run by a different team than either agent.
-- The broker is run by a different *org* than either agent (cross-org agent federation).
-- The broker is run by you, but cluster-admin compromise would silently leak every agent-to-agent message.
-- You need to convince a regulator that no third party can read agent traffic in flight or at rest.
+This is what AgentMesh (a component of Microsoft AGT — see below) provides. [Post 2](02-agentmesh-deep-dive.md) goes into the protocol details.
 
-We had all four. So we use **Signal Protocol** between agents (X3DH key agreement + Double Ratchet for forward secrecy) and reduce the broker to a ciphertext-routing role. The broker sees DIDs and ciphertext. Nothing else.
-
-This is what AgentMesh is. We didn't invent it — it's a Microsoft AGT (Agent Governance Toolkit) component, and we contribute back upstream. [Post 2](02-agentmesh-deep-dive.md) goes into the details.
+*Therefore kars uses upstream Microsoft AGT AgentMesh for every inter-agent message and never builds custom cross-agent transports — the broker is fully out of the trust set.*
 
 ### Claim 4 — Multi-runtime is the steady state
 
-There is no single winning agent framework, and there won't be one. OpenClaw, Hermes, MAF (Microsoft Agent Framework), LangGraph (Python and TS), Pydantic AI, Anthropic SDK, OpenAI Agents SDK — every team has a reason for their pick. Telling teams "you must rewrite in framework X" is a non-starter.
+There is no single winning agent framework, and there will not be one. OpenClaw, Hermes, Microsoft Agent Framework (MAF), LangGraph (Python and TypeScript), Pydantic AI, the Anthropic SDK, the OpenAI Agents SDK — every team has reasons for its choice. Telling teams "you must rewrite in framework X" is a non-starter.
 
-So the trust boundary has to be **framework-agnostic**. The router runs the same regardless of what's in the agent container. The governance CRDs apply the same regardless of runtime. New frameworks are added by writing a small adapter, not by re-implementing governance.
+The trust boundary therefore has to be **framework-agnostic**. The router runs identically regardless of what's in the agent container. The governance CRDs apply identically regardless of runtime. A new framework is added by writing an adapter, not by reimplementing governance. Kars ships eight runtime adapters in one chart today; [post 5](05-multi-runtime.md) explains the contract.
 
-Kars ships eight runtime adapters in one chart. [Post 5](05-multi-runtime.md) explains the contract.
-
----
-
-## Why not the alternatives
-
-### Why not just put the agent in an Azure Function / AWS Lambda?
-
-Works for N=1 with one user. Breaks at N=10 from multiple teams.
-
-Specific failures:
-- No isolation between agents — they share the function app's process space.
-- The function platform was not designed assuming the workload could be malicious. The agent has the same egress surface as your code.
-- Credentials are pulled from KeyVault at cold start and live in env vars. A prompt-injected agent reads them out of `os.environ` and exfiltrates them via the function platform's outbound IPs (which you can't restrict because Functions needs to call your own APIs).
-- No per-agent token budget. Per-app budgets aggregate across teams.
-- No inter-agent messaging surface unless you build one. If you build one, you've reinvented a chunk of kars.
-
-If your shop is one agent, one user, one team — keep using your function. We mean that. Don't adopt kars because the announcement was loud.
-
-### Why not Istio agent gateway?
-
-Istio agent gateway is a great fit for **the network-layer parts** of agent traffic. mTLS between sidecars, L7 HTTP authorization on the model-call path, request-level metrics — Istio does all of that well and it composes cleanly with kars.
-
-What it doesn't do, and we don't think it should:
-
-- See into the encrypted Signal Protocol frames between agents. By design, the broker shouldn't see them — see Claim 3.
-- Mint upstream model tokens from per-pod federated credentials and enforce token budgets across model deployments. That requires a process holding the upstream credential — Istio's design is that workloads hold their own credentials.
-- Validate sub-agent spawn requests against per-parent governance policy and create the child `KarsSandbox` CR. That's K8s-API-level work, not service-mesh work.
-- Compose with cosign-attested egress allowlists published as OCI artifacts. Istio's authorization policies are CRDs, not signed bundles — different supply-chain shape.
-
-So: **run Istio for pod-to-pod, run kars's router for agent-call semantics, run AgentMesh for agent-to-agent secrecy**. Three layers, three different problems.
-
-### Why not Google A2A?
-
-A2A is a wire protocol for cross-vendor agent discovery and message exchange. We **do** speak A2A — there's an `A2AAgent` CRD and an `a2a-gateway` crate in this repo. It's our **ingress** path for external A2A-speaking peers (so an agent in someone else's cluster can talk to one of ours).
-
-A2A doesn't have built-in E2E encryption — it relies on TLS plus whatever the broker does, exactly the shape Claim 3 rejects. For intra-kars and intra-trust-domain messaging, AgentMesh gives us E2E secrecy that A2A doesn't have. For cross-trust-domain messaging via A2A, the kars A2A gateway terminates the A2A connection and re-publishes the message to AgentMesh — so the message gains E2E secrecy on the internal hop even though the external sender doesn't speak Signal.
-
-A2A is a complement, not a substitute. We expect more of the industry to converge on A2A for cross-vendor interop, and we'll keep updating the kars A2A gateway as A2A evolves.
-
-### Why not the agent-sandbox SIG's eventual standard?
-
-We **want** the SIG to standardize agent workload shapes on Kubernetes. The fragmentation today is bad for everyone. Kars's design — agent + policy sidecar + per-agent namespace — is convergent with what the SIG conversation suggests is the likely outcome.
-
-We're an early mover. The SIG hasn't shipped a standard. When it does, we'll either align (most likely — our shape is what we'd propose anyway) or contribute to the standard's design from a position of operating experience.
-
-If you're waiting for the SIG to declare a winner before adopting anything — that's a reasonable position. We're shipping ahead of the standard because our internal users need it now, and we'd rather inform the standard from working code than wait for a committee.
-
-### Why not a managed SaaS agent platform?
-
-If your data residency, governance, sovereignty, and cost-per-token constraints are all satisfied by a managed offering — by all means, use it. We're not trying to compete with managed services for use cases they fit.
-
-Where managed offerings struggle:
-- Airgapped clusters (defense, regulated industries).
-- Sovereign clouds (EU regulators want everything in EU; some require operator-controlled clusters).
-- Multi-vendor model routing (an agent that should call gpt-5 for chat and Claude for coding, on a per-call basis, with audit-trail consistency).
-- Cross-org B2B federation with E2E secrecy.
-- Custom governance hooks (your security review wants a tool to require human approval; managed offerings rarely expose that hook).
-
-Kars is built for the **self-hosted, multi-team, governance-required, possibly-airgapped** end of the spectrum. The blueprints under `docs/blueprints/` cover dev, enterprise-self-hosted, sovereign-airgapped, cross-org-federation, and managed-public scenarios.
+*Therefore kars ships eight runtime adapters in one chart, with a documented small contract (six rules) that any future framework can implement to become a first-class kars runtime.*
 
 ---
 
-## Where the router fits, and why we put governance there
+## Where kars fits relative to the major efforts
 
-The router is a Rust sidecar (axum) listening on `127.0.0.1:8443` in every sandbox pod. The agent's iptables rules drop all egress from UID 1000 except loopback + DNS, so the **only** way the agent can talk to anything external is through the router.
+### Istio agent gateway + Gateway API Inference Extension
+
+Istio has invested heavily in AI in 2025–26. The `agentgateway` proxy is purpose-built for AI agent and MCP traffic, replacing Envoy where appropriate; the Gateway API Inference Extension introduces `InferencePool` and `InferenceObjective` CRDs for model-aware routing, inference-metric-based load balancing, traffic splitting between model versions, and SLO-aware request shaping. Ambient multicluster mode (beta) reduces per-pod sidecar overhead. There is `TrafficExtension` for in-flight customization via Wasm or Lua, and observability tuned for AI patterns (token accounting, queueing latency, GPU utilization).
+
+This is excellent work for what it solves: **the inference-infrastructure layer — routing requests to model serving backends, splitting versions, enforcing SLOs at the gateway, observing inference traffic**. It is the right tool when your problem is "I have N model deployments behind one gateway and I need traffic management and authorization between callers and those deployments".
+
+Kars sits at a different layer: **the per-agent trust boundary**. Concretely:
+
+- Istio agentgateway is a Gateway API `GatewayClass` (not a sidecar or waypoint per its 1.30 docs). Kars's router lives **in every agent pod** as a sidecar — the egress-guard guarantees the agent has no other path out.
+- Istio governs traffic *to and from* the agent (or model) at the network layer. Kars governs traffic *originating in* the agent at the call-semantics layer — token budgets, tool argument validation, sub-agent spawn target validation, mesh peer admission, memory store binding — across multiple call types with one audit shape.
+- An Istio gateway / ext-auth component could hold upstream credentials in principle. Kars's stronger property is the combination of **egress confinement** (the agent cannot reach upstream services directly) and **semantic mediation per call type before any upstream credential is minted**, with all of it sitting inside the agent's pod rather than at the cluster edge.
+- Istio's authorization is request-level (who can hit which model). Kars's enforcement is per-call-type (token budget across a session, tool argument schema, sub-agent spawn target, mesh peer trust score, memory store binding).
+
+The two compose cleanly. Run Istio agentgateway in front of your Foundry / model-serving cluster for inference-side traffic management. Run kars's per-pod router as the agent-side trust boundary. The model call leaves the agent through the kars router (which mints credentials, enforces semantic policy), traverses the network governed by Istio (which enforces mTLS, request-level authorization, and SLO routing), and reaches the model deployment. Each layer does what only it can do.
+
+### Google A2A (Agent-to-Agent protocol)
+
+A2A is a wire protocol for cross-vendor agent discovery and message exchange. It originated at Google and is now a Linux Foundation project. Kars supports A2A on the **ingress** side: the `A2AAgent` CRD declares a public-ingress endpoint that the `a2a-gateway` crate terminates, validates, and forwards to the destination sandbox's router. Bridging incoming A2A payloads onto the internal AgentMesh substrate for an additional E2E hop is on the roadmap but not in this release.
+
+A2A does not itself provide end-to-end secrecy beyond TLS, and it is not designed for per-pair forward-secrecy or KNOCK-style admission control. For traffic between agents inside a kars trust domain, AgentMesh gives properties A2A does not have. For traffic crossing trust domains, A2A is the right interop choice; kars supports it at the gateway and provides its own per-sandbox authz on the consuming side. We expect A2A to continue evolving; the two protocols are complementary, not substitutes.
+
+### The agent-sandbox SIG
+
+Standardizing agent workload shapes on Kubernetes is something the industry needs. The agent-sandbox SIG is the right venue for that conversation. Kars's design intent is to **align with the SIG's emerging shape via overlay + compatible-mode operation**: a kars sandbox should remain a recognizable agent-sandbox workload under any standardized contract, and kars CRDs should overlay rather than replace the SIG's primitives where they overlap.
+
+Concretely, this means:
+- Kars's `KarsSandbox` CR should be readable as a SIG-compliant sandbox descriptor with kars-specific extensions in vendor-prefixed fields.
+- Where the SIG specifies a workload shape, kars should produce that shape (controller-side translation).
+- Where the SIG specifies a tool/runtime interface, kars's runtime adapters should implement it.
+
+We are deliberately shipping ahead of a finalized standard because users need a hardened runtime now. We expect to converge with the SIG as the standard solidifies — and to feed implementation experience back into the SIG conversation.
+
+### Managed agent platforms
+
+Managed offerings are improving fast and many now support private networking, enterprise governance, multiple model backends, and tenant isolation. The right framing is not "managed is simplistic" — it is **where control-plane ownership matters**. Kars is built for shops that need self-hosted control over the K8s control plane (for airgapped, sovereign, or regulated environments), Kubernetes-native extensibility (CRDs, admission controllers, your own operators alongside ours), and on-cluster multi-team / multi-framework composition with one trust boundary. If those constraints don't bind for you, a managed platform may be a better fit. The [blueprints](../../blueprints/00-index.md) cover dev, enterprise-self-hosted, sovereign-airgapped, cross-org-federation, and managed-public scenarios so you can compare deployment shapes head-to-head.
+
+---
+
+## Why the router is the right enforcement point
+
+The router is a Rust sidecar (axum) in every sandbox pod. The agent's iptables rules (installed by an init container called the *egress-guard*) confine UID 1000 to loopback + DNS, then transparently redirect TCP 80/443 from UID 1000 to the router's port. The agent's HTTP clients work unchanged — they think they're calling `api.openai.com:443` — and every byte they emit lands at the router. There is no other path out.
 
 The router holds:
+- Upstream model auth (Workload Identity / IMDS-exchanged tokens, or an Entra-Agent-ID auth sidecar — see below), MCP server credentials, channel tokens — none of which the agent ever sees.
+- The compiled policy bundle (mounted as a ConfigMap, hot-reloaded on change), with each policy type having its own enforcement module (`InferencePolicy`, `ToolPolicy`, `KarsMemory`, `EgressApproval`, `McpServer`, `TrustGraph` projection).
+- The OpenTelemetry exporter emitting GenAI semantic-convention spans.
+- The MCP routing table, the Foundry data-plane proxy, the mesh ingress/egress to the AGT relay.
 
-- The upstream model auth (IMDS / Workload Identity token, exchanged on demand).
-- The compiled policy bundle (read from `/etc/kars/` as a ConfigMap, hot-reloaded on change).
-- The OpenTelemetry GenAI exporter.
-- The MCP backend routing table.
-- The Foundry data-plane proxy.
-- The mesh ingress/egress to the AGT relay.
-
-For every call:
-
-1. Authenticate the caller (loopback + UID check).
-2. Apply the route-appropriate policy module (InferencePolicy for model calls, ToolPolicy for tool calls, ContentSafety for both inbound and outbound, etc.).
-3. Mint the upstream credential.
+Per call (model, tool, mesh, memory, spawn — same shape):
+1. Receive the (transparently-redirected) request from the agent.
+2. Apply the route-appropriate policy module.
+3. Mint the upstream credential just-in-time.
 4. Forward.
-5. Apply outbound policy.
-6. Emit telemetry. Decrement budget. Return.
+5. Apply outbound policy (content safety on the response, token-budget decrement, telemetry emit).
+6. Return.
 
-Why this is the right place for governance:
+Why this works:
 
-1. **The agent never has a credential.** A perfectly prompt-injected agent has nothing to exfiltrate. The keys live in a process the agent cannot reach.
-2. **Single audit boundary.** Every external action — model call, tool call, mesh message, sub-agent spawn — has the same shape: agent → router → upstream. One place to find the audit trail; one place to enforce per-team budgets; one place to inject content-safety.
-3. **Framework-agnostic.** OpenClaw, Hermes, MAF, LangGraph — the router doesn't know which is upstream. Governance applies the same regardless.
-4. **Composable with anything Kubernetes-native.** Istio sits *over* the router (TCP+TLS layer); cosign-signed allowlists feed *into* the router (policy supply chain); the K8s API watches the policy CRDs that *configure* the router.
-5. **Auditable as one binary.** The router is ~30 KLOC of Rust. It can be (and is) reviewed end-to-end. A bug in the router is one CVE; a bug spread across 8 agent frameworks is 8 CVEs.
+1. **The agent has no upstream cloud credential to exfiltrate.** Even a perfectly prompt-injected agent has no model API key in its env, file system, or process memory — those live in the router's separate process. (Workspace data, task inputs, retrieved documents, and mesh-session state ARE in the agent's memory and remain in scope for endpoint-compromise threats; the trust-boundary claim is specifically about *upstream credentials*.)
+2. **Every external action has one audit shape.** Model call, tool call, mesh message, sub-agent spawn — all flow through the same router, get the same OpenTelemetry treatment, generate one audit record per call.
+3. **Framework-agnostic.** OpenClaw, Hermes, MAF — the router doesn't care which is upstream. Governance is uniform.
+4. **Composes with everything Kubernetes-native.** Istio sits over the router at the network layer; cosign-signed allowlists feed *into* it; CRDs configure it; the Headlamp plugin reads its emitted telemetry.
+5. **One binary to review and audit end-to-end.** Concentrating policy enforcement in one Rust process (vs. spread across eight agent frameworks) gives the security team one place to look. A bug spread across N frameworks is N CVE surfaces; a bug in the router is one.
 
-The alternative we considered most seriously was *enforcing at the model provider's API*. The provider doesn't know per-agent identity or per-team policy. Hop-by-hop attribution via headers is spoofable by a compromised agent. Cross-vendor consistency is impossible. The provider isn't the right place to enforce policy that's specific to *your* governance model.
-
----
-
-## What AGT is and what we're doing with it
-
-Microsoft AGT (Agent Governance Toolkit) is a broader Microsoft effort: shared governance primitives for agents across the M365 Copilot ecosystem and beyond. Open-source on github.com/microsoft. It ships:
-
-- **AgentMesh** — the Signal-Protocol mesh we use for inter-agent encryption.
-- **Governance hooks** — primitives for content safety, profile-based tool allowlists, policy attestation.
-- **Authoring tools** — surfaces for defining and validating governance policies.
-
-Kars uses AgentMesh as its mesh transport (no kars fork; we depend on stock upstream). We use AGT's governance profile primitives in our router. We contribute fixes back upstream — the Ed25519-Timestamp registry auth, the proof-of-possession on WebSocket connect, the prekey writer-lock, the modern DID format — all originated as kars contributions to AGT.
-
-The direction: as AGT's governance primitives mature, more of kars's enforcement moves to them. Kars becomes "the K8s-native runtime for AGT-governed agents", and AGT becomes the shared cross-product governance layer. We are deliberately not building a competing governance vocabulary.
+The alternatives we considered seriously were (a) enforcing at the model provider's API, which loses per-agent identity attribution and per-team policy; (b) enforcing in the agent framework, which requires per-framework reimplementation and trusts the framework not to bypass; (c) enforcing at an out-of-pod gateway, which adds a network hop and does not solve the "agent holds the key" problem on its own. The per-pod router approach avoids all three.
 
 ---
 
-## What kars is NOT trying to be
+## Identity for agents
+
+A kars sandbox can take its upstream identity from one of two router-side modes (today they are exclusive; the router selects on startup based on the presence of `KarsAuthConfig` + the Entra-auth sidecar):
+
+- **Workload Identity (default)** — the sandbox pod's ServiceAccount is federated to a per-sandbox Entra application registration. The router exchanges the IMDS token for a resource token and calls upstream. This is the default for `kars up` on AKS and is the simplest mode for service-style agents.
+- **Microsoft Entra Agent ID** — Microsoft's identity system purpose-built for AI agents (GA April 2026). Each agent is a first-class identity in Entra with its own lifecycle, owner, conditional access policies, and audit trail. When the `KarsAuthConfig` CR + the Entra auth sidecar are configured, the router routes all upstream calls through that sidecar; downstream services see the per-sandbox Agent ID as the calling identity. The router fails closed — no fallback to Workload Identity in this mode — which is the property an Agent-ID deployment depends on for clean attribution.
+
+Two other identity surfaces are orthogonal to upstream auth and coexist with both modes above:
+
+- **Mesh DID** — for inter-agent messaging on AgentMesh, each sandbox has a `did:mesh:sha256(pub)[:32]` identifier derived from its long-term Ed25519 keypair. The DID is the addressable identity on the mesh and survives across pod restarts.
+- **A2A endpoint identity** — for cross-org A2A traffic, the `A2AAgent` CR carries a public endpoint URL plus a `TrustGraph` projection that constrains which external A2A peers may send to it.
+
+So a single sandbox can simultaneously: hold a mesh DID for peer addressing, expose an A2A endpoint for cross-org ingress, and authenticate upstream via either Workload Identity or Entra Agent ID depending on the router's configured auth mode.
+
+---
+
+## What decomposing an agent over AgentMesh unlocks
+
+When an agent decomposes its work into sub-agents and the sub-agents talk to each other over AgentMesh (the encrypted mesh substrate), several properties become available that monolithic agents do not have:
+
+- **Per-sub-agent governance.** Each sub-agent has its own `KarsSandbox` CR, which means its own `InferencePolicy` (model + region + token budget), its own `ToolPolicy` (which tools it may call with which arguments), its own `EgressApproval` (which external hosts it may reach). A research sub-agent gets a model with a bigger context window and the web-search tool; a code-execution sub-agent gets a smaller, cheaper model and the sandboxed-exec tool; a summarization sub-agent gets neither. Authority granularity is per task, not per agent.
+- **Per-sub-agent model and tool selection.** Operators can pin the right model to the right job. A reasoning step uses gpt-5.4; a tool-formatting step uses a smaller, faster model. A sub-agent that should never write to a memory store has no `KarsMemory` binding; one that should has a write-scoped binding. The framework-agnostic property of the runtime means each sub-agent can also be in a *different framework* if that's what the team has — see below.
+- **Task offload and workspace offload.** A parent agent can offload a sub-task to a freshly spawned sub-agent (own pod, own namespace, own policy bundle), wait for the result on the mesh, then GC the sub-agent. For longer-running workspaces — code workspaces, document workspaces, research workspaces — the parent can hand the workspace off entirely to a specialist sub-agent and revoke it when done. The sub-agent's CRD lifecycle handles cleanup automatically.
+- **Cross-runtime inter-agent communication.** Because AgentMesh is a wire protocol and not a runtime feature, a Hermes (Python) sub-agent and an OpenClaw (TypeScript) parent can exchange end-to-end encrypted Signal Protocol frames using the same DID format, the same X3DH key agreement, the same Double Ratchet semantics, the same KNOCK gate. We rebuilt the Python implementation against the TypeScript reference until both spoke the exact same wire format; an OpenClaw parent doing `kars_mesh_send` to a Hermes child arrives correctly, decrypts on the receiver, gets a Hermes-side reply that the OpenClaw parent decrypts — verified on AKS. We have not found another Kubernetes agent runtime that combines per-agent sandbox governance with cross-runtime Signal-Protocol inter-agent messaging; this lets a team mix runtimes per sub-task without giving up the secrecy and trust properties of the mesh.
+
+The combined effect: an agent decomposed over AgentMesh is **more secure** (smaller blast radius per sub-agent) and **more capable** (mixed models, mixed tools, mixed runtimes per task) than a monolithic agent.
+
+---
+
+## What AGT is and what we contribute
+
+Microsoft AGT (Agent Governance Toolkit) is a broader Microsoft effort: shared governance primitives for AI agents across the Microsoft ecosystem. Open source on `github.com/microsoft/agent-governance-toolkit`. It ships AgentMesh (the Signal-Protocol mesh kars uses for inter-agent encryption), governance hooks (content safety, profile-based tool allowlists, policy attestation), and authoring surfaces.
+
+Kars uses stock AGT upstream — no kars fork. We contribute fixes back, including the Ed25519-Timestamp registry auth, the proof-of-possession on WebSocket connect, the prekey writer-lock that prevents accidental key clobbering, the modern DID format, and the cross-runtime (Python ↔ TypeScript) wire-format alignment.
+
+The strategic direction: as AGT's governance primitives mature, more of kars's enforcement migrates to them. Kars is the K8s-native runtime that hosts AGT-governed workloads; AGT is the cross-product governance vocabulary. We are deliberately not building a competing governance language.
+
+---
+
+## What kars is not
 
 To set expectations:
 
-- **Not a model.** Kars uses Azure OpenAI / Foundry / OpenAI / Anthropic / OpenAI-compatible endpoints upstream. It doesn't train, fine-tune, or serve models.
-- **Not an agent framework.** Kars runs agents written in eight frameworks. The agent's logic stays in the framework the team chose.
-- **Not a managed service.** Kars is a Helm chart + a CLI. You install it on your own K8s cluster.
-- **Not "Kubernetes for LLMs"** (KServe, vLLM territory). It is "Kubernetes for *agents that call* LLMs". The difference matters.
-- **Not a competitor to MCP.** Kars consumes MCP servers as tool surfaces; sits *above* MCP.
-- **Not the answer for N=1.** If you have one agent, one user, one team — kars is overkill. Use a serverless function.
+- **Not a model.** Kars uses Azure OpenAI / Foundry / OpenAI / Anthropic / OpenAI-compatible endpoints upstream.
+- **Not an agent framework.** Kars runs agents written in eight frameworks; the agent's logic stays in the framework the team picked.
+- **Not a managed service.** Kars is a Helm chart and a CLI; you install it on your own cluster.
+- **Not "Kubernetes for LLMs"** in the model-serving sense (that is KServe / vLLM / Ollama territory). It is "Kubernetes for *agents that call* LLMs".
+- **Not a competitor to MCP.** Kars consumes MCP servers as tool surfaces; the `McpServer` CRD declares which backends an agent may use.
+- **Not the right answer for one agent and one user.** If your shop is N=1, kars is overkill; use a serverless function.
 
 ---
 
-## Use cases we're optimizing for
+## Use cases we are optimizing for
 
-In rough order of how often we hear them:
+In rough order of frequency:
 
-1. **Enterprise dev platforms** — N teams running M agents against the same Foundry deployment. Need per-team token budgets, per-team policies, audit per call, isolated namespaces.
-2. **Compliance-bound agent fleets** — SOC2 / FedRAMP / GDPR. Need cosign-signed policy bundles, full audit trail, per-call OpenTelemetry, content-safety logs.
-3. **Sovereign / airgapped agent deployments** — defense, regulated industries. Need everything to work in a cluster with no internet egress and no managed services.
-4. **Cross-org B2B agent federation** — agents in your cluster talking to agents in a partner's cluster, with E2E secrecy that neither cluster admin can break.
-5. **Autonomous SRE for agent fleets** — the SRE agent watches the other agents, diagnoses incidents, proposes typed fixes that the operator approves. [Post 4](04-autonomous-sre.md) covers this.
-6. **Multi-framework shops** — let teams pick OpenClaw / MAF / LangGraph / etc. without giving up unified governance.
+1. **Enterprise developer platforms** running multiple agents from multiple teams against shared model deployments; need per-team token budgets, per-team policies, audit per call, isolated namespaces.
+2. **Compliance-bound agent fleets** (SOC2, FedRAMP, GDPR); need cosign-signed policy bundles, per-call audit, content-safety enforcement.
+3. **Sovereign / airgapped deployments** (defense, regulated industries); need everything to work without managed services and without internet egress.
+4. **Cross-org B2B agent federation**; agents in your cluster talking to agents in a partner's cluster, with mesh-level E2E secrecy that the broker / relay operator cannot read in transit (endpoint compromise — at either end — remains a separate concern, addressed by confidential-compute isolation, sandbox posture defaults, and the four-layer defense documented in [post 6](06-sandbox-anatomy.md)).
+5. **Autonomous SRE for agent fleets** — a kars-native agent that watches the others, diagnoses incidents, proposes typed fixes that an operator approves. [Post 4](04-autonomous-sre.md) covers this.
+6. **Multi-framework shops** that want teams to pick OpenClaw / MAF / LangGraph / Hermes / etc. without giving up unified governance.
 
-If your use case is one of these, kars is built for you. If it's not — give us feedback. The roadmap is at `docs/internal/roadmap.md`; opening an issue with "use case X is unserved" is the highest-signal contribution we can think of.
+If your use case sits in one of these, kars is built for you. If it does not, the highest-signal contribution we can think of is an issue with "use case X is not served" — that's how the roadmap evolves.
 
 ---
 
-## The boring summary
+## Summary
 
 Kars is:
 
 - A Kubernetes operator (Rust, kube-rs).
 - 11 CRDs that compose into a governance picture.
-- A per-pod inference router (Rust, axum) that's the only network path out of every agent.
-- 8 runtime adapters for major agent frameworks.
-- AgentMesh (Microsoft AGT) for E2E encrypted inter-agent messaging.
+- A per-pod inference router (Rust, axum) that the agent's iptables-confined egress is transparently redirected through — the only path out of every agent.
+- 8 runtime adapters for major agent frameworks, all behind the same trust boundary.
+- AgentMesh (Microsoft AGT) for E2E encrypted inter-agent messaging, with verified cross-runtime interoperability (Python ↔ TypeScript).
+- Identity options spanning Workload Identity, Microsoft Entra Agent ID, mesh DIDs, and A2A endpoint identities.
 - A Headlamp plugin for the operator UI.
 - A small CLI for the gaps.
 
-Install: `git clone https://github.com/Azure/kars && cd kars && make build && kars dev` → working agent inside a kind cluster in ~3 minutes.
+Install: `git clone https://github.com/Azure/kars && cd kars && make build && kars dev` brings up a working agent inside a kind cluster in ~3 minutes.
 
 ---
 
@@ -226,11 +214,11 @@ Install: `git clone https://github.com/Azure/kars && cd kars && make build && ka
 
 Pick a deep-dive based on what you care about:
 
-- **Encrypted inter-agent messaging, KNOCK gate, trust scoring?** → [AgentMesh deep-dive](02-agentmesh-deep-dive.md)
-- **Policy / governance model, the 9 CRDs?** → [Governance plane](03-governance-plane.md)
-- **Autonomous remediation of broken agents?** → [The autonomous SRE agent](04-autonomous-sre.md)
+- **Encrypted inter-agent messaging, KNOCK gate, trust scoring, cross-runtime mesh?** → [AgentMesh deep-dive](02-agentmesh-deep-dive.md)
+- **The 11 CRDs and how they compose?** → [Governance plane](03-governance-plane.md)
+- **Autonomous remediation of broken agents?** → [Autonomous SRE agent](04-autonomous-sre.md)
 - **Adding a new agent framework?** → [Multi-runtime](05-multi-runtime.md)
-- **Threat model, the four defense layers?** → [Sandbox anatomy](06-sandbox-anatomy.md)
+- **Threat model, the four defense layers, what an attacker has to bypass?** → [Sandbox anatomy](06-sandbox-anatomy.md)
 - **Day-2 operations, Headlamp plugin, dashboards?** → [Operator UX](07-operator-ux.md)
 
-Or just `kars dev` it.
+Or run `kars dev` and try it.
