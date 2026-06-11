@@ -135,6 +135,13 @@ pub const REASON_POLICY_NOT_ENFORCED: &str = "PolicyNotEnforced";
 /// today; plural support arrives in a later slice." Distinct from
 /// `PolicyNotEnforced` because `McpServer` *is* enforced — there is
 /// just a sandbox-side capacity cap of one.
+///
+/// Currently unused — removed from the McpServer reconciler in PR #397
+/// to stop firing one Warning Event per reconcile cycle. Kept here
+/// (with `allow(dead_code)`) for symmetry with `REASON_POLICY_NOT_ENFORCED`
+/// and for future reconcilers that may want to surface partial-support
+/// notices to operators via Events.
+#[allow(dead_code)]
 pub const REASON_LIMITED_SUPPORT: &str = "LimitedSupport";
 
 /// Default reporter identity. The pod name is filled from
@@ -198,6 +205,10 @@ impl PhaseEventReporter {
     /// where the user might expect plural support). Distinct from
     /// `warn_policy_not_enforced` so operators can grep events by
     /// reason.
+    ///
+    /// Currently unused — see `REASON_LIMITED_SUPPORT` doc comment for
+    /// the rationale (PR #397 stopped firing this per-reconcile).
+    #[allow(dead_code)]
     pub async fn warn_limited_support<R>(
         &self,
         cr: &R,
