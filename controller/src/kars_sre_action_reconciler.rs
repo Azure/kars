@@ -734,21 +734,76 @@ async fn execute_typed_action(
     Ok(())
 }
 
-/// Recovery observation. Slice 3 = look for absence of FailedCreate /
-/// BackOff events on the action's target namespace in the last 30
-/// seconds. Slice 4 will tighten this with workload-kind-specific
-/// observers (Deployment.status.conditions[Available]=True etc.).
+/// Recovery observation. The Recovered determination requires BOTH:
+///   (1) absence of recent failure events (FailedCreate / BackOff /
+///       FailedScheduling / kars `Failed`) on the target namespace
+///       in the last 30s, AND
+///   (2) every Deployment in the target namespace has
+///       `availableReplicas >= spec.replicas`.
+///
+/// The events-only check (Slice 3) had a false-positive on the
+/// canonical DeleteResourceQuota path: deleting the quota silences
+/// new FailedCreate events (no more ReplicaSet attempts), but the
+/// Deployment can still sit at `0/1` because the ReplicaSet was
+/// scaled to 0 during the failure cascade and no controller is going
+/// to scale it back up. Without the workload check we'd report
+/// Recovered while the workload is still down — directly
+/// contradicting what the operator sees in Headlamp.
 enum RecoveryStatus {
     Recovered,
     Pending,
 }
 
 async fn observe_recovery(client: &Client, action: &crate::kars_sre_action::ActionSpec) -> RecoveryStatus {
+    use k8s_openapi::api::apps::v1::Deployment;
     use k8s_openapi::api::core::v1::Event;
     let ns = match action.params.get("namespace").and_then(Value::as_str) {
         Some(n) => n,
         None => return RecoveryStatus::Pending,
     };
+
+    // ── Gate 2: every Deployment must be at desired replicas ──────
+    // Run this first because it's the more authoritative signal — if
+    // pods aren't available, recovery hasn't happened regardless of
+    // what the event log shows.
+    let dep_api: Api<Deployment> = Api::namespaced(client.clone(), ns);
+    match dep_api.list(&kube::api::ListParams::default()).await {
+        Ok(deps) => {
+            for d in &deps.items {
+                let name = d.metadata.name.clone().unwrap_or_default();
+                let desired = d
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.replicas)
+                    .unwrap_or(1);
+                let available = d
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.available_replicas)
+                    .unwrap_or(0);
+                if available < desired {
+                    tracing::debug!(
+                        ns = %ns,
+                        deployment = %name,
+                        desired = desired,
+                        available = available,
+                        "Recovery observer: workload not yet available"
+                    );
+                    return RecoveryStatus::Pending;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                ns = %ns,
+                error = %e,
+                "Recovery observer: failed to list Deployments — assuming Pending"
+            );
+            return RecoveryStatus::Pending;
+        }
+    }
+
+    // ── Gate 1: no recent failure events ──────────────────────────
     let api: Api<Event> = Api::namespaced(client.clone(), ns);
     let lp = kube::api::ListParams::default();
     let now = Utc::now();
