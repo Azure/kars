@@ -32,7 +32,7 @@ spec:
     kind: OpenClaw
     openclaw:
       version: "2026.3.13"
-      image: kars.azurecr.io/openclaw-sandbox:latest
+      image: karsacr.azurecr.io/openclaw-sandbox:latest
   sandbox:
     isolation: enhanced
     seccompProfile: kars-strict

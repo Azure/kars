@@ -1304,26 +1304,42 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   if (opts.noBuild) {
     stepper.done("skipped image load (--no-build)");
   } else {
+    // `target` = the canonical image name the controller looks for
+    // INSIDE kind. `aliases` = local docker tags we accept as a SOURCE
+    // for re-tagging. `loadImageIfPresent` re-tags the matched local
+    // image AS the target before kind-loading, so the kind containerd
+    // ends up with the canonical name in `crictl images` and the
+    // controller's IfNotPresent pull succeeds without ever touching
+    // the network.
+    //
+    // Why we DON'T list `kars.azurecr.io/...`: that ACR doesn't exist.
+    // The legacy typo crept in from the 2026-05-27 rename
+    // (azureclaw→kars) before anyone noticed the real ACR is
+    // `karsjpdyyv.azurecr.io` (azd-suffixed) — the `karsacr` alias
+    // here is the canonical name the operator's deploy script
+    // re-publishes to. Keep only `karsacr.azurecr.io/...` so the
+    // controller env stays correct on AKS too.
     const images: { target: string; aliases: string[] }[] = [
       {
-        target: opts.image,
+        target: "karsacr.azurecr.io/openclaw-sandbox:latest",
         aliases: [
-          "karsacr.azurecr.io/openclaw-sandbox:latest",
-          "kars.azurecr.io/openclaw-sandbox:latest",
+          opts.image,                       // e.g. "kars-sandbox:dev" (the local build)
+          "openclaw-sandbox:latest",
+          "openclaw-sandbox:dev",
         ],
       },
       {
-        target: "kars-controller:dev",
+        target: "karsacr.azurecr.io/kars-controller:latest",
         aliases: [
-          "karsacr.azurecr.io/kars-controller:latest",
-          "kars.azurecr.io/kars-controller:latest",
+          "kars-controller:dev",
+          "kars-controller:latest",
         ],
       },
       {
-        target: "kars-inference-router:dev",
+        target: "karsacr.azurecr.io/kars-inference-router:latest",
         aliases: [
-          "karsacr.azurecr.io/kars-inference-router:latest",
-          "kars.azurecr.io/kars-inference-router:latest",
+          "kars-inference-router:dev",
+          "kars-inference-router:latest",
         ],
       },
     ];
