@@ -143,6 +143,17 @@ spec:
         # The SRE agent's tool surface is still gated by the
         # sre-tools ToolPolicy + AGT governance hook above.
         GATEWAY_ALLOW_ALL_USERS: "true"
+        # SRE proactive watcher mode. Two values supported:
+        #   events             — fire on FailedCreate / BackOff /
+        #                        ImagePullBackOff / etc. events in
+        #                        kars-* namespaces (chatty)
+        #   phase-changes-only — fire ONLY on KarsSandbox.status.phase
+        #                        transitions (Running -> Failed, etc.).
+        #                        One Telegram message per real CR
+        #                        state change; no pod-level noise.
+        # Default phase-changes-only because it matches what most
+        # operators actually want — a status pager, not an event firehose.
+        SRE_WATCHER_MODE: "phase-changes-only"
 
   sandbox:
     isolation: standard
