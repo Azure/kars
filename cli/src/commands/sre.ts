@@ -109,7 +109,7 @@ export function sreCommand(): Command {
       //      `sre.enabled=true` baked in. The chart is already in
       //      the cluster; this just adds the SRE bits idempotently.
       //   C. no chart at all → `helm install` with --take-ownership +
-      //      a placeholder workload-identity client-id (local dev).
+      //      a fallback workload-identity client-id (local dev).
       let mode: "upgrade" | "template" | "install" = "install";
       const listArgs = ["list", "-n", options.namespace, "-q"];
       if (options.context) listArgs.push("--kube-context", options.context);
@@ -199,7 +199,7 @@ export function sreCommand(): Command {
               "--take-ownership",
               "--set", "sre.enabled=true",
               // Brand-new chart install on a fresh cluster has no prior
-              // azure.workloadIdentity.clientId — use a placeholder for
+              // azure.workloadIdentity.clientId — use a dummy fallback for
               // local-k8s dev. Real AKS installs come through `kars up`
               // which sets this properly.
               "--set", "azure.workloadIdentity.clientId=dummy",
