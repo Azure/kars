@@ -81,14 +81,15 @@ A2A does not itself provide end-to-end secrecy beyond TLS, and it is not designe
 
 ### The agent-sandbox SIG
 
-Standardizing agent workload shapes on Kubernetes is something the industry needs. The agent-sandbox SIG is the right venue for that conversation. Kars's design intent is to **align with the SIG's emerging shape via overlay + compatible-mode operation**: a kars sandbox should remain a recognizable agent-sandbox workload under any standardized contract, and kars CRDs should overlay rather than replace the SIG's primitives where they overlap.
+Standardizing agent workload shapes on Kubernetes is something the industry needs, and the agent-sandbox SIG is the right venue for that conversation. Kars's design intent is to support **two modes of operation** as the SIG's contract solidifies, so that adopters can pick whichever fits their existing platform investments:
 
-Concretely, this means:
-- Kars's `KarsSandbox` CR should be readable as a SIG-compliant sandbox descriptor with kars-specific extensions in vendor-prefixed fields.
-- Where the SIG specifies a workload shape, kars should produce that shape (controller-side translation).
-- Where the SIG specifies a tool/runtime interface, kars's runtime adapters should implement it.
+**Overlay mode** — the SIG's sandbox primitives are the base workload shape; kars layers governance and observability CRDs *on top* without replacing the SIG resource. In this mode, an operator runs the SIG's standard sandbox object as-is and references it from a `KarsSandbox` (or successor CR) that adds the inference policy, tool allow-list, mesh DID, memory binding, and the rest of the kars governance plane. Adopters who have already standardized on the SIG primitives keep them; kars provides the policy/governance overlay.
 
-We are deliberately shipping ahead of a finalized standard because users need a hardened runtime now. We expect to converge with the SIG as the standard solidifies — and to feed implementation experience back into the SIG conversation.
+**Upstream (compatible) mode** — the `KarsSandbox` CR itself is a valid SIG-compliant sandbox descriptor with kars-specific extensions in vendor-prefixed fields. The controller produces SIG-shape resources where the standard specifies them (workload spec, runtime class, network constraints), so a SIG-conformant tool reading the cluster sees a SIG sandbox and a kars-aware tool reading the same CR sees the kars extensions on the same object. Single source of truth, two readers.
+
+Both modes have the same operational footprint; what differs is whether the SIG resource is the primary object (overlay) or the kars CR is the primary object (upstream). We expect to ship both, and we expect to converge with the SIG as the standard solidifies — feeding implementation experience back into the conversation.
+
+We are deliberately shipping ahead of a finalized standard because the users we serve need a hardened runtime now. Where the SIG's contract eventually differs from kars's current CR schemas, the controller will translate (overlay) or the schemas will absorb the standard fields (upstream); either way, existing CRs migrate without redeployment.
 
 ### Managed agent platforms
 
