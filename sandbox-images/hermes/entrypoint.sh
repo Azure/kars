@@ -868,7 +868,16 @@ if [ "$1" = "hermes" ]; then
   # off-mesh (no kars_mesh_* tools, no relay egress allowlisted).
   if [ "${SRE_ENABLED:-}" != "true" ] && [ "${KARS_MESH_PROVIDER:-}" = "agt" ]; then
     echo "[kars-hermes] starting persistent mesh-keepalive (background)"
+    # KARS_MESH_AUTO_RESPONDER=1 ⇒ the auto-responder worker actually
+    # invokes Hermes to generate replies to inbound mesh messages.
+    # Without it, the worker drains the inbox and returns silently
+    # (great for "I exist on the mesh" presence, useless for actual
+    # cross-agent conversation). We set it INLINE on the env block
+    # below because the controller strips KARS_-prefixed user
+    # extraEnv (reserved-prefix guard in reconciler/mod.rs:1820),
+    # so it can't reach us via the KarsSandbox CR.
     $AS_SANDBOX env HOME="$HOME" HERMES_HOME="$HERMES_HOME" \
+      KARS_MESH_AUTO_RESPONDER=1 \
       python3 -c "
 import sys, threading, time
 print('[kars-mesh-keepalive] starting', flush=True)
