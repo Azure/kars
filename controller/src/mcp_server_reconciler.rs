@@ -421,23 +421,16 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
     } else {
-        // Slice 0 honesty event: tell operators the singular
-        // `spec.mcp:` model is intentional-today / migrating in
-        // Slice 4. Best-effort — never fail reconcile on Event
-        // publish.
-        if let Some(reporter) = &ctx.phase_reporter
-            && let Err(e) = reporter
-                .warn_limited_support(
-                    &*mcp,
-                    "BindMcpServer",
-                    "McpServer is reconciled via a singular `spec.mcp` binding today; \
-                     a plural multi-server model lands in crd-well-oiled-machine Slice 4. \
-                     CRs assuming a list of MCP servers will be migrated automatically.",
-                )
-                .await
-        {
-            tracing::warn!(error = %e, "failed to publish LimitedSupport event");
-        }
+        // (Removed) Per-reconcile `LimitedSupport` event explaining
+        // the singular-vs-plural `spec.mcp` migration roadmap was
+        // emitted here. It re-fired on every reconcile (~15s cycle)
+        // and flooded the Headlamp event view with the same advisory
+        // text. The information now lives in:
+        //   • the McpServer CRD `description` (visible in
+        //     `kubectl explain mcpserver.spec`)
+        //   • docs/blueprints/crd-well-oiled-machine.md (Slice 4 roadmap)
+        // K8s Events should carry actionable per-incident signal,
+        // not static design notes.
         Ok(Action::requeue(REQUEUE_OK))
     }
 }
