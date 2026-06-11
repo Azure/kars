@@ -298,7 +298,10 @@ fn action_id(cr: &KarsSREAction) -> String {
 /// Build the writer ClusterRoleBinding name. Matches the resourceNames
 /// pattern in the controller RBAC (`kars-sre-write-*`).
 fn writer_crb_name(action_id: &str) -> String {
-    format!("kars-sre-write-{}", action_id.trim_start_matches("sre-action-"))
+    format!(
+        "kars-sre-write-{}",
+        action_id.trim_start_matches("sre-action-")
+    )
 }
 
 async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -308,7 +311,11 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
     tracing::info!(action = %name, namespace = %ns, action_id = %aid, "Reconciling KarsSREAction");
 
     let api: Api<KarsSREAction> = Api::namespaced(ctx.client.clone(), &ns);
-    let phase = cr.status.as_ref().and_then(|s| s.phase.clone()).unwrap_or_else(|| PHASE_PROPOSED.to_string());
+    let phase = cr
+        .status
+        .as_ref()
+        .and_then(|s| s.phase.clone())
+        .unwrap_or_else(|| PHASE_PROPOSED.to_string());
     let approval = cr.spec.approval.state.as_str();
 
     // Terminal phases — short-circuit. If a terminal CR is older than
@@ -383,20 +390,41 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
 
     // Operator rejected — stamp Rejected.
     if approval == APPROVAL_REJECTED && phase != PHASE_REJECTED {
-        stamp_phase(&api, &name, PHASE_REJECTED, "operator rejected the proposal", &cr).await?;
+        stamp_phase(
+            &api,
+            &name,
+            PHASE_REJECTED,
+            "operator rejected the proposal",
+            &cr,
+        )
+        .await?;
         return Ok(Action::requeue(REQUEUE_TERMINAL));
     }
 
     // Operator hasn't acted, TTL elapsed → Expired.
     if approval == APPROVAL_PENDING && proposal_expired(&cr) {
-        stamp_phase(&api, &name, PHASE_EXPIRED, "TTL elapsed without approval", &cr).await?;
+        stamp_phase(
+            &api,
+            &name,
+            PHASE_EXPIRED,
+            "TTL elapsed without approval",
+            &cr,
+        )
+        .await?;
         return Ok(Action::requeue(REQUEUE_TERMINAL));
     }
 
     // Still waiting for approval.
     if approval == APPROVAL_PENDING {
         if phase != PHASE_PROPOSED {
-            stamp_phase(&api, &name, PHASE_PROPOSED, "awaiting operator approval", &cr).await?;
+            stamp_phase(
+                &api,
+                &name,
+                PHASE_PROPOSED,
+                "awaiting operator approval",
+                &cr,
+            )
+            .await?;
         }
         return Ok(Action::requeue(REQUEUE_PROPOSED));
     }
@@ -407,7 +435,14 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
         match validate_action(&cr.spec.action) {
             Validation::Ok => {}
             Validation::UnsupportedAction(k) => {
-                stamp_phase(&api, &name, PHASE_FAILED, &format!("unsupported action type: {k}"), &cr).await?;
+                stamp_phase(
+                    &api,
+                    &name,
+                    PHASE_FAILED,
+                    &format!("unsupported action type: {k}"),
+                    &cr,
+                )
+                .await?;
                 return Ok(Action::requeue(REQUEUE_TERMINAL));
             }
             Validation::DenylistedNamespace(ns_name) => {
@@ -466,7 +501,14 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
                 return Ok(Action::requeue(REQUEUE_APPLIED));
             }
             Err(e) => {
-                stamp_phase(&api, &name, PHASE_FAILED, &format!("apply failed: {e}"), &cr).await?;
+                stamp_phase(
+                    &api,
+                    &name,
+                    PHASE_FAILED,
+                    &format!("apply failed: {e}"),
+                    &cr,
+                )
+                .await?;
                 return Ok(Action::requeue(REQUEUE_TERMINAL));
             }
         }
@@ -498,11 +540,25 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
             // See the state-machine doc at the top of this module.
             match observe_recovery(&ctx.client, &cr.spec.action).await {
                 RecoveryStatus::Recovered => {
-                    stamp_phase(&api, &name, PHASE_RECOVERED, "no FailedCreate events in last 30s", &cr).await?;
+                    stamp_phase(
+                        &api,
+                        &name,
+                        PHASE_RECOVERED,
+                        "no FailedCreate events in last 30s",
+                        &cr,
+                    )
+                    .await?;
                     return Ok(Action::requeue(REQUEUE_TERMINAL));
                 }
                 RecoveryStatus::Pending if elapsed >= RECOVERY_WINDOW_SECONDS => {
-                    stamp_phase(&api, &name, PHASE_FAILED, "recovery window elapsed without confirmation", &cr).await?;
+                    stamp_phase(
+                        &api,
+                        &name,
+                        PHASE_FAILED,
+                        "recovery window elapsed without confirmation",
+                        &cr,
+                    )
+                    .await?;
                     return Ok(Action::requeue(REQUEUE_TERMINAL));
                 }
                 RecoveryStatus::Pending => {
@@ -551,16 +607,28 @@ async fn stamp_phase(
 ) -> Result<(), ReconcileError> {
     let approved = cr.spec.approval.state == APPROVAL_APPROVED;
     let conds = vec![
-        cond(COND_TYPE_AVAILABLE, bool_status(phase == PHASE_RECOVERED), phase, message),
+        cond(
+            COND_TYPE_AVAILABLE,
+            bool_status(phase == PHASE_RECOVERED),
+            phase,
+            message,
+        ),
         cond(
             COND_TYPE_APPROVED,
             bool_status(approved),
-            if approved { APPROVAL_APPROVED } else { APPROVAL_PENDING },
+            if approved {
+                APPROVAL_APPROVED
+            } else {
+                APPROVAL_PENDING
+            },
             "",
         ),
         cond(
             COND_TYPE_DEGRADED,
-            bool_status(matches!(phase, PHASE_FAILED | PHASE_EXPIRED | PHASE_REJECTED)),
+            bool_status(matches!(
+                phase,
+                PHASE_FAILED | PHASE_EXPIRED | PHASE_REJECTED
+            )),
             phase,
             message,
         ),
@@ -581,7 +649,11 @@ async fn stamp_phase(
     .await
 }
 
-async fn patch_status(api: &Api<KarsSREAction>, name: &str, status: Value) -> Result<(), ReconcileError> {
+async fn patch_status(
+    api: &Api<KarsSREAction>,
+    name: &str,
+    status: Value,
+) -> Result<(), ReconcileError> {
     let pp = PatchParams::apply(FIELD_MANAGER).force();
     api.patch_status(name, &pp, &Patch::Apply(&status)).await?;
     Ok(())
@@ -591,11 +663,7 @@ async fn patch_status(api: &Api<KarsSREAction>, name: &str, status: Value) -> Re
 ///
 /// Returns the CRB name (which the caller stamps on `status.writerCrbName`
 /// so a future cleanup-on-startup pass can GC it after a controller crash).
-async fn apply_action(
-    client: &Client,
-    cr: &KarsSREAction,
-    aid: &str,
-) -> anyhow::Result<String> {
+async fn apply_action(client: &Client, cr: &KarsSREAction, aid: &str) -> anyhow::Result<String> {
     let crb_name = writer_crb_name(aid);
     let action = &cr.spec.action;
     let ns = action
@@ -627,7 +695,8 @@ async fn apply_action(
     // follow-up — the immediate goal is the demo loop closing.
 
     // Step 3: execute the typed action.
-    let result = execute_typed_action(client, &action.kind, &ns, &target_name, &action.params).await;
+    let result =
+        execute_typed_action(client, &action.kind, &ns, &target_name, &action.params).await;
 
     // Step 4: tear down the binding regardless of outcome.
     let _ = delete_binding(client, &crb_name).await;
@@ -700,9 +769,9 @@ async fn execute_typed_action(
     name: &str,
     params: &std::collections::BTreeMap<String, Value>,
 ) -> anyhow::Result<()> {
-    use kube::api::DeleteParams;
+    use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
     use k8s_openapi::api::core::v1::{Pod, ResourceQuota};
-    use k8s_openapi::api::apps::v1::{Deployment, StatefulSet, DaemonSet};
+    use kube::api::DeleteParams;
 
     match action_kind {
         "DeleteResourceQuota" => {
@@ -847,7 +916,10 @@ enum RecoveryStatus {
     Pending,
 }
 
-async fn observe_recovery(client: &Client, action: &crate::kars_sre_action::ActionSpec) -> RecoveryStatus {
+async fn observe_recovery(
+    client: &Client,
+    action: &crate::kars_sre_action::ActionSpec,
+) -> RecoveryStatus {
     use k8s_openapi::api::apps::v1::Deployment;
     use k8s_openapi::api::core::v1::Event;
     let ns = match action.params.get("namespace").and_then(Value::as_str) {
@@ -864,11 +936,7 @@ async fn observe_recovery(client: &Client, action: &crate::kars_sre_action::Acti
         Ok(deps) => {
             for d in &deps.items {
                 let name = d.metadata.name.clone().unwrap_or_default();
-                let desired = d
-                    .spec
-                    .as_ref()
-                    .and_then(|s| s.replicas)
-                    .unwrap_or(1);
+                let desired = d.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
                 let available = d
                     .status
                     .as_ref()
@@ -929,11 +997,7 @@ async fn observe_recovery(client: &Client, action: &crate::kars_sre_action::Acti
                     .last_timestamp
                     .as_ref()
                     .map(|t| jiff_to_chrono(&t.0))
-                    .or_else(|| {
-                        ev.event_time
-                            .as_ref()
-                            .map(|mt| jiff_to_chrono(&mt.0))
-                    });
+                    .or_else(|| ev.event_time.as_ref().map(|mt| jiff_to_chrono(&mt.0)));
                 let ts = match ts {
                     Some(t) => t,
                     None => continue,
@@ -1018,7 +1082,10 @@ mod tests {
     #[test]
     fn unsupported_action_rejected() {
         let a = mk("EvilAction", json!({"namespace": "default", "name": "x"}));
-        matches!(validate_action(&a.spec.action), Validation::UnsupportedAction(_));
+        matches!(
+            validate_action(&a.spec.action),
+            Validation::UnsupportedAction(_)
+        );
     }
 
     #[test]
@@ -1026,7 +1093,10 @@ mod tests {
         for ns in DENYLISTED_NAMESPACES {
             let a = mk("DeleteResourceQuota", json!({"namespace": ns, "name": "x"}));
             assert!(
-                matches!(validate_action(&a.spec.action), Validation::DenylistedNamespace(_)),
+                matches!(
+                    validate_action(&a.spec.action),
+                    Validation::DenylistedNamespace(_)
+                ),
                 "{} should be denylisted",
                 ns
             );
@@ -1035,22 +1105,40 @@ mod tests {
 
     #[test]
     fn missing_params_rejected_per_kind() {
-        let a = mk("PatchDeploymentImage", json!({"namespace": "x", "name": "y"}));
-        assert!(matches!(validate_action(&a.spec.action), Validation::MissingParam("container")));
+        let a = mk(
+            "PatchDeploymentImage",
+            json!({"namespace": "x", "name": "y"}),
+        );
+        assert!(matches!(
+            validate_action(&a.spec.action),
+            Validation::MissingParam("container")
+        ));
     }
 
     #[test]
     fn delete_resourcequota_in_user_namespace_ok() {
-        let a = mk("DeleteResourceQuota", json!({"namespace": "team-a", "name": "foo"}));
+        let a = mk(
+            "DeleteResourceQuota",
+            json!({"namespace": "team-a", "name": "foo"}),
+        );
         assert!(matches!(validate_action(&a.spec.action), Validation::Ok));
     }
 
     #[test]
     fn scale_replicas_clamped_to_zero_fifty() {
-        let a = mk("ScaleDeployment", json!({"namespace": "team-a", "name": "x", "replicas": 100}));
-        assert!(matches!(validate_action(&a.spec.action), Validation::ProtectedResource(_)));
+        let a = mk(
+            "ScaleDeployment",
+            json!({"namespace": "team-a", "name": "x", "replicas": 100}),
+        );
+        assert!(matches!(
+            validate_action(&a.spec.action),
+            Validation::ProtectedResource(_)
+        ));
 
-        let a = mk("ScaleDeployment", json!({"namespace": "team-a", "name": "x", "replicas": 5}));
+        let a = mk(
+            "ScaleDeployment",
+            json!({"namespace": "team-a", "name": "x", "replicas": 5}),
+        );
         assert!(matches!(validate_action(&a.spec.action), Validation::Ok));
     }
 

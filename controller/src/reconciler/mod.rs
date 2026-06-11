@@ -133,7 +133,7 @@ pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
             "iptables -A OUTPUT -m owner --uid-owner 1000 \
              -d \"${KUBERNETES_SERVICE_HOST}\" \
              -p tcp --dport \"${KUBERNETES_SERVICE_PORT_HTTPS:-443}\" \
-             -j ACCEPT && "
+             -j ACCEPT && ",
         );
     }
 
@@ -149,7 +149,7 @@ pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
             "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 \
              -d \"${KUBERNETES_SERVICE_HOST}\" \
              -p tcp --dport \"${KUBERNETES_SERVICE_PORT_HTTPS:-443}\" \
-             -j RETURN && "
+             -j RETURN && ",
         );
     }
 
@@ -168,7 +168,7 @@ pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
         );
     } else {
         cmd.push_str(
-            "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
+            "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'",
         );
     }
 
@@ -388,8 +388,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // 10.0.0.1, EKS defaults to 172.20.0.1, and custom service-CIDR
     // operators get whatever they configured.  Reading the env at
     // reconcile time gives the right value on every cluster.
-    let apiserver_ip = std::env::var("KUBERNETES_SERVICE_HOST")
-        .unwrap_or_else(|_| "10.96.0.1".to_string());
+    let apiserver_ip =
+        std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
     let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
         .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
         .unwrap_or_else(|_| "443".to_string());

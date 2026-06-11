@@ -326,10 +326,6 @@ mod tests {
     fn helm_karssreaction_crd_matches_rust_schema() {
         let rust_crd_value =
             serde_json::to_value(kars_sre_action_crd()).expect("rust crd serializes to JSON");
-        assert_helm_matches_rust(
-            KARSSREACTION_HELM_CRD_PATH,
-            rust_crd_value,
-            "karssreaction",
-        );
+        assert_helm_matches_rust(KARSSREACTION_HELM_CRD_PATH, rust_crd_value, "karssreaction");
     }
 }
