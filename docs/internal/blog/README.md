@@ -40,10 +40,10 @@ Tone: short paragraphs, no marketing words ("revolutionize", "empower"), real co
 
 | # | Slug | Status |
 |---|---|---|
-| 1 | `01-kars-in-10-minutes.md` | drafting |
-| 2 | `02-agentmesh-deep-dive.md` | pending |
-| 3 | `03-governance-plane.md` | pending |
-| 4 | `04-autonomous-sre.md` | pending |
-| 5 | `05-multi-runtime.md` | pending |
-| 6 | `06-sandbox-anatomy.md` | pending |
-| 7 | `07-operator-ux.md` | pending |
+| 1 | `01-kars-in-10-minutes.md` | draft (v1) |
+| 2 | `02-agentmesh-deep-dive.md` | draft (v1) |
+| 3 | `03-governance-plane.md` | draft (v1) |
+| 4 | `04-autonomous-sre.md` | draft (v1) |
+| 5 | `05-multi-runtime.md` | draft (v1) |
+| 6 | `06-sandbox-anatomy.md` | draft (v1) |
+| 7 | `07-operator-ux.md` | draft (v1) |
