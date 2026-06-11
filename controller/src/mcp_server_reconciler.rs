@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use crate::mcp_server::{LocalObjectRef, McpServer, McpServerStatus};
 use crate::status::conditions::{self, reason, status as cond_status};
-use crate::status::phase::{PHASE_DEGRADED, PHASE_READY, PhaseEventReporter};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
 
 /// Field manager for SSA patches emitted by this reconciler. A unique
 /// suffix per reconciler is the §10.4 #1 craftsmanship requirement —
@@ -101,10 +101,6 @@ struct Ctx {
     client: Client,
     /// Override hook for tests — swap the JWKS fetcher with a mock.
     jwks_fetcher: Arc<dyn JwksFetcher>,
-    /// Publisher for `LimitedSupport` Warning Events. Optional so
-    /// unit tests can construct a `Ctx` without a real `Client` —
-    /// production builds always wire it via `run()`.
-    phase_reporter: Option<PhaseEventReporter>,
 }
 
 /// Pluggable JWKS fetcher — production uses [`HttpJwksFetcher`], tests
@@ -793,7 +789,6 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         jwks_fetcher: Arc::new(HttpJwksFetcher::new()),
-        phase_reporter: Some(PhaseEventReporter::new(client, "McpServer")),
     });
     Controller::new(mcps, kube::runtime::watcher::Config::default())
         .run(
