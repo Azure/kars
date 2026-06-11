@@ -664,8 +664,49 @@ function Overview() {
   const [memories] = (CRD_CLASSES.karsmemories as any).useList() as [KubeObject[] | null];
   const [mcpServers] = (CRD_CLASSES.mcpservers as any).useList() as [KubeObject[] | null];
   const [a2aAgents] = (CRD_CLASSES.a2aagents as any).useList() as [KubeObject[] | null];
+  // Workload cross-check: KarsSandbox.status.phase is 'Running' the
+  // moment the controller successfully reconciles the Deployment
+  // spec — it knows nothing about pod-level readiness. Pull the
+  // underlying Deployments so the Healthy / Workload-down headline
+  // stats reflect actual availability, not just CR reconcile state.
+  const [deployments] = (Deployment as any).useList() as [KubeObject[] | null];
   const metrics = computeMetrics(sandboxes, secrets);
   const total = sandboxes?.length ?? 0;
+
+  // Sandbox-name → workload health. Returns 'unknown' while deployments
+  // list is loading, so the UI shows '…' instead of misleading zeros.
+  const workloadHealth = (sb: KubeObject): "healthy" | "degraded" | "unknown" => {
+    if (deployments === null) return "unknown";
+    const name = sb.metadata?.name ?? "";
+    const ns = `kars-${name}`;
+    const d = deployments.find(
+      d =>
+        (d.metadata?.name ?? "") === name &&
+        (d.metadata?.namespace ?? "") === ns,
+    );
+    if (!d) return "unknown";
+    const spec = (d as any).spec ?? {};
+    const status = (d as any).status ?? {};
+    const desired = typeof spec.replicas === "number" ? spec.replicas : 1;
+    const available =
+      typeof status.availableReplicas === "number"
+        ? status.availableReplicas
+        : 0;
+    return available >= desired && desired > 0 ? "healthy" : "degraded";
+  };
+  let healthy = 0;
+  let workloadDown = 0;
+  let crDegraded = 0;
+  for (const s of sandboxes ?? []) {
+    const conds = (getStatus(s).conditions ?? []) as any[];
+    if (conds.some(c => c.type === "Degraded" && c.status === "True")) {
+      crDegraded += 1;
+      continue;
+    }
+    const wl = workloadHealth(s);
+    if (wl === "healthy") healthy += 1;
+    else if (wl === "degraded") workloadDown += 1;
+  }
 
   const phaseRows = Object.entries(metrics.sandboxesByPhase)
     .sort((a, b) => b[1] - a[1])
@@ -713,8 +754,21 @@ function Overview() {
       <SectionBox title="kars — Operator Overview">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "1rem", padding: "1rem 0" }}>
           <Stat label="Total Sandboxes" value={total} />
-          <Stat label="Ready" value={metrics.sandboxesByPhase.Ready ?? 0} tone="success" />
-          <Stat label="Degraded" value={metrics.sandboxesByPhase.Degraded ?? 0} tone={metrics.sandboxesByPhase.Degraded ? "error" : ""} />
+          <Stat
+            label="Healthy"
+            value={healthy}
+            tone={healthy === total && total > 0 ? "success" : "warning"}
+          />
+          <Stat
+            label="Workload down"
+            value={workloadDown}
+            tone={workloadDown === 0 ? "success" : "error"}
+          />
+          <Stat
+            label="CR-Degraded"
+            value={crDegraded}
+            tone={crDegraded === 0 ? "success" : "error"}
+          />
           <Stat label="Governance ON" value={`${metrics.governanceEnabled} / ${total}`} />
           <Stat label="Egress: Learn / Strict" value={`${metrics.egressLearn} / ${metrics.egressStrict}`} />
         </div>
@@ -855,6 +909,39 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
     return m;
   }, [policies]);
 
+  // Workload cross-check (sandboxes only): KarsSandbox.status.phase is
+  // 'Running' as soon as the controller reconciles the Deployment
+  // spec — it knows nothing about pod readiness. A sandbox with
+  // 'Running' phase but unavailable pods (ImagePullBackOff,
+  // OOMKilled, CrashLoopBackoff) would otherwise show as green here,
+  // hiding the actual failure. Pull Deployments once so the Phase
+  // column can reflect real workload health.
+  const isSandboxList = crd.plural === "karssandboxes";
+  const [deployments] = (isSandboxList
+    ? (Deployment as any).useList()
+    : [null]) as [KubeObject[] | null];
+  const workloadHealthy = React.useCallback(
+    (sandboxName: string): "healthy" | "degraded" | "unknown" => {
+      if (!isSandboxList || !deployments) return "unknown";
+      const ns = `kars-${sandboxName}`;
+      const d = deployments.find(
+        d =>
+          (d.metadata?.name ?? "") === sandboxName &&
+          (d.metadata?.namespace ?? "") === ns,
+      );
+      if (!d) return "unknown";
+      const spec = (d as any).spec ?? {};
+      const status = (d as any).status ?? {};
+      const desired = typeof spec.replicas === "number" ? spec.replicas : 1;
+      const available =
+        typeof status.availableReplicas === "number"
+          ? status.availableReplicas
+          : 0;
+      return available >= desired && desired > 0 ? "healthy" : "degraded";
+    },
+    [deployments, isSandboxList],
+  );
+
   const resolveModel = (sb: KubeObject): string => {
     const spec = getSpec(sb);
     const inline =
@@ -922,7 +1009,19 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
   if (crd.phaseField) {
     columns.push({
       label: "Phase",
-      getter: (r: KubeObject) => phaseChip(getStatus(r)[crd.phaseField!] as string, readyReason(r)),
+      getter: (r: KubeObject) => {
+        const phase = getStatus(r)[crd.phaseField!] as string;
+        // Sandbox-only: even when controller says 'Running', surface
+        // workload-down state in red so the operator can see
+        // ImagePullBackOff / OOMKilled / etc. without leaving the page.
+        if (isSandboxList) {
+          const wl = workloadHealthy(r.metadata?.name ?? "");
+          if (wl === "degraded") {
+            return <StatusLabel status="error">Workload down</StatusLabel>;
+          }
+        }
+        return phaseChip(phase, readyReason(r));
+      },
     });
   }
   columns.push({
