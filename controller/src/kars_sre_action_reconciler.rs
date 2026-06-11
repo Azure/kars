@@ -16,8 +16,22 @@
 //!   Approved --(controller mints +
 //!                executes typed action)----------> Applied
 //!   Applied  --(observed workload OK)------------> Recovered (terminal)
-//!   Applied  --(no recovery in 5 min)------------> Failed    (terminal)
+//!   Applied  --(no recovery in 10 min)-----------> Failed
+//!   Failed   --(workload recovers within 30 min
+//!               of appliedAt — LateRecovery)-----> Recovered (terminal)
 //! ```
+//!
+//! The `Failed → Recovered` edge exists because real Kubernetes
+//! recoveries routinely exceed 10 minutes (cold-cache image pulls,
+//! ReplicaSet back-offs, congested nodes). The Act-II 2026-06-11
+//! demo hit exactly this: the operator-approved patch worked, but
+//! research came back at ~6 min and the action had already been
+//! stamped Failed at 5 min. Late-recovery healing keeps observing
+//! for `LATE_RECOVERY_WINDOW_SECONDS` after `appliedAt` and flips
+//! Failed → Recovered (reason=`LateRecovery`) when reality catches
+//! up. Pre-apply Failed CRs (validation, unsupported action,
+//! denylisted namespace) have no `appliedAt` and are genuinely
+//! terminal.
 //!
 //! ## What it does on the Approved → Applied transition
 //!
@@ -37,8 +51,11 @@
 //! ## What it does on the Applied → Recovered transition
 //!
 //! Watches the affected workload for a `condition Available=True` (or
-//! workload-kind-appropriate equivalent) for up to 5 minutes. On match
-//! → `phase=Recovered`. On timeout → `phase=Failed`.
+//! workload-kind-appropriate equivalent) for up to 10 minutes. On match
+//! → `phase=Recovered`. On timeout → `phase=Failed`, then keeps
+//! observing for `LATE_RECOVERY_WINDOW_SECONDS` total (default 30 min
+//! from `appliedAt`) and flips back to `Recovered` if the workload
+//! eventually comes up.
 //!
 //! ## Authority model
 //!
@@ -119,8 +136,31 @@ const DEFAULT_TTL_MINUTES: u32 = 15;
 const MIN_TTL_MINUTES: u32 = 1;
 const MAX_TTL_MINUTES: u32 = 60;
 
-/// Recovery observation window after Applied.
-const RECOVERY_WINDOW_SECONDS: u64 = 300;
+/// Recovery observation window after Applied. Bumped from 300s →
+/// 600s after the Act-II demo (2026-06-11) where research recovered
+/// at ~6m but the action was already marked Failed at 5m. Real-world
+/// Kubernetes recovery (rolling restart, image pulls, RS retry
+/// back-offs) routinely exceeds 5 min on cold-cache clusters.
+const RECOVERY_WINDOW_SECONDS: u64 = 600;
+
+/// Late-recovery window. Even after a CR is stamped Failed (recovery
+/// window elapsed), keep observing for this many seconds since
+/// `appliedAt`. If we ever see the workload come back, flip
+/// Failed → Recovered (reason: `LateRecovery`) so the operator's
+/// Telegram/UI reflects what actually happened on the cluster. This
+/// is the "demo escape hatch" — slow image pulls or congested clusters
+/// won't permanently mark an action Failed when the patch did, in
+/// fact, work.
+const LATE_RECOVERY_WINDOW_SECONDS: u64 = 1800;
+
+/// Reason stamped on the Available condition when a Failed CR is
+/// later flipped to Recovered by the late-recovery observer.
+const REASON_LATE_RECOVERY: &str = "LateRecovery";
+
+/// While polling for late recovery on a Failed CR we requeue every
+/// 60s instead of the standard 300s terminal requeue — otherwise
+/// late-recovery latency is up to 5 minutes.
+const REQUEUE_LATE_RECOVERY: Duration = Duration::from_secs(60);
 
 /// Writer SA + namespace (chart-shipped).
 const WRITER_SA_NAMESPACE: &str = "kars-sre";
@@ -279,6 +319,52 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
         phase.as_str(),
         PHASE_RECOVERED | PHASE_REJECTED | PHASE_EXPIRED | PHASE_FAILED
     ) {
+        // Late-recovery healer: a Failed CR with appliedAt set means
+        // we executed the patch but the workload didn't come back in
+        // RECOVERY_WINDOW_SECONDS. The patch may still work later
+        // (slow image pulls, RS back-off, cold-cache clusters). Keep
+        // observing for LATE_RECOVERY_WINDOW_SECONDS since appliedAt;
+        // if recovery happens, flip to Recovered so the operator's
+        // pager and UI reflect reality. Only applies to Failed CRs
+        // that reached Apply — pre-apply failures (validation,
+        // unsupported action, protected namespace) have no appliedAt
+        // and are genuinely terminal.
+        if phase == PHASE_FAILED {
+            let applied_at = cr
+                .status
+                .as_ref()
+                .and_then(|s| s.applied_at.as_ref())
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&Utc));
+            if let Some(t0) = applied_at {
+                let elapsed = (Utc::now() - t0).num_seconds() as u64;
+                if elapsed < LATE_RECOVERY_WINDOW_SECONDS {
+                    if let RecoveryStatus::Recovered =
+                        observe_recovery(&ctx.client, &cr.spec.action).await
+                    {
+                        tracing::info!(
+                            action = %name,
+                            elapsed_secs = elapsed,
+                            "Late recovery observed; flipping Failed → Recovered"
+                        );
+                        stamp_phase(
+                            &api,
+                            &name,
+                            PHASE_RECOVERED,
+                            &format!(
+                                "workload recovered {elapsed}s after Apply (past initial window — {REASON_LATE_RECOVERY})"
+                            ),
+                            &cr,
+                        )
+                        .await?;
+                        return Ok(Action::requeue(REQUEUE_TERMINAL));
+                    }
+                    // Still pending; check again sooner than terminal cadence.
+                    return Ok(Action::requeue(REQUEUE_LATE_RECOVERY));
+                }
+            }
+        }
+
         if let Some(created) = cr.metadata.creation_timestamp.as_ref() {
             let age = (Utc::now() - jiff_to_chrono(&created.0)).num_seconds();
             if age > TERMINAL_RETENTION_SECONDS as i64 {
@@ -403,6 +489,13 @@ async fn reconcile(cr: Arc<KarsSREAction>, ctx: Arc<Ctx>) -> Result<Action, Reco
             // for the absence of FailedCreate events in the last 30s.
             // Slice 4 will tighten this with workload-kind-specific
             // observers (Deployment.status.conditions[Available]=True etc.)
+            //
+            // If the workload doesn't come back inside the initial
+            // RECOVERY_WINDOW_SECONDS the CR is stamped Failed, BUT the
+            // terminal-phase handler above keeps re-running observe_recovery
+            // for LATE_RECOVERY_WINDOW_SECONDS since appliedAt and will
+            // flip Failed → Recovered if the workload eventually heals.
+            // See the state-machine doc at the top of this module.
             match observe_recovery(&ctx.client, &cr.spec.action).await {
                 RecoveryStatus::Recovered => {
                     stamp_phase(&api, &name, PHASE_RECOVERED, "no FailedCreate events in last 30s", &cr).await?;
