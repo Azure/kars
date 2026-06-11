@@ -44,11 +44,11 @@ files:
 
   - path: controller/src/reconciler/mod.rs
     baseline_2026_04_24: 2383
-    phase0_cap: 3450
+    phase0_cap: 3700
     phase1_cap: 1500
     phase2_cap: 2000
     allow_grow: true
-    notes: "Phase 0 cap bumped to 3050 in PR #323 to absorb cluster-aware memory scope + policy-quintet wiring (Context.cluster_name, openclaw_env injection, tool-policy mount on openclaw container); bumped to 3300 to land Hermes runtime-kind support in the deployment builder (entrypoint selection, env injection for KARS_RUNTIME_KIND/hermes-specific knobs); bumped to 3450 in Hermes-support PR for tool-surface parity (handoff routing, mesh transfer wiring, foundry native tool propagation, telegram_status divergence handling). Phase 1+ caps unchanged. allow_grow honored only until phase2_cap (2000); enforced strictly. Phase 3 must extract per-CRD reconcilers into controller/src/reconcilers/{sandbox,mcp_server,...}.rs and shrink mod.rs back to ≤800 (drop allow_grow at that point)."
+    notes: "Phase 0 cap bumped to 3050 in PR #323 to absorb cluster-aware memory scope + policy-quintet wiring (Context.cluster_name, openclaw_env injection, tool-policy mount on openclaw container); bumped to 3300 to land Hermes runtime-kind support in the deployment builder (entrypoint selection, env injection for KARS_RUNTIME_KIND/hermes-specific knobs); bumped to 3450 in Hermes-support PR for tool-surface parity (handoff routing, mesh transfer wiring, foundry native tool propagation, telegram_status divergence handling); bumped to 3700 in PR #397 (kars-sre demo-and-agent) to absorb cluster-portable apiserver egress-guard bypass (KUBERNETES_SERVICE_HOST/PORT lookup + ACCEPT/RETURN iptables rules for role=sre sandboxes), Hermes gateway port (18789) exposure on per-sandbox Service, SANDBOX_NAME+CLUSTER_NAME env on openclaw container for ClawMemory scope, mesh-keepalive entrypoint plumbing, and Telegram-channel + SRE_WATCHER_MODE env wiring for the proactive watcher. Phase 1+ caps unchanged. allow_grow honored only until phase2_cap (2000); enforced strictly. Phase 3 must extract per-CRD reconcilers into controller/src/reconcilers/{sandbox,mcp_server,...}.rs and shrink mod.rs back to ≤800 (drop allow_grow at that point)."
 
   - path: controller/src/mesh_peer/mod.rs
     baseline_2026_04_24: 1970
