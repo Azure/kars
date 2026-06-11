@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🔱 Agent Reference Stack for Kubernetes
+<img src="docs/assets/logo.png" alt="kars logo" width="128" />
+
+# Agent Reference Stack for Kubernetes
 
 **A secure runtime for AI agents on Azure. Short name: `kars`.**
 
