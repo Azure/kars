@@ -638,13 +638,89 @@ def _dispatch_batch(candidates: list[dict[str, Any]]) -> int:
     return sent_count
 
 
+def _phase_change_loop() -> None:
+    """Phase-change-only watch mode — alerts ONLY on KarsSandbox CR
+    status.phase transitions. Engaged via SRE_WATCHER_MODE=phase-changes-only.
+
+    KarsSandbox is cluster-scoped, so we list at the cluster level. Uses the
+    same httpx singleton the event-mode watcher uses — the distroless sandbox
+    image has no kubectl binary.
+    """
+    poll = WATCH_INTERVAL_SECONDS
+    logger.info("phase-changes-only mode (poll=%ds, notify_target=%r)",
+                poll, NOTIFY_TARGET)
+
+    last_phase: dict[str, str] = {}
+    primed = False
+
+    while True:
+        try:
+            doc = sre_kube.client().get(
+                "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes"
+            )
+            now_phase: dict[str, str] = {}
+            for item in (doc.get("items") or []):
+                name = (item.get("metadata") or {}).get("name", "")
+                if not name:
+                    continue
+                ph = (item.get("status") or {}).get("phase") or "Unknown"
+                now_phase[name] = ph
+
+            if not primed:
+                last_phase = dict(now_phase)
+                primed = True
+                logger.info("primed with %d sandboxes; watching for transitions",
+                            len(last_phase))
+                time.sleep(poll); continue
+
+            transitions: list[str] = []
+            for name, ph in now_phase.items():
+                prev = last_phase.get(name)
+                if prev is None:
+                    transitions.append(f"+ {name}: NEW -> {ph}")
+                elif prev != ph:
+                    transitions.append(f"~ {name}: {prev} -> {ph}")
+            for name, prev in last_phase.items():
+                if name not in now_phase:
+                    transitions.append(f"- {name}: {prev} -> DELETED")
+
+            if transitions:
+                text = "*kars-sre: sandbox phase changes*\n" + "\n".join(
+                    f"`{t}`" for t in transitions
+                )
+                if _send_telegram(text):
+                    logger.info("sent phase-change alert: %d transition(s)",
+                                len(transitions))
+                else:
+                    logger.warning("phase-change Telegram send failed")
+            last_phase = now_phase
+        except Exception as e:  # noqa: BLE001
+            logger.warning("phase-change iteration error: %s", e)
+        time.sleep(poll)
+
+
 def run() -> None:
     """Main watch loop. Blocks forever; intended to be the entrypoint
     of a long-lived background process.
+
+    Two modes selectable via ``SRE_WATCHER_MODE``:
+
+    * ``events`` (default) — alert on FailedCreate / BackOff / etc.
+      events in kars-* namespaces. High signal for incident response
+      but chatty on noisy clusters.
+    * ``phase-changes-only`` — alert ONLY on KarsSandbox CR
+      ``status.phase`` transitions (e.g. Ready -> Degraded). One
+      message per transition, no pod-level event traffic.
     """
     if os.environ.get("SRE_WATCHER_ENABLED", "true").lower() in ("false", "0", "no", "off"):
         logger.info("disabled via SRE_WATCHER_ENABLED — exiting")
         return
+
+    mode = os.environ.get("SRE_WATCHER_MODE", "events").strip().lower()
+    if mode in ("phase-changes-only", "phase-changes", "phase", "phase_change", "phase_changes_only"):
+        _phase_change_loop()
+        return
+
     logger.info(
         "starting (poll=%ds, dedupe=%ds, prefix=%r, notify_target=%r)",
         WATCH_INTERVAL_SECONDS,
