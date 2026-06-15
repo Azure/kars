@@ -63,9 +63,10 @@
   .spotlight h4 { margin-top: 1rem; color: #0078D4; }
   .spotlight pre { margin: 0.6rem 0; }
 
-  /* Diagram */
-  .diagram-wrap { margin: 2rem 0; }
-  .diagram-wrap figcaption { font-size: 0.9rem; color: #666; margin-top: 0.6rem; font-style: italic; }
+  /* Diagram — break out of body column so it renders bigger */
+  .diagram-wrap { margin: 2rem 0; position: relative; left: 50%; transform: translateX(-50%); width: min(95vw, 1200px); }
+  .diagram-wrap svg { width: 100%; height: auto; display: block; }
+  .diagram-wrap figcaption { font-size: 0.95rem; color: #555; margin-top: 0.8rem; font-style: italic; text-align: center; }
 
   /* Substrate / Azure Linux thread */
   .substrate { background: #fdfdfb; border: 1px solid #ececec; border-radius: 6px; padding: 0.85rem 1.1rem; margin: 1rem 0; font-size: 0.95em; }
@@ -179,8 +180,8 @@ kars connect demo</code></pre>
   <text x="60" y="76" class="h-sub">One sandbox per agent. Zero credentials in the agent. End-to-end encrypted mesh. AGT-governed.</text>
 
   <!-- ============== EXTERNAL / DEPENDENCIES ROW ============== -->
-  <text x="60" y="118" class="tag-cluster">DEPENDENCIES  ·  EXTERNAL OR SHARED INFRASTRUCTURE</text>
-  <line x1="450" y1="113" x2="1140" y2="113" stroke="#e5e5e5" stroke-width="1"/>
+  <text x="60" y="118" class="tag-cluster">EXTERNAL OR SHARED INFRA</text>
+  <line x1="370" y1="113" x2="1140" y2="113" stroke="#e5e5e5" stroke-width="1"/>
 
   <g transform="translate(60, 128)">
     <rect x="0" y="0" width="260" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
