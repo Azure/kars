@@ -282,16 +282,15 @@ kars connect demo</code></pre>
       <text x="36" y="22" class="body" fill="#9a3412"><tspan font-weight="700">egress-guard init</tspan>  ·  UID 1000 default-deny</text>
     </g>
 
-    <g transform="translate(22, 116)">
+        <g transform="translate(22, 116)">
       <rect x="0" y="0" width="168" height="148" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1.2"/>
       <g transform="translate(14, 14)" color="#92400e">
         <use href="#shield-x" width="22" height="22"/>
       </g>
-      <text x="88" y="28" class="body" fill="#92400e" font-size="12.5"><tspan font-weight="700">✓</tspan> no creds</text>
-      <text x="88" y="46" class="body" fill="#92400e" font-size="12.5"><tspan font-weight="700">✓</tspan> no net</text>
-      <text x="16" y="84" class="h-component">agent</text>
-      <text x="16" y="104" class="annotation">UID 1000 · read-only</text>
-      <text x="16" y="124" class="annotation">drop-ALL caps · seccomp</text>
+      <text x="16" y="56" class="h-component">agent</text>
+      <text x="16" y="82" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  UID 1000 · read-only</text>
+      <text x="16" y="102" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no credentials</text>
+      <text x="16" y="122" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no public net</text>
     </g>
 
     <g transform="translate(210, 116)">
@@ -300,10 +299,9 @@ kars connect demo</code></pre>
         <use href="#key" width="22" height="22"/>
       </g>
       <text x="16" y="56" class="h-component">router</text>
-      <text x="16" y="76" class="annotation">UID 1001 · sidecar</text>
-      <text x="16" y="100" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> Entra Agent ID</text>
-      <text x="16" y="118" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> policy &amp; budget</text>
-      <text x="16" y="136" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> audit chain</text>
+      <text x="16" y="82" class="annotation"><tspan font-weight="700">+</tspan>  Entra Agent ID</text>
+      <text x="16" y="102" class="annotation"><tspan font-weight="700">+</tspan>  policy &amp; budget</text>
+      <text x="16" y="122" class="annotation"><tspan font-weight="700">+</tspan>  audit chain</text>
     </g>
     <line x1="190" y1="190" x2="210" y2="190" stroke="#1e40af" stroke-width="2" marker-end="url(#arr-blue)"/>
 
