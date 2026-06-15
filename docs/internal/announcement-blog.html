@@ -280,8 +280,8 @@ kars connect demo</code></pre>
     </g>
     <line x1="172" y1="190" x2="188" y2="190" stroke="#1e40af" stroke-width="2" marker-end="url(#arr-blue)"/>
 
-    <!-- confidential annotation -->
-    <text x="22" y="285" class="annotation" fill="#5C2D91"><tspan font-weight="700">+</tspan> Kata + AMD SEV-SNP, scheduled on Standard_DC4as_v5</text>
+    <!-- inline confidential annotation (inside the writer card, not dangling below) -->
+    <text x="22" y="276" class="annotation" fill="#5C2D91"><tspan font-weight="700">+</tspan> Kata + AMD SEV-SNP nodes (Standard_DC4as_v5)</text>
   </g>
 
   <!-- ============== kars-sre control-plane agent (combined into one taller card to match sandbox heights) ============== -->
@@ -305,14 +305,19 @@ kars connect demo</code></pre>
     <text x="22" y="192" class="body"><tspan font-weight="700" fill="#C2410C">WRITE</tspan>  one-shot approval per action</text>
     <text x="22" y="210" class="body">            via <tspan font-family="Cascadia Code, monospace" font-size="12">kars sre approve</tspan></text>
 
-    <!-- CLI hint inline at bottom of same card -->
+    <!-- CLI hint inline at bottom of same card (smaller font to fit) -->
     <rect x="22" y="232" width="251" height="36" rx="6" fill="#f5f3ff" stroke="#ddd6fe" stroke-width="1"/>
-    <text x="34" y="256" class="body"><tspan font-family="Cascadia Code, monospace" font-size="12" fill="#5b21b6">$ kars sre install / talk / diagnose</tspan></text>
+    <text x="34" y="255" class="body"><tspan font-family="Cascadia Code, monospace" font-size="11" fill="#5b21b6">$ kars sre install · talk · diagnose</tspan></text>
   </g>
 
-  <!-- ============== END-TO-END ENCRYPTED MESH (between regular sandboxes only) ============== -->
-  <!-- Agent A box bottom-mid: x=155, y=445.  Agent B box bottom-mid: x=540, y=445. -->
-  <path d="M 155 446 C 155 510, 540 510, 540 446" stroke="#0078D4" stroke-width="2.5" fill="none" marker-start="url(#arr-blue)" marker-end="url(#arr-blue)"/>
+  <!-- ============== END-TO-END ENCRYPTED MESH (clean curve, no arrowheads, lock badge as focal point) ============== -->
+  <!-- Agent A box bottom-mid: x=155, y=445.  Agent B box bottom-mid: x=540, y=445.
+       Curve dips through the encryption label zone. NO arrowheads — bidirectional channel; lock is the focal point. -->
+  <path d="M 155 450 C 155 510, 540 510, 540 450" stroke="#0078D4" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+
+  <!-- Small connector caps at curve endpoints (subtle dots to mark agent attachment) -->
+  <circle cx="155" cy="450" r="3.5" fill="#0078D4"/>
+  <circle cx="540" cy="450" r="3.5" fill="#0078D4"/>
 
   <!-- Lock badge at apex -->
   <g transform="translate(331, 484)" color="#0078D4">
