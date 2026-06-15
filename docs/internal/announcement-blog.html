@@ -124,23 +124,21 @@ kars connect demo</code></pre>
 <svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="kars architecture: an AKS cluster on Azure Linux running two kars sandbox pods (researcher in enhanced isolation, writer in confidential isolation via Kata + AMD SEV-SNP). Each sandbox has an init egress-guard, an agent container with no credentials, and an inference-router sidecar that holds the per-sandbox Microsoft Entra Agent ID. The Signal Protocol session lives end-to-end inside the agent processes; routers WS-bridge opaque ciphertext frames through the external AgentMesh relay and discover peer identities through the AgentMesh registry. External Azure AI Foundry, MCP servers, AgentMesh relay and registry sit outside the cluster trust boundary. The Microsoft Agent Governance Toolkit sits beneath as the consumed governance foundation.">
   <defs>
     <style>
-      .h-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 30px; font-weight: 700; fill: #0a0a0a; letter-spacing: -0.5px; }
-      .h-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 15px; font-weight: 400; fill: #6b6b6b; }
-      .tag-cluster { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; font-weight: 700; fill: #6b6b6b; letter-spacing: 1.6px; }
-      .tag-cluster-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; font-weight: 500; fill: #8b8b8b; letter-spacing: 0.4px; }
-      .card-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 16px; font-weight: 700; fill: #0a0a0a; }
-      .card-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 12.5px; font-weight: 500; fill: #6b6b6b; }
-      .iso-pill { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11px; font-weight: 700; fill: #fff; letter-spacing: 0.6px; }
-      .h-component { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 15px; font-weight: 700; fill: #0a0a0a; }
-      .body { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; fill: #3a3a3a; }
-      .body-bold { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 600; fill: #0a0a0a; }
-      .annotation { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; fill: #6b6b6b; }
-      .agt-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 15px; font-weight: 700; fill: #0a0a0a; }
-      .agt-body { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 12.5px; fill: #5b5b5b; }
-      .sre-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 700; fill: #0a0a0a; }
-      .sre-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; fill: #5b5b5b; }
-      .lock-text { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 14px; font-weight: 700; fill: #0a0a0a; letter-spacing: 0.3px; }
-      .lock-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 12px; fill: #6b6b6b; }
+      .h-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 34px; font-weight: 700; fill: #0a0a0a; letter-spacing: -0.5px; }
+      .h-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 17px; font-weight: 400; fill: #6b6b6b; }
+      .tag-cluster { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 700; fill: #6b6b6b; letter-spacing: 1.6px; }
+      .tag-cluster-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 500; fill: #8b8b8b; letter-spacing: 0.4px; }
+      .card-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 18px; font-weight: 700; fill: #0a0a0a; }
+      .card-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 14px; font-weight: 500; fill: #6b6b6b; }
+      .iso-pill { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 12.5px; font-weight: 700; fill: #fff; letter-spacing: 0.6px; }
+      .h-component { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 18px; font-weight: 700; fill: #0a0a0a; }
+      .body { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 15px; fill: #3a3a3a; }
+      .body-bold { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 15px; font-weight: 600; fill: #0a0a0a; }
+      .annotation { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; fill: #6b6b6b; }
+      .agt-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 17px; font-weight: 700; fill: #0a0a0a; }
+      .agt-body { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 14px; fill: #5b5b5b; }
+      .lock-text { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 17px; font-weight: 700; fill: #0a0a0a; letter-spacing: 0.3px; }
+      .lock-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 14px; fill: #6b6b6b; }
     </style>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
       <feGaussianBlur in="SourceAlpha" stdDeviation="2.5"/>
