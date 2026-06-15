@@ -1,0 +1,100 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "claude",
+  "elements": [
+
+    { "type": "text", "id": "title", "x": 80, "y": 30, "width": 1240, "height": 50, "text": "kars — Agent Reference Stack for Kubernetes", "fontSize": 36, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "text", "id": "subtitle", "x": 80, "y": 80, "width": 1240, "height": 35, "text": "One sandbox · one agent · one trust boundary · one per-sandbox Entra Agent ID", "fontSize": 18, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "rectangle", "id": "cluster", "x": 60, "y": 140, "width": 1320, "height": 720, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "dashed", "roundness": { "type": 3 } },
+
+    { "type": "rectangle", "id": "cluster_tag", "x": 90, "y": 130, "width": 160, "height": 32, "strokeColor": "#1e1e1e", "backgroundColor": "#1e1e1e", "fillStyle": "solid", "strokeWidth": 1, "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "cluster_tag_t"}] },
+    { "type": "text", "id": "cluster_tag_t", "x": 100, "y": 138, "width": 140, "height": 18, "text": "AKS CLUSTER", "fontSize": 14, "fontFamily": 1, "strokeColor": "#ffffff", "textAlign": "center", "verticalAlign": "middle", "containerId": "cluster_tag" },
+
+    { "type": "rectangle", "id": "sb_a", "x": 90, "y": 190, "width": 400, "height": 320, "strokeColor": "#0078D4", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 3, "roundness": { "type": 3 } },
+    { "type": "rectangle", "id": "sb_a_hdr", "x": 90, "y": 190, "width": 400, "height": 44, "strokeColor": "#0078D4", "backgroundColor": "#0078D4", "fillStyle": "solid", "strokeWidth": 2, "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "sb_a_hdr_t"}] },
+    { "type": "text", "id": "sb_a_hdr_t", "x": 100, "y": 200, "width": 380, "height": 24, "text": "KARS SANDBOX  ·  researcher", "fontSize": 16, "fontFamily": 1, "strokeColor": "#ffffff", "textAlign": "center", "verticalAlign": "middle", "containerId": "sb_a_hdr" },
+
+    { "type": "rectangle", "id": "sb_a_init", "x": 110, "y": 254, "width": 360, "height": 36, "strokeColor": "#D13438", "backgroundColor": "#FDE7E9", "fillStyle": "hachure", "strokeWidth": 1, "strokeStyle": "dashed", "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "sb_a_init_t"}] },
+    { "type": "text", "id": "sb_a_init_t", "x": 120, "y": 263, "width": 340, "height": 18, "text": "init: egress-guard  ·  iptables on UID 1000 (default-deny)", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "center", "verticalAlign": "middle", "containerId": "sb_a_init" },
+
+    { "type": "rectangle", "id": "sb_a_agent", "x": 110, "y": 308, "width": 195, "height": 180, "strokeColor": "#F7630C", "backgroundColor": "#FFF4CE", "fillStyle": "hachure", "strokeWidth": 2, "roundness": { "type": 3 } },
+    { "type": "text", "id": "sb_a_agent_t", "x": 120, "y": 320, "width": 175, "height": 30, "text": "agent", "fontSize": 22, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_a_agent_uid", "x": 120, "y": 354, "width": 175, "height": 20, "text": "UID 1000 · read-only", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_a_agent_w1", "x": 120, "y": 392, "width": 175, "height": 22, "text": "⚠ zero credentials", "fontSize": 14, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_a_agent_w2", "x": 120, "y": 420, "width": 175, "height": 22, "text": "⚠ no public-net", "fontSize": 14, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_a_agent_w3", "x": 120, "y": 446, "width": 175, "height": 22, "text": "    socket", "fontSize": 14, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "rectangle", "id": "sb_a_router", "x": 320, "y": 308, "width": 150, "height": 180, "strokeColor": "#107C10", "backgroundColor": "#DFF6DD", "fillStyle": "hachure", "strokeWidth": 2, "roundness": { "type": 3 } },
+    { "type": "text", "id": "sb_a_router_t", "x": 330, "y": 320, "width": 130, "height": 30, "text": "router", "fontSize": 22, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_a_router_l1", "x": 330, "y": 358, "width": 130, "height": 20, "text": "+ Entra Agent ID", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_a_router_l2", "x": 330, "y": 384, "width": 130, "height": 20, "text": "+ policy + budget", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_a_router_l3", "x": 330, "y": 410, "width": 130, "height": 20, "text": "+ audit chain", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_a_router_l4", "x": 330, "y": 436, "width": 130, "height": 20, "text": "+ encrypted mesh", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "arrow", "id": "sb_a_arrow", "x": 305, "y": 390, "width": 15, "height": 0, "strokeColor": "#107C10", "strokeWidth": 2, "points": [[0,0],[15,0]], "startBinding": {"elementId": "sb_a_agent", "focus": 0, "gap": 1}, "endBinding": {"elementId": "sb_a_router", "focus": 0, "gap": 1} },
+
+    { "type": "rectangle", "id": "sb_b", "x": 510, "y": 190, "width": 400, "height": 320, "strokeColor": "#0078D4", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 3, "roundness": { "type": 3 } },
+    { "type": "rectangle", "id": "sb_b_hdr", "x": 510, "y": 190, "width": 400, "height": 44, "strokeColor": "#0078D4", "backgroundColor": "#0078D4", "fillStyle": "solid", "strokeWidth": 2, "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "sb_b_hdr_t"}] },
+    { "type": "text", "id": "sb_b_hdr_t", "x": 520, "y": 200, "width": 380, "height": 24, "text": "KARS SANDBOX  ·  writer", "fontSize": 16, "fontFamily": 1, "strokeColor": "#ffffff", "textAlign": "center", "verticalAlign": "middle", "containerId": "sb_b_hdr" },
+
+    { "type": "rectangle", "id": "sb_b_init", "x": 530, "y": 254, "width": 360, "height": 36, "strokeColor": "#D13438", "backgroundColor": "#FDE7E9", "fillStyle": "hachure", "strokeWidth": 1, "strokeStyle": "dashed", "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "sb_b_init_t"}] },
+    { "type": "text", "id": "sb_b_init_t", "x": 540, "y": 263, "width": 340, "height": 18, "text": "init: egress-guard  ·  iptables on UID 1000 (default-deny)", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "center", "verticalAlign": "middle", "containerId": "sb_b_init" },
+
+    { "type": "rectangle", "id": "sb_b_agent", "x": 530, "y": 308, "width": 195, "height": 180, "strokeColor": "#F7630C", "backgroundColor": "#FFF4CE", "fillStyle": "hachure", "strokeWidth": 2, "roundness": { "type": 3 } },
+    { "type": "text", "id": "sb_b_agent_t", "x": 540, "y": 320, "width": 175, "height": 30, "text": "agent", "fontSize": 22, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_b_agent_uid", "x": 540, "y": 354, "width": 175, "height": 20, "text": "UID 1000 · read-only", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_b_agent_w1", "x": 540, "y": 392, "width": 175, "height": 22, "text": "⚠ zero credentials", "fontSize": 14, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_b_agent_w2", "x": 540, "y": 420, "width": 175, "height": 22, "text": "⚠ no public-net", "fontSize": 14, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_b_agent_w3", "x": 540, "y": 446, "width": 175, "height": 22, "text": "    socket", "fontSize": 14, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "rectangle", "id": "sb_b_router", "x": 740, "y": 308, "width": 150, "height": 180, "strokeColor": "#107C10", "backgroundColor": "#DFF6DD", "fillStyle": "hachure", "strokeWidth": 2, "roundness": { "type": 3 } },
+    { "type": "text", "id": "sb_b_router_t", "x": 750, "y": 320, "width": 130, "height": 30, "text": "router", "fontSize": 22, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_b_router_l1", "x": 750, "y": 358, "width": 130, "height": 20, "text": "+ Entra Agent ID", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_b_router_l2", "x": 750, "y": 384, "width": 130, "height": 20, "text": "+ policy + budget", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_b_router_l3", "x": 750, "y": 410, "width": 130, "height": 20, "text": "+ audit chain", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sb_b_router_l4", "x": 750, "y": 436, "width": 130, "height": 20, "text": "+ encrypted mesh", "fontSize": 12, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "arrow", "id": "sb_b_arrow", "x": 725, "y": 390, "width": 15, "height": 0, "strokeColor": "#107C10", "strokeWidth": 2, "points": [[0,0],[15,0]], "startBinding": {"elementId": "sb_b_agent", "focus": 0, "gap": 1}, "endBinding": {"elementId": "sb_b_router", "focus": 0, "gap": 1} },
+
+    { "type": "rectangle", "id": "sre", "x": 950, "y": 190, "width": 400, "height": 320, "strokeColor": "#5C2D91", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 3, "roundness": { "type": 3 } },
+    { "type": "rectangle", "id": "sre_hdr", "x": 950, "y": 190, "width": 400, "height": 44, "strokeColor": "#5C2D91", "backgroundColor": "#5C2D91", "fillStyle": "solid", "strokeWidth": 2, "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "sre_hdr_t"}] },
+    { "type": "text", "id": "sre_hdr_t", "x": 960, "y": 200, "width": 380, "height": 24, "text": "🩺  KARS-SRE  ·  the cluster's own SRE agent", "fontSize": 16, "fontFamily": 1, "strokeColor": "#ffffff", "textAlign": "center", "verticalAlign": "middle", "containerId": "sre_hdr" },
+
+    { "type": "text", "id": "sre_d1", "x": 970, "y": 254, "width": 360, "height": 28, "text": "Built-in operator agent — installed by:", "fontSize": 14, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "rectangle", "id": "sre_cli", "x": 970, "y": 286, "width": 240, "height": 32, "strokeColor": "#5C2D91", "backgroundColor": "#E8DAEF", "fillStyle": "solid", "strokeWidth": 1, "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "sre_cli_t"}] },
+    { "type": "text", "id": "sre_cli_t", "x": 980, "y": 294, "width": 220, "height": 16, "text": "kars sre install", "fontSize": 14, "fontFamily": 3, "strokeColor": "#000000", "textAlign": "center", "verticalAlign": "middle", "containerId": "sre_cli" },
+
+    { "type": "text", "id": "sre_p1", "x": 970, "y": 336, "width": 360, "height": 25, "text": "READ:   cluster-wide (kars CRs +", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sre_p1b", "x": 970, "y": 358, "width": 360, "height": 25, "text": "             apiextensions + workloads)", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sre_p2", "x": 970, "y": 390, "width": 360, "height": 25, "text": "WRITE:  gated by one-shot approval", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "sre_p3", "x": 970, "y": 422, "width": 360, "height": 25, "text": "NOT on the mesh · NO sub-agents", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "text", "id": "sre_cli2", "x": 970, "y": 460, "width": 360, "height": 22, "text": "kars sre talk / diagnose / approve", "fontSize": 13, "fontFamily": 3, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "rectangle", "id": "pod_banner", "x": 90, "y": 540, "width": 820, "height": 42, "strokeColor": "#1e1e1e", "backgroundColor": "#1e1e1e", "fillStyle": "solid", "strokeWidth": 2, "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "pod_banner_t"}] },
+    { "type": "text", "id": "pod_banner_t", "x": 100, "y": 552, "width": 800, "height": 22, "text": "⬢  POD SANDBOXING  ·  opt in per sandbox with  spec.isolation: confidential  →  Kata + AMD SEV-SNP VM-level isolation", "fontSize": 14, "fontFamily": 1, "strokeColor": "#ffffff", "textAlign": "center", "verticalAlign": "middle", "containerId": "pod_banner" },
+
+    { "type": "arrow", "id": "mesh_arrow", "x": 470, "y": 400, "width": 80, "height": 220, "strokeColor": "#107C10", "strokeWidth": 4, "roundness": {"type": 2}, "startArrowhead": "triangle", "endArrowhead": "triangle", "points": [[0,0],[40,220],[80,0]] },
+
+    { "type": "ellipse", "id": "lock_circle", "x": 490, "y": 600, "width": 40, "height": 40, "strokeColor": "#107C10", "backgroundColor": "#107C10", "fillStyle": "solid", "strokeWidth": 2 },
+    { "type": "text", "id": "lock_emoji", "x": 498, "y": 608, "width": 24, "height": 24, "text": "🔒", "fontSize": 18, "fontFamily": 1, "strokeColor": "#ffffff", "textAlign": "center", "verticalAlign": "middle" },
+
+    { "type": "text", "id": "mesh_lbl1", "x": 550, "y": 600, "width": 360, "height": 28, "text": "END-TO-END ENCRYPTED", "fontSize": 18, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "mesh_lbl2", "x": 550, "y": 628, "width": 360, "height": 22, "text": "AGT AgentMesh · Signal Protocol (X3DH + Double Ratchet)", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "rectangle", "id": "relay", "x": 320, "y": 600, "width": 150, "height": 44, "strokeColor": "#495057", "backgroundColor": "#F3F2F1", "fillStyle": "solid", "strokeWidth": 1, "roundness": { "type": 3 }, "boundElements": [{"type": "text", "id": "relay_t"}] },
+    { "type": "text", "id": "relay_t", "x": 330, "y": 608, "width": 130, "height": 28, "text": "AgentMesh relay\n(ciphertext only)", "fontSize": 11, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "center", "verticalAlign": "middle", "containerId": "relay" },
+
+    { "type": "rectangle", "id": "agt", "x": 90, "y": 690, "width": 1260, "height": 80, "strokeColor": "#5C2D91", "backgroundColor": "#E8DAEF", "fillStyle": "solid", "strokeWidth": 2, "roundness": { "type": 3 } },
+    { "type": "rectangle", "id": "agt_strip", "x": 90, "y": 690, "width": 10, "height": 80, "strokeColor": "#5C2D91", "backgroundColor": "#5C2D91", "fillStyle": "solid", "strokeWidth": 0, "roundness": { "type": 3 } },
+    { "type": "text", "id": "agt_title", "x": 120, "y": 700, "width": 1220, "height": 30, "text": "Microsoft Agent Governance Toolkit (AGT)  —  consumed, never re-implemented", "fontSize": 18, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+    { "type": "text", "id": "agt_sub", "x": 120, "y": 732, "width": 1220, "height": 25, "text": "PolicyDecisionProvider · AuditSink · SigningProvider · MeshProvider  ·  hash-chained audit · per-peer trust · behaviour monitoring · rate-limit", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "left", "verticalAlign": "top" },
+
+    { "type": "text", "id": "footer1", "x": 80, "y": 880, "width": 1280, "height": 25, "text": "⚠ marks where the agent process is intentionally isolated from credentials and the public internet — even if compromised.", "fontSize": 13, "fontFamily": 1, "strokeColor": "#000000", "textAlign": "center", "verticalAlign": "top" }
+
+  ],
+  "appState": { "viewBackgroundColor": "#ffffff", "gridSize": 20 }
+}
