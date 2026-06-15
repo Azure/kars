@@ -1040,7 +1040,7 @@ pub async fn run(client: Client) -> Result<()> {
         .for_each(|res| async move {
             match res {
                 Ok(_) => {}
-                Err(e) => tracing::warn!(err = ?e, "KarsSREAction reconciler stream error"),
+                Err(err) => tracing::warn!(error = ?err, "KarsSREAction reconciler stream error"),
             }
         })
         .await;
