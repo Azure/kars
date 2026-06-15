@@ -180,29 +180,29 @@ kars connect demo</code></pre>
   <text x="60" y="50" class="h-title">The kars architecture</text>
   <text x="60" y="76" class="h-sub">One sandbox per agent. Zero credentials in the agent. End-to-end encrypted mesh. AGT-governed.</text>
 
-  <!-- ============== EXTERNAL SYSTEMS ROW (outside the cluster) ============== -->
-  <text x="60" y="118" class="tag-cluster">EXTERNAL  ·  OUTSIDE THE TRUST BOUNDARY</text>
-  <line x1="380" y1="113" x2="1140" y2="113" stroke="#e5e5e5" stroke-width="1"/>
+  <!-- ============== EXTERNAL / DEPENDENCIES ROW ============== -->
+  <text x="60" y="118" class="tag-cluster">DEPENDENCIES  ·  EXTERNAL OR SHARED INFRASTRUCTURE</text>
+  <line x1="450" y1="113" x2="1140" y2="113" stroke="#e5e5e5" stroke-width="1"/>
 
   <g transform="translate(60, 128)">
     <rect x="0" y="0" width="260" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
-    <text x="16" y="25" class="card-title">Azure AI Foundry</text>
-    <text x="16" y="46" class="card-sub">model endpoints · Workload-Identity-authed</text>
+    <text x="16" y="25" class="card-title">Model providers</text>
+    <text x="16" y="46" class="card-sub">Azure AI Foundry · Bedrock · Anthropic · Gemini …</text>
   </g>
   <g transform="translate(340, 128)">
     <rect x="0" y="0" width="260" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
     <text x="16" y="25" class="card-title">MCP servers · web · tools</text>
-    <text x="16" y="46" class="card-sub">L7 allowlist + OISD / URLhaus blocklist</text>
+    <text x="16" y="46" class="card-sub">untrusted; L7 allowlist + OISD / URLhaus mediation</text>
   </g>
   <g transform="translate(620, 128)">
     <rect x="0" y="0" width="260" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
     <text x="16" y="25" class="card-title">AgentMesh relay</text>
-    <text x="16" y="46" class="card-sub">routes ciphertext only · not in trust set</text>
+    <text x="16" y="46" class="card-sub">in-cluster or external · ciphertext only · not in trust set</text>
   </g>
   <g transform="translate(900, 128)">
     <rect x="0" y="0" width="240" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
     <text x="16" y="25" class="card-title">AgentMesh registry</text>
-    <text x="16" y="46" class="card-sub">prekey bundles + identity discovery</text>
+    <text x="16" y="46" class="card-sub">in-cluster or external · prekeys + discovery</text>
   </g>
 
   <!-- ============== AKS CLUSTER FRAME (tighter — cards 270-555, encryption visual at middle, no big bottom space needed) ============== -->
