@@ -3,47 +3,73 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Introducing kars — the Agent Reference Stack for Kubernetes</title>
+<title>Introducing kars — the Agent Reference Stack for Azure</title>
 <meta name="author" content="Pal Lakatos-Toth" />
-<meta name="description" content="Introducing kars — the Agent Reference Stack for Kubernetes. A thoughtful take on running AI agents in production: per-pod inference router, end-to-end encrypted inter-agent mesh, native integration with the Microsoft Agent Governance Toolkit." />
+<meta name="description" content="Introducing kars — the Agent Reference Stack for Azure. A Kubernetes-native runtime that treats every AI agent as untrusted code: per-pod kernel isolation, zero credentials in the agent process, end-to-end encrypted inter-agent mesh, and native consumption of the Microsoft Agent Governance Toolkit. v0.1.0 ships today on AKS, MIT-licensed, on Azure Linux." />
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-         line-height: 1.65; color: #1a1a1a; max-width: 820px; margin: 2rem auto; padding: 0 1.25rem; }
-  h1 { font-size: 2.15rem; line-height: 1.2; margin-bottom: 0.25rem; }
-  h2 { font-size: 1.55rem; margin-top: 2.75rem; border-bottom: 2px solid #e8e8e8; padding-bottom: 0.4rem; }
-  h3 { font-size: 1.18rem; margin-top: 1.75rem; }
-  h4 { font-size: 1rem; margin-top: 1.25rem; text-transform: uppercase; letter-spacing: 0.5px; color: #555; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, Arial, sans-serif;
+         line-height: 1.7; color: #1a1a1a; max-width: 820px; margin: 2rem auto; padding: 0 1.25rem; -webkit-font-smoothing: antialiased; }
+  h1 { font-size: 2.25rem; line-height: 1.15; margin-bottom: 0.25rem; letter-spacing: -0.5px; }
+  h2 { font-size: 1.6rem; margin-top: 3rem; border-bottom: 2px solid #ececec; padding-bottom: 0.45rem; letter-spacing: -0.2px; }
+  h3 { font-size: 1.2rem; margin-top: 2rem; letter-spacing: -0.1px; }
+  h4 { font-size: 0.95rem; margin-top: 1.25rem; text-transform: uppercase; letter-spacing: 0.8px; color: #555; }
+  p { margin: 1rem 0; }
   .byline { color: #555; margin-bottom: 1.5rem; font-size: 0.95rem; }
-  .lede { font-size: 1.18rem; color: #222; border-left: 3px solid #0078d4; padding-left: 1rem; margin: 1.75rem 0; }
-  blockquote { border-left: 3px solid #ddd; margin: 1rem 0; padding: 0.4rem 1rem; color: #555; font-style: italic; }
-  code { background: #f5f5f5; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.92em; }
-  pre { background: #1a1a1a; color: #e6e6e6; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+  .byline strong { color: #1a1a1a; }
+  .lede { font-size: 1.2rem; color: #1a1a1a; border-left: 4px solid #0078D4; padding: 0.6rem 0 0.6rem 1.1rem; margin: 1.75rem 0; }
+  blockquote { border-left: 3px solid #ddd; margin: 1.25rem 0; padding: 0.5rem 1rem; color: #555; font-style: italic; }
+  code { background: #f5f5f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.92em; font-family: "Cascadia Code", "SF Mono", Menlo, Consolas, monospace; }
+  pre { background: #1a1a1a; color: #e6e6e6; padding: 1.1rem 1.25rem; border-radius: 6px; overflow-x: auto; line-height: 1.55; }
   pre code { background: transparent; color: inherit; padding: 0; }
-  table { border-collapse: collapse; margin: 1rem 0; width: 100%; font-size: 0.95em; }
-  th, td { text-align: left; padding: 0.55rem 0.75rem; border-bottom: 1px solid #e5e5e5; vertical-align: top; }
+  table { border-collapse: collapse; margin: 1.25rem 0; width: 100%; font-size: 0.95em; }
+  th, td { text-align: left; padding: 0.6rem 0.85rem; border-bottom: 1px solid #ececec; vertical-align: top; }
   th { background: #fafafa; font-weight: 600; }
-  a { color: #0067c0; }
-  hr { border: 0; border-top: 1px solid #e5e5e5; margin: 2.75rem 0; }
-  .footer { margin-top: 3rem; color: #666; font-size: 0.9rem; border-top: 1px solid #e5e5e5; padding-top: 1.5rem; }
-  .audience { background: #f7fafd; border: 1px solid #d6e6f5; border-radius: 6px; padding: 1rem 1.25rem; margin: 1.25rem 0; }
-  .audience .who { display: inline-block; background: #0078d4; color: #fff; font-size: 0.78rem; font-weight: 600;
-                   padding: 0.2rem 0.65rem; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px;
-                   margin-bottom: 0.6rem; }
-  .audience.ciso .who { background: #b34700; }
-  .audience.ai .who { background: #5c2d91; }
-  .audience.eng .who { background: #107c10; }
-  .outcomes { display: grid; gap: 0.75rem; margin: 1.5rem 0; }
-  .outcome { border-left: 3px solid #0078d4; background: #fafbfc; padding: 0.75rem 1rem; }
-  .outcome strong { display: block; color: #0078d4; margin-bottom: 0.2rem; }
-  .diagram-wrap { margin: 2rem 0; text-align: center; }
-  .diagram-wrap figcaption { font-size: 0.9rem; color: #666; margin-top: 0.75rem; max-width: 720px; margin-left: auto; margin-right: auto; }
-  .tldr { background: #1a1a1a; color: #f0f0f0; padding: 1.25rem 1.5rem; border-radius: 6px; margin: 1.5rem 0; }
+  a { color: #0067c0; text-decoration: underline; text-underline-offset: 2px; }
+  a:hover { text-decoration: none; }
+  hr { border: 0; border-top: 1px solid #ececec; margin: 2.75rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.45rem; }
+  .footer { margin-top: 3rem; color: #555; font-size: 0.9rem; border-top: 1px solid #ececec; padding-top: 1.5rem; }
+  .pill { display: inline-block; background: #f0f4fa; border: 1px solid #d6e0ef; border-radius: 999px;
+          padding: 0.15rem 0.7rem; font-size: 0.82em; color: #335; margin-right: 0.3rem; font-weight: 500; }
+
+  /* TL;DR card */
+  .tldr { background: #1a1a1a; color: #f0f0f0; padding: 1.4rem 1.6rem; border-radius: 8px; margin: 1.75rem 0; }
   .tldr h3 { color: #4cc2ff; margin-top: 0; }
-  .tldr ul { margin: 0.5rem 0; }
-  .tldr li { margin-bottom: 0.35rem; }
-  .tldr a { color: #4cc2ff; }
-  .pill { display: inline-block; background: #eef; border: 1px solid #ccd; border-radius: 999px;
-          padding: 0.1rem 0.6rem; font-size: 0.82em; color: #335; margin-right: 0.3rem; }
+  .tldr ul { margin: 0.5rem 0; padding-left: 1.2rem; }
+  .tldr li { margin-bottom: 0.55rem; }
+  .tldr a { color: #6cc8ff; }
+  .tldr code { background: #2a2a2a; color: #f0f0f0; }
+
+  /* Quickstart code block */
+  .quickstart { background: #f0f9ff; border-left: 4px solid #0078D4; border-radius: 6px; padding: 1rem 1.25rem; margin: 1.5rem 0; }
+  .quickstart h3 { margin-top: 0; color: #0078D4; }
+  .quickstart pre { margin: 0.6rem 0; }
+  .quickstart p { margin-bottom: 0; font-size: 0.92em; color: #555; }
+
+  /* Audience cards */
+  .audience { background: #fafbfd; border: 1px solid #e3e8ef; border-radius: 8px; padding: 1.1rem 1.4rem; margin: 1.4rem 0; }
+  .audience .who { display: inline-block; background: #0078D4; color: #fff; font-size: 0.78rem; font-weight: 700;
+                   padding: 0.22rem 0.7rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.7px;
+                   margin-bottom: 0.7rem; }
+  .audience.ciso .who { background: #C2410C; }
+  .audience.ai .who { background: #5C2D91; }
+  .audience.eng .who { background: #107C10; }
+  .audience h4.cta { margin-top: 1rem; margin-bottom: 0.4rem; color: #1a1a1a; font-size: 0.85rem; }
+  .audience ul { margin: 0.4rem 0; }
+
+  /* Spotlight section */
+  .spotlight { background: #f7fbff; border: 1px solid #cce0f5; border-radius: 8px; padding: 1.3rem 1.5rem; margin: 1.4rem 0; }
+  .spotlight h4 { margin-top: 1rem; color: #0078D4; }
+  .spotlight pre { margin: 0.6rem 0; }
+
+  /* Diagram */
+  .diagram-wrap { margin: 2rem 0; }
+  .diagram-wrap figcaption { font-size: 0.9rem; color: #666; margin-top: 0.6rem; font-style: italic; }
+
+  /* Substrate / Azure Linux thread */
+  .substrate { background: #fdfdfb; border: 1px solid #ececec; border-radius: 6px; padding: 0.85rem 1.1rem; margin: 1rem 0; font-size: 0.95em; }
+  .substrate strong { color: #1a1a1a; }
 </style>
 </head>
 <body>
@@ -51,593 +77,477 @@
 <article>
 
 <header>
-  <h1>Introducing <em>kars</em> — the Agent Reference Stack for Kubernetes</h1>
-  <p class="byline">By <strong>Pal Lakatos-Toth</strong> · Maintainer, <em>kars</em>
-    <span class="pill">launch</span><span class="pill">enterprise</span><span class="pill">security</span><span class="pill">kubernetes</span><span class="pill">ai-agents</span></p>
+  <h1>Introducing <em>kars</em> — the Agent Reference Stack for Azure</h1>
+  <p class="byline">By <strong>Pal Lakatos-Toth</strong>
+    <span class="pill">launch</span><span class="pill">v0.1.0</span><span class="pill">open source</span><span class="pill">MIT</span><span class="pill">AKS</span></p>
 </header>
 
 <p class="lede">
-  Today I'm publicly introducing <strong>kars</strong> — a Kubernetes-native runtime for AI agents that takes the position that running agents in an enterprise is fundamentally different from running stateless microservices, and that the existing stack does not yet reflect that. <em>kars</em> is open source under the <strong>MIT license</strong>, runs on Azure Kubernetes Service today, and integrates natively with the <a href="https://microsoft.github.io/agent-governance-toolkit/">Microsoft Agent Governance Toolkit (AGT)</a> — the governance engine kars consumes through four provider traits, with selected gap-closing features upstreamed back to AGT itself.
+  <em>kars</em> is a Kubernetes-native runtime for AI agents on Azure. It treats every agent as untrusted code: per-pod kernel isolation, zero credentials in the agent process, end-to-end encrypted inter-agent mesh, and native consumption of the <a href="https://microsoft.github.io/agent-governance-toolkit/">Microsoft Agent Governance Toolkit</a>. v0.1.0 ships today on AKS, on the Azure Linux family, MIT-licensed.
+</p>
+
+<p>
+  This builds on the foundation Brendan Burns described last month — <a href="https://opensource.microsoft.com/blog/2026/05/18/from-open-source-to-agentic-systems-microsoft-at-open-source-summit-north-america-2026/">From open source to agentic systems</a>: a hardened Azure Linux substrate (Azure Linux 4.0 + Azure Container Linux), an open agentic stack (Agent Framework, AGT, A2A), and the Agentic AI Foundation. <em>kars</em> is the K8s-native runtime that composes these primitives into a single, deployable stack you can drop into AKS.
 </p>
 
 <div class="tldr">
   <h3>TL;DR</h3>
   <ul>
-    <li><strong>What:</strong> a Kubernetes operator + per-agent inference router + E2E-encrypted inter-agent mesh that lets you run AI agents from any of <strong>eight first-class frameworks</strong> with one consistent security, governance, and audit posture.</li>
-    <li><strong>Why now:</strong> Gartner predicts <a href="https://www.gartner.com/en/newsroom/press-releases/2025-06-25-gartner-predicts-over-40-percent-of-agentic-ai-projects-will-be-canceled-by-end-of-2027">40 % of agentic-AI projects will be cancelled by end of 2027</a>; the dominant failure mode is not model quality — it's governance, isolation, and the absence of an operator-grade audit trail.</li>
-    <li><strong>Position:</strong> per-pod, kernel-confined trust boundary around <em>every</em> agent. Default-deny egress at the kernel by UID. Zero Azure credentials reachable from the agent process. Inter-agent traffic end-to-end encrypted with the Signal Protocol — the relay sees only ciphertext.</li>
-    <li><strong>Consumes:</strong> <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> for policy evaluation, mesh primitives, audit chain, trust scoring, behaviour monitoring, and signing — never re-implemented. See <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT Boundary</a> for the exact split. <em>kars</em> has upstreamed gap-closing features back to <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> in <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2090">PR #2090</a>, <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2659">#2659</a>, and <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2719">#2719</a>.</li>
-    <li><strong>Confidential by opt-in:</strong> a single field — <code>spec.isolation: confidential</code> — schedules the sandbox on AKS <a href="https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing">Pod Sandboxing</a> (Kata + AMD SEV-SNP). VM-level isolation per pod, separate kernel per workload.</li>
-    <li><strong>Status:</strong> <code>v0.1.0</code> — 8 runtime adapters shipping, 9 workload CRDs reconciled, 6 end-to-end use cases exercised by CI, 9/9 security layers validated on both AKS and kind.</li>
-    <li><strong>Honest scope:</strong> if you have one agent, one team, and no adversarial-code threat model, <em>kars is overkill</em>. The crossover is around two teams, multi-runtime, or a regulator who has heard "prompt injection" before.</li>
-    <li><strong>Source &amp; docs:</strong> <a href="https://github.com/Azure/kars">github.com/Azure/kars</a> · <a href="https://github.com/Azure/kars/tree/main/docs">documentation</a> · MIT license · contributions welcome.</li>
+    <li><strong>What:</strong> Kubernetes operator + per-agent inference router + end-to-end encrypted inter-agent mesh, on AKS. One sandbox per agent.</li>
+    <li><strong>Why:</strong> agent code is partially generated at runtime by untrusted sources (prompt injection works in practice). The trust model has to be closer to <em>running customer-submitted code</em> than to <em>running a service you wrote</em>.</li>
+    <li><strong>How:</strong> consumes <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> for governance, runs on the Azure Linux family, opt-in <a href="https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing">AKS Pod Sandboxing</a> (Kata + AMD SEV-SNP) is one CRD field. Eight first-class agent frameworks supported.</li>
+    <li><strong>Try it:</strong> <code>kars up demo --runtime openclaw</code> — 5 min on local kind, ~15 min on a fresh AKS cluster (including provisioning).</li>
+    <li><strong>Source:</strong> <a href="https://github.com/Azure/kars">github.com/Azure/kars</a> · MIT · contributions welcome.</li>
   </ul>
 </div>
 
-<div style="background: #f0f9ff; border-left: 4px solid #0078d4; border-radius: 6px; padding: 1rem 1.25rem; margin: 1.25rem 0;">
-  <h3 style="margin-top: 0; color: #0078d4;">Try it in 5 minutes</h3>
-  <pre style="margin: 0.5rem 0;"><code># 1. Install the CLI (Node 22+)
+<div class="quickstart">
+  <h3>Try it</h3>
+<pre><code># 1. Install the CLI (Node 22+)
 npm install -g @kars/cli
 
-# 2. Stand up an AKS cluster + kars controller + your first sandbox
-kars up my-first-agent --runtime openclaw --model gpt-4o
+# 2. Stand up your first sandbox
+#    Targets local kind by default (≈ 5 min). Add --aks to provision an AKS cluster (~15 min).
+kars up demo --runtime openclaw --model gpt-4o
+#                    └─ OpenClaw is kars's reference agent runtime.
+#                       Other options: hermes, openai-agents, maf-python,
+#                       langgraph (py/ts), anthropic, pydantic-ai.
 
-# 3. Talk to your governed agent
-kars connect my-first-agent</code></pre>
-  <p style="margin-bottom: 0; font-size: 0.92em; color: #555;">Or jump straight to the <a href="https://github.com/Azure/kars/blob/main/docs/getting-started.md">getting-started guide</a>. Everything below explains <em>why</em> those three lines exist.</p>
+# 3. Open a chat with your governed agent
+kars connect demo</code></pre>
+  <p>Full path in the <a href="https://github.com/Azure/kars/blob/main/docs/getting-started.md">getting-started guide</a>.</p>
 </div>
 
-<h2>The architecture in one picture</h2>
+<h2>The architecture, in one picture</h2>
 
 <figure class="diagram-wrap">
-<svg viewBox="0 0 1200 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="kars architecture: an AKS cluster running two regular kars sandbox pods (researcher and writer) plus the built-in kars-sre operator agent. Each sandbox has an init egress-guard, an agent container with no credentials, and an inference-router sidecar that holds the per-sandbox Microsoft Entra Agent ID. The two regular sandboxes can opt into Pod Sandboxing via spec.isolation: confidential. The Signal Protocol session lives end-to-end inside the agent processes; the routers WS-bridge opaque ciphertext frames and handle Entra Agent ID auth. The kars-sre agent is a special sandbox with cluster-wide read access and gated writes that diagnoses the cluster itself. The Microsoft Agent Governance Toolkit sits beneath as the consumed governance foundation.">
+<svg viewBox="0 0 1200 700" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="kars architecture: an AKS cluster on Azure Linux running two kars sandbox pods (researcher in enhanced isolation, writer in confidential isolation via Kata + AMD SEV-SNP). Each sandbox has an init egress-guard, an agent container with no credentials, and an inference-router sidecar that holds the per-sandbox Microsoft Entra Agent ID. The Signal Protocol session lives end-to-end inside the agent processes; routers WS-bridge opaque ciphertext frames and handle Entra Agent ID authentication. The Microsoft Agent Governance Toolkit sits beneath as the consumed governance foundation. A small kars-sre control-plane agent (not on the mesh) sits to the side.">
   <defs>
     <style>
-      .sans { font-family: "Segoe UI", -apple-system, "Inter", "Helvetica Neue", Arial, sans-serif; }
-      .mono { font-family: "Cascadia Code", "SF Mono", Menlo, Consolas, monospace; }
-      .title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 26px; font-weight: 700; fill: #0a0a0a; letter-spacing: -0.5px; }
-      .subtitle { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 14px; font-weight: 400; fill: #6b6b6b; letter-spacing: 0.1px; }
-      .cluster-tag { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 10.5px; font-weight: 600; fill: #6b6b6b; letter-spacing: 1.4px; }
-      .card-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 600; fill: #0a0a0a; letter-spacing: 0.1px; }
-      .card-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11px; font-weight: 400; fill: #8b8b8b; }
-      .h-component { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 600; fill: #0a0a0a; }
-      .body { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; fill: #4b4b4b; }
-      .body-bold { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; font-weight: 600; fill: #0a0a0a; }
-      .annotation { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 10.5px; fill: #6b6b6b; font-style: italic; }
-      .agt-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 14px; font-weight: 600; fill: #0a0a0a; letter-spacing: 0.1px; }
-      .agt-body { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; fill: #6b6b6b; }
-      .lock-text { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 700; fill: #0a0a0a; letter-spacing: 0.4px; }
-      .lock-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11px; fill: #6b6b6b; }
-      .footer-text { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; fill: #8b8b8b; font-style: italic; }
+      .h-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 30px; font-weight: 700; fill: #0a0a0a; letter-spacing: -0.5px; }
+      .h-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 15px; font-weight: 400; fill: #6b6b6b; }
+      .tag-cluster { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; font-weight: 700; fill: #6b6b6b; letter-spacing: 1.6px; }
+      .tag-cluster-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; font-weight: 500; fill: #8b8b8b; letter-spacing: 0.4px; }
+      .card-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 16px; font-weight: 700; fill: #0a0a0a; }
+      .card-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 12.5px; font-weight: 500; fill: #6b6b6b; }
+      .iso-pill { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11px; font-weight: 700; fill: #fff; letter-spacing: 0.6px; }
+      .h-component { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 15px; font-weight: 700; fill: #0a0a0a; }
+      .body { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; fill: #3a3a3a; }
+      .body-bold { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 600; fill: #0a0a0a; }
+      .annotation { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; fill: #6b6b6b; }
+      .agt-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 15px; font-weight: 700; fill: #0a0a0a; }
+      .agt-body { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 12.5px; fill: #5b5b5b; }
+      .sre-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 13px; font-weight: 700; fill: #0a0a0a; }
+      .sre-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 11.5px; fill: #5b5b5b; }
+      .lock-text { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 14px; font-weight: 700; fill: #0a0a0a; letter-spacing: 0.3px; }
+      .lock-sub { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 12px; fill: #6b6b6b; }
     </style>
-    <!-- Subtle, refined card shadow -->
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
-      <feOffset dx="0" dy="1" result="off"/>
-      <feComponentTransfer><feFuncA type="linear" slope="0.08"/></feComponentTransfer>
-      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <!-- Stronger shadow for hero elements -->
-    <filter id="shadow-strong" x="-15%" y="-15%" width="130%" height="130%">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="4"/>
-      <feOffset dx="0" dy="2" result="off"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2.5"/>
+      <feOffset dx="0" dy="1.5" result="off"/>
       <feComponentTransfer><feFuncA type="linear" slope="0.10"/></feComponentTransfer>
       <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
-    <!-- Lock icon (vector) -->
     <symbol id="lock" viewBox="0 0 24 24">
       <rect x="5" y="11" width="14" height="10" rx="1.5" fill="currentColor"/>
-      <path d="M 8 11 L 8 7.5 A 4 4 0 0 1 16 7.5 L 16 11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      <path d="M 8 11 L 8 7.5 A 4 4 0 0 1 16 7.5 L 16 11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
     </symbol>
-    <!-- Shield (init guard) icon -->
-    <symbol id="shield" viewBox="0 0 24 24">
-      <path d="M 12 2 L 21 6 L 21 12 C 21 17 17 21 12 22 C 7 21 3 17 3 12 L 3 6 Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <symbol id="shield-check" viewBox="0 0 24 24">
+      <path d="M 12 2 L 21 6 L 21 12 C 21 17 17 21 12 22 C 7 21 3 17 3 12 L 3 6 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      <path d="M 8 12 L 11 15 L 16 9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
     </symbol>
-    <!-- Wrench (kars-sre) icon -->
+    <symbol id="shield-x" viewBox="0 0 24 24">
+      <path d="M 12 2 L 21 6 L 21 12 C 21 17 17 21 12 22 C 7 21 3 17 3 12 L 3 6 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      <line x1="9" y1="9" x2="15" y2="15" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      <line x1="15" y1="9" x2="9" y2="15" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="key" viewBox="0 0 24 24">
+      <circle cx="8" cy="14" r="4.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <path d="M 12 14 L 21 14 M 18 14 L 18 18 M 15 14 L 15 17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
     <symbol id="wrench" viewBox="0 0 24 24">
       <path d="M 14.7 6.3 a 5 5 0 1 1 -7.07 7.07 L 3.5 17.5 a 1 1 0 0 0 0 1.41 l 1.59 1.59 a 1 1 0 0 0 1.41 0 l 4.13 -4.13 a 5 5 0 0 1 7.07 -7.07 z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
     </symbol>
-    <!-- Person / agent icon -->
-    <symbol id="agent-ico" viewBox="0 0 24 24">
-      <circle cx="12" cy="8" r="3.4" fill="none" stroke="currentColor" stroke-width="1.6"/>
-      <path d="M 5 20 c 0 -4 3 -6 7 -6 s 7 2 7 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-    </symbol>
-    <!-- Router icon (network) -->
-    <symbol id="router-ico" viewBox="0 0 24 24">
-      <rect x="3" y="13" width="18" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
-      <line x1="7" y1="17" x2="7.01" y2="17" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-      <line x1="11" y1="17" x2="11.01" y2="17" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-      <path d="M 8 13 L 8 9 M 16 13 L 16 9 M 12 13 L 12 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-    </symbol>
-    <!-- Arrow marker -->
-    <marker id="arr-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#0078D4"/>
-    </marker>
-    <marker id="arr-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9b9b9b"/>
     </marker>
   </defs>
 
-  <!-- Background = pure white -->
-  <rect x="0" y="0" width="1200" height="720" fill="#ffffff"/>
+  <!-- white background -->
+  <rect width="1200" height="700" fill="#ffffff"/>
 
   <!-- ============== TITLE ============== -->
-  <text x="60" y="50" class="title">The kars architecture, in one picture</text>
-  <text x="60" y="74" class="subtitle">One sandbox per agent. One trust boundary. One Microsoft Entra Agent ID. End-to-end encrypted mesh. Native AGT.</text>
+  <text x="60" y="50" class="h-title">The kars architecture</text>
+  <text x="60" y="76" class="h-sub">One sandbox per agent. Zero credentials in the agent. End-to-end encrypted mesh. AGT-governed.</text>
 
-  <!-- ============== AKS CLUSTER (subtle frame) ============== -->
-  <text x="60" y="118" class="cluster-tag">AKS CLUSTER</text>
-  <line x1="155" y1="113" x2="1140" y2="113" stroke="#e5e5e5" stroke-width="1"/>
-  <rect x="40" y="100" width="1120" height="520" rx="14" fill="#fafafa" stroke="#e5e5e5" stroke-width="1"/>
+  <!-- ============== AKS CLUSTER FRAME (with Azure Linux substrate badge) ============== -->
+  <rect x="40" y="110" width="1120" height="450" rx="14" fill="#fafafa" stroke="#e5e5e5" stroke-width="1"/>
+  <text x="60" y="134" class="tag-cluster">AKS CLUSTER</text>
+  <text x="170" y="134" class="tag-cluster-sub">· on Azure Linux today  ·  Azure Container Linux + AL 4.0 distroless on the way</text>
+  <line x1="60" y1="142" x2="1140" y2="142" stroke="#e5e5e5" stroke-width="1"/>
 
-  <!-- ============== SANDBOX CARDS ROW (3 cards, equal sized) ============== -->
-  <!-- card width 340, gap 25, row x starts at 65, ends at 1135 -->
+  <!-- ============== SANDBOX A — researcher · ENHANCED isolation ============== -->
+  <g transform="translate(65, 160)" filter="url(#shadow)">
+    <rect x="0" y="0" width="360" height="285" rx="10" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
+    <rect x="0" y="0" width="360" height="4" fill="#0078D4"/>
+  </g>
+  <g transform="translate(65, 160)">
+    <text x="22" y="34" class="card-title">researcher</text>
+    <text x="22" y="52" class="card-sub">kars sandbox  ·  namespace kars-researcher</text>
+    <!-- isolation pill -->
+    <rect x="245" y="22" width="100" height="22" rx="11" fill="#107C10"/>
+    <text x="295" y="37" class="iso-pill" text-anchor="middle">ENHANCED</text>
 
-  <!-- =====  SANDBOX A — researcher ===== -->
-  <g transform="translate(65, 140)" filter="url(#shadow)">
-    <rect x="0" y="0" width="340" height="280" rx="10" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
-    <!-- Accent strip top -->
-    <rect x="0" y="0" width="340" height="4" rx="10" fill="#0078D4"/>
-    <rect x="0" y="0" width="340" height="4" fill="#0078D4"/>
-    <!-- Header -->
-    <text x="22" y="32" class="card-title">researcher</text>
-    <text x="22" y="48" class="card-sub">kars sandbox · namespace kars-researcher</text>
+    <!-- egress-guard banner -->
+    <g transform="translate(22, 68)">
+      <rect x="0" y="0" width="316" height="34" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1"/>
+      <g transform="translate(10, 8)" color="#c2410c">
+        <use href="#shield-check" width="18" height="18"/>
+      </g>
+      <text x="36" y="22" class="body" fill="#9a3412"><tspan font-weight="700">egress-guard init</tspan>  blocks UID 1000 from the network</text>
+    </g>
+
+    <!-- agent box -->
+    <g transform="translate(22, 116)">
+      <rect x="0" y="0" width="150" height="148" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1.2"/>
+      <g transform="translate(16, 16)" color="#92400e">
+        <use href="#shield-x" width="22" height="22"/>
+      </g>
+      <text x="16" y="68" class="h-component">agent</text>
+      <text x="16" y="90" class="annotation">UID 1000 · read-only</text>
+      <text x="16" y="116" class="body" fill="#92400e">no credentials</text>
+      <text x="16" y="134" class="body" fill="#92400e">no public net</text>
+    </g>
+
+    <!-- router box -->
+    <g transform="translate(188, 116)">
+      <rect x="0" y="0" width="150" height="148" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.2"/>
+      <g transform="translate(16, 16)" color="#1e40af">
+        <use href="#key" width="22" height="22"/>
+      </g>
+      <text x="16" y="68" class="h-component">router</text>
+      <text x="16" y="90" class="annotation">UID 1001 · sidecar</text>
+      <text x="16" y="113" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> Entra Agent ID</text>
+      <text x="16" y="129" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> policy &amp; budget</text>
+      <text x="16" y="145" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> audit chain</text>
+    </g>
+
+    <!-- agent → router arrow -->
+    <line x1="172" y1="190" x2="188" y2="190" stroke="#1e40af" stroke-width="2" marker-end="url(#arr-blue)"/>
   </g>
 
-  <!-- Sandbox A interior (independent group so shadow doesn't apply to interior elements weirdly) -->
-  <g transform="translate(65, 140)">
-    <!-- init egress-guard (thin, with shield icon) -->
-    <g transform="translate(22, 64)">
-      <rect x="0" y="0" width="296" height="30" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1"/>
-      <g transform="translate(8, 6)" color="#c2410c">
-        <use href="#shield" width="18" height="18"/>
+  <!-- ============== SANDBOX B — writer · CONFIDENTIAL isolation ============== -->
+  <g transform="translate(450, 160)" filter="url(#shadow)">
+    <rect x="0" y="0" width="360" height="285" rx="10" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
+    <rect x="0" y="0" width="360" height="4" fill="#5C2D91"/>
+  </g>
+  <g transform="translate(450, 160)">
+    <text x="22" y="34" class="card-title">writer</text>
+    <text x="22" y="52" class="card-sub">kars sandbox  ·  namespace kars-writer</text>
+    <!-- isolation pill -->
+    <rect x="225" y="22" width="120" height="22" rx="11" fill="#5C2D91"/>
+    <text x="285" y="37" class="iso-pill" text-anchor="middle">CONFIDENTIAL</text>
+
+    <g transform="translate(22, 68)">
+      <rect x="0" y="0" width="316" height="34" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1"/>
+      <g transform="translate(10, 8)" color="#c2410c">
+        <use href="#shield-check" width="18" height="18"/>
       </g>
-      <text x="32" y="20" class="body" fill="#9a3412"><tspan font-weight="600">egress-guard</tspan>  ·  iptables blocks UID 1000</text>
+      <text x="36" y="22" class="body" fill="#9a3412"><tspan font-weight="700">egress-guard init</tspan>  blocks UID 1000 from the network</text>
     </g>
 
-    <!-- Agent box (yellow accent) -->
-    <g transform="translate(22, 110)">
-      <rect x="0" y="0" width="140" height="150" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1.2"/>
-      <g transform="translate(14, 14)" color="#92400e">
-        <use href="#agent-ico" width="22" height="22"/>
+    <g transform="translate(22, 116)">
+      <rect x="0" y="0" width="150" height="148" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1.2"/>
+      <g transform="translate(16, 16)" color="#92400e">
+        <use href="#shield-x" width="22" height="22"/>
       </g>
-      <text x="14" y="64" class="h-component">agent</text>
-      <text x="14" y="84" class="annotation">UID 1000 · read-only</text>
-      <text x="14" y="106" class="body" fill="#92400e">⚠  zero credentials</text>
-      <text x="14" y="123" class="body" fill="#92400e">⚠  net-blocked</text>
-      <text x="14" y="140" class="body" fill="#0a0a0a"><tspan font-weight="600">+</tspan> Signal session</text>
+      <text x="16" y="68" class="h-component">agent</text>
+      <text x="16" y="90" class="annotation">UID 1000 · read-only</text>
+      <text x="16" y="116" class="body" fill="#92400e">no credentials</text>
+      <text x="16" y="134" class="body" fill="#92400e">no public net</text>
     </g>
 
-    <!-- Router box (Microsoft Blue accent) -->
-    <g transform="translate(178, 110)">
-      <rect x="0" y="0" width="140" height="150" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.2"/>
-      <g transform="translate(14, 14)" color="#1e40af">
-        <use href="#router-ico" width="22" height="22"/>
+    <g transform="translate(188, 116)">
+      <rect x="0" y="0" width="150" height="148" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.2"/>
+      <g transform="translate(16, 16)" color="#1e40af">
+        <use href="#key" width="22" height="22"/>
       </g>
-      <text x="14" y="64" class="h-component">router</text>
-      <text x="14" y="84" class="annotation">UID 1001 · sidecar</text>
-      <text x="14" y="103" class="body" fill="#1e40af"><tspan font-weight="600">+</tspan> Entra Agent ID</text>
-      <text x="14" y="120" class="body" fill="#1e40af"><tspan font-weight="600">+</tspan> policy &amp; budget</text>
-      <text x="14" y="137" class="body" fill="#1e40af"><tspan font-weight="600">+</tspan> audit chain</text>
-      <text x="14" y="154" class="annotation" fill="#6b6b6b">WS-bridges ciphertext</text>
+      <text x="16" y="68" class="h-component">router</text>
+      <text x="16" y="90" class="annotation">UID 1001 · sidecar</text>
+      <text x="16" y="113" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> Entra Agent ID</text>
+      <text x="16" y="129" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> policy &amp; budget</text>
+      <text x="16" y="145" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> audit chain</text>
     </g>
+    <line x1="172" y1="190" x2="188" y2="190" stroke="#1e40af" stroke-width="2" marker-end="url(#arr-blue)"/>
 
-    <!-- Connector agent → router -->
-    <line x1="162" y1="170" x2="178" y2="170" stroke="#1e40af" stroke-width="1.8" marker-end="url(#arr-blue)"/>
+    <!-- confidential annotation -->
+    <text x="22" y="285" class="annotation" fill="#5C2D91"><tspan font-weight="700">+</tspan> Kata + AMD SEV-SNP, scheduled on Standard_DC4as_v5</text>
   </g>
 
-  <!-- =====  SANDBOX B — writer ===== -->
-  <g transform="translate(430, 140)" filter="url(#shadow)">
-    <rect x="0" y="0" width="340" height="280" rx="10" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
-    <rect x="0" y="0" width="340" height="4" fill="#0078D4"/>
-    <text x="22" y="32" class="card-title">writer</text>
-    <text x="22" y="48" class="card-sub">kars sandbox · namespace kars-writer</text>
+  <!-- ============== kars-sre control-plane agent (small, set apart) ============== -->
+  <g transform="translate(840, 160)" filter="url(#shadow)">
+    <rect x="0" y="0" width="295" height="160" rx="10" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
+    <rect x="0" y="0" width="295" height="4" fill="#1a1a1a"/>
+  </g>
+  <g transform="translate(840, 160)">
+    <g transform="translate(22, 22)" color="#1a1a1a">
+      <use href="#wrench" width="20" height="20"/>
+    </g>
+    <text x="50" y="38" class="sre-title">kars-sre</text>
+    <text x="50" y="55" class="sre-sub">control-plane agent · namespace kars-sre</text>
+    <text x="22" y="86" class="sre-sub">The cluster's own SRE agent.</text>
+    <text x="22" y="102" class="sre-sub">Same sandbox shape, different role:</text>
+    <text x="22" y="125" class="body"><tspan font-weight="700" fill="#107C10">READ</tspan>  cluster-wide on kars CRs</text>
+    <text x="22" y="143" class="body"><tspan font-weight="700" fill="#C2410C">WRITE</tspan>  one-shot approval per action</text>
+  </g>
+  <g transform="translate(840, 340)" filter="url(#shadow)">
+    <rect x="0" y="0" width="295" height="50" rx="8" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
+    <text x="22" y="22" class="body-bold">Try:</text>
+    <text x="22" y="40" class="body"><tspan font-family="Cascadia Code, monospace" font-size="12">$ kars sre install / talk / diagnose</tspan></text>
   </g>
 
-  <g transform="translate(430, 140)">
-    <g transform="translate(22, 64)">
-      <rect x="0" y="0" width="296" height="30" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1"/>
-      <g transform="translate(8, 6)" color="#c2410c">
-        <use href="#shield" width="18" height="18"/>
-      </g>
-      <text x="32" y="20" class="body" fill="#9a3412"><tspan font-weight="600">egress-guard</tspan>  ·  iptables blocks UID 1000</text>
-    </g>
+  <!-- ============== END-TO-END ENCRYPTED MESH (between regular sandboxes only) ============== -->
+  <!-- Agent A box bottom-mid: x=155, y=445.  Agent B box bottom-mid: x=540, y=445. -->
+  <path d="M 155 446 C 155 510, 540 510, 540 446" stroke="#0078D4" stroke-width="2.5" fill="none" marker-start="url(#arr-blue)" marker-end="url(#arr-blue)"/>
 
-    <g transform="translate(22, 110)">
-      <rect x="0" y="0" width="140" height="150" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1.2"/>
-      <g transform="translate(14, 14)" color="#92400e">
-        <use href="#agent-ico" width="22" height="22"/>
-      </g>
-      <text x="14" y="64" class="h-component">agent</text>
-      <text x="14" y="84" class="annotation">UID 1000 · read-only</text>
-      <text x="14" y="106" class="body" fill="#92400e">⚠  zero credentials</text>
-      <text x="14" y="123" class="body" fill="#92400e">⚠  net-blocked</text>
-      <text x="14" y="140" class="body" fill="#0a0a0a"><tspan font-weight="600">+</tspan> Signal session</text>
-    </g>
-
-    <g transform="translate(178, 110)">
-      <rect x="0" y="0" width="140" height="150" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.2"/>
-      <g transform="translate(14, 14)" color="#1e40af">
-        <use href="#router-ico" width="22" height="22"/>
-      </g>
-      <text x="14" y="64" class="h-component">router</text>
-      <text x="14" y="84" class="annotation">UID 1001 · sidecar</text>
-      <text x="14" y="103" class="body" fill="#1e40af"><tspan font-weight="600">+</tspan> Entra Agent ID</text>
-      <text x="14" y="120" class="body" fill="#1e40af"><tspan font-weight="600">+</tspan> policy &amp; budget</text>
-      <text x="14" y="137" class="body" fill="#1e40af"><tspan font-weight="600">+</tspan> audit chain</text>
-      <text x="14" y="154" class="annotation" fill="#6b6b6b">WS-bridges ciphertext</text>
-    </g>
-    <line x1="162" y1="170" x2="178" y2="170" stroke="#1e40af" stroke-width="1.8" marker-end="url(#arr-blue)"/>
-  </g>
-
-  <!-- =====  KARS-SRE — distinct (purple accent strip) ===== -->
-  <g transform="translate(795, 140)" filter="url(#shadow)">
-    <rect x="0" y="0" width="340" height="280" rx="10" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
-    <rect x="0" y="0" width="340" height="4" fill="#5C2D91"/>
-    <g transform="translate(22, 22)" color="#5C2D91">
-      <use href="#wrench" width="18" height="18"/>
-    </g>
-    <text x="48" y="36" class="card-title">kars-sre</text>
-    <text x="22" y="56" class="card-sub">built-in operator agent · namespace kars-sre</text>
-  </g>
-
-  <g transform="translate(795, 140)">
-    <!-- description -->
-    <text x="22" y="86" class="body">The cluster's own SRE agent. Same sandbox</text>
-    <text x="22" y="102" class="body">shape — different privilege model:</text>
-
-    <!-- READ row -->
-    <g transform="translate(22, 118)">
-      <rect x="0" y="0" width="60" height="22" rx="11" fill="#5C2D91"/>
-      <text x="30" y="15" class="cluster-tag" fill="#ffffff" text-anchor="middle">READ</text>
-      <text x="74" y="15" class="body">cluster-wide on kars CRs +</text>
-      <text x="74" y="32" class="body">apiextensions + workloads</text>
-    </g>
-
-    <!-- WRITE row -->
-    <g transform="translate(22, 162)">
-      <rect x="0" y="0" width="60" height="22" rx="11" fill="#5C2D91"/>
-      <text x="30" y="15" class="cluster-tag" fill="#ffffff" text-anchor="middle">WRITE</text>
-      <text x="74" y="15" class="body">one-shot approval per action</text>
-      <text x="74" y="32" class="body">via <tspan class="mono" font-size="10.5">kars sre approve</tspan></text>
-    </g>
-
-    <!-- CLI hint -->
-    <g transform="translate(22, 210)">
-      <rect x="0" y="0" width="296" height="32" rx="6" fill="#f5f3ff" stroke="#ddd6fe" stroke-width="1"/>
-      <text x="14" y="20" class="mono" font-size="11.5" fill="#5b21b6">$ kars sre install / talk / diagnose</text>
-    </g>
-
-    <!-- Containment note -->
-    <text x="22" y="262" class="annotation">no sub-agents · not on the mesh · gated by ToolPolicy</text>
-  </g>
-
-  <!-- ============== END-TO-END ENCRYPTED MESH (agent-to-agent, not router-to-router) ============== -->
-  <!-- The arc starts and ends at the AGENT boxes (Signal session endpoints), dips down through the inter-card space.
-       Agent A bottom-center x=157, y=420. Agent B bottom-center x=522, y=420. -->
-  <path d="M 157 422 C 157 488, 522 488, 522 422" stroke="#0078D4" stroke-width="2" fill="none" marker-start="url(#arr-blue)" marker-end="url(#arr-blue)"/>
-
-  <!-- Lock badge at the dip -->
-  <g transform="translate(323, 460)" color="#0078D4">
-    <circle cx="16" cy="16" r="16" fill="#ffffff" stroke="#0078D4" stroke-width="1.8"/>
+  <!-- Lock badge at apex -->
+  <g transform="translate(331, 484)" color="#0078D4">
+    <circle cx="16" cy="16" r="17" fill="#ffffff" stroke="#0078D4" stroke-width="2"/>
     <use href="#lock" x="6" y="6" width="20" height="20"/>
   </g>
 
-  <!-- Encryption label, right of the lock -->
-  <g transform="translate(370, 466)">
-    <text x="0" y="6" class="lock-text">END-TO-END ENCRYPTED — agent to agent</text>
-    <text x="0" y="22" class="lock-sub">AGT AgentMesh  ·  Signal Protocol (X3DH + Double Ratchet)  ·  routers WS-bridge opaque ciphertext</text>
-  </g>
-
-  <!-- ============== POD SANDBOXING BANNER (moved BELOW the mesh, subtle, slim) ============== -->
-  <g transform="translate(65, 506)">
-    <rect x="0" y="0" width="705" height="32" rx="6" fill="#fafafa" stroke="#e5e5e5" stroke-width="1"/>
-    <rect x="0" y="0" width="3" height="32" rx="2" fill="#0a0a0a"/>
-    <text x="18" y="21" class="body-bold">Pod Sandboxing  <tspan font-weight="400" fill="#6b6b6b" font-style="italic">— opt in per sandbox with</tspan>  <tspan class="mono" font-size="11">spec.isolation: confidential</tspan>  <tspan font-weight="400" fill="#6b6b6b">  →  Kata + AMD SEV-SNP, VM-level isolation per pod</tspan></text>
-  </g>
+  <text x="382" y="491" class="lock-text">END-TO-END ENCRYPTED — agent to agent</text>
+  <text x="382" y="510" class="lock-sub">AGT AgentMesh  ·  Signal Protocol (X3DH + Double Ratchet)  ·  routers WS-bridge opaque ciphertext</text>
 
   <!-- ============== AGT FOUNDATION ROW ============== -->
-  <g transform="translate(40, 558)">
-    <rect x="0" y="0" width="1120" height="46" rx="10" fill="#faf7ff" stroke="#e0d4ff" stroke-width="1"/>
-    <rect x="0" y="0" width="4" height="46" rx="2" fill="#5C2D91"/>
-    <text x="22" y="20" class="agt-title">Microsoft Agent Governance Toolkit (AGT)</text>
-    <text x="22" y="37" class="agt-body">PolicyDecisionProvider  ·  AuditSink  ·  SigningProvider  ·  MeshProvider  ·  hash-chained audit  ·  per-peer trust  ·  behaviour monitoring  ·  rate-limit</text>
-    <text x="1098" y="30" class="annotation" text-anchor="end" fill="#5C2D91" font-style="normal" font-weight="600">consumed, never re-implemented</text>
+  <g transform="translate(40, 590)">
+    <rect x="0" y="0" width="1120" height="56" rx="10" fill="#faf7ff" stroke="#e0d4ff" stroke-width="1"/>
+    <rect x="0" y="0" width="5" height="56" rx="2" fill="#5C2D91"/>
+    <text x="22" y="24" class="agt-title">Microsoft Agent Governance Toolkit (AGT)</text>
+    <text x="22" y="44" class="agt-body">policy decisions  ·  hash-chained audit  ·  signing  ·  Signal-Protocol mesh primitives  ·  per-peer trust  ·  behaviour monitoring  ·  rate-limit</text>
   </g>
-
-  <!-- ============== FOOTER ============== -->
-  <text x="600" y="650" class="footer-text" text-anchor="middle">⚠  marks where the agent process is intentionally isolated — even if compromised, it has no credentials and no socket to the public internet.</text>
-  <text x="600" y="672" class="footer-text" text-anchor="middle">Two regular sandboxes shown here for illustration; kars scales to any number, each with its own per-sandbox Entra Agent ID, policy bundle, and token budget.</text>
 </svg>
-<figcaption>Figure 1 — Two agents from two teams, each in its own sandbox pod with its own inference-router sidecar. The agent container (UID 1000) holds no Azure credentials and is kernel-blocked from direct egress. All outbound traffic flows through the router (UID 1001). Inter-agent messages are end-to-end encrypted; the AgentMesh relay routes ciphertext only. AGT is consumed through four provider traits — kars does not reimplement policy, audit, trust, or mesh cryptography. Each sandbox can opt into Pod Sandboxing (Kata + AMD SEV-SNP) via one field on the CRD.</figcaption>
+<figcaption>Figure 1 — Two regular sandboxes (researcher in <code>enhanced</code> isolation, writer in <code>confidential</code> = Kata + AMD SEV-SNP). The Signal session lives inside the agent processes; routers WS-bridge opaque ciphertext frames. <code>kars-sre</code> is the cluster's own operator agent — cluster-wide read, gated writes. AGT is consumed for governance.</figcaption>
 </figure>
 
-<h2>What ships today, and what it gets you</h2>
+<h2>Who this is for</h2>
 
-<p>Below is the current capability surface — what <code>v0.1.0</code> actually enforces in a running cluster today, what each capability is worth in operational terms, and where the gaps still are. The full enforcement matrix lives in <a href="https://github.com/Azure/kars/blob/main/docs/maturity.md">docs/maturity.md</a>.</p>
-
-<div class="outcomes">
-  <div class="outcome">
-    <strong>① The agent process never sees an Azure credential.</strong>
-    Workload Identity / IMDS broker (anonymous mode) or per-sandbox Microsoft Entra Agent ID via auth-sidecar (production mode, <code>--mesh-trust=entra</code>) lives in the inference router (UID 1001); the agent (UID 1000) is iptables-blocked from IMDS at the kernel. Prompt injection has nothing to exfiltrate. Per-scope token caching and refresh shipped. Status: <strong>enforced today</strong>.
-  </div>
-  <div class="outcome">
-    <strong>② Kernel-confined, default-deny egress per sandbox.</strong>
-    UID-based iptables egress guard, Kubernetes NetworkPolicy default-deny, router L7 allowlist on every outbound CONNECT, time-boxed <code>EgressApproval</code> exceptions, auto-refreshing OISD + URLhaus blocklist. Status: <strong>enforced today</strong>.
-  </div>
-  <div class="outcome">
-    <strong>③ Hardened sandbox shape: read-only rootfs, drop-ALL caps, custom seccomp, Landlock.</strong>
-    DaemonSet-installed <code>kars-strict</code> seccomp profile blocks <code>mount</code>, <code>ptrace</code>, <code>bpf</code>, <code>unshare</code>. Optional Kata + AMD SEV-SNP confidential-VM isolation via <code>spec.isolation: confidential</code>. Status: <strong>enforced today</strong>.
-  </div>
-  <div class="outcome">
-    <strong>④ Native governance via <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> — not reimplemented.</strong>
-    Policy evaluation, hash-chained audit, per-peer trust scoring, burst/failure behaviour detection, and per-identity rate limiting all consumed from AGT through four provider traits. We upstreamed connect-frame JWT verification, per-agent session counters, and the registry-verify endpoint to AGT (<a href="https://github.com/microsoft/agent-governance-toolkit/pull/2719">microsoft/agent-governance-toolkit#2719</a>). Status: <strong>enforced today</strong>.
-  </div>
-  <div class="outcome">
-    <strong>⑤ End-to-end encrypted inter-agent messaging the relay cannot decrypt.</strong>
-    Signal Protocol (X3DH + Double Ratchet) via the AGT-Rust-SDK <code>agentmesh</code> crate. The router only WebSocket-bridges opaque ciphertext. Cross-runtime conversation (e.g. Hermes ↔ OpenClaw) is production-tested on AKS and kind. Status: <strong>enforced today</strong>.
-  </div>
-  <div class="outcome">
-    <strong>⑥ Multi-runtime hosting — eight first-class adapters on one operator.</strong>
-    OpenClaw, Hermes, OpenAI Agents (Python), Microsoft Agent Framework (Python), LangGraph (Python and TypeScript), Anthropic Claude Agent SDK, Pydantic-AI — plus a documented BYO contract with strict-mode admission gating. Same router, same governance, same audit chain for every runtime. Status: <strong>shipping today</strong>.
-  </div>
-  <div class="outcome">
-    <strong>⑦ Operator-grade UX: CLI, TUI, GitOps, supply chain.</strong>
-    <code>kars up / add / dev / connect / handoff / mesh / migrate / convert / attest</code>; the <code>kars operator</code> TUI; cosign keyless OIDC image signatures and SPDX-JSON SBOM per image; Trivy + cargo-deny + RustSec advisory audit run in CI on every dependency-touching PR. Status: <strong>shipping today</strong>.
-  </div>
-</div>
-
-<p>Six end-to-end use cases are shipping and exercised by CI: kars-native OpenClaw on AKS, any-OpenClaw → kars cloud offload, kars ↔ kars mesh, multi-runtime hosting, public A2A federation across organisations (with mTLS-pinned subject), and migration from <a href="https://kagent.dev">kagent</a> or <a href="https://github.com/kubernetes-sigs/agent-sandbox"><code>sigs/agent-sandbox</code></a>. See <a href="https://github.com/Azure/kars/blob/main/docs/use-cases.md">docs/use-cases.md</a>.</p>
-
-<hr/>
-
-<h2>Why I built this — five things I think the industry has gotten wrong</h2>
-
-<p>I have spent the last year talking to enterprise platform teams, CISOs, and AI leads about what is actually blocking agentic deployments. Five patterns came up repeatedly. Each one is an assumption <em>kars</em> rejects.</p>
-
-<h3>1. "An agent is just a stateless microservice with an LLM in it."</h3>
-<p>It is not. An agent's code is partially generated at runtime by an untrusted source — the model output, the tool response, the previous turn's context, an MCP server you do not control. The threat model is closer to "running customer-submitted code" than to "running a service you wrote." The implication is that the agent process must hold no secrets, must have no ambient network reach, and must be isolated at the kernel level — not just at the network policy level. That is the entire reason <em>kars</em>'s sandbox is built the way it is.</p>
-
-<h3>2. "Governance is something you bolt on later."</h3>
-<p>Governance is the workload. Without policy evaluation, audit, trust scoring, and rate-limiting present from the first commit, the agent platform becomes unrenovatable. The right move is to consume a real governance engine — for us that is <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> — through stable provider seams from day one. <em>kars</em>'s <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT boundary document</a> says explicitly what <em>kars</em> never builds: no custom Signal primitives, no standalone audit chain, no parallel trust engine, no separate rate-limit bucket, no key custody. Any overlap is treated as a bug to resolve, not a feature to negotiate.</p>
-
-<h3>3. "Inter-agent communication is the same problem as service-to-service."</h3>
-<p>It is not. Service-to-service can rely on the cluster network as the trust boundary, because services know their own threat model. Agents do not — the agent's code can be steered by an attacker through prompt injection. So the message bus has to remove the broker from the trust set. <em>kars</em> uses AGT's end-to-end Signal-Protocol encrypted mesh where the relay routes ciphertext and cannot read message contents. The structural difference from a service mesh is the same as the difference between an HTTPS proxy and PGP-encrypted email. Both are valid. They are not equivalent.</p>
-
-<h3>4. "Multi-runtime is a transitional problem."</h3>
-<p>I do not believe it is. The framework landscape — OpenClaw, Hermes, MAF, LangChain, LangGraph, CrewAI, OpenAI Agents SDK, Anthropic Claude Agent SDK, Pydantic-AI — is converging on shared standards (MCP, A2A, AGT adapters), not on a single winning framework. <em>kars</em> ships eight first-class runtime adapters today and treats multi-runtime as the steady state. The same router, the same governance profile, the same audit chain apply across all of them; switching runtime is a one-field change in <code>KarsSandbox.spec.runtime.kind</code>.</p>
-
-<h3>5. "Sidecars are dead."</h3>
-<p>The Istio ambient-mode discussion has confused this point. For cluster-wide service-mesh traffic management, ambient is often the right choice. For a per-pod, kernel-confined, adversarial-trust boundary around one specific agent, a sidecar is structurally the right shape. <a href="https://kubernetes.io/blog/2023/08/25/native-sidecar-containers/">KEP-753</a> made native sidecar containers a first-class K8s primitive in v1.29 — this is the building block <em>kars</em> uses. The relevant question is not "sidecar yes/no" — it's "where does the trust boundary belong?" The answer for agent code is "as close to the agent as possible, in the kernel."</p>
-
-<hr/>
-
-<h2>Read this if you are the…</h2>
+<p>kars is built for teams running more than one agent across more than one team, on infrastructure they already operate. Four audience tracks, with the action you should take after reading.</p>
 
 <div class="audience">
   <span class="who">CIO / Engineering Leader</span>
-  <p><strong>The business case in 90 seconds.</strong> The dominant reason agentic-AI projects fail to reach production is not model quality — it is the absence of a governance, isolation, and audit posture that an operator and a CISO can both sign off on. <em>kars</em> closes that gap on infrastructure your platform team already operates (AKS today; the architecture is Kubernetes-native). The bet you are evaluating is not on a vendor — <em>kars</em> is open source, MIT-licensed, and consumes the <a href="https://microsoft.github.io/agent-governance-toolkit/">Microsoft Agent Governance Toolkit</a> rather than reinventing it. Concrete proof: nine security layers validated end-to-end on AKS and kind on every push; the <a href="https://github.com/Azure/kars/blob/main/docs/use-cases/exec-brief-walkthrough.md">exec-brief walkthrough</a> is a 20-minute scripted demo with per-layer evidence commands you can run yourself. The bet you are evaluating is on Kubernetes as the durable substrate for agentic workloads, the same way it became the substrate for microservices.</p>
+  <ul>
+    <li><strong>What it gives the business:</strong> a governed path from agent pilots to production on infrastructure your platform team already runs (AKS) — without standing up a separate agent stack per framework.</li>
+    <li><strong>What it reuses:</strong> your existing AKS clusters, Entra ID, Azure Linux, monitoring stack, GitOps practices. No new SaaS vendor.</li>
+    <li><strong>What it costs to evaluate:</strong> one pilot — one team, two agents, one regulated workflow — provides per-layer evidence for isolation, policy, and audit a CISO can sign off on.</li>
+    <li><strong>The bet:</strong> on Kubernetes as the durable substrate for agentic workloads, the same way it became the substrate for microservices. <em>kars</em> is MIT-licensed and integrates with the Microsoft Agent Governance Toolkit; you're not buying a vendor lock-in.</li>
+  </ul>
+  <h4 class="cta">→ Ask your platform team to run the <a href="https://github.com/Azure/kars/blob/main/docs/use-cases/exec-brief-walkthrough.md">20-minute exec-brief walkthrough</a>.</h4>
 </div>
 
 <div class="audience ciso">
   <span class="who">CISO / Security Lead</span>
-  <p><strong>The security model in one page.</strong></p>
-  <ul>
-    <li><strong>Zero Azure credentials in the agent process.</strong> The agent container (UID 1000) has no model API key, no cloud SDK token, no MCP secret. The per-pod inference router (UID 1001) holds them, authenticates with a <strong>per-sandbox Microsoft Entra Agent ID</strong> via the auth-sidecar (production mode, <code>--mesh-trust=entra</code>) — or cluster-wide Workload Identity (anonymous mode) — and exposes only the call surface, never the credential. Prompt injection has nothing to exfiltrate.</li>
-    <li><strong>Kernel-level egress confinement.</strong> An iptables init container restricts UID 1000 to localhost and DNS. The agent process literally cannot open a socket to the public internet. All egress flows through UID 1001, which applies an L7 allowlist with an auto-refreshing malicious-domain blocklist (<a href="https://oisd.nl/">OISD</a> + <a href="https://urlhaus.abuse.ch/">URLhaus</a>) refreshed daily by a CI cron job.</li>
-    <li><strong>Per-pod blast radius.</strong> One sandbox compromise contains to one Kubernetes namespace, one NetworkPolicy, one per-sandbox Entra Agent ID, one token budget. There is no cluster-wide single point of compromise.</li>
-    <li><strong>End-to-end encrypted inter-agent messaging.</strong> Signal Protocol (X3DH + Double Ratchet) via the AGT Rust SDK <code>agentmesh = "4.0.0"</code> crate. The relay routes ciphertext and cannot decrypt. Forward secrecy per message.</li>
-    <li><strong>Hardened container shape.</strong> Read-only rootfs, drop-ALL capabilities, non-root, no privilege escalation, custom <code>kars-strict</code> seccomp profile (<strong>175 allowed / 41 explicit-deny syscalls</strong>, blocking <code>mount</code> / <code>ptrace</code> / <code>bpf</code> / <code>unshare</code>), Landlock. Pod Sandboxing (Kata + AMD SEV-SNP) is one field away — see the spotlight below.</li>
-    <li><strong>Hash-chained audit with tamper detection</strong> via <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a>'s <code>AuditLogger</code>; cosign keyless OIDC image signatures and SPDX-JSON SBOM per image; Trivy + cargo-deny + RustSec advisory audit run in CI on every dependency-touching PR. Threat model: <a href="https://github.com/Azure/kars/blob/main/docs/security/stride.md">STRIDE walkthrough</a>; red-team scenarios: <a href="https://github.com/Azure/kars/blob/main/docs/security/red-team.md">red-team playbook</a>; control mapping: <a href="https://github.com/Azure/kars/blob/main/docs/compliance.md">NIST SP 800-53 + CIS Kubernetes</a>; enforcement matrix: <a href="https://github.com/Azure/kars/blob/main/docs/maturity.md">maturity page</a> (the single source of truth for enforced vs reconciler-only vs roadmap).</li>
-  </ul>
+  <p>The security model maps cleanly to the questions you actually ask:</p>
+  <table>
+    <thead><tr><th>Your question</th><th>kars's answer</th></tr></thead>
+    <tbody>
+      <tr><td>Can prompt injection exfiltrate credentials?</td><td>Agent process has no model API key, no cloud token, no MCP secret. The router sidecar holds them (per-sandbox Entra Agent ID via auth-sidecar in production; cluster Workload Identity in anonymous mode).</td></tr>
+      <tr><td>Can a compromised agent reach the internet?</td><td>An iptables init container restricts UID 1000 to localhost + DNS. All egress goes through UID 1001 (router) with an L7 allowlist plus an auto-refreshing OISD + URLhaus malicious-domain blocklist.</td></tr>
+      <tr><td>What's the blast radius of one compromise?</td><td>One namespace, one NetworkPolicy, one per-sandbox identity, one token budget. No cluster-wide single point of compromise.</td></tr>
+      <tr><td>Can the message broker read agent traffic?</td><td>No. Signal Protocol (X3DH + Double Ratchet) end-to-end between agent processes. The AgentMesh relay routes opaque ciphertext.</td></tr>
+      <tr><td>How hard is the container?</td><td>Read-only rootfs, drop-ALL capabilities, non-root, no privilege escalation, custom <code>kars-strict</code> seccomp profile (175 allowed / 41 explicit-deny syscalls), Landlock. VM-level isolation (Kata + AMD SEV-SNP) is one CRD field — see the Spotlight below.</td></tr>
+      <tr><td>Where's the evidence?</td><td><a href="https://github.com/Azure/kars/blob/main/docs/security/stride.md">STRIDE threat model</a>, <a href="https://github.com/Azure/kars/blob/main/docs/security/red-team.md">red-team playbook</a>, <a href="https://github.com/Azure/kars/blob/main/docs/compliance.md">NIST SP 800-53 + CIS Kubernetes control mapping</a>, <a href="https://github.com/Azure/kars/blob/main/docs/maturity.md">single-source-of-truth maturity matrix</a> (✅ enforced vs 🟡 reconciler-only vs ⚪ roadmap).</td></tr>
+    </tbody>
+  </table>
+  <h4 class="cta">→ Review the <a href="https://github.com/Azure/kars/blob/main/docs/security/stride.md">STRIDE doc</a> and the <a href="https://github.com/Azure/kars/blob/main/docs/maturity.md">maturity matrix</a>.</h4>
 </div>
 
 <div class="audience ai">
   <span class="who">AI / Agentic AI Lead</span>
-  <p><strong>Why this is interesting if you actually build agents.</strong> Most agentic stacks treat the agent as a single, monolithic process. Real agentic workloads spawn sub-agents, hand off tasks, call MCP tools, write to memory, and operate across organisational boundaries. <em>kars</em> takes each of those seriously. A minimal <code>KarsSandbox</code> looks like this:</p>
-
-<pre><code>apiVersion: kars.azure.com/v1alpha1
-kind: KarsSandbox
-metadata:
-  name: research-bot
-spec:
-  runtime:
-    kind: OpenClaw         # or Hermes, MAF, LangGraph, Anthropic, …
-  model:
-    provider: Foundry
-    deployment: gpt-4o
-  isolation: enhanced      # or 'confidential' → Kata + SEV-SNP
-  egress:
-    allowedEndpoints:
-      - https://api.github.com
-  tokenBudget:
-    perRequestTokens: 8000
-    perDayTokens: 1000000</code></pre>
-
+  <p>Real agentic workloads spawn sub-agents, hand off tasks, call MCP tools, write to memory, and federate across organisations. kars takes each of those seriously:</p>
   <ul>
-    <li><strong>Sub-agent spawn is governed.</strong> When an OpenClaw agent invokes <code>kars_spawn</code> or <code>kars_handoff_request</code>/<code>kars_handoff_confirm</code>, the child gets its own sandbox, its own policy bundle, its own token budget, and its own AGT trust score. Not a thread in the parent process.</li>
-    <li><strong>Per-agent policy via <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> <code>PolicyEngine</code>.</strong> Hot-reloaded YAML rules gating exec / fetch / spawn / mesh send. Different agents can run with different policy bundles on the same cluster without sharing a control plane.</li>
-    <li><strong>AgentMesh, not just A2A.</strong> Agents from different runtimes — OpenClaw, Hermes, MAF, LangGraph — talk to each other on a shared, end-to-end-encrypted mesh today. Cross-runtime Hermes ↔ OpenClaw conversation is exercised by the interop harness on kind on every push, and has been demonstrated on AKS (manual Entra RBAC provisioning required for new sandboxes). For cross-organisation flows, a public A2A gateway with mTLS-pinned subject is shipping (<a href="https://github.com/Azure/kars/blob/main/docs/adr/0001-a2a-ingress-front-edge.md">ADR 0001</a>).</li>
-    <li><strong>Memory governance.</strong> <code>KarsMemory</code> CRD bounds memory writes against per-agent policy. Foundry Memory Store today.</li>
-    <li><strong>Agent evaluation in-cluster.</strong> <code>KarsEval</code> CRD replays a signed attack corpus against a sandbox and writes outcomes to the audit chain (<a href="https://github.com/Azure/kars/blob/main/docs/api/karseval.md">operator guide</a>).</li>
-    <li><strong>Multi-framework adoption path.</strong> If you have invested in MAF, LangGraph, OpenAI Agents SDK, Anthropic Claude Agent SDK, Pydantic-AI, or <a href="https://github.com/NousResearch/hermes-agent">Hermes</a> (20+ messaging channels, 18+ inference providers, 70+ built-in tools, native MCP client out of the box), your existing agents run unchanged. The adapter wires your framework to the kars sandbox shape — you do not rewrite your agents to adopt <em>kars</em>.</li>
-    <li><strong>Migration from upstream schemas.</strong> <code>kars convert</code> translates <a href="https://github.com/kubernetes-sigs/agent-sandbox"><code>sigs/agent-sandbox</code></a> resources; <code>kars migrate from-kagent</code> translates <a href="https://kagent.dev">kagent</a> CRs. Both target <code>KarsSandbox</code> (Use Case 6).</li>
+    <li><strong>Your existing agents run unchanged.</strong> Eight first-class adapters today: OpenClaw, Hermes, OpenAI Agents (Python), Microsoft Agent Framework (Python), LangGraph (Python + TypeScript), Anthropic Claude Agent SDK, Pydantic-AI — plus a documented BYO contract. <code>spec.runtime.kind</code> is the only field that changes when you switch framework.</li>
+    <li><strong>Sub-agent spawn is governed.</strong> When a parent agent invokes <code>kars_spawn</code> / <code>kars_handoff_request</code>, the child gets its own sandbox, its own policy bundle, its own token budget, its own AGT trust score. Not a thread in the parent process.</li>
+    <li><strong>AgentMesh, not just A2A.</strong> Agents from different runtimes talk on a shared E2E-encrypted mesh today. Cross-runtime Hermes ↔ OpenClaw is exercised on kind on every push. Cross-organisation flows go through a public A2A gateway with mTLS-pinned subject (<a href="https://github.com/Azure/kars/blob/main/docs/adr/0001-a2a-ingress-front-edge.md">ADR&nbsp;0001</a>).</li>
+    <li><strong>Per-agent policy via AGT.</strong> Hot-reloaded YAML rules gating exec / fetch / spawn / mesh-send. Different agents can run with different policy bundles on the same cluster without sharing a control plane.</li>
+    <li><strong>In-cluster evaluation.</strong> <code>KarsEval</code> CRD replays a signed attack corpus against a sandbox and writes outcomes to the audit chain.</li>
   </ul>
+  <h4 class="cta">→ Bring one existing agent. See <a href="https://github.com/Azure/kars/blob/main/docs/runtimes.md">runtimes</a> and <a href="https://github.com/Azure/kars/tree/main/examples">examples</a>.</h4>
 </div>
 
 <div class="audience eng">
   <span class="who">Platform / Security Engineer</span>
-  <p><strong>The shape on the cluster.</strong> One Helm chart installs the controller and the nine workload CRDs (<code>KarsSandbox</code>, <code>A2AAgent</code>, <code>McpServer</code>, <code>ToolPolicy</code>, <code>InferencePolicy</code>, <code>KarsMemory</code>, <code>KarsEval</code>, <code>TrustGraph</code>, <code>EgressApproval</code>). <code>kars up &lt;name&gt;</code> creates a <code>KarsSandbox</code> CR; the controller reconciles it into a namespace, a deployment with the init container + agent container + inference-router sidecar, a default-deny NetworkPolicy, a per-agent ServiceAccount with workload-identity binding, a ConfigMap with the compiled policy bundle, and a cosign-attested image reference. PodMonitor + ServiceMonitor for Prometheus; the AgentMesh relay exporter scrapes connected-agent, messages-routed, and stored/delivered counts <em>without decrypting anything</em>. OTel spans; structured JSON logs. Sandbox namespaces use PSA <code>baseline</code> (egress-guard init container requires <code>NET_ADMIN</code>); the kars system namespace itself uses PSA <code>restricted</code>. Optional Kata + AMD SEV-SNP nodes (CLI auto-provisions a <code>katapool</code> on <code>Standard_DC4as_v5</code> when you opt into confidential isolation). Tested on AKS and kind today. Full CLI is 30+ commands — beyond the daily-driver <code>up / add / dev / connect / handoff / mesh / attest</code>, see <code>kars egress</code>, <code>kars eval</code>, <code>kars trace</code>, <code>kars audit</code>, <code>kars pair</code>, <code>kars migrate</code>, <code>kars convert</code>, <code>kars credentials</code>, and the <a href="https://github.com/Azure/kars/blob/main/docs/cli-reference.md">full CLI reference</a>.</p>
+  <h4>What lands in the cluster</h4>
+  <ul>
+    <li>One Helm chart: controller + nine workload CRDs (<code>KarsSandbox</code>, <code>A2AAgent</code>, <code>McpServer</code>, <code>ToolPolicy</code>, <code>InferencePolicy</code>, <code>KarsMemory</code>, <code>KarsEval</code>, <code>TrustGraph</code>, <code>EgressApproval</code>).</li>
+    <li>Per sandbox: namespace + Deployment (init egress-guard + agent + router sidecar) + default-deny NetworkPolicy + per-agent ServiceAccount + ConfigMap with compiled policy bundle.</li>
+    <li>PSA <code>baseline</code> on sandbox namespaces (egress-guard needs <code>NET_ADMIN</code>); kars system namespace uses PSA <code>restricted</code>.</li>
+  </ul>
+  <h4>Day-2 operations</h4>
+  <ul>
+    <li>PodMonitor + ServiceMonitor; AgentMesh relay exporter (counts ciphertext frames without decrypting).</li>
+    <li>OTel spans, structured JSON logs.</li>
+    <li>cosign keyless OIDC image signatures + SPDX-JSON SBOM per image; Trivy + cargo-deny + RustSec advisory audit on every dependency-touching PR.</li>
+  </ul>
+  <h4>The substrate</h4>
+  <ul>
+    <li>Tested on AKS and kind. Designed-portable; not yet validated on EKS/GKE.</li>
+    <li>Today: AKS osSKU <code>AzureLinux</code> (Azure Linux 3.0). Compiled binary images on AL3 distroless; runtime interpreter images on AL3 base. Path forward: <a href="https://techcommunity.microsoft.com/blog/linuxandopensourceblog/introducing-azure-container-linux-acl/4523411">Azure Container Linux</a> for nodes (immutable, Flatcar-derived, GA on AKS v1.34+) and <a href="https://techcommunity.microsoft.com/blog/linuxandopensourceblog/announcing-azure-linux-4-0-purpose-built-for-azure-now-in-public-preview/4524267">Azure Linux 4.0 distroless</a> for container bases as those land. The Bicep already comments <code>// AzureContainerLinux when GA; AzureLinux (v4) as fallback</code>.</li>
+    <li>Confidential nodes optional: Kata + AMD SEV-SNP on <code>Standard_DC4as_v5</code>, auto-provisioned with <code>kars add --kata</code>.</li>
+  </ul>
+  <h4>CLI</h4>
+  <ul>
+    <li>Daily-driver: <code>kars up / add / dev / connect / handoff / mesh / attest / push / destroy</code>.</li>
+    <li>Operations: <code>kars operator</code> (TUI), <code>kars egress</code>, <code>kars eval</code>, <code>kars trace</code>, <code>kars audit</code>, <code>kars pair</code>, <code>kars sre</code>, <code>kars migrate</code>, <code>kars convert</code>, <code>kars credentials</code>. Full reference in <a href="https://github.com/Azure/kars/blob/main/docs/cli-reference.md">docs/cli-reference.md</a>.</li>
+  </ul>
+  <h4 class="cta">→ Install on kind in five minutes: <a href="https://github.com/Azure/kars/blob/main/docs/getting-started.md">getting-started</a>.</h4>
 </div>
 
-<hr/>
+<h2>Spotlight — confidential agents in one CRD field</h2>
 
-<!-- ============== SPOTLIGHT: POD SANDBOXING & CONFIDENTIAL AGENTS ============== -->
-<h2>Spotlight — Pod Sandboxing &amp; confidential agents</h2>
+<p>Some agentic workloads — financial research, clinical, sovereign deployments, classified evals — need more than a hardened namespace. They need a separate kernel per workload, attestable VM-level isolation, and a barrier between the agent and the host. kars wires this into <a href="https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing">AKS Pod Sandboxing</a>.</p>
 
-<p>This is one of the strongest things you can do with <em>kars</em> today and it is one field on the CRD. Some agentic workloads handle data — health records, M&amp;A pipeline, customer PII, classified evaluations — where the "isolated namespace + hardened container" boundary is not enough. The threat model requires a <em>separate kernel</em> per workload and a hypervisor barrier between the agent and the host. <em>kars</em> wires this into AKS Pod Sandboxing.</p>
-
-<div style="background: #f7fbff; border: 1px solid #cce0f5; border-radius: 8px; padding: 1.25rem 1.5rem; margin: 1.25rem 0;">
-  <h4 style="margin-top: 0;">What you write</h4>
-  <pre style="margin: 0;"><code>apiVersion: kars.azure.com/v1alpha1
+<div class="spotlight">
+  <h4>What you write</h4>
+<pre><code>apiVersion: kars.azure.com/v1alpha1
 kind: KarsSandbox
 metadata:
   name: financial-research
 spec:
-  isolation: confidential        # ← that's it
   runtime:
-    kind: OpenClaw</code></pre>
+    kind: OpenClaw
+  isolation: confidential   # standard | enhanced | confidential
+  #          └─ confidential = Kata + AMD SEV-SNP, scheduled on Standard_DC4as_v5</code></pre>
 
-  <h4>What the controller actually does</h4>
+  <h4>What the controller does</h4>
   <ul>
     <li>Sets <code>runtimeClassName: kata-vm-isolation</code> on the pod spec (<a href="https://github.com/Azure/kars/blob/main/controller/src/reconciler/mod.rs">controller/src/reconciler/mod.rs:87</a>).</li>
     <li>Adds a <code>nodeSelector</code> for the <code>sandbox-kata</code> nodepool.</li>
-    <li>Schedules onto a <code>katapool</code> with <code>workloadRuntime: KataMshvVmIsolation</code>, <code>vmSize: Standard_D4as_v6</code> (SEV-SNP capable), <code>enableEncryptionAtHost: true</code> (auto-provisioned by Bicep / CLI <code>kars add --kata</code>).</li>
-    <li>Preserves all the other kars hardening — read-only rootfs, drop-ALL caps, default-deny egress, kars-strict seccomp.</li>
+    <li>Schedules onto a Kata nodepool with <code>workloadRuntime: KataMshvVmIsolation</code>, AMD SEV-SNP capable VMs (<code>Standard_DC4as_v5</code>), <code>enableEncryptionAtHost: true</code> — auto-provisioned by Bicep or by <code>kars add --kata</code>.</li>
+    <li>Preserves all the other kars hardening (read-only rootfs, drop-ALL caps, default-deny egress, kars-strict seccomp).</li>
   </ul>
 
   <h4>What you get</h4>
   <ul>
-    <li>A dedicated lightweight VM per pod via <a href="https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing">AKS Pod Sandboxing</a> — Kata Containers running on the Azure Linux container host with the Microsoft Hyper-V Hypervisor and Cloud Hypervisor VMM. <em>Separate kernel per workload.</em></li>
-    <li>AMD SEV-SNP attestable confidential computing — memory encryption, integrity, and remote attestation primitives at the silicon level.</li>
-    <li>A working example you can <code>kubectl apply</code> at <a href="https://github.com/Azure/kars/tree/main/examples/confidential-agent"><code>examples/confidential-agent/</code></a>.</li>
+    <li>A dedicated lightweight VM per pod via Kata Containers on the Microsoft Hyper-V Hypervisor with the Cloud Hypervisor VMM. Separate kernel per workload.</li>
+    <li>AMD SEV-SNP confidential computing: hardware-backed memory encryption and remote attestation, designed to protect guest memory from the host.</li>
+    <li>A working example at <a href="https://github.com/Azure/kars/tree/main/examples/confidential-agent"><code>examples/confidential-agent/</code></a>.</li>
   </ul>
 </div>
 
-<p>This is what unlocks the use cases that get blocked at the regulatory review: a financial-research agent that touches non-public M&amp;A data; a clinical agent that touches patient records; a sovereign-deployment agent on isolated infrastructure. The trust boundary is no longer "the container runtime trusts the host kernel" — it is "the workload runs in its own hypervisor-protected VM and the host cannot read its memory." Everything else about the agent — the framework, the model, the policy bundle, the mesh — works exactly the same. You change one field.</p>
+<p>The trust boundary becomes: <em>the workload runs in its own hypervisor-protected VM with hardware attestation; the host kernel is not in the trust set</em>. Everything else about the agent — framework, model, policy bundle, mesh — works exactly the same. One field changes.</p>
 
-<hr/>
-
-<!-- ============== AZURE LINUX SUBSTRATE ============== -->
-<h2>On Azure Linux — today and where we're headed</h2>
-
-<p>A note worth surfacing because it matters for both compliance and operations:</p>
+<h2>What v0.1.0 ships</h2>
 
 <table>
-  <thead>
-    <tr><th>Layer</th><th>Today (<code>v0.1.0</code>)</th><th>Direction</th></tr>
-  </thead>
+  <thead><tr><th>Layer</th><th>What's enforced today</th><th>Why it matters</th></tr></thead>
   <tbody>
-    <tr>
-      <td><strong>kars compiled binary images</strong> (controller, inference router, A2A gateway, conformance runner)</td>
-      <td><code>mcr.microsoft.com/azurelinux/distroless/base:3.0</code> — distroless, no shell, no package manager</td>
-      <td>Migrate to <a href="https://techcommunity.microsoft.com/blog/linuxandopensourceblog/announcing-azure-linux-4-0-purpose-built-for-azure-now-in-public-preview/4524267">Azure Linux 4.0</a> distroless (<code>mcr.microsoft.com/azurelinux-beta/distroless/{minimal,base,debug}:4.0</code>) when AKS support reaches GA. AL4 distroless is in public preview today.</td>
-    </tr>
-    <tr>
-      <td><strong>kars agent runtime images</strong> (OpenClaw, Hermes, MAF, LangGraph, Anthropic, OpenAI Agents, Pydantic-AI)</td>
-      <td><code>mcr.microsoft.com/azurelinux/base/python:3.12</code> or <code>azurelinux/base/nodejs:24</code> — base images, interpreter present (Python / Node) because agent runtimes are dynamically linked</td>
-      <td>Track AL4 base when the interpreter-bearing variants ship; the distroless story applies only to compiled binaries.</td>
-    </tr>
-    <tr>
-      <td><strong>AKS node OS</strong></td>
-      <td><code>osSKU: AzureLinux</code> (Azure Linux 3.0) — the only osSKU our Bicep uses today</td>
-      <td>Switch to <a href="https://techcommunity.microsoft.com/blog/linuxandopensourceblog/introducing-azure-container-linux-acl/4523411">Azure Container Linux (ACL)</a> — GA on AKS v1.34+, immutable Flatcar-derived node OS with read-only <code>/usr</code> mounted under dm-verity, no package manager, sub-5-second boot, ~40 % smaller disk than Ubuntu, ~15 % higher container density. The Bicep already carries the comment <code>// AzureContainerLinux when GA; AzureLinux (v4) as fallback</code>.</td>
-    </tr>
+    <tr><td>Identity</td><td>Per-sandbox Microsoft Entra Agent ID via auth-sidecar (<code>--mesh-trust=entra</code>), or cluster Workload Identity in anonymous mode. No long-lived secrets on disk.</td><td>Each agent is an addressable principal in Entra. Audit logs name the sandbox.</td></tr>
+    <tr><td>Egress</td><td>iptables UID-1000 default-deny, K8s NetworkPolicy default-deny, router L7 allowlist on every CONNECT, OISD + URLhaus blocklist (daily refresh), <code>EgressApproval</code> CRD for time-boxed exceptions.</td><td>Compromised agent code has no socket to the open internet.</td></tr>
+    <tr><td>Container shape</td><td>Read-only rootfs, drop-ALL caps, non-root, no privilege escalation, <code>kars-strict</code> seccomp (175 allowed / 41 explicit-deny), Landlock. Optional Kata + AMD SEV-SNP via <code>spec.isolation: confidential</code>.</td><td>Kernel surface minimised; optional hypervisor isolation per pod.</td></tr>
+    <tr><td>Governance</td><td>AGT consumed through four provider traits: <code>PolicyDecisionProvider</code>, <code>AuditSink</code>, <code>SigningProvider</code>, <code>MeshProvider</code> (<code>agentmesh = "4.0.0"</code>). Hot-reloaded policy, hash-chained audit, per-peer trust, behaviour monitoring, rate-limit.</td><td>kars does not reimplement governance. Gap-closing PRs upstreamed: <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2090">#2090</a>, <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2659">#2659</a>, <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2719">#2719</a>.</td></tr>
+    <tr><td>Mesh</td><td>End-to-end encrypted inter-agent messaging. Signal Protocol session in the agent process; router WS-bridges opaque ciphertext. Cross-runtime Hermes ↔ OpenClaw exercised on every push.</td><td>The relay is not in the trust set.</td></tr>
+    <tr><td>Runtimes</td><td>Eight first-class adapters: OpenClaw, Hermes, OpenAI Agents, MAF (Python), LangGraph (Py + TS), Anthropic Claude Agent SDK, Pydantic-AI. Documented BYO contract.</td><td>Multi-framework adoption path. Switching is a one-field change.</td></tr>
+    <tr><td>A2A</td><td>Public A2A gateway with mTLS-pinned <code>X-A2A-Agent-Subject</code> for cross-org inbound. In-binary <code>AgentCard</code> JWS verifier is library-complete; axum layer wiring is on the roadmap.</td><td>Foreign agents over an open standard.</td></tr>
+    <tr><td>Supply chain</td><td>cosign keyless OIDC signatures + SPDX-JSON SBOM per image; Trivy + cargo-deny + RustSec advisory audit on every dependency-touching PR.</td><td>Verifiable artifact provenance.</td></tr>
   </tbody>
 </table>
 
-<p>Two separate Microsoft Linux product lines, two separate moves. <strong>Azure Container Linux</strong> (immutable, container-host) is the natural successor for <em>kars</em>'s AKS nodes — its threat model (immutable, dm-verity-protected) aligns directly with how <em>kars</em> thinks about sandbox blast-radius. <strong>Azure Linux 4.0</strong> (general-purpose, Fedora-based) is the natural successor for <em>kars</em>'s container base images once it stabilises and AKS support lands. Neither change requires a redesign — just a base-image bump and an osSKU change. We are watching both releases closely; the operational discipline of the substrate matters as much as the agent governance running on top of it.</p>
+<p>Six end-to-end use cases are shipping and exercised by CI: kars-native OpenClaw on AKS, any-OpenClaw → kars cloud offload, kars ↔ kars mesh, multi-runtime hosting, A2A federation across organisations, and migration from <a href="https://kagent.dev">kagent</a> or <a href="https://github.com/kubernetes-sigs/agent-sandbox"><code>sigs/agent-sandbox</code></a>. See <a href="https://github.com/Azure/kars/blob/main/docs/use-cases.md">docs/use-cases.md</a>.</p>
+
+<h2>Why this design</h2>
+
+<p>Three convictions shaped kars. Each is opinionated; each rejects an assumption I see repeated in the agentic-AI conversation.</p>
+
+<h3>1. The agent is untrusted code, not a microservice.</h3>
+<p>An agent's instructions are partially generated at runtime by the model output, the tool response, the previous turn's context, an MCP server you do not control. The threat model is closer to <em>running customer-submitted code</em> than to <em>running a service you wrote</em>. The agent process must therefore hold no secrets, have no ambient network reach, and be isolated at the kernel — not just at the network policy.</p>
+
+<h3>2. Governance is the workload, not a wrapper.</h3>
+<p>Policy, audit, trust scoring, rate limiting cannot be bolted on later. The right move is to consume a real governance engine — for us that is <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> — through stable provider seams from day one. kars's <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT Boundary</a> document says explicitly what kars never builds: no custom Signal primitives, no standalone audit chain, no parallel trust engine. Overlap is treated as a bug.</p>
+
+<h3>3. Inter-agent messaging needs broker-out-of-trust-set, not just A2A.</h3>
+<p>The <a href="https://a2aproject.dev/">A2A protocol</a> standardises message shape; it does not, by itself, remove the broker from the trust set. kars uses an end-to-end Signal-Protocol encrypted mesh where the relay routes ciphertext and cannot decrypt. The structural difference is the same as HTTPS-through-a-proxy versus PGP-encrypted email. Both are valid; they are not equivalent.</p>
 
 <hr/>
 
-<h2>How <em>kars</em> aligns with the broader ecosystem</h2>
+<h2>The honest scope statement — when kars is <em>not</em> for you</h2>
 
-<p>I do not want to be in a bubble, but I also want to be precise about what is integrated today and what is design-compatible direction. Here is the honest split:</p>
-
-<table>
-  <thead>
-    <tr><th>Component</th><th>Owner</th><th>How <em>kars</em> relates today</th></tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><a href="https://microsoft.github.io/agent-governance-toolkit/">Agent Governance Toolkit (AGT)</a></td>
-      <td>Microsoft</td>
-      <td><strong>Deep integration.</strong> Consumed through four provider traits (<code>MeshProvider</code> via <code>agentmesh = "4.0.0"</code> currently pinned to upstream git SHA <code>3322175d</code> for pre-release fixes, plus <code>PolicyDecisionProvider</code> / <code>AuditSink</code> / <code>SigningProvider</code>). Gap-closing features upstreamed back to AGT in <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2090">PR #2090</a>, <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2659">#2659</a>, and <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2719">#2719</a>. See <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT Boundary</a> for the exact responsibility split.</td>
-    </tr>
-    <tr>
-      <td><a href="https://github.com/kubernetes-sigs/agent-sandbox"><code>sigs/agent-sandbox</code></a></td>
-      <td>Kubernetes SIG</td>
-      <td><strong>Migration translator shipping today.</strong> <code>kars convert</code> translates the upstream schema to <code>KarsSandbox</code> (Use Case 6).</td>
-    </tr>
-    <tr>
-      <td><a href="https://kagent.dev">kagent</a></td>
-      <td>Solo.io / community</td>
-      <td><strong>Migration translator shipping today.</strong> <code>kars migrate from-kagent</code> translates kagent CRs to <code>KarsSandbox</code> (Use Case 6).</td>
-    </tr>
-    <tr>
-      <td><a href="https://agentgateway.dev/">agentgateway</a></td>
-      <td>Solo.io / Linux Foundation</td>
-      <td><strong>Composition story, not a current integration.</strong> agentgateway sits naturally at the cluster edge in front of model deployments; <em>kars</em>'s per-pod router enforces per-agent policy and holds zero credentials in the agent process. Same call path, different trust boundary. Not integrated today; nothing about <em>kars</em>'s shape prevents the composition.</td>
-    </tr>
-    <tr>
-      <td>A2A Protocol</td>
-      <td>community</td>
-      <td><strong>A2A gateway shipping today</strong> with mTLS-pinned <code>X-A2A-Agent-Subject</code> for cross-organisation inbound (Use Case 5). In-binary <code>AgentCard</code> JWS verification is library-complete; wiring it for non-AGC topologies is on the roadmap.</td>
-    </tr>
-    <tr>
-      <td>K8s baseline (PSA, NetworkPolicy, ServiceAccount, seccomp, KEP-753 sidecars)</td>
-      <td>Kubernetes upstream</td>
-      <td><strong>Hard requirement, never replaced.</strong> No CNI lock-in. No service-mesh dependency.</td>
-    </tr>
-  </tbody>
-</table>
-
-<h2>The honest scope statement — when <em>kars</em> is <em>not</em> the right choice</h2>
-
-<p>I take credibility seriously, so here is the short list of situations where I would tell you to use something else:</p>
+<p>I take credibility seriously. Here is the short list of situations where I would tell you to use something else:</p>
 <ul>
   <li><strong>Single agent, single user, single team, no adversarial-code threat model.</strong> Use a serverless function. Save yourself the operator overhead.</li>
-  <li><strong>Pure cluster-edge LLM traffic governance with no per-agent isolation requirement.</strong> Adopt <a href="https://agentgateway.dev/">agentgateway</a> directly. It is the right tool for that job.</li>
-  <li><strong>Single-framework shop with no multi-runtime requirement.</strong> If you are 100 % LangGraph and intend to stay there, you can run vanilla LangGraph on K8s and adopt <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> directly.</li>
-  <li><strong>No Kubernetes substrate.</strong> If you operate on bare VMs or pure serverless, <em>kars</em> does not yet have a target there.</li>
+  <li><strong>Pure cluster-edge LLM traffic governance.</strong> Adopt <a href="https://agentgateway.dev/">agentgateway</a> directly. It's the right tool for that job; kars composes with it, not against it.</li>
+  <li><strong>Single-framework shop, no multi-runtime requirement.</strong> Run your framework on K8s and adopt <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> directly.</li>
+  <li><strong>No Kubernetes substrate.</strong> If you operate on bare VMs or pure serverless, kars has no target there today.</li>
 </ul>
 
-<p>I will not try to convert those workloads. <em>kars</em>'s purpose is the workloads that <em>do</em> have the multi-agent, multi-team, adversarial, multi-runtime, regulated profile — because nothing else in the ecosystem currently serves that workload end-to-end on Kubernetes with this combination of trust boundary and governance integration.</p>
+<h2>How kars fits the broader open agentic stack</h2>
 
-<hr/>
+<p>Brendan's announcement frames it precisely: <em>"agentic systems need governance primitives and those primitives belong in the open."</em> kars is the K8s-native runtime that composes those open primitives. Here's the split:</p>
+
+<table>
+  <thead><tr><th>Component</th><th>Owner</th><th>How kars relates today</th></tr></thead>
+  <tbody>
+    <tr><td><a href="https://microsoft.github.io/agent-governance-toolkit/">Agent Governance Toolkit</a></td><td>Microsoft</td><td><strong>Deep integration.</strong> Four provider traits, <code>agentmesh = "4.0.0"</code> crate. Gap-closing features upstreamed (PRs #2090, #2659, #2719). See <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT Boundary</a>.</td></tr>
+    <tr><td><a href="https://learn.microsoft.com/en-us/agent-framework/">Microsoft Agent Framework</a></td><td>Microsoft</td><td>Shipping today as a kars first-class runtime (Python; .NET deferred pending <code>AgentMeshClient</code> for .NET in upstream AGT).</td></tr>
+    <tr><td><a href="https://aaif.io/">Agentic AI Foundation</a></td><td>Linux Foundation</td><td>Aligned. The open-standards framing kars takes its cues from. Public AAIF filing on the roadmap.</td></tr>
+    <tr><td><a href="https://learn.microsoft.com/en-us/azure/azure-linux/">Azure Linux</a> + <a href="https://learn.microsoft.com/en-us/azure/azure-linux/azure-container-linux-overview">Azure Container Linux</a></td><td>Microsoft</td><td>Substrate. AL3 today on AKS nodes + container bases; ACL for node OS (GA on AKS v1.34+) and AL4 distroless for compiled binary images are the planned moves as they land in AKS.</td></tr>
+    <tr><td><a href="https://github.com/kubernetes-sigs/agent-sandbox"><code>sigs/agent-sandbox</code></a></td><td>Kubernetes SIG</td><td><strong>Migration translator shipping.</strong> <code>kars convert</code> translates the upstream schema to <code>KarsSandbox</code> (Use Case 6).</td></tr>
+    <tr><td><a href="https://kagent.dev">kagent</a></td><td>Solo.io / community</td><td><strong>Migration translator shipping.</strong> <code>kars migrate from-kagent</code>.</td></tr>
+    <tr><td><a href="https://agentgateway.dev/">agentgateway</a></td><td>Solo.io / LF</td><td><strong>Compositional, not competing.</strong> agentgateway sits at the cluster edge for LLM-side traffic; kars's per-pod router enforces per-agent policy and holds zero credentials in the agent process. Same call path, different trust boundary.</td></tr>
+    <tr><td>A2A Protocol</td><td>community</td><td>A2A gateway shipping with mTLS-pinned subject for cross-org inbound (Use Case 5).</td></tr>
+    <tr><td>K8s baseline (PSA, NetworkPolicy, seccomp, <a href="https://kubernetes.io/blog/2023/08/25/native-sidecar-containers/">KEP-753</a> sidecars)</td><td>Kubernetes upstream</td><td><strong>Hard requirement, never replaced.</strong> No CNI lock-in. No service-mesh dependency.</td></tr>
+  </tbody>
+</table>
 
 <h2>What's on the roadmap</h2>
 
-<p>Themes ordered roughly by what we expect to ship first. Nothing here is dated; landing depends on what production use surfaces as the next bottleneck. The full list lives in <a href="https://github.com/Azure/kars/blob/main/docs/roadmap.md">docs/roadmap.md</a>.</p>
-
+<p>Themes ordered roughly by what we expect to ship first. The full backlog is in <a href="https://github.com/Azure/kars/blob/main/docs/roadmap.md">docs/roadmap.md</a>.</p>
 <ul>
-  <li><strong>Trust topology, end to end.</strong> Router-side <code>TrustGraph</code> mesh-admission gating (pre-handshake edge check, separate from KNOCK); dynamic <code>TrustGraph</code> projection so topology changes do not require a sandbox roll.</li>
-  <li><strong>Inference policy enforcement.</strong> Aggregate token budgets (per-hour / per-day windows) metered at the router with <code>rejectOnExceed</code>. Today only <code>perRequestTokens</code> is metered; aggregate counters are accepted on the spec and surfaced in status.</li>
-  <li><strong>A2A gateway hardening.</strong> Opt-in in-binary <code>AgentCard</code> JWS verification axum layer (the library is complete; the wiring is the gap).</li>
-  <li><strong>Admission and supply chain.</strong> Cosign-on-admission <code>ValidatingAdmissionPolicy</code> rejecting sandboxes whose images lack a matching cosign signature.</li>
-  <li><strong>Egress allowlist authority flip.</strong> Make the signed OCI allowlist artifact the only source of truth (inline <code>allowedEndpoints</code> becomes read-only convenience).</li>
-  <li><strong>More runtimes.</strong> CrewAI as a first-class adapter; MAF (.NET) returns when AGT ships <code>AgentMeshClient</code> for .NET; Strands / Google ADK once their tool-loop SDKs stabilise.</li>
-  <li><strong>Multi-cluster and DR.</strong> Federated mesh registry, cross-cluster <code>TrustGraph</code>, cross-cluster <code>kars handoff</code>, AgentMesh registry/relay disaster recovery, per-cluster token budgets.</li>
-  <li><strong>Observability and certification.</strong> Reproducible App Insights workbooks under <code>deploy/workbooks/</code>; CNCF Kubernetes AI Conformance once the upstream programme publishes.</li>
+  <li><strong>Stronger trust topology for multi-agent systems.</strong> Router-side <code>TrustGraph</code> admission gating (pre-handshake edge check), dynamic <code>TrustGraph</code> projection without sandbox restart.</li>
+  <li><strong>Aggregate token-budget enforcement.</strong> Per-hour/per-day windows metered at the router.</li>
+  <li><strong>A2A gateway hardening.</strong> Opt-in in-binary <code>AgentCard</code> JWS verification for non-AGC topologies.</li>
+  <li><strong>Admission-time supply-chain enforcement.</strong> Cosign-on-admission <code>ValidatingAdmissionPolicy</code>.</li>
+  <li><strong>Substrate refresh.</strong> Move binary images to Azure Linux 4.0 distroless when AKS support lands. Switch AKS node osSKU to Azure Container Linux when GA. Both are tracked-not-planned: we ship when they're production-stable on AKS.</li>
+  <li><strong>More runtimes.</strong> CrewAI, MAF .NET (returns when AGT ships <code>AgentMeshClient</code> for .NET), Strands, Google ADK.</li>
+  <li><strong>Multi-cluster &amp; DR.</strong> Federated mesh registry, cross-cluster <code>TrustGraph</code>, cross-cluster <code>kars handoff</code>, regional failover playbook.</li>
+  <li><strong>Observability &amp; certification.</strong> App Insights workbooks; CNCF Kubernetes AI Conformance once the upstream programme publishes; public AAIF filing.</li>
 </ul>
-
-<hr/>
 
 <h2>Come build with us</h2>
 
-<p>The codebase is at <a href="https://github.com/Azure/kars">github.com/Azure/kars</a>, MIT-licensed. Start with the <a href="https://github.com/Azure/kars/blob/main/docs/getting-started.md">getting-started guide</a>, then the <a href="https://github.com/Azure/kars/blob/main/docs/architecture.md">architecture doc</a>, then <a href="https://github.com/Azure/kars/blob/main/docs/use-cases.md">use cases</a>. The <a href="https://github.com/Azure/kars/blob/main/docs/maturity.md">feature maturity page</a> is the single source of truth for what is enforced today vs reconciler-only vs library-only vs roadmap.</p>
+<p>The codebase is at <a href="https://github.com/Azure/kars">github.com/Azure/kars</a>, MIT-licensed. The most useful contributions would be:</p>
 
-<p>What we will <em>not</em> accept in contributions:</p>
+<h4>Where we want help</h4>
 <ul>
-  <li>Changes that put Azure credentials into the agent process.</li>
-  <li>Changes that move the inference router out of the pod.</li>
-  <li>Changes that introduce a broker into the inter-agent encryption trust set.</li>
-  <li>Duplicates of <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> primitives we can invoke instead — see <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT Boundary §4</a>.</li>
-  <li>Mocks, stubs, or TODO placeholders in production code.</li>
+  <li>Additional runtime adapters — CrewAI and Semantic Kernel particularly.</li>
+  <li>A2A interop (the structured handshake from AgentMesh to external A2A peers).</li>
+  <li>Behavioural-drift detection over the mesh + tool-call telemetry.</li>
+  <li>Per-agent developer ingress for in-cluster chat / sessions / artifact retrieval.</li>
+  <li>OWASP Agentic AI Top 10 and NIST AI RMF mapping artifacts.</li>
+  <li>GKE / EKS deployment validation.</li>
+  <li>Security review and red-team scenarios.</li>
 </ul>
 
-<p>Those constraints are the moat. Everything else is open.</p>
+<h4>Some invariants are non-negotiable</h4>
+<ul>
+  <li>Credentials stay out of the agent process.</li>
+  <li>The inference router stays in the pod.</li>
+  <li>Inter-agent encryption remains end-to-end (the broker never enters the trust set).</li>
+  <li>AGT primitives are consumed, not duplicated — see <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT Boundary §4</a>.</li>
+  <li>No mocks, stubs, or TODO placeholders in production code.</li>
+</ul>
+
+<p>Everything else is open.</p>
 
 <hr/>
 
-<p class="lede" style="border-left-color: #107c10;">
-  If you are evaluating how to take agentic AI from pilot to production on Kubernetes, I would value the conversation. Start an <a href="https://github.com/Azure/kars/discussions">issue or discussion</a> on the repository, or reach out directly. The next 18 months of agentic AI will be decided by who solves the production governance problem — not the model quality problem. I think the answer should be open source, Kubernetes-native, and aligned with the upstream landscape. That is what <em>kars</em> is.
+<p class="lede" style="border-left-color: #107C10;">
+  If you're evaluating how to take agentic AI from pilot to production on Kubernetes, I'd value the conversation. Open an <a href="https://github.com/Azure/kars/discussions">issue or discussion</a> on the repository. The next 18 months of agentic AI will be decided less by model quality and more by production governance. I think that answer should be open source, K8s-native, and aligned with the upstream landscape Brendan described. That's what <em>kars</em> is.
 </p>
 
 <div class="footer">
-  <p><strong>Pal Lakatos-Toth</strong> — Maintainer, <em>kars</em>. The views in this post are my own.</p>
-  <p>Repository: <a href="https://github.com/Azure/kars">github.com/Azure/kars</a> · MIT license · <code>v0.1.0</code> · Tested on AKS and kind.</p>
-  <p>Cited works: <a href="https://microsoft.github.io/agent-governance-toolkit/">Microsoft Agent Governance Toolkit</a> · <a href="https://github.com/microsoft/agent-governance-toolkit/pull/2719">AGT PR #2719 (kars upstream contribution)</a> · <a href="https://github.com/kubernetes-sigs/agent-sandbox"><code>sigs/agent-sandbox</code></a> · <a href="https://agentgateway.dev/">agentgateway</a> · <a href="https://kubernetes.io/blog/2023/08/25/native-sidecar-containers/">KEP-753 native sidecars</a> · <a href="https://github.com/Azure/kars/blob/main/docs/maturity.md">kars feature maturity page</a> · <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT Boundary</a> · <a href="https://github.com/Azure/kars/blob/main/docs/roadmap.md">kars roadmap</a>.</p>
+  <p><strong>Pal Lakatos-Toth</strong> — Maintainer, <em>kars</em>. The views here are my own.</p>
+  <p>Repository <a href="https://github.com/Azure/kars">github.com/Azure/kars</a> · MIT license · <code>v0.1.0</code> · Tested on AKS and kind. Cited works: <a href="https://opensource.microsoft.com/blog/2026/05/18/from-open-source-to-agentic-systems-microsoft-at-open-source-summit-north-america-2026/">Brendan Burns — From open source to agentic systems</a> · <a href="https://microsoft.github.io/agent-governance-toolkit/">Agent Governance Toolkit</a> · <a href="https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing">AKS Pod Sandboxing</a> · <a href="https://techcommunity.microsoft.com/blog/linuxandopensourceblog/introducing-azure-container-linux-acl/4523411">Azure Container Linux</a> · <a href="https://techcommunity.microsoft.com/blog/linuxandopensourceblog/announcing-azure-linux-4-0-purpose-built-for-azure-now-in-public-preview/4524267">Azure Linux 4.0</a> · <a href="https://aaif.io/">Agentic AI Foundation</a> · <a href="https://github.com/Azure/kars/blob/main/docs/maturity.md">kars feature maturity</a> · <a href="https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md">AGT Boundary</a>.</p>
 </div>
 
 </article>
