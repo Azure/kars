@@ -397,7 +397,10 @@ def _load_dedupe_from_crs() -> dict[tuple[str, str, str], float]:
         if ts_raw:
             try:
                 ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
-            except Exception:
+            except (ValueError, TypeError):
+                # creationTimestamp absent or malformed — treat as 0.0 so this
+                # CR doesn't dominate the dedupe state vs a CR with a real
+                # timestamp; the actual reconcile loop continues unaffected.
                 pass
         key = (ns, atype, name)
         if ts > out.get(key, 0.0):
