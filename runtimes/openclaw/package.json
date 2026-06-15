@@ -1,7 +1,7 @@
 {
   "name": "@kars/runtime-openclaw",
   "version": "0.1.0-alpha.1",
-  "description": "kars runtime adapter for OpenClaw — loaded as an OpenClaw plugin inside the sandbox pod",
+  "description": "kars runtime adapter for OpenClaw \u2014 loaded as an OpenClaw plugin inside the sandbox pod",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -48,5 +48,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
   }
 }
