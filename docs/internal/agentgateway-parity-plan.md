@@ -24,12 +24,16 @@ You need all three. The list below is what each takes, ordered by ROI.
 
 The gap analysis from the [comparison matrix](competitive-positioning-2026-06.md#comparison-matrix). Concrete deliverables, with rough estimates.
 
+> **Strategy note (2026-06-15):** The original draft of this plan listed "OpenAI-compatible / Anthropic-compatible front-door endpoint" (steal-from-Orka, match-agentgateway) as item #1–#2. We deliberately removed those after re-examining the strategy. A front-door is a *centralized model gateway for external clients* — that is precisely what agentgateway is for, and adding it to kars would (a) collide with agentgateway in the category where they dominate, (b) contradict our per-pod trust-boundary claim (an external IDE has no egress-guard and is a trusted, not adversarial, caller), and (c) blur our product positioning. **If a customer needs external-IDE-to-cluster traffic with governed credentials, the right composition is agentgateway in front of the cluster + kars inside the cluster for agents.** We document that. We do not reimplement it.
+>
+> The freed engineering belongs in the *agent-runtime egress* category — making the inference router measurably better than agentgateway's gateway-side enforcement *for agent-originated traffic*. Items 1–2 in the table below are renumbered to reflect this.
+
 ### Must-haves (the things evaluators will explicitly check for)
 
 | # | Item | Effort | Owner | Notes |
 |---|---|---|---|---|
-| 1 | OpenAI-compatible `/openai/v1/chat/completions` front door (auth via SA tokens) | ~1 week | router | Continue/Cursor/OpenAI-SDK "just work". Single biggest UX gap. Steal from Orka. |
-| 2 | Anthropic-compatible `/anthropic/v1/messages` front door | ~3 days | router | Claude Code support. Sister to #1. |
+| 1 | Sub-agent spawn governance hardening: validate target / inherit creds / propagate audit context across spawn chains | ~2 weeks | controller + router | Agent-specific; agentgateway has nothing here because it isn't an agent runtime. Strongest differentiation lever. |
+| 2 | Unified per-agent action-cost ledger across model + tool + MCP + mesh + spawn (one budget, one audit trail, all surfaces) | ~2 weeks | router + controller | Agentgateway tracks model calls. We should track *full agent action cost*. This is what agent operators actually want to budget on. |
 | 3 | Native Anthropic LLM provider in router (no runtime-adapter dep) | ~1 week | router | We have Anthropic-via-runtime; not first-class on the router |
 | 4 | Native AWS Bedrock LLM provider | ~1 week | router | Removes Azure-lock perception |
 | 5 | Native Google Gemini / Vertex AI LLM provider | ~1 week | router | Ditto |
@@ -42,11 +46,11 @@ The gap analysis from the [comparison matrix](competitive-positioning-2026-06.md
 | 12 | Cost-tracking dashboard in Grafana with per-key + per-sandbox + per-team breakdown | ~3 days | monitoring | Pairs with #11 |
 | 13 | MCP federation: one logical `McpServer` exposing N backends | ~2 weeks | controller + router | The "Virtual MCP" pattern |
 | 14 | CEL-based authz rules in `ToolPolicy` | ~2 weeks | controller + router | Beyond fixed schemas; CEL is the K8s-standard expression language |
-| 15 | OpenAI Realtime API support (voice + bidi streaming) | ~2 weeks | router | Requires WebSocket-aware router routing |
-| 16 | Model aliasing + content-based routing (route by request body) | ~1 week | router | Standard agentgateway capability |
+| 15 | OpenAI Realtime API support (voice + bidi streaming) | ~2 weeks | router | Requires WebSocket-aware router routing — agent voice agents are growing fast |
+| 16 | Model aliasing + content-based routing (route by request body) | ~1 week | router | Standard egress capability for agents |
 | 17 | Model failover with outlier detection | ~1 week | router | Resilience parity |
-| 18 | Prompt enrichment + prompt templates + request transformations | ~1-2 weeks | router | Lower priority — these are convenience, not threat-model |
-| 19 | OpenAPI / function-calling response shaping patterns | ~3 days | router | Mostly docs; the router already handles function calling |
+| 18 | Mesh-aware quality-of-service: per-peer rate-limit + fair-share scheduling, KNOCK-result-aware budget allocation | ~2 weeks | router | Mesh-specific; only kars has this surface |
+| 19 | Prompt enrichment + prompt templates + request transformations | ~1-2 weeks | router | Lower priority — these are convenience, not threat-model |
 | 20 | MCP auth: JWT validation, Keycloak / OIDC provider support | ~1 week | router | We have basic; agentgateway has broad |
 
 **Subtotal:** ~18–22 engineer-weeks to close every item on this list.
