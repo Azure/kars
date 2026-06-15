@@ -121,7 +121,7 @@ kars connect demo</code></pre>
 <h2>The architecture, in one picture</h2>
 
 <figure class="diagram-wrap">
-<svg viewBox="0 0 1200 700" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="kars architecture: an AKS cluster on Azure Linux running two kars sandbox pods (researcher in enhanced isolation, writer in confidential isolation via Kata + AMD SEV-SNP). Each sandbox has an init egress-guard, an agent container with no credentials, and an inference-router sidecar that holds the per-sandbox Microsoft Entra Agent ID. The Signal Protocol session lives end-to-end inside the agent processes; routers WS-bridge opaque ciphertext frames and handle Entra Agent ID authentication. The Microsoft Agent Governance Toolkit sits beneath as the consumed governance foundation.">
+<svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="kars architecture: an AKS cluster on Azure Linux running two kars sandbox pods (researcher in enhanced isolation, writer in confidential isolation via Kata + AMD SEV-SNP). Each sandbox has an init egress-guard, an agent container with no credentials, and an inference-router sidecar that holds the per-sandbox Microsoft Entra Agent ID. The Signal Protocol session lives end-to-end inside the agent processes; routers WS-bridge opaque ciphertext frames through the external AgentMesh relay and discover peer identities through the AgentMesh registry. External Azure AI Foundry, MCP servers, AgentMesh relay and registry sit outside the cluster trust boundary. The Microsoft Agent Governance Toolkit sits beneath as the consumed governance foundation.">
   <defs>
     <style>
       .h-title { font-family: "Segoe UI", -apple-system, "Inter", sans-serif; font-size: 30px; font-weight: 700; fill: #0a0a0a; letter-spacing: -0.5px; }
@@ -180,17 +180,42 @@ kars connect demo</code></pre>
   <text x="60" y="50" class="h-title">The kars architecture</text>
   <text x="60" y="76" class="h-sub">One sandbox per agent. Zero credentials in the agent. End-to-end encrypted mesh. AGT-governed.</text>
 
-  <!-- ============== AKS CLUSTER FRAME (extended for encryption visual below cards) ============== -->
-  <rect x="40" y="110" width="1120" height="490" rx="14" fill="#fafafa" stroke="#e5e5e5" stroke-width="1"/>
-  <text x="60" y="134" class="tag-cluster">AKS CLUSTER</text>
-  <line x1="60" y1="142" x2="1140" y2="142" stroke="#e5e5e5" stroke-width="1"/>
+  <!-- ============== EXTERNAL SYSTEMS ROW (outside the cluster) ============== -->
+  <text x="60" y="118" class="tag-cluster">EXTERNAL  ·  OUTSIDE THE TRUST BOUNDARY</text>
+  <line x1="380" y1="113" x2="1140" y2="113" stroke="#e5e5e5" stroke-width="1"/>
+
+  <g transform="translate(60, 128)">
+    <rect x="0" y="0" width="260" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
+    <text x="16" y="25" class="card-title">Azure AI Foundry</text>
+    <text x="16" y="46" class="card-sub">model endpoints · Workload-Identity-authed</text>
+  </g>
+  <g transform="translate(340, 128)">
+    <rect x="0" y="0" width="260" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
+    <text x="16" y="25" class="card-title">MCP servers · web · tools</text>
+    <text x="16" y="46" class="card-sub">L7 allowlist + OISD / URLhaus blocklist</text>
+  </g>
+  <g transform="translate(620, 128)">
+    <rect x="0" y="0" width="260" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
+    <text x="16" y="25" class="card-title">AgentMesh relay</text>
+    <text x="16" y="46" class="card-sub">routes ciphertext only · not in trust set</text>
+  </g>
+  <g transform="translate(900, 128)">
+    <rect x="0" y="0" width="240" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
+    <text x="16" y="25" class="card-title">AgentMesh registry</text>
+    <text x="16" y="46" class="card-sub">prekey bundles + identity discovery</text>
+  </g>
+
+  <!-- ============== AKS CLUSTER FRAME ============== -->
+  <rect x="40" y="220" width="1120" height="490" rx="14" fill="#fafafa" stroke="#e5e5e5" stroke-width="1"/>
+  <text x="60" y="244" class="tag-cluster">AKS CLUSTER</text>
+  <line x1="160" y1="240" x2="1140" y2="240" stroke="#e5e5e5" stroke-width="1"/>
 
   <!-- ============== SANDBOX A — researcher · ENHANCED isolation (wider spacing for centered encryption) ============== -->
-  <g transform="translate(60, 160)" filter="url(#shadow)">
+  <g transform="translate(60, 270)" filter="url(#shadow)">
     <rect x="0" y="0" width="400" height="285" rx="10" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
     <rect x="0" y="0" width="400" height="4" fill="#0078D4"/>
   </g>
-  <g transform="translate(60, 160)">
+  <g transform="translate(60, 270)">
     <text x="22" y="34" class="card-title">researcher</text>
     <text x="22" y="52" class="card-sub">kars sandbox  ·  namespace kars-researcher</text>
     <!-- isolation pill -->
@@ -214,8 +239,8 @@ kars connect demo</code></pre>
       </g>
       <text x="16" y="56" class="h-component">agent</text>
       <text x="16" y="76" class="annotation">UID 1000 · read-only</text>
-      <text x="16" y="104" class="body" fill="#92400e">no credentials</text>
-      <text x="16" y="124" class="body" fill="#92400e">no public net</text>
+      <text x="16" y="104" class="body" fill="#92400e">•  no credentials</text>
+      <text x="16" y="124" class="body" fill="#92400e">•  no public net</text>
     </g>
 
     <!-- router box -->
@@ -236,7 +261,7 @@ kars connect demo</code></pre>
   </g>
 
   <!-- ============== SANDBOX B — writer · CONFIDENTIAL isolation ============== -->
-  <g transform="translate(740, 160)" filter="url(#shadow)">
+  <g transform="translate(740, 270)" filter="url(#shadow)">
     <rect x="0" y="0" width="400" height="285" rx="10" fill="#ffffff" stroke="#e0e0e0" stroke-width="1"/>
     <rect x="0" y="0" width="400" height="4" fill="#5C2D91"/>
   </g>
@@ -262,8 +287,8 @@ kars connect demo</code></pre>
       </g>
       <text x="16" y="56" class="h-component">agent</text>
       <text x="16" y="76" class="annotation">UID 1000 · read-only</text>
-      <text x="16" y="104" class="body" fill="#92400e">no credentials</text>
-      <text x="16" y="124" class="body" fill="#92400e">no public net</text>
+      <text x="16" y="104" class="body" fill="#92400e">•  no credentials</text>
+      <text x="16" y="124" class="body" fill="#92400e">•  no public net</text>
     </g>
 
     <g transform="translate(210, 116)">
@@ -284,25 +309,25 @@ kars connect demo</code></pre>
   </g>
 
   <!-- ============== END-TO-END ENCRYPTED MESH ============== -->
-  <!-- Connection anchored at the HORIZONTAL MIDDLE of the BOTTOM edge of each sandbox card.
-       Card A center-bottom: x=60+200=260, y=445.  Card B center-bottom: x=740+200=940, y=445.
-       Curve naturally spans CENTERED between the two cards. Lock at apex (x=600). -->
-  <path d="M 260 450 C 260 510, 940 510, 940 450" stroke="#0078D4" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-  <circle cx="260" cy="450" r="3.5" fill="#0078D4"/>
-  <circle cx="940" cy="450" r="3.5" fill="#0078D4"/>
+  <!-- Connection anchored at HORIZONTAL MIDDLE of BOTTOM edge of each card.
+       Card A center-bottom: x=60+200=260, y=555.  Card B center-bottom: x=740+200=940, y=555.
+       Curve naturally spans CENTERED between cards. Lock at apex (x=600). -->
+  <path d="M 260 560 C 260 620, 940 620, 940 560" stroke="#0078D4" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <circle cx="260" cy="560" r="3.5" fill="#0078D4"/>
+  <circle cx="940" cy="560" r="3.5" fill="#0078D4"/>
 
-  <!-- Lock badge at the curve apex (x=600 = midpoint of 260+940) -->
-  <g transform="translate(584, 494)" color="#0078D4">
+  <!-- Lock badge at the curve apex (x=600) -->
+  <g transform="translate(584, 604)" color="#0078D4">
     <circle cx="16" cy="16" r="17" fill="#ffffff" stroke="#0078D4" stroke-width="2"/>
     <use href="#lock" x="6" y="6" width="20" height="20"/>
   </g>
 
   <!-- Encryption label CENTERED below the lock, with bottom padding inside cluster -->
-  <text x="600" y="555" class="lock-text" text-anchor="middle">END-TO-END ENCRYPTED — agent to agent</text>
-  <text x="600" y="574" class="lock-sub" text-anchor="middle">AGT AgentMesh  ·  Signal Protocol (X3DH + Double Ratchet)  ·  routers WS-bridge opaque ciphertext</text>
+  <text x="600" y="665" class="lock-text" text-anchor="middle">END-TO-END ENCRYPTED — agent to agent</text>
+  <text x="600" y="684" class="lock-sub" text-anchor="middle">AGT AgentMesh  ·  Signal Protocol (X3DH + Double Ratchet)  ·  routers WS-bridge opaque ciphertext</text>
 
   <!-- ============== AGT FOUNDATION ROW (close to cluster, text centered) ============== -->
-  <g transform="translate(40, 615)">
+  <g transform="translate(40, 725)">
     <rect x="0" y="0" width="1120" height="56" rx="10" fill="#faf7ff" stroke="#e0d4ff" stroke-width="1"/>
     <rect x="0" y="0" width="5" height="56" rx="2" fill="#5C2D91"/>
     <text x="560" y="24" class="agt-title" text-anchor="middle">Microsoft Agent Governance Toolkit (AGT)</text>
