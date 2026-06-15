@@ -198,38 +198,38 @@ kars connect demo</code></pre>
     <rect x="245" y="22" width="100" height="22" rx="11" fill="#107C10"/>
     <text x="295" y="37" class="iso-pill" text-anchor="middle">ENHANCED</text>
 
-    <!-- egress-guard banner -->
+    <!-- egress-guard banner (text shortened to fit) -->
     <g transform="translate(22, 68)">
       <rect x="0" y="0" width="316" height="34" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1"/>
       <g transform="translate(10, 8)" color="#c2410c">
         <use href="#shield-check" width="18" height="18"/>
       </g>
-      <text x="36" y="22" class="body" fill="#9a3412"><tspan font-weight="700">egress-guard init</tspan>  blocks UID 1000 from the network</text>
+      <text x="36" y="22" class="body" fill="#9a3412"><tspan font-weight="700">egress-guard</tspan>  ·  iptables default-deny on UID 1000</text>
     </g>
 
-    <!-- agent box -->
+    <!-- agent box (vertically balanced — icon top, text follows) -->
     <g transform="translate(22, 116)">
       <rect x="0" y="0" width="150" height="148" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1.2"/>
-      <g transform="translate(16, 16)" color="#92400e">
+      <g transform="translate(16, 14)" color="#92400e">
         <use href="#shield-x" width="22" height="22"/>
       </g>
-      <text x="16" y="68" class="h-component">agent</text>
-      <text x="16" y="90" class="annotation">UID 1000 · read-only</text>
-      <text x="16" y="116" class="body" fill="#92400e">no credentials</text>
-      <text x="16" y="134" class="body" fill="#92400e">no public net</text>
+      <text x="16" y="56" class="h-component">agent</text>
+      <text x="16" y="76" class="annotation">UID 1000 · read-only</text>
+      <text x="16" y="104" class="body" fill="#92400e">no credentials</text>
+      <text x="16" y="124" class="body" fill="#92400e">no public net</text>
     </g>
 
-    <!-- router box -->
+    <!-- router box (vertically balanced) -->
     <g transform="translate(188, 116)">
       <rect x="0" y="0" width="150" height="148" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.2"/>
-      <g transform="translate(16, 16)" color="#1e40af">
+      <g transform="translate(16, 14)" color="#1e40af">
         <use href="#key" width="22" height="22"/>
       </g>
-      <text x="16" y="68" class="h-component">router</text>
-      <text x="16" y="90" class="annotation">UID 1001 · sidecar</text>
-      <text x="16" y="113" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> Entra Agent ID</text>
-      <text x="16" y="129" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> policy &amp; budget</text>
-      <text x="16" y="145" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> audit chain</text>
+      <text x="16" y="56" class="h-component">router</text>
+      <text x="16" y="76" class="annotation">UID 1001 · sidecar</text>
+      <text x="16" y="100" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> Entra Agent ID</text>
+      <text x="16" y="118" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> policy &amp; budget</text>
+      <text x="16" y="136" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> audit chain</text>
     </g>
 
     <!-- agent → router arrow -->
@@ -253,30 +253,30 @@ kars connect demo</code></pre>
       <g transform="translate(10, 8)" color="#c2410c">
         <use href="#shield-check" width="18" height="18"/>
       </g>
-      <text x="36" y="22" class="body" fill="#9a3412"><tspan font-weight="700">egress-guard init</tspan>  blocks UID 1000 from the network</text>
+      <text x="36" y="22" class="body" fill="#9a3412"><tspan font-weight="700">egress-guard</tspan>  ·  iptables default-deny on UID 1000</text>
     </g>
 
     <g transform="translate(22, 116)">
       <rect x="0" y="0" width="150" height="148" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1.2"/>
-      <g transform="translate(16, 16)" color="#92400e">
+      <g transform="translate(16, 14)" color="#92400e">
         <use href="#shield-x" width="22" height="22"/>
       </g>
-      <text x="16" y="68" class="h-component">agent</text>
-      <text x="16" y="90" class="annotation">UID 1000 · read-only</text>
-      <text x="16" y="116" class="body" fill="#92400e">no credentials</text>
-      <text x="16" y="134" class="body" fill="#92400e">no public net</text>
+      <text x="16" y="56" class="h-component">agent</text>
+      <text x="16" y="76" class="annotation">UID 1000 · read-only</text>
+      <text x="16" y="104" class="body" fill="#92400e">no credentials</text>
+      <text x="16" y="124" class="body" fill="#92400e">no public net</text>
     </g>
 
     <g transform="translate(188, 116)">
       <rect x="0" y="0" width="150" height="148" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.2"/>
-      <g transform="translate(16, 16)" color="#1e40af">
+      <g transform="translate(16, 14)" color="#1e40af">
         <use href="#key" width="22" height="22"/>
       </g>
-      <text x="16" y="68" class="h-component">router</text>
-      <text x="16" y="90" class="annotation">UID 1001 · sidecar</text>
-      <text x="16" y="113" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> Entra Agent ID</text>
-      <text x="16" y="129" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> policy &amp; budget</text>
-      <text x="16" y="145" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> audit chain</text>
+      <text x="16" y="56" class="h-component">router</text>
+      <text x="16" y="76" class="annotation">UID 1001 · sidecar</text>
+      <text x="16" y="100" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> Entra Agent ID</text>
+      <text x="16" y="118" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> policy &amp; budget</text>
+      <text x="16" y="136" class="body" fill="#1e40af"><tspan font-weight="700">+</tspan> audit chain</text>
     </g>
     <line x1="172" y1="190" x2="188" y2="190" stroke="#1e40af" stroke-width="2" marker-end="url(#arr-blue)"/>
 
@@ -310,23 +310,22 @@ kars connect demo</code></pre>
     <text x="34" y="255" class="body"><tspan font-family="Cascadia Code, monospace" font-size="11" fill="#5b21b6">$ kars sre install · talk · diagnose</tspan></text>
   </g>
 
-  <!-- ============== END-TO-END ENCRYPTED MESH (clean curve, no arrowheads, lock badge as focal point) ============== -->
-  <!-- Agent A box bottom-mid: x=155, y=445.  Agent B box bottom-mid: x=540, y=445.
-       Curve dips through the encryption label zone. NO arrowheads — bidirectional channel; lock is the focal point. -->
-  <path d="M 155 450 C 155 510, 540 510, 540 450" stroke="#0078D4" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-
-  <!-- Small connector caps at curve endpoints (subtle dots to mark agent attachment) -->
+  <!-- ============== END-TO-END ENCRYPTED MESH ============== -->
+  <!-- Compact curve that dips down between the cards. Lock at apex.
+       Text label sits CENTERED BELOW the curve with clean clearance (no overlap). -->
+  <path d="M 155 450 C 155 490, 540 490, 540 450" stroke="#0078D4" stroke-width="2.5" fill="none" stroke-linecap="round"/>
   <circle cx="155" cy="450" r="3.5" fill="#0078D4"/>
   <circle cx="540" cy="450" r="3.5" fill="#0078D4"/>
 
-  <!-- Lock badge at apex -->
-  <g transform="translate(331, 484)" color="#0078D4">
+  <!-- Lock badge at curve apex -->
+  <g transform="translate(331, 470)" color="#0078D4">
     <circle cx="16" cy="16" r="17" fill="#ffffff" stroke="#0078D4" stroke-width="2"/>
     <use href="#lock" x="6" y="6" width="20" height="20"/>
   </g>
 
-  <text x="382" y="491" class="lock-text">END-TO-END ENCRYPTED — agent to agent</text>
-  <text x="382" y="510" class="lock-sub">AGT AgentMesh  ·  Signal Protocol (X3DH + Double Ratchet)  ·  routers WS-bridge opaque ciphertext</text>
+  <!-- Encryption label CENTERED below the entire curve, no overlap -->
+  <text x="347" y="535" class="lock-text" text-anchor="middle">END-TO-END ENCRYPTED — agent to agent</text>
+  <text x="347" y="554" class="lock-sub" text-anchor="middle">AGT AgentMesh  ·  Signal Protocol (X3DH + Double Ratchet)  ·  routers WS-bridge opaque ciphertext</text>
 
   <!-- ============== AGT FOUNDATION ROW ============== -->
   <g transform="translate(40, 590)">
