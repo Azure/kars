@@ -69,8 +69,30 @@ LABEL org.opencontainers.image.title="kars Hermes Sandbox" \
 # to grep when absent. Azure Linux 3 tdnf doesn't ship ripgrep; we skip
 # the optional dep rather than pulling cargo just to build it.
 RUN tdnf install -y --refresh \
-        git jq ca-certificates nodejs nodejs-npm \
+        git jq ca-certificates nodejs nodejs-npm tar xz \
     && tdnf clean all
+
+# ---- Pin Node 22 for the Hermes TUI ------------------------------------
+# Azure Linux 3 ships Node 24, but the Hermes ui-tui bundle ships a
+# pre-built JS that crashes (SIGSEGV, ~380MB core dump) on Node 24 —
+# its esbuild pre-build target is Node 22. The TUI is what backs the
+# dashboard's in-browser "Chat" tab (and `hermes chat --tui` on the
+# CLI), so a SIGSEGV here = the web chat renders, opens its WS, then
+# the spawned TUI child dies silently and the operator can't type.
+#
+# We install a vendor-supplied Node 22 binary at /opt/node22/ and
+# point Hermes' TUI launcher at it via the upstream-supported
+# HERMES_TUI_NODE env var. System Node 24 stays in place so
+# `dep_ensure` and other build-time tools that don't care about
+# bundle compat keep working.
+ARG NODE22_VERSION=22.20.0
+RUN ARCH="$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/')" \
+    && curl -fsSL -o /tmp/node22.tar.xz \
+       "https://nodejs.org/dist/v${NODE22_VERSION}/node-v${NODE22_VERSION}-linux-${ARCH}.tar.xz" \
+    && mkdir -p /opt/node22 \
+    && tar -xJf /tmp/node22.tar.xz -C /opt/node22 --strip-components=1 \
+    && rm -f /tmp/node22.tar.xz \
+    && /opt/node22/bin/node --version
 
 # ---- Install AGT-Python wheels (governance primitives only in Act 1) ----
 # The wheels directory rides in the build context via
@@ -87,8 +109,40 @@ RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
 # Pinned to a specific release tag for build reproducibility. Operators
 # bumping to a newer Hermes should also re-verify the kars runtime
 # contract is still honored (entrypoint env shape + plugin context API).
-ARG HERMES_VERSION=0.15.2
+ARG HERMES_VERSION=0.16.0
 RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
+
+# ---- Channel adapter libraries -----------------------------------------
+# Hermes auto-detects channels (Telegram / Slack / Discord) from env
+# vars (TELEGRAM_BOT_TOKEN, SLACK_BOT_TOKEN, DISCORD_BOT_TOKEN) and
+# tries to instantiate an adapter per channel. Each adapter is a
+# soft-optional dep — Hermes itself doesn't pull them — so we install
+# them here so the kars runtime image is "channels work out of the box"
+# when a credentials secret carries the token. Pinned to the
+# adapter-stable major:
+#   - python-telegram-bot 21.x   (Bot API 7.x, async-first)
+#   - slack-sdk 3.x              (Web + Socket Mode)
+#   - discord.py 2.x             (gateway client)
+# Bumping these requires re-verifying the Hermes channel adapters.
+RUN pip install --no-cache-dir \
+    "python-telegram-bot>=21,<22" \
+    "slack-sdk>=3,<4" \
+    "discord.py>=2,<3"
+
+# ---- Hermes dashboard web UI deps ---------------------------------------
+# `hermes dashboard` (the in-browser PTY chat the Headlamp SRE Console
+# embeds) needs FastAPI + Uvicorn + WebSockets + Jinja2 to start. These
+# are soft-optional in hermes-agent itself, so we pull them here so the
+# dashboard is "Just Works" inside every kars sandbox without an
+# operator having to pip-install at runtime. Pins follow Hermes 0.15.x
+# upstream's tested matrix.
+RUN pip install --no-cache-dir \
+    "fastapi>=0.110,<1" \
+    "uvicorn[standard]>=0.30,<1" \
+    "websockets>=12,<14" \
+    "jinja2>=3.1,<4" \
+    "python-multipart>=0.0.9,<1" \
+    "ptyprocess>=0.7,<1"
 
 # ---- Install the kars-runtime-hermes plugin -----------------------------
 # This is the in-pod adapter that registers kars_spawn, foundry_*,

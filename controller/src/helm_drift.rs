@@ -33,7 +33,7 @@
 #[cfg(test)]
 use crate::crd_validations::{
     a2a_agent_crd, egress_approval_crd, inference_policy_crd, kars_eval_crd, kars_memory_crd,
-    mcp_server_crd, tool_policy_crd, trust_graph_crd,
+    kars_sre_action_crd, mcp_server_crd, tool_policy_crd, trust_graph_crd,
 };
 
 const MCP_HELM_CRD_PATH: &str = concat!(
@@ -74,6 +74,11 @@ const TRUSTGRAPH_HELM_CRD_PATH: &str = concat!(
 const EGRESSAPPROVAL_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../deploy/helm/kars/templates/crd-egressapproval.yaml"
+);
+
+const KARSSREACTION_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/kars/templates/crd-karssreaction.yaml"
 );
 
 /// Strip non-schema fields that legitimately differ between the Rust
@@ -301,5 +306,26 @@ mod tests {
             rust_crd_value,
             "egressapproval",
         );
+    }
+
+    /// One-shot dumper for the karssreaction CRD. Run via:
+    ///
+    ///   DUMP_KARSSREACTION_CRD_YAML=1 cargo test --bin kars-controller \
+    ///       helm_drift::tests::dump_karssreaction_crd_yaml -- --nocapture
+    #[test]
+    fn dump_karssreaction_crd_yaml() {
+        if std::env::var("DUMP_KARSSREACTION_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = kars_sre_action_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    #[test]
+    fn helm_karssreaction_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(kars_sre_action_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(KARSSREACTION_HELM_CRD_PATH, rust_crd_value, "karssreaction");
     }
 }

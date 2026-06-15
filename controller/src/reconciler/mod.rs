@@ -89,6 +89,170 @@ pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'
     }
 }
 
+/// Build the egress-guard init-container command.
+///
+/// Standard sandboxes (every kind except SRE) get the full lockdown:
+/// UID 1000 → loopback + DNS allowed, everything else dropped, with
+/// :80/:443 NAT-redirected to the inference-router on :8444 for L7
+/// policy + audit.
+///
+/// SRE-mode sandboxes (labelled `kars.azure.com/role=sre`) get ONE
+/// extra rule inserted into the OUTPUT NAT chain BEFORE the generic
+/// REDIRECT:  apiserver-bound traffic (KUBERNETES_SERVICE_HOST :
+/// KUBERNETES_SERVICE_PORT_HTTPS, both kubelet-auto-injected envs)
+/// is RETURNed — i.e. NOT NAT'd to :8444 — so the SRE plugin's K8s
+/// API client (sre_kube.py) can hit the apiserver directly with its
+/// projected SA token.
+///
+/// The K8s audit log is the audit surface for these apiserver calls
+/// (the router's L7 audit doesn't capture them, but K8s audit is
+/// stronger — every call carries the SA identity and the verb).
+///
+/// Privilege-containment design:  this capability is uniquely held by
+/// the SRE sandbox per the proposal §7.8. Future Slice 3 will add
+/// ValidatingAdmissionPolicies to gate WHO can apply the
+/// `role=sre` label (only chart-installer SAs; see §7.8.10 design).
+pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
+    let mut cmd = String::with_capacity(1024);
+    // Filter chain (OUTPUT): UID 1000 → allow loopback + DNS +
+    // established, then DROP. Same for every sandbox kind.
+    cmd.push_str("iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ");
+    cmd.push_str("iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ");
+    cmd.push_str("iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ");
+    cmd.push_str(
+        "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && "
+    );
+
+    // SRE-mode-only: filter-chain ACCEPT for apiserver-bound traffic.
+    // The filter chain runs AFTER the NAT chain — the NAT-bypass RETURN
+    // below just decides "don't redirect", but the filter chain's DROP
+    // (next rule) would still kill the packet. We have to ACCEPT it
+    // here BEFORE the catch-all DROP.
+    if is_sre_sandbox {
+        cmd.push_str(
+            "iptables -A OUTPUT -m owner --uid-owner 1000 \
+             -d \"${KUBERNETES_SERVICE_HOST}\" \
+             -p tcp --dport \"${KUBERNETES_SERVICE_PORT_HTTPS:-443}\" \
+             -j ACCEPT && ",
+        );
+    }
+
+    cmd.push_str("iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ");
+
+    // SRE-mode-only:  NAT-chain apiserver bypass.  Inserted BEFORE the
+    // generic :443 REDIRECT so apiserver traffic short-circuits to the
+    // real upstream rather than the router. KUBERNETES_SERVICE_HOST
+    // and KUBERNETES_SERVICE_PORT_HTTPS are auto-injected by the
+    // kubelet on every container (including init containers).
+    if is_sre_sandbox {
+        cmd.push_str(
+            "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 \
+             -d \"${KUBERNETES_SERVICE_HOST}\" \
+             -p tcp --dport \"${KUBERNETES_SERVICE_PORT_HTTPS:-443}\" \
+             -j RETURN && ",
+        );
+    }
+
+    // NAT chain (OUTPUT):  :80/:443 → REDIRECT to :8444 (transparent
+    // proxy in the inference-router sidecar).  Same for every sandbox.
+    cmd.push_str(
+        "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && "
+    );
+    cmd.push_str(
+        "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && "
+    );
+
+    if is_sre_sandbox {
+        cmd.push_str(
+            "echo 'egress-guard: UID 1000 → transparent proxy on :8444 + apiserver bypass (SRE mode)'"
+        );
+    } else {
+        cmd.push_str(
+            "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'",
+        );
+    }
+
+    cmd
+}
+
+#[cfg(test)]
+#[allow(clippy::module_inception)]
+mod egress_guard_tests {
+    use super::build_egress_guard_command;
+
+    #[test]
+    fn standard_sandbox_has_no_apiserver_bypass() {
+        let cmd = build_egress_guard_command(false);
+        assert!(!cmd.contains("KUBERNETES_SERVICE_HOST"));
+        assert!(cmd.contains("REDIRECT --to-port 8444"));
+        assert!(cmd.contains("(learn + enforce)"));
+        assert!(!cmd.contains("apiserver bypass"));
+    }
+
+    #[test]
+    fn sre_sandbox_inserts_apiserver_bypass_before_redirect() {
+        let cmd = build_egress_guard_command(true);
+        // The bypass MUST come before the :443 REDIRECT — otherwise
+        // the REDIRECT wins (iptables -A appends; rules evaluate in
+        // order) and the bypass is dead code.
+        let bypass_pos = cmd
+            .find("-t nat -A OUTPUT -m owner --uid-owner 1000              -d \"${KUBERNETES_SERVICE_HOST}\"")
+            .or_else(|| cmd.find("-t nat -A OUTPUT -m owner --uid-owner 1000 \t\t\t -d \"${KUBERNETES_SERVICE_HOST}\""))
+            .or_else(|| {
+                // Match the NAT-chain bypass specifically (not the filter ACCEPT)
+                cmd.match_indices("-t nat -A OUTPUT")
+                    .find(|(i, _)| cmd[*i..].contains("KUBERNETES_SERVICE_HOST"))
+                    .map(|(i, _)| i)
+            })
+            .expect("NAT-chain bypass rule missing");
+        let redirect_pos = cmd
+            .find("--dport 443 -j REDIRECT")
+            .expect("redirect rule missing");
+        assert!(
+            bypass_pos < redirect_pos,
+            "NAT bypass at {bypass_pos} must precede redirect at {redirect_pos}"
+        );
+        assert!(cmd.contains("apiserver bypass (SRE mode)"));
+
+        // ALSO check the filter-chain ACCEPT exists BEFORE the DROP — this
+        // was the bug we hit live: NAT bypass alone wasn't enough because
+        // the filter chain's DROP for UID 1000 killed the packet anyway.
+        let filter_accept = cmd
+            .find(
+                "-A OUTPUT -m owner --uid-owner 1000              -d \"${KUBERNETES_SERVICE_HOST}\"",
+            )
+            .or_else(|| {
+                cmd.match_indices("-A OUTPUT -m owner --uid-owner 1000")
+                    .find(|(i, _)| {
+                        let tail = &cmd[*i..*i + 200.min(cmd.len() - *i)];
+                        tail.contains("KUBERNETES_SERVICE_HOST") && tail.contains("-j ACCEPT")
+                    })
+                    .map(|(i, _)| i)
+            })
+            .expect("filter-chain ACCEPT for apiserver missing");
+        let filter_drop = cmd
+            .find("-A OUTPUT -m owner --uid-owner 1000 -j DROP")
+            .expect("filter DROP rule missing");
+        assert!(
+            filter_accept < filter_drop,
+            "filter ACCEPT at {filter_accept} must precede DROP at {filter_drop}"
+        );
+    }
+
+    #[test]
+    fn both_modes_keep_the_filter_chain_lockdown() {
+        for is_sre in [false, true] {
+            let cmd = build_egress_guard_command(is_sre);
+            // The filter-chain DROP rule is the actual lockdown — must
+            // never be removed by either mode.
+            assert!(
+                cmd.contains("-A OUTPUT -m owner --uid-owner 1000 -j DROP"),
+                "filter-chain DROP missing for is_sre={is_sre}"
+            );
+        }
+    }
+}
+
 /// Custom error type that bridges serde_json and kube errors.
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
@@ -191,6 +355,44 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     let sandbox_ns = format!("kars-{name}");
     let client = &ctx.client;
+
+    // Detect SRE-mode sandbox via the kars.azure.com/role=sre label.
+    // Computed once at the top of reconcile and threaded through the
+    // NetworkPolicy + egress-guard generation below.
+    //
+    // SRE sandboxes are the deliberate exception to the egress-guard's
+    // total-mediation rule:  their UID 1000 (the agent) needs DIRECT
+    // apiserver access (bypassing the :8444 transparent proxy) so the
+    // SRE plugin's K8s API client can read CRs / pods / events with
+    // its bound SA token. Every other sandbox kind goes through the
+    // router unchanged.
+    //
+    // The label is set exclusively by deploy/helm/kars/templates/sre.yaml
+    // on the chart-created `sre` KarsSandbox; a future ValidatingAdmission
+    // Policy (proposal §7.8.2 / §7.8.10) will enforce at-most-one-per-cluster
+    // + only-chart-installer-can-create so the apiserver-bypass capability
+    // stays uniquely held.
+    let is_sre_sandbox = sandbox
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("kars.azure.com/role"))
+        .map(|v| v == "sre")
+        .unwrap_or(false);
+
+    // Resolve the apiserver Service ClusterIP from the controller's own
+    // env (kubelet auto-injects KUBERNETES_SERVICE_HOST on every pod
+    // pointing at the cluster's default Service/kubernetes ClusterIP).
+    //
+    // Cluster-portable: kind defaults to 10.96.0.1, AKS defaults to
+    // 10.0.0.1, EKS defaults to 172.20.0.1, and custom service-CIDR
+    // operators get whatever they configured.  Reading the env at
+    // reconcile time gives the right value on every cluster.
+    let apiserver_ip =
+        std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
+    let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
+        .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
+        .unwrap_or_else(|_| "443".to_string());
 
     tracing::info!("Reconciling KarsSandbox {name}");
 
@@ -952,6 +1154,27 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             "ports": [{"protocol": "TCP", "port": 5000}]
         }),
     ];
+
+    // SRE-mode-only egress allow: apiserver Service ClusterIP.
+    // Same gate as the egress-guard apiserver bypass — only sandboxes
+    // labeled `kars.azure.com/role=sre` get a NetworkPolicy egress rule
+    // allowing :443 to the cluster's apiserver ClusterIP. Required
+    // because the blanket :443 rule above explicitly EXCLUDES the
+    // 10/8 + 172.16/12 + 192.168/16 RFC1918 blocks to prevent
+    // lateral movement to other in-cluster services, and the apiserver
+    // ClusterIP is always in one of those ranges (kind: 10.96.0.1,
+    // AKS: 10.0.0.1, etc.).
+    //
+    // Cluster-portable: apiserver_ip + apiserver_port read at top of
+    // reconcile() from the controller's own KUBERNETES_SERVICE_HOST /
+    // KUBERNETES_SERVICE_PORT_HTTPS env vars (kubelet-injected on
+    // every pod).
+    if is_sre_sandbox {
+        egress_rules.push(json!({
+            "to": [{"ipBlock": {"cidr": format!("{}/32", apiserver_ip)}}],
+            "ports": [{"protocol": "TCP", "port": apiserver_port.parse::<u16>().unwrap_or(443)}]
+        }));
+    }
 
     // Add user-defined allowed endpoints (for the inference-router to reach
     // on behalf of the agent — agent itself can only reach localhost).
@@ -1901,6 +2124,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         if is_openclaw {
             // OpenClaw gateway port (used by `kars connect` port-forward).
             agent_container["ports"] = json!([{"containerPort": 18789, "name": "gateway"}]);
+        } else if matches!(runtime_spec.kind, crate::crd::RuntimeKind::Hermes) {
+            // Hermes ports:
+            //   18789 — gateway admin port (kars connect compatibility)
+            //   9119  — `hermes dashboard --tui` in-browser PTY chat,
+            //           consumed by the Headlamp SRE Console iframe.
+            agent_container["ports"] = json!([
+                {"containerPort": 18789, "name": "gateway"},
+                {"containerPort": 9119, "name": "dashboard"}
+            ]);
         }
         if let Some(cmd) = &runtime_plan.command {
             agent_container["command"] = json!(cmd);
@@ -1908,6 +2140,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         if let Some(args) = &runtime_plan.args {
             agent_container["args"] = json!(args);
         }
+
+        // (is_sre_sandbox computed at the top of reconcile() and
+        // threaded through both NP egress + egress-guard generation —
+        // see top-of-fn comment block for the design.)
+        let egress_guard_cmd = build_egress_guard_command(is_sre_sandbox);
 
         // Build the pod spec — runtimeClassName only set for Kata (confidential)
         let mut pod_spec = json!({
@@ -1929,10 +2166,17 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             //   - Enforces blocklist/allowlist per domain
             //   - Tunnels allowed traffic to the real destination
             //
-            // This blocks:
+            // SRE-mode (kars.azure.com/role=sre label) inserts ONE extra
+            // RETURN rule before the REDIRECTs:  apiserver traffic skips
+            // the router and reaches the apiserver directly. See
+            // `build_egress_guard_command` and the proposal §7.8 design.
+            //
+            // This blocks (in standard mode):
             //  - IMDS credential theft (169.254.169.254)
             //  - Data exfiltration to any external host
             //  - Lateral movement to other pods
+            //  - Apiserver enumeration (the SRE-mode exception is the
+            //    deliberate carve-out, gated by the role=sre label)
             //
             // The agent can only reach the inference-router on localhost:8443.
             // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
@@ -1946,16 +2190,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             "initContainers": [{
                 "name": "egress-guard",
                 "image": &ctx.inference_router_image,
-                "command": ["sh", "-c", concat!(
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -o lo -j ACCEPT && ",
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -p udp --dport 53 -j ACCEPT && ",
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -p tcp --dport 53 -j ACCEPT && ",
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && ",
-                    "iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ",
-                    "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 80 -j REDIRECT --to-port 8444 && ",
-                    "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && ",
-                    "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'"
-                )],
+                "command": ["sh", "-c", egress_guard_cmd],
                 "securityContext": {
                     "runAsUser": 0,
                     "runAsNonRoot": false,
@@ -2720,12 +2955,38 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "selector": {
                     "kars.azure.com/sandbox": &name
                 },
-                "ports": [{
-                    "name": "inference",
-                    "port": 8443,
-                    "targetPort": 8443,
-                    "protocol": "TCP"
-                }]
+                "ports": ({
+                    // Always expose the inference-router (8443). For
+                    // Hermes runtimes the gateway port (18789) is also
+                    // exposed so a Headlamp-embedded chat iframe (or any
+                    // operator using `kubectl port-forward svc/<name>`)
+                    // can reach the WebUI without the controller
+                    // needing per-sandbox port discovery. The
+                    // `dashboard` port (9119) exposes the in-browser
+                    // `hermes dashboard --tui` PTY chat that the
+                    // Headlamp SRE Console embeds via apiserver proxy.
+                    let mut ports = vec![json!({
+                        "name": "inference",
+                        "port": 8443,
+                        "targetPort": 8443,
+                        "protocol": "TCP"
+                    })];
+                    if matches!(runtime_spec.kind, crate::crd::RuntimeKind::Hermes) {
+                        ports.push(json!({
+                            "name": "gateway",
+                            "port": 18789,
+                            "targetPort": 18789,
+                            "protocol": "TCP"
+                        }));
+                        ports.push(json!({
+                            "name": "dashboard",
+                            "port": 9119,
+                            "targetPort": 9119,
+                            "protocol": "TCP"
+                        }));
+                    }
+                    ports
+                })
             }
         }))?;
         svc_api

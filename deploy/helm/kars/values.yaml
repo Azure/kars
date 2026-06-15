@@ -5,7 +5,7 @@
 # Controller configuration
 controller:
   image:
-    repository: kars.azurecr.io/kars-controller
+    repository: karsacr.azurecr.io/kars-controller
     tag: "latest"  # Pin to digest in production
     pullPolicy: Always
   replicas: 2
@@ -31,7 +31,7 @@ controller:
 # Inference router configuration
 inferenceRouter:
   image:
-    repository: kars.azurecr.io/kars-inference-router
+    repository: karsacr.azurecr.io/kars-inference-router
     tag: "latest"
     pullPolicy: Always
   replicas: 2
@@ -54,7 +54,7 @@ inferenceRouter:
 # Default sandbox configuration
 sandbox:
   image:
-    repository: kars.azurecr.io/openclaw-sandbox
+    repository: karsacr.azurecr.io/openclaw-sandbox
     tag: "latest"
     pullPolicy: Always
   isolation: "enhanced"  # standard | enhanced | confidential
@@ -326,7 +326,7 @@ a2aGateway:
   # default — fail-closed against unauthenticated traffic.
   anonymousOk: false
   image:
-    repository: kars.azurecr.io/kars-a2a-gateway
+    repository: karsacr.azurecr.io/kars-a2a-gateway
     tag: "latest"
     pullPolicy: Always
   replicas: 2
@@ -417,3 +417,54 @@ entraSidecar:
     limits:
       cpu: "500m"
       memory: "256Mi"
+
+
+# ── kars-sre (built-in SRE agent) ───────────────────────────────────────────
+#
+# Opt-in (default: disabled). Enable via the CLI:
+#   kars sre install
+# or directly via helm:
+#   helm upgrade --reuse-values --set sre.enabled=true ...
+#
+# When enabled, deploy/helm/kars/templates/sre.yaml provisions:
+#   - InferencePolicy `sre-inference`        (Release.Namespace)
+#   - KarsSandbox    `sre`                   (Release.Namespace)
+#   - ToolPolicy     `sre-tools`             (kars-sre)
+#   - ClusterRole    `kars-sre-reader`       (cluster-scope)
+#   - ClusterRoleBinding `kars-sre-reader`   (cluster-scope → kars-sre/sandbox SA)
+#
+# Design: docs/blueprints/07-kars-sre-proposal.md  (§7.1 slicing,
+# §7.8 privilege containment, §7.7 typed-action threat model).
+sre:
+  enabled: false
+
+  # The Azure OpenAI deployment / model name the SRE agent reasons with.
+  # Defaults to gpt-5.4; override for cost/perf tuning. The model must be
+  # available in the project the kars controller is configured with —
+  # the InferencePolicy compiles against the standard router failover
+  # chain so an unavailable model surfaces as Degraded on the sandbox.
+  model: "gpt-5.4"
+  provider: "azure-openai"
+
+  # Per-request token ceiling. The SRE agent's typical request shape
+  # (state summary + a few k of YAML/events) fits well under 32k; raise
+  # if your cluster has very large CRD inventories.
+  tokenBudget: 32000
+
+  # Require Azure Content Safety Prompt Shields on every response. ONLY
+  # set true if your Azure OpenAI deployment has an attached Content
+  # Filter policy that emits `prompt_filter_results` in responses.
+  # Bare local-dev deployments (Foundry quickstart, gpt-4.1 without an
+  # explicit Content Filter) DON'T emit those annotations and every
+  # response gets blocked at the router. Default is false.
+  requirePromptShields: false
+
+  # Additional egress hosts the SRE sandbox may reach beyond the in-
+  # cluster apiserver. Empty by default — the agent only talks to
+  # `kubernetes.default.svc` out of the box. Add api.telegram.org +
+  # api.slack.com here when wiring channel notifications (Slice 4).
+  # extraAllowedEndpoints:
+  #   - host: api.telegram.org
+  #     port: 443
+  #   - host: slack.com
+  #     port: 443

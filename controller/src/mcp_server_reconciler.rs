@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use crate::mcp_server::{LocalObjectRef, McpServer, McpServerStatus};
 use crate::status::conditions::{self, reason, status as cond_status};
-use crate::status::phase::{PHASE_DEGRADED, PHASE_READY, PhaseEventReporter};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
 
 /// Field manager for SSA patches emitted by this reconciler. A unique
 /// suffix per reconciler is the §10.4 #1 craftsmanship requirement —
@@ -101,10 +101,6 @@ struct Ctx {
     client: Client,
     /// Override hook for tests — swap the JWKS fetcher with a mock.
     jwks_fetcher: Arc<dyn JwksFetcher>,
-    /// Publisher for `LimitedSupport` Warning Events. Optional so
-    /// unit tests can construct a `Ctx` without a real `Client` —
-    /// production builds always wire it via `run()`.
-    phase_reporter: Option<PhaseEventReporter>,
 }
 
 /// Pluggable JWKS fetcher — production uses [`HttpJwksFetcher`], tests
@@ -421,23 +417,16 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
     } else {
-        // Slice 0 honesty event: tell operators the singular
-        // `spec.mcp:` model is intentional-today / migrating in
-        // Slice 4. Best-effort — never fail reconcile on Event
-        // publish.
-        if let Some(reporter) = &ctx.phase_reporter
-            && let Err(e) = reporter
-                .warn_limited_support(
-                    &*mcp,
-                    "BindMcpServer",
-                    "McpServer is reconciled via a singular `spec.mcp` binding today; \
-                     a plural multi-server model lands in crd-well-oiled-machine Slice 4. \
-                     CRs assuming a list of MCP servers will be migrated automatically.",
-                )
-                .await
-        {
-            tracing::warn!(error = %e, "failed to publish LimitedSupport event");
-        }
+        // (Removed) Per-reconcile `LimitedSupport` event explaining
+        // the singular-vs-plural `spec.mcp` migration roadmap was
+        // emitted here. It re-fired on every reconcile (~15s cycle)
+        // and flooded the Headlamp event view with the same advisory
+        // text. The information now lives in:
+        //   • the McpServer CRD `description` (visible in
+        //     `kubectl explain mcpserver.spec`)
+        //   • docs/blueprints/crd-well-oiled-machine.md (Slice 4 roadmap)
+        // K8s Events should carry actionable per-incident signal,
+        // not static design notes.
         Ok(Action::requeue(REQUEUE_OK))
     }
 }
@@ -800,7 +789,6 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         jwks_fetcher: Arc::new(HttpJwksFetcher::new()),
-        phase_reporter: Some(PhaseEventReporter::new(client, "McpServer")),
     });
     Controller::new(mcps, kube::runtime::watcher::Config::default())
         .run(

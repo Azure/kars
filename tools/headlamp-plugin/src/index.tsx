@@ -37,6 +37,7 @@ import {
 } from "@kinvolk/headlamp-plugin/lib";
 import { makeCustomResourceClass } from "@kinvolk/headlamp-plugin/lib/lib/k8s/crd";
 import type { KubeObject, KubeObjectClass } from "@kinvolk/headlamp-plugin/lib/lib/k8s/KubeObject";
+import Deployment from "@kinvolk/headlamp-plugin/lib/K8s/deployment";
 import Secret from "@kinvolk/headlamp-plugin/lib/K8s/secret";
 import {
   Link,
@@ -45,6 +46,10 @@ import {
   StatusLabel,
 } from "@kinvolk/headlamp-plugin/lib/CommonComponents";
 import { useTheme } from "@mui/material/styles";
+import {
+  Button,
+  Stack,
+} from "@mui/material";
 import * as React from "react";
 
 const GROUP = "kars.azure.com";
@@ -69,6 +74,7 @@ const KARS_CRDS: CrdDescriptor[] = [
   { plural: "karspairings",     singular: "karspairing",    kind: "KarsPairing",     label: "Pairings" },
   { plural: "karsevals",        singular: "karseval",       kind: "KarsEval",        label: "Evals",             phaseField: "phase" },
   { plural: "egressapprovals",  singular: "egressapproval", kind: "EgressApproval",  label: "Egress Approvals",  phaseField: "phase" },
+  { plural: "karssreactions",   singular: "karssreaction",  kind: "KarsSREAction",   label: "SRE Actions",       phaseField: "phase" },
 ];
 
 const CRD_CLASSES: Record<string, KubeObjectClass> = Object.fromEntries(
@@ -153,6 +159,65 @@ for (const crd of KARS_CRDS) {
     component: () => <CrdDetail crd={crd} />,
   });
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// SRE Console — primary UX for the kars-sre operator
+// ──────────────────────────────────────────────────────────────────────
+//
+// Pinned to its own top-level sidebar branch so the SRE engineer has
+// a dedicated landing page rather than browsing through the 11 CRD
+// list pages every shift. Three sub-entries:
+//
+//   /kars/sre         — Console (pending approvals + in-flight + recent)
+//   /kars/sre/chat    — Embedded Hermes WebUI iframe for the sre sandbox
+//   /kars/sre/actions — Filtered KarsSREAction list (same as
+//                       /kars/karssreactions, but reached via the SRE
+//                       navigation tree)
+
+registerSidebarEntry({
+  parent: "kars",
+  name: "kars-sre-root",
+  label: "SRE",
+  icon: "mdi:stethoscope",
+  url: "/kars/sre",
+});
+
+registerSidebarEntry({
+  parent: "kars-sre-root",
+  name: "kars-sre-console",
+  label: "Console",
+  url: "/kars/sre",
+});
+
+registerRoute({
+  path: "/kars/sre",
+  sidebar: "kars-sre-console",
+  name: "kars-sre-console",
+  exact: true,
+  component: () => <SREConsole />,
+});
+
+registerSidebarEntry({
+  parent: "kars-sre-root",
+  name: "kars-sre-chat",
+  label: "Chat",
+  url: "/kars/sre/chat",
+});
+
+registerRoute({
+  path: "/kars/sre/chat",
+  sidebar: "kars-sre-chat",
+  name: "kars-sre-chat",
+  exact: true,
+  component: () => <SREChat />,
+});
+
+registerSidebarEntry({
+  parent: "kars-sre-root",
+  name: "kars-sre-actions",
+  label: "Actions",
+  url: "/kars/karssreactions",
+});
 
 // ──────────────────────────────────────────────────────────────────────
 // Helpers
@@ -591,8 +656,49 @@ function Overview() {
   const [memories] = (CRD_CLASSES.karsmemories as any).useList() as [KubeObject[] | null];
   const [mcpServers] = (CRD_CLASSES.mcpservers as any).useList() as [KubeObject[] | null];
   const [a2aAgents] = (CRD_CLASSES.a2aagents as any).useList() as [KubeObject[] | null];
+  // Workload cross-check: KarsSandbox.status.phase is 'Running' the
+  // moment the controller successfully reconciles the Deployment
+  // spec — it knows nothing about pod-level readiness. Pull the
+  // underlying Deployments so the Healthy / Workload-down headline
+  // stats reflect actual availability, not just CR reconcile state.
+  const [deployments] = (Deployment as any).useList() as [KubeObject[] | null];
   const metrics = computeMetrics(sandboxes, secrets);
   const total = sandboxes?.length ?? 0;
+
+  // Sandbox-name → workload health. Returns 'unknown' while deployments
+  // list is loading, so the UI shows '…' instead of misleading zeros.
+  const workloadHealth = (sb: KubeObject): "healthy" | "degraded" | "unknown" => {
+    if (deployments === null) return "unknown";
+    const name = sb.metadata?.name ?? "";
+    const ns = `kars-${name}`;
+    const d = deployments.find(
+      d =>
+        (d.metadata?.name ?? "") === name &&
+        (d.metadata?.namespace ?? "") === ns,
+    );
+    if (!d) return "unknown";
+    const spec = (d as any).spec ?? {};
+    const status = (d as any).status ?? {};
+    const desired = typeof spec.replicas === "number" ? spec.replicas : 1;
+    const available =
+      typeof status.availableReplicas === "number"
+        ? status.availableReplicas
+        : 0;
+    return available >= desired && desired > 0 ? "healthy" : "degraded";
+  };
+  let healthy = 0;
+  let workloadDown = 0;
+  let crDegraded = 0;
+  for (const s of sandboxes ?? []) {
+    const conds = (getStatus(s).conditions ?? []) as any[];
+    if (conds.some(c => c.type === "Degraded" && c.status === "True")) {
+      crDegraded += 1;
+      continue;
+    }
+    const wl = workloadHealth(s);
+    if (wl === "healthy") healthy += 1;
+    else if (wl === "degraded") workloadDown += 1;
+  }
 
   const phaseRows = Object.entries(metrics.sandboxesByPhase)
     .sort((a, b) => b[1] - a[1])
@@ -640,8 +746,21 @@ function Overview() {
       <SectionBox title="kars — Operator Overview">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "1rem", padding: "1rem 0" }}>
           <Stat label="Total Sandboxes" value={total} />
-          <Stat label="Ready" value={metrics.sandboxesByPhase.Ready ?? 0} tone="success" />
-          <Stat label="Degraded" value={metrics.sandboxesByPhase.Degraded ?? 0} tone={metrics.sandboxesByPhase.Degraded ? "error" : ""} />
+          <Stat
+            label="Healthy"
+            value={healthy}
+            tone={healthy === total && total > 0 ? "success" : "warning"}
+          />
+          <Stat
+            label="Workload down"
+            value={workloadDown}
+            tone={workloadDown === 0 ? "success" : "error"}
+          />
+          <Stat
+            label="CR-Degraded"
+            value={crDegraded}
+            tone={crDegraded === 0 ? "success" : "error"}
+          />
           <Stat label="Governance ON" value={`${metrics.governanceEnabled} / ${total}`} />
           <Stat label="Egress: Learn / Strict" value={`${metrics.egressLearn} / ${metrics.egressStrict}`} />
         </div>
@@ -782,6 +901,39 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
     return m;
   }, [policies]);
 
+  // Workload cross-check (sandboxes only): KarsSandbox.status.phase is
+  // 'Running' as soon as the controller reconciles the Deployment
+  // spec — it knows nothing about pod readiness. A sandbox with
+  // 'Running' phase but unavailable pods (ImagePullBackOff,
+  // OOMKilled, CrashLoopBackoff) would otherwise show as green here,
+  // hiding the actual failure. Pull Deployments once so the Phase
+  // column can reflect real workload health.
+  const isSandboxList = crd.plural === "karssandboxes";
+  const [deployments] = (isSandboxList
+    ? (Deployment as any).useList()
+    : [null]) as [KubeObject[] | null];
+  const workloadHealthy = React.useCallback(
+    (sandboxName: string): "healthy" | "degraded" | "unknown" => {
+      if (!isSandboxList || !deployments) return "unknown";
+      const ns = `kars-${sandboxName}`;
+      const d = deployments.find(
+        d =>
+          (d.metadata?.name ?? "") === sandboxName &&
+          (d.metadata?.namespace ?? "") === ns,
+      );
+      if (!d) return "unknown";
+      const spec = (d as any).spec ?? {};
+      const status = (d as any).status ?? {};
+      const desired = typeof spec.replicas === "number" ? spec.replicas : 1;
+      const available =
+        typeof status.availableReplicas === "number"
+          ? status.availableReplicas
+          : 0;
+      return available >= desired && desired > 0 ? "healthy" : "degraded";
+    },
+    [deployments, isSandboxList],
+  );
+
   const resolveModel = (sb: KubeObject): string => {
     const spec = getSpec(sb);
     const inline =
@@ -849,7 +1001,19 @@ function CrdList({ crd }: { crd: CrdDescriptor }) {
   if (crd.phaseField) {
     columns.push({
       label: "Phase",
-      getter: (r: KubeObject) => phaseChip(getStatus(r)[crd.phaseField!] as string, readyReason(r)),
+      getter: (r: KubeObject) => {
+        const phase = getStatus(r)[crd.phaseField!] as string;
+        // Sandbox-only: even when controller says 'Running', surface
+        // workload-down state in red so the operator can see
+        // ImagePullBackOff / OOMKilled / etc. without leaving the page.
+        if (isSandboxList) {
+          const wl = workloadHealthy(r.metadata?.name ?? "");
+          if (wl === "degraded") {
+            return <StatusLabel status="error">Workload down</StatusLabel>;
+          }
+        }
+        return phaseChip(phase, readyReason(r));
+      },
     });
   }
   columns.push({
@@ -2030,6 +2194,701 @@ function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxName: str
           </Link>
         </div>
       )}
+    </SectionBox>
+  );
+}
+// ──────────────────────────────────────────────────────────────────────
+// SRE Console
+// ──────────────────────────────────────────────────────────────────────
+//
+// Primary landing page for the kars-sre operator. Mirrors what a
+// human SRE engineer wants on shift open:
+//
+//   1. 🔴 Pending — KarsSREActions awaiting their decision. Inline
+//      Approve / Reject buttons PATCH the CR's .spec.approval.state
+//      so the operator never leaves the page to drive the apply path.
+//   2. 🔄 In-flight — actions the controller is currently executing
+//      or watching for recovery. Visible phase + age so a stuck
+//      Applied (waiting for Recovered) is obvious.
+//   3. ✅ Recent — terminal-phase actions from the last hour for
+//      post-incident review.
+//   4. 📊 Cluster health — sandbox phase counts + controller status
+//      (same data the `kars sre diagnose` tool returns).
+//   5. 🚨 Active incidents — failure-class events from kars-*
+//      namespaces in the last 15 min (same filter the proactive
+//      watcher uses).
+//
+// All cards live-update via the standard headlamp useList() hook
+// (which long-polls + watches), so phase walks Proposed → Approved
+// → Applied → Recovered visibly without F5.
+
+const KarsSREActionClass = CRD_CLASSES.karssreactions!;
+
+function srePhaseChip(phase: string | undefined, approval: string | undefined) {
+  // Combined phase+approval rendering. Phase wins, but a Pending
+  // phase with Approved=true is highlighted because the controller
+  // is in the middle of executing.
+  let label = phase || "Proposed";
+  let kind: StatusKind = "warning";
+  switch (phase) {
+    case "Recovered":
+      kind = "success";
+      break;
+    case "Applied":
+      kind = approval === "Approved" ? "" : "warning";
+      label = "Applied · waiting recovery";
+      break;
+    case "Failed":
+    case "Rejected":
+    case "Expired":
+      kind = "error";
+      break;
+    case undefined:
+    case "":
+    case "Proposed":
+      // Operator hasn't acted yet → highlight pending state
+      kind = approval === "Approved" ? "" : "warning";
+      label = approval === "Approved" ? "Approved · queued" : "Proposed";
+      break;
+  }
+  return <StatusLabel status={kind}>{label}</StatusLabel>;
+}
+
+function ApproveRejectButtons({
+  item,
+  busy,
+  setBusy,
+}: {
+  item: KubeObject;
+  busy: boolean;
+  setBusy: (b: boolean) => void;
+}) {
+  const [error, setError] = React.useState<string | null>(null);
+
+  const patch = async (state: "Approved" | "Rejected", note?: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      // Server-side merge patch. The CR's .spec.approval is a
+      // small object (state + optional note); a partial merge
+      // patch overwrites it cleanly.
+      await (item as any).patch({
+        spec: { approval: { state, ...(note ? { note } : {}) } },
+      });
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Stack direction="row" spacing={1} alignItems="center">
+      <Button
+        variant="contained"
+        color="success"
+        size="small"
+        disabled={busy}
+        onClick={() => patch("Approved")}
+      >
+        Approve
+      </Button>
+      <Button
+        variant="outlined"
+        color="error"
+        size="small"
+        disabled={busy}
+        onClick={() => {
+          const reason = window.prompt("Optional reason (audit-visible)") ?? undefined;
+          patch("Rejected", reason || undefined);
+        }}
+      >
+        Reject
+      </Button>
+      {error && (
+        <span style={{ color: "var(--mui-palette-error-main)", fontSize: 12 }}>
+          ✗ {error}
+        </span>
+      )}
+    </Stack>
+  );
+}
+
+function ActionTargetCell({ item }: { item: KubeObject }) {
+  const spec = getSpec(item);
+  const action = spec.action ?? {};
+  const params = action.params ?? {};
+  return (
+    <div style={{ fontSize: 13 }}>
+      <div style={{ fontWeight: 600 }}>{action.type ?? "?"}</div>
+      <div style={{ color: "var(--mui-palette-text-secondary)" }}>
+        {params.namespace ?? "?"} / {params.name ?? "?"}
+      </div>
+    </div>
+  );
+}
+
+function ActionDiagnosisCell({ item }: { item: KubeObject }) {
+  const spec = getSpec(item);
+  const diag = spec.diagnosis ?? spec.rationale ?? "—";
+  return (
+    <div style={{ fontSize: 13, maxWidth: 400, color: "var(--mui-palette-text-secondary)" }}>
+      {String(diag).slice(0, 200)}
+      {String(diag).length > 200 ? "…" : ""}
+    </div>
+  );
+}
+
+function SREActionRow({ item }: { item: KubeObject }) {
+  const spec = getSpec(item);
+  const status = getStatus(item);
+  const approval = spec.approval?.state as string | undefined;
+  const phase = status.phase as string | undefined;
+  const [busy, setBusy] = React.useState(false);
+  const isPending =
+    (!phase || phase === "Proposed") &&
+    (!approval || approval === "Pending");
+  const isInFlight =
+    phase === "Applied" || (phase === "Proposed" && approval === "Approved");
+  return (
+    <tr style={{ borderTop: "1px solid var(--mui-palette-divider)" }}>
+      <td style={{ padding: 8 }}>
+        <Link
+          routeName="karssreactions-detail"
+          params={{
+            namespace: item.metadata?.namespace ?? "kars-sre",
+            name: item.metadata?.name ?? "",
+          }}
+        >
+          {item.metadata?.name}
+        </Link>
+        <div style={{ fontSize: 11, color: "var(--mui-palette-text-secondary)" }}>
+          {formatAge(item.metadata?.creationTimestamp)}
+        </div>
+      </td>
+      <td style={{ padding: 8 }}>
+        <ActionTargetCell item={item} />
+      </td>
+      <td style={{ padding: 8 }}>
+        <ActionDiagnosisCell item={item} />
+      </td>
+      <td style={{ padding: 8 }}>{srePhaseChip(phase, approval)}</td>
+      <td style={{ padding: 8 }}>
+        {isPending ? (
+          <ApproveRejectButtons item={item} busy={busy} setBusy={setBusy} />
+        ) : isInFlight ? (
+          <span style={{ fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
+            executing…
+          </span>
+        ) : (
+          <span style={{ fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
+            —
+          </span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function SREActionCard({
+  title,
+  emoji,
+  items,
+  emptyText,
+}: {
+  title: string;
+  emoji: string;
+  items: KubeObject[];
+  emptyText: string;
+}) {
+  return (
+    <SectionBox title={`${emoji} ${title} (${items.length})`}>
+      {items.length === 0 ? (
+        <div style={{ padding: 16, color: "var(--mui-palette-text-secondary)", fontSize: 13 }}>
+          {emptyText}
+        </div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ fontSize: 12, color: "var(--mui-palette-text-secondary)" }}>
+              <th style={{ padding: 8, textAlign: "left" }}>Action ID</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Target</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Diagnosis</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Phase</th>
+              <th style={{ padding: 8, textAlign: "left" }}>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map(item => (
+              <SREActionRow key={item.metadata?.uid ?? item.metadata?.name} item={item} />
+            ))}
+          </tbody>
+        </table>
+      )}
+    </SectionBox>
+  );
+}
+
+function SREClusterHealthCard({ sandboxes }: { sandboxes: KubeObject[] | null }) {
+  // Pull every Deployment in the cluster so we can cross-check pod-level
+  // health against the KarsSandbox CR phase. The CR alone reports
+  // `phase=Running` the moment the controller successfully reconciled
+  // the Deployment spec — it knows nothing about whether the pods
+  // inside actually pulled their images, passed readiness probes,
+  // or got evicted. A sandbox with phase=Running + ImagePullBackOff
+  // pods would otherwise show as green on this card, hiding the
+  // exact failure mode the SRE Console is meant to surface.
+  const [deployments] = (Deployment as any).useList() as [KubeObject[] | null];
+
+  if (!sandboxes) {
+    return (
+      <SectionBox title="📊 Cluster Health">
+        <div style={{ padding: 16, fontSize: 13 }}>Loading…</div>
+      </SectionBox>
+    );
+  }
+
+  // Build a quick "sandbox-name → workload-healthy?" lookup. Each
+  // KarsSandbox creates a Deployment of the same name in namespace
+  // `kars-<name>` (controller convention — see reconciler/mod.rs
+  // build_deployment). A workload is "healthy" iff the Deployment
+  // exists AND availableReplicas >= spec.replicas (≥1 when replicas
+  // is unset).
+  const workloadHealthy = (sandboxName: string): "healthy" | "degraded" | "unknown" => {
+    if (!deployments) return "unknown";
+    const ns = `kars-${sandboxName}`;
+    const d = deployments.find(
+      d => (d.metadata?.name ?? "") === sandboxName && (d.metadata?.namespace ?? "") === ns,
+    );
+    if (!d) return "unknown";
+    const spec = (d as any).spec ?? {};
+    const status = (d as any).status ?? {};
+    const desired = typeof spec.replicas === "number" ? spec.replicas : 1;
+    const available = typeof status.availableReplicas === "number" ? status.availableReplicas : 0;
+    return available >= desired && desired > 0 ? "healthy" : "degraded";
+  };
+
+  let running = 0;
+  let degraded = 0;
+  let workloadDown = 0;
+  let unknown = 0;
+  for (const s of sandboxes) {
+    const phase = getStatus(s).phase ?? "Unknown";
+    const conds = (getStatus(s).conditions ?? []) as any[];
+    const crDegraded = conds.some(c => c.type === "Degraded" && c.status === "True");
+    const wl = workloadHealthy(s.metadata?.name ?? "");
+
+    if (crDegraded) {
+      degraded += 1;
+    } else if (wl === "degraded") {
+      // CR says Running but underlying Deployment has unavailable
+      // replicas — exactly the "phase=Running + ImagePullBackOff" case
+      // the operator needs to see in red.
+      workloadDown += 1;
+    } else if (phase === "Running" && wl === "healthy") {
+      running += 1;
+    } else if (wl === "unknown") {
+      unknown += 1;
+    } else {
+      unknown += 1;
+    }
+  }
+  const total = sandboxes.length;
+  return (
+    <SectionBox title="📊 Cluster Health">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, padding: 8 }}>
+        <Stat label="Sandboxes total" value={total} />
+        <Stat
+          label="Healthy"
+          value={running}
+          tone={running === total ? "success" : "warning"}
+        />
+        <Stat
+          label="Workload down"
+          value={workloadDown}
+          tone={workloadDown === 0 ? "success" : "error"}
+        />
+        <Stat
+          label="CR-Degraded"
+          value={degraded}
+          tone={degraded === 0 ? "success" : "error"}
+        />
+      </div>
+      {(workloadDown > 0 || degraded > 0) && (
+        <div
+          style={{
+            margin: "0 8px 8px 8px",
+            padding: "8px 12px",
+            border: "1px solid var(--mui-palette-warning-main)",
+            borderRadius: 4,
+            fontSize: 12,
+            color: "var(--mui-palette-warning-main)",
+          }}
+        >
+          {sandboxes
+            .map(s => {
+              const name = s.metadata?.name ?? "?";
+              const wl = workloadHealthy(name);
+              const conds = (getStatus(s).conditions ?? []) as any[];
+              const crDegraded = conds.some(c => c.type === "Degraded" && c.status === "True");
+              if (crDegraded) return `${name} → CR Degraded`;
+              if (wl === "degraded") return `${name} → workload unavailable (check pods in kars-${name})`;
+              return null;
+            })
+            .filter((x): x is string => x !== null)
+            .map((line, i) => (
+              <div key={i}>• {line}</div>
+            ))}
+        </div>
+      )}
+      {unknown > 0 && deployments === null && (
+        <div style={{ padding: "0 16px 8px", fontSize: 12, opacity: 0.7 }}>
+          Cross-checking workloads…
+        </div>
+      )}
+    </SectionBox>
+  );
+}
+
+function SREActiveIncidentsCard() {
+  // Slice 4 placeholder. We can't useList() on the v1 Event API
+  // because the host's `pluginLib.K8s.event` namespace isn't exposed
+  // in Headlamp 0.41's plugin runtime — importing it triggers the
+  // UMD wrapper's CJS-fallback path, which crashes with
+  // `ReferenceError: require is not defined`.
+  //
+  // The KarsSREAction CR cards above already surface every incident
+  // the proactive watcher catches (it's the same dedupe key), so for
+  // Slice 4 demos the operator never needs the raw events feed.
+  // A future iteration may resurrect this via direct fetch() to
+  // /api/v1/events through the headlamp apiserver proxy.
+  return null;
+}
+
+function SREInstallCTA() {
+  // Empty-state landing when the kars-sre sandbox isn't deployed yet.
+  // Operator-facing — shows the exact one-liner that wires up the SRE
+  // sandbox + the optional Telegram channel. Idempotent so a copy-
+  // paste user who's already partway through gets a no-op.
+  return (
+    <SectionBox title="🩺 kars-sre is not deployed yet">
+      <div style={{ padding: 16, lineHeight: 1.6, fontSize: 14 }}>
+        <p style={{ marginTop: 0 }}>
+          The kars-sre agent provides on-call triage + typed apply-fix +
+          proactive incident detection for this cluster. It is gated by
+          a Helm value (<code>sre.enabled=true</code>) and ships with
+          its own KarsSandbox, ToolPolicy, InferencePolicy, RBAC, and
+          the KarsSREAction CRD.
+        </p>
+        <p>
+          <strong>Install in one command</strong> (uses the chart that
+          deployed this cluster — no extra credentials needed):
+        </p>
+        <pre
+          style={{
+            background: "var(--mui-palette-action-hover)",
+            padding: 12,
+            borderRadius: 4,
+            fontSize: 13,
+            overflowX: "auto",
+          }}
+        >
+          kars sre install
+        </pre>
+        <p>
+          <strong>Add Telegram</strong> (optional — drives the Slice 4
+          proactive watcher alerts):
+        </p>
+        <pre
+          style={{
+            background: "var(--mui-palette-action-hover)",
+            padding: 12,
+            borderRadius: 4,
+            fontSize: 13,
+            overflowX: "auto",
+          }}
+        >
+{`kars credentials update sre \\
+  --telegram-token  <BotFather token> \\
+  --telegram-allow-from <your-tg-user-id>`}
+        </pre>
+        <p style={{ marginBottom: 0 }}>
+          This console will light up as soon as the controller has the
+          sre sandbox <code>Running</code> and the KarsSREAction CRD
+          installed — no page refresh needed.
+        </p>
+      </div>
+    </SectionBox>
+  );
+}
+
+function isSREInstalled(sandboxes: KubeObject[] | null): boolean | null {
+  // `null` = still loading. Avoids a flash-of-empty-state during
+  // the first list call.
+  if (sandboxes === null) return null;
+  return sandboxes.some(
+    s => (s.metadata?.name ?? "") === "sre" && (s.metadata?.namespace ?? "") === "kars-system",
+  );
+}
+
+function SREConsole() {
+  const [actions] = (KarsSREActionClass as any).useList() as [KubeObject[] | null];
+  const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
+  const installed = isSREInstalled(sandboxes);
+
+  // Still loading sandbox list — show nothing rather than the empty
+  // state, to avoid a flicker.
+  if (installed === null) {
+    return (
+      <SectionBox title="🩺 SRE Console">
+        <div style={{ padding: 16, fontSize: 13 }}>Loading cluster state…</div>
+      </SectionBox>
+    );
+  }
+  // SRE not deployed → show install CTA, skip the data cards
+  // (most would render empty and look broken).
+  if (!installed) {
+    return <SREInstallCTA />;
+  }
+
+  const safeActions = actions ?? [];
+  const now = Date.now();
+  const recentCutoff = now - 60 * 60 * 1000; // 1 hour
+
+  const pending = safeActions.filter((a: any) => {
+    const phase = getStatus(a).phase;
+    const approval = getSpec(a).approval?.state;
+    return (!phase || phase === "Proposed") && (!approval || approval === "Pending");
+  });
+
+  const inflight = safeActions.filter((a: any) => {
+    const phase = getStatus(a).phase;
+    const approval = getSpec(a).approval?.state;
+    return phase === "Applied" || (phase === "Proposed" && approval === "Approved");
+  });
+
+  const recent = safeActions
+    .filter((a: any) => {
+      const phase = getStatus(a).phase;
+      const ts = a.metadata?.creationTimestamp;
+      if (!phase || !["Recovered", "Failed", "Rejected", "Expired"].includes(phase)) return false;
+      if (!ts) return true;
+      try {
+        return new Date(ts).getTime() >= recentCutoff;
+      } catch {
+        return false;
+      }
+    })
+    .sort(
+      (a: any, b: any) =>
+        new Date(b.metadata?.creationTimestamp ?? 0).getTime() -
+        new Date(a.metadata?.creationTimestamp ?? 0).getTime(),
+    )
+    .slice(0, 10);
+
+  return (
+    <>
+      <SREActionCard
+        title="Pending Approval"
+        emoji="🔴"
+        items={pending}
+        emptyText="No actions awaiting your approval — the cluster is quiet right now."
+      />
+      <SREActionCard
+        title="In-flight"
+        emoji="🔄"
+        items={inflight}
+        emptyText="No actions currently executing."
+      />
+      <SREClusterHealthCard sandboxes={sandboxes} />
+      <SREActiveIncidentsCard />
+      <SREActionCard
+        title="Recent (last hour)"
+        emoji="✅"
+        items={recent}
+        emptyText="No actions completed in the last hour."
+      />
+    </>
+  );
+}
+
+
+// ──────────────────────────────────────────────────────────────────────
+// SRE Chat — terminal-attach instructions
+// ──────────────────────────────────────────────────────────────────────
+//
+// Hermes is a CLI/TUI agent — no embedded WebUI to iframe. The
+// operator drives it via either:
+//
+//   1. `kars sre talk`       — opens an interactive REPL inside the
+//                              sre sandbox via `kubectl exec`. This is
+//                              the recommended path.
+//   2. `kars sre status`     — non-interactive snapshot of pod state.
+//   3. Telegram / Slack bot  — when channels are wired via
+//                              `kars credentials update sre`, the agent
+//                              accepts messages there and the operator
+//                              never needs the terminal.
+//
+// This page surfaces those three paths so the dashboard user always
+// has a clear next step, and links over to the SRE Console for the
+// approval queue + cluster health.
+
+
+// ──────────────────────────────────────────────────────────────────────
+// SRE Chat — embedded Hermes Dashboard PTY chat
+// ──────────────────────────────────────────────────────────────────────
+//
+// We can't iframe Hermes through Headlamp's apiserver proxy because
+// Headlamp's SPA fetch wrapper attaches the user's bearer token to
+// API calls, but iframe / asset loads are handled by the raw browser
+// which doesn't attach that header → apiserver sees system:anonymous
+// → 403 on every static asset and the iframe stays blank.
+//
+// The reliable path: kubectl port-forward. The user runs ONE command
+// to expose Hermes on a fixed localhost port and the iframe loads it
+// like any other local web app. Cross-port = cross-origin for parent/
+// child JS, but iframe DOCUMENT loads aren't gated by same-origin so
+// the chat UI works.
+//
+// We probe the port on mount to give the user a clear "iframe-ready"
+// vs "run this command" state instead of a silently-blank rectangle.
+
+const HERMES_DASHBOARD_PORT = 9119;
+const HERMES_LOCAL_PORT = 19119;
+const HERMES_LOCAL_URL = `http://localhost:${HERMES_LOCAL_PORT}/`;
+const HERMES_PORT_FORWARD_CMD = `kubectl port-forward -n kars-sre svc/sre ${HERMES_LOCAL_PORT}:${HERMES_DASHBOARD_PORT}`;
+
+function SREChat() {
+  // Show the install CTA when the kars-sre sandbox isn't deployed —
+  // otherwise the iframe would just spin against a missing service.
+  const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
+  const installed = isSREInstalled(sandboxes);
+
+  // Probe the local port-forward target. We can't `fetch()` it from
+  // here because of CORS — but an <img> load to /favicon.ico will
+  // resolve (success or error) regardless of CORS, which is the only
+  // signal we need. Polled every 3s so the iframe lights up the
+  // moment the user starts the port-forward.
+  const [reachable, setReachable] = React.useState<boolean | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    const probe = () => {
+      const img = new Image();
+      img.onload = () => { if (!cancelled) setReachable(true); };
+      img.onerror = () => { if (!cancelled) setReachable(prev => prev === true ? true : false); };
+      // cache-bust so the browser actually re-probes each tick
+      img.src = `${HERMES_LOCAL_URL}favicon.ico?t=${Date.now()}`;
+    };
+    probe();
+    const id = window.setInterval(probe, 3000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, []);
+
+  const copyCmd = React.useCallback(() => {
+    navigator.clipboard?.writeText(HERMES_PORT_FORWARD_CMD).catch(() => {});
+  }, []);
+
+  if (installed === null) {
+    return (
+      <SectionBox title="💬 Chat with kars-sre">
+        <div style={{ padding: 16, fontSize: 13 }}>Loading cluster state…</div>
+      </SectionBox>
+    );
+  }
+  if (!installed) {
+    return <SREInstallCTA />;
+  }
+
+  return (
+    <SectionBox title="💬 Chat with kars-sre">
+      <div style={{ padding: 8 }}>
+        <Stack
+          direction="row"
+          spacing={2}
+          alignItems="center"
+          sx={{ mb: 1, flexWrap: "wrap" }}
+        >
+          <span style={{ fontSize: 13, color: "var(--mui-palette-text-secondary)" }}>
+            Live PTY into the kars-sre sandbox, served via Hermes&apos;
+            dashboard on{" "}
+            <code>localhost:{HERMES_LOCAL_PORT}</code>.
+          </span>
+          <Button
+            size="small"
+            href={HERMES_LOCAL_URL}
+            target="_blank"
+            rel="noreferrer noopener"
+            variant="outlined"
+            disabled={!reachable}
+          >
+            Open in new tab
+          </Button>
+        </Stack>
+
+        {reachable ? (
+          <iframe
+            src={HERMES_LOCAL_URL}
+            title="kars-sre Chat"
+            style={{
+              width: "100%",
+              minHeight: "calc(100vh - 220px)",
+              border: "1px solid var(--mui-palette-divider)",
+              borderRadius: 4,
+              background: "var(--mui-palette-background-default)",
+            }}
+          />
+        ) : (
+          <div
+            style={{
+              padding: 24,
+              border: "1px dashed var(--mui-palette-divider)",
+              borderRadius: 4,
+              fontSize: 13,
+              lineHeight: 1.6,
+            }}
+          >
+            <p style={{ marginTop: 0 }}>
+              <strong>Start the chat port-forward</strong> in your
+              terminal — the iframe below will pop in automatically the
+              moment it&apos;s reachable:
+            </p>
+            <pre
+              style={{
+                background: "var(--mui-palette-action-hover)",
+                padding: 12,
+                borderRadius: 4,
+                fontSize: 13,
+                overflowX: "auto",
+                margin: "8px 0",
+              }}
+            >
+              {HERMES_PORT_FORWARD_CMD}
+            </pre>
+            <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+              <Button size="small" variant="outlined" onClick={copyCmd}>
+                Copy command
+              </Button>
+              <span
+                style={{
+                  alignSelf: "center",
+                  fontSize: 12,
+                  color: "var(--mui-palette-text-secondary)",
+                }}
+              >
+                {reachable === null
+                  ? "Probing localhost:" + HERMES_LOCAL_PORT + "…"
+                  : "Waiting for localhost:" + HERMES_LOCAL_PORT + " to come up…"}
+              </span>
+            </Stack>
+            <p style={{ marginBottom: 0, marginTop: 16, fontSize: 12, opacity: 0.8 }}>
+              Why a port-forward? Headlamp&apos;s apiserver proxy attaches
+              your bearer token only to its own SPA fetches, not to iframe
+              asset loads — so without this hop the Hermes static bundle
+              would 403. Same-origin port-forward sidesteps that entirely.
+            </p>
+          </div>
+        )}
+      </div>
     </SectionBox>
   );
 }

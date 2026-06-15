@@ -28,41 +28,82 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     Act 1 scope: wire the AGT governance gate, kars_spawn family, Foundry
     tool wrappers, http_fetch via egress proxy, and stubs for kars_mesh_*.
+
+    SRE-mode containment (per docs/blueprints/07-kars-sre-proposal.md §7.8):
+    when ``SRE_ENABLED=true`` is set on the sandbox pod (the env is
+    written exclusively by deploy/helm/kars/templates/sre.yaml on the
+    ``sre`` KarsSandbox), this entry point:
+
+      - SKIPS registering the kars_spawn family   (§7.8.5)
+      - SKIPS registering the kars_mesh_* family  (§7.8.6 — also enforced
+        at the NetworkPolicy layer; the deregistration is layer 2)
+      - REGISTERS the sre_* tool surface          (sre.py)
+
+    Standard Hermes sandboxes never have ``KARS_SRE_ENABLED`` set and
+    therefore get the full standard tool surface (spawn, mesh) with no
+    SRE tools.
     """
+    from . import sre  # noqa: PLC0415 — lazy import
+
+    sre_mode = sre.is_enabled()
+    if sre_mode:
+        logger.info(
+            "SRE_ENABLED=true detected — entering SRE-mode plugin "
+            "registration (no kars_spawn, no kars_mesh_*, sre_* tools "
+            "active)"
+        )
+
     # Phase A1.4 — register the pre_tool_call governance hook first
     from . import governance  # noqa: PLC0415 — lazy import
 
     governance.register(ctx)
 
-    # Phase A1.5 — sub-agent spawn family (HTTP-only against router)
-    from . import spawn  # noqa: PLC0415
+    # Phase A1.5 — sub-agent spawn family (HTTP-only against router).
+    # SKIPPED in SRE mode per §7.8.5 — the SRE agent must not spawn
+    # sub-agents (sub-agents would inherit the kars-sre namespace's
+    # RBAC, breaking privilege containment).
+    if not sre_mode:
+        from . import spawn  # noqa: PLC0415
 
-    spawn.register(ctx)
+        spawn.register(ctx)
+    else:
+        logger.info("§7.8.5 — skipping kars_spawn family registration (SRE mode)")
 
-    # Phase A1.6 — kars_discover (registry HTTP proxy)
-    from . import discover  # noqa: PLC0415
+    # Phase A1.6 — kars_discover (registry HTTP proxy). SKIPPED in SRE
+    # mode — the SRE agent doesn't need to find peers (it has no peers).
+    if not sre_mode:
+        from . import discover  # noqa: PLC0415
 
-    discover.register(ctx)
+        discover.register(ctx)
 
     # Phase A1.7 — 9 Foundry tool wrappers (HTTP-only; gated when KARS_PROVIDER
-    # is a slim/github mode)
+    # is a slim/github mode). Retained in SRE mode — the SRE agent may
+    # still use Foundry memory + content-safety + inference.
     from . import foundry  # noqa: PLC0415
 
     foundry.register(ctx)
 
-    # Always-on: http_fetch via /egress/fetch
+    # Always-on: http_fetch via /egress/fetch.
+    # Retained in SRE mode — the egress NetworkPolicy in sre.yaml is the
+    # actual outbound gate; http_fetch's value to the SRE agent is
+    # zero today but it's harmless and may be useful for future
+    # source-grounding (Slice 5).
     from . import http_fetch  # noqa: PLC0415
 
     http_fetch.register(ctx)
 
     # Phase A2.1 — real AGT MeshClient (replaces mesh_stubs).
-    # The mesh adapter wraps kars-agt-mesh's MeshClient and exposes the
-    # kars_mesh_{send,inbox,await,transfer_file} tool family with the
-    # same names the Act 1 stubs used, so the LLM contract is stable
-    # across the upgrade.
-    from . import mesh  # noqa: PLC0415
+    # SKIPPED in SRE mode per §7.8.6 — the SRE agent is not on the mesh
+    # at all (no DID, no relay socket, not in the registry). The
+    # NetworkPolicy in sre.yaml blocks the agentmesh namespace too, so
+    # this is one of three enforcement layers (spec env / plugin code /
+    # network policy).
+    if not sre_mode:
+        from . import mesh  # noqa: PLC0415
 
-    mesh.register(ctx)
+        mesh.register(ctx)
+    else:
+        logger.info("§7.8.6 — skipping kars_mesh_* family registration (SRE mode)")
 
     # Phase A2.1 — deregister Hermes' built-in sub-agent / direct-API
     # tools so the LLM sees ONLY kars's governed mesh path. This is the
@@ -134,50 +175,49 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     # Phase A2.1 — eagerly init the MeshClient at plugin load so the
     # sub-agent is **discoverable** before its first tool call.
-    #
-    # Without this, MeshClient connects lazily on first kars_mesh_*
-    # call, which means a freshly-spawned sub-agent has zero presence
-    # in the registry until its LLM decides to call a mesh tool. When
-    # the parent tries `kars_mesh_send(to_agent=<child>)` immediately
-    # after spawn, find_by_display_name returns no peer → spawn-then-
-    # send breaks despite the pod being Running.
-    #
-    # We init on a background thread so a transient registry/relay
-    # outage doesn't block Hermes' gateway startup. Failure here only
-    # delays the first mesh exchange; the next tool call retries via
-    # the same singleton.
-    try:
-        from . import mesh as _mesh_module  # noqa: PLC0415
+    # SKIPPED in SRE mode per §7.8.6 — the SRE agent is not on the mesh
+    # at all; eager-init would fail (registry refuses to register a DID
+    # whose pod has no relay egress) and the thread would log a noisy
+    # error.
+    if not sre_mode:
+        try:
+            from . import mesh as _mesh_module  # noqa: PLC0415
 
-        import threading as _threading  # noqa: PLC0415
+            import threading as _threading  # noqa: PLC0415
 
-        def _eager_mesh_init() -> None:
-            try:
-                _mesh_module._get_or_init_client()  # noqa: SLF001
-                logger.info("MeshClient pre-connected at plugin load")
-                # Now start the auto-responder worker (no-op unless
-                # KARS_MESH_AUTO_RESPONDER=1, which the controller sets
-                # on sub-agent containers — parent is not enabled to
-                # avoid the parent looping on its own outbound).
+            def _eager_mesh_init() -> None:
                 try:
-                    from . import mesh_worker as _worker  # noqa: PLC0415
+                    _mesh_module._get_or_init_client()  # noqa: SLF001
+                    logger.info("MeshClient pre-connected at plugin load")
+                    # Now start the auto-responder worker (no-op unless
+                    # KARS_MESH_AUTO_RESPONDER=1, which the controller sets
+                    # on sub-agent containers — parent is not enabled to
+                    # avoid the parent looping on its own outbound).
+                    try:
+                        from . import mesh_worker as _worker  # noqa: PLC0415
 
-                    _worker.start_worker(_mesh_module._get_or_init_client)  # noqa: SLF001
+                        _worker.start_worker(_mesh_module._get_or_init_client)  # noqa: SLF001
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Could not start mesh worker: %s", exc)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("Could not start mesh worker: %s", exc)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Eager MeshClient init failed (will retry on first tool call): %s",
-                    exc,
-                )
+                    logger.warning(
+                        "Eager MeshClient init failed (will retry on first tool call): %s",
+                        exc,
+                    )
 
-        _threading.Thread(
-            target=_eager_mesh_init,
-            name="kars-mesh-eager-init",
-            daemon=True,
-        ).start()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not schedule eager MeshClient init: %s", exc)
+            _threading.Thread(
+                target=_eager_mesh_init,
+                name="kars-mesh-eager-init",
+                daemon=True,
+            ).start()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not schedule eager MeshClient init: %s", exc)
+
+    # SRE-mode-only: register the sre_* tool surface AFTER everything
+    # else has registered (so deregister calls in sre.register can find
+    # the targets, though Slice 1 doesn't actually deregister anything).
+    if sre_mode:
+        sre.register(ctx)
 
     # Trust + signing-counter background pushes
     from . import telemetry  # noqa: PLC0415
@@ -185,9 +225,10 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     telemetry.register(ctx)
 
     logger.info(
-        "kars-hermes plugin registered (contract v1, mesh: %s, "
+        "kars-hermes plugin registered (contract v1, sre_mode: %s, mesh: %s, "
         "Hermes built-ins denied: %d)",
-        "real (Act 2.1 — kars-agt-mesh)",
+        sre_mode,
+        "disabled (SRE mode)" if sre_mode else "real (Act 2.1 — kars-agt-mesh)",
         len(_HERMES_DENY),
     )
 

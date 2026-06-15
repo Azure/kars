@@ -1,0 +1,124 @@
+# Agent A — the kars sandbox the showcase demo (Acts I + II) runs.
+#
+# Act I uses this sandbox to demonstrate the architecture in motion:
+# a real Hermes agent doing a real piece of agentic work (researching
+# a topic) inside the kars governance plane.
+#
+# Act II breaks this same sandbox via a Kubernetes-tier infra issue
+# (tools/demo/act2/break.sh — applies a ResourceQuota that blocks
+# pod scheduling in the kars-research namespace, then force-deletes
+# the running pod). The kars-sre agent then diagnoses and proposes
+# the fix.
+#
+# Shape mirrors tools/e2e-harness/scenarios/exec-brief-hermes-single
+# but simplified to two CRs (InferencePolicy + KarsSandbox) so the
+# demo focuses on the runtime, not the catalog of governance
+# primitives (those are covered by tools/demo/scenarios/ Act I).
+#
+# Apply with:  kubectl apply -f tools/demo/act2/agent-a-research.yaml
+# Tear down:   kubectl delete karssandbox research -n kars-system
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: research-inference
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: research
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxName: research
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-5.4
+  contentSafety:
+    requirePromptShields: false
+  tokenBudget:
+    perRequestTokens: 32000
+    # Daily lifetime budget across all sessions. 500K is enough for a
+    # quick smoke test but trivially blown by an active demo (one
+    # 175K-context conversation through a couple of turns already
+    # passes it). 2M keeps the demo on rails without hiding the
+    # token-budget enforcement signal in the Headlamp plugin.
+    dailyTokens: 2000000
+---
+# ToolPolicy required because spec.governance.enabled=true requires
+# spec.governance.toolPolicyRef.name. The kars-default profile applies
+# (allow inference + standard tools); operators wanting tighter gates
+# can swap in their own ToolPolicy.
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: research-tools
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: research
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/sandbox: research
+  agtProfile:
+    inline: |
+      version: "1.0"
+      agent: research-default
+      policies:
+        # Allow inference + the standard kars plugin tools (http_fetch,
+        # foundry_*). Same shape as kars-default-agt-profile.yaml.
+        - name: research-allow-defaults
+          type: capability
+          allowed_actions:
+            - "inference:chat_completions:*"
+            - "inference:responses:*"
+            - "inference:content_safety:*"
+            - "tool:http_fetch:*"
+            - "tool:foundry_memory:*"
+            - "tool:foundry_web_search:*"
+            - "tool:foundry_code_execute:*"
+            - "tool:foundry_file_search:*"
+            - "tool:foundry_image_generation:*"
+            - "tool:foundry_conversations:*"
+            - "tool:foundry_evaluations:*"
+            - "tool:foundry_deployments:*"
+            - "tool:foundry_agents:*"
+            - "tool:foundry_download_file:*"
+          priority: 100
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: research
+  namespace: kars-system
+  labels:
+    kars.azure.com/channels: none
+    app.kubernetes.io/part-of: kars-demo
+spec:
+  runtime:
+    kind: Hermes
+    # `hermes: {}` must be set even when no fields are pinned — the CRD's
+    # CEL guard requires `runtime.hermes` to be present (any non-null
+    # value) iff `runtime.kind=Hermes`. Empty object honours the image's
+    # baked-in Hermes version + entrypoint without drift.
+    hermes: {}
+
+  sandbox:
+    isolation: standard
+
+  inferenceRef:
+    name: research-inference
+
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: research-tools
+    registryMode: local
+    trustThreshold: 0
+
+  networkPolicy:
+    defaultDeny: true
+    # Egress allowed by default for the demo (Learn mode). Operators
+    # promote to Strict + signed allowlist for production. Documented
+    # in docs/blueprints/07-kars-sre-proposal.md §6.6.
+    egressMode: Learn

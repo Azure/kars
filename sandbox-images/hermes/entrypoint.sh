@@ -52,6 +52,63 @@ fi
 export HERMES_HOME="${HERMES_HOME:-/sandbox/.hermes}"
 mkdir -p "$HERMES_HOME"
 
+# ── HOME (writable for libraries that ignore HERMES_HOME) ──────────────
+# Distroless base sets HOME=/ (read-only). Several Hermes deps —
+# notably the gateway's per-platform lock dir (~/.local/state/hermes/
+# gateway-locks) and python-telegram-bot's internal state — assume
+# HOME is writable. Without this override, Telegram / Slack / Discord
+# channels fail at boot with `[Errno 30] Read-only file system: '/.local'`.
+# /sandbox is the per-pod writable emptyDir owned by the sandbox UID.
+export HOME="${HOME:-/sandbox}"
+if [ "$HOME" = "/" ] || [ ! -w "$HOME" ]; then
+  export HOME=/sandbox
+fi
+mkdir -p "$HOME/.local/state"
+
+# ── Pin Hermes TUI to Node 22 ─────────────────────────────────────────
+# The bundled Hermes UI-TUI (used by the dashboard's Chat tab + the
+# `hermes chat --tui` CLI path) was esbuild-targeted at Node 22. Azure
+# Linux 3 ships Node 24 — invoking the TUI under Node 24 reproducibly
+# SIGSEGVs (~380MB core dump) immediately after `resetTerminalModes()`.
+# Hermes' `_node_bin('node')` in main.py honours the HERMES_NODE env var
+# as an override, so we point it at /opt/node22/bin/node which the
+# Dockerfile installs alongside the system Node. Everything else
+# (build-time `dep_ensure`, npm probes) keeps using system Node 24.
+if [ -x /opt/node22/bin/node ]; then
+  export HERMES_NODE=/opt/node22/bin/node
+fi
+
+# ── Outbound HTTPS proxy ───────────────────────────────────────────
+# UID 1000 in a kars sandbox cannot reach the internet directly:
+# egress-guard's iptables rules transparent-redirect port 443 to
+# the inference-router's forward proxy on 127.0.0.1:8444. In Docker
+# Desktop kind clusters the redirect doesn't always apply (CAP_NET_ADMIN
+# semantics), so we ALSO export HTTPS_PROXY so libraries that honour
+# the standard env (httpx, python-telegram-bot, slack-sdk, discord.py,
+# requests, openai…) reach the router explicitly. The router then
+# enforces the egress allowlist + Learn-mode logging exactly like the
+# transparent path.
+#
+# Inference calls bypass this (Hermes sends them to OPENAI_BASE_URL=
+# http://127.0.0.1:8443/v1, the router's HTTP API), so HTTPS_PROXY
+# only affects code that tries direct external HTTPS — which is the
+# exact scope we want to route.
+#
+# NO_PROXY covers loopback + cluster-internal services so the router
+# itself, the apiserver, and intra-pod calls don't loop back through
+# the proxy. CRITICALLY this includes the LITERAL apiserver IP
+# ($KUBERNETES_SERVICE_HOST), not just the FQDN, because kubectl-style
+# clients connect via the IP from the pod's service env — the FQDN
+# variant only matches when explicitly used.
+_NP_BASE="127.0.0.1,localhost,kubernetes.default.svc.cluster.local,.svc.cluster.local,.cluster.local"
+if [ -n "${KUBERNETES_SERVICE_HOST:-}" ]; then
+  _NP_BASE="$KUBERNETES_SERVICE_HOST,$_NP_BASE"
+fi
+export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:8444}"
+export https_proxy="${https_proxy:-$HTTPS_PROXY}"
+export NO_PROXY="${NO_PROXY:-$_NP_BASE}"
+export no_proxy="${no_proxy:-$NO_PROXY}"
+
 # Hermes' multi-profile support — pin to SANDBOX_NAME so multi-sandbox
 # concurrent runs don't share session state.
 export HERMES_PROFILE="${HERMES_PROFILE:-$SANDBOX_NAME}"
@@ -178,6 +235,15 @@ echo "[kars-hermes] Building MCP server config in $HERMES_CONFIG"
   echo "  default: \"${KARS_MODEL:-${AZURE_OPENAI_DEPLOYMENT:-gpt-5.4}}\""
   echo "  provider: azure-foundry"
   echo "  base_url: \"http://127.0.0.1:8443/v1\""
+  # Pin context_length so Hermes skips its /v1/models probe on every
+  # agent cold-start. The probe targets the loopback inference router,
+  # which doesn't (and shouldn't) implement that model-introspection
+  # endpoint — so it always falls back after a 5s timeout. Pre-baking
+  # the value here saves ~5s on every new chat session and stops the
+  # dashboard SPA from timing-out its initial JSON-RPC call (the WS
+  # would otherwise close mid-init with code=1006). 200k is the
+  # safe-default Hermes itself uses for gpt-5.x family.
+  echo "  context_length: ${HERMES_MODEL_CONTEXT_LENGTH:-200000}"
   echo "mcp_servers:"
   # Built-in platform MCP — exposes the 9 Foundry tools when a Foundry
   # project is bound to this sandbox. Hermes' MCP client + governance
@@ -289,6 +355,22 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
 fi
 if [ -n "${TELEGRAM_ALLOW_FROM:-}" ]; then
   set_hermes_config "channels.telegram.allowed_users" "$TELEGRAM_ALLOW_FROM"
+  # Export TELEGRAM_ALLOWED_USERS so the gateway's Telegram platform
+  # skips the pairing-code dance for these IDs. Hermes' telegram.py
+  # reads this env at boot (not the config key); without it the bot
+  # responds to every incoming message with a "pairing code" challenge
+  # even when the sender is already in the configured allowlist.
+  export TELEGRAM_ALLOWED_USERS="$TELEGRAM_ALLOW_FROM"
+  # Set the home channel = first allowed user ID. This is the chat
+  # the `hermes send --to telegram` (no chat suffix) targets, used
+  # by the kars-sre proactive watcher to push incident alerts to the
+  # operator. If multiple IDs are configured, the watcher uses the
+  # first; operators with multi-user setups can override per-call
+  # via `--to telegram:<chat_id>` or set SRE_WATCHER_NOTIFY_TARGET.
+  TG_HOME=$(echo "$TELEGRAM_ALLOW_FROM" | tr ',' '\n' | head -1 | tr -d ' ')
+  if [ -n "$TG_HOME" ]; then
+    set_hermes_config "TELEGRAM_HOME_CHANNEL" "$TG_HOME"
+  fi
 fi
 if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
   set_hermes_config "channels.slack.token" "$SLACK_BOT_TOKEN"
@@ -504,6 +586,153 @@ AZURE_FOUNDRY_API_KEY=router-managed
 AZURE_FOUNDRY_BASE_URL=${OPENAI_BASE_URL}
 EOF
 
+# ── Persona / SOUL.md ────────────────────────────────────────────────────
+# Hermes reads $HERMES_HOME/SOUL.md as the agent's system prompt (see
+# `/usr/lib/python3.12/site-packages/hermes_cli/main.py:10387` —
+# "Edit profile/SOUL.md for different personality"). We follow the
+# OpenClaw pattern (sandbox-images/openclaw/entrypoint.sh:1214) and
+# write the prompt deterministically on every boot:
+#
+#   - Regenerated every boot so kars-managed updates always win over
+#     any "hermes" first-boot scaffolding that might overwrite it
+#   - Heredoc with env interpolation so the prompt knows the live model
+#     name, sandbox name, governance posture, etc.
+#   - Mode-gated:  if SRE_ENABLED=true, write the SRE persona; otherwise
+#     leave the file alone (Hermes' own default applies)
+#
+# The SRE persona is the long-form version of docs/sre.md — it tells
+# the model exactly which sre_* tools it has, the standard incident
+# reasoning loop, what's read-only vs proposal-only, and what it CAN'T
+# do (no spawn, no mesh, no governance-state mutation — per the
+# §7.8 containment design).
+if [ "${SRE_ENABLED:-}" = "true" ]; then
+  echo "[kars-hermes] SRE_ENABLED=true — writing kars-sre persona to $HERMES_HOME/SOUL.md"
+  _SRE_MODEL="${KARS_MODEL:-${AZURE_OPENAI_DEPLOYMENT:-gpt-5.4}}"
+  # Single heredoc, UNQUOTED so ${_SRE_MODEL} interpolates. Literal
+  # $-signs in command examples below are escaped with \$ to keep the
+  # shell from trying to expand them.
+  cat > "$HERMES_HOME/SOUL.md" <<SREEOF
+# kars-sre
+
+You are **kars-sre** — the built-in SRE agent of a kars cluster.
+
+Your job is one thing:  diagnose Kubernetes incidents on this cluster,
+using ${_SRE_MODEL} to reason and the apiserver to look.
+
+You are NOT a chat companion, a research agent, or a code-writing
+assistant. If a user asks for something outside Kubernetes / kars
+diagnostics, say so once and redirect to an operational query.
+
+## Tone
+
+* **Concise.** Operators are reading you under pressure. One paragraph
+  preferred over five. Bullet lists over prose when listing facts.
+* **Evidence-based.** Never claim a diagnosis without naming the tool
+  call that supports it. "Pod is Pending due to FailedCreate with
+  reason \`exceeded quota\` (sre_describe_resource → events_on_replica_sets)"
+  is good. "It looks like there might be a quota issue" is bad.
+* **Direct.** No hedging language ("perhaps", "you might want to").
+  State what you observed, what it means, what to do next.
+* **Honest about uncertainty.** If a tool result is empty or ambiguous,
+  say so and name the next tool you'd call to disambiguate.
+
+## Tools you have (10)
+
+Read-only kars-CR diagnostics (Slice 1):
+
+| Tool | When to use |
+|---|---|
+| \`sre_describe_state\` | First call in any new investigation. Returns a snapshot of all 11 kars-owned CR kinds across the cluster (KarsSandbox, InferencePolicy, ToolPolicy, EgressApproval, KarsMemory, KarsEval, TrustGraph, KarsPairing, A2AAgent, McpServer, KarsAuthConfig) with phase, conditions, and lastReconciled. |
+| \`sre_logs\` | Tail any pod's any container via the apiserver. Capped 500 lines. Use after \`sre_describe_resource\` shows CrashLoopBackOff or an error message you need to see in full. |
+| \`sre_diagnose\` | Walks the kars-CR health checklist (controller Ready, CRDs installed, no Degraded sandboxes, no stale reconciles). Use for the operator's "give me a cluster health overview" question. |
+| \`sre_explain_error\` | Given an error string, returns a hypothesis from the kars OOTB-blocker corpus (ImagePullBackOff, exceeded quota, OOMKilled, CrashLoopBackOff, FailedScheduling, ContainerCreating). The hypothesis is a HINT — confirm with other tools before quoting it. |
+| \`sre_propose_fix\` | Returns a typed-action proposal AND auto-creates a KarsSREAction CR in \`kars-sre\` (phase=Proposed, approval.state=Pending). Returns an \`action_id\` you quote to the operator. Operator approves via \`kars sre approve <action_id>\` → controller mints a one-shot CRB, executes the typed action, tears the binding down, watches recovery. You never execute; you propose. |
+
+K8s diagnostic toolset (Slice 2):
+
+| Tool | When to use |
+|---|---|
+| \`sre_describe_resource\` | Structured \`kubectl describe\`. For Deployment / StatefulSet / DaemonSet it walks the FULL owner graph: workload → ReplicaSet → matching Pods → events on every level. **This is the single most useful tool — call it first whenever the operator names a broken workload.** |
+| \`sre_what_changed\` | Events of failure-relevant reasons (FailedCreate, BackOff, OOMKilling, FailedScheduling, Evicted, etc.) in the last N minutes (1-60). Frames the incident in time: what broke when? |
+| \`sre_endpoints_inspect\` | Service → selector → matching pods → EndpointSlice readiness. The "service has no endpoints" detective tool. Returns a finding summary you can quote verbatim. |
+| \`sre_image_probe\` | For ImagePullBackOff incidents. Returns what tags of the same repo are CURRENTLY IN USE on this cluster and the closest match by edit-distance to the requested tag. Cluster-internal probe — does NOT reach out to the registry. |
+| \`sre_top\` | CPU + memory usage per pod or per node (metrics.k8s.io). Returns \`{unavailable: "metrics-server not installed"}\` if the API isn't registered — route around it. |
+
+## Tools you do NOT have
+
+You are intentionally not equipped with:
+
+* **\`kars_spawn\` family** — you cannot spawn sub-agents (§7.8.5 containment: sub-agents would inherit the kars-sre namespace's elevated RBAC).
+* **\`kars_mesh_*\` family** — you are not on the inter-agent mesh (§7.8.6: you have no DID, are not registered, and your NetworkPolicy blocks the relay).
+* **Shell, file, or terminal tools** — you cannot exec into other pods, port-forward, write to disk, or run arbitrary commands. The only writes happen indirectly: \`sre_propose_fix\` creates a KarsSREAction CR (a *proposal*, no execution); the controller executes it ONLY after the operator runs \`kars sre approve <action_id>\`. Even then, you never run free-form shell — only the typed action you proposed.
+* **Network tools beyond the apiserver** — your NetworkPolicy allows only \`kubernetes.default.svc\`. No DNS lookups against the internet, no external HTTP, no registry calls.
+
+If the operator asks you to do something that requires a tool you don't have, say so explicitly and (when possible) suggest the kubectl command they could run themselves.
+
+## Standard incident reasoning loop
+
+When an operator says "X is broken" — even informally — walk this loop:
+
+1. **\`sre_describe_state\`** — kars house first. Is anything kars-owned in \`Degraded\`, \`Failed\`, or stale-reconcile state? Often the operator's "broken X" is downstream of a kars CR in trouble.
+2. **\`sre_what_changed\`** (15-min default window) — what events fired in the affected namespace? FailedCreate? BackOff? FailedScheduling? Pin the incident in time before going deeper.
+3. **\`sre_describe_resource\`** on the failing workload — for a Deployment this returns the whole owner graph in one call. Read the events on the ReplicaSet AND the Pod; the root cause is often on the RS (\`exceeded quota\`, \`image pull failed\`, \`failed to schedule\`) while the Pod just shows the downstream \`ContainerCreating\` / \`Pending\`.
+4. **Specialized tool for the symptom**:
+   * \`ImagePullBackOff\` → \`sre_image_probe\` on the failing image
+   * Service has 0 endpoints → \`sre_endpoints_inspect\` on the Service
+   * \`OOMKilled\` / \`Evicted\` → \`sre_top\` on the pod and its node
+   * Stuck \`Pending\` with \`0/N nodes available\` → \`sre_describe_resource\` on the candidate Nodes
+5. **\`sre_propose_fix\`** — once you've identified the root cause, call this with a \`diagnosis\` + \`target\` payload. **\`target.kind\` is REQUIRED** (one of \`ResourceQuota\`, \`Pod\`, \`Deployment\`, \`StatefulSet\`, \`DaemonSet\`) — without it no CR is created and the response's \`cr_error\` field tells you what's missing. Always include \`target.kind\`, \`target.namespace\`, and \`target.name\`. The tool returns a proposal AND creates a KarsSREAction CR (phase=Proposed). Quote the returned \`action_id\` to the operator with the exact approve command. The current proposal types are:
+   * \`DeleteResourceQuota {namespace, name}\` — for over-tight platform-applied quotas (the controller refuses to delete quotas labelled \`kars.azure.com/managed-by=controller\` — that's the safety gate, enforced in the reconciler, not just policy).
+   * \`PatchDeploymentImage {namespace, name, container, image}\` — patch a container image.
+   * \`ScaleDeployment {namespace, name, replicas}\` — scale a deployment (clamp 0-50).
+   * \`RolloutRestart {namespace, kind, name}\` — rolling restart on Deployment / StatefulSet / DaemonSet.
+   * \`DeletePod {namespace, name}\` — delete a pod so its owning controller reconciles a fresh one.
+
+   When target.kind alone is ambiguous (e.g. Deployment → Scale vs PatchImage vs RolloutRestart), pass an explicit \`action_type\` argument to disambiguate.
+
+   When the operator runs \`kars sre approve <action_id>\` (or \`kars sre reject\`), the controller's kars_sre_action reconciler picks it up, mints a short-lived ClusterRoleBinding scoped to just that action, executes via that binding, tears the binding down, and observes recovery in the affected namespace.
+
+You PROPOSE; the operator AUTHORISES; the controller EXECUTES. You never invoke the apply path directly — the proposal flow is the apply path.
+
+## Output structure when you propose a fix
+
+When you make a fix proposal, format it like this so the operator can act on it without re-asking:
+
+\`\`\`
+**Symptom**:    one-line observation
+**Evidence**:   tool call(s) that produced the observation
+**Root cause**: one-paragraph diagnosis
+**Proposed fix**: typed action with namespace + name + fields
+**Why this is safe**: which protected-resource rules it satisfies
+**Rollback**:   how to undo the fix if it makes things worse
+\`\`\`
+
+## Boundaries — refuse to do these
+
+* Mutate any resource in \`kube-system\`, \`kars-system\`, \`kars-sre\`, \`kube-public\`, \`kube-node-lease\`, or \`agentmesh\` namespaces.
+* Mutate any \`kars.azure.com/*\` CR (KarsSandbox, ToolPolicy, InferencePolicy, EgressApproval, NetworkPolicy of kars sandboxes, etc.) — these are governance state, not workload state.
+* Mutate RBAC kinds, ServiceAccounts, secrets data, CRDs, validating/mutating admission policies.
+* Touch any ResourceQuota whose labels include \`kars.azure.com/managed-by=controller\`.
+
+The proposal layer enforces these denylists; if you ever find yourself wanting to propose a fix that hits one of these, stop and tell the operator that the requested change is outside the SRE agent's blast radius.
+
+## Audit
+
+Every tool call you make and every proposal you return is logged to the kars audit JSONL stream on this sandbox's inference-router sidecar. Operators can pull the chain with \`kubectl logs -n kars-sre deploy/sre -c inference-router | jq 'select(.audit)'\`.
+
+## First-message greeting
+
+Open with one line:
+
+\`\`\`
+kars-sre standing by. Tell me what's broken, or ask "cluster health overview" for a sweep.
+\`\`\`
+
+Don't list your tools, don't explain the slice ladder, don't editorialise. Wait for the operator's first prompt.
+SREEOF
+  unset _SRE_MODEL
+fi
+
 # ── Boot banner ──────────────────────────────────────────────────────────
 echo "═══════════════════════════════════════════════════════════════════"
 echo "  kars-hermes-entrypoint  (contract v1)"
@@ -550,6 +779,128 @@ if [ "$1" = "hermes" ]; then
   else
     echo "[kars-hermes] No channels — starting hermes gateway in idle daemon mode"
   fi
+
+  # ── kars-sre proactive watcher (Slice 4) ──────────────────────────
+  # When SRE_ENABLED=true AND at least one channel is configured, spawn
+  # the watcher as a background process. It polls K8s events for
+  # failure-class reasons in kars-* namespaces, dedupes per
+  # (ns, kind, name, reason) in a 10-min window, and on each new
+  # incident creates a KarsSREAction CR + pushes a Telegram alert with
+  # the action_id + `kars sre approve` command. Operator opt-out:
+  # SRE_WATCHER_ENABLED=false. Failures inside the watcher are
+  # contained (it logs to stderr and continues) so it cannot crash the
+  # gateway.
+  if [ "${SRE_ENABLED:-}" = "true" ] \
+      && [ "$WANT_GATEWAY" = "true" ] \
+      && [ "${SRE_WATCHER_ENABLED:-true}" != "false" ]; then
+    echo "[kars-hermes] SRE_ENABLED + channels detected — starting proactive watcher"
+    # Use sandbox UID via $AS_SANDBOX so the watcher uses the same SA
+    # token + httpx singleton as the agent. stderr→pod stdout for
+    # debuggability via `kubectl logs`.
+    $AS_SANDBOX python3 -m kars_runtime_hermes.plugin.sre_watcher &
+  fi
+
+  # ── Hermes Dashboard (in-browser chat) ────────────────────────────
+  # Hermes ships an in-browser PTY chat at `hermes dashboard`. We run
+  # it inside the sandbox bound to 0.0.0.0:9119 so the cluster
+  # apiserver-proxy (and the Headlamp SRE Console iframe) can reach
+  # it without a port-forward. Opt out by setting
+  # HERMES_DASHBOARD_ENABLED=false.
+  #
+  # We DON'T use the stock `hermes dashboard` CLI here — instead we
+  # boot via the in-tree dashboard_proxy wrapper, which installs an
+  # X-Forwarded-Prefix middleware so the SPA's absolute asset URLs
+  # resolve correctly when served via the K8s apiserver service
+  # proxy. The K8s proxy strips per-cluster path prefixes from the
+  # request line; without the injected header, the SPA's
+  # /assets/index-XYZ.js loads would 404 at the Headlamp root.
+  #
+  # The prefix is constant per-sandbox-name: every Headlamp install
+  # routes to the same /api/v1/namespaces/<ns>/services/<svc>:<port>/proxy
+  # suffix regardless of how the cluster itself is named, so we can
+  # hardcode it at entrypoint time.
+  if [ "${HERMES_DASHBOARD_ENABLED:-true}" != "false" ]; then
+    DASHBOARD_PORT="${HERMES_DASHBOARD_PORT:-9119}"
+    # The apiserver-proxy strips up to and including the cluster name;
+    # the prefix the SPA needs is what comes AFTER that — i.e. the
+    # apiserver-proxy suffix all the way to (and not including) the
+    # trailing slash. Headlamp uses its `/clusters/<cluster>` prefix
+    # which collapses into the apiserver proxy on the backend.
+    SANDBOX_NS="${POD_NAMESPACE:-kars-${SANDBOX_NAME}}"
+    SANDBOX_SVC="${SANDBOX_NAME}"
+    DASHBOARD_PREFIX="${HERMES_DASHBOARD_PREFIX:-/api/v1/namespaces/${SANDBOX_NS}/services/${SANDBOX_SVC}:${DASHBOARD_PORT}/proxy}"
+    echo "[kars-hermes] Starting hermes dashboard on 127.0.0.1:${DASHBOARD_PORT} (prefix=${DASHBOARD_PREFIX})"
+    # `runuser -u sandbox --` resets the environment to the sandbox user's
+    # /etc/passwd defaults, which sets HOME=/. The TUI subprocess that the
+    # dashboard spawns (`hermes --tui` Node bundle) then segfaults on
+    # startup trying to write its session state to a read-only root.
+    # Pass HOME + HERMES_HOME explicitly via `env` so the sandbox user
+    # inherits the writable /sandbox dir we already created above.
+    HERMES_DASHBOARD_PREFIX="$DASHBOARD_PREFIX" \
+    HERMES_DASHBOARD_HOST=127.0.0.1 \
+    HERMES_DASHBOARD_PORT="$DASHBOARD_PORT" \
+      $AS_SANDBOX env HOME="$HOME" HERMES_HOME="$HERMES_HOME" \
+        HERMES_NODE="$HERMES_NODE" \
+        HERMES_DASHBOARD_PREFIX="$DASHBOARD_PREFIX" \
+        HERMES_DASHBOARD_HOST=127.0.0.1 \
+        HERMES_DASHBOARD_PORT="$DASHBOARD_PORT" \
+        python3 -m kars_runtime_hermes.dashboard_proxy \
+        > /tmp/hermes-dashboard.log 2>&1 &
+  fi
+
+  # ── Pre-warm mesh registration (persistent) ───────────────────────
+  # `hermes gateway run` in idle-daemon mode (no Telegram/Slack/Discord
+  # channels) only runs the cron ticker — it never imports the kars
+  # Hermes plugin, so the Phase A2.1 eager MeshClient init never
+  # fires. Result: the sandbox is invisible on `kars_mesh_directory`
+  # listings until something else triggers a plugin load (e.g. an
+  # interactive `hermes chat` invocation, which registers + exits).
+  #
+  # We spawn a **long-lived** Python process that calls the same
+  # `_get_or_init_client()` the in-process eager init would, then
+  # parks on Event.wait() so the MeshClient stays connected and
+  # keeps the relay heartbeat going (without a live connection, the
+  # AGT registry marks the agent stale after ~90s of no heartbeat
+  # and discovery tools hide it). Also starts the auto-responder
+  # worker so the sandbox can REPLY to inbound mesh messages, not
+  # just appear in directory listings.
+  # SRE-mode sandboxes opt out: the SRE agent is intentionally
+  # off-mesh (no kars_mesh_* tools, no relay egress allowlisted).
+  if [ "${SRE_ENABLED:-}" != "true" ] && [ "${KARS_MESH_PROVIDER:-}" = "agt" ]; then
+    echo "[kars-hermes] starting persistent mesh-keepalive (background)"
+    # KARS_MESH_AUTO_RESPONDER=1 ⇒ the auto-responder worker actually
+    # invokes Hermes to generate replies to inbound mesh messages.
+    # Without it, the worker drains the inbox and returns silently
+    # (great for "I exist on the mesh" presence, useless for actual
+    # cross-agent conversation). We set it INLINE on the env block
+    # below because the controller strips KARS_-prefixed user
+    # extraEnv (reserved-prefix guard in reconciler/mod.rs:1820),
+    # so it can't reach us via the KarsSandbox CR.
+    $AS_SANDBOX env HOME="$HOME" HERMES_HOME="$HERMES_HOME" \
+      KARS_MESH_AUTO_RESPONDER=1 \
+      python3 -c "
+import sys, threading, time
+print('[kars-mesh-keepalive] starting', flush=True)
+try:
+    from kars_runtime_hermes.plugin import mesh as _m
+    client = _m._get_or_init_client()
+    print('[kars-mesh-keepalive] mesh client registered + connected', flush=True)
+    try:
+        from kars_runtime_hermes.plugin import mesh_worker as _w
+        _w.start_worker(_m._get_or_init_client)
+        print('[kars-mesh-keepalive] auto-responder worker started', flush=True)
+    except Exception as e:
+        print(f'[kars-mesh-keepalive] worker skipped: {e!r}', flush=True)
+    # Park indefinitely — the MeshClient + worker live in our
+    # process; if we exit, the relay drops our socket and the
+    # registry marks us stale within ~90s.
+    threading.Event().wait()
+except Exception as e:
+    print(f'[kars-mesh-keepalive] FATAL: {e!r}', flush=True)
+    sys.exit(1)
+" > /tmp/hermes-mesh-keepalive.log 2>&1 &
+  fi
+
   exec $AS_SANDBOX hermes gateway run --accept-hooks
 else
   echo "[kars-hermes] Operator override: $*"

@@ -53,6 +53,7 @@ use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
 use crate::kars_eval::KarsEval;
 use crate::kars_memory::KarsMemory;
+use crate::kars_sre_action::KarsSREAction;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
 
@@ -674,6 +675,76 @@ pub fn egress_approval_validations() -> Vec<ValidationRule> {
 pub fn egress_approval_crd() -> CustomResourceDefinition {
     inject_spec_validations(EgressApproval::crd(), egress_approval_validations())
         .expect("kube-rs derive must produce a spec property on EgressApproval")
+}
+
+/// `KarsSREAction.spec` CEL rules (Slice 3 of kars-sre).
+///
+/// 1. `action.type` must be one of the closed-set typed actions.
+/// 2. `approval.state` must be `Pending`, `Approved`, or `Rejected`.
+/// 3. `ttlMinutes` clamped to [1, 60] at admission.
+/// 4. `rationale`, when set, must be ≤ 2048 chars + control-byte free
+///    (audit-log injection guard).
+/// 5. `diagnosis`, when set, must be ≤ 512 chars.
+/// 6. `approval.note`, when set, must be ≤ 512 chars.
+#[must_use]
+pub fn kars_sre_action_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "self.action.type in ['DeleteResourceQuota', 'PatchDeploymentImage', 'ScaleDeployment', 'RolloutRestart', 'DeletePod']".into(),
+            message: Some(
+                "spec.action.type must be one of the supported typed actions (DeleteResourceQuota, PatchDeploymentImage, ScaleDeployment, RolloutRestart, DeletePod)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.approval.state in ['Pending', 'Approved', 'Rejected']".into(),
+            message: Some("spec.approval.state must be Pending, Approved, or Rejected".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.ttlMinutes) || (self.ttlMinutes >= 1 && self.ttlMinutes <= 60)".into(),
+            message: Some("spec.ttlMinutes, when set, must be in [1, 60]".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.rationale) || size(self.rationale) <= 2048".into(),
+            message: Some("spec.rationale must be ≤ 2048 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.diagnosis) || size(self.diagnosis) <= 512".into(),
+            message: Some("spec.diagnosis must be ≤ 512 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.approval.note) || size(self.approval.note) <= 512".into(),
+            message: Some("spec.approval.note must be ≤ 512 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.rationale) || !self.rationale.matches('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]')".into(),
+            message: Some(
+                "spec.rationale must not contain ASCII control bytes (audit-log injection guard)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `KarsSREAction` CRD with [`kars_sre_action_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn kars_sre_action_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsSREAction::crd(), kars_sre_action_validations())
+        .expect("kube-rs derive must produce a spec property on KarsSREAction")
 }
 
 /// `KarsSandbox` CRD as produced by the kube-rs derive.

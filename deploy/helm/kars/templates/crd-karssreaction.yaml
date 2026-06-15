@@ -1,0 +1,233 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karssreactions.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: KarsSREAction
+    plural: karssreactions
+    shortNames:
+    - sreaction
+    singular: karssreaction
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.action.type
+      name: Type
+      type: string
+    - jsonPath: .spec.action.params.namespace
+      name: Target-NS
+      type: string
+    - jsonPath: .spec.action.params.name
+      name: Target-Name
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.approval.state
+      name: Approval
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KarsSREActionSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              `KarsSREAction.spec` — declares one typed-action proposal.
+
+              The CR is namespaced; conventionally lives in `kars-sre` (the SRE
+              sandbox's own namespace) so list+watch from the SRE SA is naturally
+              scoped, but the controller accepts any namespace the operator
+              configures.
+            properties:
+              action:
+                description: |-
+                  The action the SRE agent proposes to take. Closed-set type +
+                  free-form params (validated per-type at reconcile time).
+                properties:
+                  params:
+                    additionalProperties: true
+                    description: |-
+                      Per-type params. Stored as a string-keyed map so the CRD schema
+                      emits a concrete `type: object` (apiserver rejects fields with
+                      no schema type). Values are arbitrary JSON — the reconciler
+                      validates the shape per `kind` at execute time.
+
+                      Required fields per type:
+                        - DeleteResourceQuota: {namespace, name}
+                        - PatchDeploymentImage: {namespace, name, container, image}
+                        - ScaleDeployment: {namespace, name, replicas}
+                        - RolloutRestart: {namespace, kind, name}
+                        - DeletePod: {namespace, name}
+                    type: object
+                  type:
+                    description: |-
+                      Action type from the closed set (`DeleteResourceQuota`,
+                      `PatchDeploymentImage`, `ScaleDeployment`, `RolloutRestart`,
+                      `DeletePod`). Validated at admission via CEL.
+                    type: string
+                required:
+                - params
+                - type
+                type: object
+              approval:
+                description: |-
+                  Operator decision. The agent creates the CR with
+                  `approval.state="Pending"`; the operator flips it to
+                  `Approved` or `Rejected` via `kars sre approve <id>` /
+                  `kars sre reject <id>` (or directly via `kubectl edit`).
+                properties:
+                  note:
+                    description: |-
+                      Optional human-readable note attached to the decision (e.g.
+                      "approved by oncall — incident #4711"). Surfaces in audit.
+                    nullable: true
+                    type: string
+                  state:
+                    description: |-
+                      `Pending` (initial), `Approved`, or `Rejected`. Flipped by an
+                      operator with the `kars:sre-approver` ClusterRole.
+                    type: string
+                required:
+                - state
+                type: object
+              diagnosis:
+                description: |-
+                  Short-form diagnosis (the "Symptom:" + "Root cause:" lines from
+                  the agent's proposal format). 1-line summary suitable for a
+                  Telegram notification.
+                nullable: true
+                type: string
+              rationale:
+                description: |-
+                  One-paragraph rationale from the agent: why this fix is the
+                  right response to the observed symptoms. Audit-grade text.
+                  Max 2048 chars; renders verbatim in `kubectl describe`.
+                nullable: true
+                type: string
+              ttlMinutes:
+                description: |-
+                  Maximum age (in minutes) before the proposal auto-expires.
+                  Reconciler transitions `.status.phase=Expired` after this
+                  elapses if approval is still `Pending`. Default 15.
+                  Clamped to [1, 60] at admission.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+            required:
+            - action
+            - approval
+            type: object
+            x-kubernetes-validations:
+            - message: spec.action.type must be one of the supported typed actions (DeleteResourceQuota, PatchDeploymentImage, ScaleDeployment, RolloutRestart, DeletePod)
+              reason: FieldValueInvalid
+              rule: self.action.type in ['DeleteResourceQuota', 'PatchDeploymentImage', 'ScaleDeployment', 'RolloutRestart', 'DeletePod']
+            - message: spec.approval.state must be Pending, Approved, or Rejected
+              reason: FieldValueInvalid
+              rule: self.approval.state in ['Pending', 'Approved', 'Rejected']
+            - message: spec.ttlMinutes, when set, must be in [1, 60]
+              reason: FieldValueInvalid
+              rule: '!has(self.ttlMinutes) || (self.ttlMinutes >= 1 && self.ttlMinutes <= 60)'
+            - message: spec.rationale must be ≤ 2048 characters
+              reason: FieldValueInvalid
+              rule: '!has(self.rationale) || size(self.rationale) <= 2048'
+            - message: spec.diagnosis must be ≤ 512 characters
+              reason: FieldValueInvalid
+              rule: '!has(self.diagnosis) || size(self.diagnosis) <= 512'
+            - message: spec.approval.note must be ≤ 512 characters
+              reason: FieldValueInvalid
+              rule: '!has(self.approval.note) || size(self.approval.note) <= 512'
+            - message: spec.rationale must not contain ASCII control bytes (audit-log injection guard)
+              reason: FieldValueInvalid
+              rule: '!has(self.rationale) || !self.rationale.matches(''[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'')'
+          status:
+            description: '`KarsSREAction.status` — controller-managed phase + observation.'
+            nullable: true
+            properties:
+              appliedAt:
+                description: |-
+                  Wall-clock timestamp the controller minted the writer token
+                  and executed the action (set on transition into Applied).
+                nullable: true
+                type: string
+              conditions:
+                description: |-
+                  Standard k8s conditions. The reconciler stamps:
+                    - `Available` (True iff phase=Applied/Recovered)
+                    - `Approved` (True iff spec.approval.state=Approved)
+                    - `Executed` (True iff the action ran via the minted token)
+                    - `Recovered` (True iff post-apply observation passed)
+                    - `Degraded` (True with reason if anything went wrong)
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: |-
+                  `metadata.generation` last reconciled. When != current, the
+                  reconciler still has work to do.
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: |-
+                  `Proposed` → `Approved` → `Applied` → `Recovered` | `Failed`.
+                  Or `Rejected` (operator denied) / `Expired` (TTL elapsed).
+                nullable: true
+                type: string
+              writerCrbName:
+                description: |-
+                  Name of the one-shot ClusterRoleBinding the controller minted
+                  for the writer SA on approval. Cleaned up post-execution.
+                  Persisted in status so the cleanup reconciler can find it
+                  after a controller restart.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: KarsSREAction
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
