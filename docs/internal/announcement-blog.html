@@ -238,9 +238,10 @@ kars connect demo</code></pre>
         <use href="#shield-x" width="22" height="22"/>
       </g>
       <text x="16" y="52" class="h-component">agent</text>
-      <text x="16" y="82" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  UID 1000 · read-only</text>
-      <text x="16" y="102" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no credentials</text>
-      <text x="16" y="122" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no public net</text>
+      <text x="16" y="76" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  UID 1000 · read-only</text>
+      <text x="16" y="95" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no credentials</text>
+      <text x="16" y="114" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no public net</text>
+      <text x="16" y="133" class="annotation" fill="#1e40af"><tspan font-weight="700">🔑</tspan>  owns session keys</text>
     </g>
 
     <!-- router box -->
@@ -286,9 +287,10 @@ kars connect demo</code></pre>
         <use href="#shield-x" width="22" height="22"/>
       </g>
       <text x="16" y="52" class="h-component">agent</text>
-      <text x="16" y="82" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  UID 1000 · read-only</text>
-      <text x="16" y="102" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no credentials</text>
-      <text x="16" y="122" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no public net</text>
+      <text x="16" y="76" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  UID 1000 · read-only</text>
+      <text x="16" y="95" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no credentials</text>
+      <text x="16" y="114" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no public net</text>
+      <text x="16" y="133" class="annotation" fill="#1e40af"><tspan font-weight="700">🔑</tspan>  owns session keys</text>
     </g>
 
     <g transform="translate(210, 116)">
@@ -351,7 +353,7 @@ kars connect demo</code></pre>
     <text x="560" y="46" class="agt-body" text-anchor="middle">policy decisions  ·  hash-chained audit  ·  signing  ·  Signal-Protocol mesh primitives  ·  per-peer trust  ·  behaviour monitoring  ·  rate-limit</text>
   </g>
 </svg>
-<figcaption>Figure 1 — Two sandboxes running <em>different</em> agent runtimes (<strong>researcher</strong> on OpenClaw in <code>enhanced</code> isolation; <strong>writer</strong> on Hermes in <code>confidential</code> = Kata + AMD SEV-SNP on <code>Standard_DC4as_v5</code>) talk to each other over the AgentMesh — OpenClaw, Hermes, MAF, LangGraph and the other adapters all share one Signal-Protocol wire format. The Signal session lives inside the agent processes; the relay only forwards opaque ciphertext and cannot decrypt. <strong>kars-sre</strong> is the cluster's own operator agent — same sandbox shape, but with cluster-wide read and gated writes. AGT is consumed for governance.</figcaption>
+<figcaption>Figure 1 — Two sandboxes running <em>different</em> agent runtimes (<strong>researcher</strong> on OpenClaw in <code>enhanced</code> isolation; <strong>writer</strong> on Hermes in <code>confidential</code> = Kata + AMD SEV-SNP on <code>Standard_DC4as_v5</code>) talk to each other over the AgentMesh — OpenClaw, Hermes, MAF, LangGraph and the other adapters all share one Signal-Protocol wire format. The Signal session lives inside the agent processes — each agent owns its own session keys; the relay only forwards opaque ciphertext and cannot decrypt. The per-pod router holds the Entra Agent ID and the AGT governance the agent consults on every peer message (trust, capability, policy, audit). <strong>kars-sre</strong> is the cluster's own operator agent — same sandbox shape, but with cluster-wide read and gated writes. AGT is consumed for governance.</figcaption>
 </figure>
 
 <h2>Why this design</h2>
