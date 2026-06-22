@@ -89,6 +89,11 @@ jobs:
           chmod +x ./bin/*/kars-*
           ( cd ./bin && find . -type f -name 'kars-*' -exec sha256sum {} \; | tee SHA256SUMS )
           file ./bin/*/kars-*
+      - name: Attest build provenance (binaries, GitHub-signed)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: 'bin/*/kars-*'
+
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
@@ -179,6 +184,13 @@ jobs:
             VERSION=${{ env.VERSION }}
           sbom: true
           provenance: true
+
+      - name: Attest build provenance (GitHub-signed, pushed to registry)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
       - name: Make package public (best-effort; may need one-time manual toggle)
         continue-on-error: true
@@ -291,6 +303,13 @@ jobs:
             AGT_SDK_TARBALL=${{ env.AGT_SDK_TARBALL }}
           sbom: true
           provenance: true
+
+      - name: Attest build provenance (GitHub-signed, pushed to registry)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/openclaw-sandbox
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
       - name: Make package public (best-effort; may need one-time manual toggle)
         continue-on-error: true
@@ -428,6 +447,13 @@ jobs:
           sbom: true
           provenance: true
 
+      - name: Attest build provenance (GitHub-signed, pushed to registry)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
       - name: Make package public (best-effort; may need one-time manual toggle)
         continue-on-error: true
         env:
@@ -481,6 +507,11 @@ jobs:
           npm run build
           npm pack
           ls -la ./*.tgz
+      - name: Attest build provenance (CLI tarball, GitHub-signed)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: 'cli/*.tgz'
+
       - name: Upload CLI tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
