@@ -15,15 +15,19 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 
 | For | You need |
 |---|---|
-| **Local mode (GitHub Copilot — recommended)** | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an active **GitHub Copilot** seat (Individual / Business / Enterprise). One device-code OAuth login at signup. **No Azure account, no PAT, no key files.** |
-| Local mode (Foundry / Azure OpenAI) | Docker Desktop, Node.js 22+, Rust 1.88+, an Azure AI Foundry (or Azure OpenAI) endpoint + deployment + key. |
-| Local mode (GitHub Models) | Docker Desktop, Node.js 22+, Rust 1.88+, a GitHub PAT with `models:read` scope. **No Azure account needed.** |
+| **Fastest — published images (`kars dev --release`)** | Docker Desktop (or any OCI runtime) · Node.js 22+. **No Rust, no AGT checkout, no local image build.** Plus an inference provider (GitHub Copilot seat — easiest — or a Foundry/Azure OpenAI deployment, or a GitHub PAT with `models:read`). |
+| Local mode from source (GitHub Copilot — recommended) | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an active **GitHub Copilot** seat (Individual / Business / Enterprise). One device-code OAuth login at signup. **No Azure account, no PAT, no key files.** |
+| Local mode from source (Foundry / Azure OpenAI) | Docker Desktop, Node.js 22+, Rust 1.88+, an Azure AI Foundry (or Azure OpenAI) endpoint + deployment + key. |
+| Local mode from source (GitHub Models) | Docker Desktop, Node.js 22+, Rust 1.88+, a GitHub PAT with `models:read` scope. **No Azure account needed.** |
 | AKS mode | The above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
 
-> **AGT mesh prerequisite (sub-agent spawning).** Inter-agent E2E
+> **Just want it running?** Use the [fastest path](#10-fastest-path--no-compile-published-images-) — `npm i -g <release-tarball>` then `kars dev --release <tag>`. Everything below about building from source and cloning AGT is **only** for contributors hacking on kars itself.
+
+> **AGT mesh prerequisite — source builds only.** Inter-agent E2E
 > messaging uses the [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
-> relay + registry, which kars builds from source locally. Clone it
-> next to your kars repo before the first `kars dev` / `kars up`:
+> relay + registry. With `kars dev --release` these are **pulled as
+> published images** — nothing to clone. Only when you build from source
+> does kars build them locally; clone AGT next to your kars repo first:
 > ```bash
 > git clone https://github.com/microsoft/agent-governance-toolkit ~/agent-governance-toolkit
 > ```
@@ -98,6 +102,41 @@ If you'd rather skip provisioning by hand, jump to **[Step 2 — Deploy to AKS](
 ---
 
 ## Step 1 — Local (five minutes)
+
+### 1.0 Fastest path — no compile (published images) ⭐
+
+The quickest way to a running agent: install the CLI from a published
+release and launch from **pre-built, cosign-signed images**. No Rust
+toolchain, no AGT checkout, no waiting on a local image build.
+
+**You need only:** Docker Desktop (running) · Node.js 22+.
+
+```bash
+# 1. Install the kars CLI from the latest interim release (one command)
+npm i -g https://github.com/Azure/kars/releases/download/v0.1.0-interim.6/kars-cli-0.1.0.tgz
+
+# 2. Launch a sandbox from the published images for that same release
+kars dev --release v0.1.0-interim.6
+```
+
+That's it. `--release` pulls the `openclaw-sandbox` agent image plus the AGT
+mesh relay + registry and runs them — skipping the AGT clone and every local
+build. The first run downloads the images once (a few minutes); afterwards it
+launches near-instantly. On first launch you'll pick an inference provider —
+see the [provider picker](#12-launch-a-sandbox) below (**GitHub Copilot** is
+the easiest: one device-code login, no Azure account).
+
+> **Use matching versions.** The `npm i -g …` tarball URL and the `--release`
+> flag must reference the **same** tag. Browse the
+> [Releases page](https://github.com/Azure/kars/releases) for the newest
+> `v0.1.0-interim.N` and use it in both places.
+
+> **Apple Silicon (M-series) Macs:** the sandbox + mesh images are published
+> `linux/amd64`; Docker Desktop runs them under emulation transparently
+> (slightly slower, fully functional).
+
+Want to hack on the controller / router / plugin? Build from source instead —
+**[1.1 Build the CLI](#11-build-the-cli)**.
 
 ### 1.1 Build the CLI
 
