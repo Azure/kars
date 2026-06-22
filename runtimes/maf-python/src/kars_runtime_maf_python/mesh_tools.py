@@ -3,7 +3,7 @@
 """
 First-class AgentMesh tools for the Microsoft Agent Framework Python SDK.
 
-Wraps :mod:`mesh` as ``agent_framework.ai_function``-decorated callables
+Wraps :mod:`mesh` as ``agent_framework.tool``-decorated callables
 so MAF agents pick them up automatically. See
 ``runtimes/openai-agents/.../mesh_tools.py`` for the design rationale.
 """
@@ -38,15 +38,15 @@ _MESH_SEND_DESCRIPTION = (
 
 
 def build_mesh_tools() -> List[Any]:
-    """Return ``ai_function``-decorated callables for the mesh tools."""
-    from agent_framework import ai_function  # type: ignore
+    """Return ``@tool``-decorated callables for the mesh tools."""
+    from agent_framework import tool  # type: ignore
 
-    @ai_function(name="mesh_inbox", description=_MESH_INBOX_DESCRIPTION)
+    @tool(name="mesh_inbox", description=_MESH_INBOX_DESCRIPTION)
     async def mesh_inbox() -> str:
         msgs = receive_messages()
         return json.dumps(msgs)
 
-    @ai_function(name="mesh_send", description=_MESH_SEND_DESCRIPTION)
+    @tool(name="mesh_send", description=_MESH_SEND_DESCRIPTION)
     async def mesh_send(target_agent: str, content: str, skill_id: str = "chat") -> str:
         ack = send_message(target_agent, content, skill_id=skill_id)
         return json.dumps(ack)
