@@ -197,12 +197,12 @@ kars connect demo</code></pre>
   <g transform="translate(620, 128)">
     <rect x="0" y="0" width="260" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
     <text x="16" y="26" class="card-title">AgentMesh relay</text>
-    <text x="16" y="48" class="card-sub">ciphertext only · not in trust set</text>
+    <text x="16" y="48" class="card-sub">forwards encrypted frames · can't read</text>
   </g>
   <g transform="translate(900, 128)">
     <rect x="0" y="0" width="240" height="60" rx="8" fill="#fafbfc" stroke="#d0d7de" stroke-width="1"/>
     <text x="16" y="26" class="card-title">AgentMesh registry</text>
-    <text x="16" y="48" class="card-sub">prekeys + discovery</text>
+    <text x="16" y="48" class="card-sub">public prekeys · peer discovery</text>
   </g>
 
   <!-- ============== AKS CLUSTER FRAME (taller cards inside need more cluster height + bigger gap from cluster tag) ============== -->
@@ -217,7 +217,7 @@ kars connect demo</code></pre>
   </g>
   <g transform="translate(80, 270)">
     <text x="22" y="34" class="card-title">researcher</text>
-    <text x="22" y="52" class="card-sub">namespace kars-researcher</text>
+    <text x="22" y="52" class="card-sub">OpenClaw runtime · ns kars-researcher</text>
     <!-- isolation pill: narrower (110px) and right-aligned at x=385, clear of subtitle line -->
     <rect x="275" y="22" width="110" height="22" rx="11" fill="#107C10"/>
     <text x="330" y="37" class="iso-pill" text-anchor="middle">ENHANCED</text>
@@ -237,7 +237,7 @@ kars connect demo</code></pre>
       <g transform="translate(14, 14)" color="#92400e">
         <use href="#shield-x" width="22" height="22"/>
       </g>
-      <text x="16" y="56" class="h-component">agent</text>
+      <text x="16" y="52" class="h-component">agent</text>
       <text x="16" y="82" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  UID 1000 · read-only</text>
       <text x="16" y="102" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no credentials</text>
       <text x="16" y="122" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no public net</text>
@@ -249,10 +249,11 @@ kars connect demo</code></pre>
       <g transform="translate(16, 14)" color="#1e40af">
         <use href="#key" width="22" height="22"/>
       </g>
-      <text x="16" y="56" class="h-component">router</text>
-      <text x="16" y="82" class="annotation"><tspan font-weight="700">+</tspan>  Entra Agent ID</text>
-      <text x="16" y="102" class="annotation"><tspan font-weight="700">+</tspan>  policy &amp; budget</text>
-      <text x="16" y="122" class="annotation"><tspan font-weight="700">+</tspan>  audit chain</text>
+      <text x="16" y="52" class="h-component">router</text>
+      <text x="16" y="76" class="annotation"><tspan font-weight="700">+</tspan>  Entra Agent ID</text>
+      <text x="16" y="95" class="annotation"><tspan font-weight="700">+</tspan>  capability grant</text>
+      <text x="16" y="114" class="annotation"><tspan font-weight="700">+</tspan>  trust score</text>
+      <text x="16" y="133" class="annotation"><tspan font-weight="700">+</tspan>  feedback signal</text>
     </g>
 
     <!-- agent → router arrow -->
@@ -266,7 +267,7 @@ kars connect demo</code></pre>
   </g>
   <g transform="translate(720, 270)">
     <text x="22" y="34" class="card-title">writer</text>
-    <text x="22" y="52" class="card-sub">namespace kars-writer</text>
+    <text x="22" y="52" class="card-sub">Hermes runtime · ns kars-writer</text>
     <!-- isolation pill: same width + position as ENHANCED -->
     <rect x="275" y="22" width="110" height="22" rx="11" fill="#5C2D91"/>
     <text x="330" y="37" class="iso-pill" text-anchor="middle">CONFIDENTIAL</text>
@@ -284,7 +285,7 @@ kars connect demo</code></pre>
       <g transform="translate(14, 14)" color="#92400e">
         <use href="#shield-x" width="22" height="22"/>
       </g>
-      <text x="16" y="56" class="h-component">agent</text>
+      <text x="16" y="52" class="h-component">agent</text>
       <text x="16" y="82" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  UID 1000 · read-only</text>
       <text x="16" y="102" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no credentials</text>
       <text x="16" y="122" class="annotation" fill="#92400e"><tspan font-weight="700">✓</tspan>  no public net</text>
@@ -295,10 +296,11 @@ kars connect demo</code></pre>
       <g transform="translate(16, 14)" color="#1e40af">
         <use href="#key" width="22" height="22"/>
       </g>
-      <text x="16" y="56" class="h-component">router</text>
-      <text x="16" y="82" class="annotation"><tspan font-weight="700">+</tspan>  Entra Agent ID</text>
-      <text x="16" y="102" class="annotation"><tspan font-weight="700">+</tspan>  policy &amp; budget</text>
-      <text x="16" y="122" class="annotation"><tspan font-weight="700">+</tspan>  audit chain</text>
+      <text x="16" y="52" class="h-component">router</text>
+      <text x="16" y="76" class="annotation"><tspan font-weight="700">+</tspan>  Entra Agent ID</text>
+      <text x="16" y="95" class="annotation"><tspan font-weight="700">+</tspan>  capability grant</text>
+      <text x="16" y="114" class="annotation"><tspan font-weight="700">+</tspan>  trust score</text>
+      <text x="16" y="133" class="annotation"><tspan font-weight="700">+</tspan>  feedback signal</text>
     </g>
     <line x1="190" y1="190" x2="210" y2="190" stroke="#1e40af" stroke-width="2" marker-end="url(#arr-blue)"/>
 
@@ -317,10 +319,10 @@ kars connect demo</code></pre>
     <use href="#lock" x="6" y="6" width="20" height="20"/>
   </g>
 
-  <text x="600" y="465" class="lock-text" text-anchor="middle">END-TO-END ENCRYPTED</text>
-  <text x="600" y="482" class="lock-text" text-anchor="middle">agent to agent</text>
-  <text x="600" y="502" class="lock-sub" text-anchor="middle">AGT AgentMesh · Signal Protocol</text>
-  <text x="600" y="518" class="lock-sub" text-anchor="middle">(X3DH + Double Ratchet)</text>
+  <text x="600" y="463" class="lock-text" text-anchor="middle">END-TO-END ENCRYPTED</text>
+  <text x="600" y="483" class="lock-sub" text-anchor="middle">OpenClaw ↔ Hermes · any pair</text>
+  <text x="600" y="503" class="lock-sub" text-anchor="middle">AGT AgentMesh · Signal Protocol</text>
+  <text x="600" y="519" class="lock-sub" text-anchor="middle">(X3DH + Double Ratchet)</text>
 
   <!-- ============== kars-sre control-plane bar (below cards, inside cluster) ============== -->
   <g transform="translate(80, 620)" filter="url(#shadow)">
@@ -349,7 +351,7 @@ kars connect demo</code></pre>
     <text x="560" y="46" class="agt-body" text-anchor="middle">policy decisions  ·  hash-chained audit  ·  signing  ·  Signal-Protocol mesh primitives  ·  per-peer trust  ·  behaviour monitoring  ·  rate-limit</text>
   </g>
 </svg>
-<figcaption>Figure 1 — Two sandboxes (<strong>researcher</strong> in <code>enhanced</code> isolation; <strong>writer</strong> in <code>confidential</code> = Kata + AMD SEV-SNP on <code>Standard_DC4as_v5</code>). The Signal session lives inside the agent processes; routers WS-bridge opaque ciphertext frames. <strong>kars-sre</strong> is the cluster's own operator agent — same sandbox shape, but with cluster-wide read and gated writes. AGT is consumed for governance.</figcaption>
+<figcaption>Figure 1 — Two sandboxes running <em>different</em> agent runtimes (<strong>researcher</strong> on OpenClaw in <code>enhanced</code> isolation; <strong>writer</strong> on Hermes in <code>confidential</code> = Kata + AMD SEV-SNP on <code>Standard_DC4as_v5</code>) talk to each other over the AgentMesh — OpenClaw, Hermes, MAF, LangGraph and the other adapters all share one Signal-Protocol wire format. The Signal session lives inside the agent processes; the relay only forwards opaque ciphertext and cannot decrypt. <strong>kars-sre</strong> is the cluster's own operator agent — same sandbox shape, but with cluster-wide read and gated writes. AGT is consumed for governance.</figcaption>
 </figure>
 
 <h2>Why this design</h2>
