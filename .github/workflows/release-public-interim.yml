@@ -284,6 +284,20 @@ jobs:
           echo "AGT_SDK_TARBALL=$(basename "$TARBALL")" >> "$GITHUB_ENV"
           echo "::notice::Bundling patched AGT SDK: $(basename "$TARBALL")"
 
+      - name: Build mesh-plugin (openclaw Dockerfile COPYs mesh-plugin/dist)
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: '22'
+      - name: npm ci + build mesh-plugin
+        working-directory: mesh-plugin
+        run: |
+          # The openclaw Dockerfile hard-COPYs mesh-plugin/dist/ (it ships
+          # @kars/mesh as a file: dep with the prepare script stripped), so
+          # dist/ must exist in the build context before buildx runs.
+          npm ci --no-audit --no-fund
+          npm run build
+          test -d dist || { echo "::error::mesh-plugin/dist not produced"; exit 1; }
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
 
