@@ -150,26 +150,6 @@ jobs:
         if: matrix.image.no_binaries != true
         run: find ./bin -type f -name 'kars-*' -exec chmod +x {} \;
 
-      - name: Stage patched AGT SDK (release-build correctness guard)
-        if: matrix.image.name == 'sandbox-base'
-        run: |
-          # A release sandbox image MUST bundle the kars-patched AGT SDK
-          # (POP signing + X3DH KDF fix). The Dockerfile falls back to the
-          # UNPATCHED public npm SDK if .agt-sdk/<tarball> is absent, which
-          # would ship a broken-interop image. Fail the release rather than
-          # publish an unpatched mesh.
-          TARBALL=$(find vendor/agt -maxdepth 1 -name 'microsoft-agent-governance-sdk-*.tgz' | head -1 || true)
-          if [ -z "$TARBALL" ]; then
-            echo "::error::No vendored patched AGT SDK tarball under vendor/agt/." \
-                 "Refusing to build a release sandbox image that would fall back" \
-                 "to the unpatched public SDK. See vendor/agt/pin.json."
-            exit 1
-          fi
-          mkdir -p sandbox-images/openclaw/.agt-sdk
-          cp "$TARBALL" sandbox-images/openclaw/.agt-sdk/
-          echo "AGT_SDK_TARBALL=$(basename "$TARBALL")" >> "$GITHUB_ENV"
-          echo "::notice::Bundling patched AGT SDK: $(basename "$TARBALL")"
-
       - name: Set up QEMU (for cross-arch buildx)
         if: matrix.image.platforms != 'linux/amd64'
         uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
@@ -197,7 +177,6 @@ jobs:
             ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:latest
           build-args: |
             VERSION=${{ env.VERSION }}
-            AGT_SDK_TARBALL=${{ env.AGT_SDK_TARBALL }}
           sbom: true
           provenance: true
 
@@ -250,6 +229,105 @@ jobs:
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}@${{ steps.push.outputs.digest }}
 
+  # ─── Stage 2b: build the openclaw-sandbox agent image ──────────
+  # openclaw-sandbox is the image the controller actually launches per agent.
+  # It is built FROM kars-sandbox-base + the inference-router binary + the
+  # OpenClaw plugin, and is where the patched AGT SDK gets baked in. It must
+  # build AFTER build-images so the base + router images it references are
+  # already pushed to GHCR. amd64-only (inherits sandbox-base's wheel arch).
+  build-sandbox:
+    name: Build + push openclaw-sandbox (PUBLIC GHCR)
+    needs: build-images
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    outputs:
+      sandbox_digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Stage patched AGT SDK (release-build correctness guard)
+        run: |
+          # A release sandbox image MUST bundle the kars-patched AGT SDK
+          # (POP signing + X3DH KDF fix). The Dockerfile falls back to the
+          # UNPATCHED public npm SDK if .agt-sdk/<tarball> is absent, which
+          # would ship a broken-interop mesh. Fail the release instead.
+          TARBALL=$(find vendor/agt -maxdepth 1 -name 'microsoft-agent-governance-sdk-*.tgz' | head -1 || true)
+          if [ -z "$TARBALL" ]; then
+            echo "::error::No vendored patched AGT SDK tarball under vendor/agt/." \
+                 "Refusing to publish an openclaw-sandbox that would fall back to" \
+                 "the unpatched public SDK. See vendor/agt/pin.json."
+            exit 1
+          fi
+          mkdir -p sandbox-images/openclaw/.agt-sdk
+          cp "$TARBALL" sandbox-images/openclaw/.agt-sdk/
+          echo "AGT_SDK_TARBALL=$(basename "$TARBALL")" >> "$GITHUB_ENV"
+          echo "::notice::Bundling patched AGT SDK: $(basename "$TARBALL")"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push openclaw-sandbox (PUBLIC)
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: .
+          file: sandbox-images/openclaw/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/openclaw-sandbox:latest
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            SANDBOX_BASE_IMAGE=${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}
+            INFERENCE_ROUTER_IMAGE=${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}
+            AGT_SDK_TARBALL=${{ env.AGT_SDK_TARBALL }}
+          sbom: true
+          provenance: true
+
+      - name: Make package public (best-effort; may need one-time manual toggle)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/orgs/azure/packages/container/openclaw-sandbox/visibility" \
+            -f visibility=public \
+          || echo "::warning::Could not set openclaw-sandbox public via API; set it once manually in package settings."
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom-openclaw-sandbox.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: sbom-openclaw-sandbox-${{ env.VERSION }}
+          path: sbom-openclaw-sandbox.spdx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Cosign keyless sign image
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/openclaw-sandbox@${{ steps.push.outputs.digest }}
+
   # ─── Stage 3: pack @kars/cli for GitHub Release distribution ───
   cli-pack:
     name: Pack @kars/cli tarball
@@ -277,7 +355,7 @@ jobs:
   # ─── Stage 4: assemble + publish the PUBLIC GitHub Release ─────
   release:
     name: Create PUBLIC GitHub Release
-    needs: [build-binaries, build-images, cli-pack]
+    needs: [build-binaries, build-images, build-sandbox, cli-pack]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -332,7 +410,8 @@ jobs:
               {"name": "kars-inference-router",  "ghcr": "${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}",  "digest": "${{ needs.build-images.outputs.router_digest }}"},
               {"name": "kars-a2a-gateway",       "ghcr": "${{ env.REGISTRY }}/kars-a2a-gateway:${{ env.VERSION }}",       "digest": "${{ needs.build-images.outputs.gateway_digest }}"},
               {"name": "kars-conformance-runner","ghcr": "${{ env.REGISTRY }}/kars-conformance-runner:${{ env.VERSION }}","digest": "${{ needs.build-images.outputs.runner_digest }}"},
-              {"name": "kars-sandbox-base",      "ghcr": "${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}",      "digest": "${{ needs.build-images.outputs.sandbox_base_digest }}"}
+              {"name": "kars-sandbox-base",      "ghcr": "${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}",      "digest": "${{ needs.build-images.outputs.sandbox_base_digest }}"},
+              {"name": "openclaw-sandbox",       "ghcr": "${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}",       "digest": "${{ needs.build-sandbox.outputs.sandbox_digest }}"}
             ],
             "cli_install": "npm i -g https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ steps.cli.outputs.tarball }}",
             "next_step_for_signed_release": "Migrate to the ESRP-signed public path (.github/pipelines/esrp-publish.yml → MCR + npmjs @kars + crates.io) once onboarding completes. See docs/PUBLISHING.md."
@@ -382,6 +461,7 @@ jobs:
             ${{ env.REGISTRY }}/kars-a2a-gateway:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-conformance-runner:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}
             ```
             All signed with cosign keyless (verify via Sigstore Rekor). SBOMs
             attached below.
