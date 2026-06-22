@@ -98,7 +98,7 @@
     <li><strong>Why:</strong> agent code is partially generated at runtime by untrusted sources (prompt injection works in practice). The trust model has to be closer to <em>running customer-submitted code</em> than to <em>running a service you wrote</em>.</li>
     <li><strong>How:</strong> consumes <a href="https://microsoft.github.io/agent-governance-toolkit/">AGT</a> for governance, runs on the Azure Linux family, opt-in <a href="https://learn.microsoft.com/en-us/azure/aks/use-pod-sandboxing">AKS Pod Sandboxing</a> (Kata + AMD SEV-SNP) is one CRD field. Eight first-class agent frameworks supported.</li>
     <li><strong>Unique today:</strong> end-to-end encrypted inter-<em>runtime</em> messaging — agents written in OpenClaw, Hermes, MAF, LangGraph, etc. talk on the same Signal-Protocol mesh; the broker sees only ciphertext. No other K8s-native agent runtime ships this.</li>
-    <li><strong>Try it:</strong> <code>kars up demo --runtime openclaw</code> — 5 min on local kind, ~15 min on a fresh AKS cluster (including provisioning).</li>
+    <li><strong>Try it:</strong> <code>kars dev</code> runs a governed agent on your laptop in minutes (Docker by default, or a kind cluster via <code>--target local-k8s</code>); <code>kars up</code> provisions the full stack on AKS.</li>
     <li><strong>Source:</strong> <a href="https://github.com/Azure/kars">github.com/Azure/kars</a> · MIT · contributions welcome.</li>
   </ul>
 </div>
@@ -108,16 +108,14 @@
 <pre><code># 1. Install the CLI (Node 22+)
 npm install -g @kars/cli
 
-# 2. Stand up your first sandbox
-#    Targets local kind by default (≈ 5 min). Add --aks to provision an AKS cluster (~15 min).
-kars up demo --runtime openclaw --model gpt-4o
-#                    └─ OpenClaw is kars's reference agent runtime.
-#                       Other options: hermes, openai-agents, maf-python,
-#                       langgraph (py/ts), anthropic, pydantic-ai.
+# 2. Try it on your laptop. Docker by default (fast); add
+#    --target local-k8s to run on a kind cluster that mirrors the
+#    AKS layout. kars dev prompts for the runtime and model provider.
+kars dev
 
 # 3. Open a chat with your governed agent
-kars connect demo</code></pre>
-  <p>Full path in the <a href="https://github.com/Azure/kars/blob/main/docs/getting-started.md">getting-started guide</a>.</p>
+kars connect dev-agent --local</code></pre>
+  <p>Going to production? <code>kars up</code> provisions the AKS cluster, controller and your first sandbox; <code>kars add &lt;name&gt; --runtime &lt;kind&gt;</code> adds agents on any of the eight runtimes (<code>openclaw</code>, <code>hermes</code>, <code>openai-agents</code>, <code>microsoft-agent-framework</code>, <code>langgraph</code>, <code>anthropic</code>, <code>pydantic-ai</code>, <code>byo</code>); <code>kars connect &lt;name&gt;</code> opens the chat. Full path in the <a href="https://github.com/Azure/kars/blob/main/docs/getting-started.md">getting-started guide</a>.</p>
 </div>
 
 <h2>The architecture, in one picture</h2>
@@ -342,7 +340,7 @@ kars connect demo</code></pre>
     <text x="540" y="54" class="body"><tspan font-weight="700" fill="#C2410C">WRITE</tspan>  one-shot approval per action</text>
 
     <text x="1020" y="34" class="body" text-anchor="end"><tspan font-family="Cascadia Code, monospace" font-size="13" fill="#5b21b6">$ kars sre install</tspan></text>
-    <text x="1020" y="54" class="body" text-anchor="end"><tspan font-family="Cascadia Code, monospace" font-size="13" fill="#5b21b6">$ kars sre talk · diagnose</tspan></text>
+    <text x="1020" y="54" class="body" text-anchor="end"><tspan font-family="Cascadia Code, monospace" font-size="13" fill="#5b21b6">$ kars sre talk · approve</tspan></text>
   </g>
 
   <!-- ============== AGT FOUNDATION ROW ============== -->
@@ -389,7 +387,7 @@ spec:
   <ul>
     <li>Sets <code>runtimeClassName: kata-vm-isolation</code> on the pod spec (<a href="https://github.com/Azure/kars/blob/main/controller/src/reconciler/mod.rs">controller/src/reconciler/mod.rs:87</a>).</li>
     <li>Adds a <code>nodeSelector</code> for the <code>sandbox-kata</code> nodepool.</li>
-    <li>Schedules onto a Kata nodepool with <code>workloadRuntime: KataMshvVmIsolation</code>, AMD SEV-SNP capable VMs (<code>Standard_DC4as_v5</code>), <code>enableEncryptionAtHost: true</code> — auto-provisioned by Bicep or by <code>kars add --kata</code>.</li>
+    <li>Schedules onto a Kata nodepool with <code>workloadRuntime: KataMshvVmIsolation</code>, AMD SEV-SNP capable VMs (<code>Standard_DC4as_v5</code>), <code>enableEncryptionAtHost: true</code> — auto-provisioned by Bicep or by <code>kars add &lt;name&gt; --isolation confidential</code>.</li>
     <li>Preserves all the other kars hardening (read-only rootfs, drop-ALL caps, default-deny egress, kars-strict seccomp).</li>
   </ul>
 
