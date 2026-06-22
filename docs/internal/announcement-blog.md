@@ -39,7 +39,7 @@ Going to production? `kars up` provisions the AKS cluster, controller and your f
 
 ![kars architecture diagram](assets/kars-architecture.png)
 
-*Figure 1 — Two sandboxes running different agent runtimes (**researcher** on OpenClaw in `enhanced` isolation; **writer** on Hermes in `confidential` = Kata + AMD SEV-SNP on `Standard_DC4as_v5`) talk to each other over the AgentMesh — OpenClaw, Hermes, MAF, LangGraph and the other adapters all share one Signal-Protocol wire format. The Signal session lives inside the agent processes — each agent owns its own session keys; the relay only forwards opaque ciphertext and cannot decrypt. The per-pod router holds the Entra Agent ID and the AGT governance the agent consults on every peer message (trust, capability, policy, audit). **kars-sre** is the cluster's own operator agent — same sandbox shape, but with cluster-wide read and gated writes. AGT is consumed for governance.*
+**Figure 1** — Two sandboxes running different agent runtimes (**researcher** on OpenClaw in `enhanced` isolation; **writer** on Hermes in `confidential` = Kata + AMD SEV-SNP on `Standard_DC4as_v5`) talk to each other over the AgentMesh — OpenClaw, Hermes, MAF, LangGraph and the other adapters all share one Signal-Protocol wire format. The Signal session lives inside the agent processes — each agent owns its own session keys; the relay only forwards opaque ciphertext and cannot decrypt. The per-pod router holds the Entra Agent ID and the AGT governance the agent consults on every peer message (trust, capability, policy, audit). **kars-sre** is the cluster's own operator agent — same sandbox shape, but with cluster-wide read and gated writes. AGT is consumed for governance.
 
 ## Why this design
 
@@ -92,20 +92,18 @@ The trust boundary becomes: *the workload runs in its own hypervisor-protected V
 
 ## What v0.1.0 ships
 
-| Layer | What's enforced today | Why it matters |
-|----|----|----|
-| Identity | Per-sandbox Microsoft Entra Agent ID via auth-sidecar (`--mesh-trust=entra`), or cluster Workload Identity in anonymous mode. No long-lived secrets on disk. | Each agent is an addressable principal in Entra. Audit logs name the sandbox. |
-| Egress | iptables UID-1000 default-deny, K8s NetworkPolicy default-deny, router L7 allowlist on every CONNECT, OISD + URLhaus blocklist (daily refresh), `EgressApproval` CRD for time-boxed exceptions. | Compromised agent code has no socket to the open internet. |
-| Container shape | Read-only rootfs, drop-ALL caps, non-root, no privilege escalation, `kars-strict` seccomp (175 allowed / 41 explicit-deny), Landlock. Optional Kata + AMD SEV-SNP via `spec.isolation: confidential`. | Kernel surface minimised; optional hypervisor isolation per pod. |
-| Governance | AGT consumed through four provider traits: `PolicyDecisionProvider`, `AuditSink`, `SigningProvider`, `MeshProvider` (`agentmesh = "4.0.0"`). Hot-reloaded policy, hash-chained audit, per-peer trust, behaviour monitoring, rate-limit. | kars does not reimplement governance. Gap-closing PRs upstreamed: [#2090](https://github.com/microsoft/agent-governance-toolkit/pull/2090), [#2659](https://github.com/microsoft/agent-governance-toolkit/pull/2659), [#2719](https://github.com/microsoft/agent-governance-toolkit/pull/2719). |
-| Mesh | End-to-end encrypted inter-agent messaging. Signal Protocol session in the agent process; router WS-bridges opaque ciphertext. Cross-runtime Hermes ↔ OpenClaw exercised on every push. | The relay is not in the trust set. |
-| Runtimes | Eight first-class adapters: OpenClaw, Hermes, OpenAI Agents, MAF (Python), LangGraph (Py + TS), Anthropic Claude Agent SDK, Pydantic-AI. Documented BYO contract. | Multi-framework adoption path. Switching is a one-field change. |
-| A2A | Public A2A gateway with mTLS-pinned `X-A2A-Agent-Subject` for cross-org inbound. In-binary `AgentCard` JWS verifier is library-complete; axum layer wiring is on the roadmap. | Foreign agents over an open standard. |
-| Supply chain | cosign keyless OIDC signatures + SPDX-JSON SBOM per image; Trivy + cargo-deny + RustSec advisory audit on every dependency-touching PR. | Verifiable artifact provenance. |
+- **Identity** — Per-sandbox Microsoft Entra Agent ID via auth-sidecar (`--mesh-trust=entra`), or cluster Workload Identity in anonymous mode. No long-lived secrets on disk. *Why it matters: each agent is an addressable principal in Entra; audit logs name the sandbox.*
+- **Egress** — iptables UID-1000 default-deny, K8s NetworkPolicy default-deny, router L7 allowlist on every CONNECT, OISD + URLhaus blocklist (daily refresh), `EgressApproval` CRD for time-boxed exceptions. *Why it matters: compromised agent code has no socket to the open internet.*
+- **Container shape** — Read-only rootfs, drop-ALL caps, non-root, no privilege escalation, `kars-strict` seccomp (175 allowed / 41 explicit-deny), Landlock. Optional Kata + AMD SEV-SNP via `spec.isolation: confidential`. *Why it matters: kernel surface minimised; optional hypervisor isolation per pod.*
+- **Governance** — AGT consumed through four provider traits: `PolicyDecisionProvider`, `AuditSink`, `SigningProvider`, `MeshProvider` (`agentmesh = "4.0.0"`). Hot-reloaded policy, hash-chained audit, per-peer trust, behaviour monitoring, rate-limit. *Why it matters: kars does not reimplement governance. Gap-closing PRs upstreamed: [#2090](https://github.com/microsoft/agent-governance-toolkit/pull/2090), [#2659](https://github.com/microsoft/agent-governance-toolkit/pull/2659), [#2719](https://github.com/microsoft/agent-governance-toolkit/pull/2719).*
+- **Mesh** — End-to-end encrypted inter-agent messaging. Signal Protocol session in the agent process; router WS-bridges opaque ciphertext. Cross-runtime Hermes ↔ OpenClaw exercised on every push. *Why it matters: the relay is not in the trust set.*
+- **Runtimes** — Eight first-class adapters: OpenClaw, Hermes, OpenAI Agents, MAF (Python), LangGraph (Py + TS), Anthropic Claude Agent SDK, Pydantic-AI. Documented BYO contract. *Why it matters: multi-framework adoption path; switching is a one-field change.*
+- **A2A** — Public A2A gateway with mTLS-pinned `X-A2A-Agent-Subject` for cross-org inbound. In-binary `AgentCard` JWS verifier is library-complete; axum layer wiring is on the roadmap. *Why it matters: foreign agents over an open standard.*
+- **Supply chain** — cosign keyless OIDC signatures + SPDX-JSON SBOM per image; Trivy + cargo-deny + RustSec advisory audit on every dependency-touching PR. *Why it matters: verifiable artifact provenance.*
 
 Six end-to-end use cases are shipping and exercised by CI: kars-native OpenClaw on AKS, any-OpenClaw → kars cloud offload, kars ↔ kars mesh, multi-runtime hosting, A2A federation across organisations, and migration from [kagent](https://kagent.dev) or [`sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox). See [docs/use-cases.md](https://github.com/Azure/kars/blob/main/docs/use-cases.md).
 
-------------------------------------------------------------------------
+· · ·
 
 ## The honest scope statement — when kars is *not* for you
 
@@ -159,7 +157,7 @@ The codebase is at [github.com/Azure/kars](https://github.com/Azure/kars), MIT-l
 
 Everything else is open.
 
-------------------------------------------------------------------------
+· · ·
 
 If you're evaluating how to take agentic AI from pilot to production on Kubernetes, I'd value the conversation. Open an [issue or discussion](https://github.com/Azure/kars/discussions) on the repository. The next 18 months of agentic AI will be decided less by model quality and more by production governance. I think the answer should be open source, K8s-native, and aligned with the upstream landscape. That's what *kars* is.
 
