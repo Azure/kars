@@ -513,6 +513,97 @@ jobs:
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}@${{ steps.push.outputs.digest }}
 
+  # ─── Stage 2e: build the AGT mesh relay + registry images ──────
+  # kars dev / up run the AGT relay + registry for the mesh. They are built
+  # from the pinned AGT checkout (agent-mesh/docker/Dockerfile, COMPONENT=*).
+  # Publishing them lets `kars dev --release` pull everything — no AGT clone.
+  build-mesh:
+    name: Build + push agentmesh-${{ matrix.component }} (PUBLIC GHCR)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, registry]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Clone pinned AGT
+        run: |
+          URL=$(jq -r .url vendor/agt/pin.json)
+          SHA=$(jq -r .sha vendor/agt/pin.json)
+          git clone --filter=blob:none "$URL" /tmp/agt
+          git -C /tmp/agt checkout "$SHA"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push agentmesh-${{ matrix.component }} (PUBLIC)
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: /tmp/agt
+          file: /tmp/agt/agent-governance-python/agent-mesh/docker/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:latest
+          build-args: |
+            COMPONENT=${{ matrix.component }}
+          sbom: true
+          provenance: true
+
+      - name: Attest build provenance (GitHub-signed, pushed to registry)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Make package public (best-effort; may need one-time manual toggle)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/orgs/azure/packages/container/kars-agentmesh-${{ matrix.component }}/visibility" \
+            -f visibility=public \
+          || echo "::warning::Could not set kars-agentmesh-${{ matrix.component }} public via API; set it once manually."
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom-kars-agentmesh-${{ matrix.component }}.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: sbom-kars-agentmesh-${{ matrix.component }}-${{ env.VERSION }}
+          path: sbom-kars-agentmesh-${{ matrix.component }}.spdx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Cosign keyless sign image
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}@${{ steps.push.outputs.digest }}
+
   # ─── Stage 3: pack @kars/cli for GitHub Release distribution ───
   cli-pack:
     name: Pack @kars/cli tarball
@@ -545,7 +636,7 @@ jobs:
   # ─── Stage 4: assemble + publish the PUBLIC GitHub Release ─────
   release:
     name: Create PUBLIC GitHub Release
-    needs: [build-binaries, build-images, build-sandbox, build-runtimes, cli-pack]
+    needs: [build-binaries, build-images, build-sandbox, build-runtimes, build-mesh, cli-pack]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -665,6 +756,13 @@ jobs:
             ${{ env.REGISTRY }}/kars-runtime-anthropic:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-runtime-openai-agents:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-runtime-pydantic-ai:${{ env.VERSION }}
+            ```
+
+            ### AGT mesh images (PUBLIC GHCR, amd64)
+            The relay + registry that `kars dev`/`up` run for the mesh:
+            ```
+            ${{ env.REGISTRY }}/kars-agentmesh-relay:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-agentmesh-registry:${{ env.VERSION }}
             ```
             All signed with cosign keyless (verify via Sigstore Rekor). SBOMs
             attached below.
