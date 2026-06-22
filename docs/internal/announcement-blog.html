@@ -425,12 +425,14 @@ spec:
 
 <h2>The honest scope statement — when kars is <em>not</em> for you</h2>
 
-<p>I take credibility seriously. Here is the short list of situations where I would tell you to use something else:</p>
+<p>No tool is right for every situation. Here's an honest list of where kars probably isn't the call:</p>
 <ul>
   <li><strong>Single agent, single user, single team, no adversarial-code threat model, no scale.</strong> Use a serverless function. Save yourself the operator overhead.</li>
   <li><strong>Pure cluster-edge LLM traffic governance, no per-agent isolation requirement.</strong> Adopt <a href="https://agentgateway.dev/">agentgateway</a> directly. It's the right tool for that job; kars composes with it, not against it.</li>
   <li><strong>No Kubernetes substrate.</strong> If you operate on bare VMs or pure serverless, kars has no target there today.</li>
 </ul>
+
+<p>None of this should stop you from <em>trying</em> it, though. <code>kars dev</code> brings the whole stack up locally — either as a plain Docker container or a kind cluster that mirrors the AKS layout — so anyone can play with the sandboxing, the encrypted mesh, and the governance on a laptop before deciding whether it belongs in production. The "not for you" list is about where it earns its keep, not about who's allowed to kick the tyres.</p>
 
 <p>Note that <em>single-framework</em> shops still benefit from kars at scale — the per-pod kernel isolation, per-sandbox Entra Agent ID, audit chain, and K8s-native lifecycle have nothing to do with multi-runtime support. Multi-runtime is one of the seven things kars does well, not the reason kars exists.</p>
 
