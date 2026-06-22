@@ -67,10 +67,19 @@ jobs:
         with:
           shared-key: rust-glibc-release-multiarch
           save-if: false
-      - name: Install aarch64 cross-linker
+      - name: Install aarch64 cross toolchain + libc headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          # gcc-aarch64-linux-gnu alone is not enough to compile aws-lc-sys
+          # (BoringSSL C) for arm64: --no-install-recommends drops the cross
+          # libc dev headers, so the build fails with "sys/types.h: No such
+          # file or directory". Pull them in explicitly:
+          #   libc6-dev-arm64-cross    → sys/types.h, bits/libc-header-start.h
+          #   linux-libc-dev-arm64-cross → asm/types.h, linux/types.h
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            linux-libc-dev-arm64-cross
       - name: cargo build --release (amd64 + arm64)
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc

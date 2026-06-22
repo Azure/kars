@@ -40,8 +40,7 @@ dependencies = [
     # them installed (or a --find-links source) resolves cleanly. If they are
     # not available in the active Python environment install them via:
     #   pip install --find-links ../wheels a2a_agentmesh agent_sandbox
-    "a2a_agentmesh>=3.3.0,<4",
-    "agent_sandbox>=3.3.0,<4",
+    "a2a_agentmesh>=3.3.0,<5",
 ]
 
 [project.optional-dependencies]
