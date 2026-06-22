@@ -470,3 +470,9 @@ CRD-AUDIT-REPORT.md
 
 # e2e harness run artefacts — NEVER commit
 tools/e2e-harness/out/
+
+# Playwright MCP session artifacts — local-only, never commit
+.playwright-mcp/
+
+# Local diagram/screenshot scratch images at repo root (blog/diagram iteration)
+/*.png
