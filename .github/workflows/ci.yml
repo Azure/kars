@@ -528,7 +528,7 @@ jobs:
 
       - name: Install kubectl
         if: steps.paths.outputs.run == 'true'
-        uses: azure/setup-kubectl@901a10e89ea615cf61f57ac05cecdf23e7de06d8 # v4
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v4
         with:
           version: v1.30.5
 
