@@ -37,7 +37,7 @@ Going to production? `kars up` provisions the AKS cluster, controller and your f
 
 ## The architecture, in one picture
 
-![kars architecture diagram](assets/kars-architecture.png)
+![kars architecture diagram](assets/kars-architecture.jpg)
 
 **Figure 1** — Two sandboxes running different agent runtimes (**researcher** on OpenClaw in `enhanced` isolation; **writer** on Hermes in `confidential` = Kata + AMD SEV-SNP on `Standard_DC4as_v5`) talk to each other over the AgentMesh — OpenClaw, Hermes, MAF, LangGraph and the other adapters all share one Signal-Protocol wire format. The Signal session lives inside the agent processes — each agent owns its own session keys; the relay only forwards opaque ciphertext and cannot decrypt. The per-pod router holds the Entra Agent ID and the AGT governance the agent consults on every peer message (trust, capability, policy, audit). **kars-sre** is the cluster's own operator agent — same sandbox shape, but with cluster-wide read and gated writes. AGT is consumed for governance.
 
