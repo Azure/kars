@@ -33,6 +33,10 @@
 #   SKIP_DEV_BRINGUP      — set to 1 to skip the `kars dev
 #                           --target docker` step if the container is
 #                           already up.
+#   KARS_RELEASE          — when set (e.g. v0.1.0-interim.5), bring the
+#                           sandbox up from PUBLISHED images via
+#                           `kars dev --release <ver>` (no local build,
+#                           no AGT clone). Verifies the released path.
 
 set -euo pipefail
 
@@ -57,8 +61,15 @@ platform_preflight() {
         # applied — docker mode requires the scenario to either preload
         # the bundles into the image or provide a docker-overlay/ dir
         # the helper sources. We do not pretend otherwise.
+        # KARS_RELEASE → pull published images instead of building.
+        release_args=()
+        if [ -n "${KARS_RELEASE:-}" ]; then
+            release_args=(--release "${KARS_RELEASE}")
+            log "released mode: kars dev --release ${KARS_RELEASE} (published images)"
+        fi
         kars dev --target docker \
             --name "${DOCKER_CONTAINER_NAME}" \
+            "${release_args[@]}" \
             >>"${OUT_DIR}/dev-bringup.log" 2>&1 || {
                 log "ERR kars dev bring-up failed; tail of dev-bringup.log:"
                 tail -n 80 "${OUT_DIR}/dev-bringup.log" >&2 || true
