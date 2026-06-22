@@ -97,6 +97,12 @@ const SANDBOX_BASE_IMAGE =
 const AZURELINUX_BASE =
   "mcr.microsoft.com/azurelinux/base/core:3.0";
 
+// Public registry for `--release` mode (no-compile, no-AGT-clone bringup).
+// Mirrors the names published by .github/workflows/release-public-interim.yml.
+const RELEASE_REGISTRY = "ghcr.io/azure";
+const releaseImage = (name: string, version: string): string =>
+  `${RELEASE_REGISTRY}/${name}:${version}`;
+
 const AGT_NETWORK = "kars-dev";
 const AGT_POSTGRES = "kars-agt-postgres";
 const AGT_RELAY = "kars-agt-relay";
@@ -166,6 +172,10 @@ NOT overwrite your saved credentials.
       "One-off GitHub Models override (does NOT save). Requires a PAT with `models:read`. To save GitHub Models as your default provider, run without this flag and pick GitHub Models at the prompt."
     )
     // ── Image build ────────────────────────────────────────────────────
+    .option(
+      "--release <version>",
+      "Run from PUBLISHED images instead of building. Pulls ghcr.io/azure/* at the given release tag (e.g. v0.1.0-interim.5) — no AGT clone, no local compile. Skips --build.",
+    )
     .option(
       "--image <image>",
       "Sandbox container image",
@@ -259,6 +269,26 @@ Notes:
       if (options.meshProvider && options.meshProvider !== "agt") {
         console.error(chalk.red(`\n  Error: --mesh-provider must be 'agt' (got "${options.meshProvider}"). Vendored Rust relay/registry were removed in Phase 5.2.\n`));
         process.exit(1);
+      }
+
+      // ── Release mode: run from published images, no build/clone ───
+      // `--release <version>` pulls everything from ghcr.io/azure/* at the
+      // given tag: the openclaw-sandbox, the AGT relay + registry, and any
+      // selected runtime image. It forces build OFF so we never compile or
+      // clone the AGT toolkit. An explicit --build is contradictory.
+      const releaseMode = typeof options.release === "string" && options.release.length > 0;
+      const releaseVersion: string | undefined = releaseMode ? options.release : undefined;
+      if (releaseMode) {
+        if (options.build === true || options.buildBase === true) {
+          console.error(chalk.red(`\n  Error: --release pulls published images; it cannot be combined with --build/--build-base.\n`));
+          process.exit(1);
+        }
+        options.build = false;
+        // Use the published sandbox image unless the user pinned --image.
+        const imagePassed = process.argv.some(a => a === "--image" || a.startsWith("--image="));
+        if (!imagePassed) {
+          options.image = releaseImage("openclaw-sandbox", releaseVersion!);
+        }
       }
 
       // ── First-run target prompt ──────────────────────────────────
@@ -462,7 +492,7 @@ Notes:
         // users testing local changes can opt in here without
         // remembering the --build flag. Skipped if --build was passed
         // explicitly.
-        if (!options.build) {
+        if (!options.build && !releaseMode) {
           const { rebuild } = await inquirer.prompt([{
             type: "confirm",
             name: "rebuild",
@@ -603,6 +633,13 @@ Notes:
         process.exit(1);
       }
       if (options.target === "local-k8s") {
+        if (releaseMode) {
+          console.error(chalk.red(`\n  Error: --release currently supports --target docker only.`));
+          console.error(chalk.dim(`  (local-k8s loads images into kind + Helm; published-image support there is tracked separately.)\n`));
+          console.error(chalk.yellow(`  Run the published images locally with:`));
+          console.error(chalk.cyan(`      kars dev --release ${releaseVersion}\n`));
+          process.exit(1);
+        }
         const { runLocalK8s } = await import("./dev/local-k8s.js");
         try {
           await runLocalK8s({
@@ -648,13 +685,19 @@ Notes:
       // machines can `kars dev --build` without first cloning AGT by
       // hand. Explicit --agt-repo / $KARS_AGT_REPO still win.
       let agtRepo: string;
-      try {
-        agtRepo = await ensureAgtRepo(options.agtRepo, repoRoot);
-      } catch (e: unknown) {
+      if (releaseMode) {
+        // Release mode pulls the published relay/registry images — no AGT
+        // checkout needed. Keep a harmless default so later refs don't NPE.
         agtRepo = options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO;
-        if (meshProvider === "agt" && options.build) {
-          console.error(chalk.red(`\n  Auto-cloning AGT failed:\n    ${(e as Error).message}\n`));
-          process.exit(1);
+      } else {
+        try {
+          agtRepo = await ensureAgtRepo(options.agtRepo, repoRoot);
+        } catch (e: unknown) {
+          agtRepo = options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO;
+          if (meshProvider === "agt" && options.build) {
+            console.error(chalk.red(`\n  Auto-cloning AGT failed:\n    ${(e as Error).message}\n`));
+            process.exit(1);
+          }
         }
       }
       if (meshProvider === "agt" && options.build) {
@@ -783,7 +826,27 @@ Notes:
 
         stepper.step("Resolving sandbox image...");
         let imageExists = false;
-        if (!options.build) {
+        if (releaseMode) {
+          stepper.update(`Pulling published sandbox image (${image})...`);
+          try {
+            // openclaw-sandbox is published amd64-only; on Apple Silicon it
+            // runs under emulation (Docker Desktop handles this transparently).
+            await execa("docker", ["pull", "--platform", "linux/amd64", image], { stdio: "inherit" });
+            imageExists = true;
+          } catch {
+            stepper.fail("Could not pull published sandbox image");
+            console.log(chalk.yellow(`
+  Failed to pull ${chalk.bold(image)}.
+
+  Verify the release tag exists and the package is public:
+    ${chalk.cyan(`docker pull ${image}`)}
+
+  Browse tags: https://github.com/Azure/kars/pkgs/container/openclaw-sandbox
+`));
+            process.exit(1);
+          }
+        }
+        if (!options.build && !releaseMode) {
           stepper.update("Checking for sandbox image...");
           try {
             const { stdout: cachedArch } = await execa("docker", [
@@ -805,7 +868,7 @@ Notes:
           }
         }
 
-        if (options.build || !imageExists) {
+        if (!releaseMode && (options.build || !imageExists)) {
           const baseImage = options.baseImage;
 
           // Check if Azure Linux base image exists locally, pull if not
@@ -1089,6 +1152,28 @@ Notes:
         if (!useGlobalRegistry) {
           // Local registry mode — deploy AGT relay/registry locally
           stepper.step("Starting mesh infrastructure (agt)...");
+
+          // Release mode: pull the published relay + registry and tag them
+          // as the local :dev names the run/build steps below expect. This
+          // satisfies the build-fallback's haveImage() checks so nothing is
+          // built and the AGT checkout is never needed.
+          if (releaseMode) {
+            for (const [name, devTag] of [
+              ["kars-agentmesh-relay", "agentmesh-relay:dev"],
+              ["kars-agentmesh-registry", "agentmesh-registry:dev"],
+            ] as const) {
+              const ref = releaseImage(name, releaseVersion!);
+              stepper.update(`Pulling published ${name}...`);
+              try {
+                await execa("docker", ["pull", "--platform", "linux/amd64", ref], { stdio: "pipe" });
+                await execa("docker", ["tag", ref, devTag], { stdio: "pipe" });
+              } catch {
+                stepper.fail(`Could not pull ${ref}`);
+                console.log(chalk.yellow(`\n  Failed to pull ${chalk.bold(ref)}. Verify the release tag exists and the package is public.\n`));
+                process.exit(1);
+              }
+            }
+          }
 
           // Helper: check if a docker image exists locally
           async function haveImage(tag: string): Promise<boolean> {
