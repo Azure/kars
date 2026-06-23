@@ -84,7 +84,7 @@ jobs:
           file ./bin/amd64/*
           ( cd ./bin && sha256sum amd64/* | tee SHA256SUMS )
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: kars-binaries-${{ github.sha }}
           path: ./bin/
@@ -548,7 +548,7 @@ jobs:
       # Result: each image build is ~30s instead of ~8min.
       - name: Download pre-built kars binaries
         if: steps.paths.outputs.run == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: kars-binaries-${{ github.sha }}
           path: ./bin/
