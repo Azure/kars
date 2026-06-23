@@ -103,21 +103,21 @@ If you'd rather skip provisioning by hand, jump to **[Step 2 — Deploy to AKS](
 
 ## Step 1 — Local (five minutes)
 
-### 1.0 Fastest path — no compile (published images, amd64/Linux) ⭐
+### 1.0 Fastest path — no compile (published images, macOS & Linux) ⭐
 
-The quickest way to a running agent **on an amd64 host (Linux, or amd64
-Docker)**: install the CLI from a published release and launch from
-**pre-built, cosign-signed images**. No Rust toolchain, no AGT checkout, no
-waiting on a local image build.
+The quickest way to a running agent **on any host with Docker — amd64 Linux,
+Intel Mac, or Apple Silicon (M-series)**: install the CLI from a published
+release and launch from **pre-built, cosign-signed images**. No Rust toolchain,
+no AGT checkout, no waiting on a local image build.
 
 **You need only:** Docker (running) · Node.js 22+.
 
 ```bash
 # 1. Install the kars CLI from the latest interim release (one command)
-npm i -g https://github.com/Azure/kars/releases/download/v0.1.0-interim.6/kars-cli-0.1.0.tgz
+npm i -g https://github.com/Azure/kars/releases/download/v0.1.0-interim.9/kars-cli-0.1.0.tgz
 
 # 2. Launch a sandbox from the published images for that same release
-kars dev --release v0.1.0-interim.6
+kars dev --release v0.1.0-interim.9
 ```
 
 That's it. `--release` pulls the `openclaw-sandbox` agent image plus the AGT
@@ -127,12 +127,12 @@ launches near-instantly. On first launch you'll pick an inference provider —
 see the [provider picker](#12-launch-a-sandbox) below (**GitHub Copilot** is
 the easiest: one device-code login, no Azure account).
 
-> **⚠️ Apple Silicon (M-series) Macs:** the published `openclaw-sandbox` is
-> currently `linux/amd64` only and **crashes under Rosetta** on arm64
-> (`rosetta error: rt_tgsigqueueinfo failed`). On Apple Silicon use the
-> **[build-from-source path](#11-build-the-cli)** — `kars dev` builds the
-> sandbox natively for arm64. A native arm64 published image is planned;
-> until then `--release` targets amd64/Linux hosts.
+> **Apple Silicon (M-series) Macs:** fully supported. The published images are
+> multi-arch (`linux/amd64` + `linux/arm64`, built on native arm64 runners) and
+> `kars dev --release` automatically pulls the variant matching your host
+> architecture — no Rosetta, no extra flags. Verified end-to-end on arm64:
+> the full multi-agent exec-brief scenario (parent + 3 mesh sub-agents,
+> E2E-encrypted relay) passes on a stock M-series Mac.
 
 > **Use matching versions.** The `npm i -g …` tarball URL and the `--release`
 > flag must reference the **same** tag. Browse the

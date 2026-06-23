@@ -132,31 +132,30 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 
 ## Try it in five minutes
 
-**Fastest path — published images, no compile (linux/amd64 hosts).** On an
-amd64 Linux box (or any amd64 host with Docker), two commands get you a
-running agent — no Rust toolchain, no AGT checkout, no local image build:
+**Fastest path — published images, no compile (macOS & Linux, Intel & Apple Silicon).**
+On any host with Docker (amd64 Linux, Intel Mac, or Apple Silicon M-series),
+two commands get you a running agent — no Rust toolchain, no AGT checkout, no
+local image build:
 
 ```bash
 # 1. Install the CLI from the latest interim release
-npm i -g https://github.com/Azure/kars/releases/download/v0.1.0-interim.6/kars-cli-0.1.0.tgz
+npm i -g https://github.com/Azure/kars/releases/download/v0.1.0-interim.9/kars-cli-0.1.0.tgz
 
 # 2. Launch a sandbox from the published, cosign-signed images
-kars dev --release v0.1.0-interim.6
+kars dev --release v0.1.0-interim.9
 ```
 
 > Use the newest tag from the [Releases page](https://github.com/Azure/kars/releases) — the `npm i -g …` URL and the `--release` flag must match.
 
-> **⚠️ Apple Silicon (M-series) Macs:** the published sandbox image is
-> currently `linux/amd64` only, and it **crashes under Rosetta** on arm64
-> (`rosetta error: rt_tgsigqueueinfo failed`). On an Apple Silicon Mac, use
-> the **build-from-source** path below instead — `kars dev` builds the
-> sandbox natively for your arch. (A native `arm64` published image is
-> planned; until then, `--release` is for amd64/Linux hosts.)
+> **Apple Silicon (M-series) Macs:** fully supported. The published images are
+> multi-arch (`linux/amd64` + `linux/arm64`), built on native arm64 runners,
+> and `kars dev --release` automatically pulls the image matching your host
+> architecture — no Rosetta, no extra flags.
 
 On first launch you'll pick an inference provider (see below). **GitHub Copilot** is the easiest — one device-code login, no Azure account.
 
 <details>
-<summary><strong>Build from source</strong> (Apple Silicon Macs, or to hack on the controller / router / plugin)</summary>
+<summary><strong>Build from source</strong> (to hack on the controller / router / plugin)</summary>
 
 > **Prerequisites:** Docker Desktop · Node.js 22+ · Rust 1.88+ · one of: an active GitHub Copilot seat, an Azure AI Foundry deployment, or a GitHub PAT with `models:read`.
 
