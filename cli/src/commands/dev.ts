@@ -833,9 +833,11 @@ Notes:
         if (releaseMode) {
           stepper.update(`Pulling published sandbox image (${image})...`);
           try {
-            // openclaw-sandbox is published amd64-only; on Apple Silicon it
-            // runs under emulation (Docker Desktop handles this transparently).
-            await execa("docker", ["pull", "--platform", "linux/amd64", image], { stdio: "inherit" });
+            // openclaw-sandbox is published multi-arch (amd64 + arm64); pull
+            // the HOST architecture so Apple Silicon gets the native arm64
+            // image (the amd64 image crashes under Rosetta with
+            // rt_tgsigqueueinfo). dockerPlatform = linux/<host arch>.
+            await execa("docker", ["pull", "--platform", dockerPlatform, image], { stdio: "inherit" });
             imageExists = true;
           } catch {
             stepper.fail("Could not pull published sandbox image");
