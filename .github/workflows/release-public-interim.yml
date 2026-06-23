@@ -804,7 +804,9 @@ jobs:
     needs: [build-binaries, build-images, build-sandbox-base, build-sandbox, merge-sandbox, build-runtimes, build-mesh, merge-mesh, cli-pack]
     runs-on: ubuntu-22.04
     permissions:
-      contents: write
+      contents: write       # create the GitHub Release + upload assets
+      id-token: write        # cosign keyless sign-blob + provenance OIDC
+      attestations: write    # actions/attest-build-provenance for assets
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -852,7 +854,7 @@ jobs:
             "ref": "${{ github.ref }}",
             "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "visibility": "PUBLIC",
-            "publish_status": "Public, cosign-signed GHCR images + SPDX SBOM + GitHub build-provenance (SLSA) attestation on every image; CLI tarball attested on the GitHub Release.",
+            "publish_status": "Public, cosign-signed GHCR images + SPDX SBOM + GitHub build-provenance (SLSA) attestation on every image; release assets covered by a cosign-signed + provenance-attested SHA256SUMS; npm CLI provenance-attested.",
             "containers": [
               {"name": "kars-controller",        "ghcr": "${{ env.REGISTRY }}/kars-controller:${{ env.VERSION }}",        "digest": "${{ needs.build-images.outputs.controller_digest }}"},
               {"name": "kars-inference-router",  "ghcr": "${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}",  "digest": "${{ needs.build-images.outputs.router_digest }}"},
@@ -866,6 +868,49 @@ jobs:
           }
           EOF
           cat ./release-artefacts/release-manifest.json
+
+      # ── Sign the release ASSETS (Scorecard: Signed-Releases) ─────────
+      # Images are already cosign-signed + SBOM'd + provenance-attested.
+      # Here we do the same for the downloadable GitHub Release assets:
+      #   1. a SHA256SUMS manifest over every asset,
+      #   2. a cosign keyless signature of that manifest (downloadable
+      #      bundle → `cosign verify-blob`), and
+      #   3. a GitHub build-provenance (SLSA) attestation of the manifest
+      #      (`gh attestation verify SHA256SUMS --repo <repo>`).
+      # Signing the checksums manifest transitively covers every listed
+      # asset by hash.
+      - name: Generate SHA256SUMS over release assets
+        working-directory: ./release-artefacts
+        run: |
+          # Hash every regular file except the manifest itself (and any
+          # pre-existing signature) so the list is stable + self-consistent.
+          find . -type f \
+            ! -name 'SHA256SUMS' \
+            ! -name 'SHA256SUMS.*' \
+            -printf '%P\n' | sort | while read -r f; do
+              sha256sum "$f"
+            done > SHA256SUMS
+          echo "::notice::SHA256SUMS:"; cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Cosign keyless sign the checksums manifest
+        working-directory: ./release-artefacts
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --bundle SHA256SUMS.cosign.bundle \
+            SHA256SUMS
+          echo "::notice::Wrote SHA256SUMS.cosign.bundle (verify: cosign verify-blob --bundle SHA256SUMS.cosign.bundle --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS)"
+
+      - name: Attest build provenance for the checksums manifest
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ./release-artefacts/SHA256SUMS
 
       - name: Create PUBLIC GitHub Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v2
@@ -887,25 +932,38 @@ jobs:
             no AGT clone**:
 
             ```bash
-            # install the CLI (or: npm i -g @kars-runtime/cli, once on npmjs)
-            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+            # install the CLI from npm (SLSA build-provenance attested)
+            npm i -g @kars-runtime/cli
+            # …or the one-line installer:
+            # curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
             kars dev --release
             ```
 
             Every container image is **cosign keyless-signed** (verifiable in the
             Sigstore Rekor transparency log), ships an **SPDX SBOM**, and carries
-            a **GitHub build-provenance (SLSA) attestation**; the CLI tarball is
-            attested too. Verify with `cosign verify` / `gh attestation verify`.
+            a **GitHub build-provenance (SLSA) attestation**; the npm CLI is
+            provenance-attested too (`npm audit signatures`).
+
+            **The downloadable release assets are signed.** `SHA256SUMS` lists
+            every asset's hash, and is **cosign keyless-signed**
+            (`SHA256SUMS.cosign.bundle`) + **build-provenance attested**:
+            ```bash
+            # integrity
+            sha256sum -c SHA256SUMS
+            # cosign signature of the manifest
+            cosign verify-blob --bundle SHA256SUMS.cosign.bundle \
+              --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+            # SLSA provenance of the manifest
+            gh attestation verify SHA256SUMS --repo ${{ github.repository }}
+            ```
 
             > These images bundle a kars build of the AGT mesh SDK pending
             > upstream [microsoft/agent-governance-toolkit#3128](https://github.com/microsoft/agent-governance-toolkit/pull/3128).
 
-            > Publishing to crates.io / npmjs / MCR is in progress (see
+            > Publishing to crates.io / MCR is in progress (see
             > [docs/PUBLISHING.md](../blob/main/docs/PUBLISHING.md)) — the signed
-            > GHCR images + CLI tarball here are usable today.
-
-            > These images bundle a kars build of the AGT mesh SDK pending
-            > upstream [microsoft/agent-governance-toolkit#3128](https://github.com/microsoft/agent-governance-toolkit/pull/3128).
+            > GHCR images + npm CLI here are usable today.
 
             ### Container images (PUBLIC GHCR)
             Multi-arch `linux/amd64,linux/arm64` — runs natively on Apple Silicon:

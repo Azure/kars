@@ -12,6 +12,7 @@ finding. Tracking issue: **#410**.
 | **Pinned-Dependencies — GitHub Actions** | All GitHub-owned + third-party actions pinned by commit SHA. |
 | **Vulnerabilities — actionable** | `RUSTSEC-2026-0185` (quinn-proto) fixed by upgrade. |
 | **Signing (images)** | Every container image is cosign keyless-signed + carries an SPDX SBOM + a GitHub build-provenance (SLSA) attestation. |
+| **Signed-Releases (assets)** | The GitHub Release ships a `SHA256SUMS` over every asset, **cosign keyless-signed** (`SHA256SUMS.cosign.bundle`, verify with `cosign verify-blob`) and **build-provenance attested** (`gh attestation verify SHA256SUMS --repo Azure/kars`). The npm CLI carries its own SLSA provenance (`npm audit signatures`). |
 | **Vulnerabilities — npm CLI** | `@kars-runtime/cli` ships a **clean `npm audit`** (0 advisories). Removed `blessed-contrib`, whose transitive `lodash` (GHSA-r5fr-rjxr-66jc, GHSA-f23m-r3pf-42rh) and `xml2js` via `map-canvas` (GHSA-776f-qx25-q3cc) had no consumer-applicable fix — its three used widgets (grid/table/log) are reimplemented on plain `blessed` in `cli/src/lib/operator-tui.ts`. |
 
 ## Accepted with rationale
@@ -58,8 +59,6 @@ command-injection concern does not apply.
 
 ## Open / external
 
-- **Signed-Releases (release *assets*)** — images are signed; signing the
-  GitHub Release tarball assets is tracked in #410.
 - **CII-Best-Practices badge** — application is a manual process at
   <https://www.bestpractices.dev/>; tracked in #410.
 - **Some packages private** — `kars-controller` / `kars-inference-router` GHCR
