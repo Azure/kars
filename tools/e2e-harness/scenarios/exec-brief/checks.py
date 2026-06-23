@@ -123,15 +123,50 @@ def check_chart(ctx: "Context") -> tuple[bool, str]:
 
 
 def check_relay_pairs(ctx: "Context") -> tuple[bool, str]:
-    # Encrypted blobs flow over a persistent /ws connection and the OpenClaw
-    # plugin's `log.info("AGT relay: sent to X")` does NOT reach kubectl logs
-    # (it goes to the in-pod gateway log file). So we fall back to live
-    # querying each sub-agent's inference-router for chat_completions activity
-    # — if all three subs processed at least one chat turn, mesh delivery is
-    # confirmed for the parent→sib direction. For sib→sib we count the unique
-    # *non-self* peer DIDs each sub-agent's plugin looked up in the registry.
+    # Sibling-to-sibling mesh routing is proven by the per-agent gateway logs
+    # the harness collects into OUT_DIR on EVERY platform (docker exec / kubectl
+    # logs alike): `<sub>-gateway.log`. Each sub-agent records its own outbound
+    # mesh sends there, e.g.:
+    #     AGT sub-agent mesh_transfer_file: to=writer file=/sandbox/...
+    #     AGT relay: sent to viz (did:mesh:...) via E2E encrypted relay
+    # The log's owner is the sender; the parsed peer is the target. A pair of
+    # two distinct siblings is a sibling pair. This is the authoritative,
+    # platform-agnostic signal — unlike the legacy kubectl/registry heuristic
+    # (kept below as a fallback) it works in docker mode too, where there are
+    # no K8s pods/namespaces for `kubectl` to inspect.
     siblings = ["analyst", "viz", "writer"]
     pairs: set[frozenset[str]] = set()
+
+    send_pat = re.compile(
+        r"mesh_transfer_file:\s+(?:[^\n]*?\bto=|[^\n]*?\u2192\s+)(\w+)\b"
+        r"|AGT relay:\s+sent to (\w+)\b"
+    )
+    saw_gateway_log = False
+    for sub in siblings:
+        log_path = ctx.out_dir / f"{sub}-gateway.log"
+        if not log_path.exists():
+            continue
+        saw_gateway_log = True
+        try:
+            text = log_path.read_text(errors="ignore")
+        except Exception:
+            continue
+        for m in send_pat.finditer(text):
+            target = m.group(1) or m.group(2)
+            if target in siblings and target != sub:
+                pairs.add(frozenset((sub, target)))
+
+    if saw_gateway_log:
+        expected = {frozenset(("analyst", "viz")),
+                    frozenset(("analyst", "writer")),
+                    frozenset(("viz", "writer"))}
+        missing = expected - pairs
+        ok = not missing
+        return ok, (f"{len(pairs)}/3 sibling pairs from gateway logs "
+                    f"(missing={sorted(map(sorted, missing))})")
+
+    # ── Fallback: legacy kubectl/registry heuristic (AKS live, no collected
+    # gateway logs). Only reached when no `<sub>-gateway.log` was collected. ──
     # 1. Discover each sub-agent's pod IP so we can attribute REGISTRY lines.
     pod_ip: dict[str, str] = {}
     for sub in siblings:
