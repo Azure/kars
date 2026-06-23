@@ -113,8 +113,9 @@ No Rust toolchain, no AGT checkout, no GitHub auth, no waiting on a local build.
 **You need only:** Docker (or a Docker-compatible runtime like Podman) · Node.js 22+.
 
 ```bash
-# 1. Install the kars CLI — always the latest published release
-npm i -g https://github.com/Azure/kars/releases/latest/download/kars-cli-0.1.0.tgz
+# 1. Install the kars CLI — public, signed, always the latest release
+curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
+# (or, once on npmjs:  npm i -g kars-runtime)
 
 # 2. Launch a sandbox from the published images (defaults to :latest)
 kars dev --release

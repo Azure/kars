@@ -156,8 +156,8 @@ or `kars up` for a managed AKS cluster (see [below](#when-you-are-ready-for-the-
 # Pin a specific release
 KARS_VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh)"
 
-# Or install the signed tarball directly with npm (what install.sh does under the hood)
-npm i -g https://github.com/Azure/kars/releases/latest/download/kars-cli-0.1.0.tgz
+# Or install from npmjs (once published):
+npm i -g kars-runtime
 
 # Or build from source — to hack on the controller / router / plugin (needs Rust 1.88+)
 git clone https://github.com/Azure/kars.git && cd kars

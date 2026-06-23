@@ -1,5 +1,5 @@
 {
-  "name": "@kars/cli",
+  "name": "kars-runtime",
   "version": "0.1.0",
   "description": "Enterprise-grade runtime for running OpenClaw AI assistants safely on Azure",
   "license": "MIT",
