@@ -136,17 +136,24 @@ async function azGraphRest<T>(
   method: "GET" | "POST" | "PATCH" | "DELETE",
   graphPath: string,
   body?: unknown,
+  interactive = true,
 ): Promise<T | null> {
-  return azGraphRestWithRetry<T>(method, graphPath, body, false);
+  return azGraphRestWithRetry<T>(method, graphPath, body, false, interactive);
 }
 
 /// Internal: shared implementation. `alreadyRetried` prevents an
 /// infinite loop if device-code re-login also returns AADSTS530084.
+/// `interactive` gates the device-code re-login: preflight/read-only
+/// callers pass `false` so a Conditional-Access Graph block (AADSTS530084)
+/// propagates as a normal error (→ soft warning) instead of launching a
+/// blocking `az login --use-device-code` prompt that hangs `up` on tenants
+/// whose CA also blocks the device-code device.
 async function azGraphRestWithRetry<T>(
   method: "GET" | "POST" | "PATCH" | "DELETE",
   graphPath: string,
   body: unknown,
   alreadyRetried: boolean,
+  interactive = true,
 ): Promise<T | null> {
   // Microsoft Graph requires the OData-Version header for derived
   // types like agentIdentityBlueprint. `az rest` does not let us set
@@ -184,10 +191,10 @@ async function azGraphRestWithRetry<T>(
     // differently (the device-code app may not be subject to the
     // same token-binding rule). One-shot: if it fails again, give
     // up and propagate so the caller can fall back to Bicep.
-    if (!alreadyRetried && msg.includes("AADSTS530084")) {
+    if (!alreadyRetried && interactive && msg.includes("AADSTS530084")) {
       const tenantArgs = await deviceCodeReloginForGraph();
       if (tenantArgs) {
-        return azGraphRestWithRetry<T>(method, graphPath, body, true);
+        return azGraphRestWithRetry<T>(method, graphPath, body, true, interactive);
       }
     }
 
@@ -290,6 +297,7 @@ interface BlueprintGraphResponse {
 /// operator error.
 async function findExistingBlueprint(
   displayName: string,
+  interactive = true,
 ): Promise<BlueprintGraphResponse | null> {
   const filter = encodeURIComponent(`displayName eq '${displayName}'`);
   interface ListResp {
@@ -298,6 +306,8 @@ async function findExistingBlueprint(
   const resp = await azGraphRest<ListResp>(
     "GET",
     `/beta/applications?$filter=${filter}&$top=2`,
+    undefined,
+    interactive,
   );
   if (!resp || !resp.value || resp.value.length === 0) return null;
   if (resp.value.length > 1) {
@@ -922,12 +932,15 @@ const AGENT_ID_ROLE_TEMPLATE_IDS: Record<string, string> = {
 /// `/me/transitiveMemberOf`. Soft-fails on permission errors —
 /// returning `inconclusive: true` so preflight surfaces a warning,
 /// not a block.
-export async function checkAgentIdRole(): Promise<AgentIdRoleCheckResult> {
+export async function checkAgentIdRole(opts?: { interactive?: boolean }): Promise<AgentIdRoleCheckResult> {
+  const interactive = opts?.interactive ?? true;
   let resp: MeMemberOfResp | null;
   try {
     resp = await azGraphRest<MeMemberOfResp>(
       "GET",
       "/beta/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=id,displayName,roleTemplateId&$top=100",
+      undefined,
+      interactive,
     );
   } catch (e) {
     const msg = (e as Error).message;
@@ -1008,9 +1021,10 @@ export async function checkAgentIdRole(): Promise<AgentIdRoleCheckResult> {
 /// kubeconfig that may not be ready yet during preflight).
 export async function detectExistingBlueprint(
   displayName: string,
+  opts?: { interactive?: boolean },
 ): Promise<{ present: boolean; appId?: string; message: string }> {
   try {
-    const blueprint = await findExistingBlueprint(displayName);
+    const blueprint = await findExistingBlueprint(displayName, opts?.interactive ?? true);
     if (blueprint) {
       return {
         present: true,
