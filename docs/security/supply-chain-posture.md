@@ -12,6 +12,7 @@ finding. Tracking issue: **#410**.
 | **Pinned-Dependencies — GitHub Actions** | All GitHub-owned + third-party actions pinned by commit SHA. |
 | **Vulnerabilities — actionable** | `RUSTSEC-2026-0185` (quinn-proto) fixed by upgrade. |
 | **Signing (images)** | Every container image is cosign keyless-signed + carries an SPDX SBOM + a GitHub build-provenance (SLSA) attestation. |
+| **Vulnerabilities — npm CLI** | `@kars-runtime/cli` ships a **clean `npm audit`** (0 advisories). Removed `blessed-contrib`, whose transitive `lodash` (GHSA-r5fr-rjxr-66jc, GHSA-f23m-r3pf-42rh) and `xml2js` via `map-canvas` (GHSA-776f-qx25-q3cc) had no consumer-applicable fix — its three used widgets (grid/table/log) are reimplemented on plain `blessed` in `cli/src/lib/operator-tui.ts`. |
 
 ## Accepted with rationale
 
@@ -43,6 +44,17 @@ reproducibility) — tracked in #410.
 Reproducibility for these is provided by lockfiles (`Cargo.lock`,
 `package-lock.json`) and the vendored wheels, which Scorecard's heuristic does
 not credit. Hash-pinning is tracked in #410.
+
+### Socket.dev "obfuscated code" — `execa@9.6.1`
+**False positive — reviewed & accepted.** Socket flags `lib/methods/create.js`
+in [`execa`](https://socket.dev/npm/package/@kars-runtime/cli/alerts/0.1.1)
+as "obfuscated code". `execa` (by sindresorhus) is a benign, ubiquitous
+process-execution wrapper; the flagged file is its argument-dispatch shim. The
+Socket reviewer note itself concludes there are "no signs of obfuscation,
+hard-coded secrets, or explicit malicious behavior." kars only ever invokes
+`execa` with **fixed argument arrays** (never the shell-template form) and never
+passes untrusted, unvalidated input as a command, so the heuristic's
+command-injection concern does not apply.
 
 ## Open / external
 

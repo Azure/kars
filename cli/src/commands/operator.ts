@@ -13,7 +13,7 @@
 import { Command } from "commander";
 import { execa } from "execa";
 import blessed from "blessed";
-import contrib from "blessed-contrib";
+import { makeGrid, makeTable } from "../lib/operator-tui.js";
 import { listSecretVariants } from "../config.js";
 import {
   statusBarForAgents,
@@ -134,7 +134,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
 
   // ── Layout (12×12 grid) ───────────────────────────────────────────
 
-  const grid = new contrib.grid({ rows: 12, cols: 12, screen });
+  const grid = makeGrid(screen, 12, 12);
 
   // Row 0: Header
   const header = grid.set(0, 0, 1, 12, blessed.box, {
@@ -144,7 +144,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   });
 
   // Rows 1–4: Agent table (full width)
-  const agentTable = grid.set(1, 0, 4, 12, contrib.table, {
+  const agentTable = grid.set(1, 0, 4, 12, makeTable, {
     keys: false,
     vi: false,
     fg: "white",
@@ -194,7 +194,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
   });
 
   // Rows 5–6: Activity log (cols 8–11)
-  const activityLog = grid.set(5, 8, 2, 4, contrib.log, {
+  const activityLog = grid.set(5, 8, 2, 4, blessed.log, {
     fg: "green",
     label: " Log ",
     tags: true,
