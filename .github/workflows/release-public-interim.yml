@@ -740,11 +740,14 @@ jobs:
       id-token: write
       attestations: write
     timeout-minutes: 15
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
         with:
           node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
       - name: npm install + build + pack
         working-directory: cli
         run: |
@@ -756,6 +759,21 @@ jobs:
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: 'cli/*.tgz'
+
+      # Publish @kars/cli to npmjs so `npm i -g @kars/cli` works — only for
+      # clean (non-interim) release tags, and only when an NPM_TOKEN secret is
+      # configured (so the workflow no-ops cleanly until npm publishing is set
+      # up). `--provenance` records a signed npm provenance attestation (needs
+      # the id-token:write permission above). The package.json version must
+      # match the release tag (e.g. tag v0.1.0 ↔ "version": "0.1.0").
+      - name: Publish @kars/cli to npmjs
+        if: ${{ env.NPM_TOKEN != '' && !contains(env.VERSION, 'interim') }}
+        working-directory: cli
+        env:
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+        run: |
+          echo "Publishing @kars/cli@$(node -p "require('./package.json').version") to npmjs…"
+          npm publish --provenance --access public
 
       - name: Upload CLI tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
