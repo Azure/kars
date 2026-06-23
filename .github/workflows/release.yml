@@ -11,7 +11,7 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-rc*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
@@ -33,6 +33,8 @@ jobs:
     name: Create GitHub Release
     needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release + upload assets
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
