@@ -10,13 +10,15 @@ on:
 
 permissions:
   contents: read
-  security-events: write
-  actions: read
 
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # CodeQL uploads SARIF results
+      actions: read            # read workflow run metadata for the Actions pack
     strategy:
       fail-fast: false
       matrix:

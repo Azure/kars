@@ -1,0 +1,31 @@
+# osv-scanner ignore config — accepted, triaged advisories.
+#
+# Each entry is a vulnerability with NO upstream fix (unmaintained or no-patch
+# transitive dependency) whose exploit path does not apply to kars. Reviewed
+# as part of the OpenSSF Scorecard hardening (see
+# docs/security/supply-chain-posture.md and issue #410). Re-evaluate whenever
+# a fixed version ships.
+#
+# The Rust advisories below are also enforced-ignored in deny.toml (cargo-deny)
+# and .cargo/audit.toml (cargo-audit); duplicated here so the Scorecard
+# osv-scanner pass sees the same accepted set.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+reason = "proc-macro-error is unmaintained (no vuln). Build-time only (proc-macro), never in a shipped artifact. No maintained drop-in; transitive via cedar-policy/derive macros."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+reason = "proc-macro-error2 is unmaintained (no vuln). Build-time only (proc-macro), never in a shipped artifact."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = "rsa Marvin timing side-channel; no fixed version exists. Transitive (not used for kars key operations); kars uses aws-lc/ring/ed25519 for its own crypto, not the `rsa` crate."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0134"
+reason = "rustls-pemfile is unmaintained (no vuln). PEM parsing only; superseded by rustls' inline parser. No exploit path."
+
+[[IgnoredVulns]]
+id = "GHSA-h67p-54hq-rp68"
+reason = "js-yaml quadratic-complexity DoS via repeated merge-key aliases; no fixed js-yaml release yet. Transitive via @microsoft/agent-governance-sdk. Not reachable with untrusted input in kars: js-yaml parses only trusted, in-image YAML (agent profiles / plugin config), never attacker-controlled network data."

@@ -1,52 +1,43 @@
-name: Public Interim Release (GHCR + GitHub Release)
+name: Public Release (GHCR + GitHub Release)
 
 # ─────────────────────────────────────────────────────────────────────────
-# INTERIM public release — lets customers run kars from pre-built, signed
-# artefacts WITHOUT cloning AGT or compiling anything. This is the stopgap
-# described in docs/PUBLISHING.md until the ESRP-signed public path
-# (.github/pipelines/esrp-publish.yml → MCR + npmjs `@kars` + crates.io)
-# is wired. Per PUBLISHING.md, GHCR is explicitly allowed for interim/nightly.
+# Public release — lets anyone run kars from pre-built, signed artefacts
+# WITHOUT cloning AGT or compiling anything.
 #
 # What this produces (all PUBLIC):
 #   1. Multi-arch container images → ghcr.io/azure/kars-*:<version> + :latest
-#      (cosign keyless signed, SBOM + SLSA provenance attached)
+#      (cosign keyless signed, SPDX SBOM + SLSA build-provenance attached)
 #   2. @kars/cli packed as a .tgz attached to a PUBLIC GitHub Release
-#      (NOT published to npmjs — the `@kars` scope is reserved for the
-#      ESRP-signed publish; customers install via `npm i -g <release-url>`)
-#
-# What it deliberately does NOT do (reserved for ESRP, see PUBLISHING.md):
-#   - npm publish to npmjs.com under `@kars`
-#   - cargo publish to crates.io
-#   - push to mcr.microsoft.com
+#      (build-provenance attested; customers install via
+#      `npm i -g <release-url>`). Direct crates.io / npmjs / MCR publishing
+#      is in progress — see docs/PUBLISHING.md.
 #
 # Triggers:
-#   - Tags matching `v*-interim*` (e.g. v0.1.0-interim.1)
+#   - Clean version tags `vMAJOR.MINOR.PATCH` (e.g. v0.1.0)
+#   - Pre-release tags `vMAJOR.MINOR.PATCH-<suffix>` (e.g. v0.1.0-interim.1)
 #   - Manual via workflow_dispatch (version input)
 #
 # ONE-TIME SETUP (first run only): GHCR org packages default to private.
 # After the first push, set each `kars-*` package to Public in
-# https://github.com/orgs/azure/packages → package → Settings → visibility.
-# The `set-package-public` step attempts this automatically but org policy
-# may require the one-time manual toggle.
+# https://github.com/orgs/Azure/packages → package → Settings → visibility
+# (GitHub has no API for container-package visibility; this is UI-only).
 # ─────────────────────────────────────────────────────────────────────────
 
 on:
   push:
     tags:
-      - 'v*-interim*'
+      # Public release tags — clean (v1.2.3) and interim (v1.2.3-interim.N).
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to tag (e.g. v0.1.0-interim.1). Defaults to interim-<sha>.'
+        description: 'Version to tag (e.g. v0.1.0 or v0.1.0-interim.1).'
         required: false
         default: ''
 
 permissions:
-  contents: write    # create GitHub Release
-  packages: write    # push to GHCR + set visibility
-  id-token: write    # cosign keyless OIDC
-  attestations: write
-  actions: read
+  contents: read
 
 env:
   VERSION: ${{ github.event.inputs.version != '' && github.event.inputs.version || (startsWith(github.ref, 'refs/tags/') && github.ref_name || format('interim-{0}', github.sha)) }}
@@ -57,6 +48,10 @@ jobs:
   build-binaries:
     name: Build Rust binaries (amd64 + arm64)
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -115,6 +110,11 @@ jobs:
     name: Build + push ${{ matrix.image.name }} (PUBLIC GHCR)
     needs: build-binaries
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 90
     outputs:
       controller_digest: ${{ steps.digests.outputs.controller }}
@@ -249,6 +249,9 @@ jobs:
   build-sandbox-base:
     name: Build kars-sandbox-base (${{ matrix.arch }}, native)
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -283,6 +286,9 @@ jobs:
     name: Build openclaw-sandbox (${{ matrix.arch }}, native)
     needs: [build-images, build-sandbox-base]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -355,6 +361,11 @@ jobs:
     name: Merge + sign sandbox-base + openclaw-sandbox manifests
     needs: [build-sandbox-base, build-sandbox]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 20
     outputs:
       sandbox_digest: ${{ steps.digests.outputs.openclaw }}
@@ -439,6 +450,8 @@ jobs:
   build-agt-wheels:
     name: Build AGT Python wheels (from pinned AGT)
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -477,6 +490,11 @@ jobs:
     name: Build + push ${{ matrix.runtime.ghcr }} (PUBLIC GHCR)
     needs: build-agt-wheels
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -585,6 +603,9 @@ jobs:
   build-mesh:
     name: Build agentmesh-${{ matrix.component }} (${{ matrix.arch }}, native)
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -632,6 +653,11 @@ jobs:
     name: Merge + sign agentmesh manifests
     needs: [build-mesh]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -709,12 +735,19 @@ jobs:
   cli-pack:
     name: Pack @kars/cli tarball
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 15
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
         with:
           node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
       - name: npm install + build + pack
         working-directory: cli
         run: |
@@ -726,6 +759,21 @@ jobs:
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: 'cli/*.tgz'
+
+      # Publish @kars/cli to npmjs so `npm i -g @kars/cli` works — only for
+      # clean (non-interim) release tags, and only when an NPM_TOKEN secret is
+      # configured (so the workflow no-ops cleanly until npm publishing is set
+      # up). `--provenance` records a signed npm provenance attestation (needs
+      # the id-token:write permission above). The package.json version must
+      # match the release tag (e.g. tag v0.1.0 ↔ "version": "0.1.0").
+      - name: Publish @kars/cli to npmjs
+        if: ${{ env.NPM_TOKEN != '' && !contains(env.VERSION, 'interim') }}
+        working-directory: cli
+        env:
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+        run: |
+          echo "Publishing @kars/cli@$(node -p "require('./package.json').version") to npmjs…"
+          npm publish --provenance --access public
 
       - name: Upload CLI tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
@@ -739,6 +787,8 @@ jobs:
     name: Create PUBLIC GitHub Release
     needs: [build-binaries, build-images, build-sandbox-base, build-sandbox, merge-sandbox, build-runtimes, build-mesh, merge-mesh, cli-pack]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -785,8 +835,8 @@ jobs:
             "commit": "${{ github.sha }}",
             "ref": "${{ github.ref }}",
             "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "visibility": "PUBLIC_INTERIM",
-            "publish_status": "Public GHCR images + CLI tarball on GitHub Release. npmjs/crates.io/MCR reserved for the ESRP-signed path (docs/PUBLISHING.md).",
+            "visibility": "PUBLIC",
+            "publish_status": "Public, cosign-signed GHCR images + SPDX SBOM + GitHub build-provenance (SLSA) attestation on every image; CLI tarball attested on the GitHub Release.",
             "containers": [
               {"name": "kars-controller",        "ghcr": "${{ env.REGISTRY }}/kars-controller:${{ env.VERSION }}",        "digest": "${{ needs.build-images.outputs.controller_digest }}"},
               {"name": "kars-inference-router",  "ghcr": "${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}",  "digest": "${{ needs.build-images.outputs.router_digest }}"},
@@ -795,8 +845,8 @@ jobs:
               {"name": "kars-sandbox-base",      "ghcr": "${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}",      "digest": "${{ needs.merge-sandbox.outputs.sandbox_base_digest }}"},
               {"name": "openclaw-sandbox",       "ghcr": "${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}",       "digest": "${{ needs.merge-sandbox.outputs.sandbox_digest }}"}
             ],
-            "cli_install": "npm i -g https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ steps.cli.outputs.tarball }}",
-            "next_step_for_signed_release": "Migrate to the ESRP-signed public path (.github/pipelines/esrp-publish.yml → MCR + npmjs @kars + crates.io) once onboarding completes. See docs/PUBLISHING.md."
+            "cli_install": "npm i -g https://github.com/${{ github.repository }}/releases/latest/download/${{ steps.cli.outputs.tarball }}",
+            "additional_registries_planned": "crates.io / npmjs / MCR publishing is in progress — see docs/PUBLISHING.md. The GHCR images + CLI tarball above are signed and usable today."
           }
           EOF
           cat ./release-artefacts/release-manifest.json
@@ -805,41 +855,43 @@ jobs:
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v2
         with:
           tag_name: ${{ env.VERSION }}
-          name: ${{ env.VERSION }} (Public Interim)
-          # These public interim builds are the current install target for
-          # everyone (the README's no-compile quick-start points at
-          # /releases/latest/download/…), so mark them as the repo's "latest"
-          # release. `/releases/latest/` only serves non-prerelease releases,
-          # hence prerelease:false. When the ESRP-signed release line lands it
-          # supersedes these as latest.
+          name: ${{ env.VERSION }}${{ contains(env.VERSION, 'interim') && ' (Public Interim)' || '' }}
+          # Public releases are the install target for everyone (the README's
+          # no-compile quick-start points at /releases/latest/download/…), so
+          # mark them as the repo's "latest" release. `/releases/latest/` only
+          # serves non-prerelease releases, hence prerelease:false.
           prerelease: false
           make_latest: 'true'
           generate_release_notes: true
           files: ./release-artefacts/**/*
           body: |
-            ## Public Interim Release — ${{ env.VERSION }}
+            ## kars ${{ env.VERSION }}
 
-            Pre-built, **cosign-signed** artefacts so you can run kars **without
-            cloning AGT or compiling anything**. This is the interim GHCR path
-            from [docs/PUBLISHING.md](../blob/main/docs/PUBLISHING.md); the
-            canonical Microsoft-signed release (npmjs `@kars`, MCR, crates.io)
-            arrives via ESRP later and will supersede these tags.
+            Pre-built, **cosign-signed** artefacts — run kars with **no compile,
+            no AGT clone**:
+
+            ```bash
+            npm i -g https://github.com/${{ github.repository }}/releases/latest/download/${{ steps.cli.outputs.tarball }}
+            kars dev --release
+            ```
+
+            Every container image is **cosign keyless-signed** (verifiable in the
+            Sigstore Rekor transparency log), ships an **SPDX SBOM**, and carries
+            a **GitHub build-provenance (SLSA) attestation**; the CLI tarball is
+            attested too. Verify with `cosign verify` / `gh attestation verify`.
 
             > These images bundle a kars build of the AGT mesh SDK pending
             > upstream [microsoft/agent-governance-toolkit#3128](https://github.com/microsoft/agent-governance-toolkit/pull/3128).
 
-            ### Quick start (no compile)
-            ```bash
-            # 1. Install the CLI from this Release (interim; npmjs `@kars` later)
-            npm i -g https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ steps.cli.outputs.tarball }}
+            > Publishing to crates.io / npmjs / MCR is in progress (see
+            > [docs/PUBLISHING.md](../blob/main/docs/PUBLISHING.md)) — the signed
+            > GHCR images + CLI tarball here are usable today.
 
-            # 2. Run locally against the published images (Docker Desktop)
-            kars dev --release ${{ env.VERSION }}
-            ```
+            > These images bundle a kars build of the AGT mesh SDK pending
+            > upstream [microsoft/agent-governance-toolkit#3128](https://github.com/microsoft/agent-governance-toolkit/pull/3128).
 
             ### Container images (PUBLIC GHCR)
-            Multi-arch `linux/amd64,linux/arm64` (sandbox-base is amd64-only;
-            Apple Silicon runs it under emulation):
+            Multi-arch `linux/amd64,linux/arm64` — runs natively on Apple Silicon:
             ```
             ${{ env.REGISTRY }}/kars-controller:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}
@@ -862,7 +914,7 @@ jobs:
             ${{ env.REGISTRY }}/kars-runtime-pydantic-ai:${{ env.VERSION }}
             ```
 
-            ### AGT mesh images (PUBLIC GHCR, amd64)
+            ### AGT mesh images (PUBLIC GHCR, multi-arch)
             The relay + registry that `kars dev`/`up` run for the mesh:
             ```
             ${{ env.REGISTRY }}/kars-agentmesh-relay:${{ env.VERSION }}

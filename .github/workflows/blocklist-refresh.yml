@@ -8,16 +8,15 @@ on:
   workflow_dispatch: # manual trigger
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   refresh:
     name: Fetch threat intelligence feeds
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
+      contents: write        # commit refreshed seed file
+      pull-requests: write   # open the refresh PR
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 

@@ -32,8 +32,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
-  actions: write
 
 jobs:
   build-binaries:
@@ -43,6 +41,8 @@ jobs:
     # 2.39 symbols that AL3 can't resolve.
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    permissions:
+      contents: read   # checkout + cache + artifact upload
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -70,6 +70,9 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read    # checkout + download binaries artifact
+      packages: write   # push images to GHCR
     strategy:
       fail-fast: false
       matrix:
@@ -125,9 +128,12 @@ jobs:
           echo "image=$IMG" >> "$GITHUB_OUTPUT"
           echo "sha_tag=$IMG:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "branch_tag=$IMG:${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_REF_NAME" = "main" ] || [ "$GITHUB_REF_NAME" = "dev" ]; then
-            echo "latest_tag=$IMG:latest" >> "$GITHUB_OUTPUT"
-          fi
+          # NOTE: deliberately do NOT push `:latest` here. This is a CI build
+          # CACHE workflow that produces amd64-only images; the public,
+          # multi-arch `:latest` is owned exclusively by the release workflow
+          # (release-public-interim.yml). Pushing `:latest` from here would
+          # clobber the multi-arch release image with an amd64-only one and
+          # break `kars dev --release` (default :latest) on arm64 / kind.
 
       - name: Build and push ${{ matrix.image.name }}
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
@@ -138,7 +144,6 @@ jobs:
           tags: |
             ${{ steps.tags.outputs.sha_tag }}
             ${{ steps.tags.outputs.branch_tag }}
-            ${{ steps.tags.outputs.latest_tag }}
           # Sandbox-base still has its own GHA cache because it does
           # heavy work (vendor wheels, system deps). The Rust images
           # are short COPY Dockerfiles that build in <30s — no cache
