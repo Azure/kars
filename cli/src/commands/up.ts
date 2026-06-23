@@ -7,7 +7,7 @@ import { existsSync } from "fs";
 import * as path from "path";
 import { Stepper, banner } from "../stepper.js";
 import { isValidAzureHost } from "./up/preflight.js";
-import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
+import { acquireImages } from "./up/images.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -39,6 +39,7 @@ export function upCommand(): Command {
     .option("--skip-preflight", "Skip upfront RBAC & provider checks (advanced; you know what you're doing)", false)
     // ── Images ─────────────────────────────────────────────────────────
     .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "karsacr.azurecr.io")
+    .option("--release [version]", "Import the PUBLIC, signed GHCR release images (ghcr.io/azure/*) into your ACR instead of building from source. Bare --release uses the latest release; pass a tag (e.g. v0.1.4) to pin. No Rust/Docker build needed.")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
     .option("--skip-runtime-images", "Skip building/importing the 7 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable)", false)
     // ── Foundry / Azure OpenAI ────────────────────────────────────────
@@ -536,163 +537,15 @@ Auto-resume:
 
         // ── Step 6: Get images into ACR ──────────────────────────────
         const acr = acrLoginServer.replace(".azurecr.io", "");
-
-        if (isPhaseSkippable("images", resumeFromPhase)) {
-          stepper.step(options.build ? "Building and pushing images..." : "Importing images from source ACR...");
-          stepper.detail("ok", "Already pushed/imported in previous run — skipping");
-          stepper.done("Images (skipped — resumed from prior run)");
-        } else if (options.build) {
-          // Developer mode: build locally and push
-          stepper.step("Building and pushing images...");
-          stepper.update("Logging into ACR...");
-          await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
-
-          const buildPush = async (dockerfile: string, tag: string, buildArgs: string[] = [], context?: string) => {
-            stepper.update(`Building ${tag}...`);
-            const args = [
-              "build", "--platform", "linux/amd64",
-              "--provenance=false", "--sbom=false",
-              "-f", path.join(repoRoot, dockerfile),
-              "-t", `${acrLoginServer}/${tag}`,
-              ...buildArgs,
-              context ? path.join(repoRoot, context) : repoRoot,
-            ];
-            await execa("docker", args, { stdio: "pipe" });
-            // Push with retry — ACR tokens/connections can go stale after long builds
-            for (let attempt = 1; attempt <= 3; attempt++) {
-              try {
-                stepper.update(`Pushing ${tag}${attempt > 1 ? ` (retry ${attempt}/3)` : ""}...`);
-                if (attempt > 1) await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
-                await execa("docker", ["push", `${acrLoginServer}/${tag}`], { stdio: "pipe" });
-                break;
-              } catch (e: any) {
-                if (attempt === 3) throw e;
-                stepper.update(`Push ${tag} failed, retrying...`);
-                await new Promise(r => setTimeout(r, 5000));
-              }
-            }
-          };
-
-          await buildPush("controller/Dockerfile", "kars-controller:latest");
-          await buildPush("inference-router/Dockerfile", "kars-inference-router:latest");
-
-          // Build sandbox base if not already in ACR
-          let baseExists = false;
-          try {
-            await execa("docker", ["image", "inspect", `${acrLoginServer}/kars-sandbox-base:latest`], { stdio: "pipe" });
-            baseExists = true;
-          } catch { /* not cached locally — need to build */ }
-          if (!baseExists) {
-            await buildPush(
-              "sandbox-images/openclaw/Dockerfile.base",
-              "kars-sandbox-base:latest",
-              ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`]
-            );
-          }
-
-          await buildPush(
-            "sandbox-images/openclaw/Dockerfile",
-            "openclaw-sandbox:latest",
-            ["--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/kars-sandbox-base:latest`,
-             "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/kars-inference-router:latest`]
-          );
-
-          // AgentMesh relay+registry images are no longer built by `kars up`.
-          // After Phase 5.2 the vendored Rust forks were removed; the AGT
-          // mesh manifest pulls upstream Microsoft AGT images, or rebuild
-          // locally via `kars push --only relay --apply` (requires an
-          // AGT repo checkout passed via --agt-repo).
-
-          // Multi-runtime adapter images. Tags must match the controller's
-          // DEFAULT_*_IMAGE constants in `reconciler/runtime.rs`. Skipped
-          // when --skip-runtime-images is passed (faster first deploy).
-          if (!options.skipRuntimeImages) {
-            // The six Python runtime Dockerfiles COPY runtimes/wheels/.
-            // ensureAgtWheels() (a) auto-clones the pinned AGT repo if
-            // missing and (b) builds the three Python wheels (agent-
-            // sandbox, agent-mesh, a2a-protocol) into runtimes/wheels/.
-            // No-op when the cache stamp matches the current pin SHA,
-            // so a re-run of `kars up` is fast.
-            stepper.update("Bootstrapping AGT toolkit + Python wheels...");
-            const agtRepo = await ensureAgtRepo(undefined, repoRoot);
-            await ensureAgtWheels(agtRepo, repoRoot);
-            for (const rt of [
-              { dir: "openai-agents", tag: "kars-runtime-openai-agents:latest" },
-              { dir: "maf-python", tag: "kars-runtime-maf-python:latest" },
-              { dir: "anthropic", tag: "kars-runtime-anthropic:latest" },
-              { dir: "langgraph", tag: "kars-runtime-langgraph:latest" },
-              { dir: "langgraph-ts", tag: "kars-runtime-langgraph-ts:latest" },
-              { dir: "pydantic-ai", tag: "kars-runtime-pydantic-ai:latest" },
-              // Hermes (Nous Research) — first-class adapter; must be
-              // included so `kars up` followed by `kubectl apply
-              // KarsSandbox kind: Hermes` doesn't ImagePullBackOff.
-              { dir: "hermes", tag: "kars-runtime-hermes:latest" },
-            ]) {
-              await buildPush(`sandbox-images/${rt.dir}/Dockerfile`, rt.tag);
-            }
-          }
-
-          // AgentMesh relay+registry images: kars does not build these
-          // (vendored forks were removed in Phase 5.2). Always import
-          // the pre-built AGT-compatible images from the public source
-          // ACR — both --build mode (this branch) and import mode
-          // (the else branch below) need them, since the deploy/
-          // agentmesh-agt.yaml manifest references them by tag.
-          for (const tag of ["agentmesh-relay-agt:latest", "agentmesh-registry-agt:latest"]) {
-            stepper.update(`Importing ${tag} from ${options.sourceAcr}...`);
-            await execa("az", [
-              "acr", "import",
-              "--name", acr,
-              "--source", `${options.sourceAcr}/${tag}`,
-              "--image", tag,
-              "--force",
-            ], { stdio: "pipe" }).then(() => {
-              stepper.detail("ok", tag);
-            }).catch((e: { message?: string }) => {
-              stepper.detail("skip", `${tag} — import failed (${(e.message ?? "").split("\n")[0].slice(0, 80)})`);
-            });
-          }
-
-          stepper.done("Images built and pushed to ACR");
-        } else {
-          // Customer mode: import pre-built images from source ACR
-          stepper.step("Importing images from source ACR...");
-          const sourceAcr = options.sourceAcr;
-          const images = [
-            { source: `${sourceAcr}/kars-controller:latest`, target: "kars-controller:latest" },
-            { source: `${sourceAcr}/kars-inference-router:latest`, target: "kars-inference-router:latest" },
-            { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
-            { source: `${sourceAcr}/agentmesh-relay:latest`, target: "agentmesh-relay:latest" },
-            { source: `${sourceAcr}/agentmesh-registry:latest`, target: "agentmesh-registry:latest" },
-            // Multi-runtime adapter images. Failures here are non-fatal —
-            // some source ACRs may not host every runtime.
-            { source: `${sourceAcr}/kars-runtime-openai-agents:latest`, target: "kars-runtime-openai-agents:latest" },
-            { source: `${sourceAcr}/kars-runtime-maf-python:latest`, target: "kars-runtime-maf-python:latest" },
-            { source: `${sourceAcr}/kars-runtime-anthropic:latest`, target: "kars-runtime-anthropic:latest" },
-            { source: `${sourceAcr}/kars-runtime-langgraph:latest`, target: "kars-runtime-langgraph:latest" },
-            { source: `${sourceAcr}/kars-runtime-langgraph-ts:latest`, target: "kars-runtime-langgraph-ts:latest" },
-            { source: `${sourceAcr}/kars-runtime-pydantic-ai:latest`, target: "kars-runtime-pydantic-ai:latest" },
-            { source: `${sourceAcr}/kars-runtime-hermes:latest`, target: "kars-runtime-hermes:latest" },
-          ];
-
-          for (const img of images) {
-            stepper.update(`Importing ${img.target}...`);
-            await execa("az", [
-              "acr", "import",
-              "--name", acr,
-              "--source", img.source,
-              "--image", img.target,
-              "--force",
-            ], { stdio: "pipe" }).then(() => {
-              stepper.detail("ok", img.target);
-            }).catch(() => {
-              stepper.detail("skip", `${img.target} — import failed (may already exist)`);
-            });
-          }
-
-          stepper.done("Images available in ACR");
-        }
-        markPhaseDone("images", {}, resumeTopology);
+        await acquireImages({
+          stepper,
+          options,
+          acrLoginServer,
+          acr,
+          repoRoot,
+          resumeFromPhase,
+          resumeTopology,
+        });
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
         stepper.step("Deploying Helm chart (controller + CRD + RBAC)...");

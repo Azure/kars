@@ -253,15 +253,22 @@ For **per-sandbox Entra Agent IDs**, you also need the **Agent ID Developer** En
 ### 2.2 Bring it up
 
 ```bash
-# Anonymous tier (default) — zero Entra prerequisites, shared cluster MI
-kars up --name prod-agent --region swedencentral
+# Anonymous tier (default) — zero Entra prerequisites, shared cluster MI.
+# --release pulls the public, signed images (no local build / Rust toolchain).
+kars up --name prod-agent --region swedencentral --release
 
 # Entra tier — full per-sandbox Entra Agent IDs + verified mesh trust
-kars up --name prod-agent --region swedencentral --mesh-trust=entra
+kars up --name prod-agent --region swedencentral --release --mesh-trust=entra
 
 # Microsoft-corp users: also pass your ServiceTree GUID
-kars up --name prod-agent --region swedencentral --mesh-trust=entra --service-tree <guid>
+kars up --name prod-agent --region swedencentral --release --mesh-trust=entra --service-tree <guid>
 ```
+
+> **`--release` vs `--build`:** `--release` imports the public, cosign-signed
+> `ghcr.io/azure/*` images into your ACR — no Rust, no Docker build, no source
+> checkout to compile (bare `--release` = latest, or pin `--release v0.1.4`).
+> Drop it to import from a source ACR, or pass `--build` to compile from source
+> (developer mode; compiles Rust in-Docker on macOS/arm64).
 
 The `--mesh-trust=entra` flag turns on Phase 5b (per-sandbox typed
 agent identity SPs + Foundry RBAC + federated credentials) plus
@@ -276,7 +283,7 @@ What this does, in order:
 2. Creates a resource group `kars-<name>-rg`.
 3. Creates an ACR (your private registry) and an AKS cluster with Workload Identity and OIDC issuer enabled.
 4. Creates an Azure AI Foundry project, Content Safety binding, and a model deployment.
-5. Builds and pushes the controller, inference-router, A2A gateway, and sandbox images to the new ACR.
+5. **Gets the images into your ACR** — with `--release`, imports the public, cosign-signed `ghcr.io/azure/*` images (no build); with `--build`, compiles the controller, inference-router, A2A gateway, and sandbox images from source and pushes them; otherwise imports from `--source-acr`.
 6. Installs the kars Helm chart (controller + AgentMesh relay/registry + A2A gateway + CRDs).
 7. **(--mesh-trust=entra only)** Provisions the Entra Agent ID trust anchor (idempotent): blueprint application + service principal in your tenant, controller managed identity in your subscription, and a federated identity credential trusting the controller MI. Writes a `KarsAuthConfig/default` CR to the cluster. Wires `AGENTMESH_ENTRA_AUDIENCE` + `AGENTMESH_ENTRA_TENANT_ID` env on the AGT relay+registry deployments for verified-tier mesh registration.
 8. Submits your first `KarsSandbox` and waits until it is `Ready`. With `--mesh-trust=entra`, the controller mints a per-sandbox **Entra Agent ID** (`kars-<cluster>-<sandbox>`) and Foundry sees that agent identity as the calling principal. With `--mesh-trust=anonymous`, sandboxes share the cluster's workload identity.

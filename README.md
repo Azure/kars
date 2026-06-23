@@ -208,21 +208,23 @@ The TUI drops you into a chat window. Type *"list the files in my workspace"* or
 When you are ready for the real thing:
 
 ```bash
-kars up --name prod-agent --region swedencentral
+kars up --name prod-agent --region swedencentral --release
 ```
+
+`--release` pulls the **public, cosign-signed images** from `ghcr.io/azure` into your ACR — **no local build, no Rust toolchain, no source checkout to compile.** (Drop `--release` to import from a source ACR, or pass `--build` to build from source — developer mode.)
 
 `kars up` provisions the AKS cluster, ACR, Foundry resource, Foundry-side Content Safety, controller, A2A gateway, Microsoft AGT AgentMesh relay+registry, and your first sandbox. Identity is gated by **one operator flag**:
 
 ```bash
 # Default — anonymous mesh tier, shared cluster Workload Identity for Foundry.
 # Zero Entra prerequisites. Suitable for single-tenant clusters and demos.
-kars up --name prod-agent --region swedencentral
+kars up --name prod-agent --region swedencentral --release
 
 # Verified mesh tier — per-sandbox Microsoft Entra Agent ID.
 # Each KarsSandbox (incl. spawned sub-agents) gets its own typed Entra
 # agentIdentity SP + Foundry RBAC scoped to that SP + federated credential.
 # Requires the Agent ID Developer directory role on the signed-in user.
-kars up --name prod-agent --region swedencentral --mesh-trust=entra
+kars up --name prod-agent --region swedencentral --release --mesh-trust=entra
 ```
 
 `--mesh-trust=entra` activates the full **per-sandbox Microsoft Entra Agent ID** chain (Phase 5b/6.c): the controller provisions a typed `microsoft.graph.agentIdentity` SP per sandbox, assigns Foundry RBAC to that SP, wires a federated credential, and configures the AGT mesh relay+registry to verify peer JWTs against Entra's JWKS. The default `anonymous` skips Entra entirely and uses the cluster's federated Workload Identity for Foundry — same security model as v0.0.x. See **[`docs/agent-identity.md`](docs/agent-identity.md)** and **[`docs/architecture/entra-agent-id/`](docs/architecture/entra-agent-id/)** for the full chain. See **[`docs/getting-started.md`](docs/getting-started.md)** for the full walkthrough including how to bring your own AKS / Foundry / ACR.
