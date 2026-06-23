@@ -760,7 +760,7 @@ jobs:
         with:
           subject-path: 'cli/*.tgz'
 
-      # Publish @kars/cli to npmjs so `npm i -g @kars/cli` works — only for
+      # Publish kars-runtime to npmjs so `npm i -g kars-runtime` works — only for
       # clean (non-interim) release tags, and only when an NPM_TOKEN secret is
       # configured (so the workflow no-ops cleanly until npm publishing is set
       # up). `--provenance` records a signed npm provenance attestation (needs
@@ -845,7 +845,7 @@ jobs:
               {"name": "kars-sandbox-base",      "ghcr": "${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}",      "digest": "${{ needs.merge-sandbox.outputs.sandbox_base_digest }}"},
               {"name": "openclaw-sandbox",       "ghcr": "${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}",       "digest": "${{ needs.merge-sandbox.outputs.sandbox_digest }}"}
             ],
-            "cli_install": "npm i -g https://github.com/${{ github.repository }}/releases/latest/download/${{ steps.cli.outputs.tarball }}",
+            "cli_install": "curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash   (or: npm i -g kars-runtime)",
             "additional_registries_planned": "crates.io / npmjs / MCR publishing is in progress — see docs/PUBLISHING.md. The GHCR images + CLI tarball above are signed and usable today."
           }
           EOF
@@ -871,7 +871,8 @@ jobs:
             no AGT clone**:
 
             ```bash
-            npm i -g https://github.com/${{ github.repository }}/releases/latest/download/${{ steps.cli.outputs.tarball }}
+            # install the CLI (or: npm i -g kars-runtime, once on npmjs)
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
             kars dev --release
             ```
 
