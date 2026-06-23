@@ -62,12 +62,11 @@ platform_preflight() {
             release_args=(--release "${KARS_RELEASE}")
             log "released mode: kars dev --release ${KARS_RELEASE} --target local-k8s (published images)"
         else
-            log "bringing up local-k8s via 'kars dev --target local-k8s --cluster-name ${KIND_CLUSTER_NAME} --once'"
+            log "bringing up local-k8s via 'kars dev --target local-k8s --cluster-name ${KIND_CLUSTER_NAME}'"
         fi
         kars dev --target local-k8s \
             --cluster-name "${KIND_CLUSTER_NAME}" \
             "${release_args[@]}" \
-            --once \
             >>"${OUT_DIR}/dev-bringup.log" 2>&1 || {
                 log "ERR kars dev bring-up failed; tail of dev-bringup.log:"
                 tail -n 80 "${OUT_DIR}/dev-bringup.log" >&2 || true
