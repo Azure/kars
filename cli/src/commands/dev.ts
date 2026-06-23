@@ -532,20 +532,24 @@ Notes:
               ? "Local   (recommended; relay + registry in the kind cluster alongside the sandbox)"
               : "Local   (recommended; spin up relay + registry in Docker on this laptop)";
 
-          const { default: inquirer } = await import("inquirer");
-          const { meshSource } = await inquirer.prompt([{
-            type: "list",
-            name: "meshSource",
-            message: "Where should the mesh live?",
-            default: "local",
-            choices: [
-              {
-                name: localLabel,
-                value: "local",
-              },
-              { name: remoteLabel, value: "remote" },
-            ],
-          }]);
+          let meshSource = "local";
+          if (process.stdin.isTTY) {
+            const { default: inquirer } = await import("inquirer");
+            const ans = await inquirer.prompt([{
+              type: "list",
+              name: "meshSource",
+              message: "Where should the mesh live?",
+              default: "local",
+              choices: [
+                {
+                  name: localLabel,
+                  value: "local",
+                },
+                { name: remoteLabel, value: "remote" },
+              ],
+            }]);
+            meshSource = ans.meshSource;
+          }
 
           if (meshSource === "remote") {
             if (!cachedRegistryUrl && !aksAvailable) {
@@ -602,7 +606,7 @@ Notes:
         addChannel("telegram", "telegram-token", "Telegram");
         addChannel("slack",    "slack-token",    "Slack");
         addChannel("discord",  "discord-token",  "Discord");
-        if (available.length > 0) {
+        if (available.length > 0 && process.stdin.isTTY) {
           const { default: inquirer } = await import("inquirer");
           const { picked } = await inquirer.prompt([{
             type: "checkbox",
