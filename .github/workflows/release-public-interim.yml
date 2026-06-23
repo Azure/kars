@@ -42,11 +42,7 @@ on:
         default: ''
 
 permissions:
-  contents: write    # create GitHub Release
-  packages: write    # push to GHCR + set visibility
-  id-token: write    # cosign keyless OIDC
-  attestations: write
-  actions: read
+  contents: read
 
 env:
   VERSION: ${{ github.event.inputs.version != '' && github.event.inputs.version || (startsWith(github.ref, 'refs/tags/') && github.ref_name || format('interim-{0}', github.sha)) }}
@@ -57,6 +53,10 @@ jobs:
   build-binaries:
     name: Build Rust binaries (amd64 + arm64)
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -115,6 +115,11 @@ jobs:
     name: Build + push ${{ matrix.image.name }} (PUBLIC GHCR)
     needs: build-binaries
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 90
     outputs:
       controller_digest: ${{ steps.digests.outputs.controller }}
@@ -249,6 +254,9 @@ jobs:
   build-sandbox-base:
     name: Build kars-sandbox-base (${{ matrix.arch }}, native)
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -283,6 +291,9 @@ jobs:
     name: Build openclaw-sandbox (${{ matrix.arch }}, native)
     needs: [build-images, build-sandbox-base]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -355,6 +366,11 @@ jobs:
     name: Merge + sign sandbox-base + openclaw-sandbox manifests
     needs: [build-sandbox-base, build-sandbox]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 20
     outputs:
       sandbox_digest: ${{ steps.digests.outputs.openclaw }}
@@ -439,6 +455,8 @@ jobs:
   build-agt-wheels:
     name: Build AGT Python wheels (from pinned AGT)
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -477,6 +495,11 @@ jobs:
     name: Build + push ${{ matrix.runtime.ghcr }} (PUBLIC GHCR)
     needs: build-agt-wheels
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -585,6 +608,9 @@ jobs:
   build-mesh:
     name: Build agentmesh-${{ matrix.component }} (${{ matrix.arch }}, native)
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -632,6 +658,11 @@ jobs:
     name: Merge + sign agentmesh manifests
     needs: [build-mesh]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -709,6 +740,10 @@ jobs:
   cli-pack:
     name: Pack @kars/cli tarball
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -739,6 +774,8 @@ jobs:
     name: Create PUBLIC GitHub Release
     needs: [build-binaries, build-images, build-sandbox-base, build-sandbox, merge-sandbox, build-runtimes, build-mesh, merge-mesh, cli-pack]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
