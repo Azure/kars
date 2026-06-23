@@ -300,13 +300,19 @@ jobs:
           # A release sandbox image MUST bundle the kars-patched AGT SDK
           # (POP signing + X3DH KDF fix). The Dockerfile falls back to the
           # UNPATCHED public npm SDK if .agt-sdk/<tarball> is absent.
+          #
+          # The Dockerfile's `COPY .agt-sdk/` resolves against the BUILD
+          # CONTEXT root (the repo root — `context: .` below), NOT the
+          # Dockerfile's directory. Stage into <repo-root>/.agt-sdk/ to match,
+          # exactly like the CLI from-source dev build does
+          # (cli/src/commands/dev.ts -> path.join(repoRoot, ".agt-sdk")).
           TARBALL=$(find vendor/agt -maxdepth 1 -name 'microsoft-agent-governance-sdk-*.tgz' | head -1 || true)
           if [ -z "$TARBALL" ]; then
             echo "::error::No vendored patched AGT SDK tarball under vendor/agt/."
             exit 1
           fi
-          mkdir -p sandbox-images/openclaw/.agt-sdk
-          cp "$TARBALL" sandbox-images/openclaw/.agt-sdk/
+          mkdir -p .agt-sdk
+          cp "$TARBALL" .agt-sdk/
           echo "AGT_SDK_TARBALL=$(basename "$TARBALL")" >> "$GITHUB_ENV"
 
       - name: Build mesh-plugin (openclaw Dockerfile COPYs mesh-plugin/dist)
@@ -341,6 +347,7 @@ jobs:
             VERSION=${{ env.VERSION }}
             SANDBOX_BASE_IMAGE=${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}-${{ matrix.arch }}
             INFERENCE_ROUTER_IMAGE=${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}
+            MESH_PROVIDER=agt
             AGT_SDK_TARBALL=${{ env.AGT_SDK_TARBALL }}
 
   # Merge the per-arch tags into multi-arch manifests + sign/attest/SBOM.

@@ -40,7 +40,11 @@
 
 set -euo pipefail
 
-DOCKER_CONTAINER_NAME="${DOCKER_CONTAINER_NAME:-${SCENARIO_SANDBOX}}"
+# `kars dev --name X` creates a docker container named `kars-X`. Keep the
+# bare name for the `kars dev --name` flag, but use the `kars-`-prefixed name
+# for every `docker exec` / `docker logs` / `docker ps` operation below.
+KARS_DEV_NAME="${DOCKER_CONTAINER_NAME:-${SCENARIO_SANDBOX}}"
+DOCKER_CONTAINER_NAME="kars-${KARS_DEV_NAME}"
 
 platform_preflight() {
     command -v docker >/dev/null || { log "ERR docker not on PATH"; exit 1; }
@@ -68,7 +72,7 @@ platform_preflight() {
             log "released mode: kars dev --release ${KARS_RELEASE} (published images)"
         fi
         kars dev --target docker \
-            --name "${DOCKER_CONTAINER_NAME}" \
+            --name "${KARS_DEV_NAME}" \
             "${release_args[@]}" \
             >>"${OUT_DIR}/dev-bringup.log" 2>&1 || {
                 log "ERR kars dev bring-up failed; tail of dev-bringup.log:"
