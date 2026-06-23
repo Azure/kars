@@ -7,7 +7,7 @@
 // `securityStates`, and `topologyBox` become an explicit context object.
 
 import type { SandboxInfo, SecurityState } from "../types.js";
-import { platformTag } from "../helpers.js";
+import { platformTag, sandboxKey } from "../helpers.js";
 
 interface BlessedBox {
   setContent(content: string): void;
@@ -106,7 +106,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
   }
 
   for (const p of parents) {
-    const sec = securityStates.get(p.name);
+    const sec = securityStates.get(sandboxKey(p));
     const icon = statusIcon(p.health);
     const mode = sec?.egressMode === "enforcing" ? "{green-fg}enforce{/}" :
                  sec?.egressMode === "learning" ? "{yellow-fg}learn{/}" : "";
@@ -130,7 +130,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
       if (subs.length === 1) {
         // Single child — straight line down
         lines.push(" ".repeat(parentCenter) + "│");
-        const childSec = securityStates.get(subs[0].name);
+        const childSec = securityStates.get(sandboxKey(subs[0]));
         const ci = statusIcon(subs[0].health);
         const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
         const cBox = makeBox(subs[0].name, ci, `${platformTag(subs[0])} ${subs[0].model}`, cMesh);
@@ -175,7 +175,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
         // Render child boxes side-by-side
         const childBoxes: string[][] = [];
         for (const s of subs) {
-          const childSec = securityStates.get(s.name);
+          const childSec = securityStates.get(sandboxKey(s));
           const ci = statusIcon(s.health);
           const cMesh = childSec ? `↑${childSec.agtMeshSent} ↓${childSec.agtMeshReceived}` : "";
           childBoxes.push(makeBox(s.name, ci, `${platformTag(s)} ${s.model}`, cMesh));
@@ -193,7 +193,7 @@ export function renderTopology(ctx: TopologyRenderContext): void {
       // Peer-to-peer mesh links
       const peerLinks: string[] = [];
       for (const s of subs) {
-        const childSec = securityStates.get(s.name);
+        const childSec = securityStates.get(sandboxKey(s));
         const peers = childSec?.agtTrustScores.filter((t) => {
           if (isBogusLegacyKey(t.agent)) return false;
           const a = shortAgentName(t.agent);
