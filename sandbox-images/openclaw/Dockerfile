@@ -83,7 +83,15 @@ ARG MESH_PROVIDER=vendored
 ARG AGT_SDK_TARBALL=
 COPY .agt-sdk/ /opt/kars-agt-sdk/
 RUN cd /opt/kars-plugin && \
-    if [ -n "$AGT_SDK_TARBALL" ] && [ -f "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ]; then \
+    if [ -n "$AGT_SDK_TARBALL" ]; then \
+      if [ ! -f "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ]; then \
+        echo "::error:: AGT_SDK_TARBALL=$AGT_SDK_TARBALL was requested but" >&2; \
+        echo "  /opt/kars-agt-sdk/$AGT_SDK_TARBALL is missing from the build context." >&2; \
+        echo "  The patched POP-aware SDK would NOT be installed and the mesh" >&2; \
+        echo "  would silently fall back to the unpatched npm SDK (relay flood)." >&2; \
+        echo "  Stage the tarball into <build-context-root>/.agt-sdk/ before building." >&2; \
+        exit 1; \
+      fi; \
       echo "Installing AGT SDK from local tarball: $AGT_SDK_TARBALL" && \
       npm install --omit=dev --ignore-scripts --no-save \
         "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ; \
