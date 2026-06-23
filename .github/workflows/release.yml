@@ -1,14 +1,11 @@
 name: Release
 
 on:
-  push:
-    # Only fire for public-release tags (semver). Internal/preview tags
-    # use release-internal.yml which produces wall-off artefacts.
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-alpha*'
-      - 'v[0-9]+.[0-9]+.[0-9]+-beta*'
-      - 'v[0-9]+.[0-9]+.[0-9]+-rc*'
+  # Superseded by release-public-interim.yml, which is now the single public
+  # release pipeline (multi-arch GHCR images + signed GitHub Release + npm).
+  # Kept dispatch-only so the old CI+release path stays available if ever
+  # needed, but it no longer auto-fires on v* tags and races the new pipeline.
+  workflow_dispatch:
 
 permissions:
   contents: read
