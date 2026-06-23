@@ -1,0 +1,869 @@
+name: Public Interim Release (GHCR + GitHub Release)
+
+# ─────────────────────────────────────────────────────────────────────────
+# INTERIM public release — lets customers run kars from pre-built, signed
+# artefacts WITHOUT cloning AGT or compiling anything. This is the stopgap
+# described in docs/PUBLISHING.md until the ESRP-signed public path
+# (.github/pipelines/esrp-publish.yml → MCR + npmjs `@kars` + crates.io)
+# is wired. Per PUBLISHING.md, GHCR is explicitly allowed for interim/nightly.
+#
+# What this produces (all PUBLIC):
+#   1. Multi-arch container images → ghcr.io/azure/kars-*:<version> + :latest
+#      (cosign keyless signed, SBOM + SLSA provenance attached)
+#   2. @kars/cli packed as a .tgz attached to a PUBLIC GitHub Release
+#      (NOT published to npmjs — the `@kars` scope is reserved for the
+#      ESRP-signed publish; customers install via `npm i -g <release-url>`)
+#
+# What it deliberately does NOT do (reserved for ESRP, see PUBLISHING.md):
+#   - npm publish to npmjs.com under `@kars`
+#   - cargo publish to crates.io
+#   - push to mcr.microsoft.com
+#
+# Triggers:
+#   - Tags matching `v*-interim*` (e.g. v0.1.0-interim.1)
+#   - Manual via workflow_dispatch (version input)
+#
+# ONE-TIME SETUP (first run only): GHCR org packages default to private.
+# After the first push, set each `kars-*` package to Public in
+# https://github.com/orgs/azure/packages → package → Settings → visibility.
+# The `set-package-public` step attempts this automatically but org policy
+# may require the one-time manual toggle.
+# ─────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    tags:
+      - 'v*-interim*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to tag (e.g. v0.1.0-interim.1). Defaults to interim-<sha>.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write    # create GitHub Release
+  packages: write    # push to GHCR + set visibility
+  id-token: write    # cosign keyless OIDC
+  attestations: write
+  actions: read
+
+env:
+  VERSION: ${{ github.event.inputs.version != '' && github.event.inputs.version || (startsWith(github.ref, 'refs/tags/') && github.ref_name || format('interim-{0}', github.sha)) }}
+  REGISTRY: ghcr.io/azure
+
+jobs:
+  # ─── Stage 1: multi-arch Rust binaries ─────────────────────────
+  build-binaries:
+    name: Build Rust binaries (amd64 + arm64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust-glibc-release-multiarch
+          save-if: false
+      - name: Install aarch64 cross toolchain + libc headers
+        run: |
+          sudo apt-get update
+          # gcc-aarch64-linux-gnu alone is not enough to compile aws-lc-sys
+          # (BoringSSL C) for arm64: --no-install-recommends drops the cross
+          # libc dev headers, so the build fails with "sys/types.h: No such
+          # file or directory". Pull them in explicitly:
+          #   libc6-dev-arm64-cross    → sys/types.h, bits/libc-header-start.h
+          #   linux-libc-dev-arm64-cross → asm/types.h, linux/types.h
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            linux-libc-dev-arm64-cross
+      - name: cargo build --release (amd64 + arm64)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --workspace --target x86_64-unknown-linux-gnu
+          cargo build --release --workspace --target aarch64-unknown-linux-gnu
+      - name: Stage binaries per-arch
+        run: |
+          mkdir -p ./bin/amd64 ./bin/arm64
+          for bin in kars-controller kars-inference-router kars-a2a-gateway kars-conformance-runner; do
+            cp "target/x86_64-unknown-linux-gnu/release/$bin"  "./bin/amd64/$bin"
+            cp "target/aarch64-unknown-linux-gnu/release/$bin" "./bin/arm64/$bin"
+          done
+      - name: Verify + checksum
+        run: |
+          chmod +x ./bin/*/kars-*
+          ( cd ./bin && find . -type f -name 'kars-*' -exec sha256sum {} \; | tee SHA256SUMS )
+          file ./bin/*/kars-*
+      - name: Attest build provenance (binaries, GitHub-signed)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: 'bin/*/kars-*'
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: kars-binaries-${{ env.VERSION }}
+          path: ./bin/
+          retention-days: 90
+
+  # ─── Stage 2: build + push container images to PUBLIC GHCR ─────
+  build-images:
+    name: Build + push ${{ matrix.image.name }} (PUBLIC GHCR)
+    needs: build-binaries
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    outputs:
+      controller_digest: ${{ steps.digests.outputs.controller }}
+      router_digest: ${{ steps.digests.outputs.router }}
+      gateway_digest: ${{ steps.digests.outputs.gateway }}
+      runner_digest: ${{ steps.digests.outputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: controller
+            dockerfile: controller/Dockerfile
+            ghcr: kars-controller
+            platforms: linux/amd64,linux/arm64
+          - name: inference-router
+            dockerfile: inference-router/Dockerfile
+            ghcr: kars-inference-router
+            platforms: linux/amd64,linux/arm64
+          - name: a2a-gateway
+            dockerfile: a2a-gateway/Dockerfile
+            ghcr: kars-a2a-gateway
+            platforms: linux/amd64,linux/arm64
+          - name: conformance-runner
+            dockerfile: sandbox-images/conformance-runner/Dockerfile
+            ghcr: kars-conformance-runner
+            platforms: linux/amd64,linux/arm64
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download pre-built binaries (per-arch)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kars-binaries-${{ env.VERSION }}
+          path: ./bin/
+      - name: chmod binaries
+        run: find ./bin -type f -name 'kars-*' -exec chmod +x {} \;
+
+      - name: Set up QEMU (for cross-arch buildx)
+        if: matrix.image.platforms != 'linux/amd64'
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push (PUBLIC)
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          push: true
+          platforms: ${{ matrix.image.platforms }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:latest
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          sbom: true
+          provenance: true
+
+      - name: Attest build provenance (GitHub-signed, pushed to registry)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Make package public (best-effort; may need one-time manual toggle)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/orgs/azure/packages/container/${{ matrix.image.ghcr }}/visibility" \
+            -f visibility=public \
+          || echo "::warning::Could not set ${{ matrix.image.ghcr }} public via API; set it once manually in package settings."
+
+      - name: Record digest
+        id: digests
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          case "${{ matrix.image.name }}" in
+            controller)          echo "controller=${DIGEST}"   >> "$GITHUB_OUTPUT" ;;
+            inference-router)    echo "router=${DIGEST}"       >> "$GITHUB_OUTPUT" ;;
+            a2a-gateway)         echo "gateway=${DIGEST}"      >> "$GITHUB_OUTPUT" ;;
+            conformance-runner)  echo "runner=${DIGEST}"       >> "$GITHUB_OUTPUT" ;;
+            sandbox-base)        echo "sandbox_base=${DIGEST}" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.image.name }}.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: sbom-${{ matrix.image.name }}-${{ env.VERSION }}
+          path: sbom-${{ matrix.image.name }}.spdx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Cosign keyless sign image
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}@${{ steps.push.outputs.digest }}
+
+  # ─── Stage 2b: build sandbox-base + openclaw-sandbox (NATIVE per-arch) ──
+  # These two are heavy (Python/Go/Node), so building arm64 under QEMU is far
+  # too slow. Instead build each arch on its NATIVE GitHub-hosted runner
+  # (amd64 → ubuntu-22.04, arm64 → ubuntu-24.04-arm; free for public repos),
+  # push per-arch tags, then merge into a multi-arch manifest. This is what
+  # makes openclaw-sandbox run NATIVELY on Apple Silicon (amd64 under Rosetta
+  # crashes with rt_tgsigqueueinfo). The vendored sandbox wheels ship aarch64
+  # variants, so the arm64 base installs pre-built wheels (no source compile).
+  build-sandbox-base:
+    name: Build kars-sandbox-base (${{ matrix.arch }}, native)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push kars-sandbox-base:${{ env.VERSION }}-${{ matrix.arch }}
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: .
+          file: sandbox-images/openclaw/Dockerfile.base
+          push: true
+          platforms: linux/${{ matrix.arch }}
+          tags: ${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}-${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+
+  build-sandbox:
+    name: Build openclaw-sandbox (${{ matrix.arch }}, native)
+    needs: [build-images, build-sandbox-base]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Stage patched AGT SDK (release-build correctness guard)
+        run: |
+          # A release sandbox image MUST bundle the kars-patched AGT SDK
+          # (POP signing + X3DH KDF fix). The Dockerfile falls back to the
+          # UNPATCHED public npm SDK if .agt-sdk/<tarball> is absent.
+          #
+          # The Dockerfile's `COPY .agt-sdk/` resolves against the BUILD
+          # CONTEXT root (the repo root — `context: .` below), NOT the
+          # Dockerfile's directory. Stage into <repo-root>/.agt-sdk/ to match,
+          # exactly like the CLI from-source dev build does
+          # (cli/src/commands/dev.ts -> path.join(repoRoot, ".agt-sdk")).
+          TARBALL=$(find vendor/agt -maxdepth 1 -name 'microsoft-agent-governance-sdk-*.tgz' | head -1 || true)
+          if [ -z "$TARBALL" ]; then
+            echo "::error::No vendored patched AGT SDK tarball under vendor/agt/."
+            exit 1
+          fi
+          mkdir -p .agt-sdk
+          cp "$TARBALL" .agt-sdk/
+          echo "AGT_SDK_TARBALL=$(basename "$TARBALL")" >> "$GITHUB_ENV"
+
+      - name: Build mesh-plugin (openclaw Dockerfile COPYs mesh-plugin/dist)
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: '22'
+      - name: npm ci + build mesh-plugin
+        working-directory: mesh-plugin
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          test -d dist || { echo "::error::mesh-plugin/dist not produced"; exit 1; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push openclaw-sandbox:${{ env.VERSION }}-${{ matrix.arch }}
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: .
+          file: sandbox-images/openclaw/Dockerfile
+          push: true
+          platforms: linux/${{ matrix.arch }}
+          tags: ${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}-${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            SANDBOX_BASE_IMAGE=${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}-${{ matrix.arch }}
+            INFERENCE_ROUTER_IMAGE=${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}
+            MESH_PROVIDER=agt
+            AGT_SDK_TARBALL=${{ env.AGT_SDK_TARBALL }}
+
+  # Merge the per-arch tags into multi-arch manifests + sign/attest/SBOM.
+  merge-sandbox:
+    name: Merge + sign sandbox-base + openclaw-sandbox manifests
+    needs: [build-sandbox-base, build-sandbox]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    outputs:
+      sandbox_digest: ${{ steps.digests.outputs.openclaw }}
+      sandbox_base_digest: ${{ steps.digests.outputs.base }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifests (:VERSION + :latest)
+        id: digests
+        run: |
+          for name in kars-sandbox-base openclaw-sandbox; do
+            docker buildx imagetools create \
+              -t "${REGISTRY}/${name}:${VERSION}" \
+              -t "${REGISTRY}/${name}:latest" \
+              "${REGISTRY}/${name}:${VERSION}-amd64" \
+              "${REGISTRY}/${name}:${VERSION}-arm64"
+            DIGEST=$(docker buildx imagetools inspect "${REGISTRY}/${name}:${VERSION}" --format '{{.Manifest.Digest}}')
+            case "$name" in
+              kars-sandbox-base) echo "base=${DIGEST}" >> "$GITHUB_OUTPUT" ;;
+              openclaw-sandbox)  echo "openclaw=${DIGEST}" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          VERSION: ${{ env.VERSION }}
+
+      - name: Make packages public (best-effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for name in kars-sandbox-base openclaw-sandbox; do
+            gh api -X PATCH -H "Accept: application/vnd.github+json" \
+              "/orgs/azure/packages/container/${name}/visibility" -f visibility=public \
+            || echo "::warning::Could not set ${name} public via API."
+          done
+
+      - name: Attest build provenance (both manifests)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/openclaw-sandbox
+          subject-digest: ${{ steps.digests.outputs.openclaw }}
+          push-to-registry: true
+
+      - name: Generate SBOM (openclaw-sandbox)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom-openclaw-sandbox.spdx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: sbom-openclaw-sandbox-${{ env.VERSION }}
+          path: sbom-openclaw-sandbox.spdx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+      - name: Cosign keyless sign manifests
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/kars-sandbox-base@${{ steps.digests.outputs.base }}
+          cosign sign --yes ${{ env.REGISTRY }}/openclaw-sandbox@${{ steps.digests.outputs.openclaw }}
+
+  # ─── Stage 2c: build AGT Python wheels (upstream governance pkgs) ──
+  # The Python runtime images COPY runtimes/wheels/*.whl (upstream AGT
+  # governance packages) AND runtimes/agt-mesh-python/ (kars's own
+  # spec-compliant Python MeshClient — in-repo source, bundled hermetically
+  # from the checkout). Only the upstream wheels need building here; they
+  # come from the pinned AGT checkout (vendor/agt/pin.json).
+  build-agt-wheels:
+    name: Build AGT Python wheels (from pinned AGT)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Clone pinned AGT + build wheels
+        run: |
+          URL=$(jq -r .url vendor/agt/pin.json)
+          SHA=$(jq -r .sha vendor/agt/pin.json)
+          echo "::notice::Cloning $URL @ $SHA for AGT-Python wheels"
+          git clone --filter=blob:none "$URL" /tmp/agt
+          git -C /tmp/agt checkout "$SHA"
+          AGT_PYTHON_DIR=/tmp/agt/agent-governance-python ./runtimes/build-agt-wheels.sh
+          echo "Built wheels:" && ls -la runtimes/wheels/
+      - name: Guard — wheels present
+        run: |
+          count=$(find runtimes/wheels -maxdepth 1 -name '*.whl' | wc -l)
+          if [ "$count" -lt 1 ]; then
+            echo "::error::No AGT-Python wheels were produced — Python runtime" \
+                 "images would build without governance primitives. Aborting."
+            exit 1
+          fi
+          echo "::notice::Staged $count AGT-Python wheel(s)."
+      - name: Upload wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: agt-wheels-${{ env.VERSION }}
+          path: runtimes/wheels/*.whl
+          retention-days: 90
+
+  # ─── Stage 2d: build the Python runtime adapter images ─────────
+  # Each bundles the upstream AGT wheels + kars-agt-mesh (in-repo) + the
+  # runtime adapter. amd64-only (manylinux wheels). FROM Azure Linux python.
+  build-runtimes:
+    name: Build + push ${{ matrix.runtime.ghcr }} (PUBLIC GHCR)
+    needs: build-agt-wheels
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime:
+          - { name: langgraph,     ghcr: kars-runtime-langgraph }
+          - { name: hermes,        ghcr: kars-runtime-hermes }
+          - { name: maf-python,    ghcr: kars-runtime-maf-python }
+          - { name: anthropic,     ghcr: kars-runtime-anthropic }
+          - { name: openai-agents, ghcr: kars-runtime-openai-agents }
+          - { name: pydantic-ai,   ghcr: kars-runtime-pydantic-ai }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download AGT wheels into build context
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agt-wheels-${{ env.VERSION }}
+          path: runtimes/wheels/
+
+      - name: Guard — wheels staged + kars-agt-mesh present
+        run: |
+          test -n "$(find runtimes/wheels -maxdepth 1 -name '*.whl')" \
+            || { echo "::error::AGT wheels missing in build context"; exit 1; }
+          test -f runtimes/agt-mesh-python/pyproject.toml \
+            || { echo "::error::kars-agt-mesh source missing from checkout"; exit 1; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push ${{ matrix.runtime.ghcr }} (PUBLIC)
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: .
+          file: sandbox-images/${{ matrix.runtime.name }}/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:latest
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          sbom: true
+          provenance: true
+
+      - name: Attest build provenance (GitHub-signed, pushed to registry)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Make package public (best-effort; may need one-time manual toggle)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/orgs/azure/packages/container/${{ matrix.runtime.ghcr }}/visibility" \
+            -f visibility=public \
+          || echo "::warning::Could not set ${{ matrix.runtime.ghcr }} public via API; set it once manually."
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.runtime.ghcr }}.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: sbom-${{ matrix.runtime.ghcr }}-${{ env.VERSION }}
+          path: sbom-${{ matrix.runtime.ghcr }}.spdx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Cosign keyless sign image
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}@${{ steps.push.outputs.digest }}
+
+  # ─── Stage 2e: build the AGT mesh relay + registry images ──────
+  # kars dev / up run the AGT relay + registry for the mesh. They are built
+  # from the pinned AGT checkout (agent-mesh/docker/Dockerfile, COMPONENT=*).
+  # Publishing them lets `kars dev --release` pull everything — no AGT clone.
+  # AGT relay + registry — built on NATIVE per-arch runners so they run
+  # natively on arm64 kind nodes (Apple Silicon). The AGT Python image is
+  # multi-arch-capable; amd64-only would ImagePullBackOff / "exec format
+  # error" on an arm64 kind cluster, blocking `kars dev --release
+  # --target local-k8s` on a Mac. merge-mesh fuses the per-arch tags below.
+  build-mesh:
+    name: Build agentmesh-${{ matrix.component }} (${{ matrix.arch }}, native)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, registry]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Clone pinned AGT
+        run: |
+          URL=$(jq -r .url vendor/agt/pin.json)
+          SHA=$(jq -r .sha vendor/agt/pin.json)
+          git clone --filter=blob:none "$URL" /tmp/agt
+          git -C /tmp/agt checkout "$SHA"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push agentmesh-${{ matrix.component }}:${{ env.VERSION }}-${{ matrix.arch }}
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: /tmp/agt
+          file: /tmp/agt/agent-governance-python/agent-mesh/docker/Dockerfile
+          push: true
+          platforms: linux/${{ matrix.arch }}
+          tags: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:${{ env.VERSION }}-${{ matrix.arch }}
+          build-args: |
+            COMPONENT=${{ matrix.component }}
+
+  # Merge the per-arch relay/registry tags into multi-arch manifests + sign.
+  merge-mesh:
+    name: Merge + sign agentmesh manifests
+    needs: [build-mesh]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, registry]
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest (:VERSION + :latest)
+        id: manifest
+        run: |
+          NAME="kars-agentmesh-${{ matrix.component }}"
+          docker buildx imagetools create \
+            -t "${REGISTRY}/${NAME}:${VERSION}" \
+            -t "${REGISTRY}/${NAME}:latest" \
+            "${REGISTRY}/${NAME}:${VERSION}-amd64" \
+            "${REGISTRY}/${NAME}:${VERSION}-arm64"
+          DIGEST=$(docker buildx imagetools inspect "${REGISTRY}/${NAME}:${VERSION}" --format '{{.Manifest.Digest}}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          VERSION: ${{ env.VERSION }}
+
+      - name: Make package public (best-effort; may need one-time manual toggle)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/orgs/azure/packages/container/kars-agentmesh-${{ matrix.component }}/visibility" \
+            -f visibility=public \
+          || echo "::warning::Could not set kars-agentmesh-${{ matrix.component }} public via API; set it once manually."
+
+      - name: Attest build provenance (GitHub-signed, pushed to registry)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: sbom-kars-agentmesh-${{ matrix.component }}.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: sbom-kars-agentmesh-${{ matrix.component }}-${{ env.VERSION }}
+          path: sbom-kars-agentmesh-${{ matrix.component }}.spdx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Cosign keyless sign manifest
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}@${{ steps.manifest.outputs.digest }}
+
+  # ─── Stage 3: pack @kars/cli for GitHub Release distribution ───
+  cli-pack:
+    name: Pack @kars/cli tarball
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: '22'
+      - name: npm install + build + pack
+        working-directory: cli
+        run: |
+          npm install
+          npm run build
+          npm pack
+          ls -la ./*.tgz
+      - name: Attest build provenance (CLI tarball, GitHub-signed)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: 'cli/*.tgz'
+
+      - name: Upload CLI tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: npm-kars-cli-${{ env.VERSION }}
+          path: cli/*.tgz
+          retention-days: 90
+
+  # ─── Stage 4: assemble + publish the PUBLIC GitHub Release ─────
+  release:
+    name: Create PUBLIC GitHub Release
+    needs: [build-binaries, build-images, build-sandbox-base, build-sandbox, merge-sandbox, build-runtimes, build-mesh, merge-mesh, cli-pack]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download Rust binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kars-binaries-${{ env.VERSION }}
+          path: ./release-artefacts
+
+      - name: Download CLI tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: npm-kars-cli-${{ env.VERSION }}
+          path: ./release-artefacts
+          merge-multiple: true
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: sbom-*-${{ env.VERSION }}
+          path: ./release-artefacts
+          merge-multiple: true
+
+      - name: List artefacts
+        run: find ./release-artefacts -type f | sort
+
+      - name: Resolve CLI tarball name
+        id: cli
+        run: |
+          NAME=$(find ./release-artefacts -maxdepth 2 -name '*.tgz' -printf '%f\n' | head -1)
+          if [ -z "$NAME" ]; then
+            echo "::error::No CLI tarball found under release-artefacts."
+            exit 1
+          fi
+          echo "tarball=$NAME" >> "$GITHUB_OUTPUT"
+          echo "::notice::CLI tarball: $NAME"
+
+      - name: Build release manifest
+        run: |
+          cat > ./release-artefacts/release-manifest.json <<EOF
+          {
+            "schema_version": "1",
+            "version": "${{ env.VERSION }}",
+            "commit": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "visibility": "PUBLIC_INTERIM",
+            "publish_status": "Public GHCR images + CLI tarball on GitHub Release. npmjs/crates.io/MCR reserved for the ESRP-signed path (docs/PUBLISHING.md).",
+            "containers": [
+              {"name": "kars-controller",        "ghcr": "${{ env.REGISTRY }}/kars-controller:${{ env.VERSION }}",        "digest": "${{ needs.build-images.outputs.controller_digest }}"},
+              {"name": "kars-inference-router",  "ghcr": "${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}",  "digest": "${{ needs.build-images.outputs.router_digest }}"},
+              {"name": "kars-a2a-gateway",       "ghcr": "${{ env.REGISTRY }}/kars-a2a-gateway:${{ env.VERSION }}",       "digest": "${{ needs.build-images.outputs.gateway_digest }}"},
+              {"name": "kars-conformance-runner","ghcr": "${{ env.REGISTRY }}/kars-conformance-runner:${{ env.VERSION }}","digest": "${{ needs.build-images.outputs.runner_digest }}"},
+              {"name": "kars-sandbox-base",      "ghcr": "${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}",      "digest": "${{ needs.merge-sandbox.outputs.sandbox_base_digest }}"},
+              {"name": "openclaw-sandbox",       "ghcr": "${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}",       "digest": "${{ needs.merge-sandbox.outputs.sandbox_digest }}"}
+            ],
+            "cli_install": "npm i -g https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ steps.cli.outputs.tarball }}",
+            "next_step_for_signed_release": "Migrate to the ESRP-signed public path (.github/pipelines/esrp-publish.yml → MCR + npmjs @kars + crates.io) once onboarding completes. See docs/PUBLISHING.md."
+          }
+          EOF
+          cat ./release-artefacts/release-manifest.json
+
+      - name: Create PUBLIC GitHub Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: ${{ env.VERSION }} (Public Interim)
+          # Interim builds bundle a kars build of AGT pending upstream
+          # microsoft/agent-governance-toolkit#3128 — keep them out of
+          # "latest" until the ESRP-signed release supersedes them.
+          prerelease: true
+          make_latest: 'false'
+          generate_release_notes: true
+          files: ./release-artefacts/**/*
+          body: |
+            ## Public Interim Release — ${{ env.VERSION }}
+
+            Pre-built, **cosign-signed** artefacts so you can run kars **without
+            cloning AGT or compiling anything**. This is the interim GHCR path
+            from [docs/PUBLISHING.md](../blob/main/docs/PUBLISHING.md); the
+            canonical Microsoft-signed release (npmjs `@kars`, MCR, crates.io)
+            arrives via ESRP later and will supersede these tags.
+
+            > These images bundle a kars build of the AGT mesh SDK pending
+            > upstream [microsoft/agent-governance-toolkit#3128](https://github.com/microsoft/agent-governance-toolkit/pull/3128).
+
+            ### Quick start (no compile)
+            ```bash
+            # 1. Install the CLI from this Release (interim; npmjs `@kars` later)
+            npm i -g https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ steps.cli.outputs.tarball }}
+
+            # 2. Run locally against the published images (Docker Desktop)
+            kars dev --release ${{ env.VERSION }}
+            ```
+
+            ### Container images (PUBLIC GHCR)
+            Multi-arch `linux/amd64,linux/arm64` (sandbox-base is amd64-only;
+            Apple Silicon runs it under emulation):
+            ```
+            ${{ env.REGISTRY }}/kars-controller:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-a2a-gateway:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-conformance-runner:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}
+            ```
+
+            ### Runtime adapter images (PUBLIC GHCR, amd64)
+            For `kars add --runtime <name>`. Each bundles the upstream AGT
+            governance wheels + kars-agt-mesh (kars's spec-compliant Python
+            MeshClient):
+            ```
+            ${{ env.REGISTRY }}/kars-runtime-langgraph:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-runtime-hermes:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-runtime-maf-python:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-runtime-anthropic:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-runtime-openai-agents:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-runtime-pydantic-ai:${{ env.VERSION }}
+            ```
+
+            ### AGT mesh images (PUBLIC GHCR, amd64)
+            The relay + registry that `kars dev`/`up` run for the mesh:
+            ```
+            ${{ env.REGISTRY }}/kars-agentmesh-relay:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-agentmesh-registry:${{ env.VERSION }}
+            ```
+            All signed with cosign keyless (verify via Sigstore Rekor). SBOMs
+            attached below.

@@ -118,6 +118,27 @@ export function platformLabel(s: {
 }
 
 /**
+ * Stable, globally-unique key for a sandbox across runtimes and clusters.
+ *
+ * Sandbox NAMES are not unique: the same agent name (e.g. "analyst") can
+ * exist simultaneously as a docker container, a kind-cluster pod, and an
+ * AKS pod. Keying per-sandbox maps (securityStates, egressByAgent) by bare
+ * `name` causes these to collide — a stale/empty same-named entry overwrites
+ * the live one, so the operator shows no DID / no audit for the shadowed
+ * agent. Compose the origin (kubeContext for K8s, runtime for docker) with
+ * the namespace and name to disambiguate.
+ */
+export function sandboxKey(s: {
+  name: string;
+  namespace: string;
+  runtime?: "docker" | "aks";
+  kubeContext?: string;
+}): string {
+  const origin = s.kubeContext ?? s.runtime ?? "local";
+  return `${origin}::${s.namespace}::${s.name}`;
+}
+
+/**
  * Compact "<tag> <cluster-name>" used in the agent-table Cluster column
  * and the CRD snapshot status line. Docker sandboxes show just "D"
  * (no cluster name). Kube sandboxes show "K kars-dev" or

@@ -26,10 +26,15 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    # Microsoft's unified Agent Framework Python SDK
-    # (https://github.com/microsoft/agent-framework). PyPI distribution
-    # name: `agent-framework`.
-    "agent-framework>=1.0.0b1",
+    # Microsoft's Agent Framework Python SDK
+    # (https://github.com/microsoft/agent-framework). We depend on the
+    # split sub-packages rather than the `agent-framework` meta-package:
+    # the meta-package's transitive graph is too large for pip's resolver
+    # (ResolutionTooDeep), whereas core + openai resolve in seconds.
+    #   agent-framework-core   → `agent_framework` (tool, Executor, …)
+    #   agent-framework-openai → `agent_framework.openai.OpenAIChatClient`
+    "agent-framework-core>=1.8,<2",
+    "agent-framework-openai>=1.8,<2",
     "openai>=1.50,<2",
     "azure-identity>=1.17,<2",
     "opentelemetry-api>=1.27,<2",
@@ -40,8 +45,7 @@ dependencies = [
     # AGT-Python packages — built locally from upstream by
     # `runtimes/build-agt-wheels.sh`. See runtimes/openai-agents/README.md
     # for the install pattern.
-    "a2a_agentmesh>=3.3.0,<4",
-    "agent_sandbox>=3.3.0,<4",
+    "a2a_agentmesh>=3.3.0,<5",
 ]
 
 [project.optional-dependencies]

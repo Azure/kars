@@ -8,6 +8,7 @@
 // an explicit context object.
 
 import type { SandboxInfo, SecurityState } from "../types.js";
+import { sandboxKey } from "../helpers.js";
 
 interface BlessedBox {
   setContent(content: string): void;
@@ -36,7 +37,7 @@ export function renderSecurity(ctx: SecurityRenderContext): void {
     return;
   }
 
-  const sec = securityStates.get(sb.name);
+  const sec = securityStates.get(sandboxKey(sb));
   if (!sec) {
     securityBox.setContent(`{bold}${sb.name}{/}\n\n{gray-fg}Polling...{/}`);
     return;
@@ -129,7 +130,7 @@ export function renderAGTFull(
   sandboxes: SandboxInfo[],
   securityStates: Map<string, SecurityState>,
 ): string {
-  const sec = securityStates.get(sb.name);
+  const sec = securityStates.get(sandboxKey(sb));
   if (!sec) return `{bold}${sb.name}{/}\n{gray-fg}Polling...{/}`;
   if (!sec.agtEnabled) return "{gray-fg}AGT not enabled{/}\n{gray-fg}Use --governance flag{/}";
 
@@ -280,7 +281,7 @@ export function renderAGT(ctx: SecurityRenderContext): void {
     return;
   }
 
-  const sec = securityStates.get(sb.name);
+  const sec = securityStates.get(sandboxKey(sb));
   if (!sec) {
     agtPanel.setContent(`{bold}${sb.name}{/}\n{gray-fg}Polling...{/}`);
     return;
