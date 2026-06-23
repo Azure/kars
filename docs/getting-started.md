@@ -103,13 +103,14 @@ If you'd rather skip provisioning by hand, jump to **[Step 2 — Deploy to AKS](
 
 ## Step 1 — Local (five minutes)
 
-### 1.0 Fastest path — no compile (published images) ⭐
+### 1.0 Fastest path — no compile (published images, amd64/Linux) ⭐
 
-The quickest way to a running agent: install the CLI from a published
-release and launch from **pre-built, cosign-signed images**. No Rust
-toolchain, no AGT checkout, no waiting on a local image build.
+The quickest way to a running agent **on an amd64 host (Linux, or amd64
+Docker)**: install the CLI from a published release and launch from
+**pre-built, cosign-signed images**. No Rust toolchain, no AGT checkout, no
+waiting on a local image build.
 
-**You need only:** Docker Desktop (running) · Node.js 22+.
+**You need only:** Docker (running) · Node.js 22+.
 
 ```bash
 # 1. Install the kars CLI from the latest interim release (one command)
@@ -126,16 +127,19 @@ launches near-instantly. On first launch you'll pick an inference provider —
 see the [provider picker](#12-launch-a-sandbox) below (**GitHub Copilot** is
 the easiest: one device-code login, no Azure account).
 
+> **⚠️ Apple Silicon (M-series) Macs:** the published `openclaw-sandbox` is
+> currently `linux/amd64` only and **crashes under Rosetta** on arm64
+> (`rosetta error: rt_tgsigqueueinfo failed`). On Apple Silicon use the
+> **[build-from-source path](#11-build-the-cli)** — `kars dev` builds the
+> sandbox natively for arm64. A native arm64 published image is planned;
+> until then `--release` targets amd64/Linux hosts.
+
 > **Use matching versions.** The `npm i -g …` tarball URL and the `--release`
 > flag must reference the **same** tag. Browse the
 > [Releases page](https://github.com/Azure/kars/releases) for the newest
-> `v0.1.0-interim.N` and use it in both places.
+> `v0.1.0-interim.N`.
 
-> **Apple Silicon (M-series) Macs:** the sandbox + mesh images are published
-> `linux/amd64`; Docker Desktop runs them under emulation transparently
-> (slightly slower, fully functional).
-
-Want to hack on the controller / router / plugin? Build from source instead —
+Want to hack on the controller / router / plugin? Build from source —
 **[1.1 Build the CLI](#11-build-the-cli)**.
 
 ### 1.1 Build the CLI
