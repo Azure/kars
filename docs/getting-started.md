@@ -21,7 +21,7 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 | Local mode from source (GitHub Models) | Docker Desktop, Node.js 22+, Rust 1.88+, a GitHub PAT with `models:read` scope. **No Azure account needed.** |
 | AKS mode | The above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
 
-> **Just want it running?** Use the [fastest path](#10-fastest-path--no-compile-published-images-) — `npm i -g <release-tarball>` then `kars dev --release <tag>`. Everything below about building from source and cloning AGT is **only** for contributors hacking on kars itself.
+> **Just want it running?** Use the [fastest path](#10-fastest-path--no-compile-published-images-) — `npm i -g @kars-runtime/cli` then `kars dev --release`. Everything below about building from source and cloning AGT is **only** for contributors hacking on kars itself.
 
 > **AGT mesh prerequisite — source builds only.** Inter-agent E2E
 > messaging uses the [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
@@ -113,13 +113,15 @@ No Rust toolchain, no AGT checkout, no GitHub auth, no waiting on a local build.
 **You need only:** Docker (or a Docker-compatible runtime like Podman) · Node.js 22+.
 
 ```bash
-# 1. Install the kars CLI — public, signed, always the latest release
-curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
-# (or, once on npmjs:  npm i -g @kars-runtime/cli)
+# 1. Install the kars CLI from npm — public, signed (SLSA provenance), always the latest release
+npm i -g @kars-runtime/cli
 
 # 2. Launch a sandbox from the published images (defaults to :latest)
 kars dev --release
 ```
+
+> Prefer not to use npm? A one-line installer fetches the signed CLI tarball
+> directly: `curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash`.
 
 That's it. `kars dev --release` pulls the `openclaw-sandbox` agent image plus
 the AGT mesh relay + registry and runs them — skipping the AGT clone and every
@@ -144,7 +146,7 @@ kars dev --release --target local-k8s   # local kind cluster, real K8s posture
 > sub-agents, E2E-encrypted relay) passes on a stock M-series Mac and on AKS.
 
 > **Pin a specific build (optional).** `kars dev --release` follows the newest
-> release; pass a tag — `kars dev --release v0.1.0-interim.10` — to pin a
+> release; pass a tag — `kars dev --release v0.1.1` — to pin a
 > specific build for reproducibility.
 
 Want to hack on the controller / router / plugin? Build from source —

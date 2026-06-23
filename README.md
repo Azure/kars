@@ -136,7 +136,7 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 You need only **Docker** (or Podman) and **Node.js 22+**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
+npm i -g @kars-runtime/cli
 kars dev --release
 ```
 
@@ -146,6 +146,9 @@ image is multi-arch (`amd64` + `arm64`, native on Apple Silicon). On first
 launch you pick an inference provider — **GitHub Copilot** is easiest (one
 device-code login, no Azure account).
 
+The CLI on npm is **build-provenance attested** (SLSA) — verify with
+`npm audit signatures` after install.
+
 Run on Kubernetes instead with `kars dev --release --target local-k8s` (kind),
 or `kars up` for a managed AKS cluster (see [below](#when-you-are-ready-for-the-real-thing)).
 
@@ -153,11 +156,11 @@ or `kars up` for a managed AKS cluster (see [below](#when-you-are-ready-for-the-
 <summary>Other ways to install</summary>
 
 ```bash
-# Pin a specific release
-KARS_VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh)"
+# One-line installer (no Node required up front — fetches the signed CLI tarball)
+curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
 
-# Or install from npmjs (once published):
-npm i -g @kars-runtime/cli
+# Pin a specific release with the installer
+KARS_VERSION=v0.1.1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh)"
 
 # Or build from source — to hack on the controller / router / plugin (needs Rust 1.88+)
 git clone https://github.com/Azure/kars.git && cd kars
@@ -303,7 +306,7 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 
 > 📌 **NOTE: This is not an officially supported Microsoft product.** kars is an open-source reference implementation maintained under the Azure GitHub organization. No SLA, support contract, or product roadmap commitment is attached — see [SUPPORT.md](SUPPORT.md), [TRADEMARKS.md](TRADEMARKS.md), and [LICENSE](LICENSE).
 
-> ✅ **Every published artefact is signed.** All container images on `ghcr.io/azure` are **cosign keyless-signed** (verifiable in the Sigstore Rekor transparency log), carry an **SPDX SBOM**, and a **GitHub build-provenance (SLSA) attestation** — verify with `cosign verify` / `gh attestation verify`. The CLI tarball on each GitHub Release is build-provenance attested too. Install with no compile via the [Try it in five minutes](#try-it-in-five-minutes) quick-start. *(We're additionally working on publishing to crates.io / npmjs / MCR — see [`docs/PUBLISHING.md`](docs/PUBLISHING.md); the GHCR artefacts above are signed and usable today.)*
+> ✅ **Every published artefact is signed.** All container images on `ghcr.io/azure` are **cosign keyless-signed** (verifiable in the Sigstore Rekor transparency log), carry an **SPDX SBOM**, and a **GitHub build-provenance (SLSA) attestation** — verify with `cosign verify` / `gh attestation verify`. The CLI is published to **npmjs as [`@kars-runtime/cli`](https://www.npmjs.com/package/@kars-runtime/cli)** with an SLSA build-provenance attestation (verify with `npm audit signatures`), and the CLI tarball on each GitHub Release is attested too. Install with no compile via the [Try it in five minutes](#try-it-in-five-minutes) quick-start. *(We're additionally working on publishing to crates.io / MCR — see [`docs/PUBLISHING.md`](docs/PUBLISHING.md); the GHCR + npm artefacts above are signed and usable today.)*
 
 `v0.1.0`. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E, chaos-tier fault injection, CNCF conformance self-assessment, plus a documented manual matrix on AKS — see [`tests/`](tests/)). The CRD surface is served at `v1alpha1` and may change between minor releases; the data path, security model, and audit chain are stable. See **[`CHANGELOG.md`](CHANGELOG.md)** for the change log and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
 
