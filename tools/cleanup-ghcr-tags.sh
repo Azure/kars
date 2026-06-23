@@ -31,6 +31,18 @@ if ! gh api "/orgs/${ORG}/packages/container/kars-controller/versions?per_page=1
   echo "ERR: cannot list package versions for org '${ORG}'."
   echo "     Token needs read:packages (+ delete:packages to delete):"
   echo "       gh auth refresh -h github.com -s read:packages,delete:packages"
+  # Common trap: a GH_TOKEN / GITHUB_TOKEN env var overrides the keyring
+  # token, and `gh auth refresh` only updates the keyring — so the refresh
+  # silently has no effect while the env token keeps its old scopes.
+  if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ]; then
+    echo
+    echo "  NOTE: GH_TOKEN/GITHUB_TOKEN is set in your environment. gh uses that"
+    echo "        token (not the keyring), and 'gh auth refresh' canNOT add scopes"
+    echo "        to an env-var token. Unset it first, then refresh:"
+    echo "          unset GH_TOKEN GITHUB_TOKEN"
+    echo "          gh auth refresh -h github.com -s read:packages,delete:packages"
+    echo "        (or export a token that already has read:packages,delete:packages)"
+  fi
   exit 1
 fi
 
@@ -45,7 +57,23 @@ PACKAGES=(
 is_cruft_tag() {
   case "$1" in
     sha-[0-9a-f]*|main|dev) return 0 ;;
-    *-amd64|*-arm64)        return 0 ;;
+    *-amd64|*-arm64)
+      # Per-arch tags are cruft EXCEPT when they back a clean published
+      # release (vMAJOR.MINOR.PATCH with no pre-release suffix). For the
+      # natively-built+merged images (sandbox-base, openclaw-sandbox,
+      # relay, registry) the multi-arch vX.Y.Z manifest list references
+      # these per-arch images — deleting v0.1.1-arm64 etc. risks breaking
+      # the very release `kars dev --release vX.Y.Z` pulls. Keep them.
+      local base="$1"
+      base="${base%-amd64}"; base="${base%-arm64}"
+      case "$base" in
+        v[0-9]*.[0-9]*.[0-9]*)
+          case "$base" in
+            *-*) return 0 ;;   # has a pre-release suffix (interim/rc/…) → cruft
+            *)   return 1 ;;   # clean release base → KEEP (load-bearing)
+          esac ;;
+        *) return 0 ;;          # non-release base (sha/branch) → cruft
+      esac ;;
   esac
   if [ "$DROP_OLD_INTERIMS" = 1 ]; then
     case "$1" in v*-interim.*|v*-interim) return 0 ;; esac
