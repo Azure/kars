@@ -770,11 +770,26 @@ jobs:
         run: npm install -g npm@latest
       - name: Publish @kars-runtime/cli to npmjs (OIDC trusted publishing)
         if: ${{ !contains(env.VERSION, 'interim') }}
+        # Non-fatal so a missing trusted-publisher config can't break the whole
+        # release, BUT a genuine failure (or already-published version) emits a
+        # loud ::warning:: annotation so a "green but didn't publish" outcome is
+        # visible in the run summary instead of being silently swallowed.
         continue-on-error: true
         working-directory: cli
         run: |
-          echo "Publishing @kars-runtime/cli@$(node -p "require('./package.json').version") via OIDC trusted publishing…"
-          npm publish --provenance --access public
+          PKG="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          if npm view "${PKG}@${VER}" version >/dev/null 2>&1; then
+            echo "::warning title=npm publish skipped::${PKG}@${VER} already exists on npm — bump cli/package.json version to publish a new release."
+            echo "Nothing to publish; ${PKG}@${VER} is already on the registry."
+            exit 0
+          fi
+          echo "Publishing ${PKG}@${VER} via OIDC trusted publishing…"
+          if ! npm publish --provenance --access public; then
+            echo "::warning title=npm publish failed::${PKG}@${VER} did NOT publish. Check the OIDC trusted-publisher config on npmjs (Azure/kars → release-public-interim.yml) and the log above."
+            exit 1
+          fi
+          echo "Published ${PKG}@${VER} with provenance."
 
       - name: Upload CLI tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4

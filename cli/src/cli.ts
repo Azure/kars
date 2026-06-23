@@ -2,6 +2,10 @@
 // Licensed under the MIT License.
 
 import { Command } from "commander";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { version: CLI_VERSION } = require("../package.json") as { version: string };
 import { upCommand } from "./commands/up.js";
 import { devCommand } from "./commands/dev.js";
 import { addCommand } from "./commands/add.js";
@@ -43,7 +47,7 @@ export function createCli(): Command {
     .description(
       "Run AI agents safely on Azure. One command to go from zero to production."
     )
-    .version("0.1.0-alpha.1");
+    .version(CLI_VERSION);
 
   // Lifecycle
   program.addCommand(upCommand());
