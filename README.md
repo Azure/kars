@@ -132,25 +132,39 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 
 ## Try it in five minutes
 
-**Fastest path — published images, no compile (macOS & Linux, Intel & Apple Silicon).**
-On any host with Docker (amd64 Linux, Intel Mac, or Apple Silicon M-series),
-two commands get you a running agent — no Rust toolchain, no AGT checkout, no
-local image build:
+**Fastest path — no compile, works for everyone (macOS & Linux · Intel & Apple Silicon).**
+Two commands. No Azure account, no Rust toolchain, no AGT checkout, no image
+build — just Docker (or a Docker-compatible runtime such as Podman) and Node.js 22+:
 
 ```bash
-# 1. Install the CLI from the latest interim release
-npm i -g https://github.com/Azure/kars/releases/download/v0.1.0-interim.9/kars-cli-0.1.0.tgz
+# 1. Install the CLI — always the latest published release (public, signed)
+npm i -g https://github.com/Azure/kars/releases/latest/download/kars-cli-0.1.0.tgz
 
-# 2. Launch a sandbox from the published, cosign-signed images
-kars dev --release v0.1.0-interim.9
+# 2. Launch a sandbox from the published, cosign-signed images (defaults to :latest)
+kars dev --release
 ```
 
-> Use the newest tag from the [Releases page](https://github.com/Azure/kars/releases) — the `npm i -g …` URL and the `--release` flag must match.
+That's it. `kars dev --release` pulls the published `openclaw-sandbox` agent
+image plus the AGT mesh relay + registry and runs them — no compile, no clone.
+The images are public on `ghcr.io/azure`, so **anyone** can pull them; no GitHub
+auth or org membership required. Pin a specific build for reproducibility with
+`kars dev --release v0.1.0-interim.10`.
 
-> **Apple Silicon (M-series) Macs:** fully supported. The published images are
-> multi-arch (`linux/amd64` + `linux/arm64`), built on native arm64 runners,
-> and `kars dev --release` automatically pulls the image matching your host
-> architecture — no Rosetta, no extra flags.
+Prefer Kubernetes over plain Docker? Same published images, same one flag:
+
+```bash
+# Local Kubernetes (kind) — real K8s posture (NetworkPolicy, CRDs, controller)
+kars dev --release --target local-k8s
+```
+
+For a managed cluster, `kars up` provisions AKS + ACR + Foundry + the full
+stack — see **[When you are ready for the real thing](#)** below.
+
+> **Apple Silicon (M-series) Macs:** fully supported. Every published image —
+> sandbox, controller, router, relay, registry — is multi-arch
+> (`linux/amd64` + `linux/arm64`, built on native arm64 runners), and
+> `kars dev --release` pulls the variant matching your host automatically —
+> no Rosetta, no flags. Verified end-to-end on both arm64 and amd64.
 
 On first launch you'll pick an inference provider (see below). **GitHub Copilot** is the easiest — one device-code login, no Azure account.
 
@@ -172,9 +186,11 @@ The first source build of `kars dev` builds + caches the sandbox base image (~10
 </details>
 
 <details>
-<summary><strong>For Microsoft / Azure-org members: skip the build</strong></summary>
+<summary><strong>Microsoft / Azure-org contributors: internal pre-release channel</strong></summary>
 
-While ESRP is still being wired up, internal preview releases live on the private GitHub Releases page + private GHCR. If you have Azure-org access:
+Separate from the public release above, contributors with Azure-org access can
+install from the **private** internal-release channel (private GitHub Release +
+private GHCR), which tracks unreleased work:
 
 ```bash
 brew install gh node@22
@@ -183,11 +199,10 @@ curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
 kars dev
 ```
 
-Pin a specific release: `KARS_VERSION=v0.1.0-internal.2 …`.
+Pin a specific internal release: `KARS_VERSION=v0.1.0-internal.2 …`.
 Pre-pull all container images: `KARS_PULL_IMAGES=1 …`.
-See [`install.sh`](./install.sh) header for the **personal / non-managed device** path (PAT pre-blessed on a company device, used from anywhere).
-
-This path goes away when ESRP-signed images land on MCR + npmjs.com + crates.io.
+See [`install.sh`](./install.sh) header for the **personal / non-managed device** path.
+Most users should use the public `kars dev --release` path above instead — it needs no auth.
 </details>
 
 On first run `kars dev` shows a 3-way provider picker:

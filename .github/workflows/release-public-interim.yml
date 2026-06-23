@@ -806,11 +806,14 @@ jobs:
         with:
           tag_name: ${{ env.VERSION }}
           name: ${{ env.VERSION }} (Public Interim)
-          # Interim builds bundle a kars build of AGT pending upstream
-          # microsoft/agent-governance-toolkit#3128 — keep them out of
-          # "latest" until the ESRP-signed release supersedes them.
-          prerelease: true
-          make_latest: 'false'
+          # These public interim builds are the current install target for
+          # everyone (the README's no-compile quick-start points at
+          # /releases/latest/download/…), so mark them as the repo's "latest"
+          # release. `/releases/latest/` only serves non-prerelease releases,
+          # hence prerelease:false. When the ESRP-signed release line lands it
+          # supersedes these as latest.
+          prerelease: false
+          make_latest: 'true'
           generate_release_notes: true
           files: ./release-artefacts/**/*
           body: |
