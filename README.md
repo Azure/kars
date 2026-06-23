@@ -132,77 +132,38 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 
 ## Try it in five minutes
 
-**Fastest path — no compile, works for everyone (macOS & Linux · Intel & Apple Silicon).**
-Two commands. No Azure account, no Rust toolchain, no AGT checkout, no image
-build — just Docker (or a Docker-compatible runtime such as Podman) and Node.js 22+:
+**No compile. Works for everyone — macOS & Linux, Intel & Apple Silicon.**
+You need only **Docker** (or Podman) and **Node.js 22+**:
 
 ```bash
-# 1. Install the CLI — always the latest published release (public, signed)
-npm i -g https://github.com/Azure/kars/releases/latest/download/kars-cli-0.1.0.tgz
-
-# 2. Launch a sandbox from the published, cosign-signed images (defaults to :latest)
+curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
 kars dev --release
 ```
 
-That's it. `kars dev --release` pulls the published `openclaw-sandbox` agent
-image plus the AGT mesh relay + registry and runs them — no compile, no clone.
-The images are public on `ghcr.io/azure`, so **anyone** can pull them; no GitHub
-auth or org membership required. Pin a specific build for reproducibility with
-`kars dev --release v0.1.0-interim.10`.
+`kars dev --release` pulls the published, **cosign-signed** images and runs a
+sandboxed agent — no Azure account, no Rust, no clone, no GitHub login. Every
+image is multi-arch (`amd64` + `arm64`, native on Apple Silicon). On first
+launch you pick an inference provider — **GitHub Copilot** is easiest (one
+device-code login, no Azure account).
 
-Prefer Kubernetes over plain Docker? Same published images, same one flag:
-
-```bash
-# Local Kubernetes (kind) — real K8s posture (NetworkPolicy, CRDs, controller)
-kars dev --release --target local-k8s
-```
-
-For a managed cluster, `kars up` provisions AKS + ACR + Foundry + the full
-stack — see **[When you are ready for the real thing](#)** below.
-
-> **Apple Silicon (M-series) Macs:** fully supported. Every published image —
-> sandbox, controller, router, relay, registry — is multi-arch
-> (`linux/amd64` + `linux/arm64`, built on native arm64 runners), and
-> `kars dev --release` pulls the variant matching your host automatically —
-> no Rosetta, no flags. Verified end-to-end on both arm64 and amd64.
-
-On first launch you'll pick an inference provider (see below). **GitHub Copilot** is the easiest — one device-code login, no Azure account.
+Run on Kubernetes instead with `kars dev --release --target local-k8s` (kind),
+or `kars up` for a managed AKS cluster (see [below](#when-you-are-ready-for-the-real-thing)).
 
 <details>
-<summary><strong>Build from source</strong> (to hack on the controller / router / plugin)</summary>
-
-> **Prerequisites:** Docker Desktop · Node.js 22+ · Rust 1.88+ · one of: an active GitHub Copilot seat, an Azure AI Foundry deployment, or a GitHub PAT with `models:read`.
+<summary>Other ways to install</summary>
 
 ```bash
+# Pin a specific release
+KARS_VERSION=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh)"
+
+# Or install the signed tarball directly with npm (what install.sh does under the hood)
+npm i -g https://github.com/Azure/kars/releases/latest/download/kars-cli-0.1.0.tgz
+
+# Or build from source — to hack on the controller / router / plugin (needs Rust 1.88+)
 git clone https://github.com/Azure/kars.git && cd kars
 cd cli && npm ci && npm run build && npm link && cd ..
-
-# Launch a sandbox locally — Docker only, no Azure, no AKS.
-# Builds the sandbox image natively for your architecture (incl. arm64).
-kars dev
+kars dev   # builds the images locally for your architecture
 ```
-
-The first source build of `kars dev` builds + caches the sandbox base image (~10 min once) and then launches near-instantly thereafter.
-</details>
-
-<details>
-<summary><strong>Microsoft / Azure-org contributors: internal pre-release channel</strong></summary>
-
-Separate from the public release above, contributors with Azure-org access can
-install from the **private** internal-release channel (private GitHub Release +
-private GHCR), which tracks unreleased work:
-
-```bash
-brew install gh node@22
-gh auth login --hostname github.com --web --scopes read:packages,repo
-curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
-kars dev
-```
-
-Pin a specific internal release: `KARS_VERSION=v0.1.0-internal.2 …`.
-Pre-pull all container images: `KARS_PULL_IMAGES=1 …`.
-See [`install.sh`](./install.sh) header for the **personal / non-managed device** path.
-Most users should use the public `kars dev --release` path above instead — it needs no auth.
 </details>
 
 On first run `kars dev` shows a 3-way provider picker:
