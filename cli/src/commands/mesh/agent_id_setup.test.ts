@@ -234,6 +234,23 @@ describe("checkAgentIdRole", () => {
     expect(r.message).toContain("az login --scope https://graph.microsoft.com//.default");
   });
 
+  it("does NOT attempt device-code re-login on AADSTS530084 when interactive=false (preflight)", async () => {
+    // Single Graph call returns the CA block. With interactive=false the
+    // helper must NOT shell out to `az login --use-device-code` (which would
+    // hang `up` on tenants whose CA also blocks the device-code device).
+    mockedExeca.mockRejectedValueOnce(
+      new Error(
+        "ERROR: AADSTS530084: Access has been blocked by conditional access token protection policy configured by this organization.",
+      ),
+    );
+    const r = await checkAgentIdRole({ interactive: false });
+    expect(r.hasRole).toBe(false);
+    expect(r.inconclusive).toBe(true);
+    expect(r.message).toContain("AADSTS530084");
+    // Exactly one az call — the Graph GET. No device-code re-login.
+    expect(mockedExeca).toHaveBeenCalledTimes(1);
+  });
+
   it("emits the az-login workaround when AADSTS65001/65002 (missing consent) is detected", async () => {
     mockedExeca.mockRejectedValueOnce(
       new Error("ERROR: AADSTS65001: The user or administrator has not consented..."),

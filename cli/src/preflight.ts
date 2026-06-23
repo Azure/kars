@@ -38,6 +38,9 @@ export interface PreflightOptions {
   foundryEndpoint?: string;
   /** If set, skip all preflight checks (escape hatch). */
   skipPreflight?: boolean;
+  /** Mesh trust mode. The Entra Agent ID (Microsoft Graph) preflight only
+   * runs for 'entra'; the default 'anonymous' needs no Graph access. */
+  meshTrust?: string;
 }
 
 export interface PreflightResult {
@@ -323,48 +326,54 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
     );
   }
 
-  // 5. Entra Agent ID prerequisites
-  //    Check that the signed-in user has a role permitting blueprint
-  //    creation. Soft-fail (warning, not blocking) when Graph lookup
-  //    is inconclusive, since the existing legacy auth fallback keeps
-  //    the cluster functional in anonymous tier.
-  spin = ora({ text: "Checking Entra Agent ID directory role...", color: "cyan" }).start();
-  try {
-    const { checkAgentIdRole, detectExistingBlueprint } = await import(
-      "./commands/mesh/agent_id_setup.js"
-    );
-    const roleCheck = await checkAgentIdRole();
-    if (roleCheck.hasRole) {
-      spin.succeed(`Entra Agent ID — role present (${roleCheck.detectedRoles.map((r) => r.displayName).join(", ")})`);
-    } else if (roleCheck.inconclusive) {
-      spin.warn(`Entra Agent ID — ${roleCheck.message}`);
-      result.warnings.push(
-        `Could not verify Entra Agent ID role. If \`kars up\` aborts during the Entra setup phase, grant 'Agent ID Developer' to the signed-in user.`,
+  // 5. Entra Agent ID prerequisites (ONLY for --mesh-trust=entra)
+  //    The default 'anonymous' trust mode needs NO Microsoft Graph access,
+  //    so we must NOT make any Graph call (or its interactive device-code
+  //    re-login) in that case — doing so hangs `up` on tenants whose
+  //    Conditional Access blocks the az CLI Graph token (AADSTS530084).
+  //    Even for 'entra', run the check NON-INTERACTIVELY: a Graph CA-block
+  //    becomes a soft warning here, not a blocking device-code prompt. The
+  //    real Entra setup phase (later in `up`) is where an interactive
+  //    re-login, if any, belongs.
+  if (opts.meshTrust === "entra") {
+    spin = ora({ text: "Checking Entra Agent ID directory role...", color: "cyan" }).start();
+    try {
+      const { checkAgentIdRole, detectExistingBlueprint } = await import(
+        "./commands/mesh/agent_id_setup.js"
       );
-    } else {
-      spin.warn("Entra Agent ID — directory role missing");
-      result.warnings.push(
-        `Per-sandbox Entra Agent IDs require the signed-in user to hold ` +
-          chalk.cyan("Agent ID Developer") +
-          ` (or stronger). Without it, ` +
-          `\`kars up\` will skip the Entra setup step and the cluster will ` +
-          `run in AGT anonymous tier. Activate the role via PIM at ` +
-          chalk.cyan("https://entra.microsoft.com") +
-          ` > Identity > Roles & admins, then re-run \`kars up\`.`,
-      );
-    }
+      const roleCheck = await checkAgentIdRole({ interactive: false });
+      if (roleCheck.hasRole) {
+        spin.succeed(`Entra Agent ID — role present (${roleCheck.detectedRoles.map((r) => r.displayName).join(", ")})`);
+      } else if (roleCheck.inconclusive) {
+        spin.warn(`Entra Agent ID — ${roleCheck.message}`);
+        result.warnings.push(
+          `Could not verify Entra Agent ID role. If \`kars up\` aborts during the Entra setup phase, grant 'Agent ID Developer' to the signed-in user.`,
+        );
+      } else {
+        spin.warn("Entra Agent ID — directory role missing");
+        result.warnings.push(
+          `Per-sandbox Entra Agent IDs require the signed-in user to hold ` +
+            chalk.cyan("Agent ID Developer") +
+            ` (or stronger). Without it, ` +
+            `\`kars up\` will skip the Entra setup step and the cluster will ` +
+            `run in AGT anonymous tier. Activate the role via PIM at ` +
+            chalk.cyan("https://entra.microsoft.com") +
+            ` > Identity > Roles & admins, then re-run \`kars up\`.`,
+        );
+      }
 
-    // Best-effort blueprint detection — purely informational.
-    const blueprintCheck = await detectExistingBlueprint("kars-blueprint");
-    if (blueprintCheck.present) {
-      console.log(chalk.dim(`      · ${blueprintCheck.message}`));
+      // Best-effort blueprint detection — purely informational.
+      const blueprintCheck = await detectExistingBlueprint("kars-blueprint", { interactive: false });
+      if (blueprintCheck.present) {
+        console.log(chalk.dim(`      · ${blueprintCheck.message}`));
+      }
+    } catch (e) {
+      // Preflight should never crash if our Graph helper throws unexpectedly.
+      spin.warn(`Entra Agent ID check skipped — ${(e as Error).message.split("\n")[0].slice(0, 100)}`);
+      result.warnings.push(
+        "Entra Agent ID preflight skipped due to an internal error. Cluster will run in anonymous tier unless `kars mesh setup-trust` succeeds later.",
+      );
     }
-  } catch (e) {
-    // Preflight should never crash if our Graph helper throws unexpectedly.
-    spin.warn(`Entra Agent ID check skipped — ${(e as Error).message.split("\n")[0].slice(0, 100)}`);
-    result.warnings.push(
-      "Entra Agent ID preflight skipped due to an internal error. Cluster will run in anonymous tier unless `kars mesh setup-trust` succeeds later.",
-    );
   }
 
   // Summary

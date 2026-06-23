@@ -337,6 +337,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
       isolation: options.isolation,
       foundryEndpoint: options.foundryEndpoint,
       skipPreflight: options.skipPreflight,
+      meshTrust: (options as { meshTrust?: string }).meshTrust,
     });
     if (!pf.ok) {
       process.exit(1);
