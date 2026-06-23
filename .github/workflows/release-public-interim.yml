@@ -733,7 +733,7 @@ jobs:
 
   # ─── Stage 3: pack @kars/cli for GitHub Release distribution ───
   cli-pack:
-    name: Pack + publish kars-runtime CLI
+    name: Pack + publish @kars-runtime/cli
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -760,7 +760,7 @@ jobs:
 
       # Publish to npmjs via OIDC TRUSTED PUBLISHING — NO stored NPM_TOKEN.
       # The workflow authenticates with a short-lived OIDC id-token. Authorize
-      # it ONCE on npmjs: kars-runtime → Settings → Trusted Publisher →
+      # it ONCE on npmjs: @kars-runtime/cli → Settings → Trusted Publisher →
       # "GitHub Actions", org/repo = Azure/kars, workflow file =
       # release-public-interim.yml. (Works with org 2FA.)
       # Only clean (non-interim) tags publish; continue-on-error so the release
@@ -768,12 +768,12 @@ jobs:
       - name: Upgrade npm (OIDC trusted publishing needs npm >= 11.5.1)
         if: ${{ !contains(env.VERSION, 'interim') }}
         run: npm install -g npm@latest
-      - name: Publish kars-runtime to npmjs (OIDC trusted publishing)
+      - name: Publish @kars-runtime/cli to npmjs (OIDC trusted publishing)
         if: ${{ !contains(env.VERSION, 'interim') }}
         continue-on-error: true
         working-directory: cli
         run: |
-          echo "Publishing kars-runtime@$(node -p "require('./package.json').version") via OIDC trusted publishing…"
+          echo "Publishing @kars-runtime/cli@$(node -p "require('./package.json').version") via OIDC trusted publishing…"
           npm publish --provenance --access public
 
       - name: Upload CLI tarball
@@ -846,7 +846,7 @@ jobs:
               {"name": "kars-sandbox-base",      "ghcr": "${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}",      "digest": "${{ needs.merge-sandbox.outputs.sandbox_base_digest }}"},
               {"name": "openclaw-sandbox",       "ghcr": "${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}",       "digest": "${{ needs.merge-sandbox.outputs.sandbox_digest }}"}
             ],
-            "cli_install": "curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash   (or: npm i -g kars-runtime)",
+            "cli_install": "curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash   (or: npm i -g @kars-runtime/cli)",
             "additional_registries_planned": "crates.io / npmjs / MCR publishing is in progress — see docs/PUBLISHING.md. The GHCR images + CLI tarball above are signed and usable today."
           }
           EOF
@@ -872,7 +872,7 @@ jobs:
             no AGT clone**:
 
             ```bash
-            # install the CLI (or: npm i -g kars-runtime, once on npmjs)
+            # install the CLI (or: npm i -g @kars-runtime/cli, once on npmjs)
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
             kars dev --release
             ```

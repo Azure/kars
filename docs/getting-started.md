@@ -115,7 +115,7 @@ No Rust toolchain, no AGT checkout, no GitHub auth, no waiting on a local build.
 ```bash
 # 1. Install the kars CLI — public, signed, always the latest release
 curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
-# (or, once on npmjs:  npm i -g kars-runtime)
+# (or, once on npmjs:  npm i -g @kars-runtime/cli)
 
 # 2. Launch a sandbox from the published images (defaults to :latest)
 kars dev --release

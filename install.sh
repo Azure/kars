@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# install.sh — public, no-auth installer for the kars CLI (`kars-runtime` on npm).
+# install.sh — public, no-auth installer for the kars CLI (`@kars-runtime/cli` on npm).
 #
 #   curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
 #
