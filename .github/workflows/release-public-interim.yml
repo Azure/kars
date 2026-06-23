@@ -733,15 +733,13 @@ jobs:
 
   # ─── Stage 3: pack @kars/cli for GitHub Release distribution ───
   cli-pack:
-    name: Pack @kars/cli tarball
+    name: Pack + publish kars-runtime CLI
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      id-token: write
+      id-token: write       # OIDC: npm trusted publishing + GitHub attestation
       attestations: write
     timeout-minutes: 15
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
@@ -760,25 +758,28 @@ jobs:
         with:
           subject-path: 'cli/*.tgz'
 
-      # Publish kars-runtime to npmjs so `npm i -g kars-runtime` works — only for
-      # clean (non-interim) release tags, and only when an NPM_TOKEN secret is
-      # configured (so the workflow no-ops cleanly until npm publishing is set
-      # up). `--provenance` records a signed npm provenance attestation (needs
-      # the id-token:write permission above). The package.json version must
-      # match the release tag (e.g. tag v0.1.0 ↔ "version": "0.1.0").
-      - name: Publish @kars/cli to npmjs
-        if: ${{ env.NPM_TOKEN != '' && !contains(env.VERSION, 'interim') }}
+      # Publish to npmjs via OIDC TRUSTED PUBLISHING — NO stored NPM_TOKEN.
+      # The workflow authenticates with a short-lived OIDC id-token. Authorize
+      # it ONCE on npmjs: kars-runtime → Settings → Trusted Publisher →
+      # "GitHub Actions", org/repo = Azure/kars, workflow file =
+      # release-public-interim.yml. (Works with org 2FA.)
+      # Only clean (non-interim) tags publish; continue-on-error so the release
+      # still succeeds if the trusted publisher hasn't been configured yet.
+      - name: Upgrade npm (OIDC trusted publishing needs npm >= 11.5.1)
+        if: ${{ !contains(env.VERSION, 'interim') }}
+        run: npm install -g npm@latest
+      - name: Publish kars-runtime to npmjs (OIDC trusted publishing)
+        if: ${{ !contains(env.VERSION, 'interim') }}
+        continue-on-error: true
         working-directory: cli
-        env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
         run: |
-          echo "Publishing @kars/cli@$(node -p "require('./package.json').version") to npmjs…"
+          echo "Publishing kars-runtime@$(node -p "require('./package.json').version") via OIDC trusted publishing…"
           npm publish --provenance --access public
 
       - name: Upload CLI tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
-          name: npm-kars-cli-${{ env.VERSION }}
+          name: npm-kars-runtime-${{ env.VERSION }}
           path: cli/*.tgz
           retention-days: 90
 
@@ -801,7 +802,7 @@ jobs:
       - name: Download CLI tarball
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: npm-kars-cli-${{ env.VERSION }}
+          pattern: npm-kars-runtime-${{ env.VERSION }}
           path: ./release-artefacts
           merge-multiple: true
 
