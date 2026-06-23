@@ -27,7 +27,7 @@ import type {
   ClusterHealth,
   MeshHealth,
 } from "./operator/types.js";
-import { timeSince, kctl, platformTag, clusterOriginTag } from "./operator/helpers.js";
+import { timeSince, kctl, platformTag, clusterOriginTag, sandboxKey } from "./operator/helpers.js";
 import { fetchSandboxes } from "./operator/fetchers/sandboxes.js";
 import {
   fetchEgressDomains,
@@ -310,7 +310,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
     if (!sb) return [];
-    return egressByAgent.get(sb.name) || [];
+    return egressByAgent.get(sandboxKey(sb)) || [];
   }
 
   /** Total egress domain count across all agents. */
@@ -547,21 +547,21 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
             egressByAgent = new Map();
             for (let i = 0; i < running.length; i++) {
               const r = settled[i];
-              if (r.status === "fulfilled") egressByAgent.set(running[i].name, r.value);
+              if (r.status === "fulfilled") egressByAgent.set(sandboxKey(running[i]), r.value);
             }
           }),
           Promise.allSettled(running.map((s) => fetchSecurityState(s, s.kubeContext ?? kubeContext))).then((settled) => {
             securityStates = new Map();
             for (let i = 0; i < running.length; i++) {
               const r = settled[i];
-              if (r.status === "fulfilled") securityStates.set(r.value.sandbox, r.value);
+              if (r.status === "fulfilled") securityStates.set(sandboxKey(running[i]), r.value);
             }
           }),
         );
       } else {
         // Fast AGT-only poll on non-detail cycles to keep mesh data alive
         promises.push(
-          Promise.allSettled(running.map((s) => fetchAgtQuick(s, securityStates.get(s.name), s.kubeContext ?? kubeContext))),
+          Promise.allSettled(running.map((s) => fetchAgtQuick(s, securityStates.get(sandboxKey(s)), s.kubeContext ?? kubeContext))),
         );
       }
 
@@ -720,7 +720,7 @@ async function startDashboard(refreshInterval: number, kubeContext?: string, dev
     const idx = (agentTable as any).rows?.selected ?? 0;
     const sb = sandboxes[idx];
     if (!sb) return;
-    const sec = securityStates.get(sb.name);
+    const sec = securityStates.get(sandboxKey(sb));
     const mode = sec?.egressMode;
     if (mode === "learning") {
       await enforceEgress(sb);
