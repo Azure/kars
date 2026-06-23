@@ -103,41 +103,48 @@ If you'd rather skip provisioning by hand, jump to **[Step 2 — Deploy to AKS](
 
 ## Step 1 — Local (five minutes)
 
-### 1.0 Fastest path — no compile (published images, macOS & Linux) ⭐
+### 1.0 Fastest path — no compile, works for everyone (macOS & Linux) ⭐
 
 The quickest way to a running agent **on any host with Docker — amd64 Linux,
-Intel Mac, or Apple Silicon (M-series)**: install the CLI from a published
-release and launch from **pre-built, cosign-signed images**. No Rust toolchain,
-no AGT checkout, no waiting on a local image build.
+Intel Mac, or Apple Silicon (M-series)**: install the CLI from the latest
+published release and launch from **pre-built, cosign-signed, public images**.
+No Rust toolchain, no AGT checkout, no GitHub auth, no waiting on a local build.
 
-**You need only:** Docker (running) · Node.js 22+.
+**You need only:** Docker (or a Docker-compatible runtime like Podman) · Node.js 22+.
 
 ```bash
-# 1. Install the kars CLI from the latest interim release (one command)
-npm i -g https://github.com/Azure/kars/releases/download/v0.1.0-interim.9/kars-cli-0.1.0.tgz
+# 1. Install the kars CLI — always the latest published release
+npm i -g https://github.com/Azure/kars/releases/latest/download/kars-cli-0.1.0.tgz
 
-# 2. Launch a sandbox from the published images for that same release
-kars dev --release v0.1.0-interim.9
+# 2. Launch a sandbox from the published images (defaults to :latest)
+kars dev --release
 ```
 
-That's it. `--release` pulls the `openclaw-sandbox` agent image plus the AGT
-mesh relay + registry and runs them — skipping the AGT clone and every local
-build. The first run downloads the images once (a few minutes); afterwards it
-launches near-instantly. On first launch you'll pick an inference provider —
+That's it. `kars dev --release` pulls the `openclaw-sandbox` agent image plus
+the AGT mesh relay + registry and runs them — skipping the AGT clone and every
+local build. The images are public on `ghcr.io/azure`, so anyone can pull them
+with no auth. The first run downloads the images once (a few minutes); afterwards
+it launches near-instantly. On first launch you'll pick an inference provider —
 see the [provider picker](#12-launch-a-sandbox) below (**GitHub Copilot** is
 the easiest: one device-code login, no Azure account).
 
-> **Apple Silicon (M-series) Macs:** fully supported. The published images are
-> multi-arch (`linux/amd64` + `linux/arm64`, built on native arm64 runners) and
-> `kars dev --release` automatically pulls the variant matching your host
-> architecture — no Rosetta, no extra flags. Verified end-to-end on arm64:
-> the full multi-agent exec-brief scenario (parent + 3 mesh sub-agents,
-> E2E-encrypted relay) passes on a stock M-series Mac.
+Run the same published images on Kubernetes instead of plain Docker:
 
-> **Use matching versions.** The `npm i -g …` tarball URL and the `--release`
-> flag must reference the **same** tag. Browse the
-> [Releases page](https://github.com/Azure/kars/releases) for the newest
-> `v0.1.0-interim.N`.
+```bash
+kars dev --release --target local-k8s   # local kind cluster, real K8s posture
+```
+
+> **Apple Silicon (M-series) Macs:** fully supported. Every published image
+> (sandbox, controller, router, relay, registry) is multi-arch
+> (`linux/amd64` + `linux/arm64`, built on native arm64 runners) and
+> `kars dev --release` automatically pulls the variant matching your host
+> architecture — no Rosetta, no extra flags. Verified end-to-end on both arm64
+> and amd64: the full multi-agent exec-brief scenario (parent + 3 mesh
+> sub-agents, E2E-encrypted relay) passes on a stock M-series Mac and on AKS.
+
+> **Pin a specific build (optional).** `kars dev --release` follows the newest
+> release; pass a tag — `kars dev --release v0.1.0-interim.10` — to pin a
+> specific build for reproducibility.
 
 Want to hack on the controller / router / plugin? Build from source —
 **[1.1 Build the CLI](#11-build-the-cli)**.

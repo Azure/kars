@@ -59,7 +59,7 @@ jobs:
           cp target/release/kars-a2a-gateway        ./bin/amd64/
           cp target/release/kars-conformance-runner ./bin/amd64/
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: kars-binaries-${{ github.sha }}
           path: ./bin/
@@ -99,7 +99,7 @@ jobs:
 
       - name: Download pre-built binaries
         if: matrix.image.needs_binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: kars-binaries-${{ github.sha }}
           path: ./bin/

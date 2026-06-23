@@ -173,8 +173,8 @@ NOT overwrite your saved credentials.
     )
     // ── Image build ────────────────────────────────────────────────────
     .option(
-      "--release <version>",
-      "Run from PUBLISHED images instead of building. Pulls ghcr.io/azure/* at the given release tag (e.g. v0.1.0-interim.5) — no AGT clone, no local compile. Skips --build.",
+      "--release [version]",
+      "Run from PUBLISHED images instead of building. Pulls ghcr.io/azure/* — no AGT clone, no local compile. Defaults to the latest release (`:latest`); pass a tag (e.g. v0.1.0-interim.9) to pin. Skips --build.",
     )
     .option(
       "--image <image>",
@@ -276,8 +276,15 @@ Notes:
       // given tag: the openclaw-sandbox, the AGT relay + registry, and any
       // selected runtime image. It forces build OFF so we never compile or
       // clone the AGT toolkit. An explicit --build is contradictory.
-      const releaseMode = typeof options.release === "string" && options.release.length > 0;
-      const releaseVersion: string | undefined = releaseMode ? options.release : undefined;
+      // `--release` (optional value): bare flag → latest published images
+      // (`:latest`); `--release <tag>` pins a specific release.
+      const releaseMode = options.release === true ||
+        (typeof options.release === "string" && options.release.length > 0);
+      const releaseVersion: string | undefined = !releaseMode
+        ? undefined
+        : (typeof options.release === "string" && options.release.length > 0)
+          ? options.release
+          : "latest";
       if (releaseMode) {
         if (options.build === true || options.buildBase === true) {
           console.error(chalk.red(`\n  Error: --release pulls published images; it cannot be combined with --build/--build-base.\n`));
@@ -1165,7 +1172,11 @@ Notes:
               const ref = releaseImage(name, releaseVersion!);
               stepper.update(`Pulling published ${name}...`);
               try {
-                await execa("docker", ["pull", "--platform", "linux/amd64", ref], { stdio: "pipe" });
+                // No --platform: pull the host-arch variant for multi-arch
+                // images (relay/registry are multi-arch from interim.10 /
+                // :latest), falling back to amd64 (emulated) for older
+                // amd64-only pinned tags.
+                await execa("docker", ["pull", ref], { stdio: "pipe" });
                 await execa("docker", ["tag", ref, devTag], { stdio: "pipe" });
               } catch {
                 stepper.fail(`Could not pull ${ref}`);
