@@ -53,9 +53,20 @@ platform_preflight() {
     elif kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
         log "kind cluster '${KIND_CLUSTER_NAME}' already exists — skipping bring-up"
     else
-        log "bringing up local-k8s via 'kars dev --target local-k8s --cluster-name ${KIND_CLUSTER_NAME} --once'"
+        # KARS_RELEASE=<tag> runs the published-images path (kars dev --release
+        # <tag> --target local-k8s) — pulls signed multi-arch images into kind
+        # instead of building from source. Requires multi-arch relay/registry
+        # on arm64 kind nodes.
+        local release_args=()
+        if [ -n "${KARS_RELEASE:-}" ]; then
+            release_args=(--release "${KARS_RELEASE}")
+            log "released mode: kars dev --release ${KARS_RELEASE} --target local-k8s (published images)"
+        else
+            log "bringing up local-k8s via 'kars dev --target local-k8s --cluster-name ${KIND_CLUSTER_NAME} --once'"
+        fi
         kars dev --target local-k8s \
             --cluster-name "${KIND_CLUSTER_NAME}" \
+            "${release_args[@]}" \
             --once \
             >>"${OUT_DIR}/dev-bringup.log" 2>&1 || {
                 log "ERR kars dev bring-up failed; tail of dev-bringup.log:"

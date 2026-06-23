@@ -84,6 +84,15 @@ export interface LocalK8sOptions {
    * is wired to talk to this URL instead.
    */
   globalRegistry?: string;
+  /**
+   * When set (e.g. "v0.1.0-interim.10"), pull the published, signed images
+   * for that release from ghcr.io/azure and load them into kind instead of
+   * building anything from source. Mirrors `kars dev --release` for the
+   * docker target. Requires multi-arch published images on arm64 kind nodes
+   * (relay/registry must be multi-arch — amd64-only would "exec format
+   * error" on an Apple Silicon kind node).
+   */
+  releaseVersion?: string;
 }
 
 /**
@@ -1034,48 +1043,70 @@ async function deployAgentMesh(
   meshProvider: "agt",
   agtRepo: string | undefined,
   archToken: string,
+  releaseVersion?: string,
 ): Promise<void> {
   void meshProvider;
   const platform = `linux/${archToken}`;
   const localTag = (component: "relay" | "registry"): string =>
     `agentmesh-${component}-agt:dev`;
+  const releaseMode =
+    typeof releaseVersion === "string" && releaseVersion.length > 0;
 
-  // ── Build relay + registry images locally (AGT Python) ────────────
-  if (!agtRepo) {
-    throw new Error(
-      "--mesh-provider=agt requires --agt-repo or $KARS_AGT_REPO pointing at an agent-governance-toolkit checkout.\n" +
-      "  Clone it:  git clone https://github.com/microsoft/agent-governance-toolkit",
+  if (releaseMode) {
+    // ── Release: pull published relay/registry + tag as local dev tags ──
+    // The published images must be multi-arch — an amd64-only relay/registry
+    // would "exec format error" on an arm64 kind node (Apple Silicon).
+    for (const component of ["relay", "registry"] as const) {
+      const remote = `ghcr.io/azure/kars-agentmesh-${component}:${releaseVersion}`;
+      console.log(chalk.dim(`  Pulling published agentmesh-${component} (${releaseVersion})…`));
+      try {
+        await execa(tools.runtime, ["pull", remote], { stdio: "pipe" });
+        await execa(tools.runtime, ["tag", remote, localTag(component)], { stdio: "pipe" });
+      } catch (e) {
+        throw new Error(
+          `Failed to pull published agentmesh-${component} (${remote}): ${(e as Error).message}\n` +
+            `  Verify the release tag exists and the package is public + multi-arch (arm64).`,
+        );
+      }
+    }
+  } else {
+    // ── Build relay + registry images locally (AGT Python) ────────────
+    if (!agtRepo) {
+      throw new Error(
+        "--mesh-provider=agt requires --agt-repo or $KARS_AGT_REPO pointing at an agent-governance-toolkit checkout.\n" +
+        "  Clone it:  git clone https://github.com/microsoft/agent-governance-toolkit",
+      );
+    }
+    const agtDockerfile = path.join(
+      agtRepo,
+      "agent-governance-python/agent-mesh/docker/Dockerfile",
     );
-  }
-  const agtDockerfile = path.join(
-    agtRepo,
-    "agent-governance-python/agent-mesh/docker/Dockerfile",
-  );
-  if (!existsSync(agtDockerfile)) {
-    throw new Error(
-      `AGT Dockerfile not found at ${agtDockerfile}\n` +
-      `  Clone it:  git clone https://github.com/microsoft/agent-governance-toolkit ${agtRepo}\n` +
-      `  Or pass --agt-repo <path> / set $KARS_AGT_REPO if you already have it elsewhere.`,
-    );
-  }
-  for (const component of ["relay", "registry"] as const) {
-    console.log(chalk.dim(`  Building agentmesh-${component} (AGT Python)…`));
-    await execa(
-      tools.runtime,
-      [
-        "build",
-        "--platform",
-        platform,
-        "--build-arg",
-        `COMPONENT=${component}`,
-        "-t",
-        localTag(component),
-        "-f",
-        agtDockerfile,
-        agtRepo,
-      ],
-      { stdio: "inherit" },
-    );
+    if (!existsSync(agtDockerfile)) {
+      throw new Error(
+        `AGT Dockerfile not found at ${agtDockerfile}\n` +
+        `  Clone it:  git clone https://github.com/microsoft/agent-governance-toolkit ${agtRepo}\n` +
+        `  Or pass --agt-repo <path> / set $KARS_AGT_REPO if you already have it elsewhere.`,
+      );
+    }
+    for (const component of ["relay", "registry"] as const) {
+      console.log(chalk.dim(`  Building agentmesh-${component} (AGT Python)…`));
+      await execa(
+        tools.runtime,
+        [
+          "build",
+          "--platform",
+          platform,
+          "--build-arg",
+          `COMPONENT=${component}`,
+          "-t",
+          localTag(component),
+          "-f",
+          agtDockerfile,
+          agtRepo,
+        ],
+        { stdio: "inherit" },
+      );
+    }
   }
 
   // ── Load images into kind ─────────────────────────────────────────
@@ -1152,10 +1183,19 @@ async function deployAgentMesh(
 export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   const stepper = new Stepper({ totalSteps: 14 });
 
+  // Release mode: pull published, signed images from ghcr.io/azure and load
+  // them into kind instead of building anything from source.
+  const releaseMode =
+    typeof opts.releaseVersion === "string" && opts.releaseVersion.length > 0;
+  const RELEASE_REGISTRY = "ghcr.io/azure";
+  const releaseRef = (name: string): string =>
+    `${RELEASE_REGISTRY}/${name}:${opts.releaseVersion}`;
+
   // Fail fast if the user is running outside the kars checkout.
-  // `--target local-k8s` rebuilds the controller, router, and sandbox
-  // images from local source via docker build, which needs the repo
-  // root (Cargo.toml + deploy/helm/kars + sandbox-images/...).
+  // `--target local-k8s` needs the repo root for the Helm chart
+  // (deploy/helm/kars) and the agentmesh manifest (deploy/agentmesh-agt.yaml),
+  // and — unless --release pulls published images — it also builds the
+  // controller, router, and sandbox images from local source.
   // Without this check the failure surfaces only AFTER kind cluster
   // creation (10+ seconds wasted, orphaned cluster left behind).
   if (!opts.noBuild) {
@@ -1267,7 +1307,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // `kars push` (which builds for AKS) would crash openclaw under
   // Rosetta on an Apple Silicon laptop with
   // `rt_tgsigqueueinfo failed in pend_signal`.
-  if (!opts.noBuild) {
+  if (!opts.noBuild && !releaseMode) {
     const archToken = hostDockerArch();
     const repoRootForBuild = findRepoRoot(process.cwd());
     stepper.step(`Checking image arch (host=${archToken})…`);
@@ -1283,6 +1323,35 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     } else {
       stepper.done(`rebuilt ${built.length} image(s) for linux/${archToken}`);
     }
+  }
+
+  // Release mode: pull the published images and tag them as the local "dev"
+  // aliases the load step below expects (openclaw-sandbox:dev,
+  // kars-controller:dev, kars-inference-router:dev). The existing
+  // alias→canonical retag + `kind load` plumbing then loads them unchanged.
+  // Pull host-arch (kind nodes are arm64 on Apple Silicon); the published
+  // controller/router/sandbox are multi-arch so `docker pull` selects the
+  // right variant automatically.
+  if (releaseMode) {
+    stepper.step(`Pulling published images (${opts.releaseVersion})…`);
+    const pulls: { remote: string; devTag: string }[] = [
+      { remote: releaseRef("openclaw-sandbox"), devTag: opts.image },
+      { remote: releaseRef("kars-controller"), devTag: "kars-controller:dev" },
+      { remote: releaseRef("kars-inference-router"), devTag: "kars-inference-router:dev" },
+    ];
+    for (const { remote, devTag } of pulls) {
+      try {
+        await execa(tools.runtime, ["pull", remote], { stdio: "pipe" });
+        await execa(tools.runtime, ["tag", remote, devTag], { stdio: "pipe" });
+      } catch (e) {
+        throw new Error(
+          `Failed to pull published image ${remote}: ${(e as Error).message}\n` +
+            `  Verify the release tag exists and the package is public:\n` +
+            `  https://github.com/Azure/kars/pkgs/container/${remote.split("/").pop()?.split(":")[0]}`,
+        );
+      }
+    }
+    stepper.done(`pulled ${pulls.length} published image(s) for ${opts.releaseVersion}`);
   }
 
   // The values-local-dev overlay pins all images to local "dev" tags
@@ -1301,7 +1370,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // will then ImagePullBackOff and the operator's pod-events display
   // surfaces a clear error pointing at the missing build).
   stepper.step("Loading kars images into the kind cluster…");
-  if (opts.noBuild) {
+  if (opts.noBuild && !releaseMode) {
     stepper.done("skipped image load (--no-build)");
   } else {
     // `target` = the canonical image name the controller looks for
@@ -1525,6 +1594,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       meshProvider,
       opts.agtRepo,
       archToken,
+      opts.releaseVersion,
     );
     stepper.done(`agentmesh-${meshProvider} ready`);
   }
