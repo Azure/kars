@@ -112,7 +112,8 @@ kars up [options]
 | `--skip-infra` | `false` | Skip infrastructure provisioning (reuse existing cluster) |
 | `--force-infra` | `false` | Force Bicep deployment even if AKS cluster already exists |
 | `--source-acr <server>` | `karsacr.azurecr.io` | Source ACR for pre-built images (customer deployments) |
-| `--build` | `false` | Build images locally and push to ACR (developer mode) |
+| `--release [version]` | — | Import the **public, cosign-signed GHCR release images** (`ghcr.io/azure/*`) into your ACR — no local build, no Rust toolchain. Bare `--release` uses `:latest`; pass a tag (e.g. `v0.1.4`) to pin. Takes precedence over `--build`. |
+| `--build` | `false` | Build images locally from source and push to ACR (developer mode). Compiles Rust in-Docker on macOS/arm64 via the `*.multistage` Dockerfiles. |
 | `--skip-runtime-images` | `false` | Skip building/importing the 7 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
 | `--foundry-endpoint <url>` | — | Existing Azure AI Foundry project endpoint (`services.ai.azure.com`) |
 | `--openai-endpoint <url>` | — | Existing Azure OpenAI endpoint (`openai.azure.com`; derived from Foundry if omitted) |
@@ -130,8 +131,11 @@ kars up [options]
 # Full bootstrap with defaults — provisions Azure, deploys controller, creates sandbox
 kars up
 
+# Recommended: pull the public, signed release images (no local build / Rust)
+kars up --name prod-agent --region westus3 --release
+
 # Production deployment with Confidential VM isolation in a named resource group
-kars up --name prod-agent --isolation confidential -g my-rg --region westus3
+kars up --name prod-agent --isolation confidential -g my-rg --region westus3 --release
 
 # Fast upgrade (skip infra, re-run Helm only)
 kars up --upgrade

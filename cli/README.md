@@ -38,7 +38,7 @@ kars connect dev-agent
 When you're ready for a managed cluster:
 
 ```bash
-kars up --name prod-agent --region swedencentral   # provisions AKS + Foundry + the full stack
+kars up --name prod-agent --region swedencentral --release   # provisions AKS + Foundry + the full stack from signed public images (no build)
 ```
 
 ## Common commands
@@ -48,7 +48,7 @@ kars up --name prod-agent --region swedencentral   # provisions AKS + Foundry + 
 | `kars dev --release` | Run a sandbox from published images (Docker), no compile |
 | `kars dev --release --target local-k8s` | Same, on a local kind cluster |
 | `kars connect <name>` | Open the agent chat TUI |
-| `kars up` | Provision AKS + ACR + Foundry + controller + first sandbox |
+| `kars up --release` | Provision AKS + ACR + Foundry from signed public images (no build) |
 | `kars add` | Add a sandbox / runtime to an existing deployment |
 | `kars operator` | Live operator dashboard (agents, mesh, security posture) |
 | `kars --help` | Full command list |
