@@ -577,14 +577,25 @@ jobs:
   # kars dev / up run the AGT relay + registry for the mesh. They are built
   # from the pinned AGT checkout (agent-mesh/docker/Dockerfile, COMPONENT=*).
   # Publishing them lets `kars dev --release` pull everything — no AGT clone.
+  # AGT relay + registry — built on NATIVE per-arch runners so they run
+  # natively on arm64 kind nodes (Apple Silicon). The AGT Python image is
+  # multi-arch-capable; amd64-only would ImagePullBackOff / "exec format
+  # error" on an arm64 kind cluster, blocking `kars dev --release
+  # --target local-k8s` on a Mac. merge-mesh fuses the per-arch tags below.
   build-mesh:
-    name: Build + push agentmesh-${{ matrix.component }} (PUBLIC GHCR)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    name: Build agentmesh-${{ matrix.component }} (${{ matrix.arch }}, native)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         component: [relay, registry]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -605,28 +616,51 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build + push agentmesh-${{ matrix.component }} (PUBLIC)
-        id: push
+      - name: Build + push agentmesh-${{ matrix.component }}:${{ env.VERSION }}-${{ matrix.arch }}
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
         with:
           context: /tmp/agt
           file: /tmp/agt/agent-governance-python/agent-mesh/docker/Dockerfile
           push: true
-          platforms: linux/amd64
-          tags: |
-            ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:${{ env.VERSION }}
-            ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:latest
+          platforms: linux/${{ matrix.arch }}
+          tags: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:${{ env.VERSION }}-${{ matrix.arch }}
           build-args: |
             COMPONENT=${{ matrix.component }}
-          sbom: true
-          provenance: true
 
-      - name: Attest build provenance (GitHub-signed, pushed to registry)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+  # Merge the per-arch relay/registry tags into multi-arch manifests + sign.
+  merge-mesh:
+    name: Merge + sign agentmesh manifests
+    needs: [build-mesh]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, registry]
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v3
         with:
-          subject-name: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest (:VERSION + :latest)
+        id: manifest
+        run: |
+          NAME="kars-agentmesh-${{ matrix.component }}"
+          docker buildx imagetools create \
+            -t "${REGISTRY}/${NAME}:${VERSION}" \
+            -t "${REGISTRY}/${NAME}:latest" \
+            "${REGISTRY}/${NAME}:${VERSION}-amd64" \
+            "${REGISTRY}/${NAME}:${VERSION}-arm64"
+          DIGEST=$(docker buildx imagetools inspect "${REGISTRY}/${NAME}:${VERSION}" --format '{{.Manifest.Digest}}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          VERSION: ${{ env.VERSION }}
 
       - name: Make package public (best-effort; may need one-time manual toggle)
         continue-on-error: true
@@ -638,6 +672,13 @@ jobs:
             "/orgs/azure/packages/container/kars-agentmesh-${{ matrix.component }}/visibility" \
             -f visibility=public \
           || echo "::warning::Could not set kars-agentmesh-${{ matrix.component }} public via API; set it once manually."
+
+      - name: Attest build provenance (GitHub-signed, pushed to registry)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
 
       - name: Generate SBOM (SPDX JSON)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
@@ -658,11 +699,11 @@ jobs:
         with:
           cosign-release: 'v2.4.1'
 
-      - name: Cosign keyless sign image
+      - name: Cosign keyless sign manifest
         env:
           COSIGN_EXPERIMENTAL: '1'
         run: |
-          cosign sign --yes ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}@${{ steps.push.outputs.digest }}
+          cosign sign --yes ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}@${{ steps.manifest.outputs.digest }}
 
   # ─── Stage 3: pack @kars/cli for GitHub Release distribution ───
   cli-pack:
@@ -696,7 +737,7 @@ jobs:
   # ─── Stage 4: assemble + publish the PUBLIC GitHub Release ─────
   release:
     name: Create PUBLIC GitHub Release
-    needs: [build-binaries, build-images, build-sandbox-base, build-sandbox, merge-sandbox, build-runtimes, build-mesh, cli-pack]
+    needs: [build-binaries, build-images, build-sandbox-base, build-sandbox, merge-sandbox, build-runtimes, build-mesh, merge-mesh, cli-pack]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

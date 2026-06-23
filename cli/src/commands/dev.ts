@@ -637,13 +637,6 @@ Notes:
         process.exit(1);
       }
       if (options.target === "local-k8s") {
-        if (releaseMode) {
-          console.error(chalk.red(`\n  Error: --release currently supports --target docker only.`));
-          console.error(chalk.dim(`  (local-k8s loads images into kind + Helm; published-image support there is tracked separately.)\n`));
-          console.error(chalk.yellow(`  Run the published images locally with:`));
-          console.error(chalk.cyan(`      kars dev --release ${releaseVersion}\n`));
-          process.exit(1);
-        }
         const { runLocalK8s } = await import("./dev/local-k8s.js");
         try {
           await runLocalK8s({
@@ -658,6 +651,7 @@ Notes:
             agtRepo: options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO,
             noMesh: options.noMesh === true,
             globalRegistry: typeof options.globalRegistry === "string" ? options.globalRegistry : undefined,
+            releaseVersion: releaseMode ? releaseVersion : undefined,
           });
           return;
         } catch (e) {
