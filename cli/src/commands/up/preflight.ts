@@ -26,6 +26,7 @@ import { existsSync } from "fs";
 import { banner, checkLine } from "../../stepper.js";
 import { loadContext } from "../../config.js";
 import { runPreflightChecks } from "../../preflight.js";
+import { resolveVmSizes } from "../../lib/vm-size.js";
 
 export function isValidAzureHost(url: string, expectedSuffix: string): boolean {
   try {
@@ -349,47 +350,38 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
     console.log();
     console.log(chalk.dim(`  Checking VM SKU availability in ${options.region}...\n`));
 
-    // System pool is always D4s_v5. Agent pool depends on isolation level:
-    // - standard/enhanced: D4s_v5 (general purpose, works with runc)
-    // - confidential: Standard_DC4as_v5 (AMD SEV-SNP, required for Kata CC)
-    const agentSku = options.isolation === "confidential" ? "Standard_DC4as_v5" : "Standard_D4s_v5";
-    const agentLabel = options.isolation === "confidential"
-      ? `AKS Kata pool (DC4as_v5 — confidential compute)`
-      : `AKS agent pool (D4s_v5)`;
-
-    const skuChecks = [
-      { sku: "Standard_D4s_v5", label: "AKS system pool (D4s_v5)" },
-      { sku: agentSku, label: agentLabel },
-    ];
-    const checkOne = async (check: { sku: string; label: string }): Promise<{ ok: boolean; line: string; available: boolean }> => {
-      try {
-        const { stdout: skuJson } = await execa("az", [
-          "vm", "list-skus",
-          "--location", options.region,
-          "--size", check.sku,
-          "--query", "[0].restrictions",
-          "--output", "json",
-        ], { stdio: "pipe", timeout: 10000 });
-        const restrictions = JSON.parse(skuJson || "[]");
-        const blocked = restrictions.some((r: { type: string }) => r.type === "Location");
-        return blocked
-          ? { ok: false, available: false, line: `${check.label} — ${chalk.red("not available")} in ${options.region}` }
-          : { ok: true, available: true, line: `${check.label} — available` };
-      } catch {
-        // Network/CLI failure is non-fatal — surface as "could not verify" but don't fail preflight
-        return { ok: true, available: true, line: `${check.label} — ${chalk.yellow("could not verify")} (continuing)` };
-      }
-    };
-    const results = await Promise.all(skuChecks.map(checkOne));
-    let skuOk = true;
-    for (const r of results) {
-      checkLine(r.ok, r.line);
-      if (!r.available) skuOk = false;
-    }
-    if (!skuOk) {
-      console.log(chalk.yellow(`\n  Some VM SKUs are not available in ${options.region}.`));
-      console.log(chalk.yellow(`  Try a different region: ${chalk.cyan("kars up --region westus3")}\n`));
+    // Resolve the SKUs that the deploy will actually use — auto-picked from
+    // what this subscription allows in the region (or --node-vm-size /
+    // --system-vm-size overrides). This is the same resolution used by the
+    // Bicep deploy, so preflight reflects reality instead of a hardcoded guess.
+    let vmSizes;
+    try {
+      vmSizes = await resolveVmSizes(
+        options.region,
+        options.nodeVmSize as string | undefined,
+        options.systemVmSize as string | undefined,
+      );
+    } catch (err) {
+      checkLine(false, `VM SKU — ${(err as Error).message}`);
+      console.log(chalk.yellow(`\n  Try a different region: ${chalk.cyan("kars up --region westus3")}\n`));
       process.exit(1);
+    }
+
+    // For confidential isolation the sandbox pool is pinned to a CC SKU.
+    const confidential = options.isolation === "confidential";
+    const agentSku = confidential ? "Standard_DC4as_v5" : vmSizes.node;
+    const agentLabel = confidential
+      ? `AKS Kata pool (${agentSku} — confidential compute)`
+      : `AKS sandbox pool (${agentSku})`;
+
+    if (vmSizes.checked) {
+      checkLine(true, `AKS system pool (${vmSizes.system}) — available`);
+      checkLine(true, confidential ? agentLabel : `${agentLabel} — available`);
+    } else {
+      // Could not query az vm list-skus — non-fatal; the Bicep preflight will
+      // still surface a hard error if a size is truly unavailable.
+      checkLine(true, `AKS system pool (${vmSizes.system}) — ${chalk.yellow("could not verify")} (continuing)`);
+      checkLine(true, `${agentLabel} — ${chalk.yellow("could not verify")} (continuing)`);
     }
 
     // Quick check: can we create resources in this sub+region?
