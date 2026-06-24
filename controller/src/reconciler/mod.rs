@@ -2189,7 +2189,17 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             // sidecar.
             "initContainers": [{
                 "name": "egress-guard",
-                "image": &ctx.inference_router_image,
+                // The egress-guard runs `sh -c "iptables ..."`, so it needs an
+                // image with a shell AND the iptables binary. The
+                // inference-router image is AL3 *distroless* (no sh, no
+                // iptables) since #383, so it cannot be used here — doing so
+                // fails at container start with `exec: "sh": executable file
+                // not found`, crashlooping the init and preventing every
+                // sandbox from starting. The sandbox image installs iptables +
+                // util-linux (see sandbox-images/openclaw/Dockerfile.base) and
+                // is already pulled on the node (it's the agent container), so
+                // we use it for the guard.
+                "image": &ctx.sandbox_image,
                 "command": ["sh", "-c", egress_guard_cmd],
                 "securityContext": {
                     "runAsUser": 0,

@@ -607,7 +607,7 @@ fn router_has_admin_token_volume_mount() {
 
 #[test]
 fn init_container_needs_net_admin_capability() {
-    let init = build_init_container("router:latest");
+    let init = build_init_container("sandbox:latest");
     let caps = &init["securityContext"]["capabilities"];
     let add = caps["add"].as_array().unwrap();
     assert!(add.contains(&json!("NET_ADMIN")));
@@ -616,14 +616,14 @@ fn init_container_needs_net_admin_capability() {
 
 #[test]
 fn init_container_runs_as_root() {
-    let init = build_init_container("router:latest");
+    let init = build_init_container("sandbox:latest");
     assert_eq!(init["securityContext"]["runAsUser"], 0);
     assert_eq!(init["securityContext"]["runAsNonRoot"], false);
 }
 
 #[test]
 fn init_container_seccomp_unconfined() {
-    let init = build_init_container("router:latest");
+    let init = build_init_container("sandbox:latest");
     assert_eq!(
         init["securityContext"]["seccompProfile"]["type"],
         "Unconfined"
