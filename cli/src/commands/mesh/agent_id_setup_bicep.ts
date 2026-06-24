@@ -20,6 +20,7 @@ import { execa } from "execa";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { kvLine, section } from "../../stepper.js";
+import { requireBundledAsset } from "../../lib/repo-assets.js";
 
 export interface BicepSetupOptions {
   clusterName?: string;
@@ -88,28 +89,20 @@ interface DeploymentResult {
 /// `deploy/bicep/agent-id-trust.bicep` anchor. Falls back to the
 /// repo-relative path during local dev.
 function resolveBicepTemplate(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  // From cli/src/commands/mesh/ → ../../../../deploy/bicep/...
-  // Also handle dist/commands/mesh/ → ../../../../deploy/bicep/...
-  const candidates = [
-    path.resolve(here, "../../../../deploy/bicep/agent-id-trust.bicep"),
-    path.resolve(here, "../../../deploy/bicep/agent-id-trust.bicep"),
-    path.resolve(process.cwd(), "deploy/bicep/agent-id-trust.bicep"),
-  ];
-  for (const c of candidates) {
-    // We cannot import 'fs' lazily inside the helper without changing
-    // the surrounding test mock surface; use a small sync existsSync
-    // ESM import here to keep mocked `execa` calls clean.
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { existsSync } = require("fs");
-      if (existsSync(c)) return c;
-    } catch {
-      /* env without sync require — fall through */
-    }
+  // Resolve via the shared repo-or-bundled resolver: in a repo checkout
+  // this finds `deploy/bicep/agent-id-trust.bicep`; in an npm-installed
+  // CLI it finds the copy bundled into `dist/deploy/bicep/` by
+  // scripts/bundle-deploy-assets.mjs. The previous repo-relative walk
+  // missed the bundled location entirely, so the Bicep fallback failed
+  // with "template not found" for OOTB (no-checkout) users.
+  try {
+    return requireBundledAsset("deploy/bicep/agent-id-trust.bicep");
+  } catch {
+    // Last-resort fallback (e.g. exotic packaging) — let `az deployment`
+    // surface a clear "template not found" rather than throwing here.
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    return path.resolve(here, "../../deploy/bicep/agent-id-trust.bicep");
   }
-  // Best-effort default — `az deployment` will error clearly if missing.
-  return candidates[0];
 }
 
 async function getTenantInfo(): Promise<{ tenantId: string; subscriptionId: string; user: string }> {
@@ -246,6 +239,18 @@ export async function ensureAgentIdTrustViaBicep(
       .join("\n")
       .trim();
     const summary = cleaned.split("\n")[0] || raw.split("\n")[0] || "deployment failed";
+
+    // Corp-tenant app registrations require a valid ServiceTree GUID. The
+    // raw Graph error ("ServiceManagementReference must be a valid GUID")
+    // is opaque — surface an actionable hint pointing at --service-tree.
+    if (/ServiceTree|ServiceManagementReference/i.test(raw)) {
+      throw new Error(
+        "Bicep deployment failed: your tenant requires a valid ServiceTree GUID for app " +
+          "registration. Re-run with `--service-tree <GUID>` (or set KARS_SERVICE_TREE). " +
+          `Underlying error: ${summary.slice(0, 200)}`,
+      );
+    }
+
     throw new Error(`Bicep deployment failed: ${summary.slice(0, 400)}`);
   }
 
