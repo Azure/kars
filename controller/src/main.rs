@@ -108,6 +108,34 @@ async fn main() -> Result<()> {
 
     let client = Client::try_default().await?;
 
+    // S7.E: Prometheus + health server. Default ON; opt out via
+    // `CONTROLLER_METRICS_ADDR=disabled` (or empty). Failures here are
+    // non-fatal — the reconcile loops are the primary product.
+    //
+    // IMPORTANT: this MUST start *before* the leader-election barrier below.
+    // `/healthz` (served here) backs the pod readiness probe, and with
+    // `replicas: 2` only one pod wins the lease. If health came up only after
+    // acquiring leadership, the standby replica would block forever at
+    // `ready_rx.await` and never serve `/healthz` → it stays NotReady → the
+    // Deployment is stuck at 1/2 → `helm --wait` times out on every install.
+    // Readiness means "process is alive and ready to take over", not "is
+    // leader", so health must be live on both replicas immediately.
+    let metrics_handle = {
+        match metrics_server::bind_addr_from_env() {
+            Some(addr) => Some(tokio::spawn(async move {
+                if let Err(e) = metrics_server::run(addr).await {
+                    tracing::error!(error = %e, "controller metrics server exited");
+                }
+            })),
+            None => {
+                tracing::info!(
+                    "controller metrics server disabled (CONTROLLER_METRICS_ADDR=disabled)"
+                );
+                None
+            }
+        }
+    };
+
     // S7.C: controller-wide leader election. With `replicas: 2` shipped
     // in the Helm chart, both pods would otherwise reconcile in
     // parallel and double-emit Foundry agent creates / status patches /
@@ -307,25 +335,9 @@ async fn main() -> Result<()> {
         })
     };
 
-    // S7.E: optional Prometheus metrics server. Default ON; opt out
-    // via `CONTROLLER_METRICS_ADDR=disabled` (or empty). Failures
-    // here are non-fatal — the controller's reconcile loops are the
-    // primary product; metrics are observability sugar on top.
-    let metrics_handle = {
-        match metrics_server::bind_addr_from_env() {
-            Some(addr) => Some(tokio::spawn(async move {
-                if let Err(e) = metrics_server::run(addr).await {
-                    tracing::error!(error = %e, "controller metrics server exited");
-                }
-            })),
-            None => {
-                tracing::info!(
-                    "controller metrics server disabled (CONTROLLER_METRICS_ADDR=disabled)"
-                );
-                None
-            }
-        }
-    };
+    // S7.E: the Prometheus + health server is started earlier (before the
+    // leader-election barrier) so both replicas pass their readiness probe —
+    // see the `metrics_handle` block above `let leader_election_enabled`.
 
     // Convert Option<JoinHandle> to a future that pends forever when
     // leader election is disabled. This keeps the `tokio::select!`

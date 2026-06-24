@@ -11,8 +11,11 @@ param location string
 @description('Node count for sandbox pool')
 param nodeCount int
 
-@description('VM size for nodes')
+@description('VM size for sandbox (user) nodes')
 param vmSize string
+
+@description('VM size for the system node pool')
+param systemVmSize string = 'Standard_D2as_v5'
 
 @description('Enable FIPS')
 param enableFips bool
@@ -56,7 +59,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
       {
         name: 'system'
         count: 2
-        vmSize: 'Standard_D2as_v5'
+        vmSize: systemVmSize
         osType: 'Linux'
         osSKU: 'AzureLinux'
         mode: 'System'

@@ -10,6 +10,7 @@ import { Stepper, banner } from "../stepper.js";
 import { isValidAzureHost } from "./up/preflight.js";
 import { acquireImages } from "./up/images.js";
 import { requireBundledAsset } from "../lib/repo-assets.js";
+import { resolveVmSizes } from "../lib/vm-size.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -35,6 +36,8 @@ export function upCommand(): Command {
       "enhanced"
     )
     .option("-g, --resource-group <name>", "Resource group name")
+    .option("--node-vm-size <sku>", "VM size for the sandbox (user) node pool. Default: auto-pick a size available to your subscription (D4s/D4as family).")
+    .option("--system-vm-size <sku>", "VM size for the system node pool. Default: auto-pick a size available to your subscription (D2as/D2s family).")
     // ── Infrastructure ────────────────────────────────────────────────
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
     .option("--force-infra", "Force Bicep deployment even if AKS cluster exists", false)
@@ -327,9 +330,24 @@ Auto-resume:
             stepper.detail("info", `Resources: AKS + ACR + Key Vault + Azure OpenAI + Monitor`);
           }
           stepper.detail("info", `This takes 5–10 minutes. Deploying now...`);
+
+          // Resolve VM sizes that are actually available to this subscription in
+          // this region (subscriptions commonly gate specific SKUs). Auto-picks a
+          // working size or honours --node-vm-size / --system-vm-size.
+          const vmSizes = await resolveVmSizes(
+            options.region,
+            options.nodeVmSize,
+            options.systemVmSize,
+          );
+          if (vmSizes.checked) {
+            stepper.detail("info", `Node SKUs: system=${vmSizes.system}, sandbox=${vmSizes.node}`);
+          }
+
           const bicepParams = [
             `location=${options.region}`,
             `baseName=${baseName}`,
+            `vmSize=${vmSizes.node}`,
+            `systemVmSize=${vmSizes.system}`,
           ];
           if (options.isolation === "confidential") {
             bicepParams.push("enableKata=true");
@@ -694,7 +712,13 @@ Auto-resume:
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
           "--set", `mesh.provider=${(options.meshProvider as string | undefined) ?? "agt"}`,
           "--wait",
-          "--timeout", "5m",
+          // Cold-cluster first install: the controller + inference-router pull
+          // their (Rust) images with pullPolicy=Always and the controller
+          // fetches the Sigstore TUF trust root over the network at startup, so
+          // 2 replicas can take several minutes to all become Ready on fresh
+          // small system nodes. 10m avoids a spurious "context deadline
+          // exceeded" while k8s is still legitimately rolling out.
+          "--timeout", "10m",
           // Take ownership of fields previously written by `kubectl apply`
           // or `kubectl patch` (e.g. CRDs / ClusterRoles touched out-of-band
           // during prior debugging). Without this, Helm's server-side apply

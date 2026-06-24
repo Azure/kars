@@ -17,6 +17,9 @@ param nodeCount int = 3
 @description('VM size for sandbox nodes')
 param vmSize string = 'Standard_D4s_v5'
 
+@description('VM size for the system node pool')
+param systemVmSize string = 'Standard_D2as_v5'
+
 @description('Enable Kata VM isolation for confidential sandbox level')
 param enableConfidential bool = false
 
@@ -99,6 +102,7 @@ module aks 'modules/aks.bicep' = {
     location: location
     nodeCount: nodeCount
     vmSize: enableConfidential ? 'Standard_DC4as_v5' : vmSize
+    systemVmSize: systemVmSize
     enableFips: enableFips
     logAnalyticsWorkspaceId: monitor.outputs.logAnalyticsWorkspaceId
     acrId: acr.outputs.acrId
