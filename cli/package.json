@@ -15,7 +15,7 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js && cp -r profiles dist/profiles",
+    "build": "tsc && chmod +x dist/index.js && cp -r profiles dist/profiles && node scripts/bundle-deploy-assets.mjs",
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",

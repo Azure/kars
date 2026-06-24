@@ -5,9 +5,11 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import * as path from "path";
+import * as os from "node:os";
 import { Stepper, banner } from "../stepper.js";
 import { isValidAzureHost } from "./up/preflight.js";
 import { acquireImages } from "./up/images.js";
+import { requireBundledAsset } from "../lib/repo-assets.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -219,15 +221,11 @@ Auto-resume:
           }
         }
 
-        const bicepPath = path.join(repoRoot, "deploy/bicep/main.bicep");
-        const helmPath = path.join(repoRoot, "deploy/helm/kars");
-
-        if (!existsSync(bicepPath)) {
-          stepper.fail("Bicep template not found");
-          console.log(chalk.yellow(`  Expected at: ${bicepPath}`));
-          console.log(chalk.yellow(`  Run from the kars repo root.\n`));
-          process.exit(1);
-        }
+        // Resolve the infra templates + chart from a repo checkout OR the
+        // copies bundled in the npm package — so `kars up --release` works
+        // with no source tree.
+        const bicepPath = requireBundledAsset("deploy/bicep/main.bicep");
+        const helmPath = requireBundledAsset("deploy/helm/kars");
 
         // ── Step 1: Create resource group ────────────────────────────
         stepper.step(`Setting up resource group '${rg}'...`);
@@ -656,7 +654,7 @@ Auto-resume:
                 "}",
               ].join("\n");
               const fs = await import("fs");
-              const tmpBicep = path.join(repoRoot, ".tmp-role.bicep");
+              const tmpBicep = path.join(os.tmpdir(), `kars-role-${Date.now()}.bicep`);
               fs.writeFileSync(tmpBicep, bicepRole);
               await execa("az", [
                 "deployment", "sub", "create",
