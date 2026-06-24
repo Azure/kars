@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // VM-size (SKU) resolution for `kars up`.
 //
 // Azure subscriptions frequently restrict specific VM SKUs per region (trial,
