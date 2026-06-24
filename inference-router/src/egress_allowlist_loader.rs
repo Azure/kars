@@ -528,16 +528,7 @@ pub fn spawn_egress_allowlist_watcher_with_approvals(
 }
 
 fn dir_max_mtime(dir: &str) -> Option<std::time::SystemTime> {
-    let path = Path::new(dir);
-    if !path.is_dir() {
-        return None;
-    }
-    std::fs::read_dir(path)
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|e| e.metadata().ok()?.modified().ok())
-        .max()
+    crate::config_mount::dir_max_mtime(dir, &["json"])
 }
 
 #[cfg(test)]

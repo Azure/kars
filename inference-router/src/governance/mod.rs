@@ -808,21 +808,11 @@ impl Governance {
 }
 
 /// Get the maximum mtime of YAML files in a directory (for change detection).
+/// Delegates to [`crate::config_mount::dir_max_mtime`], which follows symlinks
+/// so a Kubernetes ConfigMap `..data` swap is detected (an `lstat` poll never
+/// reloads — see that module).
 fn dir_max_mtime(dir: &str) -> Option<std::time::SystemTime> {
-    let path = Path::new(dir);
-    if !path.is_dir() {
-        return None;
-    }
-    std::fs::read_dir(path)
-        .ok()?
-        .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "yaml" || ext == "yml")
-        })
-        .filter_map(|e| e.metadata().ok()?.modified().ok())
-        .max()
+    crate::config_mount::dir_max_mtime(dir, &["yaml", "yml"])
 }
 
 /// Convert trust score to tier label (matches _score_to_tier convention).

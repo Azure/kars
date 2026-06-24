@@ -23,6 +23,7 @@ pub mod behavior_monitor;
 pub mod blocklist;
 pub mod budget;
 pub mod config;
+pub mod config_mount;
 pub mod copilot_auth;
 pub mod deployment_health;
 pub mod egress_allowlist_loader;
