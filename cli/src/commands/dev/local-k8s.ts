@@ -28,6 +28,7 @@ import { loadAgtProfile } from "../../refs.js";
 import { stageRustBinaries, type RustArch } from "../../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
+import { resolveBundledAsset, requireBundledAsset, findRepoRootOrNull } from "../../lib/repo-assets.js";
 import { buildCopilotFallbackChain } from "../../github-copilot.js";
 
 export interface LocalK8sOptions {
@@ -1039,7 +1040,6 @@ async function provisionDevCreds(
 async function deployAgentMesh(
   tools: Tooling,
   clusterName: string,
-  repoRoot: string,
   meshProvider: "agt",
   agtRepo: string | undefined,
   archToken: string,
@@ -1119,10 +1119,7 @@ async function deployAgentMesh(
   }
 
   // ── Rewrite manifest: swap ACR image refs → local tags, set Never ──
-  const manifestPath = path.join(repoRoot, "deploy", "agentmesh-agt.yaml");
-  if (!existsSync(manifestPath)) {
-    throw new Error(`Mesh manifest not found at ${manifestPath}`);
-  }
+  const manifestPath = requireBundledAsset("deploy/agentmesh-agt.yaml");
   let manifest = readFileSync(manifestPath, "utf8");
   // Plain-string replacements (no regex) — the manifest contains fixed ACR
   // image references that we swap for the local kind-loaded tags. Using
@@ -1191,26 +1188,25 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   const releaseRef = (name: string): string =>
     `${RELEASE_REGISTRY}/${name}:${opts.releaseVersion}`;
 
-  // Fail fast if the user is running outside the kars checkout.
-  // `--target local-k8s` needs the repo root for the Helm chart
-  // (deploy/helm/kars) and the agentmesh manifest (deploy/agentmesh-agt.yaml),
-  // and — unless --release pulls published images — it also builds the
-  // controller, router, and sandbox images from local source.
-  // Without this check the failure surfaces only AFTER kind cluster
-  // creation (10+ seconds wasted, orphaned cluster left behind).
-  if (!opts.noBuild) {
+  // Fail fast if the user is running outside the kars checkout — but ONLY
+  // when we actually need to build from source. `--release` pulls published
+  // images and uses the BUNDLED Helm chart + agentmesh manifest (shipped in
+  // the npm package), so it must work with no repo checkout at all. Without
+  // this guard release mode would later throw a confusing repo-root error.
+  if (!opts.noBuild && !releaseMode) {
     try {
       findRepoRoot(process.cwd());
     } catch {
       throw new Error(
-        "`kars dev --target local-k8s` must be run from inside the kars " +
-          "repo checkout — the dev flow rebuilds the controller, inference-router, " +
-          "and sandbox images from local source.\n\n" +
+        "`kars dev --target local-k8s` (build mode) must be run from inside the " +
+          "kars repo checkout — it rebuilds the controller, inference-router, and " +
+          "sandbox images from local source.\n\n" +
           "Either:\n" +
+          "  • run `kars dev --release --target local-k8s` to use published images " +
+          "(no checkout, no compile), or\n" +
           "  • `cd` into your kars checkout and re-run, or\n" +
           "  • pass `--no-build` to use already-loaded images, or\n" +
-          "  • use `--target docker` (no cluster, no rebuild — fastest dev loop), or\n" +
-          "  • use `kars up` to deploy to an existing AKS cluster (ACR images).",
+          "  • use `--target docker` (no cluster, no rebuild — fastest dev loop).",
       );
     }
   }
@@ -1256,7 +1252,11 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // and cli/src/commands/up.ts (line ~617) — keep the three call sites
   // consistent or fresh-machine OOTB breaks on whichever entry point
   // is missing.
-  if (opts.noMesh !== true && !opts.globalRegistry) {
+  // The AGT toolkit + Python wheels are only needed to BUILD images from
+  // source. In --release mode we pull published relay/registry images, so
+  // skip the bootstrap entirely (it also requires a repo checkout, which a
+  // released/npm-installed run won't have).
+  if (opts.noMesh !== true && !opts.globalRegistry && !releaseMode) {
     stepper.step("Bootstrapping AGT toolkit + Python wheels…");
     try {
       const repoRootForAgt = findRepoRoot(process.cwd());
@@ -1516,15 +1516,13 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   }
 
   stepper.step("Helm-installing the kars chart (with local-dev overlay)…");
-  const repoRoot = findRepoRoot(process.cwd());
-  const chartDir = path.join(repoRoot, "deploy", "helm", "kars");
-  if (!existsSync(chartDir)) {
-    throw new Error(`kars helm chart not found at ${chartDir}`);
-  }
+  // Resolve the Helm chart from a repo checkout OR the bundled copy shipped
+  // in the npm package — so `kars dev --release` works with no source tree.
+  const chartDir = requireBundledAsset("deploy/helm/kars");
   const valuesOverlay = path.join(chartDir, "values-local-dev.yaml");
   if (!existsSync(valuesOverlay)) {
     throw new Error(
-      `Expected local-dev overlay at ${valuesOverlay} — your checkout is incomplete.`,
+      `Expected local-dev overlay at ${valuesOverlay} — the kars chart bundle is incomplete.`,
     );
   }
   // Ensure the namespace exists before applying namespaced resources.
@@ -1590,7 +1588,6 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     await deployAgentMesh(
       tools,
       opts.clusterName,
-      repoRoot,
       meshProvider,
       opts.agtRepo,
       archToken,
@@ -1641,26 +1638,31 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   }
   stepper.done("controller rollout check finished");
 
-  // Phase 4: Headlamp dashboard for local-k8s observability.
-  // We treat Headlamp as a hard dependency of the local-k8s target — the
-  // whole point is to give devs a UI without spinning up AKS / Portal.
-  stepper.step("Installing Headlamp dashboard…");
-  await installHeadlamp(tools, opts.clusterName);
-  stepper.done("Headlamp installed");
+  // Phase 4–5b: Headlamp dashboard + kars plugin + Prometheus/Grafana.
+  // These are observability extras — make them BEST-EFFORT so a hiccup
+  // (missing asset, slow image pull, kindnet timing) never blocks an
+  // otherwise-working sandbox. The core agent is already up by here.
+  try {
+    stepper.step("Installing Headlamp dashboard…");
+    await installHeadlamp(tools, opts.clusterName);
+    stepper.done("Headlamp installed");
 
-  // Phase 5: side-load the kars Headlamp plugin (CRD views).
-  // Built into a ConfigMap and volume-mounted at /headlamp/plugins/kars
-  // so it survives pod restarts.
-  stepper.step("Installing kars Headlamp plugin…");
-  await installAzureclawPlugin(tools, opts.clusterName);
-  stepper.done("kars plugin installed");
+    stepper.step("Installing kars Headlamp plugin…");
+    await installAzureclawPlugin(tools, opts.clusterName);
+    stepper.done("kars plugin installed");
 
-  // Phase 5b: Prometheus + Grafana stack so the Headlamp plugin's
-  // metric panels (mesh topology msg counts, token budgets, AGT decisions,
-  // policy bundle health) have data on first run — no manual helm dance.
-  stepper.step("Installing Prometheus + Grafana stack…");
-  await installPrometheus(tools, opts.clusterName);
-  stepper.done("Prometheus + Grafana installed");
+    stepper.step("Installing Prometheus + Grafana stack…");
+    await installPrometheus(tools, opts.clusterName);
+    stepper.done("Prometheus + Grafana installed");
+  } catch (e) {
+    stepper.stop();
+    console.warn(
+      chalk.yellow(
+        `  ⚠ Observability stack (Headlamp/Grafana) didn't fully install — ${(e as Error).message.split("\n")[0].slice(0, 100)}.\n` +
+          "    Your sandbox + mesh are running regardless; re-run later or inspect with kubectl.",
+      ),
+    );
+  }
 
   // Open Headlamp in the user's browser. Port-forward runs detached so
   // it survives the CLI command exiting; user kills it via `kars dev down`
@@ -2092,8 +2094,12 @@ kubeProxy:
   // Apply our kars-specific monitoring manifests: PodMonitor for
   // every sandbox router, prometheus-json-exporter for the AGT relay
   // /health endpoint, and the two Grafana dashboards (fleet + ops).
-  const repoRoot = findRepoRoot(process.cwd());
-  const monitoringDir = path.join(repoRoot, "deploy", "monitoring");
+  // Resolve from a repo checkout OR the bundled copy (so --release works).
+  const monitoringDir = resolveBundledAsset("deploy/monitoring");
+  if (!monitoringDir) {
+    console.log(chalk.dim("    monitoring manifests not bundled — skipping dashboards"));
+    return;
+  }
   for (const f of [
     "podmonitor-sandbox-router.yaml",
     "agentmesh-json-exporter.yaml",
@@ -2192,42 +2198,58 @@ async function installAzureclawPlugin(
   tools: Tooling,
   clusterName: string,
 ): Promise<void> {
-  const repoRoot = findRepoRoot(process.cwd());
-  const pluginDir = path.join(repoRoot, "tools", "headlamp-plugin");
-  const distDir = path.join(pluginDir, "dist");
-  const mainJs = path.join(distDir, "main.js");
-  const pkgJson = path.join(pluginDir, "package.json");
+  // Prefer the prebuilt plugin bundled with the CLI (so `kars dev --release`
+  // works with no repo checkout); fall back to a repo checkout, building it
+  // on demand if a source tree is present.
+  let mainJs = resolveBundledAsset("tools/headlamp-plugin/dist/main.js");
+  let pkgJson = resolveBundledAsset("tools/headlamp-plugin/package.json");
 
-  if (!existsSync(mainJs)) {
-    console.log(
-      chalk.dim("    plugin not built yet — running 'npm run build' in tools/headlamp-plugin…"),
-    );
-    if (!existsSync(path.join(pluginDir, "node_modules"))) {
+  if (!mainJs || !pkgJson) {
+    const repoRoot = findRepoRootOrNull(process.cwd());
+    if (!repoRoot) {
+      console.warn(
+        chalk.yellow(
+          "    ⚠ Headlamp plugin not bundled and no repo checkout found — skipping " +
+            "(the dashboard still works for built-in resources; kars CRD views won't load).",
+        ),
+      );
+      return;
+    }
+    const pluginDir = path.join(repoRoot, "tools", "headlamp-plugin");
+    const distMain = path.join(pluginDir, "dist", "main.js");
+    pkgJson = path.join(pluginDir, "package.json");
+    if (!existsSync(distMain)) {
+      console.log(
+        chalk.dim("    plugin not built yet — running 'npm run build' in tools/headlamp-plugin…"),
+      );
+      if (!existsSync(path.join(pluginDir, "node_modules"))) {
+        try {
+          await execa("npm", ["install", "--no-audit", "--no-fund"], {
+            cwd: pluginDir,
+            stdio: "inherit",
+          });
+        } catch (err) {
+          console.warn(
+            chalk.yellow(
+              `    ⚠ npm install failed (${(err as Error).message}); skipping plugin install. ` +
+                "Run 'cd tools/headlamp-plugin && npm install && npm run build' manually then re-run this command.",
+            ),
+          );
+          return;
+        }
+      }
       try {
-        await execa("npm", ["install", "--no-audit", "--no-fund"], {
-          cwd: pluginDir,
-          stdio: "inherit",
-        });
+        await execa("npm", ["run", "build"], { cwd: pluginDir, stdio: "inherit" });
       } catch (err) {
         console.warn(
           chalk.yellow(
-            `    ⚠ npm install failed (${(err as Error).message}); skipping plugin install. ` +
-              "Run 'cd tools/headlamp-plugin && npm install && npm run build' manually then re-run this command.",
+            `    ⚠ plugin build failed (${(err as Error).message}); skipping plugin install.`,
           ),
         );
         return;
       }
     }
-    try {
-      await execa("npm", ["run", "build"], { cwd: pluginDir, stdio: "inherit" });
-    } catch (err) {
-      console.warn(
-        chalk.yellow(
-          `    ⚠ plugin build failed (${(err as Error).message}); skipping plugin install.`,
-        ),
-      );
-      return;
-    }
+    mainJs = distMain;
   }
 
   // Build the ConfigMap. Headlamp expects each plugin to be a sub-dir

@@ -12,7 +12,9 @@
 // Returns the registry-mode triple consumed by the KarsSandbox CR
 // creation step (d.4) and the saveContext() call at end-of-deploy.
 import path from "node:path";
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import * as os from "node:os";
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { resolveBundledAsset } from "../../lib/repo-assets.js";
 import type { Stepper } from "../../stepper.js";
 import { kvLine } from "../../stepper.js";
 
@@ -67,7 +69,8 @@ export async function deployAgentMesh(
   options: AgentMeshDeployOptions,
 ): Promise<AgentMeshDeployResult> {
   const { execa } = await import("execa");
-  const { repoRoot, acr: _acr, acrLoginServer, baseName, rg, stepper, entraVerify } = ctx;
+  const { acr: _acr, acrLoginServer, baseName, rg, stepper, entraVerify } = ctx;
+  void ctx.repoRoot;
 
   // Inspektor Gadget (eBPF observability) — non-fatal
   await execa("kubectl", ["gadget", "deploy"], { stdio: "pipe" }).catch(() => {});
@@ -91,8 +94,10 @@ export async function deployAgentMesh(
   } else {
     // Local registry mode — deploy AGT relay + registry in-cluster.
     const manifestName = "agentmesh-agt.yaml";
-    const agentmeshManifest = path.join(repoRoot, "deploy", manifestName);
-    if (existsSync(agentmeshManifest)) {
+    // Resolve from a repo checkout OR the bundled package copy (so
+    // `kars up --release` works without a source tree).
+    const agentmeshManifest = resolveBundledAsset(`deploy/${manifestName}`);
+    if (agentmeshManifest) {
       // Ensure the agentmesh namespace exists
       await execa("kubectl", ["create", "namespace", "agentmesh"], { stdio: "pipe" }).catch(() => {});
 
@@ -102,7 +107,7 @@ export async function deployAgentMesh(
         "karsacr.azurecr.io",
         acrLoginServer,
       );
-      const tmpManifest = path.join(repoRoot, `.tmp-${manifestName}`);
+      const tmpManifest = path.join(os.tmpdir(), `kars-${manifestName}-${Date.now()}`);
       try {
         writeFileSync(tmpManifest, patchedManifest);
         await execa("kubectl", ["apply", "-f", tmpManifest], { stdio: "pipe" });
@@ -165,8 +170,8 @@ export async function deployAgentMesh(
     // Deploy AGIC Ingress if --expose-registry is set
     if (options.exposeRegistry) {
       stepper.step("Deploying AgentMesh Ingress (public endpoints)...");
-      const ingressManifest = path.join(repoRoot, "deploy", "agentmesh-ingress.yaml");
-      if (existsSync(ingressManifest)) {
+      const ingressManifest = resolveBundledAsset("deploy/agentmesh-ingress.yaml");
+      if (ingressManifest) {
         const ingressYaml = readFileSync(ingressManifest, "utf-8");
         const domain = `${baseName}.kars.dev`;
         const { stdout: currentSubId } = await execa("az", [
@@ -177,7 +182,7 @@ export async function deployAgentMesh(
           .replace(/SUBSCRIPTION_ID/g, currentSubId.trim())
           .replace(/RESOURCE_GROUP/g, rg)
           .replace(/karsacr\.azurecr\.io/g, acrLoginServer);
-        const tmpIngress = path.join(repoRoot, ".tmp-agentmesh-ingress.yaml");
+        const tmpIngress = path.join(os.tmpdir(), `kars-agentmesh-ingress-${Date.now()}.yaml`);
         try {
           writeFileSync(tmpIngress, patchedIngress);
           await execa("kubectl", ["apply", "-f", tmpIngress], { stdio: "pipe" });
