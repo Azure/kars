@@ -352,10 +352,103 @@ export function connectCommand(): Command {
         // Start port-forward — pipe stderr so we can surface kubectl errors
         // when the connection drops. Without this, all the user sees is
         // "Disconnected." with no diagnostic.
-        console.log(chalk.dim(`  Starting port-forward on localhost:${localPort}...`));
+
+        // Wait for the pod to actually be Running with the agent container
+        // Ready before forwarding. `kubectl port-forward` fails hard with
+        // "unable to forward port because pod is not running. Current
+        // status=Pending" if the pod is still scheduling/pulling — which is
+        // common right after `kars up` (the deploy finishes before the image
+        // is pulled on the node). Poll until ready, fail fast on image-pull
+        // errors, and print a clean message instead of a raw Node stack trace.
+        const podReady = await (async (): Promise<{ ok: boolean; detail: string }> => {
+          const deadlineMs = Date.now() + 180_000; // 3 min — first image pull on a fresh node can be slow
+          const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+          let lastPhase = "Unknown";
+          let printedWait = false;
+          while (Date.now() < deadlineMs) {
+            let pod: {
+              status?: {
+                phase?: string;
+                containerStatuses?: { name: string; ready?: boolean; state?: { waiting?: { reason?: string; message?: string } } }[];
+                initContainerStatuses?: { name: string; state?: { waiting?: { reason?: string; message?: string } } }[];
+              };
+            } | undefined;
+            try {
+              const { stdout } = await execa("kubectl", [
+                ...ctxArgs, "get", "pod", "-n", namespace,
+                "-l", `kars.azure.com/sandbox=${name}`,
+                "--sort-by=.metadata.creationTimestamp", "-o", "json",
+              ], { stdio: "pipe" });
+              const items = JSON.parse(stdout).items as typeof pod[];
+              pod = items[items.length - 1]; // newest pod (handles rollouts)
+            } catch {
+              await sleep(2500);
+              continue;
+            }
+            if (!pod) { await sleep(2500); continue; }
+            lastPhase = pod.status?.phase ?? "Unknown";
+            const cs = (pod.status?.containerStatuses ?? []).find(c => c.name === podContainer);
+            if (lastPhase === "Running" && cs?.ready === true) {
+              if (printedWait) process.stdout.write("\n");
+              return { ok: true, detail: "" };
+            }
+            // Fail fast on unrecoverable image / container errors (the agent
+            // container OR the egress-guard init / inference-router sidecar).
+            const waiters = [
+              ...(pod.status?.initContainerStatuses ?? []),
+              ...(pod.status?.containerStatuses ?? []),
+            ];
+            const fatal = waiters
+              .map(c => ({ name: c.name, w: c.state?.waiting }))
+              .find(x => x.w && /ImagePullBackOff|ErrImagePull|InvalidImageName|CreateContainerConfigError|CrashLoopBackOff/.test(x.w.reason ?? ""));
+            if (fatal) {
+              if (printedWait) process.stdout.write("\n");
+              return { ok: false, detail: `${fatal.name}: ${fatal.w?.reason}${fatal.w?.message ? ` — ${fatal.w.message}` : ""}` };
+            }
+            const secsLeft = Math.max(0, Math.round((deadlineMs - Date.now()) / 1000));
+            process.stdout.write(`\r  ${chalk.dim(`Waiting for ${name} to be ready (phase=${lastPhase}, ${secsLeft}s left)…   `)}`);
+            printedWait = true;
+            await sleep(3000);
+          }
+          if (printedWait) process.stdout.write("\n");
+          return { ok: false, detail: `timed out after 3m (last phase=${lastPhase})` };
+        })();
+
+        if (!podReady.ok) {
+          console.log();
+          console.log(chalk.red(`  Sandbox '${name}' pod is not ready — ${podReady.detail}`));
+          console.log(chalk.dim(`  Inspect it with:  kubectl describe pod -n ${namespace} -l kars.azure.com/sandbox=${name}`));
+          console.log(chalk.dim(`  Then retry:       kars connect ${name}\n`));
+          return;
+        }
+
+        // Pick a free local port. If the requested port is taken by something
+        // that ISN'T a reusable HTTP forward (handled above), bump to the next
+        // free port instead of crashing with EADDRINUSE — the original
+        // "address already in use" footgun when 18789 is held by a stale
+        // process or an unrelated listener.
+        const effectivePort = await (async (): Promise<number> => {
+          const net = await import("node:net");
+          const canBind = (p: number) => new Promise<boolean>((resolve) => {
+            const srv = net.createServer();
+            srv.once("error", () => resolve(false));
+            srv.once("listening", () => srv.close(() => resolve(true)));
+            srv.listen(p, "127.0.0.1");
+          });
+          const start = Number(localPort);
+          for (let p = start; p < start + 20; p++) {
+            if (await canBind(p)) return p;
+          }
+          return start; // give up — let kubectl surface the bind error
+        })();
+        if (effectivePort !== Number(localPort)) {
+          console.log(chalk.dim(`  Port ${localPort} is in use — using ${effectivePort} instead.`));
+        }
+
+        console.log(chalk.dim(`  Starting port-forward on localhost:${effectivePort}...`));
         const pf = execa("kubectl", [
           ...ctxArgs, "port-forward", "-n", namespace,
-          `deploy/${name}`, `${localPort}:18789`,
+          `deploy/${name}`, `${effectivePort}:18789`,
         ], { stdio: ["ignore", "pipe", "pipe"] });
 
         let pfStderr = "";
@@ -372,7 +465,7 @@ export function connectCommand(): Command {
         // Wait for port-forward to be ready
         await new Promise(r => setTimeout(r, 2000));
 
-        const url = `http://localhost:${localPort}/#token=${gatewayToken}`;
+        const url = `http://localhost:${effectivePort}/#token=${gatewayToken}`;
         console.log();
         console.log(`  ${chalk.green("→")} ${chalk.cyan.underline(url)}`);
         console.log();

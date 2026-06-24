@@ -340,18 +340,10 @@ pub fn spawn_memory_binding_watcher(
 /// Get the max mtime across `*.json` files in `dir` (mirrors
 /// `governance::dir_max_mtime` but scoped to JSON since the
 /// controller publishes the binding as a single
-/// `binding.json`).
+/// `binding.json`). Delegates to [`crate::config_mount::dir_max_mtime`]
+/// so the ConfigMap symlink-swap fix is shared.
 fn dir_max_mtime(dir: &str) -> Option<std::time::SystemTime> {
-    let path = Path::new(dir);
-    if !path.is_dir() {
-        return None;
-    }
-    std::fs::read_dir(path)
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|e| e.metadata().ok()?.modified().ok())
-        .max()
+    crate::config_mount::dir_max_mtime(dir, &["json"])
 }
 
 #[cfg(test)]
