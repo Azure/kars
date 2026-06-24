@@ -128,7 +128,7 @@ export function modelCommand(): Command {
           const { stdout } = await execa("kubectl", [
             "exec", "-n", namespace, `deploy/${name}`,
             "-c", "inference-router", "--",
-            "sh", "-c", "curl -s http://localhost:8443/v1/models",
+            "/usr/local/bin/kars-inference-router", "probe", "/v1/models",
           ], { stdio: "pipe" });
           const data = JSON.parse(stdout);
           const models = (data.data || []).map((m: any) => m.id).sort();

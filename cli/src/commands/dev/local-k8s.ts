@@ -461,9 +461,28 @@ async function loadImageIntoKind(
     // fall through to the ctr import path
   }
 
-  // Verify the image is on the node; if not, push it via ctr.
+  // Verify the node has THIS EXACT image (by ID), not merely the tag. A
+  // `:dev` / `:latest` tag left over from an earlier `kars dev` build or
+  // `--release` pull points at a STALE image, and `kind load` won't re-point
+  // it — so the cluster silently keeps running the old image. This is
+  // precisely why `kars dev --release` never actually exercised the
+  // distroless images: the kind node kept a tool-rich multistage `:dev` from
+  // a prior build, masking every distroless breakage (egress-guard,
+  // operator probes, …). Compare the source image ID with the node's and
+  // re-import on ANY mismatch — erring toward re-import is safe (worst case
+  // it's a slower load), erring toward skip is what shipped the bug.
   const node = `${clusterName}-control-plane`;
-  const present = await execa(runtime, [
+  const shortId = (s: string) => s.replace(/^sha256:/, "").slice(0, 24);
+  const sourceId = await execa(runtime, [
+    "image",
+    "inspect",
+    image,
+    "--format",
+    "{{.Id}}",
+  ])
+    .then((r) => shortId(r.stdout.trim()))
+    .catch(() => "");
+  const nodeId = await execa(runtime, [
     "exec",
     node,
     "crictl",
@@ -471,10 +490,11 @@ async function loadImageIntoKind(
     "-q",
     image,
   ])
-    .then((r) => r.stdout.trim().length > 0)
-    .catch(() => false);
+    .then((r) => shortId(r.stdout.trim()))
+    .catch(() => "");
+  const upToDate = sourceId !== "" && sourceId === nodeId;
 
-  if (present) return;
+  if (upToDate) return;
 
   const save = execa(runtime, ["save", image]);
   const importProc = execa(

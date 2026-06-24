@@ -31,12 +31,12 @@ export async function fetchEgressDomains(sb: SandboxInfo, kubeContext?: string):
   const routerCurl = isDockerAgent
     ? (path: string) => execa("docker", [
         "exec", sb.podName!,
-        "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+        "/usr/local/bin/kars-inference-router", "probe", path,
       ], { stdio: "pipe" })
     : (path: string) => execa("kubectl", kctl([
         "exec", "-n", sb.namespace, sb.podName!,
         "-c", "inference-router", "--",
-        "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+        "/usr/local/bin/kars-inference-router", "probe", path,
       ], kubeContext), { stdio: "pipe", timeout: 10000 });
 
   try {
@@ -139,12 +139,12 @@ export async function fetchSecurityState(sb: SandboxInfo, kubeContext?: string):
   const routerExec = isDockerAgent
     ? (path: string) => execa("docker", [
         "exec", sb.podName!,
-        "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+        "/usr/local/bin/kars-inference-router", "probe", path,
       ], { stdio: "pipe" })
     : (path: string) => execa("kubectl", kctl([
         "exec", "-n", sb.namespace, sb.podName!,
         "-c", "inference-router", "--",
-        "curl", "-s", "--max-time", "3", `http://localhost:8443${path}`,
+        "/usr/local/bin/kars-inference-router", "probe", path,
       ], kubeContext), { stdio: "pipe", timeout: 10000 });
 
   // Docker agents don't have K8s resources (NetworkPolicy, admin token secret)
@@ -388,12 +388,12 @@ export async function fetchAgtQuick(
     const { stdout } = isDockerAgent
       ? await execa("docker", [
           "exec", sb.podName,
-          "curl", "-s", "--max-time", "2", "http://localhost:8443/agt/status",
+          "/usr/local/bin/kars-inference-router", "probe", "/agt/status",
         ], { stdio: "pipe" })
       : await execa("kubectl", kctl([
           "exec", "-n", sb.namespace, sb.podName,
           "-c", "inference-router", "--",
-          "curl", "-s", "--max-time", "2", "http://localhost:8443/agt/status",
+          "/usr/local/bin/kars-inference-router", "probe", "/agt/status",
         ], kubeContext), { stdio: "pipe", timeout: 8000 });
 
     const agt = JSON.parse(stdout);

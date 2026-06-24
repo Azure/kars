@@ -38,6 +38,7 @@ export function upCommand(): Command {
     .option("-g, --resource-group <name>", "Resource group name")
     .option("--node-vm-size <sku>", "VM size for the sandbox (user) node pool. Default: auto-pick a size available to your subscription (D4s/D4as family).")
     .option("--system-vm-size <sku>", "VM size for the system node pool. Default: auto-pick a size available to your subscription (D2as/D2s family).")
+    .option("--require-prompt-shields", "Fail-closed if a model response lacks Azure Prompt Shields annotations (prompt_filter_results). Only enable when your Foundry/AOAI deployment has a Content Filter that emits them — bare deployments don't, and every response would be blocked. Default off.", false)
     // ── Infrastructure ────────────────────────────────────────────────
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
     .option("--force-infra", "Force Bicep deployment even if AKS cluster exists", false)

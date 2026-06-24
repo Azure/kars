@@ -4,7 +4,6 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
-import { getAdminToken, withAdminAuth } from "../router-admin.js";
 import { registerPolicySignSubcommand } from "./policy/sign.js";
 
 export function policyCommand(): Command {
@@ -158,10 +157,9 @@ export function policyCommand(): Command {
         }
 
         // Use kubectl exec to curl the router from inside the pod (via inference-router container)
-        const adminToken = await getAdminToken(namespace);
         const { stdout } = await execa("kubectl", [
           "exec", "-n", namespace, podName, "-c", "inference-router", "--",
-          ...withAdminAuth(["curl", "-sf", "http://localhost:8443/egress/learned"], adminToken),
+          "/usr/local/bin/kars-inference-router", "probe", "/egress/learned",
         ], { stdio: "pipe" });
 
         const data = JSON.parse(stdout);
@@ -211,7 +209,7 @@ export function policyCommand(): Command {
         if (options.clear) {
           await execa("kubectl", [
             "exec", "-n", namespace, podName, "-c", "inference-router", "--",
-            ...withAdminAuth(["curl", "-sf", "-X", "POST", "http://localhost:8443/egress/learned/clear"], adminToken),
+            "/usr/local/bin/kars-inference-router", "probe", "POST", "/egress/learned/clear",
           ], { stdio: "pipe" });
           console.log(chalk.dim("  Learned domains cleared.\n"));
         }

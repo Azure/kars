@@ -3,7 +3,6 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
-import { getAdminToken, withAdminAuth } from "../router-admin.js";
 import { blockedCommand } from "./egress/blocked.js";
 import {
   allowExtraCommand,
@@ -145,14 +144,13 @@ export function egressCommand(): Command {
       }
 
       // Read admin token for authenticated router calls (AKS only)
-      const adminToken = mode === "k8s" ? await getAdminToken(ns) : "";
 
       // Helper: call router API — Docker exec or kubectl exec
       async function routerGet(path: string): Promise<any> {
         let curlArgs = mode === "docker"
           ? ["exec", containerName, "curl", "-s", `http://127.0.0.1:8443${path}`]
           : ["exec", "-n", ns, pod, "-c", "inference-router", "--",
-             ...withAdminAuth(["curl", "-s", `http://127.0.0.1:8443${path}`], adminToken)];
+             "/usr/local/bin/kars-inference-router", "probe", path];
         const bin = mode === "docker" ? "docker" : "kubectl";
         const { stdout } = await execa(bin, curlArgs, { stdio: "pipe" });
         return JSON.parse(stdout);
@@ -165,10 +163,7 @@ export function egressCommand(): Command {
              "-d", JSON.stringify(body),
              `http://127.0.0.1:8443${path}`]
           : ["exec", "-n", ns, pod, "-c", "inference-router", "--",
-             ...withAdminAuth(["curl", "-s", "-X", "POST",
-             "-H", "Content-Type: application/json",
-             "-d", JSON.stringify(body),
-             `http://127.0.0.1:8443${path}`], adminToken)];
+             "/usr/local/bin/kars-inference-router", "probe", "POST", path, JSON.stringify(body)];
         const bin = mode === "docker" ? "docker" : "kubectl";
         const { stdout } = await execa(bin, curlArgs, { stdio: "pipe" });
         return JSON.parse(stdout);

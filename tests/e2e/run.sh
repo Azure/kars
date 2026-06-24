@@ -279,6 +279,62 @@ test_serviceaccount_created() {
     fi
 }
 
+# DISTROLESS REGRESSION GATE.
+#
+# The checks above only assert control-plane artifacts (namespace,
+# NetworkPolicy, ServiceAccount) — they pass even if the sandbox POD never
+# starts. The sandbox pod runs DISTROLESS images: the `egress-guard` init
+# container runs `sh -c "iptables ..."` and the `inference-router` serves
+# `/healthz` (operator/CLI reach it via the in-binary `probe` subcommand,
+# since the image has no curl). If a tool went missing in a distroless
+# refactor (#383), the egress-guard crashloops at Init and the router
+# becomes unreachable — invisible to every other e2e check. This is exactly
+# how the egress-guard/operator/probe breakages shipped uncaught.
+#
+# So: assert the pod gets PAST the egress-guard init, and the router answers
+# its own `probe`. Either failing means a distroless tool is missing.
+test_sandbox_pod_starts() {
+    local ns="kars-e2e-test"
+    info "Distroless gate: waiting for sandbox pod to pass the egress-guard init (up to 150s)..."
+    local deadline=$(($(date +%s) + 150)) pod="" eg_ready=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        pod=$(kubectl get pods -n "$ns" -l kars.azure.com/sandbox=e2e-test -o name 2>/dev/null | head -1 | cut -d/ -f2)
+        if [ -n "$pod" ]; then
+            eg_ready=$(kubectl get pod -n "$ns" "$pod" -o jsonpath='{.status.initContainerStatuses[?(@.name=="egress-guard")].ready}' 2>/dev/null || true)
+            [ "$eg_ready" = "true" ] && break
+        fi
+        sleep 3
+    done
+
+    if [ "$eg_ready" != "true" ]; then
+        warn "egress-guard init never completed — likely a distroless tool break (sh/iptables missing)"
+        kubectl describe pod -n "$ns" "$pod" 2>/dev/null | sed -n '/Events:/,$p' | tail -25 || true
+        kubectl get pod -n "$ns" "$pod" -o jsonpath='egress-guard: {.status.initContainerStatuses[?(@.name=="egress-guard")].lastState.terminated.message}{"\n"}' 2>/dev/null || true
+        fail "Sandbox pod never passed the egress-guard init container (distroless regression)"
+        return
+    fi
+    pass "egress-guard init completed — distroless egress-guard OK"
+
+    # Router self-probe: distroless router has no curl, so the operator/CLI
+    # use the binary's `probe` subcommand. Verify it works against the live
+    # router (waits for the server to bind; /healthz is a public endpoint).
+    local rdeadline=$(($(date +%s) + 90)) probe_ok=0
+    while [ "$(date +%s)" -lt "$rdeadline" ]; do
+        if kubectl exec -n "$ns" "$pod" -c inference-router -- \
+            /usr/local/bin/kars-inference-router probe /healthz >/dev/null 2>&1; then
+            probe_ok=1
+            break
+        fi
+        sleep 3
+    done
+    if [ "$probe_ok" -eq 1 ]; then
+        pass "Router self-probe works in distroless image (kars-inference-router probe /healthz)"
+    else
+        kubectl logs -n "$ns" "$pod" -c inference-router --tail=30 2>/dev/null || true
+        fail "Router self-probe failed in distroless image — operator/CLI router calls would break"
+    fi
+}
+
 test_cleanup_sandbox() {
     kubectl delete karssandbox e2e-test -n kars-system 2>/dev/null || true
     sleep 3
@@ -2794,6 +2850,7 @@ main() {
     test_serviceaccount_created || true
     test_sandbox_namespace_labels || true
     test_sandbox_deployment_exists || true
+    test_sandbox_pod_starts || true
     test_sandbox_networkpolicy_denies_ingress || true
     test_sandbox_suspended_lifecycle || true
     test_secondary_resource_watch || true

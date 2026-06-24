@@ -52,7 +52,12 @@ export function buildInferencePolicy(opts: InferencePolicyOpts): Record<string, 
       },
     },
     contentSafety: {
-      requirePromptShields: opts.promptShields !== false,
+      // Default OFF: bare Foundry / Azure OpenAI deployments without an
+      // attached Content Filter do NOT emit `prompt_filter_results`, so a
+      // fail-closed requirement blocks every response. Opt in explicitly
+      // (CLI `--require-prompt-shields`) only when the deployment has a
+      // Content Filter that surfaces those annotations.
+      requirePromptShields: opts.promptShields === true,
     },
   };
   const daily = opts.tokenBudgetDaily ?? 0;

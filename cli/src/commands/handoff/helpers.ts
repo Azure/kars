@@ -222,18 +222,10 @@ export async function createHandoffHelpers(name: string): Promise<HandoffHelpers
   }
 
   async function getAksAdminToken(): Promise<string | undefined> {
-    // On AKS, the controller mounts the admin token at /etc/kars/secrets/admin-token
-    try {
-      const { stdout } = await execa("kubectl", [
-        "exec", "-n", targetNs,
-        `deploy/${name}`, "-c", "inference-router", "--",
-        "cat", "/etc/kars/secrets/admin-token",
-      ], { stdio: "pipe", reject: false });
-      if (stdout.trim()) return stdout.trim();
-    } catch {
-      /* fallback */
-    }
-    // Fallback: try the openclaw container (same volume mount)
+    // On AKS, the controller mounts the admin token at
+    // /etc/kars/secrets/admin-token. Read it via the openclaw container — the
+    // inference-router image is distroless (no `cat`); openclaw shares the same
+    // mount and has a shell. (Falls back to the K8s secret below.)
     try {
       const { stdout } = await execa("kubectl", [
         "exec", "-n", targetNs,

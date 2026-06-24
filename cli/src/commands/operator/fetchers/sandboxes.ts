@@ -345,7 +345,7 @@ export async function fetchSandboxesDocker(): Promise<SandboxInfo[]> {
         // Check if this agent has been handed off (dormant)
         try {
           const { stdout: hsOut } = await execa("docker", [
-            "exec", containerName, "curl", "-s", "--max-time", "2", "http://localhost:8443/agt/handoff/status",
+            "exec", containerName, "/usr/local/bin/kars-inference-router", "probe", "/agt/handoff/status",
           ], { stdio: "pipe" });
           const hs = JSON.parse(hsOut);
           if (hs.phase === "complete" && hs.direction === "local_to_aks") {

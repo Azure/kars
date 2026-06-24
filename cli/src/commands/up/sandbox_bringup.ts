@@ -438,7 +438,10 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     model: options.model,
     provider: "azure-openai",
     contentSafety: true,
-    promptShields: true,
+    // Default off — only fail-closed on missing prompt_filter_results when
+    // the operator opts in via --require-prompt-shields (their Foundry/AOAI
+    // deployment must have a Content Filter that emits the annotations).
+    promptShields: (options as { requirePromptShields?: boolean }).requirePromptShields === true,
   });
   const toolPolicy = buildToolPolicy({
     sandboxName: options.name,
