@@ -1,0 +1,25 @@
+# Minimal sandbox stand-in for the e2e distroless gate (test_sandbox_pod_starts).
+#
+# The real sandbox image (sandbox-images/openclaw) is ~3.8GB — far too heavy to
+# build and `kind load` on every CI run. The gate only needs the sandbox image
+# to:
+#   1. provide `sh` + `iptables` for the `egress-guard` init container (the
+#      exact tools #383's distroless move dropped from the inference-router
+#      image — the regression class this gate exists to catch), and
+#   2. be a loadable, non-`:latest` tag so the controller's IfNotPresent pull
+#      policy uses the kind-loaded copy instead of trying to pull from ACR.
+#
+# It deliberately does NOT run a real agent: the gate asserts the egress-guard
+# init completes and the (separate, real distroless) inference-router container
+# answers its in-binary `probe` — neither needs a live agent process.
+#
+# Base + toolset are pinned to the SAME azurelinux/base/core:3.0 + iptables +
+# util-linux that the production sandbox uses (sandbox-images/openclaw/
+# Dockerfile.base), so the egress-guard's iptables backend matches production.
+FROM mcr.microsoft.com/azurelinux/base/core:3.0
+RUN tdnf install -y iptables util-linux && tdnf clean all
+# The agent container the controller schedules off this image has its command
+# set by the reconciler; this CMD only matters if that is ever absent. Keep the
+# container alive so a crashlooping placeholder never masks the gate's real
+# assertions (egress-guard init + router self-probe).
+CMD ["sleep", "infinity"]

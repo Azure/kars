@@ -38,6 +38,7 @@ export function addCommand(): Command {
     .option("--no-governance", "Skip generating per-sandbox ToolPolicy / TrustGraph CRs (router guardrails still enforced)")
     .option("--trust-threshold <score>", "AGT trust threshold (0-1000)", "500")
     .option("--policy-profile <profile>", "AGT policy profile name", "default")
+    .option("--require-prompt-shields", "Fail-closed if a model response lacks Azure Prompt Shields annotations (prompt_filter_results). Only enable when the deployment has a Content Filter that emits them — bare deployments don't, and every response would be blocked. Default off.", false)
     .option("--learn-egress", "Egress learn mode: observe outbound domains (blocklist still enforced); review with 'kars policy learn'", false)
 
     // ── Foundry agent (all runtimes; optional) ─────────────────────────
@@ -294,7 +295,9 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         model: options.model,
         provider: "azure-ai-foundry",
         contentSafety: true,
-        promptShields: true,
+        // Default off — opt in via --require-prompt-shields when the
+        // deployment has a Content Filter emitting prompt_filter_results.
+        promptShields: options.requirePromptShields === true,
         tokenBudgetDaily: parseInt(options.tokenBudgetDaily) || 0,
         tokenBudgetPerRequest: parseInt(options.tokenBudgetPerRequest) || 0,
       });
@@ -501,7 +504,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
             const { stdout: healthz } = await execa("kubectl", [
               "exec", "-n", namespace,
               "deploy/" + name, "-c", "inference-router",
-              "--", "wget", "-qO-", "--timeout=5", "http://127.0.0.1:8443/healthz",
+              "--", "/usr/local/bin/kars-inference-router", "probe", "/healthz",
             ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
             if (healthz.includes("ok") || healthz.includes("healthy")) {
               ready = true;

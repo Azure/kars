@@ -66,6 +66,70 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("rustls process-level CryptoProvider already installed by a dependency");
 
+    // Self-probe subcommand: `kars-inference-router probe [METHOD] <path>`
+    // makes an HTTP request to the router's OWN already-running listener on
+    // 127.0.0.1:8443<path> and prints the body to stdout (exit 0 on 2xx,
+    // 1 otherwise). METHOD is optional (default GET; POST supported, no body).
+    // This lets `kars operator` query /agt/status, /metrics, /egress/learn,
+    // etc. via `kubectl exec -c inference-router -- kars-inference-router
+    // probe <path>` WITHOUT needing `curl` in the image — the router image
+    // is AL3 *distroless* (no curl/shell), but the binary is always present.
+    // Replaces the old `exec ... curl http://localhost:8443<path>` calls
+    // that broke when the runtime image went distroless (#383).
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("probe") {
+            // Forms: `probe <path>` (GET) | `probe GET|POST <path> [json-body]`.
+            let (method, raw_path, body) = match (args.get(2), args.get(3)) {
+                (Some(m), Some(p)) if m.eq_ignore_ascii_case("post") => {
+                    (reqwest::Method::POST, p.as_str(), args.get(4).cloned())
+                }
+                (Some(m), Some(p)) if m.eq_ignore_ascii_case("get") => {
+                    (reqwest::Method::GET, p.as_str(), None)
+                }
+                (Some(p), _) => (reqwest::Method::GET, p.as_str(), None),
+                _ => (reqwest::Method::GET, "/healthz", None),
+            };
+            let path = if raw_path.starts_with('/') {
+                raw_path.to_string()
+            } else {
+                format!("/{raw_path}")
+            };
+            let url = format!("http://127.0.0.1:8443{path}");
+            // Read the admin token exactly as the server does (same files /
+            // env), so protected endpoints (egress, policy, …) are reachable
+            // from inside the container without the caller passing a token.
+            let admin_token = std::fs::read_to_string("/etc/kars/secrets/admin-token")
+                .ok()
+                .or_else(|| std::fs::read_to_string("/run/secrets/admin-token").ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()));
+            let mut req = reqwest::Client::new()
+                .request(method, &url)
+                .timeout(std::time::Duration::from_secs(3));
+            if let Some(tok) = admin_token {
+                req = req.header("Authorization", format!("Bearer {tok}"));
+            }
+            if let Some(b) = body {
+                req = req.header("Content-Type", "application/json").body(b);
+            }
+            let code = match req.send().await {
+                Ok(resp) => {
+                    let ok = resp.status().is_success();
+                    let body = resp.text().await.unwrap_or_default();
+                    print!("{body}");
+                    i32::from(!ok)
+                }
+                Err(e) => {
+                    eprintln!("probe {url} failed: {e}");
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
+    }
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(

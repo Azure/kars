@@ -312,8 +312,7 @@ export class KubectlDataSource implements ClusterDataSource {
           [
             "exec", "-n", namespace, `deploy/${sandbox}`,
             "-c", "inference-router", "--",
-            "curl", "-sS", "--max-time", "3",
-            `http://127.0.0.1:8443${path}`,
+            "/usr/local/bin/kars-inference-router", "probe", path,
           ],
           this.kubeContext,
         ),

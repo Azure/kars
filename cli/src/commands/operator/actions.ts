@@ -55,8 +55,7 @@ export function createActions(ctx: ActionContext): OperatorActions {
       await execa("kubectl", kctl([
         "exec", "-n", sb.namespace, sb.podName,
         "-c", "inference-router", "--",
-        "curl", "-s", "-X", "POST",
-        "http://localhost:8443/egress/learn",
+        "/usr/local/bin/kars-inference-router", "probe", "POST", "/egress/learn",
       ], kubeContext), { stdio: "pipe" });
       await execa("kubectl", kctl([
         "patch", "karssandbox", sb.name, "-n", "kars-system",
