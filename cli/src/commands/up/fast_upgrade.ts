@@ -6,12 +6,11 @@
 // cached context. Caller invokes when `options.upgrade` is set and
 // returns immediately afterwards.
 
-import * as path from "node:path";
-import * as fs from "node:fs";
 import chalk from "chalk";
 import ora from "ora";
 import { execa } from "execa";
 import { loadContext } from "../../config.js";
+import { requireBundledAsset } from "../../lib/repo-assets.js";
 
 export interface UpOptionsForUpgrade {
   upgrade?: boolean;
@@ -36,26 +35,9 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         await execa("az", ["aks", "get-credentials", "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup, "--overwrite-existing"], { stdio: "pipe" });
         spin.succeed("AKS connected");
 
-        // Find Helm chart — try cwd, then walk up, then try relative to CLI source
-        let repoRoot = process.cwd();
-        for (let i = 0; i < 5; i++) {
-          if (fs.existsSync(path.join(repoRoot, "deploy", "helm"))) break;
-          repoRoot = path.dirname(repoRoot);
-        }
-        if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
-          // Try relative to the CLI package itself
-          const cliDir = new URL("../../..", import.meta.url).pathname;
-          repoRoot = cliDir;
-          for (let i = 0; i < 3; i++) {
-            if (fs.existsSync(path.join(repoRoot, "deploy", "helm"))) break;
-            repoRoot = path.dirname(repoRoot);
-          }
-        }
-        if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
-          console.error(chalk.red("\n  Helm chart not found. Run from the kars repo directory.\n"));
-          process.exit(1);
-        }
-        const helmPath = path.join(repoRoot, "deploy", "helm", "kars");
+        // Resolve the Helm chart from a repo checkout OR the bundled package
+        // copy (so `kars up --upgrade` works with no source tree).
+        const helmPath = requireBundledAsset("deploy/helm/kars");
 
         // Build Helm args from cached context
         const openAiEndpoint = ctx.foundryEndpoint || "";
