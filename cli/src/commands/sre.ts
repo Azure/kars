@@ -4,45 +4,11 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { execa } from "execa";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { requireBundledAsset } from "../lib/repo-assets.js";
 
 /**
- * Resolve the kars repo root.
- *
- * Strategy mirrors `cli/src/commands/up.ts`: first try the
- * three-levels-up-from-the-installed-CLI-file path (works for
- * `npm link` installs), then fall back to walking up from CWD
- * looking for `deploy/helm`.
+ * `kars sre` — autonomous incident triage controller.
  */
-function resolveRepoRoot(): string {
-  // Strategy 1: from the file's own location (works for npm link
-  // since the link points back into the repo's cli/dist/ tree)
-  try {
-    const thisFile = fileURLToPath(import.meta.url);
-    const cliDir = path.dirname(path.dirname(thisFile)); // .../cli/dist
-    const candidate = path.resolve(cliDir, "..", "..");  // .../<repo>
-    if (fs.existsSync(path.join(candidate, "deploy", "helm", "kars"))) {
-      return candidate;
-    }
-  } catch {
-    // import.meta.url may not be a file URL in some test contexts
-  }
-  // Strategy 2: walk up from CWD looking for deploy/helm
-  let cur = process.cwd();
-  for (let i = 0; i < 8; i++) {
-    if (fs.existsSync(path.join(cur, "deploy", "helm", "kars"))) return cur;
-    const parent = path.dirname(cur);
-    if (parent === cur) break;
-    cur = parent;
-  }
-  throw new Error(
-    "Could not resolve the kars repo root (looked for deploy/helm/kars). " +
-    "Run `kars sre install` from inside an kars checkout, or set the working " +
-    "directory to the repo root first.",
-  );
-}
 
 /**
  * `kars sre` — manage the built-in kars-sre agent.
@@ -93,7 +59,7 @@ export function sreCommand(): Command {
     }) => {
       let chartPath: string;
       try {
-        chartPath = path.join(resolveRepoRoot(), "deploy", "helm", "kars");
+        chartPath = requireBundledAsset("deploy/helm/kars");
       } catch (err: any) {
         console.error(chalk.red(`✗ ${err.message}`));
         process.exit(1);
@@ -291,7 +257,7 @@ export function sreCommand(): Command {
     .action(async (options: { release: string; namespace: string; context?: string }) => {
       let chartPath: string;
       try {
-        chartPath = path.join(resolveRepoRoot(), "deploy", "helm", "kars");
+        chartPath = requireBundledAsset("deploy/helm/kars");
       } catch (err: any) {
         console.error(chalk.red(`✗ ${err.message}`));
         process.exit(1);

@@ -62,8 +62,10 @@ export function headlampCommand(): Command {
         if (options.install) {
           const { installHeadlamp: stackInstallHeadlamp, installKarsPlugin, installPrometheus } =
             await import("./up/headlamp_stack.js");
-          const { findRepoRoot } = await import("./up/helpers.js");
-          const repoRoot = findRepoRoot(process.cwd());
+          const { findRepoRootOrNull } = await import("../lib/repo-assets.js");
+          // repoRoot is OPTIONAL now — the stack resolves the bundled plugin +
+          // monitoring when not in a checkout (npm-installed `kars`).
+          const repoRoot = findRepoRootOrNull(process.cwd()) ?? undefined;
           console.log(chalk.bold(`  Installing Headlamp + kars plugin + Prometheus into ${chalk.cyan(ctx!)}…\n`));
           await stackInstallHeadlamp({ context: ctx!, repoRoot });
           console.log();
