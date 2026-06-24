@@ -2200,6 +2200,16 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 // is already pulled on the node (it's the agent container), so
                 // we use it for the guard.
                 "image": &ctx.sandbox_image,
+                // Same pull policy as the agent container (both run the
+                // sandbox image). Without an explicit policy, k8s defaults a
+                // `:latest`-tagged image to `Always` — which makes the
+                // egress-guard try to pull from the registry even when the
+                // image is already loaded into a kind node (`kars dev`,
+                // e2e), turning the init into an ErrImagePull loop. Pinning
+                // it to `pull_policy` (IfNotPresent under dev_profile /
+                // non-`:latest` tags) keeps the kind-loaded image authoritative
+                // while still pulling fresh on AKS.
+                "imagePullPolicy": pull_policy,
                 "command": ["sh", "-c", egress_guard_cmd],
                 "securityContext": {
                     "runAsUser": 0,

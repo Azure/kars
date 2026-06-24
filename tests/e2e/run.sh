@@ -68,6 +68,7 @@ build_images() {
         else
             kind load docker-image kars-controller:e2e --name "$CLUSTER_NAME"
             kind load docker-image kars-inference-router:e2e --name "$CLUSTER_NAME"
+            build_sandbox_stub
             return 0
         fi
     fi
@@ -114,6 +115,29 @@ build_images() {
     info "Building inference router image"
     docker_build_retry kars-inference-router:e2e "$ROOT_DIR/inference-router/Dockerfile" "$ROOT_DIR"
     kind load docker-image kars-inference-router:e2e --name "$CLUSTER_NAME"
+
+    build_sandbox_stub
+}
+
+# The sandbox-image stand-in for the distroless gate. The real sandbox image is
+# ~3.8GB; this minimal azurelinux+iptables image (tests/e2e/Dockerfile.sandbox-
+# stub) gives the egress-guard init container the sh+iptables it needs and is a
+# non-`:latest` tag so the controller's IfNotPresent pull policy uses the kind-
+# loaded copy instead of pulling ACR. install_crds() points SANDBOX_IMAGE at it.
+build_sandbox_stub() {
+    info "Building sandbox stub image (egress-guard sh+iptables)"
+    local attempt
+    for attempt in 1 2 3; do
+        if docker build -t kars-sandbox-e2e:dev \
+            -f "$ROOT_DIR/tests/e2e/Dockerfile.sandbox-stub" \
+            "$ROOT_DIR/tests/e2e"; then
+            kind load docker-image kars-sandbox-e2e:dev --name "$CLUSTER_NAME"
+            return 0
+        fi
+        warn "sandbox stub build failed (attempt $attempt/3), retrying in 15s"
+        sleep 15
+    done
+    die "failed to build the sandbox stub image after 3 attempts"
 }
 
 install_crds() {
@@ -156,6 +180,8 @@ install_crds() {
         --set inferenceRouter.image.repository=kars-inference-router \
         --set inferenceRouter.image.tag=e2e \
         --set inferenceRouter.image.pullPolicy=Never \
+        --set sandbox.image.repository=kars-sandbox-e2e \
+        --set sandbox.image.tag=dev \
         "${extra_set_args[@]}" \
         --wait --timeout 5m; then
         warn "Helm install did not converge within 5m — dumping diagnostics"
@@ -283,13 +309,15 @@ test_serviceaccount_created() {
 #
 # The checks above only assert control-plane artifacts (namespace,
 # NetworkPolicy, ServiceAccount) — they pass even if the sandbox POD never
-# starts. The sandbox pod runs DISTROLESS images: the `egress-guard` init
-# container runs `sh -c "iptables ..."` and the `inference-router` serves
-# `/healthz` (operator/CLI reach it via the in-binary `probe` subcommand,
-# since the image has no curl). If a tool went missing in a distroless
-# refactor (#383), the egress-guard crashloops at Init and the router
-# becomes unreachable — invisible to every other e2e check. This is exactly
-# how the egress-guard/operator/probe breakages shipped uncaught.
+# starts. Two real containers in that pod exercise the distroless surface: the
+# `egress-guard` init container runs `sh -c "iptables ..."` (needs sh+iptables;
+# the sandbox image provides them — here a minimal azurelinux+iptables stub
+# loaded by build_sandbox_stub, since the real 3.8GB image is too heavy for CI),
+# and the real distroless `inference-router` serves `/healthz`, reachable only
+# via the in-binary `probe` subcommand (the image has no curl). If a tool went
+# missing in a distroless refactor (#383), the egress-guard crashloops at Init
+# and the router's probe path breaks — invisible to every other e2e check. This
+# is exactly how the egress-guard/operator/probe breakages shipped uncaught.
 #
 # So: assert the pod gets PAST the egress-guard init, and the router answers
 # its own `probe`. Either failing means a distroless tool is missing.
@@ -307,10 +335,18 @@ test_sandbox_pod_starts() {
     done
 
     if [ "$eg_ready" != "true" ]; then
-        warn "egress-guard init never completed — likely a distroless tool break (sh/iptables missing)"
+        warn "egress-guard init never completed within 150s — dumping pod state"
+        # Surface the actual blocker so the failure is self-diagnosing: an
+        # ErrImagePull/ImagePullBackOff means the sandbox image wasn't loaded
+        # (harness/pull-policy bug); a non-zero terminated message means the
+        # egress-guard command failed (a distroless tool break — sh/iptables
+        # missing — the regression class this gate exists to catch).
+        kubectl get pod -n "$ns" "$pod" \
+            -o jsonpath='egress-guard waiting: {.status.initContainerStatuses[?(@.name=="egress-guard")].state.waiting.reason} {.status.initContainerStatuses[?(@.name=="egress-guard")].state.waiting.message}{"\n"}' 2>/dev/null || true
+        kubectl get pod -n "$ns" "$pod" \
+            -o jsonpath='egress-guard terminated: {.status.initContainerStatuses[?(@.name=="egress-guard")].lastState.terminated.message}{"\n"}' 2>/dev/null || true
         kubectl describe pod -n "$ns" "$pod" 2>/dev/null | sed -n '/Events:/,$p' | tail -25 || true
-        kubectl get pod -n "$ns" "$pod" -o jsonpath='egress-guard: {.status.initContainerStatuses[?(@.name=="egress-guard")].lastState.terminated.message}{"\n"}' 2>/dev/null || true
-        fail "Sandbox pod never passed the egress-guard init container (distroless regression)"
+        fail "Sandbox pod never passed the egress-guard init container"
         return
     fi
     pass "egress-guard init completed — distroless egress-guard OK"
@@ -1558,8 +1594,11 @@ test_sandbox_namespace_labels() {
 
 test_sandbox_deployment_exists() {
     # Reconciler must produce a Deployment in the sandbox namespace.
-    # We don't assert pods are Ready (sandbox image not in kind), only
-    # that the reconciler shaped the workload correctly.
+    # We don't assert pods are fully Ready here (the e2e sandbox stub has
+    # no real agent, so the openclaw container won't become Ready — the
+    # egress-guard init + router probe are asserted by
+    # test_sandbox_pod_starts instead); only that the reconciler shaped
+    # the workload correctly.
     if kubectl get deploy -n kars-e2e-test --no-headers 2>/dev/null | grep -q .; then
         pass "Sandbox Deployment created in sandbox namespace"
     else

@@ -79,6 +79,43 @@ clean. End-to-end distroless validation runs via the new e2e gate on Linux CI an
 `kars dev --release` on a fresh kind. (The egress-guard instance of this class was
 already live-verified on AKS in v0.1.12.)
 
+## Addendum (e2e gate validation — egress-guard pull policy + sandbox stub)
+
+Running the new `test_sandbox_pod_starts` gate on Linux CI surfaced a real gap the
+gate was built to catch — though not the one expected. The gate failed with
+`ErrImagePull` on the sandbox pod, not a tool break:
+
+* **Root cause (harness):** the e2e only `kind load`s the controller + router
+  images; it never provided a sandbox image. With the egress-guard now running on
+  `ctx.sandbox_image` (the v0.1.12 fix), the init container had no image to pull.
+* **Latent consistency bug (controller):** the egress-guard init container carried
+  no explicit `imagePullPolicy`, so k8s defaulted a `:latest` sandbox image to
+  `Always` — diverging from the agent container, which uses the computed
+  `pull_policy` (IfNotPresent under `dev_profile`/non-`:latest`). On AKS both pull
+  `:latest` from ACR so it was invisible; on a kind node a `:latest` sandbox image
+  would ErrImagePull. Fixed by pinning the egress-guard to the same `pull_policy`
+  as the agent container (both run the sandbox image — they must share semantics).
+
+### Fixes in this addendum
+1. `controller/src/reconciler/mod.rs`: egress-guard init container gets
+   `imagePullPolicy: pull_policy` (identical to the agent container). Neutral on
+   AKS (still `Always` for `:latest`), correct on kind (`IfNotPresent`).
+2. `tests/e2e/Dockerfile.sandbox-stub` + `build_sandbox_stub` in `tests/e2e/run.sh`:
+   a minimal `azurelinux/base/core:3.0` + `iptables`/`util-linux` image (the SAME
+   base + toolset as the production sandbox, so the egress-guard's iptables backend
+   matches) loaded as `kars-sandbox-e2e:dev`; `install_crds` points `SANDBOX_IMAGE`
+   at it. The gate now runs the egress-guard's real `iptables` in a real container.
+3. Gate diagnostics now distinguish ErrImagePull/ImagePullBackOff (harness/pull
+   policy) from a non-zero terminated message (a distroless tool break) so a future
+   failure is self-diagnosing.
+
+### Threat re-assessment (unchanged verdict)
+No security control altered: the egress-guard's iptables rules, the exec-ban VAP
+(which permits exec into `egress-guard`/`inference-router` only), and pod posture
+are untouched. `imagePullPolicy` governs *where* the image bytes come from, not
+isolation. The e2e stub is test-only (`tests/e2e/`, never shipped) and runs no
+agent. Net effect is strictly more fail-closed coverage of the distroless surface.
+
 ## Verdict
 
 Accept. Eliminates the remaining distroless-tool breakages on the K8s path with a
