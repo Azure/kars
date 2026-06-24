@@ -27,6 +27,7 @@ import chalk from "chalk";
 import * as path from "node:path";
 import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
 import * as os from "node:os";
+import { resolveBundledAsset, findRepoRootOrNull } from "../../lib/repo-assets.js";
 
 /** Pin the same chart version as local-k8s so the kars plugin's
  * pluginLib API stays compatible. Bumping requires re-testing the
@@ -37,8 +38,13 @@ const KPS_CHART_VERSION = "85.3.3";
 export interface HeadlampStackOptions {
   /** kubectl context name. e.g. `kars-aks` or `kind-kars`. */
   context: string;
-  /** Absolute path to the repo root, used to locate the plugin source. */
-  repoRoot: string;
+  /**
+   * Optional repo root, used only to locate the Headlamp plugin SOURCE for
+   * an on-demand rebuild in a dev checkout. When omitted (npm-installed CLI),
+   * the prebuilt plugin + monitoring manifests are resolved from the bundled
+   * package instead.
+   */
+  repoRoot?: string;
 }
 
 /** Build a kubectl arg list scoped to the target context. */
@@ -103,59 +109,72 @@ export async function installHeadlamp(opts: HeadlampStackOptions): Promise<void>
  * the dashboard still works for built-in resources.
  */
 export async function installKarsPlugin(opts: HeadlampStackOptions): Promise<void> {
-  const { context, repoRoot } = opts;
-  const pluginDir = path.join(repoRoot, "tools", "headlamp-plugin");
-  const distDir = path.join(pluginDir, "dist");
-  const mainJs = path.join(distDir, "main.js");
-  const pkgJson = path.join(pluginDir, "package.json");
+  const { context } = opts;
 
-  // Always rebuild when ANY source file is newer than dist/main.js.
-  // Stale dist was the source of "no agents visible / wrong CRD group"
-  // bugs on AKS — the plugin was renamed from the pre-v0.1.0 brand to
-  // kars but the cached dist predated the rename. Walk src/ +
-  // package.json and rebuild if needed.
-  let needsBuild = !existsSync(mainJs);
-  if (!needsBuild) {
-    try {
-      const distMtime = statSync(mainJs).mtimeMs;
-      const srcDir = path.join(pluginDir, "src");
-      const candidates = [pkgJson];
-      if (existsSync(srcDir)) {
-        for (const f of readdirSync(srcDir)) {
-          candidates.push(path.join(srcDir, f));
-        }
-      }
-      for (const f of candidates) {
-        if (existsSync(f) && statSync(f).mtimeMs > distMtime) {
-          needsBuild = true;
-          break;
-        }
-      }
-    } catch {
-      needsBuild = true;
+  // Prefer the prebuilt plugin bundled with the CLI (so this works with no
+  // repo checkout — npm-installed `kars`). Fall back to a repo checkout,
+  // rebuilding on demand if the source is newer than the built dist.
+  let mainJs = resolveBundledAsset("tools/headlamp-plugin/dist/main.js");
+  let pkgJson = resolveBundledAsset("tools/headlamp-plugin/package.json");
+
+  if (!mainJs || !pkgJson) {
+    const repoRoot = opts.repoRoot ?? findRepoRootOrNull(process.cwd());
+    if (!repoRoot) {
+      console.warn(chalk.yellow(
+        "    ⚠ Headlamp plugin not bundled and no repo checkout found — skipping " +
+          "(dashboard still works for built-in resources; kars CRD views won't load).",
+      ));
+      return;
     }
-  }
+    const pluginDir = path.join(repoRoot, "tools", "headlamp-plugin");
+    const distDir = path.join(pluginDir, "dist");
+    const distMain = path.join(distDir, "main.js");
+    pkgJson = path.join(pluginDir, "package.json");
 
-  if (needsBuild) {
-    const reason = !existsSync(mainJs) ? "no dist yet" : "src newer than dist";
-    console.log(chalk.dim(`    rebuilding plugin (${reason}) — npm run build in tools/headlamp-plugin…`));
-    if (!existsSync(path.join(pluginDir, "node_modules"))) {
+    // Rebuild when ANY source file is newer than dist/main.js (stale dist was
+    // the source of "no agents visible / wrong CRD group" bugs).
+    let needsBuild = !existsSync(distMain);
+    if (!needsBuild) {
       try {
-        await execa("npm", ["install", "--no-audit", "--no-fund"], { cwd: pluginDir, stdio: "inherit" });
+        const distMtime = statSync(distMain).mtimeMs;
+        const srcDir = path.join(pluginDir, "src");
+        const candidates = [pkgJson];
+        if (existsSync(srcDir)) {
+          for (const f of readdirSync(srcDir)) candidates.push(path.join(srcDir, f));
+        }
+        for (const f of candidates) {
+          if (existsSync(f) && statSync(f).mtimeMs > distMtime) {
+            needsBuild = true;
+            break;
+          }
+        }
+      } catch {
+        needsBuild = true;
+      }
+    }
+
+    if (needsBuild) {
+      const reason = !existsSync(distMain) ? "no dist yet" : "src newer than dist";
+      console.log(chalk.dim(`    rebuilding plugin (${reason}) — npm run build in tools/headlamp-plugin…`));
+      if (!existsSync(path.join(pluginDir, "node_modules"))) {
+        try {
+          await execa("npm", ["install", "--no-audit", "--no-fund"], { cwd: pluginDir, stdio: "inherit" });
+        } catch (err) {
+          console.warn(chalk.yellow(
+            `    ⚠ npm install failed (${(err as Error).message}); skipping plugin install. ` +
+              "Run 'cd tools/headlamp-plugin && npm install && npm run build' manually then re-run.",
+          ));
+          return;
+        }
+      }
+      try {
+        await execa("npm", ["run", "build"], { cwd: pluginDir, stdio: "inherit" });
       } catch (err) {
-        console.warn(chalk.yellow(
-          `    ⚠ npm install failed (${(err as Error).message}); skipping plugin install. ` +
-            "Run 'cd tools/headlamp-plugin && npm install && npm run build' manually then re-run.",
-        ));
+        console.warn(chalk.yellow(`    ⚠ plugin build failed (${(err as Error).message}); skipping plugin install.`));
         return;
       }
     }
-    try {
-      await execa("npm", ["run", "build"], { cwd: pluginDir, stdio: "inherit" });
-    } catch (err) {
-      console.warn(chalk.yellow(`    ⚠ plugin build failed (${(err as Error).message}); skipping plugin install.`));
-      return;
-    }
+    mainJs = distMain;
   }
 
   const mainContent = readFileSync(mainJs, "utf8");
@@ -231,7 +250,8 @@ ${indent(pkgContent, 4)}
  * sandbox router's `:8443` metrics endpoint stays unreachable.
  */
 export async function installPrometheus(opts: HeadlampStackOptions): Promise<void> {
-  const { context, repoRoot } = opts;
+  const { context } = opts;
+  void opts.repoRoot;
 
   try {
     await execa("kubectl", kctl(context, ["create", "namespace", "monitoring"]), { stdio: "pipe" });
@@ -391,7 +411,12 @@ kubeProxy:
     ));
   }
 
-  const monitoringDir = path.join(repoRoot, "deploy", "monitoring");
+  // Resolve monitoring manifests from a repo checkout OR the bundled copy.
+  const monitoringDir = resolveBundledAsset("deploy/monitoring");
+  if (!monitoringDir) {
+    console.warn(chalk.yellow("  ⚠ monitoring manifests not bundled — skipping dashboards"));
+    return;
+  }
   for (const f of [
     "podmonitor-sandbox-router.yaml",
     "agentmesh-json-exporter.yaml",
