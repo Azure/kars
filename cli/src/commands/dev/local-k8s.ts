@@ -451,7 +451,11 @@ async function loadImageIntoKind(
     await execa(
       kind,
       ["load", "docker-image", image, "--name", clusterName],
-      { stdio: "inherit", env },
+      // Quiet (pipe, not inherit): on the containerd image store this prints
+      // a scary "ctr: content digest … not found" ERROR for multi-arch images
+      // even though the save|ctr-import fallback below recovers cleanly.
+      // Swallow it; the verify step decides success.
+      { stdio: "pipe", env },
     );
   } catch {
     // fall through to the ctr import path
@@ -1110,12 +1114,17 @@ async function deployAgentMesh(
   }
 
   // ── Load images into kind ─────────────────────────────────────────
+  // Route through loadImageIntoKind (NOT a bare `kind load docker-image`):
+  // released relay/registry images are multi-arch, and `kind load
+  // docker-image` runs `ctr import --all-platforms`, which fails on the
+  // containerd image store because only the host-platform blobs are present
+  // locally ("content digest … not found"). loadImageIntoKind falls back to
+  // `<runtime> save | ctr import -` (host platform only), which loads the
+  // multi-arch-origin image cleanly — same path the controller/router/sandbox
+  // images already use.
   for (const component of ["relay", "registry"] as const) {
     const tag = localTag(component);
-    await execa(tools.kind, ["load", "docker-image", tag, "--name", clusterName], {
-      env: tools.env,
-      stdio: "inherit",
-    });
+    await loadImageIntoKind(tools.kind, tools.runtime, clusterName, tag, tools.env);
   }
 
   // ── Rewrite manifest: swap ACR image refs → local tags, set Never ──
