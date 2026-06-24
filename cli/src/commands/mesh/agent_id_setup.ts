@@ -185,66 +185,27 @@ async function azGraphRestWithRetry<T>(
     const msg = (err.stderr ?? err.message ?? "").toString();
 
     // AADSTS530084 = Conditional Access token-binding policy block on
-    // the az CLI's first-party app token for Microsoft Graph. Trying
-    // a device-code re-login refreshes the Graph token via a
-    // different OAuth flow that some tenant CA policies treat
-    // differently (the device-code app may not be subject to the
-    // same token-binding rule). One-shot: if it fails again, give
-    // up and propagate so the caller can fall back to Bicep.
+    // the az CLI's first-party app token for Microsoft Graph. We do NOT
+    // attempt a device-code re-login here: on tenants whose CA also
+    // requires a compliant/managed device, `az login --use-device-code`
+    // hangs for ~15 min polling a device code the CA will never authorize
+    // (then fails AADSTS530033), freezing `kars up` at the Entra step.
+    // Instead, surface a clear notice and propagate immediately so the
+    // caller (`ensureAgentIdTrustAutoFallback`) falls back to the Bicep
+    // ARM path, which reaches Graph through ARM's deployment engine and is
+    // NOT subject to this CA policy (verified: the Graph request goes
+    // through server-side).
     if (!alreadyRetried && interactive && msg.includes("AADSTS530084")) {
-      const tenantArgs = await deviceCodeReloginForGraph();
-      if (tenantArgs) {
-        return azGraphRestWithRetry<T>(method, graphPath, body, true, interactive);
-      }
+      console.log();
+      console.log(
+        "  ↻ Microsoft Graph is blocked by tenant Conditional Access (AADSTS530084).",
+      );
+      console.log(
+        "    Falling back to Bicep ARM deployment — bypasses the Graph CA policy.",
+      );
     }
 
     throw new Error(msg.trim() || `az rest ${graphPath} failed`);
-  }
-}
-
-/// Attempt a one-shot `az login --use-device-code --scope graph`
-/// refresh of the Graph token cache. Returns true on success so the
-/// caller can retry the failing Graph call.
-///
-/// Device code flow uses a different OAuth path than the default
-/// interactive flow — the user authenticates on a SECOND device by
-/// visiting microsoft.com/devicelogin and entering the code. Some
-/// Conditional Access policies that block token-binding on the
-/// primary device's az CLI session do not apply to this flow.
-async function deviceCodeReloginForGraph(): Promise<boolean> {
-  console.log();
-  console.log(
-    "  ↻ AADSTS530084: az CLI token is CA-blocked for Microsoft Graph.",
-  );
-  console.log(
-    "    Attempting device-code re-login for the Graph scope...",
-  );
-  console.log(
-    "    You will be prompted to visit https://microsoft.com/devicelogin in a browser.",
-  );
-
-  try {
-    await execa(
-      "az",
-      [
-        "login",
-        "--use-device-code",
-        "--scope",
-        "https://graph.microsoft.com//.default",
-        "--allow-no-subscriptions",
-      ],
-      // Use inherit so the device-code prompt is visible to the user.
-      { stdio: ["inherit", "inherit", "inherit"] },
-    );
-    console.log("  ✓ Graph token cache refreshed via device-code flow.");
-    return true;
-  } catch (e) {
-    const msg = (e as { stderr?: string; message?: string }).stderr ?? (e as Error).message ?? "";
-    console.log(
-      `  ✘ Device-code re-login also failed (${msg.split("\n")[0].slice(0, 120)}).`,
-    );
-    console.log("    Will fall back to Bicep ARM deployment.");
-    return false;
   }
 }
 
