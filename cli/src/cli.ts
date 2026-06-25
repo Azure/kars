@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { version: CLI_VERSION } = require("../package.json") as { version: string };
 import { upCommand } from "./commands/up.js";
+import { upgradeCommand } from "./commands/upgrade.js";
 import { devCommand } from "./commands/dev.js";
 import { addCommand } from "./commands/add.js";
 import { credentialsCommand } from "./commands/credentials.js";
@@ -51,6 +52,7 @@ export function createCli(): Command {
 
   // Lifecycle
   program.addCommand(upCommand());
+  program.addCommand(upgradeCommand());
   program.addCommand(devCommand());
   program.addCommand(addCommand());
   program.addCommand(pushCommand());
