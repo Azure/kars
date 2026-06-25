@@ -114,20 +114,32 @@ export async function deployAgentMesh(
 
         // Wait for AgentMesh pods to be ready
         stepper.update("Waiting for AgentMesh pods to be ready...");
-        await execa("kubectl", [
+        const relayReady = await execa("kubectl", [
           "wait", "--for=condition=Ready", "pod",
           "-l", "app=agentmesh-relay",
           "-n", "agentmesh",
           "--timeout=180s",
-        ], { stdio: "pipe" }).catch(() => {});
-        await execa("kubectl", [
+        ], { stdio: "pipe" }).then(() => true).catch(() => false);
+        const registryReady = await execa("kubectl", [
           "wait", "--for=condition=Ready", "pod",
           "-l", "app=agentmesh-registry",
           "-n", "agentmesh",
           "--timeout=180s",
-        ], { stdio: "pipe" }).catch(() => {});
+        ], { stdio: "pipe" }).then(() => true).catch(() => false);
 
-        stepper.done(`AgentMesh infrastructure deployed (agt)`);
+        if (!relayReady || !registryReady) {
+          // Don't claim a clean success when the mesh never came up — that's
+          // the silent "broken mesh, green checkmark" trap. Sub-agent handoff
+          // will fail until these are Running; point the user at the fix.
+          const which = [!relayReady ? "relay" : "", !registryReady ? "registry" : ""]
+            .filter(Boolean).join(" + ");
+          stepper.warn(
+            `AgentMesh ${which} not Ready after 180s — sub-agent handoff won't work yet. ` +
+              `Check: kubectl get pods -n agentmesh (likely ImagePullBackOff or slow pull).`,
+          );
+        } else {
+          stepper.done(`AgentMesh infrastructure deployed (agt)`);
+        }
 
         // Phase 6.c — enable JWT verification on the relay + registry
         // when the operator has provisioned an Entra Agent Identity

@@ -49,7 +49,11 @@ export class Stepper {
   }
 
   private prefix(): string {
-    return chalk.dim(`  ${this.current}/${this.total}`);
+    // Clamp the numerator so a miscounted total can never render an overflow
+    // like `10/9` (the displayed step is at most the total). The flow is
+    // responsible for an accurate `totalSteps`; this is a last-resort guard.
+    const shown = Math.min(this.current, this.total);
+    return chalk.dim(`  ${shown}/${this.total}`);
   }
 
   /** Start a new step — automatically completes the previous one */

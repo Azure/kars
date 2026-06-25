@@ -43,6 +43,8 @@ export function upCommand(): Command {
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
     .option("--force-infra", "Force Bicep deployment even if AKS cluster exists", false)
     .option("--skip-preflight", "Skip upfront RBAC & provider checks (advanced; you know what you're doing)", false)
+    .option("--skip-validate", "Skip the pre-deploy ARM what-if/validate gate (advanced; only if it false-positives)", false)
+    .option("--yes", "Non-interactive: never prompt — use provided flags + defaults (for CI/automation). Also auto-engaged when stdin is not a TTY.", false)
     // ── Images ─────────────────────────────────────────────────────────
     .option("--source-acr <server>", "Source ACR for pre-built images (customers)", "karsacr.azurecr.io")
     .option("--release [version]", "Import the PUBLIC, signed GHCR release images (ghcr.io/azure/*) into your ACR instead of building from source. Bare --release uses the latest release; pass a tag (e.g. v0.1.4) to pin. No Rust/Docker build needed.")
@@ -193,19 +195,29 @@ Auto-resume:
         console.log(chalk.dim(`  --from-scratch: any cached partial state will be ignored.\n`));
       }
       const resumeFromPhase = resumeState?.resumeFromPhase ?? null;
-      // Stepper counts the 9 runtime phases below (10 with --expose-registry).
-      // Preflight runs before the stepper (see runPreflightChecks above).
+      // Stepper total = the runtime phases below. Each phase that calls
+      // `stepper.step()` increments the counter, so the total MUST include
+      // every conditional phase or the final step overflows (e.g. the old
+      // `10/9`). Phases:
       //   1. Resource group + preview features
       //   2. Bicep deploy (or verify existing)
       //   3. Network/firewalls/ACR attach
       //   4. Get AKS credentials
       //   5. Build OR import images
       //   6. Helm install (CRD + controller + seccomp DS)
-      //   7. AgentMesh infrastructure (relay + registry)
-      //   8. (optional) AgentMesh Ingress — only with --expose-registry
-      //   9. Create KarsSandbox CR
-      //  10. Wait for sandbox Running
-      const totalSteps = 9 + (options.exposeRegistry ? 1 : 0);
+      //   7. (optional) Entra Agent ID trust anchor — only with --mesh-trust=entra
+      //   8. AgentMesh infrastructure (relay + registry)
+      //   9. (optional) AgentMesh Ingress — only with --expose-registry
+      //  10. Create KarsSandbox CR
+      //  11. Wait for sandbox Running
+      // Base (without the two optionals) = 9 phases. We over-count rather than
+      // under-count for the rare resume path that skips the Entra provisioning
+      // step: a graceful `9/10` is fine; a broken `10/9` is not.
+      const meshTrustForCount = (options as { meshTrust?: string }).meshTrust ?? "anonymous";
+      const totalSteps =
+        9 +
+        (options.exposeRegistry ? 1 : 0) +
+        (meshTrustForCount === "entra" ? 1 : 0);
       const stepper = new Stepper({ totalSteps });
 
       try {
@@ -358,6 +370,47 @@ Auto-resume:
           }
           if (options.foundryEndpoint) {
             bicepParams.push("deployAoai=false");
+          }
+
+          // ── Pre-deploy gate: ARM preflight validation (no resources created) ──
+          // `az deployment group validate` runs Azure's two-phase server-side
+          // preflight — static (template/params) AND resource-provider preflight
+          // (RBAC, permissions, scope, name uniqueness, API/SKU). It fails in
+          // seconds INSTEAD of after minutes of partial provisioning, for both
+          // fresh and existing RGs, and surfaces CLI↔template version skew with a
+          // clear fix. `--skip-validate` opts out for the rare false positive.
+          if (!options.skipValidate) {
+            stepper.update("Validating deployment (Azure ARM preflight — no resources created yet)...");
+            try {
+              await execa("az", [
+                "deployment", "group", "validate",
+                "--resource-group", rg,
+                "--template-file", bicepPath,
+                "--parameters", ...bicepParams,
+                "--output", "none",
+              ], { stdio: "pipe" });
+            } catch (vErr: unknown) {
+              const e = vErr as { stderr?: string; message?: string };
+              const msg = String(e.stderr || e.message || vErr).trim();
+              const head = msg.split("\n").slice(0, 12).map((l) => "      " + l).join("\n");
+              // CLI passed a parameter the bundled template doesn't declare (or
+              // vice-versa) — almost always a stale local build.
+              if (/unrecognized template parameter|is not valid|No parameter named|not a valid parameter|InvalidTemplate.*[Pp]arameter/i.test(msg)) {
+                throw new Error(
+                  "Pre-deploy validation failed: the CLI and its bundled Bicep template are out of sync " +
+                  "(a parameter the template doesn't recognize).\n\n" +
+                  "  This is almost always a stale local build. Fix:\n" +
+                  "    npm i -g @kars-runtime/cli@latest        (published)\n" +
+                  "    # or, in a repo checkout:  cd cli && npm run build\n\n" +
+                  "  Azure said:\n" + head,
+                );
+              }
+              throw new Error(
+                "Pre-deploy validation failed (Azure ARM preflight) — no resources were created. " +
+                "Fix this, then re-run:\n\n" + head + "\n\n" +
+                "  If you're certain this is a false positive, re-run with --skip-validate.",
+              );
+            }
           }
 
           // Run Bicep deployment with a progress ticker

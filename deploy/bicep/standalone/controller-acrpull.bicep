@@ -23,29 +23,21 @@ param acrName string = 'karsacr'
 @description('User-assigned managed identity used by the AKS sandbox / controller workload identity.')
 param controllerIdentityName string = 'kars-aks-sandbox-wi'
 
-resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
-  name: acrName
-}
-
 resource controllerIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
   name: controllerIdentityName
 }
 
-// AcrPull built-in role
-var acrPullRoleId = subscriptionResourceId(
-  'Microsoft.Authorization/roleDefinitions',
-  '7f951dda-4ed3-4680-a7ca-43fe172d538d'
-)
-
-resource controllerAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(controllerIdentity.id, acr.id, 'acrpull')
-  scope: acr
-  properties: {
-    roleDefinitionId: acrPullRoleId
+// Idempotent assignment via the shared module: the name GUID includes the
+// controller identity's principalId (passed as a string param — BCP120-safe),
+// so re-applying after the UAMI is recreated CREATEs a fresh assignment instead
+// of failing with RoleAssignmentUpdateNotPermitted.
+module controllerAcrPull '../modules/acr-pull-assignment.bicep' = {
+  name: 'controller-acrpull'
+  params: {
+    acrName: acrName
     principalId: controllerIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
   }
 }
 
-output roleAssignmentId string = controllerAcrPull.id
+output roleAssignmentId string = controllerAcrPull.outputs.roleAssignmentId
 output principalId string = controllerIdentity.properties.principalId

@@ -238,16 +238,36 @@ export async function ensureAgentIdTrustViaBicep(
       .filter((line) => !line.trimStart().startsWith("WARNING:"))
       .join("\n")
       .trim();
-    const summary = cleaned.split("\n")[0] || raw.split("\n")[0] || "deployment failed";
+    // Prefer the line carrying the actual Graph/ARM rejection over the generic
+    // first line ("Deployment failed. Correlation id: ...") so the surfaced
+    // hint is the real cause, not boilerplate.
+    const lines = cleaned.split("\n").map((l) => l.trim()).filter(Boolean);
+    const meaningful =
+      lines.find((l) =>
+        /ServiceManagementReference|Authorization_RequestDenied|InvalidFederatedIdentity|insufficient privileges|forbidden|does not have permission/i.test(
+          l,
+        ),
+      ) ?? lines[0] ?? raw.split("\n")[0] ?? "deployment failed";
+    const summary = meaningful;
 
-    // Corp-tenant app registrations require a valid ServiceTree GUID. The
-    // raw Graph error ("ServiceManagementReference must be a valid GUID")
-    // is opaque — surface an actionable hint pointing at --service-tree.
+    // App registration in a Microsoft-corporate tenant needs a valid
+    // ServiceTree GUID. Only steer the user to `--service-tree` when they did
+    // NOT already pass one — otherwise the GUID they supplied is being
+    // rejected (wrong value, or their account isn't linked to that service),
+    // and telling them to "re-run with --service-tree" is misleading.
     if (/ServiceTree|ServiceManagementReference/i.test(raw)) {
+      if (!serviceTree) {
+        throw new Error(
+          "Bicep deployment failed: your tenant requires a valid ServiceTree GUID for app " +
+            "registration. Re-run with `--service-tree <GUID>` (or set KARS_SERVICE_TREE). " +
+            `Underlying error: ${summary.slice(0, 240)}`,
+        );
+      }
       throw new Error(
-        "Bicep deployment failed: your tenant requires a valid ServiceTree GUID for app " +
-          "registration. Re-run with `--service-tree <GUID>` (or set KARS_SERVICE_TREE). " +
-          `Underlying error: ${summary.slice(0, 200)}`,
+        `Bicep deployment failed: the ServiceTree GUID you supplied (${serviceTree}) was rejected ` +
+          "by the tenant. Confirm it's a valid ServiceTree *service* GUID and that your account is " +
+          "associated with it (the value must match a real service, not just be a well-formed GUID). " +
+          `Underlying error: ${summary.slice(0, 240)}`,
       );
     }
 

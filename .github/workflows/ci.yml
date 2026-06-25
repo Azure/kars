@@ -347,6 +347,10 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: az bicep build --file deploy/bicep/main.bicep
+      # Regression gate: every role assignment must be idempotent (principalId in
+      # the name GUID) so identity rotation can't trigger RoleAssignmentUpdateNotPermitted.
+      - name: RBAC idempotency gate
+        run: python3 ci/bicep-rbac-idempotency.py
 
   helm-lint:
     name: Helm Lint

@@ -1425,6 +1425,28 @@ Notes:
         stepper.step("Starting sandbox container...");
         const containerName = `kars-${options.name}`;
 
+        // Pick a free host port for the WebUI (container always listens on
+        // 18789 internally). Binding host 18789 unconditionally crashes
+        // `docker run` with "port is already allocated" when another sandbox,
+        // a `kars up` port-forward, or a second `kars dev --name` already holds
+        // it — an ugly, unhandled failure on the default onboarding path.
+        const webUiHostPort = await (async (): Promise<number> => {
+          const net = await import("node:net");
+          const canBind = (p: number) => new Promise<boolean>((resolve) => {
+            const srv = net.createServer();
+            srv.once("error", () => resolve(false));
+            srv.once("listening", () => srv.close(() => resolve(true)));
+            srv.listen(p, "127.0.0.1");
+          });
+          for (let p = 18789; p < 18789 + 20; p++) {
+            if (await canBind(p)) return p;
+          }
+          return 18789; // give up — let docker surface the bind error
+        })();
+        if (webUiHostPort !== 18789) {
+          stepper.detail("info", `Port 18789 in use — exposing WebUI on ${webUiHostPort} instead`);
+        }
+
         // Clean up any previous instance
         try {
           await execa("docker", ["rm", "-f", containerName], { stdio: "pipe" });
@@ -1553,7 +1575,7 @@ Notes:
           "--tmpfs", "/mnt:ro,size=0",
           "--tmpfs", "/srv:ro,size=0",
           "--tmpfs", "/root:ro,size=0",
-          "-p", "18789:18789",
+          "-p", `${webUiHostPort}:18789`,
           "-e", `OPENCLAW_MODEL=${model}`,
           "-e", `DEFAULT_MODEL=${model}`,
           "-e", `AZURE_OPENAI_ENDPOINT=${creds.endpoint}`,
@@ -1717,7 +1739,7 @@ Notes:
         console.log(`  Status:   ${chalk.cyan(`kars status ${options.name}`)}`);
         console.log(`  Stop:     ${chalk.cyan(`kars destroy ${options.name}`)}`);
         if (gatewayToken) {
-          const url = `http://localhost:18789/#token=${gatewayToken}`;
+          const url = `http://localhost:${webUiHostPort}/#token=${gatewayToken}`;
           // Print URL without chalk formatting — terminals auto-detect http:// links.
           // Chalk ANSI codes break terminal URL detection in most emulators.
           console.log(`  Web UI:   ${url}`);

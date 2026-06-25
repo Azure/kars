@@ -427,6 +427,25 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
           try { unlinkSync(tmpBicep); } catch {}
         }
       }
+
+      // ── Bing / web_search self-heal: remove DANGLING Grounding-with-Bing
+      // connections ────────────────────────────────────────────────────────
+      // kars uses the KEYLESS, Microsoft-managed `web_search` tool (Entra/IMDS
+      // auth, no API key). But if the project has a `GroundingWithBingSearch`
+      // connection — especially an `isDefault` one — pointing at a Bing
+      // resource that no longer exists (e.g. it lived in a since-deleted
+      // `kars-<region>` RG), Foundry routes web_search through that dead
+      // connection and returns a misleading 401 "audience is incorrect
+      // (https://bing.azure.com)". We detect connections whose backing
+      // `metadata.ResourceId` no longer resolves and remove them so the
+      // managed keyless path works. Purely advisory — never aborts the deploy,
+      // and never touches a connection whose Bing resource is still alive.
+      await removeDanglingBingConnections({
+        execa,
+        stepper,
+        foundryResourceId,
+        foundryProjectName,
+      }).catch(() => { /* advisory only — never block the deploy */ });
     }
   }
 
@@ -506,37 +525,61 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   let gatewayToken = "";
   let webUiUrl = "";
   try {
-    // Wait for gateway to be ready inside the pod
-    await new Promise(r => setTimeout(r, 5000));
+    // Extract the gateway token from the sandbox. The gateway is started in
+    // the background by entrypoint.sh, so on a fresh deploy `.bashrc` may not
+    // be written yet — retry with backoff instead of failing the whole WebUI
+    // step on a first-run race (the symptom behind "port-forward failed" even
+    // though `kars connect` worked moments later).
+    for (let attempt = 0; attempt < 6 && !gatewayToken; attempt++) {
+      await new Promise(r => setTimeout(r, attempt === 0 ? 5000 : 3000));
+      const { stdout: bashrc } = await execa("kubectl", [
+        "exec", "-n", sandboxNs, `deploy/${options.name}`,
+        "-c", "openclaw", "--",
+        "cat", "/sandbox/.bashrc",
+      ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+      const tokenMatch = bashrc.match(/OPENCLAW_GATEWAY_TOKEN="([^"]+)"/);
+      if (tokenMatch) gatewayToken = tokenMatch[1];
+    }
 
-    // Extract gateway token from the sandbox
-    const { stdout: bashrc } = await execa("kubectl", [
-      "exec", "-n", sandboxNs, `deploy/${options.name}`,
-      "-c", "openclaw", "--",
-      "cat", "/sandbox/.bashrc",
-    ], { stdio: "pipe" });
-    const tokenMatch = bashrc.match(/OPENCLAW_GATEWAY_TOKEN="([^"]+)"/);
-    if (tokenMatch) {
-      gatewayToken = tokenMatch[1];
+    // Pick a free local port starting at 18789. Binding 18789 unconditionally
+    // is the original footgun — a stale forward, another sandbox, or `kars dev`
+    // commonly holds it, so the forward fails. Mirror `kars connect` and bump
+    // to the next free port instead.
+    const net = await import("node:net");
+    const canBind = (p: number) => new Promise<boolean>((resolve) => {
+      const srv = net.createServer();
+      srv.once("error", () => resolve(false));
+      srv.once("listening", () => srv.close(() => resolve(true)));
+      srv.listen(p, "127.0.0.1");
+    });
+    let localPort = 18789;
+    for (let p = 18789; p < 18789 + 20; p++) {
+      if (await canBind(p)) { localPort = p; break; }
+    }
+    if (localPort !== 18789) {
+      stepper.detail("info", `Port 18789 in use — using ${localPort} for the WebUI forward`);
     }
 
     // Start port-forward in background (fully detached so CLI can exit)
     const { spawn } = await import("child_process");
     const portForward = spawn("kubectl", [
       "port-forward", "-n", sandboxNs,
-      `deploy/${options.name}`, "18789:18789",
+      `deploy/${options.name}`, `${localPort}:18789`,
     ], { stdio: "ignore", detached: true });
     portForward.unref();
     // Give it a moment to bind
     await new Promise(r => setTimeout(r, 2000));
 
     if (gatewayToken) {
-      webUiUrl = `http://localhost:18789/#token=${gatewayToken}`;
+      webUiUrl = `http://localhost:${localPort}/#token=${gatewayToken}`;
+      stepper.done("Sandbox running");
+    } else {
+      // The sandbox is up; only the token read raced. Don't claim failure —
+      // `kars connect` re-derives the token and works.
+      stepper.warn(`Sandbox running — WebUI token not ready yet; run 'kars connect ${options.name}'`);
     }
-
-    stepper.done("Sandbox running");
   } catch {
-    stepper.warn("Sandbox running but WebUI port-forward failed");
+    stepper.warn(`Sandbox running but WebUI setup failed — run 'kars connect ${options.name}'`);
   }
 
   stepper.summary();
@@ -607,4 +650,88 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   } catch { /* non-critical */ }
 
   console.log();
+}
+
+/**
+ * Detect and remove DANGLING `GroundingWithBingSearch` connections on a Foundry
+ * project — connections whose backing `Microsoft.Bing/accounts` resource no
+ * longer exists. Such a connection (especially when `isDefault`) makes the
+ * keyless, Microsoft-managed `web_search` tool fail with a misleading
+ * `401 "audience is incorrect (https://bing.azure.com)"`, because Foundry tries
+ * to route web_search through the dead connection instead of the managed Bing
+ * resource.
+ *
+ * kars never provisions or stores a Bing API key (its `web_search` is keyless),
+ * so the correct remediation is to delete the stale connection and let the
+ * managed path take over. Strictly advisory: any error is swallowed by the
+ * caller, and a connection whose Bing resource is still alive is left untouched.
+ */
+async function removeDanglingBingConnections(ctx: {
+  execa: typeof import("execa").execa;
+  stepper: Stepper;
+  /** Full ARM id of the Foundry (CognitiveServices) account. */
+  foundryResourceId: string;
+  /** Project name (the `…/api/projects/<name>` segment). */
+  foundryProjectName: string;
+}): Promise<void> {
+  const { execa, stepper, foundryResourceId, foundryProjectName } = ctx;
+  if (!foundryResourceId || !foundryProjectName) return;
+
+  const connectionsUrl =
+    `${foundryResourceId}/projects/${foundryProjectName}/connections?api-version=2025-06-01`;
+  const { stdout: connsJson } = await execa("az", [
+    "rest", "--method", "get", "--url", connectionsUrl,
+  ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+  if (!connsJson.trim()) return;
+
+  let connections: Array<{
+    name?: string;
+    properties?: {
+      category?: string;
+      isDefault?: boolean;
+      metadata?: { ResourceId?: string };
+    };
+  }> = [];
+  try {
+    connections = (JSON.parse(connsJson).value ?? []) as typeof connections;
+  } catch {
+    return;
+  }
+
+  for (const conn of connections) {
+    if (conn.properties?.category !== "GroundingWithBingSearch") continue;
+    const bingResourceId = conn.properties?.metadata?.ResourceId;
+    const connName = conn.name;
+    if (!bingResourceId || !connName) continue;
+
+    // Does the backing Bing resource still resolve? A 404 / ResourceGroupNotFound
+    // (e.g. the RG was deleted) marks the connection as dangling.
+    const probe = await execa("az", [
+      "rest", "--method", "get",
+      "--url", `${bingResourceId}?api-version=2020-06-10`,
+    ], { stdio: "pipe" }).then(() => ({ ok: true, err: "" }))
+      .catch((e: { stderr?: string; message?: string }) => ({
+        ok: false,
+        err: String(e.stderr || e.message || ""),
+      }));
+
+    const dangling = !probe.ok &&
+      /ResourceGroupNotFound|ResourceNotFound|NotFound|could not be found|status code 404/i.test(probe.err);
+    if (!dangling) continue;
+
+    // Remove the dead connection at both project and account scope (it can
+    // exist at either). Deletions are idempotent — a missing one is fine.
+    const projConnUrl =
+      `${foundryResourceId}/projects/${foundryProjectName}/connections/${connName}?api-version=2025-06-01`;
+    const acctConnUrl =
+      `${foundryResourceId}/connections/${connName}?api-version=2025-06-01`;
+    await execa("az", ["rest", "--method", "delete", "--url", projConnUrl], { stdio: "pipe" }).catch(() => {});
+    await execa("az", ["rest", "--method", "delete", "--url", acctConnUrl], { stdio: "pipe" }).catch(() => {});
+
+    stepper.detail(
+      "info",
+      `Removed dangling Bing connection '${connName}' (backing resource deleted) — ` +
+        `keyless managed web_search will be used instead`,
+    );
+  }
 }

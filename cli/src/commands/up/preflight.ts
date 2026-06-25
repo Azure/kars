@@ -75,6 +75,12 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   const { default: inquirer } = await import("inquirer");
   const { execa } = await import("execa");
 
+  // Non-interactive when explicitly requested (--yes) or when there's no TTY to
+  // read prompts from (CI / piped stdin). In that mode we NEVER call inquirer;
+  // every value comes from flags + defaults, so `kars up` is fully scriptable.
+  // The interactive TTY path is unchanged.
+  const interactive = !(options as { yes?: boolean }).yes && process.stdin.isTTY === true;
+
   // Auto-detect developer mode: if running from the repo (Dockerfile exists),
   // default to --build. BUT not when --release is set: `kars up --release`
   // imports the published GHCR images via `az acr import` (server-side) and
@@ -125,11 +131,22 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   }
 
   // ── 1. Check required CLI tools ────────────────────────────────
+  // Docker is only needed for `--build`. When it isn't required (the common
+  // `--release` / customer path) probe the *binary* with `docker --version`
+  // rather than `docker info`: `docker info` needs a running daemon, so a
+  // machine that HAS Docker installed but with the daemon stopped would print
+  // a misleading "not found". `--build` still uses `docker info` because a live
+  // daemon is genuinely required to build.
   const tools: { cmd: string; args: string[]; label: string; required: boolean }[] = [
     { cmd: "az", args: ["--version"], label: "Azure CLI", required: true },
     { cmd: "kubectl", args: ["version", "--client"], label: "kubectl", required: true },
     { cmd: "helm", args: ["version", "--short"], label: "Helm", required: true },
-    { cmd: "docker", args: ["info", "--format", "{{.ServerVersion}}"], label: "Docker", required: options.build },
+    {
+      cmd: "docker",
+      args: options.build ? ["info", "--format", "{{.ServerVersion}}"] : ["--version"],
+      label: "Docker",
+      required: options.build,
+    },
   ];
 
   {
@@ -187,7 +204,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
         ], { stdio: "pipe" });
         const subs = JSON.parse(subsJson) as { id: string; name: string; isDefault: boolean }[];
 
-        if (subs.length > 1) {
+        if (subs.length > 1 && interactive) {
           // Multiple subscriptions — let user confirm or pick
           const subChoices = subs.map((s) => ({
             name: `${s.name} (${s.id.slice(0, 8)}...)${s.isDefault ? chalk.dim(" ← default") : ""}`,
@@ -223,7 +240,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   const userProvidedName = process.argv.includes("--name");
   const userProvidedIsolation = process.argv.includes("--isolation");
 
-  if (!options.dryRun && (!userProvidedRegion || !userProvidedName || !userProvidedIsolation)) {
+  if (!options.dryRun && interactive && (!userProvidedRegion || !userProvidedName || !userProvidedIsolation)) {
     console.log();
 
     if (!userProvidedRegion) {
