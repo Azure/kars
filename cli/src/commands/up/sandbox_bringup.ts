@@ -19,6 +19,7 @@ import { saveContext } from "../../config.js";
 import {
   buildInferencePolicy,
   buildToolPolicy,
+  buildKarsMemory,
   inferenceRefName,
   toolPolicyRefName,
 } from "../../refs.js";
@@ -139,40 +140,57 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   //   1. Sandbox WI → Azure AI User on the Foundry AI Services resource (so pods can call APIs)
   //   2. Foundry project MI → Azure AI User on the resource group (so Memory Store can call models internally)
   if (foundryEndpoint) {
-    stepper.update("Configuring Foundry project RBAC (via Bicep)...");
+    stepper.update("Configuring Foundry project (discovery + setup + RBAC)...");
+
+    // Discover + best-effort provision the BYO Foundry project: pick the best
+    // deployed chat model, ensure an embedding model, and enable the project's
+    // system-assigned MI (Memory Store authenticates internally as the project
+    // MI). All idempotent + non-fatal — see foundry_setup.ts.
+    const { setupFoundryForKars } = await import("./foundry_setup.js");
+    const foundrySetup = await setupFoundryForKars({
+      execa, stepper, foundryEndpoint,
+    }).catch(() => null);
+
+    // Adopt the best deployed chat model unless the user explicitly set --model.
+    const modelExplicit = process.argv.includes("--model");
+    if (foundrySetup?.bestChatModel && !modelExplicit) {
+      if (foundrySetup.bestChatModel !== options.model) {
+        stepper.detail("info", `Using best deployed model '${foundrySetup.bestChatModel}' (was default '${options.model}'; pass --model to override)`);
+      }
+      options.model = foundrySetup.bestChatModel;
+    }
+    for (const note of foundrySetup?.notes ?? []) {
+      stepper.detail("info", note);
+    }
+
     const foundryHost = new URL(foundryEndpoint).hostname;
     // Extract account name: "foo.services.ai.azure.com" → "foo", or "foo.openai.azure.com" → "foo"
-    const foundryAccountName = foundryHost.split(".")[0];
+    const foundryAccountName = foundrySetup?.accountName || foundryHost.split(".")[0];
 
     // Extract project name from URL path: "/api/projects/bar" → "bar"
     const foundryUrl = new URL(foundryEndpoint);
     const projectMatch = foundryUrl.pathname.match(/\/api\/projects\/([^/]+)/);
-    const foundryProjectName = projectMatch ? projectMatch[1] : "";
+    const foundryProjectName = foundrySetup?.projectName || (projectMatch ? projectMatch[1] : "");
 
-    // Find the Foundry AI Services account and its resource group
-    const { stdout: foundryAccountJson } = await execa("az", [
-      "cognitiveservices", "account", "list",
-      "--query", `[?name=='${foundryAccountName}'].{id:id, rg:resourceGroup} | [0]`,
-      "--output", "json",
-    ], { stdio: "pipe" }).catch(() => ({ stdout: "{}" }));
-
-    const foundryAccount = JSON.parse(foundryAccountJson.trim() || "{}");
-    const foundryResourceId = foundryAccount.id || "";
-    const foundryRg = foundryAccount.rg || "";
+    // Account ARM id + resource group — reuse the discovery result, else resolve.
+    let foundryResourceId = foundrySetup?.accountResourceId || "";
+    let foundryRg = foundrySetup?.resourceGroup || "";
+    if (!foundryResourceId || !foundryRg) {
+      const { stdout: foundryAccountJson } = await execa("az", [
+        "cognitiveservices", "account", "list",
+        "--query", `[?name=='${foundryAccountName}'].{id:id, rg:resourceGroup} | [0]`,
+        "--output", "json",
+      ], { stdio: "pipe" }).catch(() => ({ stdout: "{}" }));
+      const foundryAccount = JSON.parse(foundryAccountJson.trim() || "{}");
+      foundryResourceId = foundryAccount.id || "";
+      foundryRg = foundryAccount.rg || "";
+    }
 
     if (foundryResourceId && foundryRg && foundryProjectName) {
-      // Query the project's managed identity principal ID via ARM REST API
-      let projectMiPrincipalId = "";
-      try {
-        const { stdout: projectJson } = await execa("az", [
-          "rest", "--method", "get",
-          "--url", `${foundryResourceId}/projects/${foundryProjectName}?api-version=2025-06-01`,
-        ], { stdio: "pipe" });
-        const project = JSON.parse(projectJson.trim());
-        projectMiPrincipalId = project?.identity?.principalId || "";
-      } catch {
-        // Project may not have system MI enabled — warn but continue
-      }
+      // Project MI principalId — resolved (and, if it was off, enabled) by the
+      // discovery step above.
+      const projectMiPrincipalId = foundrySetup?.projectMiPrincipalId || "";
+
 
       // Get the sandbox workload identity principal ID
       let sandboxWiPrincipalId = "";
@@ -383,7 +401,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
         try { unlinkSync(tmpBicep); } catch {}
       }
 
-      if (!projectMiPrincipalId) {
+      if (!projectMiPrincipalId && !foundrySetup) {
         console.log(chalk.yellow("\n  ⚠ Foundry project has no system-assigned MI. Memory Store will not work."));
         console.log(chalk.yellow("    Enable it: Portal → Project → Resource Management → Identity → System assigned → On"));
         console.log(chalk.yellow("    Then re-run: kars up ...\n"));
@@ -498,15 +516,40 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       },
     },
   };
+  // KarsMemory binding — only meaningful with a Foundry project endpoint
+  // (Memory Store is a Foundry feature). Gives the sandbox the same
+  // controller-managed binding `kars dev` creates, instead of relying purely
+  // on the runtime's lazy store creation.
+  const memoryCr = foundryEndpoint
+    ? buildKarsMemory({ sandboxName: options.name, namespace: sandboxNamespace })
+    : null;
+
   const bundleManifest = {
     apiVersion: "v1",
     kind: "List",
-    items: [inferencePolicy, toolPolicy, sandboxManifest],
+    items: [inferencePolicy, toolPolicy, ...(memoryCr ? [memoryCr] : []), sandboxManifest],
   };
   await execa("kubectl", ["apply", "-f", "-"], {
     input: JSON.stringify(bundleManifest),
     stdio: ["pipe", "pipe", "pipe"],
   });
+
+  // ── CRD status report — confirm each resource applied + its phase ──
+  stepper.detail("ok", "Applied CRDs:");
+  const crdChecks: Array<{ kind: string; name: string; phasePath: string }> = [
+    { kind: "inferencepolicy", name: inferenceRefName(options.name), phasePath: "{.status.phase}" },
+    { kind: "toolpolicy", name: toolPolicyRefName(options.name), phasePath: "{.status.phase}" },
+    ...(memoryCr ? [{ kind: "karsmemory", name: (memoryCr.metadata as { name: string }).name, phasePath: "{.status.phase}" }] : []),
+    { kind: "karssandbox", name: options.name, phasePath: "{.status.phase}" },
+  ];
+  for (const c of crdChecks) {
+    const { stdout: phase } = await execa("kubectl", [
+      "get", c.kind, c.name, "-n", sandboxNamespace,
+      "-o", `jsonpath=${c.phasePath}`,
+    ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+    const ph = phase.trim();
+    stepper.detail(ph && ph !== "Failed" ? "ok" : "info", `  ${c.kind}/${c.name}${ph ? ` — ${ph}` : " — applied"}`);
+  }
 
   // ── Step 8: Wait for sandbox ─────────────────────────────────
   stepper.step("Waiting for sandbox to start...");
