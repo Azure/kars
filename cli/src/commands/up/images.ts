@@ -255,36 +255,58 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     // Customer mode: import pre-built images from source ACR
     stepper.step("Importing images from source ACR...");
     const sourceAcr = options.sourceAcr;
-    const images = [
-      { source: `${sourceAcr}/kars-controller:latest`, target: "kars-controller:latest" },
-      { source: `${sourceAcr}/kars-inference-router:latest`, target: "kars-inference-router:latest" },
-      { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest" },
-      { source: `${sourceAcr}/agentmesh-relay:latest`, target: "agentmesh-relay:latest" },
-      { source: `${sourceAcr}/agentmesh-registry:latest`, target: "agentmesh-registry:latest" },
+    // `required` images must land or the cluster can't run; runtime adapters
+    // are optional (a given source ACR may not host every runtime). Mesh
+    // images MUST use the `-agt` suffix — that's the tag the
+    // deploy/agentmesh-agt.yaml manifest references; importing them without it
+    // (the old bug) left the relay/registry in ImagePullBackOff while the
+    // deploy still reported success.
+    const images: Array<{ source: string; target: string; required: boolean }> = [
+      { source: `${sourceAcr}/kars-controller:latest`, target: "kars-controller:latest", required: true },
+      { source: `${sourceAcr}/kars-inference-router:latest`, target: "kars-inference-router:latest", required: true },
+      { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest", required: true },
+      { source: `${sourceAcr}/agentmesh-relay-agt:latest`, target: "agentmesh-relay-agt:latest", required: true },
+      { source: `${sourceAcr}/agentmesh-registry-agt:latest`, target: "agentmesh-registry-agt:latest", required: true },
       // Multi-runtime adapter images. Failures here are non-fatal —
       // some source ACRs may not host every runtime.
-      { source: `${sourceAcr}/kars-runtime-openai-agents:latest`, target: "kars-runtime-openai-agents:latest" },
-      { source: `${sourceAcr}/kars-runtime-maf-python:latest`, target: "kars-runtime-maf-python:latest" },
-      { source: `${sourceAcr}/kars-runtime-anthropic:latest`, target: "kars-runtime-anthropic:latest" },
-      { source: `${sourceAcr}/kars-runtime-langgraph:latest`, target: "kars-runtime-langgraph:latest" },
-      { source: `${sourceAcr}/kars-runtime-langgraph-ts:latest`, target: "kars-runtime-langgraph-ts:latest" },
-      { source: `${sourceAcr}/kars-runtime-pydantic-ai:latest`, target: "kars-runtime-pydantic-ai:latest" },
-      { source: `${sourceAcr}/kars-runtime-hermes:latest`, target: "kars-runtime-hermes:latest" },
+      { source: `${sourceAcr}/kars-runtime-openai-agents:latest`, target: "kars-runtime-openai-agents:latest", required: false },
+      { source: `${sourceAcr}/kars-runtime-maf-python:latest`, target: "kars-runtime-maf-python:latest", required: false },
+      { source: `${sourceAcr}/kars-runtime-anthropic:latest`, target: "kars-runtime-anthropic:latest", required: false },
+      { source: `${sourceAcr}/kars-runtime-langgraph:latest`, target: "kars-runtime-langgraph:latest", required: false },
+      { source: `${sourceAcr}/kars-runtime-langgraph-ts:latest`, target: "kars-runtime-langgraph-ts:latest", required: false },
+      { source: `${sourceAcr}/kars-runtime-pydantic-ai:latest`, target: "kars-runtime-pydantic-ai:latest", required: false },
+      { source: `${sourceAcr}/kars-runtime-hermes:latest`, target: "kars-runtime-hermes:latest", required: false },
     ];
 
+    let customerFailures = 0;
     for (const img of images) {
       stepper.update(`Importing ${img.target}...`);
-      await execa("az", [
-        "acr", "import",
-        "--name", acr,
-        "--source", img.source,
-        "--image", img.target,
-        "--force",
-      ], { stdio: "pipe" }).then(() => {
+      try {
+        await execa("az", [
+          "acr", "import",
+          "--name", acr,
+          "--source", img.source,
+          "--image", img.target,
+          "--force",
+        ], { stdio: "pipe" });
         stepper.detail("ok", img.target);
-      }).catch(() => {
-        stepper.detail("skip", `${img.target} — import failed (may already exist)`);
-      });
+      } catch (e) {
+        const msg = ((e as { message?: string }).message ?? "").split("\n")[0].slice(0, 90);
+        if (img.required) {
+          customerFailures++;
+          stepper.detail("skip", `${img.target} — import FAILED (${msg})`);
+        } else {
+          stepper.detail("skip", `${img.target} — import failed (optional: ${msg})`);
+        }
+      }
+    }
+    if (customerFailures > 0) {
+      throw new Error(
+        `Failed to import ${customerFailures} required image(s) from ${sourceAcr}. ` +
+          `Verify you can 'az acr import' from it (network + auth) and that it hosts the ` +
+          `controller, inference-router, openclaw-sandbox, and agentmesh-*-agt images. ` +
+          `Tip: 'kars up --release' imports the public GHCR images instead — no source-ACR access needed.`,
+      );
     }
 
     stepper.done("Images available in ACR");

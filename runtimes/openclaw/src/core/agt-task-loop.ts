@@ -436,25 +436,15 @@ export async function processTaskWithTools(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let reqBody: any;
             if (fnName === "foundry_web_search") {
-              let connId: string | undefined;
-              try {
-                const connsRaw = await new Promise<string>((resolve, reject) => {
-                  const r = http.get(routerUrl("/connections?api-version=2025-05-15-preview"), { timeout: 10000 }, (res) => {
-                    let body = ""; res.on("data", (c: Buffer) => { body += c.toString(); }); res.on("end", () => resolve(body));
-                  });
-                  r.on("error", reject); r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
-                });
-                const conns = JSON.parse(connsRaw);
-                const bingConn = (conns.value || conns || []).find(
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  (c: any) => c.type === "GroundingWithBingSearch" || c.properties?.category === "GroundingWithBingSearch"
-                );
-                if (bingConn) connId = bingConn.id;
-              } catch { /* fall through */ }
+              // Keyless, Microsoft-managed web search — no Bing key, no
+              // user-created Bing resource, no GroundingWithBingSearch
+              // connection. Authenticated by the router's Entra/IMDS token.
+              // (The classic `bing_grounding` tool requires a key-based
+              // connection's project_connection_id and 400s without one.)
               reqBody = {
                 model: model,
                 input: args.query,
-                tools: [{ type: "bing_grounding", bing_grounding: { search_configurations: [{ project_connection_id: connId }] } }],
+                tools: [{ type: "web_search" }],
                 store: false,
               };
             } else if (fnName === "foundry_code_execute") {

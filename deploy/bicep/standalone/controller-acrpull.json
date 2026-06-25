@@ -4,8 +4,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.38.33.27573",
-      "templateHash": "14104848645051047431"
+      "version": "0.44.1.10279",
+      "templateHash": "10162397949945554113"
     }
   },
   "parameters": {
@@ -24,26 +24,78 @@
       }
     }
   },
-  "variables": {
-    "acrPullRoleId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]"
-  },
   "resources": [
     {
-      "type": "Microsoft.Authorization/roleAssignments",
-      "apiVersion": "2022-04-01",
-      "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', parameters('acrName'))]",
-      "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('controllerIdentityName')), resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), 'acrpull')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "controller-acrpull",
       "properties": {
-        "roleDefinitionId": "[variables('acrPullRoleId')]",
-        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('controllerIdentityName')), '2023-01-31').principalId]",
-        "principalType": "ServicePrincipal"
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "acrName": {
+            "value": "[parameters('acrName')]"
+          },
+          "principalId": {
+            "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('controllerIdentityName')), '2023-01-31').principalId]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.44.1.10279",
+              "templateHash": "2251908231826129564"
+            }
+          },
+          "parameters": {
+            "acrName": {
+              "type": "string",
+              "metadata": {
+                "description": "ACR (registry) name in this resource group."
+              }
+            },
+            "principalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Object ID (principalId) of the identity to grant AcrPull."
+              }
+            }
+          },
+          "variables": {
+            "acrPullRoleId": "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+              "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), parameters('principalId'), variables('acrPullRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('acrPullRoleId'))]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ],
+          "outputs": {
+            "roleAssignmentId": {
+              "type": "string",
+              "value": "[extensionResourceId(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), parameters('principalId'), variables('acrPullRoleId')))]"
+            }
+          }
+        }
       }
     }
   ],
   "outputs": {
     "roleAssignmentId": {
       "type": "string",
-      "value": "[extensionResourceId(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('controllerIdentityName')), resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), 'acrpull'))]"
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'controller-acrpull'), '2025-04-01').outputs.roleAssignmentId.value]"
     },
     "principalId": {
       "type": "string",

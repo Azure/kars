@@ -476,29 +476,19 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
     },
     async execute(_id: string, params: Record<string, unknown>) {
       try {
-        // Connection ID: env var override → auto-discover first GroundingWithBingSearch connection.
-        // The Responses API requires the FULL resource ID, not short /connections/name.
-        let connId = process.env.BING_CONNECTION_ID;
-        if (!connId) {
-          try {
-            const conns = await routerCall("GET", "/connections?api-version=2025-05-15-preview");
-            const bingConn = (conns.value || conns || []).find(
-              (c: any) => c.type === "GroundingWithBingSearch" ||
-                c.properties?.category === "GroundingWithBingSearch"
-            );
-            if (bingConn) connId = bingConn.id; // full resource ID
-          } catch { /* fall through to default */ }
-        }
-
+        // Keyless, Microsoft-managed web search. The `web_search` tool uses a
+        // Microsoft-managed Bing resource and authenticates via the router's
+        // Entra/IMDS token (ai.azure.com) — NO Bing API key, NO user-created
+        // `Microsoft.Bing/accounts` resource, and NO `GroundingWithBingSearch`
+        // connection on the project. This is the right fit for kars's
+        // no-API-keys principle. (The classic `bing_grounding` tool, by
+        // contrast, REQUIRES a key-based connection's `project_connection_id`
+        // and 400s without one — which is what previously broke this tool when
+        // no/stale Bing connection existed.)
         const result = await routerCall("POST", "/openai/responses?api-version=2025-11-15-preview", {
           model: (params.model as string) || "gpt-4.1",
           input: params.query,
-          tools: [{
-            type: "bing_grounding",
-            bing_grounding: {
-              search_configurations: [{ project_connection_id: connId }],
-            },
-          }],
+          tools: [{ type: "web_search" }],
           store: false,
         });
         const output = result.output || result;
