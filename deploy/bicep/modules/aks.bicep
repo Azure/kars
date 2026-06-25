@@ -168,76 +168,23 @@ resource controllerFederatedCredential 'Microsoft.ManagedIdentity/userAssignedId
 }
 
 // Grant sandbox MI "Managed Identity Contributor" on itself — controller can create/delete fedcreds
-resource miContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(sandboxIdentity.id, sandboxIdentity.id, 'mi-contributor')
-  scope: sandboxIdentity
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e40ec5ca-96e0-45a2-b4ff-59039f2c2b59')  // Managed Identity Contributor
-    principalId: sandboxIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// ─── RBAC Role Assignments ──────────────────────────────────────────────────
-
-// Grant AKS kubelet pull access to ACR
-resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(aks.id, acrId, 'acrpull')
-  scope: resourceGroup()
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')  // AcrPull
-    principalId: aks.properties.identityProfile.kubeletidentity.objectId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Grant the sandbox/controller workload identity AcrPull on the ACR.
-// The controller uses this UAMI (federated via OIDC) to fetch signed
-// egress allowlist artifacts (and any other policy artifacts) from
-// the registry as part of `AllowlistVerified` verification. Without
-// this assignment the controller falls back to anonymous, which 401s
-// when anonymous pull is disabled (the secure default).
-resource acrRef 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
-  name: last(split(acrId, '/'))
-}
-
-resource sandboxAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(sandboxIdentity.id, acrId, 'acrpull')
-  scope: acrRef
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')  // AcrPull
-    principalId: sandboxIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Grant sandbox identity "Cognitive Services OpenAI User" on the AOAI resource (only when AOAI is deployed)
-resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = if (!empty(openAiAccountId)) {
-  name: last(split(openAiAccountId, '/'))
-}
-
-resource openAiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(openAiAccountId)) {
-  name: guid(sandboxIdentity.id, openAiAccountId, 'openai-user')
-  scope: openAiAccount
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')  // Cognitive Services OpenAI User
-    principalId: sandboxIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Grant sandbox identity "Key Vault Secrets User" on Key Vault
-resource keyVaultRef 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: keyVaultName
-}
-
-resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(sandboxIdentity.id, keyVaultRef.id, 'kv-secrets-user')
-  scope: keyVaultRef
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')  // Key Vault Secrets User
-    principalId: sandboxIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
+// ─── RBAC Role Assignments (idempotent — see modules/sandbox-rbac.bicep) ────
+//
+// Delegated to a sub-module so every role-assignment `name` GUID can include the
+// assignee principalId (BCP120 forbids a runtime `reference()` in a roleAssignment
+// name, but a module string param is allowed). Without this, a rotated identity
+// (recreated AKS kubelet identity, or a re-created sandbox UAMI of the same name)
+// keeps the old GUID with a new principalId and ARM fails the whole deploy with
+// `RoleAssignmentUpdateNotPermitted`.
+module sandboxRbac 'sandbox-rbac.bicep' = {
+  name: '${name}-sandbox-rbac'
+  params: {
+    sandboxIdentityId: sandboxIdentity.id
+    sandboxPrincipalId: sandboxIdentity.properties.principalId
+    kubeletPrincipalId: aks.properties.identityProfile.kubeletidentity.objectId
+    acrName: last(split(acrId, '/'))
+    keyVaultName: keyVaultName
+    openAiAccountId: openAiAccountId
   }
 }
 
