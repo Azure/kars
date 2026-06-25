@@ -27,6 +27,46 @@ export const inferenceRefName = (sandboxName: string) =>
 export const toolPolicyRefName = (sandboxName: string) =>
   kebabRefName(sandboxName, "-toolpolicy");
 
+export const memoryRefName = (sandboxName: string) =>
+  kebabRefName(sandboxName, "-memory");
+
+/** Foundry Memory Store name for a sandbox — matches the runtime convention
+ *  `memory-<sandbox>` in runtimes/openclaw memory-binding.ts. DNS-label safe. */
+export const memoryStoreName = (sandboxName: string) =>
+  kebabRefName(sandboxName, "").replace(/^/, "memory-").slice(0, 63).replace(/-+$/g, "");
+
+export interface KarsMemoryOpts {
+  sandboxName: string;
+  namespace: string;
+  retentionDays?: number;
+}
+
+/**
+ * Build a KarsMemory CR so a `kars up` sandbox gets the same controller-managed
+ * Foundry Memory Store binding that `kars dev` already creates. Without it the
+ * runtime falls back to lazy store creation with no declarative binding.
+ */
+export function buildKarsMemory(opts: KarsMemoryOpts): Record<string, unknown> {
+  const store = memoryStoreName(opts.sandboxName);
+  return {
+    apiVersion: "kars.azure.com/v1alpha1",
+    kind: "KarsMemory",
+    metadata: {
+      name: memoryRefName(opts.sandboxName),
+      namespace: opts.namespace,
+      labels: { "kars.azure.com/sandbox": opts.sandboxName },
+    },
+    spec: {
+      sandboxRef: { name: opts.sandboxName },
+      storeName: store,
+      scope: `agent:${opts.sandboxName}`,
+      retentionDays: opts.retentionDays ?? 30,
+      deleteOnSandboxDelete: true,
+      displayName: `Default memory for ${opts.sandboxName}`,
+    },
+  };
+}
+
 export interface InferencePolicyOpts {
   sandboxName: string;
   namespace: string;

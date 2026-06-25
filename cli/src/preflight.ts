@@ -248,6 +248,17 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
         `Grant the current user sufficient RBAC. At minimum you need the roles:\n      ${REMEDIATION_ROLES.map((r) => chalk.cyan(r)).join("\n      ")}\n\n      Ask your subscription Owner / Global Admin to run:\n      ${chalk.cyan(`az role assignment create --assignee ${account.user?.name ?? "<your-user>"} --role "Contributor" --scope /subscriptions/${account.id}`)}\n      ${chalk.cyan(`az role assignment create --assignee ${account.user?.name ?? "<your-user>"} --role "User Access Administrator" --scope /subscriptions/${account.id}`)}`
       );
     }
+  } else if (spin.isSpinning) {
+    // `fetchSubscriptionPermissions` returned an empty set WITHOUT throwing
+    // (e.g. the ARM `elevateAccess`/permissions call returns `value: []`).
+    // Neither branch above runs, so without this the spinner is never
+    // concluded — its `setInterval` keeps the Node event loop alive and the
+    // whole `kars up` hangs after the summary (and the spinner animates the
+    // entire run). Conclude it and treat as inconclusive, not blocking.
+    spin.info("RBAC — effective permissions inconclusive (continuing)");
+    result.warnings.push(
+      "RBAC check inconclusive (no effective permissions returned). If `up` fails with an authorization error, re-run with Contributor + User Access Administrator.",
+    );
   }
 
   // 3. Resource providers
@@ -281,9 +292,13 @@ export async function runPreflightChecks(opts: PreflightOptions): Promise<Prefli
       );
     }
     if (notFound.length > 0) {
-      spin = ora().fail(
-        `Resource providers — could not verify ${notFound.length} (${notFound.map((p) => p.ns).join(", ")})`
-      );
+      const msg = `Resource providers — could not verify ${notFound.length} (${notFound.map((p) => p.ns).join(", ")})`;
+      // Conclude the EXISTING provider spinner rather than replacing the
+      // reference with a fresh `ora()` — the old `spin = ora().fail(...)`
+      // orphaned the still-spinning provider spinner whenever `pending` was
+      // empty, leaking a `setInterval` that kept the process alive.
+      if (spin.isSpinning) spin.fail(msg);
+      else ora().fail(msg);
       result.warnings.push(
         `Could not read registration state for: ${notFound.map((p) => p.ns).join(", ")}. Verify network access to management.azure.com.`
       );

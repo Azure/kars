@@ -14,7 +14,7 @@
 //   foundry_evaluations      foundry_deployments
 //   foundry_agents
 
-import { routerCall, routerCallBinary } from "../router-client.js";
+import { routerCall, routerCallStrict, routerCallBinary } from "../router-client.js";
 import { safeJson } from "../safe-json.js";
 import { resolveMemoryStoreName, resolveMemoryScope } from "../memory-binding.js";
 import type { FoundryProjectInfo } from "../foundry-discovery.js";
@@ -701,7 +701,12 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
             (d: any) => d.id?.includes("embedding") || d.model?.includes("embedding")
           )?.id || "text-embedding-3-small";
           log.info(`Creating memory store '${store}' (chat=${chatModel}, embedding=${embeddingModel})`);
-          await routerCall("POST", `/memory_stores?${apiVer}`, {
+          // Use the STRICT call so an upstream 4xx (e.g. 403 because the Foundry
+          // project's managed identity isn't enabled / lacks Azure AI User on
+          // the resource group, or 400 because no embedding model is deployed)
+          // surfaces the REAL reason instead of being swallowed and collapsing
+          // into a generic "could not be created".
+          await routerCallStrict("POST", `/memory_stores?${apiVer}`, {
             name: store,
             description: "kars agent persistent memory",
             definition: {
@@ -772,7 +777,7 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
               result = await doUpdate();
             }
             if (isNotFound(result)) {
-              return { content: [{ type: "text", text: `Memory update failed: store '${store}' could not be created.` }] };
+              return { content: [{ type: "text", text: `Memory update failed: store '${store}' could not be created — the Foundry Memory Store service returned not-found after a create attempt. Common causes: the Foundry project's system-assigned managed identity isn't enabled or lacks 'Azure AI User' on the resource group (RBAC can take a few minutes to propagate), or no embedding model is deployed in the project.` }] };
             }
             const status = result?.status || "submitted";
             return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };

@@ -975,6 +975,12 @@ Auto-resume:
           registryMode, globalRegistryUrl, globalRelayUrl,
         });
 
+        // Explicit success exit. Some `az`/REST calls leave keep-alive sockets
+        // (and we spawn a detached kubectl port-forward), so the event loop
+        // wouldn't drain on its own — without this the command hangs after the
+        // deployment summary instead of returning to the shell.
+        process.exit(0);
+
       } catch (error) {
         stepper.stop();
         console.error(chalk.red(`\n  Deployment failed`));
