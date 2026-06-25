@@ -46,6 +46,10 @@ export interface UpOptionsForPreflight {
   foundryEndpoint?: string;
   openaiEndpoint?: string;
   build: boolean;
+  /** `--release [version]`: import published GHCR images instead of building.
+   * `true` for bare `--release`, or the pinned tag string. When set, the
+   * local Docker build path (and its Docker preflight requirement) is skipped. */
+  release?: string | boolean;
   sourceAcr: string;
   dryRun: boolean;
   skipInfra: boolean;
@@ -71,8 +75,13 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   const { default: inquirer } = await import("inquirer");
   const { execa } = await import("execa");
 
-  // Auto-detect developer mode: if running from the repo (Dockerfile exists), default to --build
-  if (!options.build && !process.argv.includes("--source-acr")) {
+  // Auto-detect developer mode: if running from the repo (Dockerfile exists),
+  // default to --build. BUT not when --release is set: `kars up --release`
+  // imports the published GHCR images via `az acr import` (server-side) and
+  // never builds locally, so Docker must NOT be required — otherwise a clone
+  // without Docker fails preflight even though it never needs Docker.
+  const releaseMode = Boolean(options.release) || process.argv.includes("--release");
+  if (!options.build && !releaseMode && !process.argv.includes("--source-acr")) {
     const repoRoot = new URL("../../../..", import.meta.url).pathname;
     if (existsSync(`${repoRoot}/inference-router/Dockerfile`) || existsSync("inference-router/Dockerfile")) {
       options.build = true;

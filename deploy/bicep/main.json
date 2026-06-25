@@ -4,8 +4,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.43.8.12551",
-      "templateHash": "17988187282288113771"
+      "version": "0.44.1.10279",
+      "templateHash": "940580305345174806"
     }
   },
   "parameters": {
@@ -127,8 +127,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.43.8.12551",
-              "templateHash": "14451878920477996846"
+              "version": "0.44.1.10279",
+              "templateHash": "2707625082998162876"
             }
           },
           "parameters": {
@@ -229,8 +229,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.43.8.12551",
-              "templateHash": "6253323614075829972"
+              "version": "0.44.1.10279",
+              "templateHash": "7925585065634029621"
             }
           },
           "parameters": {
@@ -327,8 +327,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.43.8.12551",
-              "templateHash": "14420824941714154587"
+              "version": "0.44.1.10279",
+              "templateHash": "18367271307769626034"
             }
           },
           "parameters": {
@@ -456,8 +456,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.43.8.12551",
-              "templateHash": "12722266352135439899"
+              "version": "0.44.1.10279",
+              "templateHash": "12523284796891620699"
             }
           },
           "parameters": {
@@ -566,8 +566,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.43.8.12551",
-              "templateHash": "10277985618594722511"
+              "version": "0.44.1.10279",
+              "templateHash": "5350835899888631225"
             }
           },
           "parameters": {
@@ -738,72 +738,150 @@
               ]
             },
             {
-              "type": "Microsoft.Authorization/roleAssignments",
-              "apiVersion": "2022-04-01",
-              "scope": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]",
-              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), 'mi-contributor')]",
+              "type": "Microsoft.Resources/deployments",
+              "apiVersion": "2025-04-01",
+              "name": "[format('{0}-sandbox-rbac', parameters('name'))]",
               "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e40ec5ca-96e0-45a2-b4ff-59039f2c2b59')]",
-                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]",
-                "principalType": "ServicePrincipal"
+                "expressionEvaluationOptions": {
+                  "scope": "inner"
+                },
+                "mode": "Incremental",
+                "parameters": {
+                  "sandboxIdentityId": {
+                    "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
+                  },
+                  "sandboxPrincipalId": {
+                    "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]"
+                  },
+                  "kubeletPrincipalId": {
+                    "value": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').identityProfile.kubeletidentity.objectId]"
+                  },
+                  "acrName": {
+                    "value": "[last(split(parameters('acrId'), '/'))]"
+                  },
+                  "keyVaultName": {
+                    "value": "[parameters('keyVaultName')]"
+                  },
+                  "openAiAccountId": {
+                    "value": "[parameters('openAiAccountId')]"
+                  }
+                },
+                "template": {
+                  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                  "contentVersion": "1.0.0.0",
+                  "metadata": {
+                    "_generator": {
+                      "name": "bicep",
+                      "version": "0.44.1.10279",
+                      "templateHash": "9340508370433890200"
+                    }
+                  },
+                  "parameters": {
+                    "sandboxIdentityId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Resource ID of the sandbox user-assigned identity (scope for the MI-Contributor grant)."
+                      }
+                    },
+                    "sandboxPrincipalId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "principalId (objectId) of the sandbox user-assigned identity."
+                      }
+                    },
+                    "kubeletPrincipalId": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "principalId (objectId) of the AKS kubelet identity."
+                      }
+                    },
+                    "acrName": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "ACR name (the sandbox UAMI gets AcrPull on it; kubelet gets AcrPull at RG scope)."
+                      }
+                    },
+                    "keyVaultName": {
+                      "type": "string",
+                      "metadata": {
+                        "description": "Key Vault name (the sandbox UAMI gets Key Vault Secrets User on it)."
+                      }
+                    },
+                    "openAiAccountId": {
+                      "type": "string",
+                      "defaultValue": "",
+                      "metadata": {
+                        "description": "Full resource ID of the Azure OpenAI / AI Services account, or empty when using an external endpoint."
+                      }
+                    }
+                  },
+                  "variables": {
+                    "acrPullRole": "7f951dda-4ed3-4680-a7ca-43fe172d538d",
+                    "miContributorRole": "e40ec5ca-96e0-45a2-b4ff-59039f2c2b59",
+                    "openAiUserRole": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd",
+                    "kvSecretsUserRole": "4633458b-17de-408a-b874-0445c86b69e6"
+                  },
+                  "resources": [
+                    {
+                      "type": "Microsoft.Authorization/roleAssignments",
+                      "apiVersion": "2022-04-01",
+                      "scope": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', last(split(parameters('sandboxIdentityId'), '/')))]",
+                      "name": "[guid(parameters('sandboxIdentityId'), parameters('sandboxPrincipalId'), variables('miContributorRole'))]",
+                      "properties": {
+                        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('miContributorRole'))]",
+                        "principalId": "[parameters('sandboxPrincipalId')]",
+                        "principalType": "ServicePrincipal"
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Authorization/roleAssignments",
+                      "apiVersion": "2022-04-01",
+                      "name": "[guid(resourceGroup().id, parameters('kubeletPrincipalId'), variables('acrPullRole'))]",
+                      "properties": {
+                        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('acrPullRole'))]",
+                        "principalId": "[parameters('kubeletPrincipalId')]",
+                        "principalType": "ServicePrincipal"
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Authorization/roleAssignments",
+                      "apiVersion": "2022-04-01",
+                      "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+                      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), parameters('sandboxPrincipalId'), variables('acrPullRole'))]",
+                      "properties": {
+                        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('acrPullRole'))]",
+                        "principalId": "[parameters('sandboxPrincipalId')]",
+                        "principalType": "ServicePrincipal"
+                      }
+                    },
+                    {
+                      "condition": "[not(empty(parameters('openAiAccountId')))]",
+                      "type": "Microsoft.Authorization/roleAssignments",
+                      "apiVersion": "2022-04-01",
+                      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', last(split(parameters('openAiAccountId'), '/')))]",
+                      "name": "[guid(parameters('openAiAccountId'), parameters('sandboxPrincipalId'), variables('openAiUserRole'))]",
+                      "properties": {
+                        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('openAiUserRole'))]",
+                        "principalId": "[parameters('sandboxPrincipalId')]",
+                        "principalType": "ServicePrincipal"
+                      }
+                    },
+                    {
+                      "type": "Microsoft.Authorization/roleAssignments",
+                      "apiVersion": "2022-04-01",
+                      "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+                      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), parameters('sandboxPrincipalId'), variables('kvSecretsUserRole'))]",
+                      "properties": {
+                        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('kvSecretsUserRole'))]",
+                        "principalId": "[parameters('sandboxPrincipalId')]",
+                        "principalType": "ServicePrincipal"
+                      }
+                    }
+                  ]
+                }
               },
               "dependsOn": [
-                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
-              ]
-            },
-            {
-              "type": "Microsoft.Authorization/roleAssignments",
-              "apiVersion": "2022-04-01",
-              "name": "[guid(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), parameters('acrId'), 'acrpull')]",
-              "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
-                "principalId": "[reference(resourceId('Microsoft.ContainerService/managedClusters', parameters('name')), '2024-09-01').identityProfile.kubeletidentity.objectId]",
-                "principalType": "ServicePrincipal"
-              },
-              "dependsOn": [
-                "[resourceId('Microsoft.ContainerService/managedClusters', parameters('name'))]"
-              ]
-            },
-            {
-              "type": "Microsoft.Authorization/roleAssignments",
-              "apiVersion": "2022-04-01",
-              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', last(split(parameters('acrId'), '/')))]",
-              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), parameters('acrId'), 'acrpull')]",
-              "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
-                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]",
-                "principalType": "ServicePrincipal"
-              },
-              "dependsOn": [
-                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
-              ]
-            },
-            {
-              "condition": "[not(empty(parameters('openAiAccountId')))]",
-              "type": "Microsoft.Authorization/roleAssignments",
-              "apiVersion": "2022-04-01",
-              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', last(split(parameters('openAiAccountId'), '/')))]",
-              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), parameters('openAiAccountId'), 'openai-user')]",
-              "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')]",
-                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]",
-                "principalType": "ServicePrincipal"
-              },
-              "dependsOn": [
-                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
-              ]
-            },
-            {
-              "type": "Microsoft.Authorization/roleAssignments",
-              "apiVersion": "2022-04-01",
-              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
-              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), 'kv-secrets-user')]",
-              "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
-                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name'))), '2023-01-31').principalId]",
-                "principalType": "ServicePrincipal"
-              },
-              "dependsOn": [
+                "[resourceId('Microsoft.ContainerService/managedClusters', parameters('name'))]",
                 "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sandbox-wi', parameters('name')))]"
               ]
             }
