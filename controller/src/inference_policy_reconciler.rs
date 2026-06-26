@@ -50,7 +50,6 @@ use kube::{
     api::{Api, ListParams, ObjectMeta, Patch, PatchParams},
     runtime::controller::{Action, Controller},
     runtime::reflector::ObjectRef,
-    runtime::watcher,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -838,10 +837,10 @@ pub async fn run(client: Client) -> Result<()> {
     // pure label-selector-only policies (no sandboxName + no
     // inferenceRef from sandbox) still rely on the periodic resync.
     let sandboxes: Api<crate::crd::KarsSandbox> = Api::all(client);
-    Controller::new(policies, watcher::Config::default())
+    Controller::new(policies, crate::watch_config::bounded())
         .watches(
             sandboxes,
-            watcher::Config::default(),
+            crate::watch_config::bounded(),
             |sb: crate::crd::KarsSandbox| {
                 let name = sb.spec.inference_ref.name.clone();
                 let ns = sb.namespace().unwrap_or_default();

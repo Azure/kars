@@ -1310,7 +1310,7 @@ pub async fn run(client: Client) -> Result<()> {
         }
     }
     let ctx = Arc::new(Ctx { client });
-    Controller::new(evals, kube::runtime::watcher::Config::default())
+    Controller::new(evals, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("KarsEval", reconcile(x, ctx)).await

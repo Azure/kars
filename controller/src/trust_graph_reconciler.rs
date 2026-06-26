@@ -386,7 +386,7 @@ pub async fn run(client: Client) -> Result<()> {
         }
     }
     let ctx = Arc::new(Ctx { client });
-    Controller::new(graphs, kube::runtime::watcher::Config::default())
+    Controller::new(graphs, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("TrustGraph", reconcile(x, ctx)).await

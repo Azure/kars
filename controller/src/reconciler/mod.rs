@@ -3525,10 +3525,10 @@ pub async fn run(client: Client) -> Result<()> {
         agent_id_cache: Arc::new(crate::agent_id_provisioning::ProvisionerCache::new()),
     });
 
-    Controller::new(sandboxes, kube::runtime::watcher::Config::default())
+    Controller::new(sandboxes, crate::watch_config::bounded())
         .watches(
             Api::<Deployment>::all(ctx.client.clone()),
-            kube::runtime::watcher::Config::default(),
+            crate::watch_config::bounded(),
             deployment_to_sandbox_ref,
         )
         .run(

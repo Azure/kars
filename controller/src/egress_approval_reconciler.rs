@@ -1007,7 +1007,7 @@ pub async fn run(client: Client) -> Result<()> {
         http,
         ttl_ceiling_seconds,
     });
-    Controller::new(approvals, kube::runtime::watcher::Config::default())
+    Controller::new(approvals, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("EgressApproval", reconcile(x, ctx)).await

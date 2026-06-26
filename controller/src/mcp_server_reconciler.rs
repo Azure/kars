@@ -790,7 +790,7 @@ pub async fn run(client: Client) -> Result<()> {
         client: client.clone(),
         jwks_fetcher: Arc::new(HttpJwksFetcher::new()),
     });
-    Controller::new(mcps, kube::runtime::watcher::Config::default())
+    Controller::new(mcps, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("McpServer", reconcile(x, ctx)).await
