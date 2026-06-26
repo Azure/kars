@@ -33,11 +33,11 @@ override env var on the controller (e.g. `OPENAI_AGENTS_RUNTIME_IMAGE`,
 Releases are cut by bumping `cli/package.json` and pushing a git tag:
 
 ```bash
-# 1. Bump version in cli/package.json (e.g. 0.1.0)
+# 1. Bump version in cli/package.json (e.g. 0.1.18)
 # 2. Commit + push to dev
 # 3. After dev → main merge:
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.18
+git push origin v0.1.18
 
 # 4. Build + push every image with the pinned tag:
 make images push push-runtimes  # uses VERSION from package.json + GIT_SHA

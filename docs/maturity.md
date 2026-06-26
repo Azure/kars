@@ -1,6 +1,6 @@
 # Feature maturity & enforcement status
 
-kars is `v0.1.0`. Most of the control plane is enforced at runtime today, but some
+kars is `v0.1.18`. Most of the control plane is enforced at runtime today, but some
 capabilities are reconciled-but-not-yet-gated, ship as a library that is not yet wired
 into the request path, or are still on the [roadmap](roadmap.md). This page is the
 **single, honest source of truth** for where each capability sits, so reviewers do not
@@ -39,7 +39,7 @@ closed — not that the field merely exists on a CRD.
 | Router L7 allowlist on every outbound CONNECT | ✅ Enforced | Inline `allowedEndpoints` is the source of truth today |
 | `EgressApproval` time-boxed exceptions | ✅ Enforced | Router consults active `EgressApproval` CRs per request |
 | Auto-refreshing malicious-domain blocklist (OISD + URLhaus) | ✅ Enforced | [egress-proxy.md](egress-proxy.md) |
-| Signed-OCI allowlist as the **authoritative** source (authority flip) | ⚪ Roadmap | Today the signed artifact is a parallel advisory check; making it the only source of truth is on the [roadmap](roadmap.md#egress-allowlist-authority-flip) |
+| Signed-OCI allowlist as the L7 egress source of truth | ✅ Enforced | The router loads the cosign-verified, controller-resolved bundle and the forward proxy denies any host not in it (`egress_allowlist_loader.rs`, `forward_proxy.rs`). Default-deny in `egressMode: Strict`; the default `Learn` mode records non-blocklisted hosts instead of denying. Active `EgressApproval` CRs are unioned in. |
 
 ## Kernel & container hardening
 
@@ -57,7 +57,7 @@ closed — not that the field merely exists on a CRD.
 | Content Safety on GitHub Copilot / GitHub Models paths (provider-side) | ✅ Enforced (provider-side, opaque to router) | Both providers enforce Microsoft Responsible AI content filtering server-side. The router itself does not see per-request `prompt_filter_results` annotations, so AGT `BehaviorMonitor` cannot tune severity or surface category flags on those paths — see [security.md → What we do *not* defend against](security.md#what-we-do-not-defend-against) for the router-side gap. The underlying content filter is on. |
 | Per-request token cap (`tokenBudget.perRequestTokens`) | ✅ Enforced | Router, HTTP 429 on overrun |
 | Per-tenant daily / monthly UTC token counters | ✅ Enforced | On-disk persistence in the router |
-| `InferencePolicy` **aggregate** token budgets (per-hour / per-day windows, `rejectOnExceed`) | 🟡 Reconciler-only | Accepted on spec and surfaced in status; not yet metered at the router. [roadmap](roadmap.md#inference-policy-enforcement) |
+| `InferencePolicy` **aggregate** token budgets (daily + monthly windows) | ✅ Enforced | Per-sandbox UTC-calendar daily + monthly counters metered at the router; requests over budget are rejected (`budget.rs`, `routes/chat_completions.rs`). Per-hour windows are not implemented. |
 
 ## Governance (AGT, in-router)
 
@@ -107,7 +107,7 @@ closed — not that the field merely exists on a CRD.
 
 | Capability | Status | Notes |
 |---|---|---|
-| OpenClaw, OpenAI Agents (Py), Microsoft Agent Framework (Py), Anthropic Claude Agent SDK, LangGraph (Py + TS), Pydantic-AI | ✅ Enforced | Seven first-class adapters (LangGraph ships Python + TypeScript) + BYO. [runtimes.md](runtimes.md) |
+| Hermes, OpenClaw, OpenAI Agents (Py), Microsoft Agent Framework (Py), Anthropic Claude Agent SDK, LangGraph (Py + TS), Pydantic-AI | ✅ Enforced | Eight first-class adapters (LangGraph ships Python + TypeScript) + BYO. [runtimes.md](runtimes.md) |
 | CrewAI, Microsoft Agent Framework (.NET), Strands / Google ADK | ⚪ Roadmap | [roadmap](roadmap.md#more-runtimes) — .NET returns when AGT ships `AgentMeshClient` for .NET |
 
 ## Multi-cluster & DR

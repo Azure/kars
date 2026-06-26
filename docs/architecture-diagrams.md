@@ -25,7 +25,7 @@ flowchart TB
   Foundry["Azure AI Foundry<br/>model + content safety"]
   Router -->|"HTTPS<br/>(your key)"| Foundry
 
-  classDef laptop fill:#fff5e6,stroke:#cc8800
+  classDef laptop fill:#fff5e6,stroke:#cc8800,color:#0b1220
   class Laptop laptop
 ```
 
@@ -75,8 +75,8 @@ flowchart TB
   Router -->|"WS, opaque ciphertext<br/>(Entra JWT in entra mode)"| Mesh
   Router -->|HTTPS| A2A
 
-  classDef cluster fill:#e6f0ff,stroke:#0078d4
-  classDef pod fill:#f0fff0,stroke:#2a9d2a
+  classDef cluster fill:#e6f0ff,stroke:#0078d4,color:#0b1220
+  classDef pod fill:#f0fff0,stroke:#2a9d2a,color:#0b1220
   class Cluster cluster
   class Pod pod
 ```
@@ -138,9 +138,9 @@ signing of the chain head is on the roadmap (see [security.md](security.md#the-h
 
 ---
 
-## 4. The mesh — encrypted inter-agent messaging
+## 4. The mesh — Cross-Framework Secure Mesh
 
-Two kars agents in (possibly) different clusters that need to talk. The Signal-Protocol session (X3DH key agreement, Double Ratchet, KNOCK trust evaluation) lives **entirely inside the agent process** via `@microsoft/agent-governance-sdk`. The router is a transparent WebSocket bridge to the AgentMesh relay — it forwards opaque ciphertext, never holds a session key, and cannot decrypt. The relay is the same: ciphertext in, ciphertext out.
+Two kars agents in (possibly) different clusters — and (possibly) built on **different frameworks: Hermes, OpenClaw, or LangGraph** — that need to talk. This is the **Cross-Framework Secure Mesh**: every runtime speaks the same E2E Signal wire format over AgentMesh, so framework choice never partitions the mesh. The Signal-Protocol session (X3DH key agreement, Double Ratchet, KNOCK trust evaluation) lives **entirely inside the agent process** via `@microsoft/agent-governance-sdk` (or, for Hermes, the wire-compatible Python AGT MeshClient). The router is a transparent WebSocket bridge to the AgentMesh relay — it forwards opaque ciphertext, never holds a session key, and cannot decrypt. The relay is the same: ciphertext in, ciphertext out.
 
 ```mermaid
 sequenceDiagram
@@ -192,6 +192,8 @@ sequenceDiagram
 
 For cross-organisation peers that are not in your AgentMesh.
 
+> **Status — partial (forward-looking).** The inbound `AgentCard` JWS verifier is library-complete and the router accepts the mTLS env + cert paths, but the dedicated public TLS listener is **not yet wired** (see [A2A gateway](architecture/a2a-gateway.md)). The diagram below shows the intended production edge; internal-mesh A2A between kars sandboxes works today, cross-org public ingress is on the [roadmap](roadmap.md).
+
 ```mermaid
 flowchart LR
   subgraph Internet
@@ -223,7 +225,7 @@ The A2A gateway is the only inbound public surface. Every request gets the same 
 ```mermaid
 flowchart LR
   User["operator / CLI / GitOps"]
-  CRD[("9 CRDs<br/>KarsSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>KarsMemory · KarsEval · TrustGraph<br/>EgressApproval")]
+  CRD[("10 CRDs<br/>KarsSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>KarsMemory · KarsEval · TrustGraph<br/>EgressApproval · KarsSREAction")]
   Ctrl["kars-controller<br/>(kube-rs)"]
 
   User -->|kubectl apply / kars cli| CRD
@@ -239,13 +241,13 @@ flowchart LR
   Status --> User
 ```
 
-The controller is a vanilla kube-rs reconciler. It owns the nine user-facing CRDs (plus the infrastructure CRDs `KarsAuthConfig` and the controller-internal `KarsPairing`), watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
+The controller is a vanilla kube-rs reconciler. It owns the ten user-facing CRDs (plus the infrastructure CRDs `KarsAuthConfig` and the controller-internal `KarsPairing`), watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
 
 ---
 
 ## 7. CRD relationships
 
-How the nine CRDs reference each other. Arrow labels show the **actual** field path on the spec (camelCase as serialized).
+How the workload CRDs reference each other. Arrow labels show the **actual** field path on the spec (camelCase as serialized). `KarsSREAction` is standalone (proposed by the SRE operator, approval-gated) and does not reference the other CRDs, so it is omitted from this relationship graph.
 
 ```mermaid
 flowchart TB
@@ -311,9 +313,9 @@ flowchart TB
   PodN -->|HTTPS, WI| Foundry
   GwPod -->|in-cluster| Pod1
 
-  classDef sys fill:#e6f0ff,stroke:#0078d4
-  classDef tenant fill:#f0fff0,stroke:#2a9d2a
-  classDef mesh fill:#fff0f5,stroke:#9933cc
+  classDef sys fill:#e6f0ff,stroke:#0078d4,color:#0b1220
+  classDef tenant fill:#f0fff0,stroke:#2a9d2a,color:#0b1220
+  classDef mesh fill:#fff0f5,stroke:#9933cc,color:#0b1220
   class Sys sys
   class Tenant1 tenant
   class TenantN tenant

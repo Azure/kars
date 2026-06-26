@@ -33,6 +33,7 @@ All commands also inherit Commander.js built-in `--help`.
 ### Lifecycle
 
 - [up](#kars-up)
+- [upgrade](#kars-upgrade)
 - [dev](#kars-dev)
 - [add](#kars-add)
 - [destroy](#kars-destroy)
@@ -43,8 +44,10 @@ All commands also inherit Commander.js built-in `--help`.
 ### Operations
 
 - [operator](#kars-operator)
+- [headlamp](#kars-headlamp)
 - [connect](#kars-connect)
 - [handoff](#kars-handoff)
+- [sre](#kars-sre)
 - [status](#kars-status)
 - [list](#kars-list)
 - [logs](#kars-logs)
@@ -112,7 +115,7 @@ kars up [options]
 | `--skip-infra` | `false` | Skip infrastructure provisioning (reuse existing cluster) |
 | `--force-infra` | `false` | Force Bicep deployment even if AKS cluster already exists |
 | `--source-acr <server>` | `karsacr.azurecr.io` | Source ACR for pre-built images (customer deployments) |
-| `--release [version]` | — | Import the **public, cosign-signed GHCR release images** (`ghcr.io/azure/*`) into your ACR — no local build, no Rust toolchain. Bare `--release` uses `:latest`; pass a tag (e.g. `v0.1.4`) to pin. Takes precedence over `--build`. |
+| `--release [version]` | — | Import the **public, cosign-signed GHCR release images** (`ghcr.io/azure/*`) into your ACR — no local build, no Rust toolchain. Bare `--release` uses `:latest`; pass a tag (e.g. `v0.1.18`) to pin. Takes precedence over `--build`. |
 | `--build` | `false` | Build images locally from source and push to ACR (developer mode). Compiles Rust in-Docker on macOS/arm64 via the `*.multistage` Dockerfiles. |
 | `--skip-runtime-images` | `false` | Skip building/importing the 7 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
 | `--foundry-endpoint <url>` | — | Existing Azure AI Foundry project endpoint (`services.ai.azure.com`) |
@@ -169,11 +172,92 @@ The state is invalidated automatically when:
 
 ---
 
+### `kars upgrade`
+
+Move an **existing** kars cluster to a published GitHub release — safely and
+idempotently. Where `kars up --upgrade` is a fast Helm-only re-run that assumes
+your ACR already holds the new images, `kars upgrade` owns the whole release
+migration end to end:
+
+1. **Detects** the current deployed version vs. the target (the latest GHCR
+   release, or `--to <tag>`).
+2. **Records a rollback point** (the current Helm revision).
+3. **Imports** the target release's cosign-signed images from `ghcr.io/azure`
+   into your ACR — both the immutable version tag and `:latest`, so any
+   version remains available in your ACR to roll to by tag.
+4. **`helm upgrade --atomic`** — a failed upgrade auto-rolls-back the release, so
+   the cluster never lands half-migrated.
+5. **Rolling restart** of the controller, router, and sandbox workloads onto the
+   new images.
+6. **Verifies health** and prints what changed.
+
+It reads the deployment context cached by `kars up` (`~/.kars/context.json`), so
+run it from the machine that deployed the cluster (or any machine with that
+context + cluster credentials).
+
+**Usage:**
+```
+kars upgrade [options]
+```
+
+**Options:**
+| Flag | Default | Description |
+|---|---|---|
+| `--to <tag>` | latest release | Target release tag (e.g. `v0.1.18`). Defaults to the latest GitHub release. |
+| `--dry-run` | `false` | Show the upgrade plan (which images would be imported, from→to) without making any changes. |
+| `--rollback` | `false` | Roll the cluster back to the previous Helm revision, restart workloads, and verify. |
+| `--skip-runtime-images` | `false` | Skip the seven multi-runtime adapter images (faster; OpenClaw + BYO only). |
+| `--force` | `false` | Re-run even if already at the target version (also required to intentionally downgrade). |
+
+**Examples:**
+```bash
+# Upgrade to the latest published GitHub release
+kars upgrade
+
+# Pin a specific release
+kars upgrade --to v0.1.18
+
+# Preview the plan — no changes made
+kars upgrade --dry-run
+
+# Revert to the previous Helm revision
+kars upgrade --rollback
+```
+
+**Safety model:** the only mutating step before the atomic Helm upgrade is the
+ACR image import (additive). If a required image fails to import, the command
+aborts **before** touching the cluster. The Helm upgrade itself is `--atomic`,
+and a recorded Helm revision means `kars upgrade --rollback` is always available.
+See **[Operations → Upgrades & rollback](operations/upgrades.md)** for the full
+runbook and **[Image versioning](operations/image-versioning.md)** for the
+tagging model.
+
+**See also:** [`kars up`](#kars-up) (initial bootstrap), [Operations → Upgrades & rollback](operations/upgrades.md)
+
+---
+
 ### `kars dev`
 
-Runs a fully-policy-enforced sandbox locally via Docker for inner-loop
-development. Same model routing, same egress policies, and the same
-AGT governance layer as AKS — but on your laptop.
+Runs a fully-policy-enforced sandbox locally for inner-loop development —
+same model routing, same egress policies, and the same AGT governance
+layer as AKS, but on your laptop.
+
+> **Recommended dev flow:** `kars dev --release --target local-k8s`. The
+> `local-k8s` target spins up a **kind** cluster and deploys the full
+> control plane (controller, AgentMesh relay + registry, Headlamp) exactly
+> as it runs on AKS, so what you test locally mirrors real Kubernetes
+> behaviour — NetworkPolicy, the controller reconcile path, and pod-level
+> isolation all included. Adding `--release` pulls the public,
+> cosign-signed GHCR images, so no local Rust toolchain is needed. Plain
+> `--target docker` is the faster bare inner loop, but it does **not**
+> exercise any of the Kubernetes machinery, so prefer `local-k8s` once you
+> are validating real behaviour.
+
+> **Operational UX — Headlamp.** `--target local-k8s` (and every AKS
+> deploy) ships the **kars Headlamp plugin**: a point-and-click dashboard
+> for sandboxes, egress allowlists, AGT receipts, and live inference-router
+> metrics. `kars dev --target local-k8s` auto-port-forwards Headlamp and
+> prints its URL; tear it down again with `kars dev down`.
 
 **Three inference providers** are supported. On first run you'll be asked
 to pick one; your choice is saved to `~/.kars/config.json` and
@@ -199,6 +283,7 @@ kars dev [options]
 | `--target <target>` | `docker` | Where to run the sandbox: `docker` (fast inner loop) or `local-k8s` (kind + Helm, mirrors AKS layout). |
 | `--cluster-name <name>` | `kars-dev` | Kind cluster name (only used with `--target local-k8s`). |
 | `--ephemeral` | `false` | (local-k8s only) destroy the kind cluster on exit. |
+| `--release [version]` | — | Import the **public, cosign-signed GHCR release images** (`ghcr.io/azure/*`) into the local cluster instead of building from source — no Rust toolchain. Bare `--release` uses `:latest`; pass a tag (e.g. `v0.1.18`) to pin. Pairs with `--target local-k8s`. |
 | `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use for ephemeral runs that shouldn't overwrite your saved provider. To save Copilot/GitHub-Models as your default, run `kars dev` (or `kars credentials`) without this flag and pick at the prompt. |
 | `--image <image>` | `kars-sandbox:dev` | Sandbox container image |
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
@@ -472,7 +557,7 @@ kars migrate <subcommand> [arguments] [options]
 | `to-translate <name>` | Accept upstream SandboxClaim semantics on inbound (schema-only translation). |
 | `to-observe <name>` | Mirror status of an upstream Sandbox CR without overlay. |
 | `to-native <name>` | Reset to default native mode (kars owns the workload). |
-| `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into an kars resource bundle. Use `-` to read from stdin. |
+| `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into a kars resource bundle. Use `-` to read from stdin. |
 
 **Common options (all subcommands except `from-kagent`):**
 | Flag | Default | Description |
@@ -559,6 +644,69 @@ kars operator --panels status,logs --per-sandbox
 ```
 
 **See also:** [docs/operator-tui.md](operator-tui.md)
+
+---
+
+### `kars headlamp`
+
+Open the [Headlamp](https://headlamp.dev/) Kubernetes dashboard for the current cluster, with the kars plugin loaded — a graphical view of sandboxes, policies, mesh peers, and audit alongside the cluster's native resources. Port-forwards Headlamp and opens it in your browser.
+
+**Usage:**
+```
+kars headlamp [options]
+```
+
+**Options:**
+| Flag | Default | Description |
+|---|---|---|
+| `--install` | `false` | Install Headlamp + the kars plugin into the cluster first, then open. |
+| `--port <port>` | `4466` | Local port to bind. |
+| `--namespace <ns>` | `headlamp` | Namespace where Headlamp is deployed. |
+| `--context <name>` | current | Kubernetes context to use. |
+| `--token-duration <dur>` | `24h` | Token TTL passed to `kubectl create token`. |
+| `--no-browser` | — | Skip opening the browser; just port-forward and print the URL. |
+
+**Examples:**
+```bash
+# First time — install Headlamp + the kars plugin, then open the dashboard
+kars headlamp --install
+
+# Subsequent runs — just port-forward and open
+kars headlamp
+```
+
+---
+
+### `kars sre`
+
+Manage the built-in **kars-sre** agent — an in-cluster SRE operator that diagnoses cluster issues and proposes approval-gated remediations as `KarsSREAction` CRs. The controller executes an action only after you approve it; see the [SRE runbook](runbooks/sre.md) for the full model.
+
+**Usage:**
+```
+kars sre <subcommand> [options]
+```
+
+**Subcommands:**
+| Subcommand | Description |
+|---|---|
+| `install` | Enable the kars-sre agent on the current cluster (cluster-wide read; gated writes). |
+| `uninstall` | Disable the kars-sre agent (namespace + RBAC torn down by the controller). |
+| `status` | Show the sre `KarsSandbox` CR + pod state. |
+| `talk` | Open the kars-sre WebUI (alias for `kars connect sre`). |
+| `actions` | List recent `KarsSREAction` proposals. |
+| `show <action-id>` | Show full details of a proposal — diagnosis, rationale, action target, approval state, conditions. Review this before approving. |
+| `approve <action-id>` | Approve a pending proposal — authorises the controller to execute it. `--note <text>` attaches an audit note. |
+| `reject <action-id>` | Reject a pending proposal — the controller will not execute it. `--reason <text>` attaches an audit reason. |
+
+**Examples:**
+```bash
+kars sre install                 # enable the operator
+kars sre actions                 # list proposals
+kars sre show sreaction-xyz      # review one before deciding
+kars sre approve sreaction-xyz --note "confirmed: safe to restart"
+```
+
+**See also:** [Autonomous SRE operator runbook](runbooks/sre.md), [`KarsSREAction` CRD](api/crd-reference.md#karssreaction--approval-gated-sre-remediation)
 
 ---
 
@@ -1251,6 +1399,13 @@ handoff and federation. Controls the Ed25519 mesh identity (stored
 AES-256-GCM encrypted at `~/.kars/mesh-identity.json`), relay
 registration enforcement, and cluster federation peer state.
 
+> **Cross-Framework Secure Mesh.** kars meshes agents written in *different*
+> frameworks — **Hermes**, **OpenClaw**, and **LangGraph** — over a single
+> AgentMesh fabric. Every hop is **end-to-end encrypted with the Signal
+> Protocol** (X3DH + Double Ratchet), so a Hermes agent can KNOCK and
+> exchange messages with an OpenClaw or LangGraph agent without either side
+> sharing keys or having to trust the relay.
+
 **Usage:**
 ```
 kars mesh <subcommand> [arguments] [options]
@@ -1492,7 +1647,7 @@ kars a2a-agent apply partner-bot --from-file partner.yaml
 kars a2a-agent list -n acme
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md#a2aagent), [`kars toolpolicy`](#kars-toolpolicy)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#a2aagent--public-ingress-peer-endpoint), [`kars toolpolicy`](#kars-toolpolicy)
 
 ---
 
@@ -1549,7 +1704,7 @@ kars tp apply payments-cap --tool send-payment \
 kars tp apply complex-policy --from-file policy.yaml
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md#toolpolicy), [`kars inferencepolicy`](#kars-inferencepolicy)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#toolpolicy--per-tool-gate), [`kars inferencepolicy`](#kars-inferencepolicy)
 
 ---
 
@@ -1607,7 +1762,7 @@ kars ip apply cs-floor --action '*' --content-safety-severity Medium
 kars ip apply complex --from-file policy.yaml
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md#inferencepolicy), [`kars toolpolicy`](#kars-toolpolicy)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#inferencepolicy--model-routing-and-budgets), [`kars toolpolicy`](#kars-toolpolicy)
 
 ---
 
@@ -1664,7 +1819,7 @@ kars mcp apply prod-mcp \
 kars mcp apply complex --from-file mcp.yaml
 ```
 
-**See also:** [docs/api/crd-reference.md](api/crd-reference.md#mcpserver), [`kars toolpolicy`](#kars-toolpolicy)
+**See also:** [docs/api/crd-reference.md](api/crd-reference.md#mcpserver--declared-mcp-backend), [`kars toolpolicy`](#kars-toolpolicy)
 
 ---
 
@@ -1710,4 +1865,4 @@ kars memory list -n kars-my-agent
 kars memory delete my-agent-mem -n kars-my-agent
 ```
 
-**See also:** [docs/api/crd-reference.md#karsmemory](api/crd-reference.md#karsmemory--foundry-memory-binding)
+**See also:** [docs/api/crd-reference.md#karsmemory](api/crd-reference.md#karsmemory--memory-store-binding)

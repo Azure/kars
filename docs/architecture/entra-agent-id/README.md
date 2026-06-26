@@ -14,10 +14,8 @@ numbered by deployment order and scope.
 | Doc | Scope |
 |-----|-------|
 | [01-runtime-token-flow.md](01-runtime-token-flow.md) | Runtime auth flow — sidecar → blueprint → agent token → Foundry |
-| [02-aci-token-flow.md](02-aci-token-flow.md) | Alternative ACI-based token flow (reference / not deployed) |
-| [03-original-findings.md](03-original-findings.md) | Initial POC findings + design constraints |
 | [05-security-alignment.md](05-security-alignment.md) | Phase 5 — custom security attributes, CA baseline, scale-out invariant |
-| [00-poc-archive.md](00-poc-archive.md) | Archived original POC README |
+| [06-mesh-trust-design.md](06-mesh-trust-design.md) | Mesh trust model — Entra JWT verification on the AGT relay/registry |
 
 ## TL;DR architecture
 
@@ -133,9 +131,6 @@ Anonymous mode skips all of the above — sandboxes share the cluster's
 workload identity for Foundry, and the AGT mesh runs in trust score 0
 (everyone-accepts-everyone). Good for local dev, demos, and tenants
 where the operator can't (or won't) provision Entra resources.
-
-See [04-migration-guide.md](04-migration-guide.md) for the operator
-journey from anonymous → entra.
 
 ## Open follow-ups
 

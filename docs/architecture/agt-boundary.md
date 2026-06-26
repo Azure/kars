@@ -25,24 +25,23 @@ AGT ships the governance engine. kars is the AKS operator and data plane that fe
 - **Kubernetes operator** — controller, CRDs, admission policies, reconcilers.
 - **Router data plane** — L7 proxy, IMDS / Workload-Identity auth, Foundry calls, MCP transport (Streamable HTTP + SSE compat), A2A transport, OpenAI-SDK sandbox-provider adapter, channel plugins.
 - **Sandbox image** — Dockerfile layout, seccomp profiles, Landlock policy, egress-guard iptables, UID layout, init containers.
-- **CLI (`kars`)** — including `operator` TUI, `up`, `add`, `push`, `dev`, `handoff`, `offload`, `policy learn`, `migrate`, `convert`, `claw attest`.
+- **CLI (`kars`)** — including `operator` TUI, `up`, `upgrade`, `add`, `push`, `dev`, `handoff`, `policy`, `migrate`, `convert`, `attest`, `sre`, `mesh`, `pair`.
 - **Confidential-compute integration** — Kata + SEV-SNP runtime class, attestation-document handling.
-- **`sigs/agent-sandbox` compatibility mode** — translator / overlay / vendored reconciler for the upstream schema. Opt-in; default stays Native.
 
 ---
 
 ## 2. Provider contracts
 
-kars exposes four provider traits. Three of them (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) ship a vendored implementation alongside the AGT-Rust-SDK path; one (`MeshProvider`) links the `agentmesh` crate (the AGT Rust SDK) from crates.io.
+kars exposes four provider traits. Three of them (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) ship a vendored implementation alongside the AGT-Rust-SDK path. The fourth (`MeshProvider`) is **plugin-side only**: the router is a transport proxy for mesh traffic, holds no Signal keys, and intentionally provides **no** Rust mesh implementation — E2E encryption happens in the agent (see [The mesh](../architecture.md#the-mesh)).
 
-| Trait | Current implementations | Role |
+| Trait | Where it's implemented | Role |
 |---|---|---|
-| `MeshProvider` | [`agentmesh`](https://crates.io/crates/agentmesh) crate (`agentmesh = "3.1.0"`) — AGT Rust SDK | E2E session establishment + message send/receive |
+| `MeshProvider` | **Agent-side only** — OpenClaw via the AGT TypeScript SDK, Hermes via the AGT Python mesh client. The router has **no** mesh `impl` (it proxies opaque ciphertext). | E2E session establishment + message send/receive |
 | `PolicyDecisionProvider` | `Vendored` · `AgtRustSdk` · `Null` | Allow / Deny / Approval / RateLimit evaluation |
 | `AuditSink` | `Vendored` · `AgtRustSdk` · `Null` | Append-only audit events → receipt id |
 | `SigningProvider` | `Vendored` · `AgtRustSdk` · `Null` | Sign `(key_ref, payload)` and verify |
 
-`Null*` is test-only and blocked in production by admission policy. The Rust-side `Cargo.toml` depends on the published `agentmesh = "3.1.0"` crate; on the TypeScript side, the OpenClaw plugin installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time. There is no in-tree fork of either SDK — the historical `vendor/agentmesh-*` overlay has been retired.
+`Null*` is test-only and blocked in production by admission policy. The router **does** link the [`agentmesh`](https://crates.io/crates/agentmesh) Rust crate (`agentmesh = "4.0.0"`, the crates.io floor, temporarily redirected to a pinned `microsoft/agent-governance-toolkit` revision via `[patch.crates-io]` while two pre-release fixes are in review) — but only for the shared **governance** primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`), never for mesh crypto. On the TypeScript side, the OpenClaw plugin bundles `@microsoft/agent-governance-sdk` at sandbox-image build time (currently from the same pinned AGT build, switching to the published npm release once those fixes land); the Python runtimes use the AGT Python mesh client (`kars-agt-mesh` / `a2a_agentmesh`). There is **no in-tree fork** of either SDK — every client is an upstream AGT build, and the historical `vendor/agentmesh-*` overlay has been retired.
 
 The remaining vendored paths (`PolicyDecisionProvider`, `AuditSink`, `SigningProvider`) are a **permanent alternate architecture**, not migration staging — they are never scheduled for deletion.
 

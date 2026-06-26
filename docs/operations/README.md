@@ -5,6 +5,7 @@ How to operate kars in production. Each page is one operational concern, with th
 | Topic | Read |
 |---|---|
 | **GitOps** — managing kars with Flux / Argo CD instead of the CLI. | [`gitops.md`](gitops.md) |
+| **Upgrades & rollback** — moving a cluster to a new release with `kars upgrade`; atomic Helm + rollback. | [`upgrades.md`](upgrades.md) |
 | **Secret rotation** — rotating Foundry keys, ACR credentials, federated identities. | [`secret-rotation.md`](secret-rotation.md) |
 | **Image versioning** — `:latest` tag policy, pinning by digest, supply-chain considerations. | [`image-versioning.md`](image-versioning.md) |
 | **Helm packaging** — packaging the chart for offline / sovereign deployments. | [`helm-packaging.md`](helm-packaging.md) |

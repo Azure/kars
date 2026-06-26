@@ -20,7 +20,6 @@ Everything below explains how those four guarantees are enforced and where the s
 > **What is not yet enforced in this release.** Trying to be explicit so reviewers do not have to hunt:
 > - **TrustGraph mesh-admission gating** — the CRD is reconciler-only today; router-side enforcement of the topology is tracked in the [roadmap](roadmap.md).
 > - **A2A `AgentCard` verification in the gateway** — the verifier ships as a library; wiring it into the gateway request path is tracked in the roadmap.
-> - **Signed-OCI egress allowlists** — advisory today (the controller fetches and logs); the egress proxy will become the authority — see [egress-proxy.md](egress-proxy.md) and the roadmap.
 > - **Audit-chain head signing** — entries are hash-chained for tamper *detection* today; cryptographic signing of the chain head (for non-repudiation) is on the roadmap.
 > - **`attest sign` / `attest verify`** — scaffolded CLI commands; the full attestation flow is on the roadmap.
 
@@ -133,8 +132,8 @@ flowchart LR
   BM -->|anomaly| AL[("emit alert<br/>(does not block)")]
   BM -->|normal| OK[("→ proceed")]
 
-  classDef deny fill:#fde2e1,stroke:#c0392b
-  classDef ok fill:#dff5e1,stroke:#27ae60
+  classDef deny fill:#fde2e1,stroke:#c0392b,color:#0b1220
+  classDef ok fill:#dff5e1,stroke:#27ae60,color:#0b1220
   class D1,D2 deny
   class OK ok
 ```
@@ -240,7 +239,7 @@ Honesty matters. kars does not — and cannot — protect against:
 
 - **A compromised model provider.** If Azure AI Foundry is compromised, an attacker can change model output. Content Safety on the way out limits the damage but does not eliminate it. Use the confidential isolation level for workloads where this matters.
 - **A compromised cluster operator who controls Kata-less nodes.** Without Kata + AMD SEV-SNP, a cluster operator can read pod memory. Move to confidential isolation if your threat model includes the cluster operator.
-- **A compromised CI / supply chain.** We add gates and pinning, but ultimately you trust your builders. The vendor / patch surface is itemised in `vendor/agentmesh-sdk/README.md`; per-route threat-model walkthroughs are tracked in the internal review board.
+- **A compromised CI / supply chain.** We add gates and pinning, but ultimately you trust your builders. The vendored AGT artifact and its pin are recorded in `vendor/agt/pin.json`; the supply-chain posture is itemised in [supply-chain-posture.md](security/supply-chain-posture.md) and the [supply-chain pipeline](operations/supply-chain.md).
 - **The model knowing your API surface.** Prompt injection is real. Treat any output from the model as untrusted; the router enforces this assumption, but you must too in your tools and plugins.
 - **Router-tunable inline prompt-shield surface on GitHub Copilot (`provider: "github-copilot"`) and GitHub Models (`kars dev --github-token` / `provider: "github-models"`).** Both providers enforce Microsoft Responsible AI content filtering server-side (the filter is on; you cannot opt out). But neither provider returns Foundry's `prompt_filter_results` annotations, so the router cannot tune severity floors, suppress categories per `KARS_SUPPRESS_CONTENT_FLAGS`, or surface per-request flags into AGT `BehaviorMonitor` on those backends. Use Foundry / Azure OpenAI in any environment where you need the router-tunable inline observability (severity-floor changes, per-category audit entries, trust-score deltas) as part of your threat model. The CLI logs and `~/.kars/config.json` make the chosen provider explicit so this is auditable.
 

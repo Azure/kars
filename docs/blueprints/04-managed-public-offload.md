@@ -91,8 +91,8 @@ flowchart LR
   T1Encl -.->|"audit chain"| Mon
   T2Encl -.->|"audit chain"| Mon
 
-  classDef tenant1 fill:#fef3c7,stroke:#a16207;
-  classDef tenant2 fill:#dbeafe,stroke:#1e40af;
+  classDef tenant1 fill:#fef3c7,stroke:#a16207,color:#0b1220;
+  classDef tenant2 fill:#dbeafe,stroke:#1e40af,color:#0b1220;
   classDef enclave fill:#0c0c1f,stroke:#fbbf24,color:#fff,stroke-width:2px;
   class T1NS,Cust1,A1 tenant1;
   class T2NS,Cust2,G1 tenant2;
@@ -193,10 +193,10 @@ flowchart LR
   Relay -->|"deliver ciphertext"| Sandbox
   Sandbox -->|"Workload Identity"| Foundry
 
-  classDef cust fill:#fef3c7,stroke:#a16207;
-  classDef prov fill:#dbeafe,stroke:#1e40af;
+  classDef cust fill:#fef3c7,stroke:#a16207,color:#0b1220;
+  classDef prov fill:#dbeafe,stroke:#1e40af,color:#0b1220;
   classDef enc fill:#0c0c1f,stroke:#fbbf24,color:#fff;
-  classDef fnd fill:#dcfce7,stroke:#16a34a;
+  classDef fnd fill:#dcfce7,stroke:#16a34a,color:#0b1220;
   class Cust cust;
   class Provider prov;
   class Enclave enc;
@@ -365,6 +365,10 @@ None of these change the trust model. They change the customer-facing UX around 
 - `docs/security-validation.md` (live-AKS validation of all 9 defence-in-depth layers, including Kata VM)
 - `docs/multi-tenant.md` (per-namespace tenant isolation patterns)
 - `docs/security.md` § Layer 2 (Kata VM Isolation)
-- `docs/api/crd-reference.md` (all eleven CRDs, especially `InferencePolicy`, `ToolPolicy`, `KarsMemory`, `A2AAgent`)
+- `docs/api/crd-reference.md` (all twelve CRDs, especially `InferencePolicy`, `ToolPolicy`, `KarsMemory`, `A2AAgent`)
 - `docs/use-cases.md` Scenario 2 (the customer-side experience)
 - ADR-0001 (A2A ingress front-edge, identical pattern for A2A 1.0.0 inbound)
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

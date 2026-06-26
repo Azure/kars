@@ -1,8 +1,8 @@
 # CRD reference
 
-kars exposes its API through **eleven** CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. **Nine are workload CRDs** you author per agent or per policy — catalogued in [At a glance](#at-a-glance) below. **Two are infrastructure CRDs** you do not hand-write: [`KarsAuthConfig`](#karsauthconfig--cluster-trust-anchor) (a cluster-scoped singleton created by `kars mesh setup-trust`) and [`KarsPairing`](#infrastructure-crds) (a controller-internal binding record). This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
+kars exposes its API through **twelve** CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. **Ten are workload CRDs** you author per agent or per policy (or, for `KarsSREAction`, that the SRE operator proposes on your behalf) — catalogued in [At a glance](#at-a-glance) below. **Two are infrastructure CRDs** you do not hand-write: [`KarsAuthConfig`](#karsauthconfig--cluster-trust-anchor) (a cluster-scoped singleton created by `kars mesh setup-trust`) and [`KarsPairing`](#infrastructure-crds) (a controller-internal binding record). This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
 
-> **Version.** All CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.0`; see [`CHANGELOG.md`](../../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](../roadmap.md) for what's next.
+> **Version.** All CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.18`; see [`CHANGELOG.md`](../../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](../roadmap.md) for what's next.
 
 ## At a glance
 
@@ -17,6 +17,7 @@ kars exposes its API through **eleven** CustomResourceDefinitions in the `kars.a
 | `karsevals.kars.azure.com` | `KarsEval` | `ceval` | Namespaced | `spec.corpus.bundleRef` (signed OCI eval-corpus bundle, mutex with `corpus.builtin`) | Reproducible evaluation run. |
 | `trustgraphs.kars.azure.com` | `TrustGraph` | `tg` | Cluster | Inline `spec.edges[].signature` (Ed25519 per edge, domain-separated payload) | Cross-namespace / cross-cluster mesh trust topology. |
 | `egressapprovals.kars.azure.com` | `EgressApproval` | `eappr` | Namespaced | None on the CR itself (it's a sibling overlay); the sandbox's signed `allowlistRef` is the cryptographic baseline | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
+| `karssreactions.kars.azure.com` | `KarsSREAction` | `sreaction` | Namespaced | None on the CR; execution is gated by `spec.approval.state` + a one-shot minted writer token | An approval-gated, TTL-bounded cluster remediation the SRE operator proposes. |
 
 ### Infrastructure CRDs
 
@@ -27,7 +28,7 @@ Two more CRDs round out the API. You don't author these per agent, but the same 
 | `karsauthconfigs.kars.azure.com` | `KarsAuthConfig` | `kac` | Cluster | `kars mesh setup-trust` (singleton, `metadata.name: default`) | Tenant-wide Entra Agent ID trust anchor. When absent, sandboxes run in the AGT anonymous tier. Fully documented in [KarsAuthConfig](#karsauthconfig--cluster-trust-anchor) below. |
 | `karspairings.kars.azure.com` | `KarsPairing` | `cp` | Namespaced | Controller | Binds two agents to their AgentMesh registry IDs and tracks handshake/trust state. Created from a one-time pairing token; read-only from your side. |
 
-The full Kubernetes schema for all eleven lives in `deploy/helm/kars/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
+The full Kubernetes schema for all twelve lives in `deploy/helm/kars/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
 
 > **A note on short names.** The `c`-prefixed aliases (`cs`, `cmem`, `ceval`, `cp`) are retained from the project's earlier name and kept stable for API compatibility. One caveat: `cs` overlaps with kubectl's deprecated built-in `componentstatuses` alias, so in scripts prefer the unambiguous full plural (`karssandboxes`) or the kind (`KarsSandbox`).
 
@@ -187,7 +188,7 @@ spec:
   memoryRef:                        # optional: sibling KarsMemory
     name: my-agent-memory
   governance:
-    # AGT governance defaults to enabled=true since v0.1.0 — AGT is
+    # AGT governance defaults to enabled=true since v0.1.18 — AGT is
     # part of every kars deployment. To opt out, set enabled: false.
     enabled: true                   # default true
     toolPolicyRef:
@@ -487,7 +488,7 @@ spec:
 | `spec.contentSafety.requirePromptShields` | Fail-closed if Prompt Shields are advertised by the deployment but the response lacks the corresponding annotations. |
 | `spec.bundleRef` | Signed OCI artifact alternative to inline `tokenBudget` / `contentSafety` / `modelPreference` / `displayName`. `appliesTo` always comes from the CR. |
 
-> **Budget enforcement scope today.** The router enforces `tokenBudget.perRequestTokens` on every model call. Aggregate counters across requests (`dailyTokens`, `monthlyTokens`) are **not yet persisted**; the fields are accepted and surfaced for forward compatibility but only the per-request limit fires denials today. Aggregate enforcement is on the roadmap — see [`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades).
+> **Budget enforcement scope today.** The router enforces `tokenBudget.perRequestTokens` on every model call. Aggregate counters across requests (`dailyTokens`, `monthlyTokens`) are **not yet persisted**; the fields are accepted and surfaced for forward compatibility but only the per-request limit fires denials today. Aggregate enforcement is on the roadmap — see [`docs/roadmap.md`](../roadmap.md#trust-topology-end-to-end).
 
 ---
 
@@ -684,6 +685,71 @@ status:
 ```
 
 CLI: `kars egress allow-extra <sandbox> --host … --reason … --ttl PT4H` to grant, `kars egress approvals <sandbox>` to list, `kars egress revoke <name>` to revoke. See **[Network egress & proxy](../egress-proxy.md)** for the full lifecycle, status semantics, and FAQ.
+
+---
+
+## `KarsSREAction` — approval-gated SRE remediation
+
+Namespaced. This is the **write surface** of the [autonomous SRE operator](../runbooks/sre.md). The SRE agent runs read-only by default; when it wants to *change* the cluster it does not call `kubectl` from inside its own process — it **proposes** a `KarsSREAction` (created with `approval.state: Pending`) carrying a diagnosis, a rationale, and one typed action from a closed set. The controller executes the action **only** after a human (or policy) flips `approval.state` to `Approved`, and then only through a **short-lived, single-use writer token**: it mints a `TokenRequest` for a dedicated writer ServiceAccount, binds it with a one-shot `ClusterRoleBinding` scoped to exactly that action, runs the action, and revokes the binding immediately afterwards. The agent's own ServiceAccount never holds write permissions.
+
+Conventionally these CRs live in the SRE sandbox's own namespace (`kars-sre`) so list/watch from the agent's ServiceAccount is naturally scoped, but the controller accepts whatever namespace the operator configures.
+
+```yaml
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSREAction
+metadata:
+  name: scale-frontend-2026-06-25
+  namespace: kars-sre
+spec:
+  action:
+    type: ScaleDeployment              # closed set (see table below)
+    params:                            # shape validated per-type at execute time
+      namespace: shop
+      name: frontend
+      replicas: 5
+  diagnosis: "Symptom: 5xx spike. Root cause: frontend CPU-throttled at 2 replicas."
+  rationale: >
+    Request rate tripled after the launch banner went live; HPA is disabled on
+    this Deployment. Scaling to 5 restores headroom seen in the last incident.
+  approval:
+    state: Pending                     # Pending → operator flips to Approved | Rejected
+  ttlMinutes: 15                       # auto-expire if still Pending; default 15, clamped [1,60]
+```
+
+| `spec` field | Required | Validation |
+|---|---|---|
+| `action.type` | ✅ | One of `DeleteResourceQuota`, `PatchDeploymentImage`, `ScaleDeployment`, `RolloutRestart`, `DeletePod` (CEL-enforced closed set). |
+| `action.params` | ✅ | String-keyed object; required keys depend on `type` — `DeleteResourceQuota`/`DeletePod`: `{namespace, name}`; `PatchDeploymentImage`: `{namespace, name, container, image}`; `ScaleDeployment`: `{namespace, name, replicas}`; `RolloutRestart`: `{namespace, kind, name}`. The reconciler validates the shape for the given `type` before executing. |
+| `approval.state` | ✅ | One of `Pending`, `Approved`, `Rejected` (CEL-enforced). The agent creates it `Pending`; only a principal holding the `kars:sre-approver` ClusterRole can flip it. |
+| `approval.note` | optional | Free-form decision note (e.g. `"approved by oncall — INC-4711"`); surfaces in the audit trail. |
+| `diagnosis` | optional | One-line `Symptom:` / `Root cause:` summary suitable for a notification. |
+| `rationale` | optional | Audit-grade paragraph, ≤2048 chars; rendered verbatim in `kubectl describe`. |
+| `ttlMinutes` | optional | Minutes before an un-approved proposal auto-expires. Default 15; clamped to `[1, 60]` at admission. |
+
+`status`:
+
+```yaml
+status:
+  phase: Applied                       # Proposed → Approved → Applied → Recovered | Failed
+                                       # (or Rejected / Expired)
+  observedGeneration: 2
+  appliedAt: "2026-06-25T10:14:52Z"    # set on transition into Applied
+  writerCrbName: kars-sre-writer-...   # one-shot ClusterRoleBinding, cleaned up post-exec
+  conditions:
+    - type: Approved                   # True iff spec.approval.state=Approved
+      status: "True"
+    - type: Executed                   # True iff the action ran via the minted token
+      status: "True"
+    - type: Recovered                  # True iff post-apply observation passed
+      status: "True"
+    - type: Available                  # True iff phase=Applied/Recovered
+      status: "True"
+    # - type: Degraded                 # True with a reason if anything went wrong
+```
+
+Printer columns (`kubectl get sreaction`): **Type**, **Target-NS**, **Target-Name**, **Phase**, **Approval**, **Age**.
+
+CLI: `kars sre actions` lists open proposals, `kars sre show <action-id>` prints the full diagnosis/rationale/target/conditions, `kars sre approve <action-id>` and `kars sre reject <action-id> --reason "…"` flip the decision (equivalent to `kubectl edit` of `spec.approval`). See the **[Autonomous SRE operator runbook](../runbooks/sre.md)** for the end-to-end flow and the slice ladder.
 
 ---
 

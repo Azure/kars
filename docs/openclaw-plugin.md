@@ -113,6 +113,6 @@ For users running OpenClaw on their **laptop** and wanting to delegate heavy wor
 
 - **[Architecture → The mesh](architecture.md#the-mesh)** — why the Signal session is plugin-owned, not router-owned.
 - **[AGT boundary](architecture/agt-boundary.md)** — what AGT enforces vs. what kars enforces.
-- **[Runtimes](runtimes.md)** — how OpenClaw fits among the seven first-class agent runtimes.
+- **[Runtimes](runtimes.md)** — how OpenClaw fits among the eight first-class agent runtimes.
 - **[Channels & plugins](channels-plugins.md)** — Telegram / Slack / Discord / WhatsApp channel wiring + 3rd-party API plugins.
 - **[CRD reference → KarsSandbox](api/crd-reference.md#karssandbox--the-agent)** — `spec.runtime.openclaw` configuration.

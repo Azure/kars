@@ -11,15 +11,15 @@ Six fully-shipped use cases covering every deployment pattern from laptop inner-
 | 3 | **kars ↔ kars mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | See § 3 below |
 | 4 | **Multi-runtime hosting** | AKS (same operator, different agent stacks) | Cluster-internal per sandbox | ✅ Shipping (OpenClaw, OpenAIAgents, MAF Python, LangGraph Py+TS, Anthropic, PydanticAi, BYO) | [`docs/runtimes.md`](runtimes.md) |
 | 5 | **A2A federation across organisations** | Foreign agent anywhere; inbound via public a2a-gateway | Internet → A2A gateway → per-sandbox router (mTLS-pinned) | ✅ Shipping | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
-| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → kars cluster | Translate + apply | ✅ Shipping | See § 6 below |
+| 6 | **Alignment with kagent ** | Source cluster (any) → kars cluster | Convert + apply | ✅ Shipping | See § 6 below |
 
 All use cases share the same trust boundary:
 
 - The agent process (UID 1000) **never** sees Azure credentials.
 - All external traffic flows through the per-sandbox **inference router** (UID 1001).
 - All inter-agent traffic flows through the **AgentMesh relay** (Signal Protocol — X3DH + Double Ratchet); the relay sees only ciphertext.
-- Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture.md#four-seam-provider-architecture).
-- The nine workload CRDs (`KarsSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval`) are first-class and reconciled. The operator TUI (`kars operator`) renders live panels for the sandbox, its policy / peer / memory / eval CRDs, and `KarsPairing`; `TrustGraph` and `EgressApproval` are inspected via `kubectl` and `kars egress` rather than a dedicated panel. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
+- Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture/agt-boundary.md#2-provider-contracts).
+- The ten workload CRDs (`KarsSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval`, `KarsSREAction`) are first-class and reconciled. The operator TUI (`kars operator`) renders live panels for the sandbox, its policy / peer / memory / eval CRDs, and `KarsPairing`; `TrustGraph` and `EgressApproval` are inspected via `kubectl` and `kars egress`, and `KarsSREAction` proposals via `kars sre actions` / `kars sre show`, rather than a dedicated panel. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
 
 ---
 
@@ -153,7 +153,7 @@ spec:
 | Resource | Reference |
 |---|---|
 | Blueprint | [Blueprint 01 — Developer inner-loop](blueprints/01-developer-inner-loop.md), [Blueprint 03 — Enterprise self-hosted](blueprints/03-enterprise-self-hosted.md) |
-| CRD fields | [`spec.runtime.openclaw`](api/crd-reference.md#spcruntimeopenclaw-sub-table), [`spec.sandbox`](api/crd-reference.md#spec-fields--specsandbox), [`spec.networkPolicy.allowlistRef`](api/crd-reference.md#spec-fields--specnetworkpolicy) |
+| CRD fields | [`spec.runtime.openclaw`](api/crd-reference.md#karssandbox--the-agent), [`spec.sandbox`](api/crd-reference.md#karssandbox--the-agent), [`spec.networkPolicy.allowlistRef`](api/crd-reference.md#karssandbox--the-agent) |
 | CLI commands | [`kars up`](cli-reference.md#kars-up), [`kars add`](cli-reference.md#kars-add), [`kars operator`](cli-reference.md#kars-operator), [`kars egress`](cli-reference.md#kars-egress) |
 | Architecture | [`docs/architecture.md`](architecture.md) |
 
@@ -268,7 +268,7 @@ spec:
 |---|---|
 | Blueprint | [Blueprint 04 — Managed public offload](blueprints/04-managed-public-offload.md) |
 | CLI commands | [`kars mesh`](cli-reference.md#kars-mesh), [`kars pair`](cli-reference.md#kars-pair) |
-| CRD fields | [`KarsPairing`](api/crd-reference.md#karspairing), [`spec.governance`](api/crd-reference.md#spec-fields--specgovernance) |
+| CRD fields | [`KarsPairing`](api/crd-reference.md#infrastructure-crds), [`spec.governance`](api/crd-reference.md#karssandbox--the-agent) |
 
 ---
 
@@ -380,7 +380,7 @@ spec:
 |---|---|
 | Blueprint | [Blueprint 05 — Cross-org federation](blueprints/05-cross-org-federation.md) |
 | CLI commands | [`kars mesh`](cli-reference.md#kars-mesh), [`kars pair`](cli-reference.md#kars-pair), [`kars up --expose-registry`](cli-reference.md#kars-up) |
-| CRD fields | [`KarsPairing`](api/crd-reference.md#karspairing), [`spec.governance.registryMode`](api/crd-reference.md#spec-fields--specgovernance) |
+| CRD fields | [`KarsPairing`](api/crd-reference.md#infrastructure-crds), [`spec.governance.registryMode`](api/crd-reference.md#karssandbox--the-agent) |
 | ADR | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
 
 ---
@@ -393,7 +393,7 @@ spec:
 
 ### What the operator wants — now SHIPPED
 
-Today the platform supports seven first-class runtimes and a BYO contract for everything else. The same `KarsSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `KarsMemory` / `KarsEval` CRDs, and the same operator TUI apply regardless of runtime kind.
+Today the platform supports eight first-class runtimes and a BYO contract for everything else. The same `KarsSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `KarsMemory` / `KarsEval` CRDs, and the same operator TUI apply regardless of runtime kind.
 
 | `spec.runtime.kind` | Status |
 |---|---|
@@ -571,10 +571,10 @@ spec:
 
 | Resource | Reference |
 |---|---|
-| CRD fields | [`spec.runtime`](api/crd-reference.md#spec-fields--specruntime), [`InferencePolicy`](api/crd-reference.md#inferencepolicy), [`ToolPolicy`](api/crd-reference.md#toolpolicy), [`KarsMemory`](api/crd-reference.md#karsmemory), [`KarsEval`](api/crd-reference.md#karseval) |
+| CRD fields | [`spec.runtime`](api/crd-reference.md#karssandbox--the-agent), [`InferencePolicy`](api/crd-reference.md#inferencepolicy--model-routing-and-budgets), [`ToolPolicy`](api/crd-reference.md#toolpolicy--per-tool-gate), [`KarsMemory`](api/crd-reference.md#karsmemory--memory-store-binding), [`KarsEval`](api/crd-reference.md#karseval--reproducible-evaluation-run) |
 | CLI commands | [`kars add --runtime`](cli-reference.md#kars-add), [`kars add --byo-image`](cli-reference.md#kars-add) |
 | BYO contract | [`docs/runtimes.md`](runtimes.md) |
-| Conditions | [`RuntimeReady`, `AdapterMissing`](api/crd-reference.md#conditions-emitted) |
+| Conditions | [`RuntimeReady`, `AdapterMissing`](api/conditions.md) |
 
 ---
 
@@ -725,23 +725,27 @@ spec:
 |---|---|
 | Blueprint | [Blueprint 05 — Cross-org federation](blueprints/05-cross-org-federation.md) |
 | ADR | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
-| CRD fields | [`spec.a2a`](api/crd-reference.md#spec-fields--speca2a), [`AllowlistVerified` condition](api/crd-reference.md#conditions-emitted) |
+| CRD fields | [`spec.a2a`](api/crd-reference.md#a2aagent--public-ingress-peer-endpoint), [`AllowlistVerified` condition](api/conditions.md) |
 | CLI commands | [`kars a2a list-exposed`](cli-reference.md#kars-a2a), [`kars a2a schema`](cli-reference.md#kars-a2a) |
 | Architecture | [`docs/architecture/a2a-gateway.md`](architecture/a2a-gateway.md) |
 
 ---
 
-## 6. Migration from kagent or `sigs/agent-sandbox`
+## 6. Alignment with kagent 
 
 > "My team already uses `kagent.dev/v1alpha2 Agent` YAMLs or
 > `agents.x-k8s.io/v1alpha1 Sandbox` manifests. I want to run them on
 > kars without rewriting YAML from scratch."
 
+### How kars complements these projects
+
+- **kars** adds the piece neither provides: a **zero-trust inference router inside the pod**, so no Azure credentials ever live in the agent process. The agent (UID 1000) never holds a key; the router (UID 1001) brokers every call via Workload Identity.
+
 ### What the operator wants
 
-A translator that converts existing agent manifests into kars resource bundles, with explicit warnings for lossy fields and a dry-run path. The full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`) are documented in the translator source under `cli/src/commands/migrate/`.
+A converter that maps existing agent manifests into kars resource bundles, with explicit warnings for lossy fields and a dry-run path. The full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`) are documented in the converter source under `cli/src/commands/migrate/`.
 
-### Topology — migration flow
+### Topology — conversion flow
 
 ```mermaid
 graph LR
@@ -767,7 +771,7 @@ graph LR
     CONVERT --> CS
 ```
 
-### CLI walkthrough — migrate from kagent
+### CLI walkthrough — convert from kagent
 
 ```bash
 # Dry run first — see what would be emitted and any lossy warnings
@@ -794,7 +798,6 @@ kubectl apply -f ./manifests/
 kars status my-agent
 ```
 
-### CLI walkthrough — convert from `sigs/agent-sandbox`
 
 ```bash
 # Convert an upstream Sandbox YAML to a KarsSandbox (no cluster required)
@@ -851,7 +854,7 @@ spec:
 
 | Mode | What kars does | When to use |
 |---|---|---|
-| `Native` (default) | kars owns all objects. No upstream CR involved. | Fresh migrations; kagent YAML fully converted. |
+| `Native` (default) | kars owns all objects. No upstream CR involved. | Fresh conversions; kagent YAML fully converted. |
 | `Translate` (opt-in) | kars emits an upstream `Sandbox` CR as a subresource. | Co-existence with an existing upstream controller. |
 | `Overlay` (opt-in) | kars adds only governance overlay; upstream CR owns the pod. | Upstream controller must remain; add governance without pod re-ownership. |
 | `Observe` | kars mirrors status of an upstream CR without overlay. | Read-only integration for auditing. |
@@ -872,7 +875,7 @@ All dropped fields default to `disabled` (dev-only label applied automatically) 
 | Resource | Reference |
 |---|---|
 | CLI commands | [`kars migrate from-kagent`](cli-reference.md#kars-migrate), [`kars migrate to-overlay`](cli-reference.md#kars-migrate), [`kars convert`](cli-reference.md#kars-convert) |
-| CRD fields | [`spec.upstreamCompatibility`](api/crd-reference.md#spec-fields--specupstreamcompatibility) |
+| CRD fields | [`spec.upstreamCompatibility`](api/crd-reference.md#karssandbox--the-agent) |
 | Blueprint | [Blueprint 03 — Enterprise self-hosted](blueprints/03-enterprise-self-hosted.md) |
 
 ---

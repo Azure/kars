@@ -3,6 +3,14 @@
 **Status**: stable contract; runtimes adopting this spec are first-class peers of OpenClaw.
 **Audience**: implementers of new kars runtime adapters (Hermes, future agent frameworks).
 
+> **What "stable" means here.** The *contract surface* (the HTTP / env / file
+> interface below) is stable — you can build against it. Two injection details are
+> still being generalised from the OpenClaw reference branch to every runtime kind
+> (tracked as **A1.2** and called out inline below); the **"Status (today)"**
+> columns mark exactly what is wired now versus the target v1 state. Nothing in the
+> stable surface will change incompatibly — A1.2 only widens where the existing
+> envs/mounts are injected.
+
 ---
 
 ## What a "runtime" is in kars
@@ -120,7 +128,7 @@ The controller mounts these paths into the runtime container.
 | `/etc/kars/egress/allowlist.json` | ConfigMap (egress allowlist) | Router | ✅ router |
 | `/etc/kars/egress-approvals/<host>.json` | ConfigMap (per-host EgressApproval) | Router | ✅ router |
 | `/etc/kars/a2a-card/agent.json` (optional) | ConfigMap (A2AAgent compiled) | Router (mounts `/.well-known/agent.json` + `/a2a` routes when present) | ✅ router |
-| `/etc/kars/trustgraph/projection.json` (optional) | ConfigMap (TrustGraph projection per sandbox) | Runtime + router | ⚠️ TrustGraph reconciler exists; runtime-side consumption is post-Act 1 |
+| `/etc/kars/trustgraph/projection.json` (optional) | ConfigMap (TrustGraph projection per sandbox) | Runtime + router | ⚠️ TrustGraph reconciler exists; runtime-side consumption is planned |
 | `/sandbox/agent/` | OCI artifact or git via `spec.openclaw.config.agentCode` (and per-runtime equivalent) | Runtime entrypoint — user-supplied agent code lands here | ✅ all runtimes that support `agentCode` |
 | `/sandbox/.openclaw/`, `/sandbox/.hermes/`, etc. | emptyDir | Runtime writable state (sessions, memory cache, prekeys) | ✅ all runtimes; per-runtime subdir |
 | `/tmp` (4 GiB tmpfs by default) | pod spec | Runtime scratch space | ✅ all runtimes |
@@ -304,7 +312,7 @@ Two runtimes can interoperate on the mesh **only if both implement the kars AGT 
 
 A runtime that fails any of these will fail to handshake (KNOCK), fail to register (POP), or get rejected at the relay (Entra). Wire compatibility ≠ protocol compatibility.
 
-For Hermes Act 1, mesh tools (`kars_mesh_send`, `_inbox`, `_await`, `_transfer_file`) are non-functional stubs that return `{"error": "mesh not available in Hermes v0.5.2; requires Python MeshClient (Act 2)"}`. Hermes Act 2 implements the full kars AGT profile, at which point mesh between OpenClaw and Hermes is supported.
+Hermes implements the full kars AGT profile including the mesh tools (`kars_mesh_send`, `_inbox`, `_await`, `_transfer_file`) on the Python AGT MeshClient (`runtimes/agt-mesh-python/`), so encrypted mesh between OpenClaw and Hermes is supported and exercised end-to-end (`tests/e2e/interop/hermes_openclaw_bidi.sh`).
 
 ---
 
@@ -358,7 +366,7 @@ What each CRD tells the runtime / controller / router. **Runtime-visible** colum
 | | `spec.downstreamApis[]` | Controller / router | Per-API downstream auth config | No |
 | `EgressApproval` | `spec.hosts[]` (plural) | Router | Operator-approved egress destinations | No |
 | | `spec.effectiveAt`, `expiresAt` | Router | Time-window enforcement | No |
-| `TrustGraph` | `spec.peers[]` | Controller projection → mount `/etc/kars/trustgraph/projection.json` | Per-sandbox trust graph (post-A1 consumption) | ⚠️ planned post-Act 1 |
+| `TrustGraph` | `spec.peers[]` | Controller projection → mount `/etc/kars/trustgraph/projection.json` | Per-sandbox trust graph (runtime-side consumption planned) | ⚠️ planned |
 | `KarsPairing` | `spec.peer.amid`, `spec.peer.endpoint` | Controller | External / offload agent pairing — affects handoff + mesh trust seeding | Indirect |
 | `KarsEval` | `spec.targetSandboxRef.name` | Controller | Eval orchestration; failures can mark sandbox Degraded (operationally affects runtime availability) | Indirect |
 | | `spec.failSandboxOnDrift` | Controller | Hard-fail behavior on eval regression | No |
@@ -440,7 +448,7 @@ For runtimes without channel support, the env vars are ignored — kars makes no
 | Trust scoring | ✅ (push to `/agt/trust`) | — |
 | Sub-agent spawn | ✅ (router calls k8s/docker) | — |
 | Mesh inter-agent E2E messaging | Only when runtime has a working AGT MeshClient implementation | Cross-runtime mesh is wire-compatible (same AGT v1.0 spec) once both sides have MeshClient |
-| Foundry tools | When runtime ships the wrapper (OpenClaw ✅, Hermes ✅ in v0.5.2) | Other runtimes may have partial coverage |
+| Foundry tools | When runtime ships the wrapper (OpenClaw ✅, Hermes ✅) | Other runtimes may have partial coverage |
 | Channel adapters (Telegram/Slack/etc.) | When runtime entrypoint translates the kars secret env into its native config | Channels not implemented in the runtime |
 | MCP via McpServer CRD | When runtime entrypoint translates the ConfigMap into native MCP config | Runtime without MCP support |
 
@@ -464,4 +472,4 @@ The current contract version is exposed as the env var `KARS_RUNTIME_CONTRACT_VE
 - `sandbox-images/openclaw/Dockerfile` — image build pattern
 - `sandbox-images/openclaw/entrypoint.sh` — env translation, channel config emission, MCP config translation, runtime startup
 
-`runtimes/hermes/` ships in kars v0.5.2 as the second v1-conformant runtime.
+`runtimes/hermes/` is the second v1-conformant runtime, at parity with OpenClaw on the spawn, mesh, handoff, discovery, and governance surfaces.

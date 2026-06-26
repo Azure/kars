@@ -15,7 +15,7 @@ If you only read one document about how kars fits together, read this one.
 - [`InferencePolicy` — the policy compile pattern](#inferencepolicy--the-policy-compile-pattern)
 - [`McpServer` — declared MCP backend](#mcpserver--declared-mcp-backend)
 - [`A2AAgent` — public-ingress endpoint](#a2aagent--public-ingress-endpoint)
-- [`ToolPolicy` / `KarsMemory` / `KarsEval` / `TrustGraph`](#toolpolicy--karsmemory--karsevaluation--trustgraph)
+- [`ToolPolicy` / `KarsMemory` / `KarsEval` / `TrustGraph`](#toolpolicy--karsmemory--karseval--trustgraph)
 - [Status, conditions, requeue](#status-conditions-requeue)
 - [Deletion & finalizers](#deletion--finalizers)
 
@@ -26,7 +26,7 @@ If you only read one document about how kars fits together, read this one.
 ```mermaid
 flowchart LR
   CLI["kars CLI<br/>or GitOps / kubectl"]
-  CRD[("CRD<br/>(9 kinds)")]
+  CRD[("CRD<br/>(12 kinds)")]
   Ctrl["kars-controller<br/>(kube-rs)"]
   Art[("Cluster artifacts<br/>Namespace · ServiceAccount · NetworkPolicy<br/>Deployment · Service · ConfigMap · Secret<br/>FederatedIdentityCredential")]
   Runtime["Runtime data plane<br/>inference-router · A2A gateway · sandbox pod"]
@@ -50,12 +50,13 @@ This is the whole loop. Everything else on this page is detail.
 
 ## Two reconcile patterns
 
-kars's nine user-facing CRDs split into two operational shapes:
+kars's ten user-facing CRDs split into two operational shapes:
 
 | Pattern | CRDs | What gets produced |
 |---|---|---|
 | **Compile-to-artifact** | `InferencePolicy`, `ToolPolicy`, `A2AAgent`, `McpServer`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval` | A deterministic `ConfigMap` (and sometimes a `Secret`) that the router or gateway mounts. The CRD spec is hashed; the hash is stored in `status.versionHash` or equivalent. |
 | **Heavyweight namespace** | `KarsSandbox` | A whole tenant namespace: `Namespace` + `ServiceAccount` + Workload-Identity federated credential + `NetworkPolicy` + governance `ConfigMap` + `Deployment` + `Service`. |
+| **Propose-approve-execute** | `KarsSREAction` | No mounted artifact. The reconciler gates on `spec.approval.state`, and on `Approved` mints a one-shot writer token (`TokenRequest` + scoped `ClusterRoleBinding`) to execute a single typed cluster action, then revokes it. Phase advances `Proposed → Approved → Applied → Recovered`. |
 
 ### The reconciler map
 
@@ -77,6 +78,7 @@ graph TD
       R7["KarsEval<br/>fm: karseval"]
       R8["TrustGraph<br/>fm: trustgraph"]
       R9["EgressApproval<br/>fm: egressapproval"]
+      R11["KarsSREAction<br/>fm: karssreaction"]
     end
     R10["KarsPairing reconciler<br/>(internal — bound by KarsSandbox)"]
     MESH["mesh-peer reconciler<br/>(own lease — agentmesh-mesh-peer-leader)"]

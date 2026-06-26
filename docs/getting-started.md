@@ -1,13 +1,22 @@
 # Getting started
 
-This guide takes you from a clean machine to a working kars agent in two steps:
+One `npm i` and one `kars dev`, and you're talking to a secured AI agent on your laptop in about five minutes — no Azure account required.
 
-1. **[Local — five minutes](#step-1--local-five-minutes)** — `kars dev` runs a sandbox in one Docker container on your laptop. No Azure subscription, no AKS, no Kubernetes.
-2. **[AKS — half an hour](#step-2--deploy-to-aks)** — `kars up` provisions AKS + ACR + Foundry + the kars control plane in your subscription, and runs the same sandbox under Workload Identity, NetworkPolicies, and the egress guard.
+This guide takes you from a clean machine to a working kars agent (v0.1.18) in two steps:
 
-The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole point.
+1. **[Local — five minutes](#step-1--local-five-minutes)** — `kars dev` runs a real sandbox on your laptop. The **recommended dev loop is a local [kind](https://kind.sigs.k8s.io/) cluster** (`--target local-k8s`) because it reproduces the production pod shape — separate router container, `NetworkPolicy`, seccomp — and behaves almost identically to AKS. A single-container **Docker** target is also available for the fastest possible smoke test. No Azure subscription either way.
+2. **[AKS — half an hour](#step-2--deploy-to-aks)** — when you're ready for production, `kars up` provisions AKS + ACR + Foundry + the kars control plane in your subscription, and runs the same sandbox under Workload Identity, NetworkPolicies, and the egress guard.
 
-> **Want production-shaped Kubernetes on your laptop?** Between these two there is a local-Kubernetes middle ground: `kars dev --target local-k8s` runs the same controller, CRDs, Helm chart, and NetworkPolicies on a [kind](https://kind.sigs.k8s.io/) cluster — no Azure, no AKS. Use it when you are changing the controller, the chart, or the CRDs and want to validate the Kubernetes glue before you touch AKS. Full walkthrough: **[Blueprint 02 — Local Kubernetes dev loop](blueprints/02-local-k8s-dev-loop.md)**.
+The sandbox YAML you wrote in step 1 runs **unchanged** in step 2 — build locally, ship to production with no rewrites.
+
+<div class="cta-row">
+
+<a href="#step-1--local-five-minutes" class="btn-primary">Try it locally</a>
+<a href="#step-2--deploy-to-aks" class="btn-primary">Deploy to AKS</a>
+
+</div>
+
+> 💡 **Which local target?** Use **`--target local-k8s`** (kind) for anything you intend to ship — it exercises the real controller, CRDs, Helm chart, and NetworkPolicies, so you catch Kubernetes-only issues before AKS. Use the **default Docker** target for the quickest prompt/tool iteration when you don't need the K8s glue. Same images, same router, same governance either way. Full kind walkthrough: **[Blueprint 02 — Local Kubernetes dev loop](blueprints/02-local-k8s-dev-loop.md)**.
 
 ---
 
@@ -15,13 +24,14 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 
 | For | You need |
 |---|---|
-| **Fastest — published images (`kars dev --release`)** | Docker Desktop (or any OCI runtime) · Node.js 22+. **No Rust, no AGT checkout, no local image build.** Plus an inference provider (GitHub Copilot seat — easiest — or a Foundry/Azure OpenAI deployment, or a GitHub PAT with `models:read`). |
-| Local mode from source (GitHub Copilot — recommended) | Docker Desktop (or any OCI runtime), Node.js 22+, Rust 1.88+, an active **GitHub Copilot** seat (Individual / Business / Enterprise). One device-code OAuth login at signup. **No Azure account, no PAT, no key files.** |
-| Local mode from source (Foundry / Azure OpenAI) | Docker Desktop, Node.js 22+, Rust 1.88+, an Azure AI Foundry (or Azure OpenAI) endpoint + deployment + key. |
-| Local mode from source (GitHub Models) | Docker Desktop, Node.js 22+, Rust 1.88+, a GitHub PAT with `models:read` scope. **No Azure account needed.** |
-| AKS mode | The above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
+| **Recommended — local Kubernetes (`kars dev --release --target local-k8s`)** | [`kind`](https://kind.sigs.k8s.io/) · [`kubectl`](https://kubernetes.io/docs/tasks/tools/) · any container runtime (**Docker, Podman, or nerdctl** — kind drives all three) · Node.js 22+. Runs the published images in the real production pod shape — the closest mirror of AKS. **No Rust, no AGT checkout, no local image build.** |
+| Fastest smoke test (`kars dev --release`) | The **`docker` CLI** (or a Podman `docker`-compatible shim) · Node.js 22+. One container, no Kubernetes — quickest path to a chat, not the production shape. |
+| From source (contributors hacking on kars) | Either of the above, plus Rust 1.88+ and a local [AGT](https://github.com/microsoft/agent-governance-toolkit) checkout (relay + registry are built locally). |
+| AKS mode | Any of the above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
 
-> **Just want it running?** Use the [fastest path](#10-fastest-path--no-compile-published-images-) — `npm i -g @kars-runtime/cli` then `kars dev --release`. Everything below about building from source and cloning AGT is **only** for contributors hacking on kars itself.
+All four paths need an **inference provider** — you pick one on first run (see [Choosing an inference provider](#choosing-an-inference-provider)). The easiest is a **GitHub Copilot** seat (no Azure account, no PAT).
+
+> **Just want it running right now?** Use the [fastest path](#10-fastest-path--no-compile-published-images) — `npm i -g @kars-runtime/cli@0.1.18` then `kars dev --release`. Everything below about building from source and cloning AGT is **only** for contributors hacking on kars itself — skip it if that's not you.
 
 > **AGT mesh prerequisite — source builds only.** Inter-agent E2E
 > messaging uses the [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
@@ -37,40 +47,14 @@ The sandbox YAML you wrote in step 1 runs unchanged in step 2. That is the whole
 
 The CLI bootstraps everything else (Helm chart install, Foundry resource creation, ACR build/push, federated identity wiring). You do not need to provision any of it by hand.
 
-### Quickest path: GitHub Copilot (no Azure account, no PAT)
+### Choosing an inference provider
 
-If you have a GitHub Copilot seat — Individual, Business, or Enterprise — `kars dev` is a one-step setup:
+`kars dev` prompts you to pick a provider on first run. You have three options — **GitHub Copilot** (easiest: one device-code login, no Azure account, no PAT), **Azure AI Foundry / Azure OpenAI** (full feature set — Memory Store, agents, Content Safety), or **GitHub Models** (free, just a `models:read` PAT; smaller context, Foundry routes disabled). The complete picker, with the trade-offs of each, is documented **once** in **[Step 1.2 — Launch a sandbox](#12-launch-a-sandbox)** — you don't need to decide now.
 
-1. Run `kars dev`. The CLI prints a **device code** and a URL.
-2. Open <https://github.com/login/device> in your browser, paste the code, approve the kars client.
-3. Pick a model from the catalogue the CLI shows you — current Claude, GPT, Gemini, and reasoning-class models are exposed; run `kars models` to see today's list. The router will use the selected model for every chat completion the agent makes.
+<details>
+<summary><strong>Don't have an Azure AI Foundry deployment yet?</strong> (only needed if you pick the Foundry provider — skip for Copilot / GitHub Models)</summary>
 
-That's it. No PAT to rotate, no API key on disk, no subscription to provision. The OAuth token is stored in `~/.kars/` and refreshed automatically.
-
-**Why we recommend Copilot for the inner loop:**
-
-- **Frontier models, large contexts.** Current Claude, GPT, and Gemini frontier tiers through one auth surface — exactly the catalogue you'd compose by hand against three vendors.
-- **Native Anthropic shape for Claude.** kars routes Claude requests to Copilot's `/v1/messages` endpoint with no shape translation, preserving full tool-calling fidelity (no lossy OpenAI-to-Anthropic rewrites).
-- **One credential, no key sprawl.** The same OAuth token works for the parent agent and every sub-agent it spawns; the router refreshes it on its own.
-- **Sub-agent inheritance.** Spawned sub-agents automatically inherit the parent's provider, model, and credentials — no per-agent wiring.
-
-You can switch to Foundry or GitHub Models any time with `kars credentials`.
-
-### Alternative: GitHub Models (no Azure account, smaller scale)
-
-If you don't have a Copilot seat and don't want to provision Foundry, GitHub Models works with just a PAT:
-
-1. Create a fine-grained PAT at <https://github.com/settings/personal-access-tokens/new> with the **`models:read`** scope.
-2. Run `kars dev` and pick **GitHub Models** at the provider prompt.
-3. Paste your PAT. The CLI verifies it against `https://models.github.ai/catalog/models` and saves it to `~/.kars/`.
-
-Subsequent runs reuse the saved provider — no flag required. To override for one run only (without overwriting your saved provider), pass `--github-token <pat>`.
-
-> ⚠️ **Trade-offs in GitHub Models mode.** Foundry-only routes return `501 Not Implemented` (Memory Store, agents, evaluations, indexes, knowledge bases, datasets, deployments, connections). Inline Content Safety prompt-shield filtering is **not enforced** server-side — the router can only act on `prompt_filter_results` returned by the model, and GitHub Models doesn't return them. Smaller context windows and tighter rate limits than Copilot or Foundry — fine for trivial demos, frustrating for real agent loops. See [GitHub Models docs](https://docs.github.com/github-models) for current quotas.
-
-### Don't have an Azure AI Foundry deployment yet?
-
-Local mode needs an existing Azure AI Foundry resource and a model deployment. Foundry is the unified successor to standalone Azure OpenAI accounts — same model catalogue, same OpenAI-compatible API, plus Content Safety, Memory Store, agents, and the rest of the AI Services surface in one resource. Two `az` commands get you both. Pick a region that has the model you want (`gpt-4.1` is widely available in `swedencentral`, `eastus2`, `westus3`):
+Local mode with the Foundry provider needs an existing Azure AI Foundry resource and a model deployment. Foundry is the unified successor to standalone Azure OpenAI accounts — same model catalogue, same OpenAI-compatible API, plus Content Safety, Memory Store, agents, and the rest of the AI Services surface in one resource. Two `az` commands get you both. Pick a region that has the model you want (`gpt-4.1` is widely available in `swedencentral`, `eastus2`, `westus3`):
 
 ```bash
 # 1. Create the Foundry (AI Services) resource (≈ 30 s)
@@ -99,11 +83,15 @@ Use `--kind AIServices` (not `--kind OpenAI`) — Foundry is what kars integrate
 
 If you'd rather skip provisioning by hand, jump to **[Step 2 — Deploy to AKS](#step-2--deploy-to-aks)** — `kars up` provisions the Foundry resource, project, Content Safety binding, and a model deployment for you.
 
+</details>
+
 ---
 
 ## Step 1 — Local (five minutes)
 
-### 1.0 Fastest path — no compile, works for everyone (macOS & Linux) ⭐
+> Steps 1.0–1.3 below are all you need to go from nothing to a running, secured agent you can chat with — about five minutes.
+
+### 1.0 Fastest path — no compile (published images)
 
 The quickest way to a running agent **on any host with Docker — amd64 Linux,
 Intel Mac, or Apple Silicon (M-series)**: install the CLI from the latest
@@ -114,7 +102,7 @@ No Rust toolchain, no AGT checkout, no GitHub auth, no waiting on a local build.
 
 ```bash
 # 1. Install the kars CLI from npm — public, signed (SLSA provenance), always the latest release
-npm i -g @kars-runtime/cli
+npm i -g @kars-runtime/cli@0.1.18
 
 # 2. Launch a sandbox from the published images (defaults to :latest)
 kars dev --release
@@ -137,6 +125,13 @@ Run the same published images on Kubernetes instead of plain Docker:
 kars dev --release --target local-k8s   # local kind cluster, real K8s posture
 ```
 
+> **Why `--target local-k8s` matters.** Plain Docker is the fastest way to a
+> running agent, but it co-locates the agent and router in one container. The
+> `local-k8s` target runs the *same* published images on a real [kind](https://kind.sigs.k8s.io/)
+> cluster — separate router container, init container, NetworkPolicy, seccomp profile,
+> the whole sandbox shape. It is behaviourally the closest mirror of AKS you can
+> run on a laptop, so it's the recommended dev loop once you move past first-run.
+
 > **Apple Silicon (M-series) Macs:** fully supported. Every published image
 > (sandbox, controller, router, relay, registry) is multi-arch
 > (`linux/amd64` + `linux/arm64`, built on native arm64 runners) and
@@ -146,7 +141,7 @@ kars dev --release --target local-k8s   # local kind cluster, real K8s posture
 > sub-agents, E2E-encrypted relay) passes on a stock M-series Mac and on AKS.
 
 > **Pin a specific build (optional).** `kars dev --release` follows the newest
-> release; pass a tag — `kars dev --release v0.1.1` — to pin a
+> release; pass a tag — `kars dev --release v0.1.18` — to pin a
 > specific build for reproducibility.
 
 Want to hack on the controller / router / plugin? Build from source —
@@ -198,11 +193,13 @@ To switch providers later (or rotate keys), run **`kars credentials`** — the s
 
 After the provider picker, `kars dev` also prompts for an **agent name** (default `dev-agent` — hit Enter to accept) and offers any saved channel tokens for one-tap wiring.
 
-The CLI then builds (or pulls cached) the local sandbox image and starts a single container. In dev mode the agent runtime and the inference router are co-located in that one image — there is no separate router pod, no init container, no NetworkPolicy. You get the same router code path, the same governance profile, the same audit format.
+The CLI then builds (or pulls cached) the local sandbox image and starts a single container. In dev mode the agent runtime and the inference router are co-located in that one image — there is no separate router container, no init container, no NetworkPolicy. You get the same router code path, the same governance profile, the same audit format.
 
 > 💡 **Picking a model with Copilot.** Claude Opus 4.7 is the largest-context option and the best default for tool-heavy agents. Sonnet 4.5 is faster and cheaper for routine tasks. GPT-5 is comparable on reasoning. Switching is `kars credentials` → re-pick — the saved OAuth token is reused, only the model selection changes.
 
 ### 1.3 Talk to the agent
+
+You now have a live, secured agent:
 
 ```bash
 kars connect dev-agent   # opens the TUI
@@ -266,7 +263,7 @@ kars up --name prod-agent --region swedencentral --release --mesh-trust=entra --
 
 > **`--release` vs `--build`:** `--release` imports the public, cosign-signed
 > `ghcr.io/azure/*` images into your ACR — no Rust, no Docker build, no source
-> checkout to compile (bare `--release` = latest, or pin `--release v0.1.4`).
+> checkout to compile (bare `--release` = latest, or pin `--release v0.1.18`).
 > Drop it to import from a source ACR, or pass `--build` to compile from source
 > (developer mode; compiles Rust in-Docker on macOS/arm64).
 
@@ -332,6 +329,18 @@ kars add hermes-helper --runtime Hermes --model gpt-4.1 \
 
 The Hermes adapter ships its own plugin (mesh tools, governance hook, Foundry tool wrappers, sub-agent spawn) and joins the AGT mesh identically to OpenClaw — so `kars_mesh_send` works in either direction between OpenClaw and Hermes peers. Full reference: **[Hermes plugin](hermes-plugin.md)**.
 
+### 2.5b Upgrade the cluster to a new release
+
+When a newer kars release ships, move your cluster to it with one failsafe command:
+
+```bash
+kars upgrade --dry-run   # preview from→to and the images that would be imported
+kars upgrade             # import signed images, atomic Helm upgrade, rolling restart, verify
+kars upgrade --rollback  # revert to the previous Helm revision if needed
+```
+
+`kars upgrade` records a rollback point and uses an atomic Helm upgrade, so the cluster never lands half-migrated. Full runbook: **[Operations → Upgrades & rollback](operations/upgrades.md)**.
+
 ### 2.6 Tear it down
 
 ```bash
@@ -362,7 +371,7 @@ Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [m
 
 - **[Architecture](architecture.md)** — the design in 15 minutes.
 - **[CRD reference](api/crd-reference.md)** — every spec field of every CRD.
-- **[Runtimes](runtimes.md)** — choosing between the seven adapters and BYO.
+- **[Runtimes](runtimes.md)** — choosing between the eight adapters and BYO.
 - **[Blueprints](blueprints/00-index.md)** — six reference deployment shapes (developer inner loop → sovereign air-gapped).
 - **[Security model](security.md)** — what each layer enforces and what it does not.
 
@@ -372,7 +381,7 @@ Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [m
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `kars dev` hangs on first run | Docker Desktop is not running | Start Docker. |
+| `kars dev` hangs on first run | The container runtime isn't running | Start your container runtime (Docker Desktop, `podman machine start`, or colima). |
 | `kars up` fails on `az login` | Stale CLI session | `az logout && az login --use-device-code`. |
 | `kars connect` fails with `address already in use` | Leftover `kubectl port-forward` from a previous session is still holding the local port | `lsof -ti:18789 \| xargs kill` (or restart your terminal). Then retry. |
 | `kars dev` errors with `Unsupported engine` on `npm ci` | Node.js < 22 | Install Node 22+ (we test against the LTS line; see [`cli/package.json`](../cli/package.json) for the exact engines pin). |
@@ -382,6 +391,6 @@ Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [m
 | GitHub Copilot provider returns `401` | The token is a classic PAT, not a Copilot-enabled OAuth token; or your Copilot seat is inactive | Verify your seat at [github.com/settings/copilot](https://github.com/settings/copilot). See [`cli-reference.md#kars-dev`](cli-reference.md#kars-dev) for the OAuth flow. |
 | Sandbox stays `Pending` | Foundry quota / model not deployed | `kubectl describe karssandbox <name>` — the controller surfaces the cause as a `Condition`. |
 | Agent gets `403` on tool call | `ToolPolicy` denies it | `kars policy show <name>` and adjust. See [`cli-reference.md#kars-policy`](cli-reference.md#kars-policy). |
-| Mesh KNOCK fails | Trust score below threshold | See **[AGT boundary](architecture/agt-boundary.md#trust-scoring)**. |
+| Mesh KNOCK fails | Trust score below threshold | See **[AGT boundary](architecture/agt-boundary.md#agt-owns)**. |
 
 The complete operational runbook is in **[`docs/operations/`](operations/)**.

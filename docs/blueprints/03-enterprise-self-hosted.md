@@ -88,7 +88,7 @@ flowchart LR
   AKS -->|"Workload Identity"| FND
   AKS -->|"audit"| LAW
 
-  classDef boundary stroke:#1e40af,stroke-width:3px,fill:#dbeafe;
+  classDef boundary stroke:#1e40af,stroke-width:3px,fill:#dbeafe,color:#0b1220;
   class TB1 boundary;
 ```
 
@@ -312,5 +312,9 @@ The controller ships production-grade operator hygiene relevant to enterprise de
 - `controller/src/policy_fetcher.rs` (signed OCI allowlist fetch + verify)
 - `inference-router/src/auth.rs` (Workload Identity OIDC exchange)
 - `deploy/helm/kars/values.yaml` (Helm contract)
-- `docs/api/crd-reference.md` (all eleven CRDs)
+- `docs/api/crd-reference.md` (all twelve CRDs)
 - ADR-0001 — A2A ingress front-edge (`docs/adr/0001-a2a-ingress-front-edge.md`)
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

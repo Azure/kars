@@ -1,14 +1,67 @@
-# kars documentation
+<div align="center">
 
-A secure runtime for AI agents on Azure Kubernetes Service. This is the documentation index. The top-level [`README`](../README.md) is a faster on-ramp; come here when you need depth.
+<img src="assets/logo.png" alt="kars logo" width="128" />
+
+# kars — Agent Reference Stack for Kubernetes
+
+**The secure, Kubernetes-native runtime for AI agents: one hardened sandbox per agent, zero credentials in the agent, every call governed.**
+
+[![npm](https://img.shields.io/npm/v/@kars-runtime/cli?logo=npm&label=%40kars-runtime%2Fcli&color=CB3837)](https://www.npmjs.com/package/@kars-runtime/cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](../LICENSE)
+[![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Azure/kars/actions/workflows/ci.yml)
+[![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry-0078D4)](https://azure.microsoft.com)
+
+This is the documentation index. The top-level [`README`](../README.md) is a faster on-ramp; come here when you need depth.
+
+</div>
+
+<div class="cta-row">
+
+<a href="quickstart.md" class="btn-primary">Quickstart — 3 commands</a>
+<a href="getting-started.md#step-2--deploy-to-aks" class="btn-primary">Run it on AKS</a>
+<a href="architecture.md" class="btn-primary">Architecture</a>
+<a href="maturity.md" class="btn-primary">Feature status</a>
+
+</div>
+
+## How it works
+
+One hardened sandbox per agent. The agent has **no network of its own** — every external call (model, tool, MCP, peer) goes through an in-pod Rust **inference router** that enforces identity, content safety, budgets, governance, and a tamper-evident audit chain. The agent never holds a credential.
+
+```mermaid
+flowchart LR
+  subgraph Pod["KarsSandbox pod"]
+    Agent["agent runtime<br/>(UID 1000, no network)"]
+    Router["inference router<br/>(UID 1001, Rust)"]
+    Agent -->|localhost only| Router
+  end
+  Router --> Model["inference backend<br/>(Foundry / Copilot / …)"]
+  Router --> Mesh["AgentMesh relay<br/>(opaque ciphertext)"]
+  Router --> A2A["A2A peers"]
+  classDef pod fill:#e6f0ff,stroke:#0078d4,color:#0b1220
+  class Pod pod
+```
+
+## Why kars
+
+| Running agents directly | Running agents on kars |
+|---|---|
+| API keys in the agent's environment | **Zero credentials** in the agent process; the router brokers every call |
+| Governance bolted on per-app, in code | **Declarative CRDs** — approval gates, rate limits, tool allowlists, content-safety floors, token budgets as Kubernetes resources |
+| Network egress wide open | **Default-deny egress** + L7 allowlist + blocklist; the agent has no socket of its own |
+| Inter-agent traffic readable by the broker | **End-to-end encrypted mesh** (Signal Protocol); the relay sees only ciphertext |
+| One framework, lock-in | **Eight runtimes** (OpenClaw, Hermes, MAF, LangGraph, …) on one wire format; switch with a one-field change |
+| Trust boundary = the cluster | **Trust boundary = the pod** — optional Kata + AMD SEV-SNP per workload via one CRD field |
+
 
 ## Choose your path
 
 ### Read in order if you are new
-1. [Getting started](getting-started.md) — laptop in five minutes, then AKS.
-2. [Architecture](architecture.md) — the design and why.
-3. [Architecture diagrams](architecture-diagrams.md) — every component, dev and prod side by side.
-4. [Use cases](use-cases.md) — the six scenarios kars was built for.
+1. [Quickstart](quickstart.md) — a running agent on your laptop in three commands.
+2. [Getting started](getting-started.md) — the full local walkthrough, then AKS.
+3. [Architecture](architecture.md) — the design and why.
+4. [Architecture diagrams](architecture-diagrams.md) — every component, dev and prod side by side.
+5. [Use cases](use-cases.md) — the six scenarios kars was built for.
 
 ### By audience
 
@@ -34,7 +87,7 @@ This section mirrors the chapter groups in **[`SUMMARY.md`](SUMMARY.md)**, which
 - [Egress proxy](egress-proxy.md) — outbound network controls.
 
 ### API & policy
-- [CRD reference](api/crd-reference.md) — all eleven CRDs with schema and examples.
+- [CRD reference](api/crd-reference.md) — all twelve CRDs with schema and examples.
 - [KarsEval operator guide](api/karseval.md) — replaying the signed attack corpus against a sandbox.
 - [Lifecycle & reconciliation](api/lifecycle.md) — what happens, end to end, when you apply each CRD.
 - [Conditions reference](api/conditions.md) — every status condition the controller emits.
@@ -42,12 +95,11 @@ This section mirrors the chapter groups in **[`SUMMARY.md`](SUMMARY.md)**, which
 
 ### Agent capabilities
 - [kars OpenClaw plugin](openclaw-plugin.md) — the in-sandbox plugin (24 governance-aware tools, 10 skills) every kars-managed agent loads.
-- [`@kars/mesh` plugin](mesh-plugin.md) — the companion npm package for pairing a local OpenClaw with a remote kars cluster.
+- [`@kars/mesh` plugin](mesh-plugin.md) — the companion local plugin (built from source, not yet published on npm) for pairing a local OpenClaw with a remote kars cluster.
 - [Channels & external plugins](channels-plugins.md) — Telegram / Slack / Discord / WhatsApp channels + 3rd-party search/scrape API integrations via CLI flags.
 - [Operator TUI](operator-tui.md) — `kars operator`, the live cluster dashboard.
 - [Permissions model](permissions.md) — the Azure RBAC `kars up` needs, enumerated.
 - [Per-sandbox identity](agent-identity.md) — each sandbox runs under its own Entra Agent ID.
-- [Demo script](demo-script.md) — the three-act live walkthrough.
 - [Examples catalogue](examples.md) — every `examples/` blueprint, each a `kubectl apply` after `kars up`.
 
 ### Blueprints
@@ -76,6 +128,7 @@ This section mirrors the chapter groups in **[`SUMMARY.md`](SUMMARY.md)**, which
 - [GitOps](operations/gitops.md) — declarative fleet management.
 - [Helm packaging](operations/helm-packaging.md) — chart layout and release.
 - [Image versioning](operations/image-versioning.md) — the `:latest` convention and rollout.
+- [Upgrades & rollback](operations/upgrades.md) — `kars upgrade`, atomic Helm, one-command rollback.
 - [Secret rotation](operations/secret-rotation.md) — credential lifecycle.
 - [Supply chain](operations/supply-chain.md) — signing, SBOM, provenance.
 - [BYO strict mode](operations/byo-strict.md) — bring-your-own-model hardening.

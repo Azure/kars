@@ -52,9 +52,9 @@ flowchart TB
   AgentA -.->|"local audit"| AuditA
   AgentB -.->|"local audit"| AuditB
 
-  classDef orgA fill:#fef3c7,stroke:#a16207;
-  classDef orgB fill:#dbeafe,stroke:#1e40af;
-  classDef gw fill:#dcfce7,stroke:#15803d;
+  classDef orgA fill:#fef3c7,stroke:#a16207,color:#0b1220;
+  classDef orgB fill:#dbeafe,stroke:#1e40af,color:#0b1220;
+  classDef gw fill:#dcfce7,stroke:#15803d,color:#0b1220;
   class OrgA,AGwA,RegA,RlyA,AgentA,AuditA orgA;
   class OrgB,AGwB,RegB,RlyB,AgentB,AuditB orgB;
   class A2AGwA,A2AGwB gw;
@@ -86,8 +86,8 @@ flowchart LR
   PA -.->|"audit A"| AuditA
 
   classDef boundary stroke-width:3px;
-  classDef a stroke:#a16207,fill:#fef3c7;
-  classDef b stroke:#1e40af,fill:#dbeafe;
+  classDef a stroke:#a16207,fill:#fef3c7,color:#0b1220;
+  classDef b stroke:#1e40af,fill:#dbeafe,color:#0b1220;
   class A a;
   class B b;
 ```
@@ -297,3 +297,7 @@ The controller verifies against the `kars-signer-policy` ConfigMap in `kars-syst
 - `deploy/helm/kars/values.yaml` lines ~263–300 (`a2aGateway.*` + `inferenceRouter.a2aMtls.enabled`)
 - `docs/api/crd-reference.md` (`A2AAgent` CRD spec, `KarsSandbox.spec.a2a.*`)
 - ADR-0001 (front-edge architecture for non-mesh ingress; relevant for A2A 1.0.0 cross-org path)
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

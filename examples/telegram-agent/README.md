@@ -62,10 +62,10 @@ CLI flag (--telegram-token) → env var (TELEGRAM_BOT_TOKEN)
 
 ## CRD Manifest
 
-See [`karssandbox.yaml`](karssandbox.yaml) for the Kubernetes CRD manifest you can apply directly:
+See [`clawsandbox.yaml`](clawsandbox.yaml) for the Kubernetes CRD manifest you can apply directly:
 
 ```bash
-kubectl apply -f examples/telegram-agent/karssandbox.yaml
+kubectl apply -f examples/telegram-agent/clawsandbox.yaml
 ```
 
 ## Prerequisites

@@ -19,7 +19,7 @@ import { requireBundledAsset } from "../lib/repo-assets.js";
  *   status       — show the sre KarsSandbox CR's state (kubectl get karssandbox sre)
  *   talk         — alias for `kars connect sre` (open the WebUI)
  *
- * Design: docs/blueprints/07-kars-sre-proposal.md
+ * Design: docs/runbooks/sre.md
  */
 export function sreCommand(): Command {
   const cmd = new Command("sre");

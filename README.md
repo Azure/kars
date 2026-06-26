@@ -2,60 +2,71 @@
 
 <img src="docs/assets/logo.png" alt="kars logo" width="128" />
 
-# Agent Reference Stack for Kubernetes
+# kars — Agent Reference Stack for Kubernetes
 
-**A secure runtime for AI agents on Azure. Short name: `kars`.**
+**The secure, Kubernetes-native runtime for AI agents: one hardened sandbox per agent, zero credentials in the agent, every call governed.**
 
+[![npm](https://img.shields.io/npm/v/@kars-runtime/cli?logo=npm&label=%40kars-runtime%2Fcli&color=CB3837)](https://www.npmjs.com/package/@kars-runtime/cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](LICENSE)
 [![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Azure/kars/actions/workflows/ci.yml)
 [![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry-0078D4)](https://azure.microsoft.com)
-[![Status: Reference Stack](https://img.shields.io/badge/Status-Reference%20Stack-yellow)](#status)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Azure/kars/badge)](https://scorecard.dev/viewer/?uri=github.com/Azure/kars)
-<!-- [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/<ID>/badge)](https://www.bestpractices.dev/projects/<ID>) -->
-<!-- Best Practices badge: uncomment + fill in <ID> after registering at https://www.bestpractices.dev/en/projects/new (post-public flip). -->
 
+Hardened sandbox per agent · zero credentials in the agent · every external call brokered by a Rust router that enforces identity, content safety, governance, and audit · end-to-end encrypted inter-agent messaging · one CLI from laptop to AKS.
 
-Hardened sandbox per agent. Zero credentials in the agent. Every external call goes through a Rust router that enforces identity, content safety, governance, and audit. End-to-end encrypted inter-agent messaging. One CLI for the whole loop — laptop to AKS.
-
-[**Try it on your laptop →**](#try-it-in-five-minutes) &nbsp;·&nbsp; [**Run it on AKS →**](docs/getting-started.md#step-2--deploy-to-aks) &nbsp;·&nbsp; [**Architecture →**](docs/architecture.md) &nbsp;·&nbsp; [**Blueprints →**](docs/blueprints/00-index.md)
+[**Try it in five minutes →**](#try-it-in-five-minutes) &nbsp;·&nbsp; [**Run it on AKS →**](docs/getting-started.md#step-2--deploy-to-aks) &nbsp;·&nbsp; [**Architecture →**](docs/architecture.md) &nbsp;·&nbsp; [**Blueprints →**](docs/blueprints/00-index.md)
 
 </div>
 
 ---
 
-## Status
+```bash
+# 1. Install the CLI (Node 22+)
+npm i -g @kars-runtime/cli
 
-> 📌 **NOTE: This is not an officially supported Microsoft product.** See [Project status](#project-status) below for distribution, framing, and limitations.
+# 2. Bring up a governed agent on a local Kubernetes (kind) cluster that mirrors AKS
+kars dev --release --target local-k8s
 
----
-
-## What problem does this solve?
-
-Giving an AI agent real tools today means giving it real credentials and a real network. That blast radius is unacceptable for any production workload — one prompt-injected agent and your Azure subscription, your GitHub org, your customer data are reachable.
-
-The Agent Reference Stack for Kubernetes (`kars`) is the runtime that lets you ship agents with the same operational discipline you ship the rest of your services: namespace isolation, NetworkPolicies, signed admission, audit, RBAC. In production (AKS) the agent process runs under a different UID than the router and never sees an Azure key — the router holds the credential and brokers every call. (In `kars dev` the agent and router are co-located in one container; see [Two modes, one mental model](#two-modes-one-mental-model) for the security boundary in each.) Every model call, every web fetch, every peer message passes through a control plane you can reason about, version, and roll back.
-
-It is built for three audiences:
-
-- **Platform teams** — host LLM agents on AKS without inventing a new operational model.
-- **Security teams** — one opinionated, layered control plane for identity, egress, content safety, governance, mesh trust.
-- **Agent builders** — build the agent, not the boring-but-load-bearing infrastructure underneath it.
-
-> **Status — pre-launch (v0.1.0).** The Agent Reference Stack for Kubernetes is an open-source project from Microsoft. We don't yet have public reference customers to list — if your team is running governed agents on AKS and wants to be one, we'd love to hear from you ([SUPPORT.md](SUPPORT.md)). The design assumes platform teams operating roughly ten or more agents on AKS with an Azure-AI-Foundry-or-Copilot model backend; below that, `kars dev` on a laptop is probably the right shape.
-
-### What makes it different
-
-- **A prompt-injected agent cannot leak your Azure credentials** — because the agent process runs under a different UID than the Rust router that holds them, on a different network, and never sees the bearer token. (iptables + NetworkPolicy back this up; they are not the primary control.)
-- **Your security and platform teams review YAML, not Python.** Approval gates, rate limits, tool allowlists, content-safety floors, token budgets, and trust topology are declarative Kubernetes resources — commit them to a repo, reconcile with Argo / Flux, audit with `git log`. No out-of-band config store, no per-agent code review for policy.
-- **Two agents that talk cannot be eavesdropped by you, by us, or by the relay.** Agent-to-agent messaging is end-to-end encrypted with Signal Protocol (X3DH + Double Ratchet) and KNOCK trust gating. The relay sees only ciphertext.
-- **You are not locked to one runtime or one model provider.** Eight first-class runtimes (OpenClaw, Hermes, OpenAI Agents SDK, Microsoft Agent Framework, LangGraph in Python and TypeScript, Anthropic, Pydantic-AI) plus BYO. GitHub Copilot, Azure AI Foundry, Azure OpenAI, and GitHub Models as backends — switching is a one-field CRD change, not a re-architecture. Native Anthropic-shape passthrough for Claude.
-- **What runs on your laptop is what runs in production.** `kars dev` and `kars up` share the same router binary, the same audit chain, the same governance profile. The dev-to-prod jump is one CLI command — no separate stack to learn or debug.
-
----
-
-## How it works (in one diagram)
-
+# 3. Chat with it
+kars connect dev-agent
 ```
+
+<div align="center">
+
+<img src="docs/assets/kars-dev-firstrun.gif" alt="kars first run: kars dev --release --target local-k8s brings up a governed agent on a local kind cluster" width="100%" />
+
+<em>First run: pick a provider, and kars brings up the controller, the encrypted mesh, and a sandboxed agent on a local kind cluster. <a href="docs/quickstart.md"><strong>Full quickstart →</strong></a></em>
+
+</div>
+
+> 📌 **Not an officially supported Microsoft product.** `kars` is an open-source reference implementation from the Azure Cloud Native team (the team behind Azure Kubernetes Service and Azure Linux). See [Project status](#project-status) for framing and limitations.
+
+---
+
+## The problem
+
+Giving an AI agent real tools means giving it real credentials and a real network. In production that is too much blast radius: a single prompt-injected agent can reach your Azure subscription, your GitHub org, and your customer data.
+
+kars runs agents with the same operational discipline as the rest of your services:
+
+- **Zero-trust agent process** — the agent runs under a different UID than the router and never sees an Azure key. The inference router holds the credential and brokers every call.
+- **Cross-framework E2E mesh** — agents on different frameworks talk over AgentMesh using the Signal Protocol; the relay sees only ciphertext. **OpenClaw ↔ Hermes** is wired and exercised end-to-end on every push (`tests/e2e/interop/hermes_openclaw_bidi.sh`); the other adapters bundle the mesh client and are being brought to the same bar ([roadmap](docs/roadmap.md)).
+- **Declarative operations** — fleet operations are GitOps-native and observable through the Headlamp plugin: a Kubernetes dashboard for agent sandboxes, policy CRDs, and trust topology.
+- **Real Kubernetes dev loop** — `kars dev --target local-k8s` runs your agent in `kind` using the same Helm chart, NetworkPolicies, and sidecars as production AKS.
+
+---
+
+
+
+## Ecosystem Alignment
+
+The Kubernetes agent ecosystem is evolving rapidly. Our long-term aim is to align architecturally and collaborate with upstream community efforts like `kubernetes-sigs/agent-sandbox` (for isolated pod primitives) and `agentgateway` (for edge/protocol routing). 
+
+While no formal integrations or project discussions have taken place yet, `kars` is designed with composability in mind, so it can grow toward this broader cloud-native agentic stack as those standards mature.
+
+## Architecture (How it works)
+
+```text
                     ┌──────────────── Sandbox pod ────────────────┐
    User / TUI ────► │  agent container (UID 1000, no network)     │
                     │              │                              │
@@ -64,8 +75,7 @@ It is built for three audiences:
                     │  ┌────────────────────────────────────┐     │
                     │  │  Inference Router (Rust)           │     │
                     │  │                                    │     │
-                    │  │  Identity (Entra Agent ID *or*     │     │
-                    │  │    cluster Workload Identity)      │     │
+                    │  │  Identity (Entra Agent ID)         │     │
                     │  │  Content Safety (Foundry inline)   │     │
                     │  │  Token budget · rate limit         │     │
                     │  │  Tool policy · governance (AGT)    │     │
@@ -73,84 +83,110 @@ It is built for three audiences:
                     │  └─────────────────┬──────────────────┘     │
                     │                    │                        │
                     │            init: egress-guard               │
-                    │      (iptables safety net: agent UID         │
-                    │       can only reach the router locally)     │
+                    │      (iptables safety net: agent UID        │
+                    │       can only reach the router locally)    │
                     └────────────────────┼────────────────────────┘
                                          │
-                       Per-sandbox Entra Agent ID (default)
-                       or shared Workload Identity (opt-out)
-                                         │
-                  ┌──────────────────────┼─────────────────────────┐
-                  ▼                      ▼                         ▼
-           Inference backend       AgentMesh relay            A2A peers
-           ┌─────────────────┐     (Signal-Protocol           (signed
-           │ GitHub Copilot  │      E2E messages)              AgentCards)
-           │ (Claude · GPT · │
-           │  Gemini · …)    │  ◄── recommended for dev (one OAuth login)
-           ├─────────────────┤
-           │ Azure AI Foundry│
-           │ / Azure OpenAI  │  ◄── full feature set (Memory, Agents, CS)
-           ├─────────────────┤
-           │ GitHub Models   │  (free tier · PAT · small context)
-           ├─────────────────┤
-           │ + more soon     │  ◄── feature-request via GitHub issues
-           └─────────────────┘
+                   ┌─────────────────────┼─────────────────────────┐
+                   ▼                     ▼                         ▼
+            Inference backend      AgentMesh relay            A2A peers
 ```
 
-**The agent has no network of its own.** Every byte that leaves the pod leaves through the router — that's the policy point where egress, governance, content-safety, token budgets, and audit are enforced. The K8s `NetworkPolicy` and the `egress-guard` iptables init container are **safety nets** that contain blast radius if the router is bypassed or compromised — they are not the policy layer. Compromise of the agent does not compromise the cloud account, the model, the audit log, or the peer mesh.
+**The agent has no network of its own.** Every byte that leaves the pod leaves through the Rust inference router. The `NetworkPolicy` and `egress-guard` iptables container are **safety nets** that contain blast radius if the router is bypassed. Compromise of the agent does not compromise the cloud account, the model, the audit log, or the peer mesh.
 
-**Pluggable inference backend.** Three providers are wired in today:
+### Spotlight: the inference router is the zero-trust core
 
-- **GitHub Copilot** — recommended for the [inner loop](docs/architecture.md#dev-mode-kars-dev). One device-code OAuth login (no Azure account, no PAT to manage). Picks from the full Copilot model catalogue, including current Claude, GPT, Gemini, and reasoning-class models. Native Anthropic-shape passthrough for Claude (no shape translation, full tool-calling fidelity). Largest context windows in the lineup. See [Sandbox pod — dev mode](docs/architecture-diagrams.md#1-sandbox-pod--dev-mode) for the runtime shape.
-- **Azure AI Foundry / Azure OpenAI** — the [production-grade](docs/architecture.md#prod-mode-kars-up) default. Unlocks the full feature set: Memory Store, Agents, Evaluations, Indexes, Datasets, inline Content Safety, and the rest of the Foundry data-plane the router proxies. Use this when you need anything beyond plain chat completions, or when running on AKS. See [Sandbox pod — prod mode](docs/architecture-diagrams.md#2-sandbox-pod--prod-mode) and [The data path of one model call](docs/architecture-diagrams.md#3-the-data-path-of-one-model-call).
-- **GitHub Models** — free, PAT-only, no subscription. Convenient for trivial demos; smaller context windows and tight rate limits make it a poor fit for real agents. Foundry-only routes return `501`; inline Content Safety is not enforced (see [security.md](docs/security.md#what-we-do-not-defend-against) and the [data path](docs/architecture.md#the-data-path-of-one-external-call) for what each provider routes through).
+The per-pod router is the one component every external call passes through, and it carries most of the security model. It runs as a **separate container under a different UID (1001) than the agent (1000)**, holds the credentials the agent never sees, and is the single enforcement point for:
 
-Adding more providers (Bedrock, direct Anthropic, third-party OpenAI-compatible gateways) is mostly an endpoint+auth recipe in `inference-router/src/proxy.rs::build_upstream_url` plus a CLI prompt branch — please open a GitHub issue / feature request.
+- **Identity & token brokering** — exchanges the per-sandbox Entra Agent ID (or cluster Workload Identity) for backend tokens via federated OIDC / IMDS; refreshes them automatically. The agent process holds **no** long-lived key. *(`auth.rs`, `copilot_auth.rs`)*
+- **Inline content safety** — reads Foundry's `prompt_filter_results` on every completion (jailbreak / indirect-attack / hate / violence / self-harm / sexual), enforces a configurable severity floor, and feeds detections into a per-peer trust penalty. *(`safety.rs`)*
+- **Token budgets & rate limits** — per-tenant token ceilings and request rate limits, enforced before the call leaves the pod. *(`budget.rs`, `rate_limiter.rs`)*
+- **L7 egress allowlist + blocklist** — every outbound `CONNECT` is checked against the per-sandbox allowlist and the OISD + URLhaus blocklist (daily refresh); `EgressApproval` CRDs add time-boxed exceptions. *(`forward_proxy.rs`, `egress_allowlist_loader.rs`, `blocklist.rs`)*
+- **MCP gateway** — brokers calls to external MCP servers with OAuth and per-tool allowlists. *(`mcp/`)*
+- **Governance (AGT)** — policy decisions, per-peer trust scoring, and behaviour monitoring through the consumed Agent Governance Toolkit primitives. *(`governance/`, `behavior_monitor.rs`)*
+- **Tamper-evident audit** — every decision is written to an append-only, **SHA-256 hash-chained** audit log (AGT's `AuditLogger`: each entry's hash covers the prior entry's hash) in a stable JSONL format. *(consumed from `agentmesh::AuditLogger`; persisted via `audit_sink.rs` / `audit_jsonl.rs`)*
+- **A2A data plane** — the cross-org A2A surface, including AP2 mandate signing and the trust store. *(`a2a/`)*
+- **Sub-agent spawn & handoff** — creates/destroys `KarsSandbox` sub-agents and drains/migrates sessions, all through the pod's scoped ServiceAccount. *(`spawn/`, `handoff/`)*
+- **Mesh bridge** — WebSocket-bridges **opaque** Signal-Protocol ciphertext to the relay. The router holds no session keys and cannot decrypt. *(`mesh.rs`)*
 
-For the full picture (control plane, data plane, mesh, A2A, MCP), see **[`docs/architecture.md`](docs/architecture.md)** and **[`docs/architecture-diagrams.md`](docs/architecture-diagrams.md)**.
+**Why this is not the same as a cluster-edge gateway (e.g. `agentgateway`).** A north-south gateway governs traffic at the cluster boundary; the kars router is an **in-pod policy enforcement point** that sits on `localhost` between the agent and everything else, so the agent has **no network path that bypasses it**. They operate at different layers and are **complementary, not interchangeable** — a cluster-edge gateway can front kars, and the per-pod router still does the per-agent identity, content-safety, budget, and audit enforcement that a shared edge cannot do per-sandbox. This is the structural core of the zero-trust model: the trust boundary is the pod, not the cluster perimeter.
 
 ---
 
-## Two modes, one mental model
+## What makes it different
 
-You write the same `KarsSandbox` YAML for both. The difference is where it runs and what isolates it.
+- **Security teams review YAML, not Python.** Approval gates, rate limits, tool allowlists, content-safety floors, token budgets, and trust topology are declarative Kubernetes resources — commit them to a repo, reconcile with Argo / Flux, audit with `git log`. 
+- **End-to-End Encrypted Mesh.** Two agents that talk cannot be eavesdropped by you, by us, or by the relay. X3DH + Double Ratchet with KNOCK trust gating.
+- **Pluggable backends.** GitHub Copilot, Azure AI Foundry, Azure OpenAI, and GitHub Models. Switch with a one-field CRD change.
 
-| Aspect | **Dev mode** (`kars dev`) | **Prod mode** (`kars up` → AKS) |
-|---|---|---|
-| Where | One Docker container on your laptop | An AKS cluster in your subscription |
-| Pod shape | **Single container** — agent + router co-located in one image | **Multi-container pod** — agent (UID 1000) + router (UID 1001) + init `egress-guard` |
-| Network isolation | Docker network, no egress guard | Router is the policy point; `NetworkPolicy` + `egress-guard` initContainer act as safety nets containing blast radius |
-| Identity | Provider credential — Copilot OAuth token, Foundry resource key, or GitHub PAT (mounted from a local secret) | **Per-sandbox Entra Agent ID** when `--mesh-trust=entra` (default `anonymous` uses the cluster's federated Workload Identity for Foundry); router never sees a long-lived key |
-| Optional VM isolation | n/a | Kata + AMD SEV-SNP (Confidential Containers) — requires a Kata-enabled node pool |
-| Use it for | Inner-loop dev, plugin authoring, demos | Real workloads, multi-tenant, production |
+[**Read the full architecture and security guarantees in the docs →**](docs/architecture.md)
 
-There is also a third option for when Docker dev is too simple but AKS is too heavy: **`kars dev --target local-k8s`** runs a real Kubernetes cluster locally (kind) with the same Helm chart, the same controller, the same multi-container pod shape, and the same NetworkPolicies as AKS. The only differences from prod are static-key auth (no Workload Identity, no Entra Agent ID) and the absence of cloud node pools. See [Architecture → Local Kubernetes mode](docs/architecture.md#local-kubernetes-mode-kars-dev---target-local-k8s) and [Blueprint 02 — Local Kubernetes dev loop](docs/blueprints/02-local-k8s-dev-loop.md).
+---
 
-Same CRDs. Same router code path. Same audit format. Same governance profiles. The graduation from `dev` to `up` is a one-line CLI change, not a port to a new system.
+## Three ways to run it, one mental model
+
+You write the same `KarsSandbox` YAML for all of them. The difference is where it runs and what isolates it.
+
+| Aspect | **Local — kind** (`kars dev --target local-k8s`) *(recommended)* | **Local — Docker** (`kars dev`) | **Prod — AKS** (`kars up`) |
+|---|---|---|---|
+| Where | A local [kind](https://kind.sigs.k8s.io/) Kubernetes cluster | One container on your laptop | An AKS cluster in your subscription |
+| Pod shape | **Multi-container pod** — agent + router + init `egress-guard`, the real production shape | **Single container** — agent + router co-located (fastest, not the prod shape) | **Multi-container pod** — agent (UID 1000) + router (UID 1001) + init `egress-guard` |
+| Network isolation | `NetworkPolicy` + `egress-guard`, same as AKS | Container network, no egress guard | Router is the policy point; `NetworkPolicy` + `egress-guard` contain blast radius |
+| Identity | Static provider credential (no Workload Identity / Entra) | Static provider credential (mounted from a local secret) | **Per-sandbox Entra Agent ID** with `--mesh-trust=entra` (default `anonymous` uses cluster Workload Identity); router never sees a long-lived key |
+| Optional VM isolation | n/a | n/a | Kata + AMD SEV-SNP (Confidential Containers) — requires a Kata node pool |
+| Use it for | **The dev loop for anything you'll ship** — validates the K8s glue | Fastest prompt/tool inner loop, demos | Real workloads, multi-tenant, production |
+
+The kind loop reproduces the AKS pod shape, `NetworkPolicy`, and UID split, so what you test locally is what ships — it differs from AKS only in auth source and infrastructure (no cloud node pools). The Docker target is the quickest path to a chat when you don't need the Kubernetes glue. See [Architecture → Local Kubernetes mode](docs/architecture.md#local-kubernetes-mode-kars-dev---release---target-local-k8s) and [Blueprint 02 — Local Kubernetes dev loop](docs/blueprints/02-local-k8s-dev-loop.md).
+
+Same CRDs. Same router code path. Same audit format. Same governance profiles. The graduation from local to AKS is a one-line CLI change, not a port to a new system.
 
 ---
 
 ## Try it in five minutes
 
-**No compile. Works for everyone — macOS & Linux, Intel & Apple Silicon.**
-You need only **Docker** (or Podman) and **Node.js 22+**:
+**No compile. Works for everyone — macOS & Linux, Intel & Apple Silicon.** All
+the images are multi-arch (`amd64` + `arm64`, native on Apple Silicon) and
+cosign-signed; `--release` pulls them, so there's no Rust, no clone, no build.
+
+Install the CLI:
 
 ```bash
 npm i -g @kars-runtime/cli
-kars dev --release
 ```
 
-`kars dev --release` pulls the published, **cosign-signed** images and runs a
-sandboxed agent — no Azure account, no Rust, no clone, no GitHub login. Every
-image is multi-arch (`amd64` + `arm64`, native on Apple Silicon). On first
-launch you pick an inference provider — **GitHub Copilot** is easiest (one
-device-code login, no Azure account).
+**Recommended — a real Kubernetes dev loop on a local [kind](https://kind.sigs.k8s.io/) cluster.**
+You need **kind** + **kubectl** + any container runtime (**Docker, Podman, or nerdctl** — kind drives all three):
 
-The CLI on npm is **build-provenance attested** (SLSA) — verify with
-`npm audit signatures` after install.
+```bash
+kars dev --release --target local-k8s
+```
 
-Run on Kubernetes instead with `kars dev --release --target local-k8s` (kind),
-or `kars up` for a managed AKS cluster (see [below](#when-you-are-ready-for-the-real-thing)).
+This runs the published images in the **real production pod shape** — separate
+router container, init `egress-guard`, `NetworkPolicy`, seccomp — so it behaves
+almost identically to AKS. It's the dev loop we recommend, because what you test
+locally is what ships.
+
+<details>
+<summary><strong>Just want the fastest smoke test?</strong> A single container, no Kubernetes.</summary>
+
+If you only need to kick the tyres and don't have kind installed, the default
+target runs the agent + router co-located in **one container** (no
+`NetworkPolicy`, no separate router container — not the production shape, but the
+quickest path to a chat). This path uses the **`docker` CLI** directly, so it
+needs Docker (or a Podman `docker`-compatible shim) plus Node 22+:
+
+```bash
+kars dev --release          # one container via the docker CLI
+```
+
+</details>
+
+On first launch you pick an inference provider — **GitHub Copilot** is easiest
+(one device-code login, no Azure account). The CLI on npm is **build-provenance
+attested** (SLSA) — verify with `npm audit signatures` after install.
+
+When you're ready for a managed cluster, `kars up` provisions AKS (see
+[Getting started → Deploy to AKS](docs/getting-started.md#step-2--deploy-to-aks)).
 
 <details>
 <summary>Other ways to install</summary>
@@ -160,7 +196,7 @@ or `kars up` for a managed AKS cluster (see [below](#when-you-are-ready-for-the-
 curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
 
 # Pin a specific release with the installer
-KARS_VERSION=v0.1.1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh)"
+KARS_VERSION=v0.1.18 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh)"
 
 # Or build from source — to hack on the controller / router / plugin (needs Rust 1.88+)
 git clone https://github.com/Azure/kars.git && cd kars
@@ -169,41 +205,18 @@ kars dev   # builds the images locally for your architecture
 ```
 </details>
 
-On first run `kars dev` shows a 3-way provider picker:
+On first run, `kars dev` shows a three-way provider picker — **GitHub Copilot** (default; one device-code login, no Azure account), **Azure AI Foundry / Azure OpenAI** (full feature set: Memory Store, agents, Content Safety), or **GitHub Models** (free, PAT-only, smaller context). Your choice is saved to `~/.kars/config.json` and reused on later runs; switch with `kars credentials`. Full walkthrough: **[Getting started → Launch a sandbox](docs/getting-started.md#12-launch-a-sandbox)**.
 
-```
-$ kars dev
-
-  ╭────────────────────────────────────────────────╮
-  │  kars · Local Sandbox                     │
-  │  Secure AI Agent Runtime on Azure              │
-  ╰────────────────────────────────────────────────╯
-
-  👋 First time? Pick an inference provider — no Azure account needed for the GitHub options.
-  Copilot is the default (largest context). You can change later with `kars credentials`.
-
-? Which inference provider do you want to use?
-❯ GitHub Copilot                    (recommended; needs an active Copilot seat — large context, Claude/GPT/Gemini)
-  Azure AI Foundry / Azure OpenAI   (full feature set: Memory Store, agents, Content Safety, etc.)
-  GitHub Models                     (free; just need a GitHub PAT — small context, Foundry features disabled)
-```
-
-1. **GitHub Copilot** *(default)* — one device-code login at `https://github.com/login/device`, then pick from the Copilot model catalogue. No Azure, no PAT, no key files. **This is the fastest path to a working agent on a real frontier model.**
-2. **Azure AI Foundry / Azure OpenAI** — paste an endpoint, deployment, and resource-level API key. Required for Memory Store, agents, evaluations, and inline Content Safety.
-3. **GitHub Models** — paste a GitHub PAT with `models:read`. Free; small context windows.
-
-Your choice is saved to `~/.kars/config.json` and reused on subsequent runs. Switch later with `kars credentials`.
-
-The first run also prompts for an **agent name** (default `dev-agent` — hit Enter to accept). Use that name in subsequent commands:
+`kars dev` then prompts for an **agent name** (default `dev-agent`). Use that name in subsequent commands:
 
 ```bash
 # Talk to the agent (TUI auto-opens; or use the CLI directly)
 kars connect dev-agent
 ```
 
-The TUI drops you into a chat window. Type *"list the files in my workspace"* or *"write a Python script that prints the current Azure subscription"* — every tool call the agent makes is governed by the same router code path that runs in production.
+The TUI drops you into a chat window. Type *"list the files in my workspace"* or *"write a Python script that reverses a string and run it"* — every tool call the agent makes is governed by the same router code path that runs in production.
 
-> **Don't have an Azure AI Foundry deployment yet?** If you picked Copilot or Models above, you don't need one. If you want the full Foundry feature set, two `az` commands get you both — see **[Getting started — prerequisites](docs/getting-started.md#dont-have-an-azure-ai-foundry-deployment-yet)**.
+> **Don't have an Azure AI Foundry deployment yet?** If you picked Copilot or Models above, you don't need one. If you want the full Foundry feature set, two `az` commands get you both — see **[Getting started → Choosing an inference provider](docs/getting-started.md#choosing-an-inference-provider)**.
 
 When you are ready for the real thing:
 
@@ -233,9 +246,11 @@ kars up --name prod-agent --region swedencentral --release --mesh-trust=entra
 
 ## What is built in
 
-### Nine CRDs
+### Twelve CRDs (ten workload + two infrastructure)
 
-`KarsSandbox` is the unit of work — one CRD per agent. Everything else binds policy, identity, or peer relationships to it.
+`KarsSandbox` is the unit of work — one CRD per agent. The other nine **workload** CRDs bind policy, identity, peer relationships, memory, evaluation, and operations to it. Two **infrastructure** CRDs are written by the platform, not authored per agent.
+
+**Ten workload CRDs** (you author these):
 
 | CRD | Purpose |
 |---|---|
@@ -248,18 +263,19 @@ kars up --name prod-agent --region swedencentral --release --mesh-trust=entra
 | **`KarsEval`** | Reproducible evaluation runs against a sandbox spec. |
 | **`TrustGraph`** | Cross-namespace / cross-cluster trust topology for the AgentMesh layer. *(`v1alpha1` — reconciler-only; router-side **mesh-admission gating** against the projected graph is on the [roadmap](docs/roadmap.md). KNOCK accept/deny stays agent-side — the router cannot decrypt the Signal session.)* |
 | **`EgressApproval`** | Ephemeral, TTL-bounded extra egress hosts overlaid on the baseline allowlist. |
+| **`KarsSREAction`** | Approval-gated, TTL-bounded write action proposed by the [autonomous SRE operator](docs/runbooks/sre.md). The controller executes it only when `spec.approval.state` is `Approved`, via a short-lived `TokenRequest` + scoped `ClusterRoleBinding` (least-privilege, auto-revoked). |
 
-Plus two infrastructure CRDs you don't author per agent: **`KarsAuthConfig`** (cluster-scoped singleton written by `kars mesh setup-trust` — the tenant-wide Entra Agent ID trust anchor) and the controller-internal **`KarsPairing`** record (binds sandboxes to AgentMesh registry IDs). Eleven CRDs in total.
+**Two infrastructure CRDs** (platform-written, not per-agent): **`KarsAuthConfig`** (cluster-scoped singleton written by `kars mesh setup-trust` — the tenant-wide Entra Agent ID trust anchor) and the controller-internal **`KarsPairing`** record (binds sandboxes to AgentMesh registry IDs).
 
-Full schema in **[`docs/api/crd-reference.md`](docs/api/crd-reference.md)**.
+That's **twelve CRDs in total** — ten you author, two the platform manages. Full schema in **[`docs/api/crd-reference.md`](docs/api/crd-reference.md)**.
 
-### Seven first-class agent runtimes (plus BYO)
+### Eight agent runtimes (plus BYO)
 
 You pick the runtime via `KarsSandbox.spec.runtime.kind`. The router, governance, isolation, and audit chain are identical across all of them.
 
 | Runtime | Language | Image dir | Status |
 |---|---|---|---|
-| **OpenClaw** (default) | Python | `sandbox-images/openclaw/` | ✅ |
+| **OpenClaw** (default) | TypeScript / Node | `sandbox-images/openclaw/` | ✅ |
 | **Hermes** (Nous Research) | Python | `sandbox-images/hermes/` | ✅ |
 | **OpenAI Agents SDK** | Python | `sandbox-images/openai-agents/` | ✅ |
 | **Microsoft Agent Framework** | Python | `sandbox-images/maf-python/` | ✅ (`.NET` deferred) |
@@ -273,7 +289,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 ### One mesh, one gateway, one CLI
 
-- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. **The Signal session lives in the agent process**, not the router: the OpenClaw plugin layer (and every other supported runtime) installs `@microsoft/agent-governance-sdk` from npm at sandbox-image build time and owns X3DH / Double Ratchet / KNOCK end to end. The inference router links the [`agentmesh`](https://crates.io/crates/agentmesh) crate from crates.io only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — never for mesh crypto — and acts as a transparent WebSocket bridge to the relay for the encrypted bytes. There is no in-tree fork of either SDK.
+- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. **The Signal session lives in the agent process**, not the router: **OpenClaw** bundles the AGT TypeScript SDK and **Hermes** the AGT Python mesh client, both wire-compatible (proven by `tests/e2e/interop/hermes_openclaw_bidi.sh`). The router holds **no** session keys and never does mesh crypto — it links the upstream `agentmesh` crate only for shared governance primitives and WebSocket-bridges opaque ciphertext to the relay. Every client is an upstream Microsoft AGT build — **no in-tree fork**. (Full provenance, crate pins, and the per-adapter status: **[architecture → The mesh](docs/architecture.md#the-mesh)**.)
 - **A2A gateway** — public-ingress for peer-to-peer agent traffic with tenant routing, audit, and rate limiting. AgentCard signature verification (`kars_a2a_core::verify_inbound_card`) ships as a library and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer. Wiring the verifier as an axum layer inside the gateway binary is tracked in the [roadmap](docs/roadmap.md).
 - **CLI (`kars …`)** — 30+ commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
@@ -306,18 +322,18 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 
 ## Project status
 
-> 📌 **NOTE: This is not an officially supported Microsoft product.** kars is an open-source reference implementation maintained under the Azure GitHub organization. No SLA, support contract, or product roadmap commitment is attached — see [SUPPORT.md](SUPPORT.md), [TRADEMARKS.md](TRADEMARKS.md), and [LICENSE](LICENSE).
+> 📌 **NOTE: This is not an officially supported Microsoft product.** kars is an open-source reference implementation developed in the open by the **Azure Cloud Native team** — the team behind Azure Kubernetes Service and Azure Linux. No SLA, support contract, or product roadmap commitment is attached — see [SUPPORT.md](SUPPORT.md), [TRADEMARKS.md](TRADEMARKS.md), and [LICENSE](LICENSE).
 
-> ✅ **Every published artefact is signed.** All container images on `ghcr.io/azure` are **cosign keyless-signed** (verifiable in the Sigstore Rekor transparency log), carry an **SPDX SBOM**, and a **GitHub build-provenance (SLSA) attestation** — verify with `cosign verify` / `gh attestation verify`. The CLI is published to **npmjs as [`@kars-runtime/cli`](https://www.npmjs.com/package/@kars-runtime/cli)** with an SLSA build-provenance attestation (verify with `npm audit signatures`), and the CLI tarball on each GitHub Release is attested too. Install with no compile via the [Try it in five minutes](#try-it-in-five-minutes) quick-start. *(We're additionally working on publishing to crates.io / MCR — see [`docs/PUBLISHING.md`](docs/PUBLISHING.md); the GHCR + npm artefacts above are signed and usable today.)*
+> ✅ **Every published artefact is signed.** All container images on `ghcr.io/azure` are **cosign keyless-signed** (verifiable in the Sigstore Rekor transparency log), carry an **SPDX SBOM**, and a **GitHub build-provenance (SLSA) attestation** — verify with `cosign verify` / `gh attestation verify`. The CLI is published to **npmjs as [`@kars-runtime/cli`](https://www.npmjs.com/package/@kars-runtime/cli)** with an SLSA build-provenance attestation (verify with `npm audit signatures`), and the CLI tarball on each GitHub Release is attested too. Install with no compile via the [Try it in five minutes](#try-it-in-five-minutes) quick-start. *(We're additionally working on publishing to crates.io / MCR — the GHCR + npm artefacts above are signed and usable today.)*
 
-`v0.1.0`. The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E, chaos-tier fault injection, CNCF conformance self-assessment, plus a documented manual matrix on AKS — see [`tests/`](tests/)). The CRD surface is served at `v1alpha1` and may change between minor releases; the data path, security model, and audit chain are stable. See **[`CHANGELOG.md`](CHANGELOG.md)** for the change log and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
+**`v0.1.18`.** The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E, chaos-tier fault injection, CNCF conformance self-assessment, plus a documented manual matrix on AKS — see [`tests/`](tests/)). The CRD surface is served at `v1alpha1` and may change between minor releases; the data path, security model, and audit chain are stable. See **[`CHANGELOG.md`](CHANGELOG.md)** for the change log and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
 
 ## Known limitations
 
 We would rather you find these in this list than in production. None of them block the core promise (one router, one audit chain, one CRD shape across runtimes), but they shape how you should run the rc:
 
 - **Mesh trust tiers default to anonymous.** Sub-agents register with the AgentMesh registry as the *anonymous* tier unless the operator passes `--mesh-trust=entra` to `kars up` AND holds the `Agent ID Developer` Entra directory role. Under the default, the relay accepts every peer at trust score `0`; KNOCK gating still happens but score-based admission is moot. Verified-tier registration (per-sandbox Entra Agent ID JWTs verified by the AGT relay against tenant JWKS) is fully wired in this repo; the AGT-side relay+registry patches are tracked upstream in [microsoft/agent-governance-toolkit#2659](https://github.com/microsoft/agent-governance-toolkit/pull/2659). One CLI flag (`--mesh-trust=entra`) is the whole opt-in; see **[`docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite`](docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite)** for the failure modes when the role / upstream patches are missing.
-- **Multi-runtime images are not yet published to a public registry.** OpenClaw runs out of the box; the other six wired runtimes (OpenAI Agents SDK, Microsoft Agent Framework Python, LangGraph, LangGraph.js, Anthropic, Pydantic-AI) currently require `kars push --build` against your own ACR before `kars add --runtime <kind>` will succeed. The build pipeline is in tree (`sandbox-images/<kind>/Dockerfile`); the public distribution is what's pending.
+- **Mesh/spawn/handoff is fully wired for OpenClaw and Hermes; partial for the other adapters.** The encrypted AgentMesh (and the sub-agent spawn / handoff tools that ride on it) is exercised end-to-end for **OpenClaw** and **Hermes** (`tests/e2e/interop/hermes_openclaw_bidi.sh`). The other adapter images (OpenAI Agents SDK, MAF-Python, LangGraph Py/TS, Anthropic, Pydantic-AI) are **published to `ghcr.io/azure` and imported by `--release`**, and run governed inference + the Foundry/MCP tool surface — but their `kars_mesh_*` / spawn / handoff tools are not yet exposed (pending the Python AGT mesh client reaching TS parity for those adapters). Use OpenClaw or Hermes when you need cross-agent mesh today; track the rest on the [roadmap](docs/roadmap.md).
 - **Semantic Kernel and MAF .NET runtimes are CRD-wired but adapter-incomplete.** The CRD enum accepts the values, the controller emits a `ShapeInvalid` condition, the agent does not start. Treat them as future work, not silent breakage.
 - **Attestation is router-and-audit only.** We sign and hash-chain audit entries; we do not yet emit cosign-signed runtime receipts (`attest sign`/`attest verify` are scaffolded — see `docs/roadmap.md`).
 - **No managed-service equivalent.** This is a runtime you operate. There is no hosted control plane.
@@ -326,7 +342,14 @@ If a limitation surprised you in a way this list didn't warn about, that's a bug
 
 ## Contributing & support
 
-- Contributing guide: **[`CONTRIBUTING.md`](CONTRIBUTING.md)**
+kars is built in the open and we'd love your help. Good places to start:
+
+- 🟢 **[Good first issues](https://github.com/Azure/kars/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)** — small, well-scoped, beginner-friendly tasks with clear acceptance criteria.
+- 🤝 **[Help wanted](https://github.com/Azure/kars/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)** — slightly bigger tasks the maintainers would love a hand with.
+- 💬 **[Discussions](https://github.com/Azure/kars/discussions)** — questions, ideas, and "is kars right for us?" — we'd genuinely rather you ask than feel stuck.
+
+Before opening a PR, see the **[contributing guide](CONTRIBUTING.md)**. Other references:
+
 - Security policy: **[`SECURITY.md`](SECURITY.md)**
 - Support: **[`SUPPORT.md`](SUPPORT.md)**
 - Code of Conduct: **[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)**

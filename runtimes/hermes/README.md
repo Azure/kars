@@ -16,7 +16,7 @@ Implements the kars **v1 runtime contract** for [Hermes Agent](https://hermes-ag
 │     ├─ foundry_*  (9 tools)            ├─→ localhost:8443    │
 │     ├─ kars_discover                   │                     │
 │     ├─ http_fetch                      │                     │
-│     └─ kars_mesh_* (Act 1: stubs)      │                     │
+│     └─ kars_mesh_* (Signal E2E)        │                     │
 │                                        │                     │
 │  inference-router (Rust, sidecar)  ◄───┘                     │
 └──────────────────────────────────────────────────────────────┘
@@ -35,7 +35,7 @@ The plugin is installed two ways:
 | **AGT policy gate** | `ctx.register_hook("pre_tool_call", ...)` — every tool call POSTs `/agt/evaluate`; denied calls return an error result to the LLM without executing |
 | **Sub-agent spawn** | `kars_spawn`, `kars_spawn_status`, `kars_spawn_destroy`, `kars_spawn_list` — HTTP to `/sandbox/*` on the router |
 | **Peer discovery** | `kars_discover` — `/agt/registry/v1/agents/{did}` lookup |
-| **Mesh messaging (Act 1)** | `kars_mesh_send`, `_inbox`, `_await`, `_transfer_file` — return a clear "mesh not available; requires Python MeshClient (Act 2)" error |
+| **Mesh messaging** | `kars_mesh_send`, `_inbox`, `_await`, `_transfer_file` — end-to-end encrypted (Signal Protocol) via the Python AGT MeshClient (`runtimes/agt-mesh-python/`); the router bridges opaque ciphertext only. Exercised by `tests/e2e/interop/hermes_openclaw_bidi.sh` |
 | **Handoff** | `kars_handoff_request`, `kars_handoff_confirm`, `kars_handoff_status` |
 | **Foundry tools** | `foundry_code_execute`, `foundry_download_file`, `foundry_image_generation`, `foundry_web_search`, `foundry_file_search`, `foundry_memory`, `foundry_conversations`, `foundry_evaluations`, `foundry_deployments`, `foundry_agents` — all proxied through router |
 | **Memory binding** | `foundry_memory` uses store name `memory-${SANDBOX_NAME}` per the KarsMemory convention |
@@ -50,13 +50,12 @@ The plugin honors [`docs/runtimes/CONTRACT.md`](../../docs/runtimes/CONTRACT.md)
 - Reads `/etc/kars/secrets/admin-token` at plugin init for admin-scope endpoints
 - Honors `KARS_DEV_PROFILE` for relaxed dev-mode behavior
 - Skips Foundry tool registration when `KARS_PROVIDER` ∈ {`github-copilot`, `github-models`}
-- Pre-seeds trust set from `AGT_TRUSTED_PEERS` (Act 2 — mesh feature)
+- Pre-seeds trust set from `AGT_TRUSTED_PEERS` (mesh trust bootstrap)
 - Fail-closed grace period of 3 consecutive `/agt/evaluate` failures (`KARS_AGT_EVALUATE_FAIL_OPEN_GRACE` env override)
 
-## Act 1 limitations
+## Mesh parity
 
-- **No live mesh communication**: `kars_mesh_*` tools are stubs. Act 2 builds a Python AgentMesh `MeshClient` at parity with the TypeScript SDK, after which mesh tools are live.
-- Until then, multi-agent workflows on Hermes can coordinate via shared Foundry Memory Store or Foundry Conversations.
+`kars_mesh_*` tools run on a Python AgentMesh `MeshClient` (`runtimes/agt-mesh-python/`) at byte-for-byte wire parity with the TypeScript SDK, so a Hermes agent and an OpenClaw agent are first-class encrypted-mesh peers (proven by `tests/e2e/interop/hermes_openclaw_bidi.sh`). The Signal session lives in the agent process; the router only bridges ciphertext.
 
 ## Development
 

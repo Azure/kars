@@ -100,7 +100,6 @@ export function upgradeCommand(): Command {
     .option("--rollback", "Roll the cluster back to the previous Helm revision.", false)
     .option("--skip-runtime-images", "Skip the 7 multi-runtime adapter images (faster).", false)
     .option("--force", "Re-run the upgrade even if already at the target version.", false)
-    .option("--yes", "Non-interactive (for CI/automation).", false)
     .addHelpText("after", `
 Examples:
   kars upgrade                     # Upgrade to the latest GitHub release

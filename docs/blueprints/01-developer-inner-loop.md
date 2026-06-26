@@ -8,7 +8,17 @@
 - **You want:** seconds of feedback. Real router code. Real policy decisions. Real audit format. Real frontier-model output (Claude Opus, GPT-5, Gemini) with a single `gh auth login`. No Azure subscription, no Foundry resource, no Kubernetes.
 - **You do not want:** to operate a kind cluster for every PR; to stand up Workload Identity locally; to maintain a parallel "dev mock" that drifts from production.
 
-> **Need real Kubernetes locally?** If you're changing the controller, the Helm chart, the CRDs, or the inference router sidecar wiring, see [Blueprint 02 — Local Kubernetes dev loop](02-local-k8s-dev-loop.md). It runs the same controller + router images on a kind cluster, with a Headlamp dashboard. Pick `kars dev --target local-k8s` (or pick "Local Kubernetes" at the first-run prompt). For prompt-iteration and tool-policy work, this Docker loop is faster — start here.
+> **Recommended primary dev flow.** For most work — controller, Helm chart, CRDs, inference-router sidecar wiring, and any change you intend to ship — use [Blueprint 02 — Local Kubernetes dev loop](02-local-k8s-dev-loop.md). It runs the same controller + router images on a kind cluster with a Headlamp dashboard, and because it reproduces the real production pod shape, `NetworkPolicy`, and UID split, it reflects how the sandbox actually behaves in Kubernetes. Pick `kars dev --release --target local-k8s` (or pick "Local Kubernetes" at the first-run prompt). This single-container Docker loop is the *fast inner loop* for prompt-iteration and tool-policy work — reach for it when you don't need the K8s glue, then validate in local-k8s before you trust the change.
+
+### Which loop do I want?
+
+| If you are… | Use | Why |
+|---|---|---|
+| Iterating on prompts, tools, or `ToolPolicy` / `InferencePolicy` YAML | **This blueprint (01)** — `kars dev` | Seconds of feedback in one container; no K8s glue to wait on. |
+| Changing the controller, Helm chart, CRDs, router sidecar wiring, or **anything you intend to ship** | **[Blueprint 02](02-local-k8s-dev-loop.md)** — `kars dev --target local-k8s` | Reproduces the real pod shape, `NetworkPolicy`, UID split, and Headlamp UX — behaviourally almost identical to AKS. |
+| Validating a change before a PR | **Blueprint 02** | Catch K8s-only issues (RBAC, NetworkPolicy, init container) that the single-container loop can't surface. |
+
+The two loops share the same images and the same `kars dev` entry point — `--target local-k8s` is the only switch. Use 01 for speed, then 02 to trust the result.
 
 ## Topology
 
@@ -122,3 +132,7 @@ On the first run you are prompted to pick an inference provider — **GitHub Cop
 - [`sandbox-images/`](../../sandbox-images/) — the per-runtime images dev mode uses.
 - [Architecture — Two modes](../architecture.md#two-modes) — the canonical write-up of dev vs prod.
 - [Getting started — Step 1](../getting-started.md#step-1--local-five-minutes) — the user-facing walkthrough.
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

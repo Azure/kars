@@ -4,18 +4,20 @@
 
 ## Persona & intent
 
-- **You are:** an kars maintainer working on the controller, the inference router, the CRD schema, or the Headlamp plugin. Or an agent author who wants to see exactly what AKS will do to your `KarsSandbox` before you push to AKS.
+- **You are:** a kars maintainer working on the controller, the inference router, the CRD schema, or the Headlamp plugin. Or an agent author who wants to see exactly what AKS will do to your `KarsSandbox` before you push to AKS.
 - **You want:** the same Helm chart, the same CRDs, the same controller image, the same router image — running locally on a kind cluster — with a dashboard that shows you everything in one place.
 - **You do not want:** to maintain a separate "Docker dev" code path that drifts from the K8s code path.
 
-This blueprint is the **K8s-shaped** developer loop. For the lighter-weight single-Docker-container loop, see [Blueprint 01](01-developer-inner-loop.md). Both are first-class — pick the one that matches the change you're testing.
+This blueprint is the **K8s-shaped** developer loop and the **recommended primary dev flow** for kars: it reproduces the production pod shape, `NetworkPolicy`, UID split, and the controller reconciliation loop, so what's green here is green in AKS. For the lighter-weight single-Docker-container fast inner loop, see [Blueprint 01](01-developer-inner-loop.md). Both are first-class — start in local-k8s for anything you intend to ship, and drop to Docker only for quick prompt or tool-policy iteration.
+
+The **Headlamp plugin** is the operational UX for this loop: a browser dashboard (`http://localhost:4466`) with a dedicated **kars sidebar** that surfaces every `KarsSandbox` and its sibling CRDs, live reconciliation status, pod health, and events — so you watch the controller do its work instead of polling `kubectl`.
 
 ## Topology
 
 ```mermaid
 flowchart TB
   subgraph Laptop["💻 Your laptop"]
-    CLI["kars dev --target local-k8s"]
+    CLI["kars dev --release --target local-k8s"]
     Browser["browser → http://localhost:4466"]
     subgraph Kind["kind cluster (kars-dev)"]
       direction TB
@@ -61,9 +63,9 @@ sequenceDiagram
   participant Kind as kind cluster
   participant Ctrl as kars-controller
   participant HL as Headlamp + plugin
-  Dev->>CLI: kars dev --target local-k8s
+  Dev->>CLI: kars dev --release --target local-k8s
   CLI->>Kind: kind create cluster
-  CLI->>Kind: docker build && load (controller, router, sandbox)
+  CLI->>Kind: build/pull + load images (controller, router, sandbox) via the detected runtime
   CLI->>Kind: helm template | kubectl apply --server-side
   CLI->>Kind: create kars-dev-creds Secret (Foundry / Copilot / Models)
   CLI->>HL: helm install headlamp
@@ -84,7 +86,7 @@ make image-controller image-inference-router
 make sandbox-image  # or `kars push --only sandbox` against a local registry
 
 # 2. Bring everything up (~2 min first run, ~30 s on re-runs).
-kars dev --target local-k8s
+kars dev --release --target local-k8s
 
 # 3. Apply a sandbox CR.
 kubectl apply -f examples/basic-agent/karssandbox.yaml -n kars-system
@@ -120,7 +122,7 @@ The CLI handles:
 | Dashboard | Headlamp + kars plugin | `kars connect` (gateway port-forward) | Azure Portal + Headlamp |
 | Teardown | `kars dev down` | `kars destroy <name>` | `kars destroy <name>` |
 
-The point is: this blueprint validates **the K8s glue** (controller reconciliation, CRD admission, helm chart, NetworkPolicy) before you ever touch AKS. If `kars dev --target local-k8s` is green, the AKS bring-up is almost guaranteed to be green too.
+The point is: this blueprint validates **the K8s glue** (controller reconciliation, CRD admission, helm chart, NetworkPolicy) before you ever touch AKS. If `kars dev --release --target local-k8s` is green, the AKS bring-up is almost guaranteed to be green too.
 
 ## References
 
@@ -129,3 +131,7 @@ The point is: this blueprint validates **the K8s glue** (controller reconciliati
 - Helm chart overlay: `deploy/helm/kars/values-local-dev.yaml`
 - CRDs: `deploy/helm/kars/templates/crd-*.yaml`
 - Strict seccomp profile: `deploy/helm/kars/files/kars-strict.json`
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

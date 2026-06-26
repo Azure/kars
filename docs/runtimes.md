@@ -10,7 +10,7 @@ The same router, the same governance profile, the same audit chain, the same Net
 
 | Kind | Language | Image dir | Adapter source | Status |
 |---|---|---|---|---|
-| `OpenClaw` | Python 3.12 | `sandbox-images/openclaw/` | `runtimes/openclaw/` | Shipping |
+| `OpenClaw` | TypeScript / Node 22 | `sandbox-images/openclaw/` | `runtimes/openclaw/` | Shipping |
 | `Hermes` | Python 3.12 | `sandbox-images/hermes/` | `runtimes/hermes/` | Shipping |
 | `OpenAIAgents` | Python 3.12 | `sandbox-images/openai-agents/` | `runtimes/openai-agents/` | Shipping |
 | `MicrosoftAgentFramework` (Python) | Python 3.12 | `sandbox-images/maf-python/` | `runtimes/maf-python/` | Shipping |
@@ -61,7 +61,7 @@ A purpose-built adapter does three things you would otherwise have to do in BYO 
 2. **Replace the API key with a sentinel** — sets `OPENAI_API_KEY=ROUTED-VIA-KARS` (or equivalent). The router brokers the real credential on egress.
 3. **Wire AAD broker + OTel + AgentMesh** — federated identity exchange, OpenTelemetry to your observability stack, mesh registration on bootstrap.
 
-If your runtime SDK reads its model endpoint from one of the well-known env vars, a stock adapter is a small Python or Node entrypoint. The seven first-class adapters are short for exactly this reason.
+If your runtime SDK reads its model endpoint from one of the well-known env vars, a stock adapter is a small Python or Node entrypoint. The eight first-class adapters are short for exactly this reason.
 
 ### `OpenClaw`
 
@@ -151,7 +151,7 @@ A reference BYO image (a tiny FastAPI agent) is in [`examples/byo-quickstart/`](
 
 ### Worked examples — full catalogue
 
-Eight end-to-end examples ship under [`examples/`](../examples/README.md) — one per runtime, plus two multi-tenant attack-simulation demos:
+Ten end-to-end examples ship under [`examples/`](../examples/README.md) — one per runtime, a full-stack CRD showcase, plus two multi-tenant attack-simulation demos:
 
 | Example | Runtime | Shows |
 |---|---|---|
@@ -162,8 +162,9 @@ Eight end-to-end examples ship under [`examples/`](../examples/README.md) — on
 | [`openai-agents-quickstart`](../examples/openai-agents-quickstart/) | OpenAIAgents | Unmodified OpenAI Agents SDK app |
 | [`maf-quickstart`](../examples/maf-quickstart/) | MicrosoftAgentFramework | Unmodified MAF Python app |
 | [`byo-quickstart`](../examples/byo-quickstart/) | BYO | Any container image under the BYO contract |
+| [`full-stack-demo`](../examples/full-stack-demo/) | OpenClaw | One `kubectl apply` wiring every kars CRD to a single agent |
 | [`demo-clawshield`](../examples/demo-clawshield/) | OpenClaw ×3 | Multi-tenant isolation proof (poisoned doc, two victim tenants) |
-| [`lethal-trifecta-demo`](../examples/lethal-trifecta-demo/) | OpenClaw ×2 | Reproduces the Jan-2026 Claude Cowork file-exfiltration attack against vanilla OpenClaw vs. an kars-managed agent — six independent layers each catch the attack. **Recommended launch demo.** |
+| [`lethal-trifecta-demo`](../examples/lethal-trifecta-demo/) | OpenClaw ×2 | Reproduces the Jan-2026 Claude Cowork file-exfiltration attack against vanilla OpenClaw vs. a kars-managed agent — six independent layers each catch the attack. **Recommended launch demo.** |
 
 ---
 
@@ -195,7 +196,7 @@ The existing adapters are the reference. CrewAI is tracked in the [roadmap](road
 
 ## Running OpenClaw locally and offloading to kars (no in-cluster runtime)
 
-The runtimes above describe agents that run **inside** an kars sandbox pod. There is a second, complementary shape: a local OpenClaw (or OpenClaw variant, e.g. NVIDIA's `nemoclaw`) running on your laptop or a non-kars host that uses the kars **mesh-plugin** to delegate heavy work to a governed AKS sandbox over the encrypted mesh.
+The runtimes above describe agents that run **inside** a kars sandbox pod. There is a second, complementary shape: a local OpenClaw (or OpenClaw variant, e.g. NVIDIA's `nemoclaw`) running on your laptop or a non-kars host that uses the kars **mesh-plugin** to delegate heavy work to a governed AKS sandbox over the encrypted mesh.
 
 - **The local OpenClaw is not operated by kars.** You install it yourself, configure it yourself, run it under your shell. kars governs only the cloud-side environment that receives the offloaded task.
 - **The mesh-plugin (`@kars/mesh`) installs into your local OpenClaw.** It registers the local agent on AGT, pairs to your kars cluster with a one-time token, and exposes tools (`mesh_send`, `mesh_offload`, `mesh_transfer_file`, etc.) that your agent can call.

@@ -1,8 +1,8 @@
-# Phase 6 — Entra-signed AGT mesh trust (design + status)
+# Entra-signed AGT mesh trust (design + status)
 
-> Status: **shipped** in Phase 6.b+6.c (commits `78606a8`, `b300526`,
-> `4c0d466`). End-to-end verified on `kars-aks` with 9/9 e2e harness
-> PASS under verified-tier registration.
+> **Status: shipped.** Verified end-to-end on AKS (`kars up --mesh-trust=entra`),
+> with the full mesh e2e harness passing under verified-tier registration. This
+> document is both the design rationale and the current behaviour.
 
 When the operator sets `kars up --mesh-trust=entra`, kars replaces
 the anonymous-tier mesh registration with **Entra-signed agent

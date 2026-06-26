@@ -419,7 +419,7 @@ The reproducible end-to-end harness now runs on **AKS** and **local-k8s** (kind 
 
 ## What you can see while it runs (Headlamp + Grafana)
 
-The four sub-agents and their inter-agent traffic are observable end-to-end without any extra setup on local-k8s — `kars dev` installs Prometheus + Grafana + the kars Headlamp plugin on first run.
+The four sub-agents and their inter-agent traffic are observable end-to-end without any extra setup on local-k8s — `kars dev --release --target local-k8s` installs Prometheus + Grafana + the kars Headlamp plugin on first run.
 
 | View | URL (after `kars dev`) | Shows |
 |---|---|---|
@@ -434,11 +434,11 @@ The mesh traffic counters (`kars_mesh_messages_sent_total` / `kars_mesh_messages
 
 ## Running it yourself
 
-`kars dev` on **local-k8s** brings up the whole stack — controller + sandbox + AGT relay + Headlamp + Prometheus + Grafana — and the exec-brief harness can then be pointed at the running cluster:
+`kars dev --release --target local-k8s` is the preferred inner loop — a `kind` cluster mirrors real AKS behaviour far more faithfully than plain Docker. It brings up the whole stack — controller + sandbox + AGT relay + Headlamp + Prometheus + Grafana — and the exec-brief harness can then be pointed at the running cluster:
 
 ```bash
 # from repo root
-kars dev --target local-k8s        # ~3-4 min on first run (kube-prometheus-stack image pulls)
+kars dev --release --target local-k8s   # ~3-4 min on first run (kube-prometheus-stack image pulls)
 # observe at http://localhost:4466/ (Headlamp), http://localhost:3000/ (Grafana)
 
 cd tools/e2e-harness

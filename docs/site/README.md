@@ -43,12 +43,42 @@ docs/
 ├── adr/
 └── site/
     ├── README.md       # this file
-    └── book.toml       # mdbook config (src = "..", build-dir = "../../target/book")
+    ├── book.toml       # mdbook config (src = "..", build-dir = "../../target/book")
+    ├── mermaid.min.js  # bundled Mermaid runtime (additional-js)
+    ├── mermaid-init.js # brand-aligned Mermaid theme bootstrap (additional-js)
+    └── theme/          # kars theme overrides
+        ├── index.hbs   # HTML template: top nav bar with kars logo + GitHub CTA
+        ├── favicon.svg # kars brand favicon (vector)
+        ├── favicon.png # kars brand favicon (raster fallback)
+        └── css/
+            └── custom.css  # comprehensive theme layer (additional-css)
 ```
 
 The `src = ".."` setting in `book.toml` tells mdbook to use the entire `docs/` directory as the source tree. That way the same `.md` files reviewers see on GitHub also become the chapters of the rendered site.
 
 The build output (`/target/book/`) is gitignored.
+
+## Theme
+
+The site ships a custom mdbook theme under `site/theme/`:
+
+- **`theme/index.hbs`** overrides the default HTML template to add a sticky top
+  navigation bar with the kars logo lockup (mark + wordmark + `docs` tag), the
+  centered book title, and a GitHub call-to-action pill. It also loads the
+  Inter (UI/prose) and JetBrains Mono (code) webfonts.
+- **`theme/css/custom.css`** is the comprehensive theme layer, wired up via
+  `additional-css` so it loads last and wins over the stock themes. It defines
+  per-theme design tokens (light/rust/coal/navy/ayu), modern typography, CTA
+  buttons (`.btn-primary` / `.btn-secondary` inside `.cta-row`), card-style
+  tables and admonitions, framed code blocks with shared syntax highlighting,
+  and styled Mermaid diagram cards.
+- **`theme/favicon.svg` / `theme/favicon.png`** brand the browser tab.
+- **`mermaid-init.js`** initialises Mermaid with a kars Azure-family palette and
+  the Inter font, switching between light and dark variants with the theme.
+
+Because the overrides only add an `index.hbs` plus a `custom.css` layer (rather
+than forking every stock CSS file), the theme stays resilient across mdbook
+upgrades.
 
 ## Updating the site
 
@@ -61,6 +91,20 @@ There is no separate publication step; deploying the rendered HTML to a hosting 
 ## Validation in CI
 
 The Helm Lint and other docs-touching workflows do not run mdbook, but `make docs-site` is fast (≈ 1s) and always runnable locally. A future CI job can wrap it as a build-only check; for now the contract is "it builds locally before merge".
+
+## `llms.txt`
+
+`docs/llms.txt` is a machine-readable index of the documentation following the
+[llms.txt convention](https://llmstxt.org/), so AI/agent tooling can consume the
+docs without scraping. It is generated from `SUMMARY.md` + the first prose line
+of each page by `site/gen-llms-txt.py`. Regenerate it after changing `SUMMARY.md`
+or a page intro:
+
+```bash
+python3 docs/site/gen-llms-txt.py
+```
+
+Because `src = ".."`, mdbook copies `docs/llms.txt` to the rendered site root.
 
 ## Limitations
 

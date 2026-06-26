@@ -1,4 +1,4 @@
-# Upstream Alignment
+# OpenClaw upstream alignment
 
 **TL;DR** — kars does **not** fork OpenClaw. It uses only first-class extension
 points (`tools.deny` config, `api.registerTool()` plugin API, `~/.openclaw-data/extensions/`
@@ -50,7 +50,7 @@ upstream `api.registerTool()` contract:
 - `mesh_send` / `mesh_inbox` / `discover` — peer-to-peer messaging via AgentMesh
 - …plus file, memory, and Foundry skill tools
 
-Source: [`cli/src/plugin.ts`](../cli/src/plugin.ts) (all `api.registerTool({ ... })` call sites).
+Source: [`runtimes/openclaw/src/index.ts`](../runtimes/openclaw/src/index.ts) (all `api.registerTool({ ... })` call sites).
 
 From the agent's perspective, the mental model is preserved: it still has
 "tools for spawning sub-agents" and "tools for sending messages" — the
@@ -103,9 +103,11 @@ For completeness, these are the things we explicitly do **not** do:
 - Intercept transport at a level below the plugin API
 - Ship a modified OpenClaw protocol on the wire
 
-A quick check: `vendor/` in this repo contains only **AgentMesh** forks
-(SDK, relay, registry) — documented with numbered patches against upstream
-bugs that block our use case. There is **no OpenClaw fork.**
+A quick check: kars does **not** vendor an OpenClaw fork. The only vendored AGT
+artifact is the pinned upstream Agent Governance Toolkit build (`vendor/agt/`, a
+tarball + pin, plus locally-built AGT Python wheels) — used while two pre-release
+fixes are in review, switching to the published releases once they land. There is
+**no in-tree fork** of OpenClaw or of AGT.
 
 If upstream OpenClaw ever removes `tools.deny` or the `api.registerTool()`
 contract, **that** is the point at which alignment would need to be
@@ -124,8 +126,8 @@ re-examined — but today, both are supported, documented extension points.
 ## References
 
 - Native tool deny list: [`sandbox-images/openclaw/entrypoint.sh:223`](../sandbox-images/openclaw/entrypoint.sh)
-- Replacement tool registrations: [`cli/src/plugin.ts`](../cli/src/plugin.ts) (all `api.registerTool(...)` call sites)
-- Plugin manifest + entry exports: [`cli/src/plugin.ts`](../cli/src/plugin.ts) (`register` / `activate`)
+- Replacement tool registrations: [`runtimes/openclaw/src/index.ts`](../runtimes/openclaw/src/index.ts) (all `api.registerTool(...)` call sites)
+- Plugin manifest + entry exports: [`runtimes/openclaw/src/index.ts`](../runtimes/openclaw/src/index.ts) (`register` / `activate`)
 - Plugin discovery path: `~/.openclaw-data/extensions/kars-mesh/`
 - Architecture overview: [`architecture.md`](architecture.md)
 - Security model: [`security.md`](security.md)

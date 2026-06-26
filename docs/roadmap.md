@@ -1,18 +1,18 @@
 # kars Roadmap
 
-> Living document. The project is at **`v0.1.0`** — see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped. This roadmap lists the themes we are evolving the platform towards. Versions and ordering may change as we learn from production deployments.
+> Living document. The project is at **`v0.1.18`** — see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped. This roadmap lists the themes we are evolving the platform towards. Versions and ordering may change as we learn from production deployments.
 
-## What ships today (`v0.1.0`)
+## What ships today (`v0.1.18`)
 
 The current public surface — exercised by CI (Kind E2E + manual matrix) on every push to `main`:
 
-- **`KarsSandbox` CRD** (`kars.azure.com/v1alpha1`) plus eight sibling CRDs covering inference policy, tool policy, A2A agents, MCP servers, memory, evaluation, egress approval, and trust topology.
-- **Seven first-class agent runtime adapters:** OpenClaw, OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python **and** TypeScript — two adapters), Pydantic-AI. Plus a documented **BYO runtime** path with strict-mode admission gating ([`operations/byo-strict.md`](operations/byo-strict.md)). See [`runtimes.md`](runtimes.md) for the authoritative table.
+- **`KarsSandbox` CRD** (`kars.azure.com/v1alpha1`) plus nine sibling workload CRDs covering inference policy, tool policy, A2A agents, MCP servers, memory, evaluation, egress approval, trust topology, and approval-gated SRE remediation actions (`KarsSREAction`). Two infrastructure CRDs (`KarsAuthConfig`, `KarsPairing`) bring the registered total to twelve. Full schema in [`api/crd-reference.md`](api/crd-reference.md).
+- **Eight first-class agent runtime adapters:** OpenClaw, Hermes (Nous Research), OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python **and** TypeScript — two adapters), Pydantic-AI. Plus a documented **BYO runtime** path with strict-mode admission gating ([`operations/byo-strict.md`](operations/byo-strict.md)). See [`runtimes.md`](runtimes.md) for the authoritative table.
 - **Inference router** with IMDS / Workload-Identity broker, content-safety floor, per-sandbox token budgets, the full Foundry data-plane API surface, MCP Streamable-HTTP + SSE compat, A2A transport.
 - **E2E-encrypted inter-agent messaging** via AgentMesh (Signal Protocol — X3DH + Double Ratchet). The Signal session is owned end-to-end by the agent processes; the inference router only WebSocket-bridges opaque ciphertext.
 - **Defense-in-depth sandbox:** read-only rootfs, UID-1000 + UID-1001 split, drop-ALL caps, custom seccomp (`kars-strict`), Landlock, iptables UID-based egress, optional Kata.
 - **AGT integration:** `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` consumed via four provider traits (`MeshProvider`, `PolicyDecisionProvider`, `AuditSink`, `SigningProvider`).
-- **Operator UX:** `kars up / add / dev / connect / handoff / mesh / policy learn / migrate / convert / claw attest` plus the operator TUI.
+- **Operator UX:** `kars up / upgrade / add / dev / connect / handoff / mesh / policy / migrate / convert / attest` plus the operator TUI.
 - **Supply chain:** cosign keyless OIDC signatures, SBOM (CycloneDX) per image, Trivy + Container Image Scan + Rust Supply-Chain Gate (cargo-deny) + RustSec advisory audit in CI.
 
 ## What we're working on next
@@ -26,7 +26,7 @@ Themes ordered roughly by what we expect to ship first. Nothing here is dated; l
 
 ### Inference policy enforcement
 
-- **Aggregate token budgets** in `InferencePolicy` — persisted counters across requests (per-hour / per-day windows) with `rejectOnExceed` enforced at the router. Today only `tokenBudget.perRequestTokens` is enforced; aggregate counters are accepted on the spec and surfaced in status but not yet metered.
+- **Aggregate token budgets — per-hour windows + `rejectOnExceed` knob.** Per-sandbox **daily and monthly** aggregate counters are already metered and enforced at the router (over-budget requests are rejected) — see [feature maturity](maturity.md#inference-safety). Still on the roadmap: shorter **per-hour** windows and an explicit `rejectOnExceed` policy field to make the reject-vs-warn behaviour configurable per `InferencePolicy`.
 
 ### A2A gateway hardening
 

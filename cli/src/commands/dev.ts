@@ -19,27 +19,59 @@ import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
  * `kars dev` takes ~5–10 min on a cold first run; bailing halfway
  * through with "helm: command not found" is a bad first impression.
  */
-export async function preflightTools(
+/** Pure helper: the external tools required for a given dev invocation.
+ *
+ *  Rust (`cargo`) is required ONLY when we build images locally from source.
+ *  `--release` pulls pre-built, signed images from ghcr.io/azure and compiles
+ *  nothing, so it must NOT require a Rust toolchain — that's the whole point of
+ *  the no-compile path (and the README/quickstart "no Rust" promise).
+ *
+ *  The **container runtime** is handled separately (see `CONTAINER_RUNTIMES` /
+ *  the anyOf check in `preflightTools`) — it is NOT in this flat list, because:
+ *    - `local-k8s` (kind) accepts **any** of docker / podman / nerdctl (kind
+ *      drives them via `KIND_EXPERIMENTAL_PROVIDER`; see `dev/local-k8s.ts`).
+ *    - the single-container `docker` target shells out to the `docker` CLI
+ *      directly, so it needs the `docker` binary specifically.
+ *  This list is the set of tools that must EACH be present. Exported for tests. */
+export function requiredToolsFor(
   target: "docker" | "local-k8s",
-  agtRepo: string,
-  opts: { build: boolean; noMesh: boolean },
-): Promise<void> {
-  // Per-target tool requirements:
-  //   docker     → just docker (single container, no kind/helm/kubectl)
-  //   local-k8s  → docker + kind + kubectl + helm
+  opts: { build: boolean; noMesh: boolean; release?: boolean },
+): Array<{ bin: string; install: string }> {
+  const buildsLocally = !opts.release;
   const required: Array<{ bin: string; install: string }> =
     target === "local-k8s"
       ? [
-          { bin: "docker",  install: "https://docs.docker.com/get-docker/" },
           { bin: "kind",    install: "https://kind.sigs.k8s.io/docs/user/quick-start/#installation" },
           { bin: "kubectl", install: "https://kubernetes.io/docs/tasks/tools/" },
           { bin: "helm",    install: "https://helm.sh/docs/intro/install/" },
-          { bin: "cargo",   install: "https://rustup.rs/" },
         ]
       : [
+          // The single-container target invokes the `docker` CLI directly.
           { bin: "docker", install: "https://docs.docker.com/get-docker/" },
-          { bin: "cargo",  install: "https://rustup.rs/" },
         ];
+  if (buildsLocally) {
+    required.push({ bin: "cargo", install: "https://rustup.rs/" });
+  }
+  return required;
+}
+
+/** Container runtimes the `local-k8s` (kind) target can drive, in preference
+ *  order — kind selects one via `KIND_EXPERIMENTAL_PROVIDER`. The preflight
+ *  requires **at least one** of these, not `docker` specifically, so Podman-
+ *  and nerdctl-only setups work. Mirrors `RUNTIME_PRIORITY` in `dev/local-k8s.ts`. */
+export const CONTAINER_RUNTIMES = ["docker", "podman", "nerdctl"] as const;
+
+export async function preflightTools(
+  target: "docker" | "local-k8s",
+  agtRepo: string,
+  opts: { build: boolean; noMesh: boolean; release?: boolean },
+): Promise<void> {
+  // Per-target tool requirements:
+  //   docker     → the `docker` CLI (single container, no kind/helm/kubectl)
+  //   local-k8s  → kind + kubectl + helm, plus ANY container runtime
+  //                (docker / podman / nerdctl)
+  // Rust (`cargo`) is added only for local source builds — see requiredToolsFor.
+  const required = requiredToolsFor(target, opts);
 
   const missing: typeof required = [];
   for (const t of required) {
@@ -47,6 +79,29 @@ export async function preflightTools(
       await execa("which", [t.bin], { stdio: "pipe" });
     } catch {
       missing.push(t);
+    }
+  }
+
+  // local-k8s (kind) needs a container runtime but is not picky about which —
+  // kind drives docker / podman / nerdctl via KIND_EXPERIMENTAL_PROVIDER. Probe
+  // for ANY of them rather than requiring `docker` specifically, so Podman- and
+  // nerdctl-only setups are not blocked at preflight.
+  if (target === "local-k8s") {
+    let hasRuntime = false;
+    for (const rt of CONTAINER_RUNTIMES) {
+      try {
+        await execa("which", [rt], { stdio: "pipe" });
+        hasRuntime = true;
+        break;
+      } catch {
+        /* keep probing */
+      }
+    }
+    if (!hasRuntime) {
+      missing.push({
+        bin: "docker | podman | nerdctl",
+        install: "https://docs.docker.com/get-docker/ (or install podman / nerdctl)",
+      });
     }
   }
 
@@ -68,8 +123,8 @@ export async function preflightTools(
       console.error(chalk.red(`    • ${chalk.bold(t.bin)}  — install: ${chalk.cyan(t.install)}`));
     }
     if (target === "local-k8s") {
-      console.error(chalk.dim(`\n  Tip: macOS one-liner — \`brew install kind kubectl helm\` + Docker Desktop.`));
-      console.error(chalk.dim(`       (Or fall back to \`--target docker\` which only needs Docker.)`));
+      console.error(chalk.dim(`\n  Tip: macOS one-liner — \`brew install kind kubectl helm\` + a container runtime (Docker Desktop, Podman, or colima/nerdctl).`));
+      console.error(chalk.dim(`       (Or fall back to \`--target docker\` — the single-container path, which uses the \`docker\` CLI.)`));
     }
   }
   if (agtMissing) {
@@ -349,7 +404,7 @@ Notes:
       await preflightTools(
         options.target as "docker" | "local-k8s",
         options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO,
-        { build: options.build === true, noMesh: options.noMesh === true },
+        { build: options.build === true, noMesh: options.noMesh === true, release: releaseMode },
       );
 
       // ── First-run common prompts (apply to BOTH targets) ──────────

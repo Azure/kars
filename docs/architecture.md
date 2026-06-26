@@ -8,7 +8,7 @@ This document explains *what kars is made of* and *why each part exists*. For di
 2. **Every external call must pass a policy decision point.** No invisible side effects, no silent network egress.
 3. **Inter-agent communication must be confidential, authenticated, and forward-secret.** No plaintext fallback.
 4. **The same data-path code runs in dev and in prod.** A small number of code paths branch on `KARS_DEV_MODE` to swap auth source (static key vs. Workload Identity) and spawn driver (Docker vs. Kubernetes). The router's policy decision points, content-safety parsing, audit format, and governance hooks do not change between modes — local mode is *easier*, not *different*.
-5. **Operability over cleverness.** Standard Kubernetes primitives (CRDs, NetworkPolicies, RBAC, Helm) so platform teams can operate kars the way they operate the rest of the cluster.
+5. **Operability over cleverness.** Standard Kubernetes primitives (CRDs, NetworkPolicies, RBAC, Helm) so platform teams can operate kars the way they operate the rest of the cluster. Operational UX is first-class: the **Headlamp plugin** ships a kars sidebar and dashboards that surface every `KarsSandbox` and its sibling CRDs, reconciliation status, pod health, and events in the browser — the same view in local-k8s dev and in production.
 
 Everything below follows from those five.
 
@@ -20,20 +20,21 @@ kars has four code components, two languages, and one rule that ties them togeth
 
 | Component | Language | Crate / package | Responsibility |
 |---|---|---|---|
-| **Controller** | Rust (kube-rs) | `kars-controller` | Watches `KarsSandbox` and its eight peer workload CRDs, plus the infrastructure CRDs `KarsAuthConfig` and (controller-internal) `KarsPairing`; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
+| **Controller** | Rust (kube-rs) | `kars-controller` | Watches `KarsSandbox` and its nine peer workload CRDs, plus the infrastructure CRDs `KarsAuthConfig` and (controller-internal) `KarsPairing`; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
 | **Inference router** | Rust (axum) | `kars-inference-router` | Sits in the data path of every external call — identity, content safety, governance, audit, A2A. **Mesh**: WebSocket-bridges opaque Signal-Protocol ciphertext for the agent (the Signal session is plugin-owned; see [The mesh](#the-mesh)). |
 | **A2A gateway** | Rust (axum) | `kars-a2a-gateway` + `kars-a2a-core` | Public-ingress entry point for A2A 1.0.0 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
 | **kars OpenClaw plugin** | TypeScript | `runtimes/openclaw/` (id `kars`) | The agent-side surface for OpenClaw-runtime sandboxes: registers 24 governance-aware tools with OpenClaw (`kars_spawn`, `kars_mesh_send`, `kars_mesh_transfer_file`, `foundry_web_search`, `foundry_code_execute`, `foundry_image_generation`, …) and owns the Signal Protocol session via `@microsoft/agent-governance-sdk`. Catalogued in [OpenClaw plugin](openclaw-plugin.md). |
 | **kars Hermes plugin** | Python | `runtimes/hermes/` (id `kars`) | The agent-side surface for Hermes-runtime sandboxes: registers 9 governance-aware tools, the `pre_tool_call` AGT governance hook, and the `post_tool_call` telemetry hook with the [Hermes Agent](https://github.com/NousResearch/hermes-agent) gateway. Owns the Signal Protocol session via the Python AGT MeshClient at `runtimes/agt-mesh-python/` (kars-agt-mesh), at byte-for-byte wire-format parity with the TS SDK. Catalogued in [Hermes plugin](hermes-plugin.md). |
-| **CLI** | TypeScript | `@kars/cli` | Lifecycle of clusters, sandboxes, policies. 30+ commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
+| **CLI** | TypeScript | `@kars-runtime/cli` | Lifecycle of clusters, sandboxes, policies. 30+ commands. The CLI is convenience; everything it does is achievable with `az` + `helm` + `kubectl`. |
 
 The rule that ties them together: **the agent has no network of its own**. The router is the only process in the sandbox pod that can talk to the outside. Every other property of kars is a downstream consequence of holding that line.
+
 
 ---
 
 ## Two modes
 
-`kars dev` and `kars up` produce sandboxes that are observably the same to the agent code, but architecturally very different to a security reviewer. There is also a local-Kubernetes middle ground (`kars dev --target local-k8s`) for when you want production-shaped infrastructure on a laptop. All three are first-class.
+`kars dev` and `kars up` produce sandboxes that are observably the same to the agent code, but architecturally very different to a security reviewer. There is also a local-Kubernetes middle ground (`kars dev --release --target local-k8s`) for when you want production-shaped infrastructure on a laptop. All three are first-class — but **`kars dev --release --target local-k8s` (kind) is the recommended primary dev flow**: it runs the real controller, the real multi-container pod shape, real `NetworkPolicy`, and real UID separation, so it reflects how your sandbox actually behaves in Kubernetes. Plain single-container Docker dev (`kars dev`) is the fast inner loop for prompt and tool-policy iteration; reach for it when you don't need the K8s glue, and graduate to local-k8s before you trust a change.
 
 ### Dev mode (`kars dev`)
 
@@ -45,9 +46,9 @@ The rule that ties them together: **the agent has no network of its own**. The r
 
 The router still runs the same data-path code it does in prod — the request handlers, policy decision points, content-safety parsing, audit format, and governance hooks are all real. What is *different* is the auth source (a static API key or PAT instead of an exchanged Workload-Identity token) and the spawn driver (Docker instead of Kubernetes). A small number of code paths branch on `KARS_DEV_MODE` to enable those substitutions. What is *not* real is the network and identity isolation — there is no separate router process to break out *to*. Treat dev mode as a development surface, not a security surface.
 
-### Local Kubernetes mode (`kars dev --target local-k8s`)
+### Local Kubernetes mode (`kars dev --release --target local-k8s`)
 
-Between Docker-only dev and full AKS there is a third option: a real Kubernetes cluster running locally via [kind](https://kind.sigs.k8s.io/).
+Between Docker-only dev and full AKS there is a third option, and it is the one we recommend as the **primary** day-to-day dev flow: a real Kubernetes cluster running locally via [kind](https://kind.sigs.k8s.io/). Because it reproduces the production pod shape, `NetworkPolicy`, and UID split, a change that is green here is overwhelmingly likely to be green in AKS — which plain Docker dev cannot promise.
 
 - **Pod shape:** multi-container Kubernetes pod — the same shape as prod. Agent (UID 1000), router (UID 1001), egress-guard init container.
 - **Inside:** the controller, router, and AgentMesh relay + registry run inside the kind cluster. The same Helm chart that installs to AKS is installed locally with dev-friendly defaults.
@@ -56,7 +57,7 @@ Between Docker-only dev and full AKS there is a third option: a real Kubernetes 
 - **What it is for:** testing CRD changes, validating `NetworkPolicy` generation, running the chaos test suite locally, validating Helm changes, exercising the operator TUI against a real cluster — anything where Docker-only dev is too simple but AKS is too heavy.
 
 ```bash
-kars dev --target local-k8s
+kars dev --release --target local-k8s
 ```
 
 The kind cluster is created if it does not already exist, the locally-built images are loaded into kind, and the Helm chart is installed. See **[Blueprint 02 — Local Kubernetes dev loop](blueprints/02-local-k8s-dev-loop.md)** for the full walkthrough (including the Headlamp dashboard).
@@ -152,15 +153,15 @@ Every other external call (web fetch, MCP tool, sub-agent spawn, A2A peer messag
 
 ## The mesh
 
-Inter-agent communication is **end-to-end encrypted**. Two agents that want to talk:
+Inter-agent communication is a **Cross-Framework Secure Mesh**: agents built on **different frameworks** communicate over **end-to-end-encrypted Signal sessions carried on AgentMesh**, with no plaintext fallback. Framework choice is not a partition — every client speaks the same Signal wire format, so peers interoperate without per-framework bridging. This is **wired and exercised end-to-end today for OpenClaw and Hermes** (an OpenClaw agent and a Hermes agent are first-class peers on the same or a federated mesh); the other adapters bundle the mesh client and are being brought to the same bar (see [Runtimes](runtimes.md)). Two agents that want to talk:
 
 1. Each agent registers identity (Ed25519 sign, X25519 KEX) and uploads signed prekeys to the AgentMesh registry.
 2. The initiator looks up the peer in the registry, fetches its prekeys, runs **X3DH** to derive a shared secret.
-3. The initiator sends a **KNOCK** to the peer. The peer's **agent** (via `@microsoft/agent-governance-sdk` running plugin-side, *not* the router) evaluates trust score against `AGT_TRUST_THRESHOLD`. If the peer is below threshold, the KNOCK is denied (audited).
+3. The initiator sends a **KNOCK** to the peer. The peer's **agent** (via its AGT mesh client running plugin-side, *not* the router) evaluates trust score against `AGT_TRUST_THRESHOLD`. If the peer is below threshold, the KNOCK is denied (audited).
 4. On accept, both sides advance the **Double Ratchet**. Every subsequent message is encrypted with a fresh key (forward secrecy) and authenticated.
 5. The relay sees only opaque ciphertext blobs and addressing metadata. It cannot read messages and cannot impersonate either party.
 
-The relay and registry are operated by kars (`agentmesh` namespace, two small services). They are not trusted with content. The cryptographic primitives are libsodium / Signal Protocol. **The Signal session is owned by the agent process** — each runtime ships its own mesh client (OpenClaw + the six SDK adapters use `@microsoft/agent-governance-sdk` from npm; Hermes uses `runtimes/agt-mesh-python/`, the Python AGT MeshClient at byte-for-byte wire-format parity with the TS SDK) and runs X3DH / Double Ratchet / KNOCK inside the sandbox container (UID 1000). The inference router links the [`agentmesh`](https://crates.io/crates/agentmesh) crate from crates.io only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — it holds **no** Signal session keys, performs **no** encryption or decryption, and merely WebSocket-bridges opaque ciphertext between the agent and the relay. There is no in-tree fork of either SDK. The cross-runtime symmetry (Hermes ↔ OpenClaw) is proven end-to-end by `tests/e2e/interop/hermes_openclaw_bidi.sh` (local kind) and `tests/e2e/interop/aks_full_suite.sh` (AKS production sandboxes).
+The relay and registry are operated by kars (`agentmesh` namespace, two small services). They are not trusted with content. The cryptographic primitives are libsodium / Signal Protocol. **The Signal session is owned by the agent process** — each runtime ships an AGT mesh client matched to its language, byte-for-byte wire-compatible: **OpenClaw** uses the AGT **TypeScript SDK** (`@microsoft/agent-governance-sdk`), and **Hermes** uses the AGT **Python mesh client** (`kars-agt-mesh` / `a2a_agentmesh`, built on upstream `agentmesh-platform`). Both run X3DH / Double Ratchet / KNOCK inside the sandbox container (UID 1000). The remaining Python adapters (OpenAI Agents, MAF-Python, LangGraph-Python, Anthropic, Pydantic-AI) bundle the same Python client but **do not yet expose the `kars_mesh_*` tools** — their mesh wiring is in progress (the LangGraph adapter currently ships only an A2A/HTTP helper, not a Signal session). The inference router links the [`agentmesh`](https://crates.io/crates/agentmesh) Rust crate (`4.0.0`) only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — it holds **no** Signal session keys, performs **no** encryption or decryption, and merely WebSocket-bridges opaque ciphertext between the agent and the relay. Every client is built from the upstream Microsoft Agent Governance Toolkit (currently pinned to a pre-release revision while two fixes are in review); there is **no in-tree fork**. Because the wire format is shared, a Python Hermes agent and a TypeScript-hosted OpenClaw agent interoperate without any per-framework bridging — proven end-to-end by `tests/e2e/interop/hermes_openclaw_bidi.sh` (local kind) and `tests/e2e/interop/aks_full_suite.sh` (AKS production sandboxes).
 
 > **Multi-agent peer roster.** When an agent spawns more than one sub-agent (each with a `role` — e.g. `data analyst`, `visualization engineer`, `technical writer`), the OpenClaw runtime maintains a **peer roster** of canonical names + roles and **automatically prepends a `Peer roster:` block** to every outbound `mesh_send` / `mesh_transfer_file` once two or more siblings exist. Sub-agents that need to hand work to each other ("send the chart to viz", "deliver the brief to the writer") resolve role references against this roster instead of guessing names — eliminating misroute bugs in pipelines like `analyst → viz → writer`. The roster is built deterministically from spawn metadata; `kars_spawn` rejects sub-agents without a `role` parameter when more than one sibling will exist. Implementation: `runtimes/openclaw/src/core/agt-tools/agt.ts` (roster maintenance + auto-prepend), `runtimes/openclaw/skills/kars-spawn/SKILL.md` (agent-facing contract).
 
@@ -186,7 +187,7 @@ Two separate channels for two separate trust models. See **[`docs/architecture/a
 You operate kars by writing CRDs, not by clicking through a dashboard or
 editing a private config store. The full schema lives in
 **[`docs/api/crd-reference.md`](api/crd-reference.md)**. This section answers
-the question we get every time: *why nine CRDs and not one?*
+the question we get every time: *why ten CRDs and not one?*
 
 ### The principle: separate concerns that change at different rates
 
@@ -201,7 +202,7 @@ A CRD makes sense when it represents a thing that
 
 Anything that fails all three tests is a `KarsSandbox` field, not its own CRD.
 
-### The nine CRDs and what each one buys you
+### The ten CRDs and what each one buys you
 
 | CRD | Owner / changes-with | What you'd give up if it were a `KarsSandbox` field |
 |---|---|---|
@@ -214,6 +215,7 @@ Anything that fails all three tests is a `KarsSandbox` field, not its own CRD.
 | **`KarsEval`** | Eval / QA. Run on demand. | Eval runs would be pods or jobs without a reproducible record; you'd lose the `status` history that lets `kars eval` show "this prompt regressed at commit X". |
 | **`TrustGraph`** | Cluster admin. Cross-namespace, cross-cluster. | Sibling-trust at scale collapses: every sandbox would need a list of every peer's AMID. `TrustGraph` is the *only* cluster-scoped CRD precisely because trust topology is a cluster concern. <br><br> **Status — reconciler-only.** The graph is projected to `/etc/kars/trustgraph/graph.json` in each sandbox; the router does not yet consume it for mesh-admission gating. KNOCK accept/deny is — and stays — agent-side (the router cannot decrypt the Signal session). The router-side post-decision trust-score map exists for audit/governance only. **Tracked in the [roadmap](roadmap.md):** router-side **mesh-admission gating** against the projected graph (pre-handshake, refuse to bridge a WS for an edge not in the graph) — a separate, coarser layer that complements agent-side KNOCK rather than replacing it. See [`api/crd-reference.md` §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology). |
 | **`EgressApproval`** | On-call / SRE. Ephemeral, TTL-bounded. | A single inline overlay would mix permanent allowlist drift with short-lived break-glass grants. As a separate CRD, the grant carries its own audit record, TTL, and revocation path. |
+| **`KarsSREAction`** | The [autonomous SRE operator](runbooks/sre.md) proposes; a human (or policy) approves. Ephemeral, TTL-bounded. | A remediation an agent wants to perform — scale a Deployment, restart a rollout, patch an image, delete a stuck pod — would be an un-audited, un-gated `kubectl` call from inside an agent process. As a CRD, every proposed action carries a `diagnosis`, a `rationale`, an explicit `approval.state`, and a TTL; the controller executes it **only** when approved, via a short-lived `TokenRequest` + scoped `ClusterRoleBinding` that is revoked immediately after. |
 
 Two further resources are **infrastructure CRDs** you don't author per
 agent. `KarsAuthConfig` is a cluster-scoped singleton, written by
@@ -223,7 +225,7 @@ in the AGT anonymous tier. `KarsPairing` is **controller-internal** — it
 records the binding between a `KarsSandbox` and its AgentMesh registry
 identity. Both are exposed as CRDs so the controller can use the same
 reconciliation machinery as everything else, but you never write either by
-hand. That brings the registered total to **eleven** CRDs.
+hand. That brings the registered total to **twelve** CRDs.
 
 ### What you actually get from this design
 
@@ -241,15 +243,15 @@ Three properties fall out of treating these as separate CRDs:
   able to stop a workload. These splits are not theoretical — they are the
   reason the CRDs exist.
 - **GitOps works without translation.** Each CRD is independently committed
-  to a repo and reconciled by Argo / Flux. There is no "render these nine
-  things from one mega-template" step, because the nine things are already
+  to a repo and reconciled by Argo / Flux. There is no "render these ten
+  things from one mega-template" step, because the ten things are already
   the API.
 
 ### When this design would be wrong
 
 If kars only ever ran one agent per cluster, with one model, no policy,
-no peers, no memory, and no eval — nine CRDs would be cargo-culting. We
-believe a single CRD with nine optional sub-objects would be worse for
+no peers, no memory, and no eval — ten CRDs would be cargo-culting. We
+believe a single CRD with ten optional sub-objects would be worse for
 real-world deployments because you'd lose the rate-of-change separation
 above. But this is a judgement call, and we re-evaluate it every minor
 release. If your deployment never references a CRD other than `KarsSandbox`,
@@ -258,7 +260,7 @@ running workloads.
 
 ### Version
 
-The CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.0`; see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](roadmap.md) for what's next.
+The CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.18`; see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](roadmap.md) for what's next.
 
 ---
 
@@ -277,3 +279,5 @@ The CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.0`; se
 - **[Security model](security.md)** — what each layer enforces.
 - **[Blueprints](blueprints/00-index.md)** — six reference deployment shapes.
 - **[CRD reference](api/crd-reference.md)** — the operator's API.
+
+> **Ecosystem Alignment:** kars aims to complement the broader Kubernetes agent ecosystem. We are looking forward to aligning architecturally with projects like `agentgateway` (north-south edge) and `sigs/agent-sandbox` (Kubernetes isolation primitives) as they mature. Note that no formal discussions or integrations exist today; this is our directional goal for a composable cloud-native stack.
