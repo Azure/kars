@@ -14,8 +14,13 @@
 - [Architecture overview](architecture.md)
 - [Architecture diagrams](architecture-diagrams.md)
 - [Runtimes](runtimes.md)
+  - [Runtime contract (BYO)](runtimes/CONTRACT.md)
 - [A2A gateway (architecture)](architecture/a2a-gateway.md)
 - [AGT boundary](architecture/agt-boundary.md)
+- [Per-sandbox identity (Entra Agent ID) — deep dive](architecture/entra-agent-id/README.md)
+  - [Runtime token flow](architecture/entra-agent-id/01-runtime-token-flow.md)
+  - [Security alignment](architecture/entra-agent-id/05-security-alignment.md)
+  - [Mesh trust design](architecture/entra-agent-id/06-mesh-trust-design.md)
 - [Multi-tenant model](multi-tenant.md)
 - [Egress proxy](egress-proxy.md)
 
@@ -28,6 +33,7 @@
 - [Red team playbook](security/red-team.md)
 - [CRD trust model](security/crd-trust-model.md)
 - [Security validation](security-validation.md)
+- [Supply-chain posture & OpenSSF Scorecard](security/supply-chain-posture.md)
 - [MCP top-10](security-mcp-top10.md)
 - [Upstream alignment](upstream-alignment.md)
 
@@ -40,11 +46,11 @@
 - [Operator TUI](operator-tui.md)
 - [Permissions model](permissions.md)
 - [Per-sandbox identity (Entra Agent ID)](agent-identity.md)
-- [Demo script](demo-script.md)
 - [Examples catalogue](examples.md)
 
 # Runbooks
 
+- [Autonomous SRE operator](runbooks/sre.md)
 - [Hermes runtime — troubleshooting](runbooks/hermes-troubleshooting.md)
 
 # Operations

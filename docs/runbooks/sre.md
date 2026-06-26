@@ -8,9 +8,9 @@ Licensed under the MIT License.
 A long-running, in-cluster agent that diagnoses Kubernetes incidents
 on the same kars cluster that runs your other agents. Optional, opt-in.
 
-Status: **Slice 1 (MVP)** — read-only diagnostic tools. See
-[`docs/blueprints/07-kars-sre-proposal.md`](blueprints/07-kars-sre-proposal.md)
-§7.1 for the full slice ladder.
+Status: **Slice 1 (MVP)** — read-only diagnostic tools. The write-action
+surface (`KarsSREAction`) is approval-gated; see the
+[Roadmap](../roadmap.md) for the slice ladder.
 
 ---
 
@@ -118,5 +118,5 @@ ownerRefs.
 
 ## See also
 
-- Full design: [`docs/blueprints/07-kars-sre-proposal.md`](blueprints/07-kars-sre-proposal.md)
-- Demo Act II walkthrough: [`tools/demo/act2/runbook.md`](../tools/demo/act2/runbook.md)
+- Roadmap & slice ladder: [Roadmap](../roadmap.md)
+- Demo Act II walkthrough: [`tools/demo/act2/runbook.md`](../../tools/demo/act2/runbook.md)
