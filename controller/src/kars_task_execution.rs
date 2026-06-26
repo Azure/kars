@@ -81,6 +81,31 @@ fn runtime_variant_key(kind: &str) -> &'static str {
     }
 }
 
+/// Resolve the default `(deployment, provider)` a task-materialized
+/// InferencePolicy should request. The deployment is required by the sandbox
+/// reconciler — without it the pod degrades — so we derive a sane default from
+/// the controller's own configured inference model and let an operator override
+/// it for the task lane specifically.
+///
+/// Resolution order for the deployment:
+/// `KARS_TASK_DEFAULT_MODEL` → `AZURE_OPENAI_DEPLOYMENT` → `DEFAULT_MODEL` →
+/// `gpt-4o-mini`. The provider tag is `KARS_TASK_DEFAULT_PROVIDER` →
+/// `azure-openai` (the router routes by the configured endpoint URL, so this
+/// tag only needs to be a valid non-empty value).
+fn default_model() -> (String, String) {
+    let deployment = std::env::var("KARS_TASK_DEFAULT_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("AZURE_OPENAI_DEPLOYMENT").ok().filter(|s| !s.is_empty()))
+        .or_else(|| std::env::var("DEFAULT_MODEL").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let provider = std::env::var("KARS_TASK_DEFAULT_PROVIDER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "azure-openai".to_string());
+    (deployment, provider)
+}
+
 /// Materialize (or re-apply) the InferencePolicy + KarsSandbox for a launched
 /// task, then read back the sandbox phase. Idempotent via server-side apply.
 pub async fn materialize(
@@ -99,10 +124,18 @@ pub async fn materialize(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "OpenClaw".to_string());
 
-    // 1. Minimal InferencePolicy scoped to this sandbox. Token budget mirrors
-    //    the envelope when present (the router's TokenBudgetTracker enforces).
+    // 1. InferencePolicy scoped to this sandbox. Token budget mirrors the
+    //    envelope when present (the router's TokenBudgetTracker enforces).
+    //    A model preference is REQUIRED — without it the sandbox reconciler
+    //    degrades the pod (no deployment to call). We default it from the
+    //    controller's configured model so a launched task actually runs, and
+    //    let an operator override the defaults via env.
+    let (model_deployment, model_provider) = default_model();
     let mut inference_spec = json!({
         "appliesTo": { "sandboxName": task_name },
+        "modelPreference": {
+            "primary": { "provider": model_provider, "deployment": model_deployment },
+        },
     });
     if let Some(tokens) = envelope.budget.as_ref().and_then(|b| b.tokens)
         && tokens > 0
@@ -280,6 +313,34 @@ async fn apply_dynamic(
 mod tests {
     use super::*;
     use crate::kars_task::TaskBudget;
+
+    #[test]
+    fn default_model_resolution() {
+        // Single test (env is process-global; avoid cross-test races).
+        unsafe {
+            std::env::remove_var("KARS_TASK_DEFAULT_MODEL");
+            std::env::remove_var("AZURE_OPENAI_DEPLOYMENT");
+            std::env::remove_var("DEFAULT_MODEL");
+            std::env::remove_var("KARS_TASK_DEFAULT_PROVIDER");
+        }
+        // No knobs → safe builtin default + valid provider tag.
+        let (deployment, provider) = default_model();
+        assert!(!deployment.is_empty());
+        assert_eq!(provider, "azure-openai");
+
+        // Explicit task overrides win.
+        unsafe {
+            std::env::set_var("KARS_TASK_DEFAULT_MODEL", "openai/gpt-4o-mini");
+            std::env::set_var("KARS_TASK_DEFAULT_PROVIDER", "github-models");
+        }
+        let (deployment, provider) = default_model();
+        assert_eq!(deployment, "openai/gpt-4o-mini");
+        assert_eq!(provider, "github-models");
+        unsafe {
+            std::env::remove_var("KARS_TASK_DEFAULT_MODEL");
+            std::env::remove_var("KARS_TASK_DEFAULT_PROVIDER");
+        }
+    }
 
     #[test]
     fn runtime_variant_keys() {
