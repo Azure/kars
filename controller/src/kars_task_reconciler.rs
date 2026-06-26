@@ -449,7 +449,13 @@ async fn reconcile_receipt(
     };
     let facts = approval_facts(&task_approvals);
 
-    let Some(statement) = build_statement(task, status, &signer.key_id, &facts) else {
+    // Gather the completeness-floor posture from cluster state (best-effort —
+    // a read failure yields a conservative "not enforced" observation, never a
+    // false positive). This is what makes the receipt's completeness claim
+    // concrete and re-derivable by an auditor.
+    let completeness = gather_completeness(client).await;
+
+    let Some(statement) = build_statement(task, status, &signer.key_id, &facts, completeness) else {
         // No digest → no receipt. Retract any prior one.
         match receipts
             .delete(&name, &kube::api::DeleteParams::default())
@@ -505,15 +511,33 @@ async fn reconcile_receipt(
         return;
     }
 
+    // Enter the receipt in the hash-chained inclusion log (cross-receipt
+    // tamper-evidence). Best-effort: a log failure must not block the receipt,
+    // which is already durable and individually signed.
+    let payload_sha = crate::kars_receipt_log::sha256_hex(&payload);
+    let log_ref = format!("{ns}/{name}");
+    let inclusion = match crate::kars_receipt_log::append(client, &log_ref, &payload_sha).await {
+        Ok(entry) => Some(entry),
+        Err(e) => {
+            tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to enter receipt in inclusion log");
+            None
+        }
+    };
+
     // Informational status echo (unsigned). Stamp issuance time on first write;
-    // observedTaskGeneration tracks freshness.
+    // observedTaskGeneration tracks freshness; inclusion fields bind to the log.
+    let mut status_obj = json!({
+        "issuedAt": chrono::Utc::now().to_rfc3339(),
+        "observedTaskGeneration": task.metadata.generation,
+    });
+    if let Some(entry) = &inclusion {
+        status_obj["inclusionSeq"] = json!(entry.seq as i64);
+        status_obj["inclusionEntryHash"] = json!(entry.entry_hash);
+    }
     let status_patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsReceipt",
-        "status": {
-            "issuedAt": chrono::Utc::now().to_rfc3339(),
-            "observedTaskGeneration": task.metadata.generation,
-        },
+        "status": status_obj,
     });
     if let Err(e) = receipts
         .patch_status(
@@ -527,6 +551,51 @@ async fn reconcile_receipt(
     }
 
     tracing::info!(karstask = %name, ns = %ns, key_id = %signer.key_id, "Governance Receipt emitted");
+}
+
+/// Observe which completeness-floor controls (design note §24b) are enforced
+/// on the cluster, for binding into the receipt. Best-effort: any read error
+/// yields a conservative `false` (we never claim a control is enforced unless
+/// we positively observed it). The runtime egress-guard iptables hash and the
+/// eBPF witness are intentionally NOT gathered here — they are V1/V2.
+async fn gather_completeness(client: &kube::Client) -> crate::kars_receipt::PredicateCompleteness {
+    use k8s_openapi::api::admissionregistration::v1::ValidatingAdmissionPolicy;
+    use k8s_openapi::api::networking::v1::NetworkPolicy;
+
+    let vaps: Api<ValidatingAdmissionPolicy> = Api::all(client.clone());
+    let vap_present = |name: &str, list: &[ValidatingAdmissionPolicy]| -> bool {
+        list.iter().any(|p| p.metadata.name.as_deref() == Some(name))
+    };
+    let vap_list = vaps
+        .list(&ListParams::default())
+        .await
+        .map(|l| l.items)
+        .unwrap_or_default();
+
+    // A cluster-wide default-deny egress NetworkPolicy is installed by the
+    // operator chart in kars-system; treat its presence there as the floor.
+    let nps: Api<NetworkPolicy> = Api::namespaced(client.clone(), "kars-system");
+    let default_deny_egress = nps
+        .list(&ListParams::default())
+        .await
+        .map(|l| {
+            l.items.iter().any(|np| {
+                np.spec
+                    .as_ref()
+                    .and_then(|s| s.policy_types.as_ref())
+                    .is_some_and(|t| t.iter().any(|pt| pt == "Egress"))
+            })
+        })
+        .unwrap_or(false);
+
+    crate::kars_receipt::PredicateCompleteness {
+        task_namespace_floor_vap: vap_present("kars-task-namespace-floor", &vap_list),
+        exec_ban_vap: vap_present("kars-sandbox-exec-ban", &vap_list),
+        posture_lock_vap: vap_present("kars-sandbox-posture-lock", &vap_list),
+        default_deny_egress,
+        floor_enforced: false,
+    }
+    .with_rollup()
 }
 
 /// True iff the task carries our cleanup finalizer.

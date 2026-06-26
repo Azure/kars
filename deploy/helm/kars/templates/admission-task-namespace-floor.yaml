@@ -1,0 +1,121 @@
+{{- /*
+  kars Bridge completeness floor (design note §24b, roadmap item 4).
+
+  ValidatingAdmissionPolicy that enforces the *create-time* completeness
+  floor on pods in sandbox / task namespaces (labelled
+  kars.azure.com/isolated=strict). This complements two existing VAPs:
+
+   * kars-sandbox-exec-ban    — denies exec/attach into the agent runtime.
+   * kars-sandbox-posture-lock — blocks posture *downgrades* on UPDATE only
+                                 (CREATE is "handled by the controller's own
+                                 pod template").
+
+  The gap this closes
+  -------------------
+  The posture-lock trusts the controller's pod template on CREATE. But the
+  *completeness* claim in a Governance Receipt is "no pod in this task's
+  namespace bypassed the router / escaped the sandbox" — and that claim must
+  hold against a **compromised controller or a direct `kubectl apply`**, not
+  just against posture drift. So this policy denies, at CREATE time, the
+  canonical pod-level escape vectors that would let a workload reach the
+  network (or host) outside the inference router:
+
+   * hostNetwork / hostPID / hostIPC = true  — joins the host namespaces,
+     bypassing the pod CNI + egress-guard entirely (the exact host-netns
+     egress vector the design note scopes OUT of V0/V1 at the *node* level is
+     still denied here at the *pod* level).
+   * any privileged container                — root-equivalent; can rewrite
+     iptables / load kernel modules.
+   * any container with allowPrivilegeEscalation=true.
+   * ephemeralContainers present at CREATE   — the canonical escape hatch
+     (joins an existing pod's PID/net ns with a different securityContext);
+     posture-lock blocks them on UPDATE, this blocks a pod that ships them.
+   * hostPath volumes                        — mount the node filesystem.
+
+  Scope & break-glass mirror the sibling VAPs exactly: namespace-labelled
+  (not pod-labelled, so a compromised controller can't re-label a pod to
+  escape), with a `kars.azure.com/break-glass=true` namespace override that
+  is audited.
+
+  The router + egress-guard sidecars themselves run inside these constraints
+  (the router needs no host access; the egress-guard init container uses
+  NET_ADMIN, which is a capability add — not privileged/hostNetwork — and is
+  unaffected by this policy).
+
+  Requires Kubernetes >= 1.30 (VAP GA).
+*/}}
+{{- if .Values.admission.taskNamespaceFloor.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-task-namespace-floor
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   [""]
+        apiVersions: ["v1"]
+        operations:  ["CREATE"]
+        resources:   ["pods"]
+    namespaceSelector:
+      matchLabels:
+        kars.azure.com/isolated: strict
+      matchExpressions:
+        - key: kars.azure.com/break-glass
+          operator: NotIn
+          values: ["true"]
+  variables:
+    - name: allContainers
+      expression: |
+        (object.spec.?containers.orValue([])) +
+        (object.spec.?initContainers.orValue([]))
+    - name: usesHostNamespace
+      expression: |
+        object.spec.?hostNetwork.orValue(false) == true ||
+        object.spec.?hostPID.orValue(false) == true ||
+        object.spec.?hostIPC.orValue(false) == true
+    - name: hasPrivileged
+      expression: |
+        variables.allContainers.exists(c,
+          c.?securityContext.?privileged.orValue(false) == true)
+    - name: hasPrivEsc
+      expression: |
+        variables.allContainers.exists(c,
+          c.?securityContext.?allowPrivilegeEscalation.orValue(false) == true)
+    - name: hasEphemeral
+      expression: |
+        size(object.spec.?ephemeralContainers.orValue([])) > 0
+    - name: hasHostPath
+      expression: |
+        object.spec.?volumes.orValue([]).exists(v, has(v.hostPath))
+  validations:
+    - expression: "!variables.usesHostNamespace"
+      message: "hostNetwork / hostPID / hostIPC are denied in kars task namespaces (kars.azure.com/isolated=strict): they bypass the pod CNI and the per-pod egress-guard, breaking the receipt's no-bypass completeness claim. Emergency override: label the namespace kars.azure.com/break-glass=true (audited)."
+      reason: Forbidden
+    - expression: "!variables.hasPrivileged"
+      message: "privileged containers are denied in kars task namespaces: a privileged container can rewrite iptables / load kernel modules and defeat the egress-guard. Override: kars.azure.com/break-glass=true (audited)."
+      reason: Forbidden
+    - expression: "!variables.hasPrivEsc"
+      message: "allowPrivilegeEscalation=true is denied in kars task namespaces. Override: kars.azure.com/break-glass=true (audited)."
+      reason: Forbidden
+    - expression: "!variables.hasEphemeral"
+      message: "ephemeralContainers are denied at create time in kars task namespaces: they are the canonical sandbox escape hatch (join an existing pod's PID/net namespace with a different securityContext). Override: kars.azure.com/break-glass=true (audited)."
+      reason: Forbidden
+    - expression: "!variables.hasHostPath"
+      message: "hostPath volumes are denied in kars task namespaces: they mount the node filesystem and escape the sandbox. Override: kars.azure.com/break-glass=true (audited)."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-task-namespace-floor-binding
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: admission
+spec:
+  policyName: kars-task-namespace-floor
+  validationActions: [Deny, Audit]
+{{- end }}

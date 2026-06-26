@@ -116,6 +116,7 @@ pub async fn materialize(
         &inference_name,
         task,
         inference_spec,
+        None,
     )
     .await?;
 
@@ -134,6 +135,19 @@ pub async fn materialize(
     governance_block(envelope).inspect(|g| {
         sandbox_spec["governance"] = g.clone();
     });
+    // Task attribution for router metering: the task id and its lineage *root*
+    // (the oldest ancestor, or the task itself when it is a root). The main
+    // reconciler forwards these to the router as KARS_TASK_ID / KARS_TASK_ROOT
+    // so token cost is attributable per task branch.
+    let task_root = task
+        .status
+        .as_ref()
+        .and_then(|s| s.lineage.first().cloned())
+        .unwrap_or_else(|| task_name.clone());
+    let attribution = std::collections::BTreeMap::from([
+        ("kars.azure.com/task-id".to_string(), task_name.clone()),
+        ("kars.azure.com/task-root".to_string(), task_root),
+    ]);
     apply_dynamic(
         client,
         namespace,
@@ -141,6 +155,7 @@ pub async fn materialize(
         &task_name,
         task,
         sandbox_spec,
+        Some(attribution),
     )
     .await?;
 
@@ -233,6 +248,7 @@ async fn apply_dynamic(
     name: &str,
     task: &KarsTask,
     spec: serde_json::Value,
+    annotations: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<(), kube::Error> {
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
     let mut obj = DynamicObject::new(name, ar).within(namespace);
@@ -247,6 +263,7 @@ async fn apply_dynamic(
             ),
             ("kars.azure.com/karstask".to_string(), task.name_any()),
         ])),
+        annotations,
         ..Default::default()
     };
     obj.data = json!({ "spec": spec });
