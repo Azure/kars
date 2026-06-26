@@ -1414,36 +1414,45 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     // for re-tagging. `loadImageIfPresent` re-tags the matched local
     // image AS the target before kind-loading, so the kind containerd
     // ends up with the canonical name in `crictl images` and the
-    // controller's IfNotPresent pull succeeds without ever touching
-    // the network.
+    // workload's `imagePullPolicy: Never` pull succeeds without ever
+    // touching the network.
     //
-    // Why we DON'T list `kars.azurecr.io/...`: that ACR doesn't exist.
-    // The legacy typo crept in from the 2026-05-27 rename
-    // (azureclaw→kars) before anyone noticed the real ACR is
-    // `karsjpdyyv.azurecr.io` (azd-suffixed) — the `karsacr` alias
-    // here is the canonical name the operator's deploy script
-    // re-publishes to. Keep only `karsacr.azurecr.io/...` so the
-    // controller env stays correct on AKS too.
+    // The target MUST be the exact image name the local-dev workloads
+    // reference, because `imagePullPolicy: Never` does a literal name match:
+    //   - controller pod    → `controller.image` (values-local-dev.yaml)
+    //   - sandbox container  → controller's `SANDBOX_IMAGE` env
+    //                          (= `sandbox.image`, values-local-dev.yaml)
+    //   - router sidecar     → controller's `INFERENCE_ROUTER_IMAGE` env
+    //                          (= `inferenceRouter.image`, values-local-dev.yaml)
+    // values-local-dev.yaml pins all three to local `:dev` tags, so the
+    // targets here are those `:dev` names — NOT the `karsacr.azurecr.io/...`
+    // ACR names (those are the AKS/`kars up` image strings the controller
+    // falls back to only when the `*_IMAGE` env is unset; on local-dev the
+    // env is always set to `:dev`). Loading the ACR name into the node while
+    // the workload requests `:dev` is an ErrImageNeverPull — the controller
+    // never starts and `kars dev` times out at "Waiting for sandbox pod".
+    // The ACR `:latest` names are kept as *aliases* (fallback retag sources).
     const images: { target: string; aliases: string[] }[] = [
       {
-        target: "karsacr.azurecr.io/openclaw-sandbox:latest",
+        target: "kars-sandbox:dev", // matches sandbox.image (values-local-dev)
         aliases: [
-          opts.image,                       // e.g. "kars-sandbox:dev" (the local build)
+          opts.image, // the local build / --release retag (usually kars-sandbox:dev)
+          "karsacr.azurecr.io/openclaw-sandbox:latest",
           "openclaw-sandbox:latest",
           "openclaw-sandbox:dev",
         ],
       },
       {
-        target: "karsacr.azurecr.io/kars-controller:latest",
+        target: "kars-controller:dev", // matches controller.image
         aliases: [
-          "kars-controller:dev",
+          "karsacr.azurecr.io/kars-controller:latest",
           "kars-controller:latest",
         ],
       },
       {
-        target: "karsacr.azurecr.io/kars-inference-router:latest",
+        target: "kars-inference-router:dev", // matches inferenceRouter.image
         aliases: [
-          "kars-inference-router:dev",
+          "karsacr.azurecr.io/kars-inference-router:latest",
           "kars-inference-router:latest",
         ],
       },
