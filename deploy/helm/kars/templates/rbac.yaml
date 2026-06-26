@@ -56,6 +56,9 @@ rules:
       - "karsauthconfigs/status"
       - "karssreactions"
       - "karssreactions/status"
+      - "karstasks"
+      - "karstasks/status"
+      - "karstasks/finalizers"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Create and manage sandbox namespaces
   - apiGroups: [""]
