@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use crate::kars_task::{KarsTask, KarsTaskStatus, TIER_MAX, TIER_MIN};
 use crate::status::conditions::{self, TYPE_READY, reason as cond_reason, status as cond_status};
-use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_TASK;
 const FINALIZER: &str = "kars.azure.com/karstask-cleanup";
@@ -38,6 +38,10 @@ const FINALIZER: &str = "kars.azure.com/karstask-cleanup";
 const RECEIPT_FIELD_MANAGER: &str = "kars-controller/receipt";
 
 const REQUEUE_OK: Duration = Duration::from_secs(300);
+
+/// A child waiting on its parent requeues quickly so it converges to `Ready`
+/// promptly once the parent reconciles, rather than waiting a full cycle.
+const REQUEUE_PENDING: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
@@ -182,6 +186,14 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                     Vec::new(),
                 )
             }
+            Delegation::ParentNotReady { parent } => {
+                tracing::info!(karstask = %name, ns = %ns, %parent, "KarsTask parent not yet ready — waiting");
+                pending_status(
+                    prior_ready,
+                    generation,
+                    &format!("waiting for parent `{parent}` to become ready"),
+                )
+            }
             Delegation::Child {
                 lineage,
                 violations,
@@ -240,7 +252,13 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // so this is idempotent across requeues.
     reconcile_receipt(&ctx.client, &ns, &task, &new_status, &ctx.signer).await;
 
-    Ok(Action::requeue(REQUEUE_OK))
+    // A child still waiting on its parent requeues quickly to converge.
+    let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING) {
+        REQUEUE_PENDING
+    } else {
+        REQUEUE_OK
+    };
+    Ok(Action::requeue(requeue))
 }
 
 /// Outcome of resolving a task's `parentRef`.
@@ -249,6 +267,10 @@ enum Delegation {
     Root,
     /// `parentRef` set but the parent does not exist.
     ParentMissing { parent: String },
+    /// `parentRef` resolved but the parent is not yet governance-`Ready` (no
+    /// validated envelope digest). A child must not be granted authority
+    /// against a parent whose own authority isn't established — it waits.
+    ParentNotReady { parent: String },
     /// `parentRef` resolved; carries the minted lineage and any attenuation
     /// violations (empty = valid subset).
     Child {
@@ -284,6 +306,17 @@ async fn resolve_delegation(
             });
         }
     };
+
+    // Parent-readiness gate: a child may only be granted authority once the
+    // parent's own authority is established (governance-`Ready` with a stamped
+    // envelope digest). Otherwise the subset relation would be checked against
+    // an unvalidated — possibly degraded or in-flux — parent envelope.
+    if !task_is_ready(&parent) {
+        return Ok(Delegation::ParentNotReady {
+            parent: parent_ref.name.clone(),
+        });
+    }
+
     // Minted lineage = parent's ancestry + the parent itself. The controller
     // owns this; a client-supplied lineage is ignored.
     let mut lineage = parent
@@ -293,14 +326,28 @@ async fn resolve_delegation(
         .unwrap_or_default();
     lineage.push(parent.name_any());
 
-    let violations = task
-        .spec
-        .envelope
-        .attenuation_violations(&parent.spec.envelope);
+    // Full attenuation over the effective authority the sandbox enforces
+    // (envelope numeric/ref axes + effective tool policy + effective egress).
+    let violations = crate::kars_task::spec_attenuation_violations(&task.spec, &parent.spec);
     Ok(Delegation::Child {
         lineage,
         violations,
     })
+}
+
+/// A task is governance-`Ready` when its `Ready` condition is `True` and it
+/// carries a stamped envelope digest — the proof its authority was validated.
+fn task_is_ready(task: &KarsTask) -> bool {
+    let Some(status) = task.status.as_ref() else {
+        return false;
+    };
+    let digest_ok = status.envelope_digest.as_ref().is_some_and(|d| !d.is_empty());
+    let ready_ok = status
+        .conditions
+        .iter()
+        .flatten()
+        .any(|c| c.type_ == TYPE_READY && c.status == cond_status::TRUE);
+    digest_ok && ready_ok
 }
 
 /// Build a `Ready` status with the given digest + lineage.
@@ -330,6 +377,32 @@ fn ready_status(
 
 /// Build a `Degraded` status with no digest — the receipt must never bind to
 /// authority that didn't validate or that amplified its parent.
+/// Build a `Pending` status for a child whose parent is not yet ready — a
+/// transient, non-degraded waiting state (no digest, no execution) that
+/// converges once the parent reconciles to `Ready`.
+fn pending_status(
+    prior_ready: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition>,
+    generation: Option<i64>,
+    message: &str,
+) -> KarsTaskStatus {
+    let ready = conditions::preserve_transition_time(
+        prior_ready,
+        TYPE_READY,
+        cond_status::FALSE,
+        cond_reason::DEPENDENCY_MISSING,
+        message,
+        generation,
+    );
+    KarsTaskStatus {
+        phase: Some(PHASE_PENDING.to_string()),
+        observed_generation: generation,
+        conditions: Some(vec![ready]),
+        envelope_digest: None,
+        lineage: Vec::new(),
+        ..Default::default()
+    }
+}
+
 fn degraded_status(
     prior_ready: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition>,
     generation: Option<i64>,
