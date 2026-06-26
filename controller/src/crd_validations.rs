@@ -53,6 +53,7 @@ use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
 use crate::kars_eval::KarsEval;
 use crate::kars_memory::KarsMemory;
+use crate::kars_receipt::KarsReceipt;
 use crate::kars_sre_action::KarsSREAction;
 use crate::kars_task::KarsTask;
 use crate::mcp_server::McpServer;
@@ -577,6 +578,14 @@ pub fn kars_task_validations() -> Vec<ValidationRule> {
 pub fn kars_task_crd() -> CustomResourceDefinition {
     inject_spec_validations(KarsTask::crd(), kars_task_validations())
         .expect("kube-rs derive must produce a spec property on KarsTask")
+}
+
+/// `KarsReceipt` CRD. The Governance Receipt is written solely by the
+/// controller (never by users), so it carries no admission CEL rules — its
+/// integrity comes from the DSSE/Ed25519 signature, not from schema gates.
+#[must_use]
+pub fn kars_receipt_crd() -> CustomResourceDefinition {
+    KarsReceipt::crd()
 }
 
 /// `TrustGraph.spec` CEL rules. Phase F1.
