@@ -709,6 +709,7 @@ mod tests {
                 },
                 parent_ref: None,
                 execution: None,
+                blueprint: None,
                 display_name: None,
             },
         );

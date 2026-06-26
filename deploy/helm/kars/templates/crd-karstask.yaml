@@ -44,6 +44,105 @@ spec:
           spec:
             description: '`KarsTask.spec` — a governed unit of work plus its trust envelope.'
             properties:
+              blueprint:
+                description: |-
+                  The **run blueprint** — the concrete, editable shape of the agent that
+                  will run this task: which harness, which model, the system prompt, the
+                  connected services (MCP) and tools it may use, the network destinations
+                  it may reach, and the sandbox isolation. This is the substance a human
+                  reviews and edits on the §20 launch package; every field here drives a
+                  real field on the materialized `InferencePolicy` / `KarsSandbox`. When a
+                  field is unset the controller falls back to a safe default.
+                nullable: true
+                properties:
+                  egress:
+                    description: |-
+                      Network destinations the mission may reach. Drives
+                      `KarsSandbox.spec.networkPolicy.allowedEndpoints`. When non-empty the
+                      sandbox runs in strict egress mode bounded to exactly these hosts.
+                    items:
+                      description: A network destination the mission may reach.
+                      properties:
+                        host:
+                          description: Hostname, e.g. `api.github.com`.
+                          type: string
+                        port:
+                          description: Optional TCP port (e.g. `443`); any port when omitted.
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          nullable: true
+                          type: integer
+                      required:
+                      - host
+                      type: object
+                    type: array
+                  instructions:
+                    description: |-
+                      System prompt / standing instructions for the agent, in addition to the
+                      objective. Drives `KarsSandbox.spec.agent.instructions`.
+                    nullable: true
+                    type: string
+                  isolation:
+                    description: |-
+                      Sandbox isolation level (`standard`, `enhanced`, `confidential`). Drives
+                      `KarsSandbox.spec.sandbox.isolation`. Defaults to `standard`.
+                    nullable: true
+                    type: string
+                  mcpServers:
+                    description: |-
+                      Connected services (MCP server names, same namespace) the mission may
+                      use. Drives `KarsSandbox.spec.governance.mcpServerRefs`. Requires
+                      `toolPolicy` to be set (governed MCP access is bounded by the tool
+                      policy).
+                    items:
+                      type: string
+                    type: array
+                  memory:
+                    description: |-
+                      Shared team memory — the name of a same-namespace `KarsMemory` the agent
+                      reads/writes. Drives `KarsSandbox.spec.memoryRef`. This is how a
+                      persistent team shares knowledge across members and over time; a short
+                      one-off task usually leaves it unset.
+                    nullable: true
+                    type: string
+                  model:
+                    description: |-
+                      The model the agent reasons with. Drives
+                      `InferencePolicy.spec.modelPreference.primary`. Defaults from controller
+                      env when unset.
+                    nullable: true
+                    properties:
+                      deployment:
+                        description: Deployment / model name as the provider advertises it.
+                        type: string
+                      provider:
+                        description: |-
+                          Provider tag: `azure-openai`, `anthropic`, `gemini`, `bedrock`,
+                          `ollama`, `github-models`.
+                        type: string
+                    required:
+                    - deployment
+                    - provider
+                    type: object
+                  runtime:
+                    description: |-
+                      Harness/runtime the agent runs on (`OpenClaw`, `OpenAIAgents`, `MAF`,
+                      `Hermes`, `BYO`). Drives `KarsSandbox.spec.runtime.kind`. Defaults to
+                      `OpenClaw`.
+                    nullable: true
+                    type: string
+                  toolPolicy:
+                    description: |-
+                      Tools the agent may call, expressed as the name of an existing
+                      same-namespace `ToolPolicy`. Drives `KarsSandbox.spec.governance`
+                      (`enabled: true` + `toolPolicyRef`). Composing the existing `ToolPolicy`
+                      CRD keeps the AGT profile + `appliesTo` scope authoritative rather than
+                      duplicating an allow-list here. Required whenever `mcpServers` is set —
+                      governed MCP access is meaningless without a tool policy to bound it.
+                    nullable: true
+                    type: string
+                type: object
               displayName:
                 description: Optional short label surfaced in CLI / UI listings.
                 nullable: true
@@ -136,7 +235,8 @@ spec:
                   runtime:
                     description: |-
                       Runtime to launch the agent on. Defaults to `OpenClaw`. Must match the
-                      controller's `RuntimeKind` enum.
+                      controller's `RuntimeKind` enum. Superseded by `blueprint.runtime` when
+                      both are set.
                     nullable: true
                     type: string
                 type: object
@@ -193,6 +293,24 @@ spec:
             - message: spec.displayName, when set, must be 1-253 characters
               reason: FieldValueInvalid
               rule: '!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 253)'
+            - message: spec.blueprint.runtime must be one of OpenClaw, OpenAIAgents, MAF, MicrosoftAgentFramework, Hermes, BYO
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.runtime) || self.blueprint.runtime in [''OpenClaw'',''OpenAIAgents'',''MAF'',''MicrosoftAgentFramework'',''Hermes'',''BYO'']'
+            - message: spec.blueprint.isolation must be one of standard, enhanced, confidential
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.isolation) || self.blueprint.isolation in [''standard'',''enhanced'',''confidential'']'
+            - message: spec.blueprint.instructions, when set, must be <= 8192 characters
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.instructions) || size(self.blueprint.instructions) <= 8192'
+            - message: spec.blueprint.mcpServers may list at most 8 connected services
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.mcpServers) || size(self.blueprint.mcpServers) <= 8'
+            - message: spec.blueprint.mcpServers requires spec.blueprint.toolPolicy — governed MCP access must be bounded by a tool policy
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.mcpServers) || size(self.blueprint.mcpServers) == 0 || has(self.blueprint.toolPolicy)'
+            - message: spec.blueprint.egress may list at most 32 destinations
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.egress) || size(self.blueprint.egress) <= 32'
           status:
             description: '`KarsTask.status`.'
             nullable: true
