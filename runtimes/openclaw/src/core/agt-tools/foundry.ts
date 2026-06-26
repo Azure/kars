@@ -14,9 +14,8 @@
 //   foundry_evaluations      foundry_deployments
 //   foundry_agents
 
-import { routerCall, routerCallStrict, routerCallBinary } from "../router-client.js";
+import { routerCall, routerCallBinary, callPlatformTool } from "../router-client.js";
 import { safeJson } from "../safe-json.js";
-import { resolveMemoryStoreName, resolveMemoryScope } from "../memory-binding.js";
 import type { FoundryProjectInfo } from "../foundry-discovery.js";
 
 // _routerCall is the historical alias used inside these blocks; keep it for
@@ -622,6 +621,10 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
   });
 
   // ── Foundry Memory: persistent semantic memory store ────────────────
+  // Thin client. The router's platform MCP `foundry.memory` tool owns the
+  // Memory Store REST contract, store/scope resolution from the KarsMemory
+  // binding, auto-provision, retry, and CRD status reporting. This handler
+  // only forwards intent — no Foundry contract logic lives in the agent.
   api.registerTool({
     name: "foundry_memory",
     label: "Foundry Memory Store",
@@ -641,168 +644,28 @@ export function registerFoundryTools(api: AnyApi, deps: FoundryToolsDeps): void 
           type: "string",
           description: "For 'update': the fact or preference to remember (e.g. 'User prefers dark roast coffee'). For 'search': the query to find relevant memories (e.g. 'coffee preferences').",
         },
-        scope: { type: "string", description: "Memory scope (default: sandbox name). Use to partition memories by user." },
-        store_name: { type: "string", description: "Memory store name (default: 'memory-{agent}')." },
+        scope: {
+          type: "string",
+          description: "Memory scope/partition (default: the bound KarsMemory scope, else 'agent_<sandbox>'). Use '_' as the separator (e.g. 'session_<id>', 'user_<id>') — colons are rejected by the API.",
+        },
+        top_k: {
+          type: "integer",
+          description: "For 'search': max memories to return (default 10).",
+        },
       },
-      required: ["operation", "text"],
+      required: ["operation"],
     },
     async execute(_id: string, params: Record<string, unknown>) {
+      const op = String(params.operation ?? "");
+      const args: Record<string, unknown> = { operation: op };
+      if (typeof params.text === "string" && params.text.length > 0) args.text = params.text;
+      if (typeof params.scope === "string" && params.scope.length > 0) args.scope = params.scope;
+      if (typeof params.top_k === "number") args.top_k = params.top_k;
       try {
-        const agentName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "default";
-        const store = (params.store_name as string) || resolveMemoryStoreName(agentName);
-        const scope = (params.scope as string) || resolveMemoryScope(agentName);
-        const op = params.operation as string;
-        const text = (params.text as string) || "";
-        const apiVer = "api-version=2025-11-15-preview";
-
-        // Build Foundry-format conversation item (same for both update and search)
-        const makeItem = (content: string) => ({
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: content }],
-        });
-
-        // Poll an update operation until complete (LRO)
-        const pollUpdate = async (updateId: string, maxWaitMs = 60000) => {
-          const start = Date.now();
-          while (Date.now() - start < maxWaitMs) {
-            await new Promise(r => setTimeout(r, 2000));
-            try {
-              const status = await routerCall("GET", `/memory_stores/${store}/updates/${updateId}?${apiVer}`);
-              const state = status?.status || status?.state;
-              if (state === "completed" || state === "succeeded") return status;
-              if (state === "failed" || state === "error") throw new Error(`Memory update failed: ${safeJson(status)}`);
-            } catch (e: any) {
-              if (!e.message?.includes("404")) throw e;
-            }
-          }
-          return { status: "timeout", message: "Memory update still processing. It will complete in the background." };
-        };
-
-        const isNotFound = (r: any): boolean => {
-          if (!r || typeof r !== "object") return false;
-          const code = r?.error?.code || r?.code;
-          const msg = r?.error?.message || r?.message;
-          return code === "not_found" || code === 404 ||
-            (typeof msg === "string" && (msg.includes("not found") || msg.includes("not_found")));
-        };
-
-        const ensureStore = async () => {
-          try {
-            const probe = await routerCall("GET", `/memory_stores/${store}?${apiVer}`);
-            if (!isNotFound(probe)) return;
-          } catch (e: any) {
-            if (!(e.message?.includes("404") || e.message?.includes("not_found") || e.message?.includes("not found"))) {
-              return;
-            }
-          }
-          const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
-          const embeddingModel = getFoundryProject()?.deployments?.find(
-            (d: any) => d.id?.includes("embedding") || d.model?.includes("embedding")
-          )?.id || "text-embedding-3-small";
-          log.info(`Creating memory store '${store}' (chat=${chatModel}, embedding=${embeddingModel})`);
-          // Use the STRICT call so an upstream 4xx (e.g. 403 because the Foundry
-          // project's managed identity isn't enabled / lacks Azure AI User on
-          // the resource group, or 400 because no embedding model is deployed)
-          // surfaces the REAL reason instead of being swallowed and collapsing
-          // into a generic "could not be created".
-          await routerCallStrict("POST", `/memory_stores?${apiVer}`, {
-            name: store,
-            description: "kars agent persistent memory",
-            definition: {
-              kind: "default",
-              chat_model: chatModel,
-              embedding_model: embeddingModel,
-              options: {
-                user_profile_enabled: true,
-                user_profile_details: "Store user preferences, decisions, and project context",
-                chat_summary_enabled: true,
-              },
-            },
-          });
-          log.info(`Memory store '${store}' created successfully`);
-        };
-
-        if (op === "search") {
-          const body = {
-            scope,
-            items: [makeItem(text)],
-            options: { max_memories: 10 },
-          };
-          try {
-            let result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
-            if (isNotFound(result)) {
-              await ensureStore();
-              result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
-              if (isNotFound(result)) {
-                return { content: [{ type: "text", text: "Memory store just created — no memories stored yet. Try saving something first." }] };
-              }
-            }
-            return { content: [{ type: "text", text: safeJson(result) }] };
-          } catch (e: any) {
-            if (e.message?.includes("not found") || e.message?.includes("not_found")) {
-              try {
-                await ensureStore();
-                const result = await routerCall("POST", `/memory_stores/${store}:search_memories?${apiVer}`, body);
-                return { content: [{ type: "text", text: safeJson(result) }] };
-              } catch {
-                return { content: [{ type: "text", text: "Memory store just created — no memories stored yet. Try saving something first." }] };
-              }
-            }
-            log.warn(`Memory search failed: ${e.message}`);
-            return { content: [{ type: "text", text: `Memory search failed: ${e.message}. The memory service may still be initializing.` }] };
-          }
-        } else if (op === "update") {
-          const body = {
-            scope,
-            items: [makeItem(text)],
-            update_delay: 0,
-          };
-          const doUpdate = async () => {
-            const result = await routerCall("POST", `/memory_stores/${store}:update_memories?${apiVer}`, body);
-            // update_memories is a LRO — log completion in background, don't block chat
-            const updateId = result?.update_id || result?.id;
-            if (updateId && (result?.status === "queued" || result?.status === "running")) {
-              pollUpdate(updateId).then(
-                (r) => log.info(`Memory update ${updateId} completed: ${JSON.stringify(r?.memory_operations?.length ?? 0)} ops`),
-                (e) => log.warn(`Memory update ${updateId} failed: ${e.message}`),
-              );
-            }
-            return result;
-          };
-          try {
-            let result = await doUpdate();
-            if (isNotFound(result)) {
-              await ensureStore();
-              result = await doUpdate();
-            }
-            if (isNotFound(result)) {
-              return { content: [{ type: "text", text: `Memory update failed: store '${store}' could not be created — the Foundry Memory Store service returned not-found after a create attempt. Common causes: the Foundry project's system-assigned managed identity isn't enabled or lacks 'Azure AI User' on the resource group (RBAC can take a few minutes to propagate), or no embedding model is deployed in the project.` }] };
-            }
-            const status = result?.status || "submitted";
-            return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };
-          } catch (e: any) {
-            if (e.message?.includes("not found") || e.message?.includes("not_found")) {
-              try {
-                await ensureStore();
-                const result = await doUpdate();
-                const status = result?.status || "submitted";
-                return { content: [{ type: "text", text: `Memory update ${status}. The memory will be available shortly.` }] };
-              } catch (retryErr: any) {
-                log.warn(`Memory update failed after store creation: ${retryErr.message}`);
-                return { content: [{ type: "text", text: `Memory update failed: ${retryErr.message}` }] };
-              }
-            }
-            log.warn(`Memory update failed: ${e.message}`);
-            return { content: [{ type: "text", text: `Memory update failed: ${e.message}. The memory service may still be initializing.` }] };
-          }
-        } else if (op === "delete_scope") {
-          await routerCall("POST", `/memory_stores/${store}:delete_scope?${apiVer}`, { scope });
-          return { content: [{ type: "text", text: `Scope '${scope}' deleted from memory store '${store}'.` }] };
-        }
-        return { content: [{ type: "text", text: `Unknown operation: ${op}` }] };
+        const { text, isError } = await callPlatformTool("foundry.memory", args);
+        return { content: [{ type: "text", text }], isError };
       } catch (e: any) {
-        return { content: [{ type: "text", text: `Foundry memory failed: ${e.message}` }] };
+        return { content: [{ type: "text", text: `Foundry memory failed: ${e.message}` }], isError: true };
       }
     },
   });
