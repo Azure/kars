@@ -108,9 +108,10 @@ pub struct KarsMemorySpec {
     pub sandbox_ref: SandboxRef,
 
     /// Scope key under which this sandbox writes/reads memories.
-    /// Foundry Memory Store partitions data per scope. CEL:
-    /// non-empty. Default convention (set by the runtime path if
-    /// absent here): `agent:{sandboxName}`.
+    /// Foundry Memory Store partitions data per scope and validates the
+    /// value to letters, digits, and `_ - . % + @ /` — colons are
+    /// rejected. CEL: non-empty + charset. Default convention (set by
+    /// the runtime path if absent here): `agent_{sandboxName}`.
     ///
     /// Required when [`Self::bundle_ref`] is absent (the inline
     /// path); MUST be absent when [`Self::bundle_ref`] is set.

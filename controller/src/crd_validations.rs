@@ -350,9 +350,14 @@ pub fn inference_policy_crd() -> CustomResourceDefinition {
 ///   verbatim in URLs and ConfigMap labels.
 /// - `sandboxRef.name` non-empty (1-253 chars; same length cap as
 ///   K8s object names).
-/// - `scope` non-empty (1-256 chars). Foundry uses scope as a
-///   partition key — empty scope would cross-contaminate every
-///   sandbox bound to the same store.
+/// - `scope` non-empty (1-256 chars) and restricted to the Foundry
+///   Memory Store partition-key charset (letters, digits, and
+///   `_ - . % + @ /`). Foundry uses scope as a partition key — an empty
+///   scope would cross-contaminate every sandbox bound to the same
+///   store, and an out-of-charset value (most commonly a colon, e.g.
+///   `agent:foo`) is rejected by the data plane with HTTP 400. The
+///   router sanitizes defensively at call time, but rejecting at
+///   admission gives the operator an immediate, legible error.
 /// - `retentionDays > 0` when present. Zero would request immediate
 ///   deletion, which is what `delete_scope` is for.
 #[must_use]
@@ -373,8 +378,8 @@ pub fn kars_memory_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256)".into(),
-            message: Some("spec.scope must be 1-256 characters when spec.bundleRef is not set".into()),
+            rule: "has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256 && self.scope.matches('^[A-Za-z0-9_./%+@-]+$'))".into(),
+            message: Some("spec.scope must be 1-256 characters using only letters, digits, and _ - . % + @ / (colons are rejected by the Foundry Memory Store) when spec.bundleRef is not set".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },

@@ -28,6 +28,20 @@ import {
 
 const NS = "kars-system";
 
+/** True only when `ep` is a Foundry project endpoint whose host is exactly
+ *  `services.ai.azure.com` or a subdomain of it. A proper hostname check —
+ *  NOT a substring match, which `https://services.ai.azure.com.evil.com`
+ *  would defeat. */
+export function isFoundryProjectHost(ep: string): boolean {
+  if (!ep) return false;
+  try {
+    const host = new URL(ep).hostname.toLowerCase();
+    return host === "services.ai.azure.com" || host.endsWith(".services.ai.azure.com");
+  } catch {
+    return false;
+  }
+}
+
 interface UpgradeContext {
   acrLoginServer: string;
   aksCluster: string;
@@ -35,6 +49,7 @@ interface UpgradeContext {
   wiClientId?: string;
   keyVaultName?: string;
   foundryEndpoint?: string;
+  foundryProjectEndpoint?: string;
 }
 
 /** Build the `helm upgrade` args. `--atomic` makes a failed upgrade auto-roll
@@ -112,12 +127,13 @@ Examples:
         wiClientId: ctxRaw.wiClientId,
         keyVaultName: ctxRaw.keyVaultName,
         foundryEndpoint: ctxRaw.foundryEndpoint,
+        foundryProjectEndpoint: ctxRaw.foundryProjectEndpoint,
       };
       const acrName = ctx.acrLoginServer.replace(/\.azurecr\.io$/, "");
 
       banner("kars · Upgrade", "Move an existing cluster to a published release");
 
-      const stepper = new Stepper({ totalSteps: options.rollback ? 4 : 7 });
+      const stepper = new Stepper({ totalSteps: options.rollback ? 4 : 8 });
 
       try {
         // ── Step 1: Connect to the cluster ────────────────────────────
@@ -246,7 +262,30 @@ Examples:
         if (healthy) stepper.done("Cluster healthy on the new release");
         else stepper.warn("Upgrade applied but some workloads aren't Ready yet — check `kars status` / `kubectl get pods -A`");
 
-        // ── Step 7: Report ────────────────────────────────────────────
+        // ── Step 7: Reconcile Foundry Memory Store access ─────────────
+        // Memory persistence depends on the Foundry PROJECT managed
+        // identity holding `Azure AI User` on the resource group plus an
+        // embedding deployment — provisioning that historically only ran
+        // on a fresh `kars up`. Re-reconcile it idempotently here so an
+        // existing cluster's memory starts working on upgrade. Best-effort:
+        // memory is one capability and never fails the upgrade itself.
+        stepper.step("Reconciling Foundry Memory Store access...");
+        const foundryProjectEp = ctx.foundryProjectEndpoint || ctx.foundryEndpoint || "";
+        if (isFoundryProjectHost(foundryProjectEp)) {
+          try {
+            const { ensureFoundryMemoryRbac } = await import("./up/foundry_memory_rbac.js");
+            const mem = await ensureFoundryMemoryRbac({ execa, stepper, foundryEndpoint: foundryProjectEp });
+            for (const n of mem.notes) stepper.detail("info", n);
+            if (mem.granted) stepper.done("Foundry Memory Store access reconciled");
+            else stepper.warn("Foundry Memory Store needs manual RBAC — see the notes above");
+          } catch {
+            stepper.warn("Could not reconcile Foundry Memory Store access (non-fatal) — run `kars up` to retry");
+          }
+        } else {
+          stepper.done("No Foundry project bound — Memory Store reconcile skipped");
+        }
+
+        // ── Step 8: Report ────────────────────────────────────────────
         stepper.step("Done");
         stepper.done(`Upgraded ${current || "cluster"} → ${target}`);
         stepper.summary();

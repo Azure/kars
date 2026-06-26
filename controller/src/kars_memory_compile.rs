@@ -125,7 +125,7 @@ mod tests {
             sandbox_ref: SandboxRef {
                 name: "agent-x".into(),
             },
-            scope: Some("agent:agent-x".into()),
+            scope: Some("agent_agent-x".into()),
             retention_days: Some(30),
             delete_on_sandbox_delete: Some(true),
             display_name: Some("Agent X memory".into()),
@@ -140,13 +140,13 @@ mod tests {
             sandbox_ref: SandboxRef {
                 name: "agent".into(),
             },
-            scope: Some("agent:agent".into()),
+            scope: Some("agent_agent".into()),
             ..KarsMemorySpec::default()
         };
         let binding = compile_to_binding(&spec);
         assert_eq!(binding["storeName"], "minimal");
         assert_eq!(binding["sandboxRef"]["name"], "agent");
-        assert_eq!(binding["scope"], "agent:agent");
+        assert_eq!(binding["scope"], "agent_agent");
         assert!(binding["retentionDays"].is_null());
         // delete_on_sandbox_delete defaults to true at compile time
         // (preserving the prior bool-default semantics).
@@ -159,7 +159,7 @@ mod tests {
         let binding = compile_to_binding(&spec);
         assert_eq!(binding["storeName"], "agent-x-mem");
         assert_eq!(binding["sandboxRef"]["name"], "agent-x");
-        assert_eq!(binding["scope"], "agent:agent-x");
+        assert_eq!(binding["scope"], "agent_agent-x");
         assert_eq!(binding["retentionDays"], 30);
         assert_eq!(binding["deleteOnSandboxDelete"], true);
         assert_eq!(binding["displayName"], "Agent X memory");
