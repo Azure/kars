@@ -24,9 +24,20 @@ Hardened sandbox per agent · zero credentials in the agent · every external ca
 # 1. Install the CLI (Node 22+)
 npm i -g @kars-runtime/cli
 
-# 2. Try it on a local Kubernetes cluster (kind) that mirrors AKS
+# 2. Bring up a governed agent on a local Kubernetes (kind) cluster that mirrors AKS
 kars dev --release --target local-k8s
+
+# 3. Chat with it
+kars connect dev-agent
 ```
+
+<div align="center">
+
+<img src="docs/assets/kars-dev-firstrun.gif" alt="kars first run: kars dev --release --target local-k8s brings up a governed agent on a local kind cluster" width="100%" />
+
+<em>First run: pick a provider, and kars brings up the controller, the encrypted mesh, and a sandboxed agent on a local kind cluster. <a href="docs/quickstart.md"><strong>Full quickstart →</strong></a></em>
+
+</div>
 
 > 📌 **Not an officially supported Microsoft product.** `kars` is an open-source reference implementation from the Azure Cloud Native team (the team behind Azure Kubernetes Service and Azure Linux). See [Project status](#project-status) for framing and limitations.
 
@@ -136,12 +147,6 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 **No compile. Works for everyone — macOS & Linux, Intel & Apple Silicon.** All
 the images are multi-arch (`amd64` + `arm64`, native on Apple Silicon) and
 cosign-signed; `--release` pulls them, so there's no Rust, no clone, no build.
-
-<p align="center">
-  <img src="docs/assets/kars-dev-firstrun.gif" alt="kars first run: kars dev --release --target local-k8s brings up a governed agent on a local kind cluster" width="100%" />
-  <br />
-  <em><code>kars dev --release --target local-k8s</code> — first run: pick a provider, and kars brings up the controller, the encrypted mesh, and a sandboxed agent on a local kind cluster.</em>
-</p>
 
 Install the CLI:
 
@@ -284,7 +289,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 ### One mesh, one gateway, one CLI
 
-- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. **The Signal session lives in the agent process**, not the router. Each runtime ships an AGT mesh client matched to its language: **OpenClaw** bundles the AGT **TypeScript SDK** (`@microsoft/agent-governance-sdk`), while **Hermes** uses the AGT **Python mesh client** (`kars-agt-mesh`, built on upstream `agentmesh-platform`); both own X3DH / Double Ratchet / KNOCK end to end and are wire-compatible (proven by `tests/e2e/interop/hermes_openclaw_bidi.sh`). The other Python adapters bundle the same client but do not yet expose the mesh tools (see [Known limitations](#known-limitations)). (The TS SDK is currently vendored from a pinned AGT revision — [`microsoft/agent-governance-toolkit@3322175d`](https://github.com/microsoft/agent-governance-toolkit), carrying two in-review pre-release fixes — and switches to the published npm release once those land; it is an upstream build, **not an in-tree fork**.) The inference router links Microsoft's [`agentmesh`](https://crates.io/crates/agentmesh) crate (`4.0.0`, temporarily patched to the same AGT revision via `[patch.crates-io]`) only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — **never for mesh crypto** — and acts as a transparent WebSocket bridge to the relay for the encrypted bytes.
+- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. **The Signal session lives in the agent process**, not the router: **OpenClaw** bundles the AGT TypeScript SDK and **Hermes** the AGT Python mesh client, both wire-compatible (proven by `tests/e2e/interop/hermes_openclaw_bidi.sh`). The router holds **no** session keys and never does mesh crypto — it links the upstream `agentmesh` crate only for shared governance primitives and WebSocket-bridges opaque ciphertext to the relay. Every client is an upstream Microsoft AGT build — **no in-tree fork**. (Full provenance, crate pins, and the per-adapter status: **[architecture → The mesh](docs/architecture.md#the-mesh)**.)
 - **A2A gateway** — public-ingress for peer-to-peer agent traffic with tenant routing, audit, and rate limiting. AgentCard signature verification (`kars_a2a_core::verify_inbound_card`) ships as a library and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer. Wiring the verifier as an axum layer inside the gateway binary is tracked in the [roadmap](docs/roadmap.md).
 - **CLI (`kars …`)** — 30+ commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
