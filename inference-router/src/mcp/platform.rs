@@ -79,11 +79,48 @@ use crate::policy_status::{PolicyKind, PolicyStatusRegistry};
 /// `wiremock`/axum fake on a free port.
 const DEFAULT_ROUTER_PORT: u16 = 8443;
 
-/// Default Memory Store id when callers don't pin one explicitly via
-/// `FOUNDRY_MEMORY_STORE_ID`. Foundry projects ship with a
-/// project-default store named `default`; production deployments that
-/// pin a per-tenant store override the env var.
-const DEFAULT_MEMORY_STORE: &str = "default";
+/// Per-sandbox Memory Store name prefix. When neither
+/// `FOUNDRY_MEMORY_STORE_ID` nor a KarsMemory binding pins a store, the
+/// dispatcher falls back to `<prefix><sandbox>` — the same convention
+/// the runtime plugins use (`memory-<sandbox>`).
+const DEFAULT_MEMORY_STORE_PREFIX: &str = "memory-";
+
+/// Foundry Memory Store data-plane API version. The router self-calls
+/// its own `/memory_stores` proxy, which forwards the query string
+/// verbatim, so the version must be pinned here (the proxy does NOT
+/// inject a default). Mirrors the value the runtime plugins use.
+const MEMORY_API_VERSION: &str = "2025-11-15-preview";
+
+/// A single conversation item in the Foundry Memory Store contract
+/// shape. Both `:update_memories` and `:search_memories` take an
+/// `items` array of Responses-API message items — NOT a `messages`
+/// array or a bare `query`/`top_k` pair. Contract:
+/// <https://learn.microsoft.com/azure/ai-foundry/agents/how-to/memory-usage>
+fn memory_item(text: &str) -> Value {
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": text }],
+    })
+}
+
+/// Coerce an arbitrary scope string to the Foundry Memory Store charset.
+/// Foundry partitions memories by `scope` and accepts only letters,
+/// digits, and `_ - . % + @ /`. Anything else (most commonly a colon
+/// from a legacy `agent:foo` convention) is rejected with HTTP 400, so
+/// we map every out-of-charset byte to `_`. A no-op for already-valid
+/// scopes.
+fn sanitize_scope(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '%' | '+' | '@' | '/') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
 /// Sync-path return for any `foundry.*` tool. The async path
 /// ([`PlatformDispatcher`] as `AsyncToolDispatcher`) does the real
@@ -157,22 +194,35 @@ pub fn foundry_tool_catalog() -> ToolCatalog {
         ToolDefinition {
             name: "foundry.memory".into(),
             description: "Persistent agent memory via Azure AI Foundry Memory Store. Use \
-                'search' to recall, 'update' to store new knowledge."
+                'search' to recall, 'update' to store new knowledge, 'delete_scope' to \
+                wipe a partition. Store name and scope come from the bound KarsMemory CRD."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["search", "update"],
-                        "description": "Operation: 'search' or 'update'."
+                        "enum": ["search", "update", "delete_scope"],
+                        "description": "Operation: 'search', 'update', or 'delete_scope'."
                     },
                     "text": {
                         "type": "string",
-                        "description": "For 'update': the fact to remember. For 'search': the query."
+                        "description": "For 'update': the fact to remember. For 'search': the query (alias: 'query')."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Alias for 'text' on 'search' (empty = list all in scope)."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Memory partition. Defaults to the CRD/convention scope. Use '_' as the separator (e.g. 'session_<id>', 'user_<id>') — colons are rejected by the API."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "For 'search': max memories to return (default 10)."
                     }
                 },
-                "required": ["operation", "text"]
+                "required": ["operation"]
             }),
         },
         ToolDefinition {
@@ -326,7 +376,7 @@ impl PlatformDispatcher {
     /// Default dispatcher: catalog of 9 tools, base URL derived from
     /// `ROUTER_INTERNAL_PORT` (default `8443`), sandbox identifier from
     /// `SANDBOX_NAME` (default `unknown`), memory store id from
-    /// `FOUNDRY_MEMORY_STORE_ID` (default `default`).
+    /// `FOUNDRY_MEMORY_STORE_ID` (default `memory-<sandbox>`).
     pub fn standard() -> Self {
         let port = std::env::var("ROUTER_INTERNAL_PORT")
             .ok()
@@ -334,8 +384,19 @@ impl PlatformDispatcher {
             .unwrap_or(DEFAULT_ROUTER_PORT);
         let base_url = format!("http://127.0.0.1:{port}");
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+        // Store-id precedence: explicit `FOUNDRY_MEMORY_STORE_ID` env →
+        // the per-sandbox convention `memory-<sandbox>`. The KarsMemory
+        // binding (when present) overrides both at call time via
+        // `effective_memory_store_id`. The convention default keeps the
+        // router as a faithful single source of truth: a sandbox with no
+        // CRD and no env still lands on the same store the runtime
+        // plugins historically used (`memory-<sandbox>`), not the
+        // project-wide `default` store.
         let memory_store_id = std::env::var("FOUNDRY_MEMORY_STORE_ID")
-            .unwrap_or_else(|_| DEFAULT_MEMORY_STORE.into());
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("{DEFAULT_MEMORY_STORE_PREFIX}{sandbox_name}"));
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -414,6 +475,40 @@ impl PlatformDispatcher {
             }
         }
         self.memory_store_id.clone()
+    }
+
+    /// Resolve the effective memory `scope` (partition key) for a
+    /// `foundry.memory` call. Precedence: an explicit `scope` arg from
+    /// the agent → the KarsMemory binding's `scope` → the convention
+    /// `agent_<cluster>_<sandbox>` (or `agent_<sandbox>` when no cluster
+    /// is set). Every branch is run through [`sanitize_scope`] so an
+    /// out-of-charset value (e.g. a legacy colon scope baked into a CRD)
+    /// can never reach the upstream and 400 the whole call.
+    async fn effective_scope(&self, args: &Value) -> String {
+        if let Some(s) = args.get("scope").and_then(|v| v.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return sanitize_scope(s);
+            }
+        }
+        if let Some(handle) = self.memory_binding.as_ref() {
+            let guard = handle.read().await;
+            if let Some(binding) = guard.as_ref() {
+                let s = binding.scope.trim();
+                if !s.is_empty() {
+                    return sanitize_scope(s);
+                }
+            }
+        }
+        let sandbox = sanitize_scope(self.sandbox_name.trim());
+        match std::env::var("CLUSTER_NAME")
+            .ok()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+        {
+            Some(cluster) => format!("agent_{}_{}", sanitize_scope(&cluster), sandbox),
+            None => format!("agent_{sandbox}"),
+        }
     }
 
     pub fn with_catalog(mut self, catalog: ToolCatalog) -> Self {
@@ -509,22 +604,60 @@ impl PlatformDispatcher {
 
     async fn memory(&self, args: &Value) -> Result<ToolCallOutput, DispatchError> {
         let op = self.require_str(args, "operation", "foundry.memory")?;
-        let text = self.require_str(args, "text", "foundry.memory")?;
+        let scope = self.effective_scope(args).await;
+        // `text` is the memory/query content; accept the `query` alias
+        // for search. Update requires non-empty text; search and
+        // delete_scope do not (empty search = list everything in scope).
+        let text = args
+            .get("text")
+            .or_else(|| args.get("query"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let max_memories = args
+            .get("top_k")
+            .and_then(|v| v.as_u64())
+            .filter(|n| *n >= 1)
+            .unwrap_or(10);
+
         let (suffix, body) = match op {
-            "search" => (":search_memories", json!({"query": text, "top_k": 10})),
-            "update" => (
-                ":update_memories",
-                json!({"messages": [{"role": "user", "content": text}]}),
+            "search" => (
+                ":search_memories",
+                json!({
+                    "scope": scope,
+                    "items": [memory_item(&text)],
+                    "options": { "max_memories": max_memories },
+                }),
             ),
+            "update" => {
+                if text.is_empty() {
+                    return Err(DispatchError::InvalidArguments {
+                        tool: "foundry.memory".into(),
+                        reason: "operation=update requires a non-empty 'text'".into(),
+                    });
+                }
+                (
+                    ":update_memories",
+                    json!({
+                        "scope": scope,
+                        "items": [memory_item(&text)],
+                        "update_delay": 0,
+                    }),
+                )
+            }
+            "delete_scope" => (":delete_scope", json!({ "scope": scope })),
             other => {
                 return Err(DispatchError::InvalidArguments {
                     tool: "foundry.memory".into(),
-                    reason: format!("operation must be 'search' or 'update', got '{other}'"),
+                    reason: format!(
+                        "operation must be 'search', 'update', or 'delete_scope', got '{other}'"
+                    ),
                 });
             }
         };
         let store_id = self.effective_memory_store_id().await;
-        let path = format!("/memory_stores/{store_id}{suffix}");
+        let path = format!("/memory_stores/{store_id}{suffix}?api-version={MEMORY_API_VERSION}");
         let (status, output) = self
             .post_json_with_status("foundry.memory", &path, &body)
             .await;
@@ -545,7 +678,7 @@ impl PlatformDispatcher {
         // fails for any other reason → fall through to the existing
         // `MemoryStoreMissing:` record path so the operator still
         // gets a signal.
-        if status == Some(404) {
+        if status == Some(404) && op != "delete_scope" {
             match self.ensure_memory_store(&store_id).await {
                 EnsureOutcome::Ready => {
                     let (retry_status, retry_output) = self
@@ -619,10 +752,16 @@ impl PlatformDispatcher {
         // ensure-on-404 path either failed for a non-auth reason or
         // claimed success but the store still 404s (defensive).
         // Otherwise the retry above already returned 2xx and we
-        // never get here. The wire prefix is pinned controller-side
-        // as `conditions::MEMORY_STORE_MISSING_PREFIX`; replicated
-        // here as a literal because no cross-binary dep is allowed.
+        // never get here. `delete_scope` is excluded: it deliberately
+        // skips the ensure path (we don't auto-create a store just to
+        // wipe it), so a 404 there is a benign idempotent no-op, not a
+        // misconfiguration — recording MemoryStoreMissing would flip the
+        // CRD to Degraded on an ordinary agent-initiated delete. The
+        // wire prefix is pinned controller-side as
+        // `conditions::MEMORY_STORE_MISSING_PREFIX`; replicated here as a
+        // literal because no cross-binary dep is allowed.
         if status == Some(404)
+            && op != "delete_scope"
             && let Some(registry) = self.policy_status.as_ref()
         {
             let source_path = registry
@@ -674,7 +813,11 @@ impl PlatformDispatcher {
             },
         });
         let (status, _envelope) = self
-            .post_json_with_status("foundry.memory.ensure", "/memory_stores", &body)
+            .post_json_with_status(
+                "foundry.memory.ensure",
+                &format!("/memory_stores?api-version={MEMORY_API_VERSION}"),
+                &body,
+            )
             .await;
         match status {
             Some(s) if (200..300).contains(&s) || s == 409 => {
@@ -1245,10 +1388,118 @@ mod tests {
         .unwrap();
         let req = &server.received_requests().await.unwrap()[0];
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(
-            body["messages"][0]["content"],
-            json!("user prefers concise replies")
+        // Foundry Memory Store contract: items[] of message items, NOT a
+        // legacy {messages:[{role,content}]} shape.
+        assert!(
+            body.get("messages").is_none(),
+            "legacy messages shape must be gone"
         );
+        assert_eq!(body["update_delay"], json!(0));
+        assert_eq!(
+            body["items"][0],
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "user prefers concise replies" }],
+            })
+        );
+        // Scope must be present and colon-free.
+        let scope = body["scope"].as_str().unwrap();
+        assert!(
+            !scope.is_empty() && !scope.contains(':'),
+            "scope `{scope}` must be a valid partition key"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_search_sends_items_and_options_not_query_top_k() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/memstore-test:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"memories": []})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "search", "query": "what did I say", "top_k": 3}),
+        )
+        .await
+        .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert!(body.get("query").is_none() && body.get("top_k").is_none());
+        assert_eq!(body["options"]["max_memories"], json!(3));
+        assert_eq!(
+            body["items"][0]["content"][0]["text"],
+            json!("what did I say")
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_delete_scope_sends_scope_only_and_skips_ensure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/memstore-test:delete_scope"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"deleted": 4})))
+            .mount(&server)
+            .await;
+        let d = dispatcher_for(&server);
+        let out = AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "delete_scope", "scope": "session_abc"}),
+        )
+        .await
+        .unwrap();
+        assert!(!out.is_error);
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body, json!({"scope": "session_abc"}));
+    }
+
+    #[tokio::test]
+    async fn memory_binding_scope_overrides_and_colon_is_sanitized() {
+        use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/memstore-test:search_memories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"memories": []})))
+            .mount(&server)
+            .await;
+        let handle = empty_handle();
+        {
+            let mut g = handle.write().await;
+            *g = Some(LoadedMemoryBinding {
+                digest: "sha256:deadbeef".into(),
+                source_path: "/etc/kars/memory/binding.json".into(),
+                store_name: "memstore-test".into(),
+                // legacy colon scope from a CRD — must be coerced to a
+                // valid partition key before it reaches the upstream.
+                scope: "agent:legacy".into(),
+                raw: json!({}),
+            });
+        }
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("memstore-test")
+            .with_memory_binding(handle);
+        AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation": "search"}))
+            .await
+            .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["scope"], json!("agent_legacy"));
+    }
+
+    #[test]
+    fn sanitize_scope_maps_out_of_charset_to_underscore() {
+        assert_eq!(sanitize_scope("agent:foo"), "agent_foo");
+        assert_eq!(
+            sanitize_scope("session_1-a.b@c/d+e%f"),
+            "session_1-a.b@c/d+e%f"
+        );
+        assert_eq!(sanitize_scope("a b:c"), "a_b_c");
     }
 
     #[tokio::test]
@@ -1851,6 +2102,53 @@ mod tests {
         // Digest preserved through the error record (matches the
         // 3b.4 design — record_error never wipes the digest).
         assert_eq!(entry.digest, Some(prior_digest));
+    }
+
+    #[tokio::test]
+    async fn memory_delete_scope_404_does_not_record_memory_store_missing() {
+        // A delete_scope against a store that doesn't exist is a benign
+        // idempotent no-op — it must NOT flip the KarsMemory CRD to
+        // Degraded (delete skips ensure-on-404 AND the missing-store
+        // record).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory_stores/store-xyz:delete_scope"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let registry = Arc::new(PolicyStatusRegistry::new());
+        registry.record_success(
+            PolicyKind::Memory,
+            "/etc/kars/memory/binding.json",
+            b"binding",
+        );
+
+        let d = PlatformDispatcher::with_base_url(server.uri())
+            .with_memory_store_id("store-xyz")
+            .with_policy_status(registry.clone());
+        AsyncToolDispatcher::invoke(
+            &d,
+            "foundry.memory",
+            &json!({"operation": "delete_scope", "scope": "session_x"}),
+        )
+        .await
+        .unwrap();
+
+        // No ensure attempt + no MemoryStoreMissing record → status stays clean.
+        let entry = registry.get(PolicyKind::Memory).expect("entry present");
+        assert!(
+            entry.last_error.is_none(),
+            "delete_scope 404 must not record an error, got {:?}",
+            entry.last_error
+        );
+        // Only the delete_scope call should have hit the upstream (no
+        // ensure POST /memory_stores).
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(
+            reqs.len(),
+            1,
+            "delete_scope must not trigger an ensure call"
+        );
     }
 
     /// 404 must NOT trip the AuthMisconfigured surface — the

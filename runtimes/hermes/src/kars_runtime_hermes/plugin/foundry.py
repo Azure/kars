@@ -37,99 +37,84 @@ logger = logging.getLogger("kars.hermes.foundry")
 
 _FOUNDRY_API_VERSION = "2025-11-15-preview"
 
+# The Foundry Memory Store contract — store + scope resolution from the
+# KarsMemory binding, the request body shapes, auto-provision on 404,
+# retry, and 401/403 RBAC surfacing — is owned by the inference router's
+# platform MCP ``foundry.memory`` tool. This wrapper is a thin client: it
+# forwards intent to ``POST /platform/mcp`` and returns the router's text
+# result. A single contract implementation (in the router) means the
+# OpenClaw and Hermes runtimes can never drift apart on the wire shape,
+# and a custom storeName/scope on the KarsMemory CR is honoured centrally
+# without the agent process needing any Foundry knowledge.
 
-def _store_name() -> str:
-    """Resolve the Foundry Memory Store this sandbox is bound to.
 
-    Convention (matches OpenClaw plugin + KarsMemory CR ``storeName``):
-    ``memory-${SANDBOX_NAME}``. Operators bind via
-    ``KarsMemory.spec.storeName: memory-<sandbox>``; the router
-    auto-provisions on first 404.
+def _call_platform_tool(name: str, arguments: dict[str, Any]) -> str:
+    """Invoke a router platform-MCP tool via one JSON-RPC ``tools/call``.
+
+    Returns the flattened text content. A JSON-RPC error (unknown tool,
+    invalid arguments) or a tool-level ``isError`` is surfaced as the
+    returned text so the LLM sees the real reason.
     """
-    sandbox = os.environ.get("SANDBOX_NAME", "unknown")
-    # Defensive truncation: K8s DNS-label limit is 63 chars; we use 7
-    # chars for the "memory-" prefix, leaving 56 for the sandbox name.
-    return f"memory-{sandbox[:56]}"
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }
+    try:
+        resp = router_client.call("POST", "/platform/mcp", json=rpc)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{name} request failed: {exc}"})
+    if resp.status_code >= 400:
+        return json.dumps(
+            {"error": f"{name} HTTP {resp.status_code}", "body": resp.text[:500]}
+        )
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return resp.text[:2000]
+    if isinstance(payload, dict) and payload.get("error"):
+        err = payload["error"] or {}
+        reason = (
+            (err.get("data") or {}).get("reason")
+            or err.get("message")
+            or "unknown error"
+        )
+        return json.dumps({"error": f"{name}: {reason}"})
+    result = payload.get("result") if isinstance(payload, dict) else None
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, list):
+        texts = [
+            c["text"]
+            for c in content
+            if isinstance(c, dict)
+            and c.get("type") == "text"
+            and isinstance(c.get("text"), str)
+        ]
+        if texts:
+            return "\n\n".join(texts)
+    return json.dumps(result if result is not None else payload)
 
 
 def _foundry_memory(args: dict[str, Any], **_kwargs: Any) -> str:
-    """Memory CRUD against the Foundry Memory Store bound to this sandbox."""
-    op = str(args.get("operation", "")).lower().strip()
-    store = str(args.get("store_name") or _store_name()).strip()
-    scope = str(args.get("scope") or f"agent:{os.environ.get('SANDBOX_NAME', 'unknown')}").strip()
-
-    if op not in ("search", "update", "delete_scope"):
-        return json.dumps(
-            {
-                "error": "operation must be 'search', 'update', or 'delete_scope'",
-                "got": op,
-            }
-        )
-
-    api_ver = f"api-version={_FOUNDRY_API_VERSION}"
-    base = f"/memory_stores/{store}"
-
-    try:
-        if op == "search":
-            query = args.get("query", "")
-            body = {
-                "query_text": str(query) if query else "",
-                "scope": scope,
-                "top_k": int(args.get("top_k", 10)),
-            }
-            resp = router_client.call(
-                "POST", f"{base}:search_memories?{api_ver}", json=body
-            )
-        elif op == "update":
-            text = args.get("text", "")
-            if not text:
-                return json.dumps({"error": "operation=update requires 'text'"})
-            body = {
-                "messages": [{"role": "user", "content": str(text)}],
-                "scope": scope,
-            }
-            resp = router_client.call(
-                "POST", f"{base}:update_memories?{api_ver}", json=body
-            )
-        else:  # delete_scope
-            resp = router_client.call(
-                "POST", f"{base}:delete_scope?{api_ver}", json={"scope": scope}
-            )
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"error": f"foundry_memory request failed: {exc}"})
-
-    if resp.status_code == 404 and op != "delete_scope":
-        # First-time use: router auto-creates the store on next call.
-        # Retry once.
-        try:
-            router_client.call(
-                "POST",
-                f"/memory_stores?{api_ver}",
-                json={
-                    "name": store,
-                    "description": f"kars memory binding for sandbox {os.environ.get('SANDBOX_NAME', '')}",
-                },
-            )
-        except Exception:  # noqa: BLE001
-            pass  # the next call below will surface the real error
-
-    if resp.status_code >= 400:
-        return json.dumps(
-            {
-                "error": f"foundry_memory HTTP {resp.status_code}",
-                "body": resp.text[:500],
-                "operation": op,
-                "store": store,
-                "scope": scope,
-            }
-        )
-
-    try:
-        return json.dumps(resp.json())
-    except Exception:  # noqa: BLE001
-        return json.dumps(
-            {"operation": op, "store": store, "scope": scope, "raw": resp.text[:500]}
-        )
+    """Persistent agent memory — thin client over the router's
+    ``foundry.memory`` platform-MCP tool. The router owns the Memory
+    Store contract, store/scope resolution from the KarsMemory binding,
+    auto-provision, retry, and CRD status."""
+    forwarded: dict[str, Any] = {"operation": str(args.get("operation", "")).strip()}
+    text = args.get("text")
+    if isinstance(text, str) and text:
+        forwarded["text"] = text
+    query = args.get("query")
+    if isinstance(query, str) and query:
+        forwarded["query"] = query
+    scope = args.get("scope")
+    if isinstance(scope, str) and scope:
+        forwarded["scope"] = scope
+    top_k = args.get("top_k")
+    if isinstance(top_k, int):
+        forwarded["top_k"] = top_k
+    return _call_platform_tool("foundry.memory", forwarded)
 
 
 _FOUNDRY_MEMORY_SCHEMA = {
@@ -140,7 +125,7 @@ _FOUNDRY_MEMORY_SCHEMA = {
         "scope), 'update' (write a new memory), 'delete_scope' (wipe all "
         "memories under a scope). The store name follows the kars convention "
         "memory-${SANDBOX_NAME} and is auto-provisioned on first use. The "
-        "scope defaults to agent:${SANDBOX_NAME}; pass scope to namespace "
+        "scope defaults to agent_${SANDBOX_NAME}; pass scope to namespace "
         "memories per-session or per-user."
     ),
     "parameters": {
@@ -166,16 +151,10 @@ _FOUNDRY_MEMORY_SCHEMA = {
             "scope": {
                 "type": "string",
                 "description": (
-                    "Memory namespace (default: agent:${SANDBOX_NAME}). "
-                    "Use 'session:<id>' for per-conversation memory, "
-                    "'user:<id>' for per-user memory across sessions."
-                ),
-            },
-            "store_name": {
-                "type": "string",
-                "description": (
-                    "Override the kars store name convention "
-                    "(default: memory-${SANDBOX_NAME}). Usually leave unset."
+                    "Memory namespace (default: agent_${SANDBOX_NAME}). "
+                    "Use 'session_<id>' for per-conversation memory, "
+                    "'user_<id>' for per-user memory across sessions. "
+                    "Use '_' as the separator — colons are rejected by the API."
                 ),
             },
         },
