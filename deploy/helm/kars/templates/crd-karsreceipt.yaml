@@ -136,6 +136,19 @@ spec:
               from its signature, not from this block.
             nullable: true
             properties:
+              inclusionEntryHash:
+                description: |-
+                  Hash of this receipt's inclusion-log entry. An auditor checks the log
+                  chain is intact and that this hash is present (`kars receipt verify`).
+                nullable: true
+                type: string
+              inclusionSeq:
+                description: |-
+                  Sequence number of this receipt's entry in the `kars-receipt-log`
+                  inclusion log (the cross-receipt tamper-evidence chain).
+                format: int64
+                nullable: true
+                type: integer
               issuedAt:
                 description: RFC3339 issuance time (unsigned — not part of the attested payload).
                 nullable: true

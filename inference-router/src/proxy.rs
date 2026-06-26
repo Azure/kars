@@ -155,22 +155,20 @@ fn record_metrics(
         && let Some(usage) = body_json.get("usage")
     {
         if let Some(input) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
-            metrics::TOKENS_USED
-                .with_label_values(&[
-                    &upstream.sandbox_name,
-                    &upstream.deployment,
-                    &"input".to_string(),
-                ])
-                .inc_by(input as u64);
+            metrics::record_tokens(
+                &upstream.sandbox_name,
+                &upstream.deployment,
+                "input",
+                input as u64,
+            );
         }
         if let Some(output) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
-            metrics::TOKENS_USED
-                .with_label_values(&[
-                    &upstream.sandbox_name,
-                    &upstream.deployment,
-                    &"output".to_string(),
-                ])
-                .inc_by(output as u64);
+            metrics::record_tokens(
+                &upstream.sandbox_name,
+                &upstream.deployment,
+                "output",
+                output as u64,
+            );
         }
     }
 }
@@ -541,14 +539,10 @@ pub async fn forward_stream(
                             .and_then(|v| v.as_i64())
                             .or_else(|| usage.get("output_tokens").and_then(|v| v.as_i64()));
                         if let Some(input) = input_tokens {
-                            metrics::TOKENS_USED
-                                .with_label_values(&[&sandbox_name, &model, &"input".to_string()])
-                                .inc_by(input as u64);
+                            metrics::record_tokens(&sandbox_name, &model, "input", input as u64);
                         }
                         if let Some(output) = output_tokens {
-                            metrics::TOKENS_USED
-                                .with_label_values(&[&sandbox_name, &model, &"output".to_string()])
-                                .inc_by(output as u64);
+                            metrics::record_tokens(&sandbox_name, &model, "output", output as u64);
                         }
                     }
                 }

@@ -117,3 +117,43 @@ describe("receipt verify — verifyReceipt", () => {
     expect(res.ok).toBe(false);
   });
 });
+
+describe("receipt verify — inclusion chain", () => {
+  function buildChain(receipts: Array<{ receipt: string; payloadSha256: string }>) {
+    let prev = "genesis";
+    return receipts.map((r, i) => {
+      const entryHash = __test.inclusionEntryHash(i, r.receipt, r.payloadSha256, prev);
+      const e = { seq: i, receipt: r.receipt, payloadSha256: r.payloadSha256, prevHash: prev, entryHash };
+      prev = entryHash;
+      return e;
+    });
+  }
+
+  it("accepts an intact chain", () => {
+    const chain = buildChain([
+      { receipt: "ns/a", payloadSha256: "sha-a" },
+      { receipt: "ns/b", payloadSha256: "sha-b" },
+    ]);
+    expect(__test.verifyInclusionChain(chain)).toBeNull();
+    expect(__test.verifyInclusionChain([])).toBeNull();
+  });
+
+  it("detects a tampered payload digest", () => {
+    const chain = buildChain([
+      { receipt: "ns/a", payloadSha256: "sha-a" },
+      { receipt: "ns/b", payloadSha256: "sha-b" },
+    ]);
+    chain[0].payloadSha256 = "evil";
+    expect(__test.verifyInclusionChain(chain)).toBe(0);
+  });
+
+  it("detects a deleted entry", () => {
+    const chain = buildChain([
+      { receipt: "ns/a", payloadSha256: "sha-a" },
+      { receipt: "ns/b", payloadSha256: "sha-b" },
+      { receipt: "ns/c", payloadSha256: "sha-c" },
+    ]);
+    chain.splice(1, 1);
+    expect(__test.verifyInclusionChain(chain)).not.toBeNull();
+  });
+});
