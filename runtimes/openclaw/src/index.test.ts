@@ -734,6 +734,18 @@ describe("Foundry tool registration", () => {
     expect(tools.has("foundry_memory")).toBe(true);
   });
 
+  it("foundry_memory is a thin client (operation-only required, no store_name)", () => {
+    const tool = tools.get("foundry_memory")!;
+    const props = tool.parameters?.properties ?? {};
+    // Router owns the contract; the agent only forwards intent.
+    expect(tool.parameters.required).toEqual(["operation"]);
+    expect(props.operation.enum).toEqual(["search", "update", "delete_scope"]);
+    expect(props.top_k).toBeDefined();
+    // store_name override is gone — the bound KarsMemory CRD is the
+    // single source of truth for the store name.
+    expect(props.store_name).toBeUndefined();
+  });
+
   it("registers http_fetch tool", () => {
     expect(tools.has("http_fetch")).toBe(true);
   });
