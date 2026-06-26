@@ -280,3 +280,7 @@ bundle.tar.gz
 - `Makefile` `bundle` target (🚧 to be added)
 - `docs/api/crd-reference.md` (all twelve CRDs; `spec.runtime.kind` enum; `spec.networkPolicy.allowlistRef.*`)
 - `docs/security.md` § "Air-gapped operating mode"
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

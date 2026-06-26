@@ -297,3 +297,7 @@ The controller verifies against the `kars-signer-policy` ConfigMap in `kars-syst
 - `deploy/helm/kars/values.yaml` lines ~263–300 (`a2aGateway.*` + `inferenceRouter.a2aMtls.enabled`)
 - `docs/api/crd-reference.md` (`A2AAgent` CRD spec, `KarsSandbox.spec.a2a.*`)
 - ADR-0001 (front-edge architecture for non-mesh ingress; relevant for A2A 1.0.0 cross-org path)
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

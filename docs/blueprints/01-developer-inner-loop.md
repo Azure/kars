@@ -132,3 +132,7 @@ On the first run you are prompted to pick an inference provider — **GitHub Cop
 - [`sandbox-images/`](../../sandbox-images/) — the per-runtime images dev mode uses.
 - [Architecture — Two modes](../architecture.md#two-modes) — the canonical write-up of dev vs prod.
 - [Getting started — Step 1](../getting-started.md#step-1--local-five-minutes) — the user-facing walkthrough.
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

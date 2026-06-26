@@ -314,3 +314,7 @@ The controller ships production-grade operator hygiene relevant to enterprise de
 - `deploy/helm/kars/values.yaml` (Helm contract)
 - `docs/api/crd-reference.md` (all twelve CRDs)
 - ADR-0001 — A2A ingress front-edge (`docs/adr/0001-a2a-ingress-front-edge.md`)
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._

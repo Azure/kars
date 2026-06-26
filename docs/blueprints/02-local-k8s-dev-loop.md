@@ -131,3 +131,7 @@ The point is: this blueprint validates **the K8s glue** (controller reconciliati
 - Helm chart overlay: `deploy/helm/kars/values-local-dev.yaml`
 - CRDs: `deploy/helm/kars/templates/crd-*.yaml`
 - Strict seccomp profile: `deploy/helm/kars/files/kars-strict.json`
+
+---
+
+_Last tested with kars `v0.1.18` on 2026-06-26._
