@@ -517,7 +517,24 @@ async fn reconcile_receipt(
     let payload_sha = crate::kars_receipt_log::sha256_hex(&payload);
     let log_ref = format!("{ns}/{name}");
     let inclusion = match crate::kars_receipt_log::append(client, &log_ref, &payload_sha).await {
-        Ok(entry) => Some(entry),
+        Ok(entry) => {
+            // Publish a fresh signed checkpoint (signed tree head) over the log
+            // so clients / an external witness can pin the log's size + head
+            // without the full chain. Best-effort; never blocks the receipt.
+            match crate::kars_receipt_log::read_chain(client).await {
+                Ok(chain) => {
+                    if let Err(e) =
+                        crate::kars_receipt_log::publish_checkpoint(client, signer, &chain).await
+                    {
+                        tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to publish receipt checkpoint");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(karstask = %name, ns = %ns, error = %e, "could not read chain for checkpoint");
+                }
+            }
+            Some(entry)
+        }
         Err(e) => {
             tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to enter receipt in inclusion log");
             None
