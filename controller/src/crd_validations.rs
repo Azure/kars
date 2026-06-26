@@ -54,6 +54,7 @@ use crate::inference_policy::InferencePolicy;
 use crate::kars_eval::KarsEval;
 use crate::kars_memory::KarsMemory;
 use crate::kars_sre_action::KarsSREAction;
+use crate::kars_task::KarsTask;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
 
@@ -505,6 +506,77 @@ pub fn kars_eval_validations() -> Vec<ValidationRule> {
 pub fn kars_eval_crd() -> CustomResourceDefinition {
     inject_spec_validations(KarsEval::crd(), kars_eval_validations())
         .expect("kube-rs derive must produce a spec property on KarsEval")
+}
+
+/// `KarsTask.spec` CEL rules — enforce the trust-envelope invariants at
+/// admission time, before the reconciler ever sees the CR. These are the
+/// substrate guarantees that capability-attenuating delegation builds on.
+#[must_use]
+pub fn kars_task_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.objective) > 0 && size(self.objective) <= 4096".into(),
+            message: Some("spec.objective must be 1-4096 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.tier >= 1 && self.envelope.tier <= 5".into(),
+            message: Some("spec.envelope.tier must be in 1..5".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.authorityCeiling >= 1 && self.envelope.authorityCeiling <= 5".into(),
+            message: Some("spec.envelope.authorityCeiling must be in 1..5".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            // A task can never authorize a descendant to act with more
+            // authority than it holds itself. This is the load-bearing
+            // anti-amplification rule.
+            rule: "self.envelope.authorityCeiling <= self.envelope.tier".into(),
+            message: Some(
+                "spec.envelope.authorityCeiling must be <= spec.envelope.tier (a task cannot grant a child more authority than it holds)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.delegationDepth >= 0 && self.envelope.delegationDepth <= 16".into(),
+            message: Some("spec.envelope.delegationDepth must be in 0..16".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.envelope.budget) || !has(self.envelope.budget.tokens) || self.envelope.budget.tokens >= 0".into(),
+            message: Some("spec.envelope.budget.tokens, when set, must be >= 0".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.envelope.budget) || !has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros >= 0".into(),
+            message: Some("spec.envelope.budget.usdMicros, when set, must be >= 0".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 253)".into(),
+            message: Some("spec.displayName, when set, must be 1-253 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `KarsTask` CRD with [`kars_task_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn kars_task_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsTask::crd(), kars_task_validations())
+        .expect("kube-rs derive must produce a spec property on KarsTask")
 }
 
 /// `TrustGraph.spec` CEL rules. Phase F1.
