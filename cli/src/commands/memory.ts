@@ -74,6 +74,11 @@ export function validateMemorySpec(spec: Record<string, unknown>): string[] {
     errs.push("missing required spec.scope — pass --scope");
   } else if (scope.length > 256) {
     errs.push("spec.scope must be 1–256 characters");
+  } else if (!/^[A-Za-z0-9_./%+@-]+$/.test(scope)) {
+    errs.push(
+      "spec.scope may only contain letters, digits, and _ - . % + @ / " +
+        "(colons are rejected by the Foundry Memory Store) — e.g. agent_my-agent",
+    );
   }
 
   const ret = spec.retentionDays;
@@ -118,7 +123,7 @@ export function memoryCommand(): Command {
     .option("--from-file <path>", "Read spec from a YAML/JSON file")
     .option("--sandbox <name>", "Sandbox to bind (spec.sandboxRef.name)")
     .option("--store <name>", "Foundry Memory Store name (DNS-label)")
-    .option("--scope <key>", "Scope key under which this sandbox reads/writes (e.g. agent:my-agent)")
+    .option("--scope <key>", "Scope key under which this sandbox reads/writes (e.g. agent_my-agent). Charset: letters, digits, _ - . % + @ / — no colons")
     .option("--retention-days <n>", "Retention floor in days (delete_scope sweep, >0)", (v) => parseInt(v, 10))
     .option("--display-name <s>", "Human-readable display label")
     .option("--no-delete-on-sandbox-delete", "Keep store contents when the sandbox is deleted (default: cleanup)")

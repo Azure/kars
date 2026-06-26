@@ -581,7 +581,7 @@ spec:
   storeName: e2e-store
   sandboxRef:
     name: e2e-test
-  scope: "agent:e2e-test"
+  scope: "agent_e2e-test"
 EOF
     if wait_for_resource configmap karsmemory-e2e-karsmemory-binding kars-system 45; then
         pass "KarsMemory → binding ConfigMap created"
