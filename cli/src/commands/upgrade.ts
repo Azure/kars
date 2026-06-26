@@ -144,6 +144,24 @@ Examples:
         }
         stepper.done(`Connected — kars release at revision ${karsRel.revision}`);
 
+        // ── Pre-flight: cluster must be able to run the upgrade ────────
+        // Fail fast on a degraded/stopped cluster (e.g. all nodes NotReady)
+        // BEFORE the 5-minute image import + 8-minute Helm wait that would only
+        // time out and roll back. This is the failsafe: no work is done until we
+        // know the cluster can actually schedule the new pods.
+        if (!options.rollback) {
+          const health = await assertClusterUpgradeable(execa);
+          if (!health.ok) {
+            stepper.stop();
+            console.error(chalk.red(`\n  ✗ Cluster is not in a state to upgrade — no changes made.`));
+            console.error(chalk.red(`  ${health.reason}\n`));
+            for (const hint of health.hints) console.error(chalk.dim(`  ${hint}`));
+            console.error();
+            process.exit(1);
+          }
+          for (const hint of health.hints) stepper.detail("info", hint);
+        }
+
         // ── Rollback path ─────────────────────────────────────────────
         if (options.rollback) {
           stepper.step("Rolling back to the previous Helm revision...");
@@ -539,4 +557,43 @@ async function verifyHealth(execa: Execa): Promise<boolean> {
     "-o", "jsonpath={.status.conditions[?(@.type=='Available')].status}",
   ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
   return ctrl.trim() === "True";
+}
+
+/** Pre-flight: can this cluster actually accept an upgrade right now? The upgrade
+ *  reimports images and runs `helm upgrade --wait`, which needs schedulable,
+ *  Ready nodes. A stopped/degraded cluster (all nodes NotReady — e.g. an AKS
+ *  cluster whose VMSS was deallocated, or a broken CNI) would burn ~13 minutes
+ *  and then time out + roll back. Detect it up front. */
+async function assertClusterUpgradeable(
+  execa: Execa,
+): Promise<{ ok: boolean; reason: string; hints: string[] }> {
+  const { stdout } = await execa("kubectl", [
+    "get", "nodes",
+    "-o", "jsonpath={range .items[*]}{.metadata.name}{\"|\"}{range .status.conditions[?(@.type=='Ready')]}{.status}{end}{\"\\n\"}{end}",
+  ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+
+  const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    // Couldn't read nodes — don't hard-block on an unexpected API shape, but the
+    // later `helm --wait` still guards correctness.
+    return { ok: true, reason: "", hints: [] };
+  }
+  const total = lines.length;
+  const ready = lines.filter((l) => l.endsWith("|True")).length;
+
+  if (ready === 0) {
+    return {
+      ok: false,
+      reason: `All ${total} cluster node(s) are NotReady — the upgrade can't schedule new pods and would time out.`,
+      hints: [
+        "Check node health:   kubectl get nodes",
+        "If the AKS cluster is stopped, start it:   az aks start -g <rg> -n <cluster>",
+        "If nodes are stuck (CNI/kubelet), check:   kubectl describe nodes",
+        "Re-run `kars upgrade` once nodes are Ready.",
+      ],
+    };
+  }
+  // Some-but-not-all Ready is allowed (the upgrade can still proceed), but worth
+  // surfacing — the controller wants 2 replicas and `helm --wait` needs them.
+  return { ok: true, reason: "", hints: ready < total ? [`Note: ${ready}/${total} nodes Ready.`] : [] };
 }

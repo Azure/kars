@@ -34,6 +34,12 @@ write path. No new privileges or mutations are introduced.
 4. **Y/N confirmation.** Interactive prompt before any write; auto-proceeds under
    `--yes` or a non-TTY (CI). `--dry-run` still previews and exits.
 
+5. **Fail-fast cluster health gate.** Before any work (image import / Helm), the
+   upgrade checks node readiness via `kubectl get nodes`. If **all** nodes are
+   NotReady (a stopped/degraded cluster — e.g. a deallocated VMSS or broken CNI),
+   it aborts in ~2s with actionable guidance instead of burning ~13 minutes on an
+   image import + `helm --wait` that can only time out and roll back.
+
 ## T1: New capability / attack surface? (NO)
 - All additions are reads: `kubectl get` (pods/deployments), unauthenticated GETs
   to `api.github.com` (public releases/tags) and `ghcr.io` (public image
