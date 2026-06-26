@@ -112,50 +112,69 @@ The per-pod router is the one component every external call passes through, and 
 
 ---
 
-## Two modes, one mental model
+## Three ways to run it, one mental model
 
-You write the same `KarsSandbox` YAML for both. The difference is where it runs and what isolates it.
+You write the same `KarsSandbox` YAML for all of them. The difference is where it runs and what isolates it.
 
-| Aspect | **Dev mode** (`kars dev`) | **Prod mode** (`kars up` → AKS) |
-|---|---|---|
-| Where | One Docker container on your laptop | An AKS cluster in your subscription |
-| Pod shape | **Single container** — agent + router co-located in one image | **Multi-container pod** — agent (UID 1000) + router (UID 1001) + init `egress-guard` |
-| Network isolation | Docker network, no egress guard | Router is the policy point; `NetworkPolicy` + `egress-guard` initContainer act as safety nets containing blast radius |
-| Identity | Provider credential — Copilot OAuth token, Foundry resource key, or GitHub PAT (mounted from a local secret) | **Per-sandbox Entra Agent ID** when `--mesh-trust=entra` (default `anonymous` uses the cluster's federated Workload Identity for Foundry); router never sees a long-lived key |
-| Optional VM isolation | n/a | Kata + AMD SEV-SNP (Confidential Containers) — requires a Kata-enabled node pool |
-| Use it for | Inner-loop dev, plugin authoring, demos | Real workloads, multi-tenant, production |
+| Aspect | **Local — kind** (`kars dev --target local-k8s`) *(recommended)* | **Local — Docker** (`kars dev`) | **Prod — AKS** (`kars up`) |
+|---|---|---|---|
+| Where | A local [kind](https://kind.sigs.k8s.io/) Kubernetes cluster | One container on your laptop | An AKS cluster in your subscription |
+| Pod shape | **Multi-container pod** — agent + router + init `egress-guard`, the real production shape | **Single container** — agent + router co-located (fastest, not the prod shape) | **Multi-container pod** — agent (UID 1000) + router (UID 1001) + init `egress-guard` |
+| Network isolation | `NetworkPolicy` + `egress-guard`, same as AKS | Container network, no egress guard | Router is the policy point; `NetworkPolicy` + `egress-guard` contain blast radius |
+| Identity | Static provider credential (no Workload Identity / Entra) | Static provider credential (mounted from a local secret) | **Per-sandbox Entra Agent ID** with `--mesh-trust=entra` (default `anonymous` uses cluster Workload Identity); router never sees a long-lived key |
+| Optional VM isolation | n/a | n/a | Kata + AMD SEV-SNP (Confidential Containers) — requires a Kata node pool |
+| Use it for | **The dev loop for anything you'll ship** — validates the K8s glue | Fastest prompt/tool inner loop, demos | Real workloads, multi-tenant, production |
 
-For when Docker dev is too simple but AKS is too heavy, **`kars dev --target local-k8s`** runs a real Kubernetes cluster locally (kind) with the same Helm chart, controller, multi-container pod shape, and NetworkPolicies as AKS — differing only in auth source (static key, no Workload Identity or Entra Agent ID) and infrastructure (no cloud node pools). See [Architecture → Local Kubernetes mode](docs/architecture.md#local-kubernetes-mode-kars-dev---release---target-local-k8s) and [Blueprint 02 — Local Kubernetes dev loop](docs/blueprints/02-local-k8s-dev-loop.md).
+The kind loop reproduces the AKS pod shape, `NetworkPolicy`, and UID split, so what you test locally is what ships — it differs from AKS only in auth source and infrastructure (no cloud node pools). The Docker target is the quickest path to a chat when you don't need the Kubernetes glue. See [Architecture → Local Kubernetes mode](docs/architecture.md#local-kubernetes-mode-kars-dev---release---target-local-k8s) and [Blueprint 02 — Local Kubernetes dev loop](docs/blueprints/02-local-k8s-dev-loop.md).
 
-Same CRDs. Same router code path. Same audit format. Same governance profiles. The graduation from `dev` to `up` is a one-line CLI change, not a port to a new system.
+Same CRDs. Same router code path. Same audit format. Same governance profiles. The graduation from local to AKS is a one-line CLI change, not a port to a new system.
 
 ---
 
 ## Try it in five minutes
 
-**No compile. Works for everyone — macOS & Linux, Intel & Apple Silicon.**
-You need only **Docker** (or Podman) and **Node.js 22+**:
+**No compile. Works for everyone — macOS & Linux, Intel & Apple Silicon.** All
+the images are multi-arch (`amd64` + `arm64`, native on Apple Silicon) and
+cosign-signed; `--release` pulls them, so there's no Rust, no clone, no build.
+
+Install the CLI:
 
 ```bash
 npm i -g @kars-runtime/cli
-kars dev --release
 ```
 
-`kars dev --release` pulls the published, **cosign-signed** images and runs a
-sandboxed agent — no Azure account, no Rust, no clone, no GitHub login. Every
-image is multi-arch (`amd64` + `arm64`, native on Apple Silicon). On first
-launch you pick an inference provider — **GitHub Copilot** is easiest (one
-device-code login, no Azure account).
+**Recommended — a real Kubernetes dev loop on a local [kind](https://kind.sigs.k8s.io/) cluster.**
+You need **kind** + **kubectl** + a container runtime (Docker or Podman):
 
-The CLI on npm is **build-provenance attested** (SLSA) — verify with
-`npm audit signatures` after install.
+```bash
+kars dev --release --target local-k8s
+```
 
-Run on Kubernetes instead with `kars dev --release --target local-k8s` — this
-runs the **same images on a local [kind](https://kind.sigs.k8s.io/) cluster**
-with the real pod shape (separate router **container**, init container, `NetworkPolicy`,
-seccomp). It behaves almost identically to AKS, so it's the **recommended dev
-loop** once you're past first-run. For a managed cluster, `kars up` provisions
-AKS (see [Getting started → Deploy to AKS](docs/getting-started.md#step-2--deploy-to-aks)).
+This runs the published images in the **real production pod shape** — separate
+router container, init `egress-guard`, `NetworkPolicy`, seccomp — so it behaves
+almost identically to AKS. It's the dev loop we recommend, because what you test
+locally is what ships.
+
+<details>
+<summary><strong>Just want the fastest smoke test?</strong> A single Docker container, no Kubernetes.</summary>
+
+If you only need to kick the tyres and don't have kind installed, the default
+target runs the agent + router co-located in **one Docker container** (no
+`NetworkPolicy`, no separate router container — not the production shape, but the
+quickest path to a chat):
+
+```bash
+kars dev --release          # one container; needs only Docker + Node 22+
+```
+
+</details>
+
+On first launch you pick an inference provider — **GitHub Copilot** is easiest
+(one device-code login, no Azure account). The CLI on npm is **build-provenance
+attested** (SLSA) — verify with `npm audit signatures` after install.
+
+When you're ready for a managed cluster, `kars up` provisions AKS (see
+[Getting started → Deploy to AKS](docs/getting-started.md#step-2--deploy-to-aks)).
 
 <details>
 <summary>Other ways to install</summary>
