@@ -62,6 +62,9 @@ rules:
       - "karsreceipts"
       - "karsreceipts/status"
       - "karsreceipts/finalizers"
+      - "karsapprovals"
+      - "karsapprovals/status"
+      - "karsapprovals/finalizers"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Create and manage sandbox namespaces
   - apiGroups: [""]

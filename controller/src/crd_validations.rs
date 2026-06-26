@@ -52,6 +52,7 @@ use crate::a2a_agent::A2AAgent;
 use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
 use crate::kars_eval::KarsEval;
+use crate::kars_approval::KarsApproval;
 use crate::kars_memory::KarsMemory;
 use crate::kars_receipt::KarsReceipt;
 use crate::kars_sre_action::KarsSREAction;
@@ -586,6 +587,14 @@ pub fn kars_task_crd() -> CustomResourceDefinition {
 #[must_use]
 pub fn kars_receipt_crd() -> CustomResourceDefinition {
     KarsReceipt::crd()
+}
+
+/// `KarsApproval` CRD. The HITL approval primitive carries no admission CEL in
+/// V0 — the controller is the sole writer of `status` (the binding, phase, and
+/// immutable timestamps), and `spec.decision` is a human steer, not a gate.
+#[must_use]
+pub fn kars_approval_crd() -> CustomResourceDefinition {
+    KarsApproval::crd()
 }
 
 /// `TrustGraph.spec` CEL rules. Phase F1.

@@ -38,6 +38,8 @@ mod helm_drift;
 mod inference_policy;
 mod inference_policy_compile;
 mod inference_policy_reconciler;
+mod kars_approval;
+mod kars_approval_reconciler;
 mod kars_eval;
 mod kars_eval_reconciler;
 mod kars_memory;
@@ -252,6 +254,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { kars_task_reconciler::run(client).await })
     };
+    let kars_approval_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { kars_approval_reconciler::run(client).await })
+    };
     let trust_graph_handle = {
         let client = client.clone();
         tokio::spawn(async move { trust_graph_reconciler::run(client).await })
@@ -405,6 +411,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = kars_task_handle => {
+            res??;
+        }
+        res = kars_approval_handle => {
             res??;
         }
         res = trust_graph_handle => {
