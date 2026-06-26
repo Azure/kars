@@ -2793,7 +2793,7 @@ async function autoCreateSandbox(
           "  sandboxRef:",
           `    name: ${opts.name}`,
           `  storeName: ${memoryStoreName}`,
-          `  scope: "agent:${opts.name}"`,
+          `  scope: "agent_${opts.name}"`,
           "  retentionDays: 30",
           "  deleteOnSandboxDelete: true",
           `  displayName: "Default memory for ${opts.name}"`,

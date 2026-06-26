@@ -59,7 +59,7 @@ export function buildKarsMemory(opts: KarsMemoryOpts): Record<string, unknown> {
     spec: {
       sandboxRef: { name: opts.sandboxName },
       storeName: store,
-      scope: `agent:${opts.sandboxName}`,
+      scope: `agent_${opts.sandboxName}`,
       retentionDays: opts.retentionDays ?? 30,
       deleteOnSandboxDelete: true,
       displayName: `Default memory for ${opts.sandboxName}`,

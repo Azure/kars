@@ -53,7 +53,7 @@ spec:
 # ── 2. KarsMemory ──────────────────────────────────────────────────
 # Binds the agent to a Foundry memory store. The router uses this to
 # scope every memory_*  tool call so the agent can only read/write its
-# own memories. `scope: "agent:demo-agent"` is the default convention.
+# own memories. `scope: "agent_demo-agent"` is the default convention.
 apiVersion: kars.azure.com/v1alpha1
 kind: KarsMemory
 metadata:
@@ -68,7 +68,7 @@ spec:
   # see runtimes/openclaw/src/core/agt-tools/foundry.ts:634 (the
   # plugin hardcodes this name when calling memory_* tools).
   storeName: memory-demo-agent
-  scope: "agent:demo-agent"
+  scope: "agent_demo-agent"
   retentionDays: 30
   deleteOnSandboxDelete: true
   displayName: "Demo Agent Memory"
