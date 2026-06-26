@@ -45,6 +45,8 @@ mod kars_memory_compile;
 mod kars_memory_reconciler;
 mod kars_sre_action;
 mod kars_sre_action_reconciler;
+mod kars_task;
+mod kars_task_reconciler;
 mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
@@ -237,6 +239,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { kars_eval_reconciler::run(client).await })
     };
+    let kars_task_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { kars_task_reconciler::run(client).await })
+    };
     let trust_graph_handle = {
         let client = client.clone();
         tokio::spawn(async move { trust_graph_reconciler::run(client).await })
@@ -387,6 +393,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = kars_eval_handle => {
+            res??;
+        }
+        res = kars_task_handle => {
             res??;
         }
         res = trust_graph_handle => {
