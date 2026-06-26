@@ -24,9 +24,9 @@ The sandbox YAML you wrote in step 1 runs **unchanged** in step 2 — build loca
 
 | For | You need |
 |---|---|
-| **Fastest — published images (`kars dev --release`)** | Docker Desktop (or any OCI runtime) · Node.js 22+. **No Rust, no AGT checkout, no local image build.** |
-| **Local Kubernetes (`kars dev --release --target local-k8s`)** | The above, plus [`kind`](https://kind.sigs.k8s.io/) and [`kubectl`](https://kubernetes.io/docs/tasks/tools/). Runs the published images on a real local cluster — the closest mirror of AKS posture. |
-| From source (contributors hacking on kars) | The above, plus Rust 1.88+ and a local [AGT](https://github.com/microsoft/agent-governance-toolkit) checkout (relay + registry are built locally). |
+| **Recommended — local Kubernetes (`kars dev --release --target local-k8s`)** | [`kind`](https://kind.sigs.k8s.io/) · [`kubectl`](https://kubernetes.io/docs/tasks/tools/) · any container runtime (**Docker, Podman, or nerdctl** — kind drives all three) · Node.js 22+. Runs the published images in the real production pod shape — the closest mirror of AKS. **No Rust, no AGT checkout, no local image build.** |
+| Fastest smoke test (`kars dev --release`) | The **`docker` CLI** (or a Podman `docker`-compatible shim) · Node.js 22+. One container, no Kubernetes — quickest path to a chat, not the production shape. |
+| From source (contributors hacking on kars) | Either of the above, plus Rust 1.88+ and a local [AGT](https://github.com/microsoft/agent-governance-toolkit) checkout (relay + registry are built locally). |
 | AKS mode | Any of the above, plus the [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), [Helm 3.14+](https://helm.sh/), and an Azure subscription where you can create resource groups. |
 
 All four paths need an **inference provider** — you pick one on first run (see [Choosing an inference provider](#choosing-an-inference-provider)). The easiest is a **GitHub Copilot** seat (no Azure account, no PAT).

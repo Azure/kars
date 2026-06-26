@@ -144,7 +144,7 @@ npm i -g @kars-runtime/cli
 ```
 
 **Recommended — a real Kubernetes dev loop on a local [kind](https://kind.sigs.k8s.io/) cluster.**
-You need **kind** + **kubectl** + a container runtime (Docker or Podman):
+You need **kind** + **kubectl** + any container runtime (**Docker, Podman, or nerdctl** — kind drives all three):
 
 ```bash
 kars dev --release --target local-k8s
@@ -156,15 +156,16 @@ almost identically to AKS. It's the dev loop we recommend, because what you test
 locally is what ships.
 
 <details>
-<summary><strong>Just want the fastest smoke test?</strong> A single Docker container, no Kubernetes.</summary>
+<summary><strong>Just want the fastest smoke test?</strong> A single container, no Kubernetes.</summary>
 
 If you only need to kick the tyres and don't have kind installed, the default
-target runs the agent + router co-located in **one Docker container** (no
+target runs the agent + router co-located in **one container** (no
 `NetworkPolicy`, no separate router container — not the production shape, but the
-quickest path to a chat):
+quickest path to a chat). This path uses the **`docker` CLI** directly, so it
+needs Docker (or a Podman `docker`-compatible shim) plus Node 22+:
 
 ```bash
-kars dev --release          # one container; needs only Docker + Node 22+
+kars dev --release          # one container via the docker CLI
 ```
 
 </details>

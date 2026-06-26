@@ -2,7 +2,7 @@
 
 Get a governed, sandboxed agent running on your laptop in **three commands** — no Azure account, no Rust, no clone.
 
-> 📋 **You need:** [Docker](https://docs.docker.com/get-docker/) (or Podman) · [Node.js 22+](https://nodejs.org/) · a **GitHub Copilot** seat (any tier). Nothing else.
+> 📋 **You need:** the [`docker` CLI](https://docs.docker.com/get-docker/) (or Podman's `docker`-compatible shim) · [Node.js 22+](https://nodejs.org/) · a **GitHub Copilot** seat (any tier). Nothing else. *(For the production-shaped kind loop, see the tip below — it also accepts Podman and nerdctl.)*
 
 ```bash
 # 1. Install the CLI (public, signed, SLSA-attested)
@@ -17,7 +17,7 @@ kars connect dev-agent
 
 On first run, `kars dev` asks you to pick an inference provider — choose **GitHub Copilot** (one device-code login, no Azure account). That's it: you now have an agent whose every model call, tool call, and network request is brokered by the in-pod Rust router.
 
-> 💡 **Tip — try the real Kubernetes shape.** Swap step 2 for `kars dev --release --target local-k8s` to run the *same* images on a local [kind](https://kind.sigs.k8s.io/) cluster with the production pod shape (separate router container, `NetworkPolicy`, seccomp). It behaves almost identically to AKS and is the recommended dev loop.
+> 💡 **Tip — the recommended dev loop is kind, not a single container.** Swap step 2 for `kars dev --release --target local-k8s` to run the *same* images on a local [kind](https://kind.sigs.k8s.io/) cluster in the real production pod shape (separate router container, `NetworkPolicy`, seccomp). It behaves almost identically to AKS, and kind drives **Docker, Podman, or nerdctl** — your choice.
 
 ## What just happened?
 
