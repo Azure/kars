@@ -1,0 +1,653 @@
+/* ==========================================================================
+   kars — documentation theme
+   Layered on top of the stock mdBook themes (light / rust / coal / navy / ayu).
+   Loaded last via `additional-css`, so every rule here intentionally
+   overrides the defaults. Organised as:
+     1. Design tokens (brand + per-theme overrides)
+     2. Typography
+     3. Top navigation / brand bar
+     4. Call-to-action buttons
+     5. Content polish (headings, links, tables, blockquotes, admonitions)
+     6. Code blocks & syntax highlighting
+     7. Mermaid diagrams
+     8. Sidebar, search & misc chrome
+   ========================================================================== */
+
+/* ==========================================================================
+   1. Design tokens
+   ========================================================================== */
+
+:root {
+  /* Brand palette — Azure family, tuned for AA contrast on both modes. */
+  --kars-azure: #0078d4;
+  --kars-azure-bright: #2899f5;
+  --kars-azure-hover: #1a86e0;
+  --kars-azure-active: #005a9e;
+  --kars-azure-deep: #004578;
+  --kars-accent: #50e6ff;          /* cyan accent for highlights */
+  --kars-violet: #8a63d2;
+
+  /* Elevation + radii — a single, consistent system. */
+  --kars-radius-sm: 6px;
+  --kars-radius: 10px;
+  --kars-radius-lg: 16px;
+  --kars-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.08), 0 1px 1px rgba(15, 23, 42, 0.04);
+  --kars-shadow: 0 4px 16px rgba(15, 23, 42, 0.10), 0 2px 4px rgba(15, 23, 42, 0.06);
+  --kars-shadow-lg: 0 18px 48px rgba(15, 23, 42, 0.18), 0 6px 16px rgba(15, 23, 42, 0.10);
+
+  /* Typography */
+  --kars-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono-font: "JetBrains Mono", ui-monospace, "SF Mono", "Source Code Pro",
+    Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --code-font-size: 0.86em;
+
+  /* Layout — a touch more breathing room than stock mdBook. */
+  --content-max-width: 820px;
+  --menu-bar-height: 60px;
+
+  /* Per-theme surfaces, recoloured below for each theme class. */
+  --kars-surface: #ffffff;
+  --kars-surface-2: #f7f9fc;
+  --kars-border: rgba(15, 23, 42, 0.10);
+  --kars-code-bg: #f6f8fa;
+  --kars-code-border: rgba(15, 23, 42, 0.08);
+  --kars-nav-bg: rgba(255, 255, 255, 0.78);
+  --kars-nav-border: rgba(15, 23, 42, 0.08);
+  --kars-brand-fg: #0b1220;
+  --kars-link: var(--kars-azure);
+}
+
+/* --- Light-family themes -------------------------------------------------- */
+.light, .rust, html:not(.js) {
+  --links: var(--kars-azure);
+  --kars-link: var(--kars-azure);
+  --sidebar-active: var(--kars-azure);
+  --kars-surface: #ffffff;
+  --kars-surface-2: #f5f7fb;
+  --kars-border: rgba(15, 23, 42, 0.10);
+  --kars-code-bg: #f6f8fa;
+  --kars-code-border: rgba(15, 23, 42, 0.08);
+  --kars-nav-bg: rgba(255, 255, 255, 0.80);
+  --kars-nav-border: rgba(15, 23, 42, 0.09);
+  --kars-brand-fg: #0b1220;
+}
+
+.rust {
+  --kars-surface: #f4efe6;
+  --kars-surface-2: #efe8db;
+  --kars-code-bg: #efe9dd;
+  --kars-code-border: rgba(60, 40, 20, 0.14);
+  --kars-nav-bg: rgba(238, 232, 219, 0.85);
+  --kars-nav-border: rgba(60, 40, 20, 0.14);
+  --kars-brand-fg: #2b2118;
+}
+
+/* --- Dark-family themes --------------------------------------------------- */
+.coal, .navy, .ayu {
+  --links: var(--kars-azure-bright);
+  --kars-link: var(--kars-azure-bright);
+  --kars-brand-fg: #eef2f8;
+  --kars-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.40);
+  --kars-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --kars-shadow-lg: 0 22px 60px rgba(0, 0, 0, 0.55);
+}
+
+.coal {
+  --sidebar-active: var(--kars-azure-bright);
+  --kars-surface: #1a1d1f;
+  --kars-surface-2: #15181a;
+  --kars-border: rgba(255, 255, 255, 0.08);
+  --kars-code-bg: #0f1416;
+  --kars-code-border: rgba(255, 255, 255, 0.07);
+  --kars-nav-bg: rgba(20, 22, 23, 0.82);
+  --kars-nav-border: rgba(255, 255, 255, 0.07);
+}
+
+.navy {
+  --sidebar-active: var(--kars-azure-bright);
+  --kars-surface: #1b2030;
+  --kars-surface-2: #161a27;
+  --kars-border: rgba(255, 255, 255, 0.08);
+  --kars-code-bg: #11141f;
+  --kars-code-border: rgba(255, 255, 255, 0.07);
+  --kars-nav-bg: rgba(22, 25, 35, 0.82);
+  --kars-nav-border: rgba(255, 255, 255, 0.07);
+}
+
+.ayu {
+  --sidebar-active: var(--kars-accent);
+  --kars-surface: #11151a;
+  --kars-surface-2: #0d1015;
+  --kars-border: rgba(255, 255, 255, 0.08);
+  --kars-code-bg: #0b0e13;
+  --kars-code-border: rgba(255, 255, 255, 0.06);
+  --kars-nav-bg: rgba(15, 19, 24, 0.82);
+  --kars-nav-border: rgba(255, 255, 255, 0.06);
+}
+
+/* ==========================================================================
+   2. Typography
+   ========================================================================== */
+
+html {
+  font-family: var(--kars-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  scroll-behavior: smooth;
+}
+
+.content {
+  font-size: 1.0rem;
+  line-height: 1.7;
+}
+
+.content p,
+.content li {
+  line-height: 1.72em;
+}
+
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content h5 {
+  font-weight: 700;
+  letter-spacing: -0.018em;
+  line-height: 1.25;
+  scroll-margin-top: calc(var(--menu-bar-height) + 16px);
+}
+
+.content h1 {
+  font-size: 2.1rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.content h2 {
+  font-size: 1.55rem;
+  margin-top: 2.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--kars-border);
+}
+
+.content h3 { font-size: 1.25rem; margin-top: 1.9rem; }
+.content h4 { font-size: 1.05rem; }
+
+/* Anchor link affordance on hover. */
+.content h1 a.header:hover::after,
+.content h2 a.header:hover::after,
+.content h3 a.header:hover::after,
+.content h4 a.header:hover::after {
+  content: "#";
+  margin-inline-start: 0.4rem;
+  color: var(--kars-link);
+  opacity: 0.6;
+  font-weight: 600;
+}
+
+/* ==========================================================================
+   3. Top navigation / brand bar
+   ========================================================================== */
+
+#mdbook-menu-bar.kars-menu-bar {
+  align-items: center;
+  height: var(--menu-bar-height);
+  flex-wrap: nowrap;
+  gap: 0.25rem;
+  padding-inline: 6px;
+  background-color: var(--kars-nav-bg);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  backdrop-filter: saturate(180%) blur(14px);
+  border-block-end: 1px solid var(--kars-nav-border);
+  box-shadow: var(--kars-shadow-sm);
+}
+
+/* Brand lockup: mark + wordmark + subtle tag. */
+.kars-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-inline: 0.4rem 0.2rem;
+  padding: 0.25rem 0.45rem;
+  border-radius: var(--kars-radius);
+  text-decoration: none !important;
+  color: var(--kars-brand-fg) !important;
+  white-space: nowrap;
+  transition: background-color 0.18s ease, transform 0.18s ease;
+}
+
+.kars-brand:hover {
+  background-color: var(--kars-border);
+  transform: translateY(-1px);
+}
+
+.kars-brand-mark {
+  display: block;
+  filter: drop-shadow(0 2px 5px rgba(0, 120, 212, 0.35));
+  border-radius: 8px;
+}
+
+.kars-brand-wordmark {
+  font-weight: 800;
+  font-size: 1.18rem;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.kars-brand-tag {
+  font-weight: 600;
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  color: var(--kars-azure);
+  background: color-mix(in srgb, var(--kars-azure) 14%, transparent);
+}
+
+/* Re-balance the centred title alongside the new brand block. */
+.kars-menu-bar .menu-title {
+  font-weight: 600;
+  font-size: 0.98rem;
+  letter-spacing: -0.01em;
+  opacity: 0.66;
+  text-align: center;
+}
+
+@media only screen and (max-width: 900px) {
+  .kars-menu-bar .menu-title { display: none; }
+}
+@media only screen and (max-width: 520px) {
+  .kars-brand-tag,
+  .kars-brand-wordmark { display: none; }
+}
+
+/* GitHub call-to-action pill in the top bar. */
+.kars-right-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-inline-end: 10px;
+}
+
+a.kars-gh-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  height: 34px;
+  padding: 0 0.85rem;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #fff !important;
+  background: linear-gradient(180deg, var(--kars-azure-bright), var(--kars-azure));
+  border: 1px solid color-mix(in srgb, var(--kars-azure-deep) 60%, transparent);
+  box-shadow: var(--kars-shadow-sm);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease;
+}
+
+a.kars-gh-cta:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+  box-shadow: var(--kars-shadow);
+}
+
+a.kars-gh-cta .fa-svg {
+  fill: currentColor;
+  color: #fff;
+}
+
+a.kars-gh-cta .kars-gh-cta-label { line-height: 1; }
+
+@media only screen and (max-width: 520px) {
+  a.kars-gh-cta { padding: 0 0.6rem; }
+  a.kars-gh-cta .kars-gh-cta-label { display: none; }
+}
+
+/* ==========================================================================
+   4. Call-to-action buttons (authored in markdown)
+   ========================================================================== */
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.75rem 0;
+}
+
+.content a.btn-primary,
+.content a.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.62rem 1.4rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-decoration: none;
+  border-radius: var(--kars-radius);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease,
+    background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.content a.btn-primary,
+.content a.btn-primary:link,
+.content a.btn-primary:visited {
+  color: #fff;
+  background: linear-gradient(180deg, var(--kars-azure-bright), var(--kars-azure));
+  border: 1px solid color-mix(in srgb, var(--kars-azure-deep) 55%, transparent);
+  box-shadow: 0 6px 18px rgba(0, 120, 212, 0.30);
+}
+
+.content a.btn-primary:hover {
+  color: #fff;
+  transform: translateY(-2px);
+  filter: brightness(1.05);
+  box-shadow: 0 10px 26px rgba(0, 120, 212, 0.40);
+}
+
+.content a.btn-primary:active {
+  transform: translateY(0);
+  background: var(--kars-azure-active);
+  box-shadow: 0 4px 12px rgba(0, 120, 212, 0.30);
+}
+
+.content a.btn-secondary,
+.content a.btn-secondary:link,
+.content a.btn-secondary:visited {
+  color: var(--kars-link);
+  background: var(--kars-surface);
+  border: 1px solid var(--kars-border);
+  box-shadow: var(--kars-shadow-sm);
+}
+
+.content a.btn-secondary:hover {
+  transform: translateY(-2px);
+  border-color: var(--kars-azure);
+  box-shadow: var(--kars-shadow);
+}
+
+/* ==========================================================================
+   5. Content polish
+   ========================================================================== */
+
+.content main {
+  padding-top: 0.5rem;
+}
+
+.content a:link,
+.content a:visited {
+  color: var(--kars-link);
+  text-decoration-color: color-mix(in srgb, var(--kars-link) 35%, transparent);
+  text-underline-offset: 2px;
+}
+
+.content a:hover {
+  text-decoration-color: var(--kars-link);
+}
+
+/* Tables — card-like, zebra striped, rounded corners. */
+.content table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 1.5rem 0;
+  border: 1px solid var(--kars-border);
+  border-radius: var(--kars-radius);
+  overflow: hidden;
+  box-shadow: var(--kars-shadow-sm);
+}
+
+.content table thead th {
+  background: var(--kars-surface-2);
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  border: none;
+}
+
+.content table td,
+.content table th {
+  border: none;
+  border-bottom: 1px solid var(--kars-border);
+  padding: 0.6rem 0.85rem;
+}
+
+.content table tbody tr:last-child td { border-bottom: none; }
+.content table tbody tr:nth-child(2n) { background: var(--kars-surface-2); }
+
+/* Blockquotes + GitHub-style admonitions. */
+.content blockquote {
+  background: var(--kars-surface-2);
+  border-inline-start: 4px solid var(--kars-azure);
+  border-radius: 0 var(--kars-radius) var(--kars-radius) 0;
+  padding: 0.85rem 1.1rem;
+  margin: 1.4rem 0;
+  color: inherit;
+}
+
+/* Horizontal rules as soft dividers. */
+.content hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--kars-border), transparent);
+  margin: 2.2rem 0;
+}
+
+/* Images sit on a subtle card so diagrams/screenshots feel intentional. */
+.content img {
+  max-width: 100%;
+  border-radius: var(--kars-radius);
+}
+
+/* ==========================================================================
+   6. Code blocks & syntax highlighting
+   ========================================================================== */
+
+/* Inline code chips. */
+.content code:not(pre code) {
+  background: color-mix(in srgb, var(--kars-azure) 10%, var(--kars-code-bg));
+  color: var(--inline-code-color);
+  padding: 0.12em 0.4em;
+  border-radius: var(--kars-radius-sm);
+  border: 1px solid var(--kars-code-border);
+  font-size: 0.84em;
+}
+
+/* Block code — framed card with comfortable padding. */
+.content pre {
+  position: relative;
+  background: var(--kars-code-bg) !important;
+  border: 1px solid var(--kars-code-border);
+  border-radius: var(--kars-radius);
+  padding: 0;
+  margin: 1.5rem 0;
+  box-shadow: var(--kars-shadow-sm);
+  overflow: hidden;
+}
+
+.content pre > code {
+  display: block;
+  padding: 1rem 1.15rem;
+  background: transparent !important;
+  font-size: var(--code-font-size);
+  line-height: 1.6;
+  overflow-x: auto;
+  border-radius: var(--kars-radius);
+}
+
+/* Accent strip down the left edge of every code block. */
+.content pre::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--kars-azure-bright), var(--kars-violet));
+  opacity: 0.85;
+}
+
+/* Copy button refinement. */
+.content pre:hover > .buttons,
+pre > .buttons {
+  transition: opacity 0.2s ease;
+}
+pre > .buttons button {
+  border-radius: var(--kars-radius-sm);
+}
+
+/* Syntax token palette — applied to highlight.js classes so all five
+   mdBook themes share one carefully chosen, AA-friendly set of colours. */
+.content pre code .hljs-comment,
+.content pre code .hljs-quote { color: #7d8590; font-style: italic; }
+
+.content pre code .hljs-keyword,
+.content pre code .hljs-selector-tag,
+.content pre code .hljs-literal,
+.content pre code .hljs-type { color: #c678dd; }
+
+.content pre code .hljs-string,
+.content pre code .hljs-meta-string,
+.content pre code .hljs-regexp { color: #98c379; }
+
+.content pre code .hljs-number,
+.content pre code .hljs-symbol,
+.content pre code .hljs-bullet { color: #d19a66; }
+
+.content pre code .hljs-function,
+.content pre code .hljs-title,
+.content pre code .hljs-section { color: #61afef; }
+
+.content pre code .hljs-attr,
+.content pre code .hljs-attribute,
+.content pre code .hljs-variable,
+.content pre code .hljs-template-variable { color: #56b6c2; }
+
+.content pre code .hljs-built_in,
+.content pre code .hljs-class .hljs-title { color: #e5c07b; }
+
+.content pre code .hljs-meta,
+.content pre code .hljs-doctag { color: #56b6c2; }
+
+.content pre code .hljs-deletion { color: #e06c75; background: rgba(224, 108, 117, 0.10); }
+.content pre code .hljs-addition { color: #98c379; background: rgba(152, 195, 121, 0.10); }
+.content pre code .hljs-emphasis { font-style: italic; }
+.content pre code .hljs-strong { font-weight: 700; }
+
+/* Soften token brightness on the light/rust themes for contrast. */
+.light .content pre code .hljs-keyword,
+.rust .content pre code .hljs-keyword { color: #a626a4; }
+.light .content pre code .hljs-string,
+.rust .content pre code .hljs-string { color: #50a14f; }
+.light .content pre code .hljs-function,
+.light .content pre code .hljs-title,
+.rust .content pre code .hljs-function,
+.rust .content pre code .hljs-title { color: #1a73c4; }
+.light .content pre code .hljs-comment,
+.rust .content pre code .hljs-comment { color: #8a909c; }
+
+/* ==========================================================================
+   7. Mermaid diagrams
+   ========================================================================== */
+
+.content .mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 1.75rem auto;
+  padding: 1.25rem;
+  background: var(--kars-surface);
+  border: 1px solid var(--kars-border);
+  border-radius: var(--kars-radius-lg);
+  box-shadow: var(--kars-shadow-sm);
+  overflow-x: auto;
+}
+
+.content .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Keep edge labels legible on dark surfaces. */
+.coal .content .mermaid .edgeLabel,
+.navy .content .mermaid .edgeLabel,
+.ayu .content .mermaid .edgeLabel {
+  background-color: transparent !important;
+}
+
+/* Mermaid caps subgraph (cluster) title foreignObjects at 200px, which clips
+   longer titles to a second, vertically-hidden line. Let the title render at
+   its natural width, centred on the cluster, overflowing the 200px box. The
+   foreignObject is positioned with its 200px box centred on the cluster, so
+   left:50% lands on the cluster centre and translateX(-50%) re-centres the
+   natural-width text on that point. */
+.content .mermaid .cluster-label foreignObject {
+  overflow: visible;
+}
+.content .mermaid .cluster-label foreignObject > div {
+  width: max-content !important;
+  max-width: none !important;
+  white-space: nowrap;
+  position: relative;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* ==========================================================================
+   8. Sidebar, search & misc chrome
+   ========================================================================== */
+
+.sidebar {
+  border-inline-end: 1px solid var(--kars-nav-border);
+}
+
+.chapter li.chapter-item {
+  line-height: 1.5;
+  margin-top: 0.2em;
+}
+
+/* Active chapter pill. */
+.chapter li a.active {
+  font-weight: 700;
+  border-radius: var(--kars-radius-sm);
+  background: color-mix(in srgb, var(--sidebar-active) 16%, transparent);
+  box-shadow: inset 3px 0 0 var(--sidebar-active);
+  padding-inline-start: 0.4rem;
+}
+
+.chapter li a:hover {
+  border-radius: var(--kars-radius-sm);
+}
+
+/* Section header labels in the sidebar. */
+.chapter .spacer + li > ol > li,
+.part-title {
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  font-weight: 700;
+  opacity: 0.65;
+}
+
+/* Search box. */
+#mdbook-searchbar {
+  border-radius: var(--kars-radius);
+  border: 1px solid var(--kars-border);
+  padding: 0.55rem 0.85rem;
+  font-family: var(--kars-sans);
+}
+
+.searchresults-outer {
+  border-radius: var(--kars-radius);
+}
+
+/* Reduced-motion users get no transitions. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

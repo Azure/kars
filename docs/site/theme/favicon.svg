@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="kars">
+  <defs>
+    <linearGradient id="kars-fav-grad" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2899f5"/>
+      <stop offset="1" stop-color="#0050a0"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="url(#kars-fav-grad)"/>
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>
+  <path d="M11 8v16M11 16.5l8-8.5M11 15.5l8 8.5" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
