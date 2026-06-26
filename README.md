@@ -195,8 +195,8 @@ When you're ready for a managed cluster, `kars up` provisions AKS (see
 # One-line installer (no Node required up front — fetches the signed CLI tarball)
 curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh | bash
 
-# Pin a specific release with the installer
-KARS_VERSION=v0.1.18 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh)"
+# Pin a specific release with the installer (any published tag; omit for latest)
+KARS_VERSION=v0.1.20 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Azure/kars/main/install.sh)"
 
 # Or build from source — to hack on the controller / router / plugin (needs Rust 1.88+)
 git clone https://github.com/Azure/kars.git && cd kars
@@ -326,7 +326,7 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 
 > ✅ **Every published artefact is signed.** All container images on `ghcr.io/azure` are **cosign keyless-signed** (verifiable in the Sigstore Rekor transparency log), carry an **SPDX SBOM**, and a **GitHub build-provenance (SLSA) attestation** — verify with `cosign verify` / `gh attestation verify`. The CLI is published to **npmjs as [`@kars-runtime/cli`](https://www.npmjs.com/package/@kars-runtime/cli)** with an SLSA build-provenance attestation (verify with `npm audit signatures`), and the CLI tarball on each GitHub Release is attested too. Install with no compile via the [Try it in five minutes](#try-it-in-five-minutes) quick-start. *(We're additionally working on publishing to crates.io / MCR — the GHCR + npm artefacts above are signed and usable today.)*
 
-**`v0.1.18`.** The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E, chaos-tier fault injection, CNCF conformance self-assessment, plus a documented manual matrix on AKS — see [`tests/`](tests/)). The CRD surface is served at `v1alpha1` and may change between minor releases; the data path, security model, and audit chain are stable. See **[`CHANGELOG.md`](CHANGELOG.md)** for the change log and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
+**Status: active development; CRDs at `v1alpha1`.** The core data path (router, controller, A2A gateway, mesh) is feature-complete and exercised by CI (Kind E2E, chaos-tier fault injection, CNCF conformance self-assessment, plus a documented manual matrix on AKS — see [`tests/`](tests/)). The CRD surface is served at `v1alpha1` and may change between minor releases; the data path, security model, and audit chain are stable. See the **[latest release](https://github.com/Azure/kars/releases/latest)** and **[`CHANGELOG.md`](CHANGELOG.md)** for what shipped, and **[`docs/roadmap.md`](docs/roadmap.md)** for what's next.
 
 ## Known limitations
 
