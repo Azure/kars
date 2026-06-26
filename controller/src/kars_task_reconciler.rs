@@ -114,17 +114,15 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // There is nothing cluster-side to clean up in V0.
     if task.metadata.deletion_timestamp.is_some() {
         if has_finalizer(&task) {
-            let patch = json!({
-                "apiVersion": "kars.azure.com/v1alpha1",
-                "kind": "KarsTask",
-                "metadata": { "finalizers": drop_finalizer(&task) },
-            });
+            // Drop our finalizer with a merge patch. A server-side *apply* that
+            // sets `finalizers: []` does not reliably remove a finalizer the
+            // apiserver no longer attributes to this manager (it 400s with
+            // "name must be provided"), which would strand the object in
+            // Terminating forever and leak its sandbox. A merge patch replaces
+            // the array deterministically.
+            let patch = json!({ "metadata": { "finalizers": drop_finalizer(&task) } });
             tasks
-                .patch(
-                    &name,
-                    &PatchParams::apply(FIELD_MANAGER).force(),
-                    &Patch::Apply(patch),
-                )
+                .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
         }
         return Ok(Action::await_change());
@@ -137,7 +135,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         let patch = json!({
             "apiVersion": "kars.azure.com/v1alpha1",
             "kind": "KarsTask",
-            "metadata": { "finalizers": finalizers },
+            "metadata": { "name": name, "finalizers": finalizers },
         });
         tasks
             .patch(
