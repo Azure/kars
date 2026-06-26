@@ -496,7 +496,14 @@ async function loadImageIntoKind(
 
   if (upToDate) return;
 
-  const save = execa(runtime, ["save", image]);
+  // `buffer: false` is essential: execa otherwise accumulates the
+  // subprocess stdout into its result (capped at `maxBuffer`, default
+  // 100 MB) *even when the stream is also piped*. `docker save` of a
+  // multi-hundred-MB image (e.g. openclaw-sandbox) overflows that cap and
+  // fails the whole `kars dev` bring-up at "Loading kars images". We never
+  // need the tarball in memory — it streams straight to `ctr import` — so
+  // disable buffering entirely.
+  const save = execa(runtime, ["save", image], { buffer: false });
   const importProc = execa(
     runtime,
     ["exec", "-i", node, "ctr", "-n=k8s.io", "images", "import", "-"],
