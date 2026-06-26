@@ -34,118 +34,106 @@ class _FakeCtx:
         self.tools[kwargs["name"]] = kwargs
 
 
-# ── foundry_memory — store name convention ─────────────────────────
+# ── foundry_memory — thin client over the router platform MCP ──────
+#
+# The router owns the Memory Store contract; the Hermes tool only
+# forwards intent to `POST /platform/mcp` as a JSON-RPC `tools/call`.
+# These tests pin THAT seam — the on-the-wire contract is exercised by
+# the router's own platform tests (inference-router/src/mcp/platform.rs).
 
 
-def test_store_name_follows_kars_convention(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_NAME", "auditor")
-    assert foundry._store_name() == "memory-auditor"
+def _rpc_ok(text: str, *, is_error: bool = False) -> dict[str, Any]:
+    """A JSON-RPC `tools/call` success envelope as the router returns it."""
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"content": [{"type": "text", "text": text}], "isError": is_error},
+    }
 
 
-def test_store_name_truncates_long_sandbox_names(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_NAME", "a" * 100)
-    name = foundry._store_name()
-    assert len(name) <= 63
-    assert name.startswith("memory-")
-
-
-def test_store_name_falls_back_when_sandbox_name_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("SANDBOX_NAME", raising=False)
-    assert foundry._store_name() == "memory-unknown"
-
-
-# ── foundry_memory — operation dispatch ─────────────────────────────
-
-
-def test_foundry_memory_rejects_unknown_operation(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_NAME", "x")
-    result = foundry._foundry_memory({"operation": "purge"})
-    parsed = json.loads(result)
-    assert "must be" in parsed["error"]
-
-
-def test_foundry_memory_search_uses_correct_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_NAME", "auditor")
+def _capture_platform_call(response: httpx.Response) -> tuple[dict[str, Any], Any]:
+    """Build a `router_client.call` fake that records the JSON-RPC body."""
     captured: dict[str, Any] = {}
 
     def fake_call(method: str, path: str, **kwargs: Any) -> httpx.Response:
         captured["method"] = method
         captured["path"] = path
         captured["body"] = kwargs.get("json")
-        return _mock_response(200, {"memories": [{"text": "hello"}]})
+        return response
 
-    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
-        result = foundry._foundry_memory({"operation": "search", "query": "test"})
-
-    assert captured["method"] == "POST"
-    assert ":search_memories" in captured["path"]
-    assert "memory-auditor" in captured["path"]
-    assert captured["body"]["query_text"] == "test"
-    assert captured["body"]["scope"] == "agent:auditor"
-    parsed = json.loads(result)
-    assert "memories" in parsed
+    return captured, fake_call
 
 
-def test_foundry_memory_update_requires_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_NAME", "x")
-    result = foundry._foundry_memory({"operation": "update"})
-    parsed = json.loads(result)
-    assert "requires 'text'" in parsed["error"]
-
-
-def test_foundry_memory_update_wraps_text_in_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_NAME", "x")
-    captured: dict[str, Any] = {}
-
-    def fake_call(method: str, path: str, **kwargs: Any) -> httpx.Response:
-        captured["body"] = kwargs.get("json")
-        return _mock_response(200, {"id": "mem-1"})
-
-    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
-        foundry._foundry_memory({"operation": "update", "text": "remember this"})
-
-    body = captured["body"]
-    assert body["messages"][0]["content"] == "remember this"
-    assert body["scope"] == "agent:x"
-
-
-def test_foundry_memory_custom_scope_overrides_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_NAME", "x")
-    captured: dict[str, Any] = {}
-
-    def fake_call(method: str, path: str, **kwargs: Any) -> httpx.Response:
-        captured["body"] = kwargs.get("json")
-        return _mock_response(200, {"results": []})
-
-    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
-        foundry._foundry_memory(
-            {"operation": "search", "query": "x", "scope": "session:abc123"}
-        )
-
-    assert captured["body"]["scope"] == "session:abc123"
-
-
-def test_foundry_memory_delete_scope() -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_call(method: str, path: str, **kwargs: Any) -> httpx.Response:
-        captured["path"] = path
-        captured["body"] = kwargs.get("json")
-        return _mock_response(200, {"deleted_count": 5})
-
+def test_foundry_memory_forwards_search_to_platform_mcp() -> None:
+    captured, fake_call = _capture_platform_call(_mock_response(200, _rpc_ok('{"memories": []}')))
     with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
         result = foundry._foundry_memory(
-            {"operation": "delete_scope", "scope": "session:xyz"}
+            {"operation": "search", "query": "coffee?", "top_k": 5}
         )
 
-    assert ":delete_scope" in captured["path"]
-    assert captured["body"]["scope"] == "session:xyz"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/platform/mcp"
+    body = captured["body"]
+    assert body["method"] == "tools/call"
+    assert body["params"]["name"] == "foundry.memory"
+    # Only intent is forwarded — no store name, no scope unless given,
+    # no REST contract shape.
+    assert body["params"]["arguments"] == {
+        "operation": "search",
+        "query": "coffee?",
+        "top_k": 5,
+    }
+    # The router's text result is flattened back to the caller.
+    assert json.loads(result) == {"memories": []}
+
+
+def test_foundry_memory_forwards_update_text() -> None:
+    captured, fake_call = _capture_platform_call(_mock_response(200, _rpc_ok("queued")))
+    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
+        result = foundry._foundry_memory(
+            {"operation": "update", "text": "likes dark roast"}
+        )
+    assert captured["body"]["params"]["arguments"] == {
+        "operation": "update",
+        "text": "likes dark roast",
+    }
+    assert result == "queued"
+
+
+def test_foundry_memory_forwards_scope_and_delete_scope() -> None:
+    captured, fake_call = _capture_platform_call(_mock_response(200, _rpc_ok('{"deleted": 3}')))
+    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
+        foundry._foundry_memory({"operation": "delete_scope", "scope": "session_xyz"})
+    assert captured["body"]["params"]["arguments"] == {
+        "operation": "delete_scope",
+        "scope": "session_xyz",
+    }
+
+
+def test_foundry_memory_surfaces_jsonrpc_error() -> None:
+    err_env = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": -32602, "message": "bad", "data": {"reason": "operation must be search"}},
+    }
+    _, fake_call = _capture_platform_call(_mock_response(200, err_env))
+    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
+        result = foundry._foundry_memory({"operation": "purge"})
     parsed = json.loads(result)
-    assert parsed["deleted_count"] == 5
+    assert "operation must be search" in parsed["error"]
 
 
-def test_foundry_memory_http_error_surfaces_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SANDBOX_NAME", "x")
+def test_foundry_memory_surfaces_tool_is_error_text() -> None:
+    # A tool-level failure (e.g. upstream 403) comes back as result.content
+    # text with isError=true; the text is what the LLM should see.
+    hint = "foundry.memory:search returned HTTP 403 (verify the project managed identity...)"
+    _, fake_call = _capture_platform_call(_mock_response(200, _rpc_ok(hint, is_error=True)))
+    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
+        result = foundry._foundry_memory({"operation": "search", "query": "x"})
+    assert "HTTP 403" in result
+
+
+def test_foundry_memory_surfaces_http_error() -> None:
     with mock.patch.object(
         foundry.router_client,
         "call",

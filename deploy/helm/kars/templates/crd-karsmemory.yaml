@@ -135,9 +135,10 @@ spec:
               scope:
                 description: |-
                   Scope key under which this sandbox writes/reads memories.
-                  Foundry Memory Store partitions data per scope. CEL:
-                  non-empty. Default convention (set by the runtime path if
-                  absent here): `agent:{sandboxName}`.
+                  Foundry Memory Store partitions data per scope and validates the
+                  value to letters, digits, and `_ - . % + @ /` — colons are
+                  rejected. CEL: non-empty + charset. Default convention (set by
+                  the runtime path if absent here): `agent_{sandboxName}`.
 
                   Required when [`Self::bundle_ref`] is absent (the inline
                   path); MUST be absent when [`Self::bundle_ref`] is set.
@@ -166,9 +167,9 @@ spec:
             - message: spec.sandboxRef.name must be 1-253 characters
               reason: FieldValueInvalid
               rule: size(self.sandboxRef.name) > 0 && size(self.sandboxRef.name) <= 253
-            - message: spec.scope must be 1-256 characters when spec.bundleRef is not set
+            - message: spec.scope must be 1-256 characters using only letters, digits, and _ - . % + @ / (colons are rejected by the Foundry Memory Store) when spec.bundleRef is not set
               reason: FieldValueInvalid
-              rule: has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256)
+              rule: has(self.bundleRef) || (has(self.scope) && size(self.scope) > 0 && size(self.scope) <= 256 && self.scope.matches('^[A-Za-z0-9_./%+@-]+$'))
             - message: spec.retentionDays must be > 0 when set (use delete_scope for immediate deletion)
               reason: FieldValueInvalid
               rule: '!has(self.retentionDays) || self.retentionDays > 0'

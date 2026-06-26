@@ -273,14 +273,14 @@ mod tests {
     fn parse_full_bundle_ok() {
         let body = br#"{
             "storeName": "agent-x-mem",
-            "scope": "agent:agent-x",
+            "scope": "agent_agent-x",
             "retentionDays": 30,
             "deleteOnSandboxDelete": true,
             "displayName": "Agent X memory"
         }"#;
         let v = parse(body).unwrap();
         assert_eq!(v.store_name.as_deref(), Some("agent-x-mem"));
-        assert_eq!(v.scope.as_deref(), Some("agent:agent-x"));
+        assert_eq!(v.scope.as_deref(), Some("agent_agent-x"));
         assert_eq!(v.retention_days, Some(30));
         assert_eq!(v.delete_on_sandbox_delete, Some(true));
         assert_eq!(v.display_name.as_deref(), Some("Agent X memory"));

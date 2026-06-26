@@ -264,3 +264,48 @@ export async function pushSigningCounter(action: "signed" | "verified" | "reject
     });
   } catch { /* best effort */ }
 }
+
+/**
+ * Invoke a tool on the router's **platform MCP server** (`POST
+ * /platform/mcp`) via a single JSON-RPC `tools/call`. This is the
+ * canonical seam for capabilities the router owns end-to-end (e.g.
+ * `foundry.memory`): the runtime expresses intent + arguments, the
+ * router owns the upstream REST contract, store/scope resolution from
+ * the KarsMemory binding, auto-provision, retry, and CRD status. The
+ * agent process therefore carries no Foundry contract knowledge.
+ *
+ * Returns the flattened text content plus the tool's `isError` flag.
+ * A JSON-RPC error (unknown tool, invalid arguments) is surfaced as
+ * `{ isError: true }` with the server-provided reason.
+ */
+export async function callPlatformTool(
+  name: string,
+  args: Record<string, unknown>,
+  timeoutMs = 60000,
+): Promise<{ text: string; isError: boolean }> {
+  const rpc = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name, arguments: args },
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const resp: any = await routerCall("POST", "/platform/mcp", rpc, timeoutMs);
+  if (resp && typeof resp === "object" && resp.error) {
+    const reason =
+      resp.error?.data?.reason || resp.error?.message || "unknown error";
+    return { text: `${name}: ${reason}`, isError: true };
+  }
+  const result = resp?.result;
+  const content = Array.isArray(result?.content) ? result.content : [];
+  const text = content
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .filter((c: any) => c?.type === "text" && typeof c.text === "string")
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((c: any) => c.text)
+    .join("\n\n");
+  return {
+    text: text || JSON.stringify(result ?? resp ?? {}),
+    isError: Boolean(result?.isError),
+  };
+}
