@@ -157,3 +157,18 @@ describe("receipt verify — inclusion chain", () => {
     expect(__test.verifyInclusionChain(chain)).not.toBeNull();
   });
 });
+
+describe("receipt checkpoint — note + root", () => {
+  it("builds the canonical signed-note body", () => {
+    expect(__test.checkpointNote(5, "abc")).toBe("kars-receipt-log\n5\nabc\n");
+  });
+
+  it("chainRoot is the head entry hash or genesis", () => {
+    expect(__test.chainRoot([])).toBe("genesis");
+    const chain = [
+      { seq: 0, receipt: "ns/a", payloadSha256: "s0", prevHash: "genesis", entryHash: "h0" },
+      { seq: 1, receipt: "ns/b", payloadSha256: "s1", prevHash: "h0", entryHash: "h1" },
+    ];
+    expect(__test.chainRoot(chain)).toBe("h1");
+  });
+});

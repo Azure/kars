@@ -44,10 +44,18 @@ use crate::mesh_peer::IDENTITY_NAMESPACE;
 
 /// ConfigMap holding the hash-chained inclusion log.
 pub const LOG_CONFIGMAP_NAME: &str = "kars-receipt-log";
+/// ConfigMap holding the signed checkpoint (signed tree head).
+pub const CHECKPOINT_CONFIGMAP_NAME: &str = "kars-receipt-checkpoint";
+/// Checkpoint note origin line (Go-sumdb-style signed note).
+pub const CHECKPOINT_ORIGIN: &str = "kars-receipt-log";
 /// Data key inside the ConfigMap holding the JSON chain.
 const CHAIN_KEY: &str = "chain.json";
 /// Genesis previous-hash for the first entry.
 const GENESIS_PREV: &str = "genesis";
+/// Root-hash value used in a checkpoint over an empty log.
+const EMPTY_ROOT: &str = "genesis";
+/// SSA field manager for checkpoint writes.
+const CHECKPOINT_FIELD_MANAGER: &str = "kars-controller/receipt-checkpoint";
 /// Bounded optimistic-concurrency retries on append.
 const MAX_APPEND_RETRIES: usize = 5;
 
@@ -235,6 +243,103 @@ pub async fn append(
     anyhow::bail!("receipt inclusion log append exhausted retries (contention)")
 }
 
+/// Read and parse the full inclusion chain (for checkpointing + the CLI).
+pub async fn read_chain(client: &Client) -> Result<Vec<InclusionEntry>> {
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    let cm = cms.get_opt(LOG_CONFIGMAP_NAME).await?;
+    Ok(cm
+        .and_then(|c| {
+            c.data
+                .and_then(|d| d.get(CHAIN_KEY).cloned())
+                .and_then(|s| serde_json::from_str::<Vec<InclusionEntry>>(&s).ok())
+        })
+        .unwrap_or_default())
+}
+
+/// The root hash a checkpoint commits to: the head entry's hash (which, in a
+/// hash chain, already commits to the entire prefix), or `genesis` for an empty
+/// log.
+pub fn chain_root(chain: &[InclusionEntry]) -> String {
+    chain
+        .last()
+        .map(|e| e.entry_hash.clone())
+        .unwrap_or_else(|| EMPTY_ROOT.to_string())
+}
+
+/// Build the signed-note body for a checkpoint over a log of `tree_size`
+/// entries with head `root_hash`. Go-sumdb signed-note style: origin line, then
+/// size, then root, newline-terminated. Deterministic and timestamp-free so the
+/// signature is stable for a given log state (the publish time is recorded
+/// out-of-band in the ConfigMap, not in the signed body).
+pub fn checkpoint_note(tree_size: u64, root_hash: &str) -> String {
+    format!("{CHECKPOINT_ORIGIN}\n{tree_size}\n{root_hash}\n")
+}
+
+/// A published, signed checkpoint (signed tree head) over the inclusion log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Checkpoint {
+    pub origin: String,
+    pub tree_size: u64,
+    pub root_hash: String,
+    /// Hex SHA-256 key fingerprint of the signer (matches the trust anchor).
+    pub key_id: String,
+    /// Base64 Ed25519 signature over [`checkpoint_note`].
+    pub signature: String,
+}
+
+/// Publish a signed checkpoint for the current chain to the
+/// `kars-receipt-checkpoint` ConfigMap. Idempotent: re-publishing the same log
+/// state is a byte-identical no-op write (Ed25519 is deterministic).
+pub async fn publish_checkpoint(
+    client: &Client,
+    signer: &crate::providers::signing::ReceiptSigner,
+    chain: &[InclusionEntry],
+) -> Result<Checkpoint> {
+    let tree_size = chain.len() as u64;
+    let root_hash = chain_root(chain);
+    let note = checkpoint_note(tree_size, &root_hash);
+    let signature = signer.sign_note(note.as_bytes());
+    let checkpoint = Checkpoint {
+        origin: CHECKPOINT_ORIGIN.to_string(),
+        tree_size,
+        root_hash,
+        key_id: signer.key_id.clone(),
+        signature,
+    };
+
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    let cm: ConfigMap = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": CHECKPOINT_CONFIGMAP_NAME,
+            "namespace": IDENTITY_NAMESPACE,
+            "labels": {
+                "app.kubernetes.io/name": "kars",
+                "app.kubernetes.io/component": "receipt-checkpoint",
+            },
+        },
+        "data": {
+            "treeSize": tree_size.to_string(),
+            "rootHash": checkpoint.root_hash,
+            "keyId": checkpoint.key_id,
+            "signature": checkpoint.signature,
+            "note": note,
+            "publishedAt": chrono::Utc::now().to_rfc3339(),
+        },
+    }))?;
+    cms.patch(
+        CHECKPOINT_CONFIGMAP_NAME,
+        &kube::api::PatchParams::apply(CHECKPOINT_FIELD_MANAGER).force(),
+        &kube::api::Patch::Apply(&cm),
+    )
+    .await
+    .context("publishing receipt checkpoint ConfigMap")?;
+    tracing::debug!(tree_size, "receipt checkpoint published");
+    Ok(checkpoint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +411,43 @@ mod tests {
         assert!(already_current(&chain, "ns/r2", "sha2"));
         assert!(!already_current(&chain, "ns/r2", "sha-new"));
         assert!(!already_current(&chain, "ns/r9", "sha9"));
+    }
+
+    #[test]
+    fn chain_root_is_head_or_genesis() {
+        assert_eq!(chain_root(&[]), EMPTY_ROOT);
+        let chain = chain_of(3);
+        assert_eq!(chain_root(&chain), chain.last().unwrap().entry_hash);
+    }
+
+    #[test]
+    fn checkpoint_note_is_stable_signed_note_format() {
+        let note = checkpoint_note(5, "abc123");
+        assert_eq!(note, "kars-receipt-log\n5\nabc123\n");
+        // Deterministic for a given state.
+        assert_eq!(note, checkpoint_note(5, "abc123"));
+        // Sensitive to size and root.
+        assert_ne!(note, checkpoint_note(6, "abc123"));
+        assert_ne!(note, checkpoint_note(5, "abc124"));
+    }
+
+    #[test]
+    fn checkpoint_note_commits_to_head_which_commits_to_prefix() {
+        // The head entry hash chains over the whole prefix, so a checkpoint
+        // over it detects any prior-entry tamper without listing every entry.
+        let chain = chain_of(4);
+        let note = checkpoint_note(chain.len() as u64, &chain_root(&chain));
+        // Tamper an earlier entry → recomputing the chain changes the head →
+        // the note (and thus its signature) would differ.
+        let mut tampered = chain.clone();
+        tampered[1].payload_sha256 = "evil".to_string();
+        // Recompute the tampered chain's head as an honest log would.
+        let mut rebuilt: Vec<InclusionEntry> = Vec::new();
+        for e in &tampered {
+            rebuilt.push(next_entry(&rebuilt, &e.receipt, &e.payload_sha256));
+        }
+        let tampered_note =
+            checkpoint_note(rebuilt.len() as u64, &chain_root(&rebuilt));
+        assert_ne!(note, tampered_note);
     }
 }
