@@ -65,7 +65,7 @@ sequenceDiagram
   participant HL as Headlamp + plugin
   Dev->>CLI: kars dev --release --target local-k8s
   CLI->>Kind: kind create cluster
-  CLI->>Kind: docker build && load (controller, router, sandbox)
+  CLI->>Kind: build/pull + load images (controller, router, sandbox) via the detected runtime
   CLI->>Kind: helm template | kubectl apply --server-side
   CLI->>Kind: create kars-dev-creds Secret (Foundry / Copilot / Models)
   CLI->>HL: helm install headlamp
