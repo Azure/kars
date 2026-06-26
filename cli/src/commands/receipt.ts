@@ -32,6 +32,8 @@ import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto
 const ANCHOR_NAMESPACE = "kars-system";
 const ANCHOR_CONFIGMAP = "kars-receipt-pubkey";
 const LOG_CONFIGMAP = "kars-receipt-log";
+const CHECKPOINT_CONFIGMAP = "kars-receipt-checkpoint";
+const CHECKPOINT_ORIGIN = "kars-receipt-log";
 const DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json";
 // Fixed ASN.1/DER SubjectPublicKeyInfo prefix for an Ed25519 public key
 // (RFC 8410). Prepending it to the 32 raw key bytes yields a SPKI DER that
@@ -294,6 +296,94 @@ async function fetchInclusionChain(): Promise<InclusionEntry[] | null> {
   }
 }
 
+interface CheckpointData {
+  treeSize: number;
+  rootHash: string;
+  keyId: string;
+  signature: string;
+  note: string;
+  publishedAt?: string;
+}
+
+/** The signed-note body the controller signs — byte-identical recipe. */
+export function checkpointNote(treeSize: number, rootHash: string): string {
+  return `${CHECKPOINT_ORIGIN}\n${treeSize}\n${rootHash}\n`;
+}
+
+/** Head hash of a chain (commits to the whole prefix); 'genesis' if empty. */
+export function chainRoot(chain: InclusionEntry[]): string {
+  return chain.length > 0 ? chain[chain.length - 1].entryHash : "genesis";
+}
+
+async function fetchCheckpoint(): Promise<CheckpointData | null> {
+  const cm = (await kubectlGetJson([
+    "get",
+    "configmap",
+    CHECKPOINT_CONFIGMAP,
+    "-n",
+    ANCHOR_NAMESPACE,
+  ])) as { data?: Record<string, string> } | null;
+  const d = cm?.data;
+  if (!d?.signature || !d?.rootHash || d?.treeSize === undefined) return null;
+  return {
+    treeSize: Number(d.treeSize),
+    rootHash: d.rootHash,
+    keyId: d.keyId ?? "",
+    signature: d.signature,
+    note: d.note ?? checkpointNote(Number(d.treeSize), d.rootHash),
+    publishedAt: d.publishedAt,
+  };
+}
+
+/**
+ * Verify a signed checkpoint: the Ed25519 signature over the note must validate
+ * against the trust anchor, and (when a chain is supplied) the checkpoint must
+ * commit to the chain's current size + head — proving the operator has not
+ * silently diverged from the log they published. Returns a check row.
+ */
+function checkCheckpoint(
+  checkpoint: CheckpointData,
+  anchor: TrustAnchor,
+  chain: InclusionEntry[] | null,
+): { name: string; ok: boolean; detail: string } {
+  // 1. Signature over the canonical note.
+  let sigOk = false;
+  try {
+    const raw = Buffer.from(anchor.publicKey, "base64");
+    const key = importEd25519PublicKey(raw);
+    const note = checkpointNote(checkpoint.treeSize, checkpoint.rootHash);
+    sigOk = cryptoVerify(null, Buffer.from(note, "utf8"), key, Buffer.from(checkpoint.signature, "base64"));
+  } catch {
+    sigOk = false;
+  }
+  if (!sigOk) {
+    return { name: "checkpoint", ok: false, detail: "signed checkpoint signature INVALID" };
+  }
+  // 2. Key binding to the anchor.
+  if (checkpoint.keyId && checkpoint.keyId !== anchor.keyId) {
+    return {
+      name: "checkpoint",
+      ok: false,
+      detail: `checkpoint signed by an untrusted key (${checkpoint.keyId.slice(0, 16)}…)`,
+    };
+  }
+  // 3. Consistency with the live chain.
+  if (chain) {
+    if (checkpoint.treeSize !== chain.length || checkpoint.rootHash !== chainRoot(chain)) {
+      return {
+        name: "checkpoint",
+        ok: false,
+        detail: `checkpoint (size ${checkpoint.treeSize}) diverges from the live log (size ${chain.length}) — history may have been rewritten`,
+      };
+    }
+  }
+  return {
+    name: "checkpoint",
+    ok: true,
+    detail: `signed checkpoint valid over ${checkpoint.treeSize} entries (pin this to detect later rewrites; external witness is V2)`,
+  };
+}
+
 /**
  * Check the receipt is included in the intact hash-chained log. Returns a
  * check row; `ok=false` if the chain is broken or the receipt is absent.
@@ -429,8 +519,16 @@ export function receiptCommand(): Command {
       const chain = await fetchInclusionChain();
       if (chain) {
         result.checks.push(checkInclusion(receipt, chain));
-        result.ok = result.ok && result.checks.every((c) => c.ok);
       }
+
+      // Checkpoint check: the signed tree head must validate and agree with the
+      // live log (detects a silent history rewrite).
+      const checkpoint = await fetchCheckpoint();
+      if (checkpoint) {
+        result.checks.push(checkCheckpoint(checkpoint, anchor, chain));
+      }
+
+      result.ok = result.checks.length > 0 && result.checks.every((c) => c.ok);
 
       if (options.format === "json") {
         console.log(JSON.stringify(result, null, 2));
@@ -505,6 +603,55 @@ export function receiptCommand(): Command {
       if (broken !== null) process.exit(2);
     });
 
+  cmd
+    .command("checkpoint")
+    .description(
+      "Verify the inclusion log's signed checkpoint (signed tree head) against " +
+        "the trust anchor and the live log. Pin the printed root to detect later " +
+        "history rewrites. Exits non-zero if invalid or divergent.",
+    )
+    .option("--format <fmt>", "Output format: 'human' (default) or 'json'", "human")
+    .action(async (options: { format: string }) => {
+      const checkpoint = await fetchCheckpoint();
+      if (!checkpoint) {
+        process.stderr.write(
+          chalk.yellow(
+            `No signed checkpoint found (${CHECKPOINT_CONFIGMAP} in ${ANCHOR_NAMESPACE}). ` +
+              `It is published when the first Governance Receipt is emitted.\n`,
+          ),
+        );
+        return;
+      }
+      const anchor = await fetchAnchor();
+      if (!anchor) {
+        process.stderr.write(
+          chalk.red(`✗ trust anchor '${ANCHOR_CONFIGMAP}' not found in '${ANCHOR_NAMESPACE}'.\n`),
+        );
+        process.exit(5);
+        return;
+      }
+      const chain = await fetchInclusionChain();
+      const check = checkCheckpoint(checkpoint, anchor, chain);
+      if (options.format === "json") {
+        console.log(JSON.stringify({ checkpoint, check }, null, 2));
+      } else {
+        console.log("");
+        console.log(`  ${chalk.bold("Receipt log signed checkpoint")}`);
+        console.log(`  ${chalk.bold("Tree size:")}  ${checkpoint.treeSize}`);
+        console.log(`  ${chalk.bold("Root hash:")}  ${chalk.dim(checkpoint.rootHash)}`);
+        console.log(`  ${chalk.bold("Signed by:")}  ${checkpoint.keyId.slice(0, 24)}…`);
+        if (checkpoint.publishedAt) {
+          console.log(`  ${chalk.bold("Published:")}  ${chalk.dim(checkpoint.publishedAt)}`);
+        }
+        const verdict = check.ok
+          ? chalk.green.bold("✓ valid")
+          : chalk.red.bold("✗ invalid");
+        console.log(`  ${chalk.bold("Verdict:")}    ${verdict} ${chalk.dim(`— ${check.detail}`)}`);
+        console.log("");
+      }
+      if (!check.ok) process.exit(2);
+    });
+
   return cmd;
 }
 
@@ -514,4 +661,6 @@ export const __test = {
   importEd25519PublicKey,
   inclusionEntryHash,
   verifyInclusionChain,
+  checkpointNote,
+  chainRoot,
 };
