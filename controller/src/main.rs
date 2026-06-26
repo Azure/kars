@@ -43,6 +43,7 @@ mod kars_eval_reconciler;
 mod kars_memory;
 mod kars_memory_compile;
 mod kars_memory_reconciler;
+mod kars_receipt;
 mod kars_sre_action;
 mod kars_sre_action_reconciler;
 mod kars_task;
