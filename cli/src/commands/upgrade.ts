@@ -24,6 +24,10 @@ import {
   releaseImagePlan,
   compareVersions,
   fetchLatestReleaseTag,
+  fetchRecentReleases,
+  releasesBetween,
+  fetchTagMessage,
+  ghcrManifestDigests,
 } from "../lib/release.js";
 
 const NS = "kars-system";
@@ -190,6 +194,8 @@ Examples:
         const images = releaseImagePlan(target, { includeRuntimes: !options.skipRuntimeImages });
         if (options.dryRun) {
           stepper.stop();
+          await printChangelog(current, target);
+          await printImpactTable(execa);
           section("Upgrade plan (dry-run — no changes made)");
           kvLine("Cluster", ctx.aksCluster);
           kvLine("ACR", ctx.acrLoginServer);
@@ -201,6 +207,30 @@ Examples:
           }
           console.log(chalk.dim(`\n  Then: helm upgrade --atomic, rolling restart of controller/router/sandboxes, verify.\n`));
           process.exit(0);
+        }
+
+        // ── Changelog summary + confirmation ─────────────────────────
+        // Show what's about to change, then confirm before any write. The
+        // dry-run above already exited; this only runs for a real upgrade.
+        stepper.stop();
+        await printChangelog(current, target);
+        await printImpactTable(execa);
+
+        const interactive = !options.yes && process.stdin.isTTY === true;
+        if (interactive) {
+          const { default: inquirer } = await import("inquirer");
+          const { proceed } = await inquirer.prompt([{
+            type: "confirm",
+            name: "proceed",
+            message: `Upgrade ${ctx.aksCluster} from ${current || "unknown"} to ${target}?`,
+            default: true,
+          }]);
+          if (!proceed) {
+            console.log(chalk.dim("\n  Upgrade cancelled — no changes made.\n"));
+            process.exit(0);
+          }
+        } else {
+          console.log(chalk.dim(`  Non-interactive — proceeding with upgrade to ${target}.\n`));
         }
 
         // ── Step 3: Import target release images into ACR ─────────────
@@ -275,10 +305,170 @@ Examples:
 
 type Execa = typeof import("execa").execa;
 
-/** Determine the deployed kars release. Prefers the `karsRelease` value stamped
- *  into Helm by a prior `kars upgrade` (reliable), falling back to the chart's
- *  static appVersion (only accurate right after a same-version install). */
+/** Read the cluster and print a table of every kars workload the upgrade would
+ *  restart (controller + sandboxes), with namespace, readiness, and the running
+ *  image — the blast radius, shown before the confirm. Best-effort: a read
+ *  failure prints a note rather than aborting. */
+async function printImpactTable(execa: Execa): Promise<void> {
+  section("Impact — workloads that will be restarted");
+
+  interface Row { component: string; namespace: string; name: string; ready: string; image: string }
+  const rows: Row[] = [];
+
+  const shortImage = (img: string): string => {
+    if (!img) return "—";
+    // ".../openclaw-sandbox:latest" → "openclaw-sandbox:latest"; strip digest.
+    const noDigest = img.split("@")[0];
+    const parts = noDigest.split("/");
+    return parts[parts.length - 1] || noDigest;
+  };
+
+  const readyOf = (d: { status?: { readyReplicas?: number; replicas?: number }; spec?: { replicas?: number } }): string => {
+    const ready = d.status?.readyReplicas ?? 0;
+    const desired = d.spec?.replicas ?? d.status?.replicas ?? 0;
+    return `${ready}/${desired}`;
+  };
+
+  interface DeployJson {
+    metadata?: { name?: string; namespace?: string };
+    spec?: { replicas?: number; template?: { spec?: { containers?: Array<{ name?: string; image?: string }> } } };
+    status?: { readyReplicas?: number; replicas?: number };
+  }
+  const firstImage = (d: DeployJson, prefer?: string): string => {
+    const cs = d.spec?.template?.spec?.containers ?? [];
+    const pick = prefer ? cs.find((c) => c.name?.includes(prefer)) : undefined;
+    return shortImage((pick ?? cs[0])?.image ?? "");
+  };
+
+  try {
+    // Controller.
+    const { stdout: ctrlJson } = await execa("kubectl", [
+      "get", "deployment", "kars-controller", "-n", NS, "-o", "json",
+    ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+    if (ctrlJson.trim()) {
+      const d = JSON.parse(ctrlJson) as DeployJson;
+      rows.push({ component: "controller", namespace: NS, name: "kars-controller", ready: readyOf(d), image: firstImage(d, "controller") });
+    }
+
+    // Sandboxes across all namespaces (the inference-router rides inside these).
+    const { stdout: sbJson } = await execa("kubectl", [
+      "get", "deployment", "-A", "-l", "kars.azure.com/component=sandbox", "-o", "json",
+    ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+    if (sbJson.trim()) {
+      const list = JSON.parse(sbJson) as { items?: DeployJson[] };
+      for (const d of list.items ?? []) {
+        rows.push({
+          component: "sandbox",
+          namespace: d.metadata?.namespace ?? "?",
+          name: d.metadata?.name ?? "?",
+          ready: readyOf(d),
+          image: firstImage(d, "openclaw"),
+        });
+      }
+    }
+  } catch {
+    console.log(chalk.dim("\n  (could not read cluster workloads — continuing)\n"));
+    return;
+  }
+
+  if (rows.length === 0) {
+    console.log(chalk.dim("\n  (no kars workloads found)\n"));
+    return;
+  }
+
+  // Render a simple aligned table.
+  const headers = { component: "TYPE", namespace: "NAMESPACE", name: "NAME", ready: "READY", image: "IMAGE" };
+  const w = {
+    component: Math.max(headers.component.length, ...rows.map((r) => r.component.length)),
+    namespace: Math.max(headers.namespace.length, ...rows.map((r) => r.namespace.length)),
+    name: Math.max(headers.name.length, ...rows.map((r) => r.name.length)),
+    ready: Math.max(headers.ready.length, ...rows.map((r) => r.ready.length)),
+    image: Math.max(headers.image.length, ...rows.map((r) => r.image.length)),
+  };
+  const pad = (s: string, n: number) => s.padEnd(n);
+  console.log();
+  console.log(
+    "  " + chalk.dim(
+      `${pad(headers.component, w.component)}  ${pad(headers.namespace, w.namespace)}  ${pad(headers.name, w.name)}  ${pad(headers.ready, w.ready)}  ${headers.image}`,
+    ),
+  );
+  for (const r of rows) {
+    const notReady = (() => {
+      const [a, b] = r.ready.split("/").map((n) => parseInt(n, 10));
+      return !(b > 0 && a === b);
+    })();
+    const readyCell = notReady ? chalk.yellow(pad(r.ready, w.ready)) : chalk.green(pad(r.ready, w.ready));
+    console.log(
+      `  ${pad(r.component, w.component)}  ${pad(r.namespace, w.namespace)}  ${pad(r.name, w.name)}  ${readyCell}  ${chalk.dim(r.image)}`,
+    );
+  }
+  const sandboxCount = rows.filter((r) => r.component === "sandbox").length;
+  console.log(chalk.dim(`\n  ${rows.length} workload(s) will be rolling-restarted (1 controller + ${sandboxCount} sandbox(es)).`));
+  console.log(chalk.dim(`  Each sandbox restarts its agent pod; in-flight agent work is interrupted briefly.\n`));
+}
+
+/** Print a concise changelog of the releases between current and target. */
+async function printChangelog(current: string, target: string): Promise<void> {
+  section("What's changing");
+  kvLine("From", current || "unknown");
+  kvLine("To", target);
+
+  const releases = await fetchRecentReleases(20);
+  const between = current
+    ? releasesBetween(releases, current, target)
+    : releases.filter((r) => compareVersions(r.tag, target) <= 0).slice(0, 1);
+  if (between.length === 0) {
+    console.log(chalk.dim(`\n  (no release notes found between ${current || "?"} and ${target})\n`));
+    return;
+  }
+  console.log();
+  // Newest first reads best in a terminal. Prefer the annotated tag message
+  // (real changelog) over the auto-generated release body (boilerplate).
+  for (const r of [...between].reverse()) {
+    const tagMsg = await fetchTagMessage(r.tag);
+    console.log(`  ${chalk.bold(r.tag)}${r.name && r.name !== r.tag ? chalk.dim(` — ${r.name}`) : ""}`);
+    for (const line of summarizeChangelog(tagMsg || r.body)) {
+      console.log(chalk.dim(`    ${line}`));
+    }
+  }
+  console.log();
+}
+
+/** Pull human-meaningful lines (bullets, or the first prose lines) from an
+ *  annotated tag message or release body, skipping install/verification
+ *  boilerplate and the leading "kars vX.Y.Z" title line. */
+function summarizeChangelog(text: string, maxLines = 8): string[] {
+  const lines = text.split("\n").map((l) => l.trim());
+  const bullets: string[] = [];
+  const prose: string[] = [];
+  for (const l of lines) {
+    if (!l) continue;
+    if (/^#+\s*(container images|runtime adapter|verification|integrity|install)/i.test(l)) break;
+    if (l.startsWith("```")) continue;
+    if (/^kars v\d/i.test(l)) continue; // title line
+    if (/^[-*]\s+/.test(l)) {
+      bullets.push("• " + l.replace(/^[-*]\s+/, "").slice(0, 100));
+    } else if (/^#+\s+/.test(l)) {
+      bullets.push(l.replace(/^#+\s+/, "").slice(0, 100));
+    } else {
+      prose.push(l.slice(0, 100));
+    }
+    if (bullets.length >= maxLines) { bullets.push("…"); break; }
+  }
+  // Prefer bullets; if none, fall back to the first couple of prose lines.
+  if (bullets.length > 0) return bullets;
+  return prose.slice(0, 3);
+}
+
+/** Determine the deployed kars release, most-reliable signal first:
+ *  1. the `karsRelease` value stamped into Helm by a prior `kars upgrade`;
+ *  2. **image-digest match** — the controller's running image digest matched
+ *     against published release digests (works even for clusters deployed before
+ *     the stamp existed, since `az acr import` preserves content-addressed
+ *     digests). This is what makes "Current:" accurate on an old cluster;
+ *  3. the chart's static appVersion (last resort; often `v0.1.0`). */
 async function detectCurrentVersion(execa: Execa, appVersion?: string): Promise<string> {
+  // 1. Stamped Helm value (set by a prior `kars upgrade`).
   const { stdout } = await execa("helm", [
     "get", "values", "kars", "-n", NS, "-o", "json",
   ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
@@ -286,7 +476,42 @@ async function detectCurrentVersion(execa: Execa, appVersion?: string): Promise<
     const vals = JSON.parse(stdout || "{}") as { karsRelease?: string };
     if (vals.karsRelease) return vals.karsRelease;
   } catch { /* ignore */ }
+
+  // 2. Match the running controller image digest against published releases.
+  const byDigest = await detectVersionByImageDigest(execa).catch(() => undefined);
+  if (byDigest) return byDigest;
+
+  // 3. Static chart appVersion.
   return appVersion ? `v${appVersion.replace(/^v/, "")}` : "";
+}
+
+/** Resolve the deployed version by matching the controller pod's running image
+ *  digest to the digests of recent published `kars-controller` release tags. */
+async function detectVersionByImageDigest(execa: Execa): Promise<string | undefined> {
+  // Scan all kars-controller container statuses for a running image digest
+  // (`imageID` is like `…/kars-controller@sha256:<digest>`). Skips Pending pods
+  // (empty imageID) and tolerates rollouts with multiple replicas.
+  const { stdout: ids } = await execa("kubectl", [
+    "get", "pods", "-n", NS, "-l", "app.kubernetes.io/name=kars",
+    "-o", "jsonpath={range .items[*]}{range .status.containerStatuses[*]}{.image}{\"|\"}{.imageID}{\"\\n\"}{end}{end}",
+  ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+
+  // Prefer the controller container's digest; accept any kars-controller image.
+  let runningDigest: string | undefined;
+  for (const line of ids.split("\n")) {
+    if (!line.includes("kars-controller")) continue;
+    const m = line.match(/@(sha256:[a-f0-9]{64})/);
+    if (m) { runningDigest = m[1]; break; }
+  }
+  if (!runningDigest) return undefined;
+
+  // Compare against recent release tags (newest first → report the newest match).
+  const releases = await fetchRecentReleases(20);
+  for (const r of releases) {
+    const digests = await ghcrManifestDigests("azure/kars-controller", r.tag);
+    if (digests.has(runningDigest)) return r.tag;
+  }
+  return undefined;
 }
 
 /** `az acr import --force` one image. Returns true on success. */

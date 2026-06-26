@@ -6,6 +6,8 @@ import {
   parseVersionTag,
   compareVersions,
   releaseImagePlan,
+  releasesBetween,
+  type ReleaseNote,
 } from "./release.js";
 import { buildHelmUpgradeArgs } from "../commands/upgrade.js";
 
@@ -83,5 +85,29 @@ describe("buildHelmUpgradeArgs", () => {
   it("omits the foundry endpoint when absent", () => {
     const args = buildHelmUpgradeArgs({ ...ctx, foundryEndpoint: undefined }, "/chart");
     expect(args.join(" ")).not.toContain("inferenceRouter.azure.openai.endpoint");
+  });
+});
+
+describe("releasesBetween", () => {
+  const rels: ReleaseNote[] = [
+    { tag: "v0.1.18", name: "v0.1.18", body: "" },
+    { tag: "v0.1.17", name: "v0.1.17", body: "" },
+    { tag: "v0.1.16", name: "v0.1.16", body: "" },
+    { tag: "v0.1.15", name: "v0.1.15", body: "" },
+    { tag: "v0.1.14", name: "v0.1.14", body: "" },
+  ];
+  it("returns releases newer than current up to target, oldest→newest", () => {
+    expect(releasesBetween(rels, "v0.1.15", "v0.1.18").map((r) => r.tag))
+      .toEqual(["v0.1.16", "v0.1.17", "v0.1.18"]);
+  });
+  it("excludes the current version and anything above target", () => {
+    const got = releasesBetween(rels, "v0.1.16", "v0.1.17").map((r) => r.tag);
+    expect(got).toEqual(["v0.1.17"]);
+    expect(got).not.toContain("v0.1.16");
+    expect(got).not.toContain("v0.1.18");
+  });
+  it("with no known current, includes everything up to target", () => {
+    expect(releasesBetween(rels, "", "v0.1.16").map((r) => r.tag))
+      .toEqual(["v0.1.14", "v0.1.15", "v0.1.16"]);
   });
 });
