@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as fs from "node:fs";
-import { preflightTools } from "./dev.js";
+import { preflightTools, requiredToolsFor } from "./dev.js";
 
 describe("preflightTools — AGT toolkit gating", () => {
   const origExit = process.exit;
@@ -58,6 +58,28 @@ describe("preflightTools — AGT toolkit gating", () => {
     const agtErrors = errorCalls.filter((l) => l.includes("Agent Governance Toolkit"));
     expect(agtErrors).toHaveLength(0);
     expect(exitCalls).toHaveLength(0);
+  });
+
+  it("does NOT require cargo in --release mode (no-compile promise)", async () => {
+    // The README/quickstart headline is "kars dev --release — no Rust". That
+    // path pulls pre-built, signed images from ghcr.io and compiles nothing,
+    // so a missing Rust toolchain must not block it. We can't easily uninstall
+    // cargo in CI, so assert on the required-tools list instead: in --release
+    // mode, cargo must not be listed as required.
+    const required = requiredToolsFor("docker", { build: false, noMesh: false, release: true });
+    expect(required.map((t) => t.bin)).not.toContain("cargo");
+
+    const requiredK8s = requiredToolsFor("local-k8s", { build: false, noMesh: false, release: true });
+    expect(requiredK8s.map((t) => t.bin)).not.toContain("cargo");
+    // local-k8s still needs the cluster tools.
+    expect(requiredK8s.map((t) => t.bin)).toEqual(
+      expect.arrayContaining(["docker", "kind", "kubectl", "helm"]),
+    );
+  });
+
+  it("DOES require cargo when building locally (no --release)", async () => {
+    const required = requiredToolsFor("docker", { build: false, noMesh: false, release: false });
+    expect(required.map((t) => t.bin)).toContain("cargo");
   });
 
   it("DOES require the AGT toolkit when --build is set and mesh is on", async () => {
