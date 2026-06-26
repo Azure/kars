@@ -426,12 +426,30 @@ async fn reconcile_receipt(
     status: &KarsTaskStatus,
     signer: &crate::providers::signing::ReceiptSigner,
 ) {
-    use crate::kars_receipt::{KarsReceipt, build_spec, build_statement, canonical_json};
+    use crate::kars_approval::KarsApproval;
+    use crate::kars_receipt::{KarsReceipt, approval_facts, build_spec, build_statement, canonical_json};
 
     let name = task.name_any();
     let receipts: Api<KarsReceipt> = Api::namespaced(client.clone(), ns);
 
-    let Some(statement) = build_statement(task, status, &signer.key_id) else {
+    // Gather the human decisions (HITL approvals) bound to this task, so every
+    // steer is recorded in the signed receipt. Best-effort: a list failure
+    // must not block the receipt (it just omits approvals this pass).
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    let task_approvals = match approvals.list(&ListParams::default()).await {
+        Ok(list) => list
+            .items
+            .into_iter()
+            .filter(|a| a.spec.task_ref.name == name)
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::debug!(karstask = %name, ns = %ns, error = %e, "could not list KarsApprovals for receipt");
+            Vec::new()
+        }
+    };
+    let facts = approval_facts(&task_approvals);
+
+    let Some(statement) = build_statement(task, status, &signer.key_id, &facts) else {
         // No digest → no receipt. Retract any prior one.
         match receipts
             .delete(&name, &kube::api::DeleteParams::default())

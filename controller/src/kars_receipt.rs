@@ -176,9 +176,29 @@ pub struct Predicate {
     pub lineage: Vec<String>,
     pub delegation: PredicateDelegation,
     pub execution: PredicateExecution,
+    /// The human decisions (HITL approvals) recorded for this task — every
+    /// steer is itself part of the signed record. Empty when none were taken.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<PredicateApproval>,
     pub conformance: PredicateConformance,
     pub claims: Vec<Claim>,
     pub issuer: PredicateIssuer,
+}
+
+/// One human decision bound into the receipt. Built from a decided
+/// `KarsApproval` (Approved or Denied).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PredicateApproval {
+    pub name: String,
+    pub action_kind: String,
+    pub summary: String,
+    /// `approve` or `deny`.
+    pub verdict: String,
+    pub decider: String,
+    pub decided_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_tier: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -251,6 +271,7 @@ pub fn build_statement(
     task: &KarsTask,
     status: &KarsTaskStatus,
     key_id: &str,
+    approvals: &[PredicateApproval],
 ) -> Option<Statement> {
     let digest = status.envelope_digest.clone()?;
     let namespace = task
@@ -323,6 +344,7 @@ pub fn build_statement(
             phase: status.execution_phase.clone(),
             sandbox_ref: status.sandbox_ref.as_ref().map(|r| r.name.clone()),
         },
+        approvals: approvals.to_vec(),
         conformance: PredicateConformance {
             envelope_valid: true,
             attenuates_parent,
@@ -380,6 +402,39 @@ pub fn build_spec(
     }
 }
 
+/// Convert decided `KarsApproval`s for a task into deterministic receipt
+/// facts. Only **Approved** or **Denied** approvals (a real human decision)
+/// are included; Pending/Expired/Stale ones are not part of the attested
+/// human-decision record. Sorted by name so the signed payload is stable.
+pub fn approval_facts(approvals: &[crate::kars_approval::KarsApproval]) -> Vec<PredicateApproval> {
+    use crate::kars_approval::{PHASE_APPROVED, PHASE_DENIED};
+    use kube::ResourceExt;
+
+    let mut facts: Vec<PredicateApproval> = approvals
+        .iter()
+        .filter_map(|a| {
+            let status = a.status.as_ref()?;
+            let phase = status.phase.as_deref()?;
+            let verdict = match phase {
+                PHASE_APPROVED => "approve",
+                PHASE_DENIED => "deny",
+                _ => return None,
+            };
+            Some(PredicateApproval {
+                name: a.name_any(),
+                action_kind: a.spec.action.kind.clone(),
+                summary: a.spec.action.summary.clone(),
+                verdict: verdict.to_string(),
+                decider: status.decider.clone().unwrap_or_default(),
+                decided_at: status.decided_at.clone().unwrap_or_default(),
+                requested_tier: a.spec.action.requested_tier,
+            })
+        })
+        .collect();
+    facts.sort_by(|a, b| a.name.cmp(&b.name));
+    facts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,13 +480,13 @@ mod tests {
     fn no_receipt_without_digest() {
         let (task, mut status) = ready_task(false);
         status.envelope_digest = None;
-        assert!(build_statement(&task, &status, "kid").is_none());
+        assert!(build_statement(&task, &status, "kid", &[]).is_none());
     }
 
     #[test]
     fn root_statement_shape() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid123").unwrap();
+        let st = build_statement(&task, &status, "kid123", &[]).unwrap();
         assert_eq!(st.typ, STATEMENT_TYPE);
         assert_eq!(st.predicate_type, PREDICATE_TYPE);
         assert_eq!(st.subject[0].name, "kars-system/demo");
@@ -445,7 +500,7 @@ mod tests {
     #[test]
     fn child_statement_records_attenuation_and_lineage() {
         let (task, status) = ready_task(true);
-        let st = build_statement(&task, &status, "kid").unwrap();
+        let st = build_statement(&task, &status, "kid", &[]).unwrap();
         assert!(st.predicate.delegation.is_child);
         assert_eq!(st.predicate.delegation.parent_ref.as_deref(), Some("parent"));
         assert_eq!(st.predicate.delegation.depth_from_root, 2);
@@ -456,7 +511,7 @@ mod tests {
     #[test]
     fn claim_matrix_is_honest() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid").unwrap();
+        let st = build_statement(&task, &status, "kid", &[]).unwrap();
         let by = |c: &str| {
             st.predicate
                 .claims
@@ -475,8 +530,8 @@ mod tests {
     #[test]
     fn canonical_json_is_stable() {
         let (task, status) = ready_task(true);
-        let a = canonical_json(&build_statement(&task, &status, "kid").unwrap());
-        let b = canonical_json(&build_statement(&task, &status, "kid").unwrap());
+        let a = canonical_json(&build_statement(&task, &status, "kid", &[]).unwrap());
+        let b = canonical_json(&build_statement(&task, &status, "kid", &[]).unwrap());
         assert_eq!(a, b);
         // Sanity: it really is the in-toto envelope.
         let s = String::from_utf8(a).unwrap();
@@ -487,8 +542,74 @@ mod tests {
     #[test]
     fn launched_execution_is_recorded() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid").unwrap();
+        let st = build_statement(&task, &status, "kid", &[]).unwrap();
         assert!(st.predicate.execution.launched);
         assert_eq!(st.predicate.execution.phase.as_deref(), Some("Degraded"));
+    }
+
+    #[test]
+    fn approvals_are_bound_into_the_predicate() {
+        let (task, status) = ready_task(false);
+        let approvals = vec![PredicateApproval {
+            name: "raise-tier".to_string(),
+            action_kind: "tierRaise".to_string(),
+            summary: "raise to tier 4 for the migration".to_string(),
+            verdict: "approve".to_string(),
+            decider: "alice@example.com".to_string(),
+            decided_at: "2026-06-26T10:00:00+00:00".to_string(),
+            requested_tier: Some(4),
+        }];
+        let st = build_statement(&task, &status, "kid", &approvals).unwrap();
+        assert_eq!(st.predicate.approvals.len(), 1);
+        assert_eq!(st.predicate.approvals[0].verdict, "approve");
+        assert_eq!(st.predicate.approvals[0].requested_tier, Some(4));
+        // The signed payload carries the human decision.
+        let json = String::from_utf8(canonical_json(&st)).unwrap();
+        assert!(json.contains("\"approvals\""));
+        assert!(json.contains("alice@example.com"));
+    }
+
+    #[test]
+    fn approval_facts_filters_to_decided_and_sorts() {
+        use crate::kars_approval::{
+            ApprovalAction, KarsApproval, KarsApprovalSpec, KarsApprovalStatus,
+        };
+        let mk = |name: &str, phase: Option<&str>, decider: Option<&str>| {
+            let mut a = KarsApproval::new(
+                name,
+                KarsApprovalSpec {
+                    task_ref: LocalObjectRef {
+                        name: "t".to_string(),
+                    },
+                    action: ApprovalAction {
+                        kind: "checkpoint".to_string(),
+                        summary: "ok?".to_string(),
+                        ..Default::default()
+                    },
+                    ttl: None,
+                    decision: None,
+                },
+            );
+            a.status = Some(KarsApprovalStatus {
+                phase: phase.map(|s| s.to_string()),
+                decider: decider.map(|s| s.to_string()),
+                decided_at: decider.map(|_| "2026-06-26T10:00:00+00:00".to_string()),
+                ..Default::default()
+            });
+            a
+        };
+        let approvals = vec![
+            mk("zebra", Some("Approved"), Some("z")),
+            mk("pending-one", Some("Pending"), None),
+            mk("alpha", Some("Denied"), Some("a")),
+            mk("stale-one", Some("Stale"), None),
+        ];
+        let facts = approval_facts(&approvals);
+        // Only the two decided ones, sorted by name.
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].name, "alpha");
+        assert_eq!(facts[0].verdict, "deny");
+        assert_eq!(facts[1].name, "zebra");
+        assert_eq!(facts[1].verdict, "approve");
     }
 }
