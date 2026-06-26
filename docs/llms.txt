@@ -1,0 +1,89 @@
+# kars
+
+> kars is a secure, Kubernetes-native runtime for AI agents on Azure: one hardened sandbox per agent, zero credentials in the agent process, an in-pod inference router that brokers every external call, and an end-to-end encrypted inter-agent mesh. Governance is consumed from the Microsoft Agent Governance Toolkit (AGT).
+
+Source: https://github.com/Azure/kars (MIT). Docs are mdBook Markdown under `docs/`.
+
+- [Introduction](https://github.com/Azure/kars/blob/main/docs/README.md): This is the documentation index. The top-level README is a faster on-ramp; come here when you need depth.
+
+## Getting started
+- [Quickstart](https://github.com/Azure/kars/blob/main/docs/quickstart.md): Get a governed, sandboxed agent running on your laptop in three commands — no Azure account, no Rust, no clone.
+- [Getting started](https://github.com/Azure/kars/blob/main/docs/getting-started.md): One npm i and one kars dev, and you're talking to a secured AI agent on your laptop in about five minutes — no Azure account required.
+- [CLI reference](https://github.com/Azure/kars/blob/main/docs/cli-reference.md): kars ships dozens of top-level commands organised by purpose: Lifecycle,
+- [Use cases](https://github.com/Azure/kars/blob/main/docs/use-cases.md): Six fully-shipped use cases covering every deployment pattern from laptop inner-loop to cross-organisation A2A federation. All six are implemented end-to-end and exercised by the compat / conformance…
+  - [Exec-brief walkthrough](https://github.com/Azure/kars/blob/main/docs/use-cases/exec-brief-walkthrough.md): This page walks a real, reproducible end-to-end scenario: one parent agent orchestrates three sub-agents to produce a two-page executive brief on the 2026 state of agentic AI runtimes. It exists for…
+
+## Architecture
+- [Architecture overview](https://github.com/Azure/kars/blob/main/docs/architecture.md): This document explains what kars is made of and why each part exists. For diagrams, see Architecture diagrams. For a faster on-ramp, see Getting started.
+- [Architecture diagrams](https://github.com/Azure/kars/blob/main/docs/architecture-diagrams.md): Every diagram on this page is rendered from Mermaid in the source markdown. The rendered site (mdBook) shows them as SVG; on GitHub they render natively. If you are reading the source, paste any code…
+- [Runtimes](https://github.com/Azure/kars/blob/main/docs/runtimes.md): kars is a host for agent runtimes. The runtime is the framework your agent code is written against (OpenClaw, OpenAI Agents SDK, LangGraph, …) plus the small adapter that wires it to the kars sandbox…
+  - [Runtime contract (BYO)](https://github.com/Azure/kars/blob/main/docs/runtimes/CONTRACT.md): A runtime is the agent framework that executes inside a kars sandbox pod / container. Kars provides isolation (K8s pod, seccomp, NetworkPolicy, egress-guard), an inference proxy sidecar…
+- [A2A gateway (architecture)](https://github.com/Azure/kars/blob/main/docs/architecture/a2a-gateway.md): Before this component existed the inference router exposed A2A
+- [AGT boundary](https://github.com/Azure/kars/blob/main/docs/architecture/agt-boundary.md): AGT ships the governance engine. kars is the AKS operator and data plane that feeds AGT and surfaces AGT decisions as Kubernetes primitives. Any overlap is treated as a bug to resolve, not a feature…
+- [Per-sandbox identity (Entra Agent ID) — deep dive](https://github.com/Azure/kars/blob/main/docs/architecture/entra-agent-id/README.md): This directory is the canonical reference for how kars provisions and uses
+  - [Runtime token flow](https://github.com/Azure/kars/blob/main/docs/architecture/entra-agent-id/01-runtime-token-flow.md): This document captures the architecture that was validated end-to-end on
+  - [Security alignment](https://github.com/Azure/kars/blob/main/docs/architecture/entra-agent-id/05-security-alignment.md): Per Microsoft's [Entra Agent ID design patterns][design-patterns],
+  - [Mesh trust design](https://github.com/Azure/kars/blob/main/docs/architecture/entra-agent-id/06-mesh-trust-design.md): When the operator sets kars up --mesh-trust=entra, kars replaces
+- [Multi-tenant model](https://github.com/Azure/kars/blob/main/docs/multi-tenant.md): Each sandbox runs in its own Kubernetes namespace with independent security boundaries. No shared state between tenants.
+- [Egress proxy](https://github.com/Azure/kars/blob/main/docs/egress-proxy.md): Egress policy is not its own CRD. It's a sub-block of the KarsSandbox
+
+## Security
+- [Security overview](https://github.com/Azure/kars/blob/main/docs/security.md): kars is a layered control plane. Each layer enforces a specific property; together they bound the blast radius of a compromised agent. This page documents what each layer does, what it does not do,…
+- [Feature maturity & status](https://github.com/Azure/kars/blob/main/docs/maturity.md): kars is v0.1.18. Most of the control plane is enforced at runtime today, but some
+- [Control mapping](https://github.com/Azure/kars/blob/main/docs/compliance.md): This page maps kars's shipped, enforced controls (the ✅ rows in
+- [STRIDE × trust boundaries](https://github.com/Azure/kars/blob/main/docs/security/stride.md): Items accepted today with explicit user-visible markers in source/docs:
+- [Red team playbook](https://github.com/Azure/kars/blob/main/docs/security/red-team.md): This is not a coordinated-disclosure inbox. External researchers please use the procedure in SECURITY.md.
+- [CRD trust model](https://github.com/Azure/kars/blob/main/docs/security/crd-trust-model.md): This page is the threat model and proof for kars's signed-CRD surface. The schema and per-CRD details are in CRD reference → Signing and verification. This page answers three questions an SRE or…
+- [Security validation](https://github.com/Azure/kars/blob/main/docs/security-validation.md): All 9 security layers were validated on a live AKS cluster on this date with the evidence captured below.
+- [Supply-chain posture & OpenSSF Scorecard](https://github.com/Azure/kars/blob/main/docs/security/supply-chain-posture.md): This document records kars's supply-chain decisions and how we address — or
+- [MCP top-10](https://github.com/Azure/kars/blob/main/docs/security-mcp-top10.md): Internal mapping. Each row answers: what kars surface takes the hit,
+- [Upstream alignment](https://github.com/Azure/kars/blob/main/docs/upstream-alignment.md): points (tools.deny config, api.registerTool() plugin API, ~/.openclaw-data/extensions/
+
+## Agent capabilities
+- [kars OpenClaw plugin](https://github.com/Azure/kars/blob/main/docs/openclaw-plugin.md): The kars OpenClaw plugin is the agent-side runtime surface for kars. When a sandbox boots, the OpenClaw gateway auto-discovers and loads the plugin from ~/.openclaw-data/extensions/kars/. From that…
+- [kars Hermes plugin](https://github.com/Azure/kars/blob/main/docs/hermes-plugin.md): The kars Hermes plugin is the agent-side runtime surface for kars on top of the Hermes Agent (Nous Research, MIT) — a Python 3.11+ agent harness with 20+ messaging channels, 18+ inference providers,…
+- [`@kars/mesh` plugin (local OpenClaw)](https://github.com/Azure/kars/blob/main/docs/mesh-plugin.md): @kars/mesh is the local-OpenClaw companion plugin that turns any local OpenClaw install into a mesh-federated client of a kars cluster. It is not yet published on npm — today you build it from source…
+- [Channels & external plugins](https://github.com/Azure/kars/blob/main/docs/channels-plugins.md): Messaging channels (Telegram, Slack, Discord, WhatsApp) and third-party search/scrape API integrations (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI) extend your kars agent with external…
+- [Operator TUI](https://github.com/Azure/kars/blob/main/docs/operator-tui.md): kars operator is the operator's terminal dashboard for live cluster
+- [Permissions model](https://github.com/Azure/kars/blob/main/docs/permissions.md): kars up provisions a complete secure-by-default AKS runtime: cluster,
+- [Per-sandbox identity (Entra Agent ID)](https://github.com/Azure/kars/blob/main/docs/agent-identity.md): Every kars sandbox runs under its own Microsoft Entra Agent ID.
+- [Examples catalogue](https://github.com/Azure/kars/blob/main/docs/examples.md): Eight end-to-end examples live under examples/. Each one is a self-contained kubectl apply -f after kars up. All examples share the same control-plane install and isolation guarantees — only the…
+
+## Runbooks
+- [Autonomous SRE operator](https://github.com/Azure/kars/blob/main/docs/runbooks/sre.md): A long-running, in-cluster agent that diagnoses Kubernetes incidents
+- [Hermes runtime — troubleshooting](https://github.com/Azure/kars/blob/main/docs/runbooks/hermes-troubleshooting.md): A short, scoped runbook for the most common Hermes-specific issues. For the broader kars operator surface (sandboxes, mesh, governance) see the Operations guide and the Operator TUI guide.
+
+## Operations
+- [Operations overview](https://github.com/Azure/kars/blob/main/docs/operations/README.md): How to operate kars in production. Each page is one operational concern, with the full runbook for that concern.
+- [A2A gateway (operations)](https://github.com/Azure/kars/blob/main/docs/operations/a2a-gateway.md): The gateway is opt-in. To turn it on:
+- [BYO strict mode](https://github.com/Azure/kars/blob/main/docs/operations/byo-strict.md): When controller.byoStrict=true, the controller validates the
+- [Branch protection](https://github.com/Azure/kars/blob/main/docs/operations/branch-protection.md): This is the canonical list of CI jobs that must be set as required
+- [Chaos tier](https://github.com/Azure/kars/blob/main/docs/operations/chaos-tier.md): The chaos tier is a permanent CI surface that protects
+- [GitOps](https://github.com/Azure/kars/blob/main/docs/operations/gitops.md): This walkthrough covers the sign-by-default + --emit-manifest
+- [Helm packaging](https://github.com/Azure/kars/blob/main/docs/operations/helm-packaging.md): The kars Helm chart lives under deploy/helm/kars/. This page documents how the chart is versioned and how a maintainer packages it for a release.
+- [Image versioning](https://github.com/Azure/kars/blob/main/docs/operations/image-versioning.md): kars produces eight container images: the controller, the
+- [Upgrades & rollback](https://github.com/Azure/kars/blob/main/docs/operations/upgrades.md): This runbook covers moving a running kars cluster from one release to the next,
+- [Secret rotation](https://github.com/Azure/kars/blob/main/docs/operations/secret-rotation.md): This runbook covers rotation of every secret kars materialises: per-sandbox credentials, TLS certs, AgentMesh identities, and Azure-side credentials. Rotation never requires recompiling the…
+- [Supply chain](https://github.com/Azure/kars/blob/main/docs/operations/supply-chain.md): This document describes the kars build, sign, and verify pipeline
+
+## API & policy
+- [CRD reference](https://github.com/Azure/kars/blob/main/docs/api/crd-reference.md): kars exposes its API through twelve CustomResourceDefinitions in the kars.azure.com group, all at version v1alpha1. Ten are workload CRDs you author per agent or per policy (or, for KarsSREAction,…
+- [KarsEval (operator guide)](https://github.com/Azure/kars/blob/main/docs/api/karseval.md): KarsEval is the operator-facing surface for replaying a signed
+- [Lifecycle & reconciliation](https://github.com/Azure/kars/blob/main/docs/api/lifecycle.md): This page is the end-to-end story for every kars CRD: which CLI command writes it, what the controller does when it lands, what cluster artifacts get produced, and which component consumes those…
+- [Conditions](https://github.com/Azure/kars/blob/main/docs/api/conditions.md): Every kars CRD exposes a status.conditions[] array following the
+- [Policy canonical format](https://github.com/Azure/kars/blob/main/docs/api/policy-canonical-format.md): These rules hold for every application/vnd.kars..v1+yaml artifact.
+
+## Blueprints
+- [Index](https://github.com/Azure/kars/blob/main/docs/blueprints/00-index.md): Six concrete shapes for running kars. Each blueprint pins down who runs what, where the trust boundary sits, and the main flow end to end.
+- [Developer inner loop](https://github.com/Azure/kars/blob/main/docs/blueprints/01-developer-inner-loop.md): The two loops share the same images and the same kars dev entry point — --target local-k8s is the only switch. Use 01 for speed, then 02 to trust the result.
+- [Local k8s dev loop](https://github.com/Azure/kars/blob/main/docs/blueprints/02-local-k8s-dev-loop.md): This blueprint is the K8s-shaped developer loop and the recommended primary dev flow for kars: it reproduces the production pod shape, NetworkPolicy, UID split, and the controller reconciliation…
+- [Enterprise self-hosted](https://github.com/Azure/kars/blob/main/docs/blueprints/03-enterprise-self-hosted.md): Blueprint 03 uses the full shipped CRD stack. Apply these in the sandbox namespace (kars-<name>) before creating the KarsSandbox:
+- [Managed public offload](https://github.com/Azure/kars/blob/main/docs/blueprints/04-managed-public-offload.md): This is the use case where kars's threat model earns its complexity. In every other blueprint, you (the operator) and the agent user are in the same trust domain — you'd both lose if a sandbox…
+- [Cross-org federation](https://github.com/Azure/kars/blob/main/docs/blueprints/05-cross-org-federation.md): The crucial property: every mesh frame is policy-evaluated twice:
+- [Sovereign / air-gapped](https://github.com/Azure/kars/blob/main/docs/blueprints/06-sovereign-airgapped.md): The trust boundary is the network island. Nothing inside it talks to anything outside it; nothing outside it talks to anything inside it. The router's allow-list is configured to a single internal…
+
+## Roadmap & ADRs
+- [Roadmap](https://github.com/Azure/kars/blob/main/docs/roadmap.md): The current public surface — exercised by CI (Kind E2E + manual matrix) on every push to main:
+- [ADR index](https://github.com/Azure/kars/blob/main/docs/adr/README.md): Architecture Decision Records for kars. Each ADR is immutable
+  - [ADR-0001: A2A ingress front edge](https://github.com/Azure/kars/blob/main/docs/adr/0001-a2a-ingress-front-edge.md): The A2A 1.0 (Agent2Agent) protocol is a public-facing, peer-to-peer
+  - [ADR-0002: Inference endpoint sourcing](https://github.com/Azure/kars/blob/main/docs/adr/0002-inference-endpoint-sourcing.md): The inference router is a per-sandbox proxy that fronts every model call

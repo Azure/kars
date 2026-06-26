@@ -92,6 +92,20 @@ There is no separate publication step; deploying the rendered HTML to a hosting 
 
 The Helm Lint and other docs-touching workflows do not run mdbook, but `make docs-site` is fast (≈ 1s) and always runnable locally. A future CI job can wrap it as a build-only check; for now the contract is "it builds locally before merge".
 
+## `llms.txt`
+
+`docs/llms.txt` is a machine-readable index of the documentation following the
+[llms.txt convention](https://llmstxt.org/), so AI/agent tooling can consume the
+docs without scraping. It is generated from `SUMMARY.md` + the first prose line
+of each page by `site/gen-llms-txt.py`. Regenerate it after changing `SUMMARY.md`
+or a page intro:
+
+```bash
+python3 docs/site/gen-llms-txt.py
+```
+
+Because `src = ".."`, mdbook copies `docs/llms.txt` to the rendered site root.
+
 ## Limitations
 
 - Cross-repo links must be absolute URLs.

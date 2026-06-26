@@ -4,6 +4,7 @@
 
 # Getting started
 
+- [Quickstart](quickstart.md)
 - [Getting started](getting-started.md)
 - [CLI reference](cli-reference.md)
 - [Use cases](use-cases.md)
@@ -63,6 +64,7 @@
 - [GitOps](operations/gitops.md)
 - [Helm packaging](operations/helm-packaging.md)
 - [Image versioning](operations/image-versioning.md)
+- [Upgrades & rollback](operations/upgrades.md)
 - [Secret rotation](operations/secret-rotation.md)
 - [Supply chain](operations/supply-chain.md)
 

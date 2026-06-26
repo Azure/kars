@@ -17,20 +17,51 @@ This is the documentation index. The top-level [`README`](../README.md) is a fas
 
 <div class="cta-row">
 
-<a href="getting-started.md#step-1--local-five-minutes" class="btn-primary">Try it on local Kubernetes</a>
+<a href="quickstart.md" class="btn-primary">Quickstart — 3 commands</a>
 <a href="getting-started.md#step-2--deploy-to-aks" class="btn-primary">Run it on AKS</a>
 <a href="architecture.md" class="btn-primary">Architecture</a>
-<a href="blueprints/00-index.md" class="btn-primary">Blueprints</a>
+<a href="maturity.md" class="btn-primary">Feature status</a>
 
 </div>
+
+## How it works
+
+One hardened sandbox per agent. The agent has **no network of its own** — every external call (model, tool, MCP, peer) goes through an in-pod Rust **inference router** that enforces identity, content safety, budgets, governance, and a tamper-evident audit chain. The agent never holds a credential.
+
+```mermaid
+flowchart LR
+  subgraph Pod["KarsSandbox pod"]
+    Agent["agent runtime<br/>(UID 1000, no network)"]
+    Router["inference router<br/>(UID 1001, Rust)"]
+    Agent -->|localhost only| Router
+  end
+  Router --> Model["inference backend<br/>(Foundry / Copilot / …)"]
+  Router --> Mesh["AgentMesh relay<br/>(opaque ciphertext)"]
+  Router --> A2A["A2A peers"]
+  classDef pod fill:#e6f0ff,stroke:#0078d4,color:#0b1220
+  class Pod pod
+```
+
+## Why kars
+
+| Running agents directly | Running agents on kars |
+|---|---|
+| API keys in the agent's environment | **Zero credentials** in the agent process; the router brokers every call |
+| Governance bolted on per-app, in code | **Declarative CRDs** — approval gates, rate limits, tool allowlists, content-safety floors, token budgets as Kubernetes resources |
+| Network egress wide open | **Default-deny egress** + L7 allowlist + blocklist; the agent has no socket of its own |
+| Inter-agent traffic readable by the broker | **End-to-end encrypted mesh** (Signal Protocol); the relay sees only ciphertext |
+| One framework, lock-in | **Eight runtimes** (OpenClaw, Hermes, MAF, LangGraph, …) on one wire format; switch with a one-field change |
+| Trust boundary = the cluster | **Trust boundary = the pod** — optional Kata + AMD SEV-SNP per workload via one CRD field |
+
 
 ## Choose your path
 
 ### Read in order if you are new
-1. [Getting started](getting-started.md) — laptop in five minutes, then AKS.
-2. [Architecture](architecture.md) — the design and why.
-3. [Architecture diagrams](architecture-diagrams.md) — every component, dev and prod side by side.
-4. [Use cases](use-cases.md) — the six scenarios kars was built for.
+1. [Quickstart](quickstart.md) — a running agent on your laptop in three commands.
+2. [Getting started](getting-started.md) — the full local walkthrough, then AKS.
+3. [Architecture](architecture.md) — the design and why.
+4. [Architecture diagrams](architecture-diagrams.md) — every component, dev and prod side by side.
+5. [Use cases](use-cases.md) — the six scenarios kars was built for.
 
 ### By audience
 
@@ -97,6 +128,7 @@ This section mirrors the chapter groups in **[`SUMMARY.md`](SUMMARY.md)**, which
 - [GitOps](operations/gitops.md) — declarative fleet management.
 - [Helm packaging](operations/helm-packaging.md) — chart layout and release.
 - [Image versioning](operations/image-versioning.md) — the `:latest` convention and rollout.
+- [Upgrades & rollback](operations/upgrades.md) — `kars upgrade`, atomic Helm, one-command rollback.
 - [Secret rotation](operations/secret-rotation.md) — credential lifecycle.
 - [Supply chain](operations/supply-chain.md) — signing, SBOM, provenance.
 - [BYO strict mode](operations/byo-strict.md) — bring-your-own-model hardening.
