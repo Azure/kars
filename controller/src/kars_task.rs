@@ -409,6 +409,14 @@ pub enum EnvelopeViolation {
         child: Option<String>,
         parent: String,
     },
+    /// A child's blueprint egress reaches a destination the parent does not
+    /// allow — egress must be a subset of the parent's (capability attenuation
+    /// applied to the *effective* network surface the sandbox enforces, not a
+    /// vestigial ref).
+    EgressNotSubset {
+        host: String,
+        port: Option<u16>,
+    },
 }
 
 impl std::fmt::Display for EnvelopeViolation {
@@ -454,6 +462,16 @@ impl std::fmt::Display for EnvelopeViolation {
                 "{axis:?} ref {} must match parent's bound `{parent}`",
                 child.as_deref().unwrap_or("<none>")
             ),
+            EnvelopeViolation::EgressNotSubset { host, port } => match port {
+                Some(p) => write!(
+                    f,
+                    "egress to {host}:{p} is not permitted by the parent (egress must be a subset of the parent's)"
+                ),
+                None => write!(
+                    f,
+                    "egress to {host} is not permitted by the parent (egress must be a subset of the parent's)"
+                ),
+            },
         }
     }
 }
@@ -502,6 +520,77 @@ fn attenuate_policy_axis(
             parent: parent_ref.to_string(),
         });
     }
+}
+
+/// The *effective* tool policy a task runs under: the blueprint's tool policy
+/// when set (it composes the sandbox governance), else the envelope's
+/// `toolPolicyRef`. This is the single source attenuation must check so that
+/// the verified subset relation matches what `materialize` actually enforces.
+#[must_use]
+pub fn effective_tool_policy(spec: &KarsTaskSpec) -> Option<&str> {
+    spec.blueprint
+        .as_ref()
+        .and_then(|b| b.tool_policy.as_deref())
+        .filter(|s| !s.is_empty())
+        .or_else(|| spec.envelope.tool_policy_ref.as_ref().map(|r| r.name.as_str()))
+}
+
+/// The *effective* egress allow-list a task runs under: the blueprint's egress
+/// list (which materializes to `KarsSandbox.networkPolicy.allowedEndpoints`).
+/// This is the real network surface, so it is what delegation must attenuate.
+#[must_use]
+pub fn effective_egress(spec: &KarsTaskSpec) -> &[TaskEgress] {
+    spec.blueprint
+        .as_ref()
+        .map(|b| b.egress.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Whether a child egress destination is covered by the parent's allow-list.
+/// A parent entry with no port (any port) covers a child entry on the same
+/// host with any port; otherwise host + port must match exactly.
+fn egress_covers(parent: &[TaskEgress], child: &TaskEgress) -> bool {
+    parent.iter().any(|p| {
+        p.host == child.host && (p.port.is_none() || p.port == child.port)
+    })
+}
+
+/// Full capability-attenuation check over the whole task spec: the numeric +
+/// ref envelope axes **plus** the effective tool policy and effective egress
+/// the sandbox will actually enforce. This closes the gap where attenuation
+/// validated the envelope while execution used the blueprint — they now share
+/// one source of truth. Returns an empty vec when the child strictly attenuates
+/// the parent.
+#[must_use]
+pub fn spec_attenuation_violations(
+    child: &KarsTaskSpec,
+    parent: &KarsTaskSpec,
+) -> Vec<EnvelopeViolation> {
+    let mut v = child.envelope.attenuation_violations(&parent.envelope);
+
+    // Effective tool policy: same equality rule as the envelope ref axis, but
+    // over the value the sandbox actually runs (blueprint-or-envelope).
+    attenuate_policy_axis(
+        effective_tool_policy(child),
+        effective_tool_policy(parent),
+        PolicyAxis::ToolPolicy,
+        &mut v,
+    );
+
+    // Effective egress must be a subset of the parent's: every destination the
+    // child may reach must already be permitted to the parent. An empty parent
+    // allow-list (model path only) permits no extra child egress.
+    let parent_egress = effective_egress(parent);
+    for dest in effective_egress(child) {
+        if !egress_covers(parent_egress, dest) {
+            v.push(EnvelopeViolation::EgressNotSubset {
+                host: dest.host.clone(),
+                port: dest.port,
+            });
+        }
+    }
+
+    v
 }
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -819,5 +908,107 @@ mod tests {
         assert_eq!(e.delegation_depth, 0);
         assert_eq!(e.authority_ceiling, TIER_MIN);
         assert!(e.budget.is_none());
+    }
+
+    // ── Effective-authority attenuation (tools + egress the sandbox enforces) ──
+
+    fn spec_with(
+        envelope: TaskEnvelope,
+        tool_policy: Option<&str>,
+        egress: Vec<TaskEgress>,
+    ) -> KarsTaskSpec {
+        KarsTaskSpec {
+            objective: "x".into(),
+            envelope,
+            parent_ref: None,
+            execution: None,
+            blueprint: Some(TaskBlueprint {
+                tool_policy: tool_policy.map(str::to_string),
+                egress,
+                ..Default::default()
+            }),
+            display_name: None,
+        }
+    }
+
+    fn eg(host: &str, port: Option<u16>) -> TaskEgress {
+        TaskEgress { host: host.into(), port }
+    }
+
+    /// A child envelope that strictly attenuates `parent_envelope()` on every
+    /// numeric axis, so attenuation tests isolate the tool/egress axes.
+    fn child_envelope() -> TaskEnvelope {
+        TaskEnvelope {
+            tier: 4,
+            budget: Some(TaskBudget {
+                tokens: Some(100_000),
+                usd_micros: Some(5_000_000),
+            }),
+            tool_policy_ref: Some(LocalObjectRef { name: "strict-tools".into() }),
+            egress_allowlist_ref: None,
+            delegation_depth: 2,
+            authority_ceiling: 4,
+        }
+    }
+
+    #[test]
+    fn effective_tool_policy_prefers_blueprint_then_envelope() {
+        // Blueprint wins when set.
+        let s = spec_with(parent_envelope(), Some("bp-tools"), vec![]);
+        assert_eq!(effective_tool_policy(&s), Some("bp-tools"));
+        // Falls back to the envelope ref when the blueprint omits it.
+        let s2 = spec_with(parent_envelope(), None, vec![]);
+        assert_eq!(effective_tool_policy(&s2), Some("strict-tools"));
+    }
+
+    #[test]
+    fn child_egress_must_be_subset_of_parent() {
+        let parent = spec_with(
+            parent_envelope(),
+            Some("strict-tools"),
+            vec![eg("api.github.com", Some(443)), eg("pkg.go.dev", None)],
+        );
+        // Child within the parent's allow-list (exact + any-port host) → ok.
+        let ok = spec_with(
+            child_envelope(),
+            Some("strict-tools"),
+            vec![eg("api.github.com", Some(443)), eg("pkg.go.dev", Some(443))],
+        );
+        assert!(spec_attenuation_violations(&ok, &parent).is_empty());
+        // Child reaching a host the parent never allowed → rejected.
+        let bad = spec_with(
+            child_envelope(),
+            Some("strict-tools"),
+            vec![eg("evil.example.com", Some(443))],
+        );
+        let v = spec_attenuation_violations(&bad, &parent);
+        assert!(matches!(
+            v.as_slice(),
+            [EnvelopeViolation::EgressNotSubset { host, .. }] if host == "evil.example.com"
+        ));
+    }
+
+    #[test]
+    fn empty_parent_egress_permits_no_child_egress() {
+        let parent = spec_with(parent_envelope(), Some("strict-tools"), vec![]);
+        let bad = spec_with(
+            child_envelope(),
+            Some("strict-tools"),
+            vec![eg("api.github.com", Some(443))],
+        );
+        let v = spec_attenuation_violations(&bad, &parent);
+        assert!(v.iter().any(|x| matches!(x, EnvelopeViolation::EgressNotSubset { .. })));
+    }
+
+    #[test]
+    fn child_tool_policy_must_match_parent_effective() {
+        let parent = spec_with(parent_envelope(), Some("strict-tools"), vec![]);
+        // Different effective tool policy than the parent → rejected.
+        let bad = spec_with(child_envelope(), Some("loose-tools"), vec![]);
+        let v = spec_attenuation_violations(&bad, &parent);
+        assert!(v.iter().any(|x| matches!(
+            x,
+            EnvelopeViolation::PolicyMismatch { axis: PolicyAxis::ToolPolicy, .. }
+        )));
     }
 }
