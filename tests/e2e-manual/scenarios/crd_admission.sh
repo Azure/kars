@@ -251,7 +251,7 @@ spec:
   storeName: memory-min
   sandboxRef:
     name: nonexistent-sandbox
-  scope: agent:nonexistent-sandbox
+  scope: agent_nonexistent-sandbox
 "; then
     metric_finish "cm_admit" crd_admission admitKarsMemory
     log_pass "KarsMemory admitted"

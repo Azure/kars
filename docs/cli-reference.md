@@ -1688,7 +1688,7 @@ sandbox-delete sweep). Mirrors `kubectl get/apply/delete` patterns.
 | `--from-file <path>` | Read full spec from a YAML/JSON file (mutually exclusive with the flags below). |
 | `--sandbox <name>` | Sandbox to bind (`spec.sandboxRef.name`). |
 | `--store <name>` | Foundry Memory Store name (DNS-label). |
-| `--scope <key>` | Scope key under which this sandbox reads/writes (e.g. `agent:my-agent`). |
+| `--scope <key>` | Scope key under which this sandbox reads/writes (e.g. `agent_my-agent`). Charset: letters, digits, `_ - . % + @ /` — no colons. |
 | `--retention-days <n>` | Retention floor for the `delete_scope` sweep (must be > 0). |
 | `--display-name <s>` | Human-readable display label. |
 | `--no-delete-on-sandbox-delete` | Keep store contents when the sandbox is deleted (default: cleanup on delete). |
@@ -1700,7 +1700,7 @@ kars memory apply my-agent-mem \
   -n kars-my-agent \
   --sandbox my-agent \
   --store prod-shared-memory \
-  --scope agent:my-agent \
+  --scope agent_my-agent \
   --retention-days 30
 
 # List bindings in a namespace

@@ -34,7 +34,7 @@ NAME                                                       AGE
 inferencepolicy.kars.azure.com/demo-agent-inference        30s
 
 NAME                                              SANDBOX      STORE                SCOPE                PHASE       AGE
-karsmemory.kars.azure.com/demo-agent-memory       demo-agent   memory-demo-agent    agent:demo-agent     Compiled    30s
+karsmemory.kars.azure.com/demo-agent-memory       demo-agent   memory-demo-agent    agent_demo-agent     Compiled    30s
 
 NAME                                              URL                            PRODUCTION   PHASE      AGE
 mcpserver.kars.azure.com/demo-agent-mcp           https://mcp.example.com/sse    false        Ready      30s
