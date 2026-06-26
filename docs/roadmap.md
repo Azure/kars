@@ -26,7 +26,7 @@ Themes ordered roughly by what we expect to ship first. Nothing here is dated; l
 
 ### Inference policy enforcement
 
-- **Aggregate token budgets** in `InferencePolicy` — persisted counters across requests (per-hour / per-day windows) with `rejectOnExceed` enforced at the router. Today only `tokenBudget.perRequestTokens` is enforced; aggregate counters are accepted on the spec and surfaced in status but not yet metered.
+- **Aggregate token budgets — per-hour windows + `rejectOnExceed` knob.** Per-sandbox **daily and monthly** aggregate counters are already metered and enforced at the router (over-budget requests are rejected) — see [feature maturity](maturity.md#inference-safety). Still on the roadmap: shorter **per-hour** windows and an explicit `rejectOnExceed` policy field to make the reject-vs-warn behaviour configurable per `InferencePolicy`.
 
 ### A2A gateway hardening
 
