@@ -29,11 +29,11 @@ describe("memoryCommand — registration", () => {
 
 describe("memoryCommand — buildMemorySpecFromFlags", () => {
   it("emits sandboxRef.name + storeName + scope from flags", () => {
-    const spec = buildMemorySpecFromFlags({ sandbox: "my-agent", store: "episodic", scope: "agent:my-agent" });
+    const spec = buildMemorySpecFromFlags({ sandbox: "my-agent", store: "episodic", scope: "agent_my-agent" });
     expect(spec).toEqual({
       sandboxRef: { name: "my-agent" },
       storeName: "episodic",
-      scope: "agent:my-agent",
+      scope: "agent_my-agent",
     });
   });
 
@@ -54,7 +54,7 @@ describe("memoryCommand — buildMemorySpecFromFlags", () => {
 });
 
 describe("memoryCommand — validateMemorySpec", () => {
-  const ok = { sandboxRef: { name: "a" }, storeName: "s", scope: "agent:a" };
+  const ok = { sandboxRef: { name: "a" }, storeName: "s", scope: "agent_a" };
 
   it("accepts a minimal valid spec", () => {
     expect(validateMemorySpec(ok)).toEqual([]);
@@ -73,6 +73,15 @@ describe("memoryCommand — validateMemorySpec", () => {
   it("rejects empty scope", () => {
     const errs = validateMemorySpec({ ...ok, scope: "" });
     expect(errs.join(" ")).toMatch(/spec\.scope/);
+  });
+
+  it("rejects a scope with a colon (Foundry charset)", () => {
+    const errs = validateMemorySpec({ ...ok, scope: "agent:a" });
+    expect(errs.join(" ")).toMatch(/colons are rejected|may only contain/);
+  });
+
+  it("accepts a scope using the valid charset separators", () => {
+    expect(validateMemorySpec({ ...ok, scope: "session_1-a.b@c/d" })).toEqual([]);
   });
 
   it("rejects non-positive retentionDays", () => {
@@ -99,12 +108,12 @@ describe("memoryCommand — summarizeMemoryRow", () => {
     const row = summarizeMemoryRow(
       {
         metadata: { name: "mem1", creationTimestamp: "2024-12-25T00:00:00Z" },
-        spec: { sandboxRef: { name: "a" }, storeName: "episodic", scope: "agent:a", retentionDays: 30 },
+        spec: { sandboxRef: { name: "a" }, storeName: "episodic", scope: "agent_a", retentionDays: 30 },
         status: { phase: "Bound" },
       },
       NOW,
     );
-    expect(row).toEqual(["mem1", "a", "episodic", "agent:a", "30d", "7d", "Bound"]);
+    expect(row).toEqual(["mem1", "a", "episodic", "agent_a", "30d", "7d", "Bound"]);
   });
 
   it("renders '-' for missing retentionDays", () => {

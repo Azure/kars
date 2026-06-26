@@ -505,7 +505,7 @@ spec:
   sandboxRef:
     name: my-agent                                        # required: sibling KarsSandbox
   storeName: episodic                                     # required (unless bundleRef)
-  scope: "agent:my-agent"                                 # optional; default `agent:<sandboxName>`
+  scope: "agent_my-agent"                                 # optional; default `agent_<sandboxName>`; charset: letters/digits/_-.%+@/ (no colons)
   retentionDays: 30                                       # optional; > 0 when set
   deleteOnSandboxDelete: true                             # default true
 ```
