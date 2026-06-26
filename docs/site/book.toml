@@ -19,6 +19,9 @@ build-dir = "../../target/book"
 create-missing = false
 
 [output.html]
+# Theme overrides live in ./theme (custom index.hbs with the kars top nav).
+# `theme` is relative to this book root (docs/site).
+theme = "theme"
 default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/Azure/kars"
@@ -26,6 +29,8 @@ edit-url-template = "https://github.com/Azure/kars/edit/dev/docs/{path}"
 no-section-label = false
 mathjax-support = false
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
+# custom.css is the comprehensive kars theme layer, loaded last so it wins.
+additional-css = ["theme/css/custom.css"]
 
 [output.html.fold]
 enable = true

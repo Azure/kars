@@ -43,12 +43,42 @@ docs/
 ├── adr/
 └── site/
     ├── README.md       # this file
-    └── book.toml       # mdbook config (src = "..", build-dir = "../../target/book")
+    ├── book.toml       # mdbook config (src = "..", build-dir = "../../target/book")
+    ├── mermaid.min.js  # bundled Mermaid runtime (additional-js)
+    ├── mermaid-init.js # brand-aligned Mermaid theme bootstrap (additional-js)
+    └── theme/          # kars theme overrides
+        ├── index.hbs   # HTML template: top nav bar with kars logo + GitHub CTA
+        ├── favicon.svg # kars brand favicon (vector)
+        ├── favicon.png # kars brand favicon (raster fallback)
+        └── css/
+            └── custom.css  # comprehensive theme layer (additional-css)
 ```
 
 The `src = ".."` setting in `book.toml` tells mdbook to use the entire `docs/` directory as the source tree. That way the same `.md` files reviewers see on GitHub also become the chapters of the rendered site.
 
 The build output (`/target/book/`) is gitignored.
+
+## Theme
+
+The site ships a custom mdbook theme under `site/theme/`:
+
+- **`theme/index.hbs`** overrides the default HTML template to add a sticky top
+  navigation bar with the kars logo lockup (mark + wordmark + `docs` tag), the
+  centered book title, and a GitHub call-to-action pill. It also loads the
+  Inter (UI/prose) and JetBrains Mono (code) webfonts.
+- **`theme/css/custom.css`** is the comprehensive theme layer, wired up via
+  `additional-css` so it loads last and wins over the stock themes. It defines
+  per-theme design tokens (light/rust/coal/navy/ayu), modern typography, CTA
+  buttons (`.btn-primary` / `.btn-secondary` inside `.cta-row`), card-style
+  tables and admonitions, framed code blocks with shared syntax highlighting,
+  and styled Mermaid diagram cards.
+- **`theme/favicon.svg` / `theme/favicon.png`** brand the browser tab.
+- **`mermaid-init.js`** initialises Mermaid with a kars Azure-family palette and
+  the Inter font, switching between light and dark variants with the theme.
+
+Because the overrides only add an `index.hbs` plus a `custom.css` layer (rather
+than forking every stock CSS file), the theme stays resilient across mdbook
+upgrades.
 
 ## Updating the site
 
