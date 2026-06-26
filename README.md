@@ -51,7 +51,7 @@ kars runs agents with the same operational discipline as the rest of your servic
 
 The Kubernetes agent ecosystem is evolving rapidly. Our long-term aim is to align architecturally and collaborate with upstream community efforts like `kubernetes-sigs/agent-sandbox` (for isolated pod primitives) and `agentgateway` (for edge/protocol routing). 
 
-While no formal integrations or project discussions have taken place yet, `kars` is designed with composability in mind to eventually fit seamlessly into this broader cloud-native agentic stack as those standards mature.
+While no formal integrations or project discussions have taken place yet, `kars` is designed with composability in mind, so it can grow toward this broader cloud-native agentic stack as those standards mature.
 
 ## Architecture (How it works)
 
@@ -209,7 +209,7 @@ On first run, `kars dev` shows a three-way provider picker — **GitHub Copilot*
 kars connect dev-agent
 ```
 
-The TUI drops you into a chat window. Type *"list the files in my workspace"* or *"write a Python script that prints the current Azure subscription"* — every tool call the agent makes is governed by the same router code path that runs in production.
+The TUI drops you into a chat window. Type *"list the files in my workspace"* or *"write a Python script that reverses a string and run it"* — every tool call the agent makes is governed by the same router code path that runs in production.
 
 > **Don't have an Azure AI Foundry deployment yet?** If you picked Copilot or Models above, you don't need one. If you want the full Foundry feature set, two `az` commands get you both — see **[Getting started → Choosing an inference provider](docs/getting-started.md#choosing-an-inference-provider)**.
 
@@ -337,7 +337,14 @@ If a limitation surprised you in a way this list didn't warn about, that's a bug
 
 ## Contributing & support
 
-- Contributing guide: **[`CONTRIBUTING.md`](CONTRIBUTING.md)**
+kars is built in the open and we'd love your help. Good places to start:
+
+- 🟢 **[Good first issues](https://github.com/Azure/kars/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)** — small, well-scoped, beginner-friendly tasks with clear acceptance criteria.
+- 🤝 **[Help wanted](https://github.com/Azure/kars/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)** — slightly bigger tasks the maintainers would love a hand with.
+- 💬 **[Discussions](https://github.com/Azure/kars/discussions)** — questions, ideas, and "is kars right for us?" — we'd genuinely rather you ask than feel stuck.
+
+Before opening a PR, see the **[contributing guide](CONTRIBUTING.md)**. Other references:
+
 - Security policy: **[`SECURITY.md`](SECURITY.md)**
 - Support: **[`SUPPORT.md`](SUPPORT.md)**
 - Code of Conduct: **[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)**
