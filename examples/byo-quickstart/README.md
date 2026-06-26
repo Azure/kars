@@ -6,7 +6,7 @@ full round-trip:
 1. Author a small FastAPI app that calls the kars inference
    router at `http://127.0.0.1:8443/openai/v1`.
 2. Package it into an OCI image that meets the
-   [BYO contract](../../docs/byo-runtime-contract.md):
+   [BYO contract](../../docs/runtimes/CONTRACT.md):
    - Runs as UID 1000.
    - Read-only root filesystem, writable `/sandbox` and `/tmp`.
    - Emits the `org.kars.runtime.contract` label.

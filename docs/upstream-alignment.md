@@ -103,9 +103,11 @@ For completeness, these are the things we explicitly do **not** do:
 - Intercept transport at a level below the plugin API
 - Ship a modified OpenClaw protocol on the wire
 
-A quick check: `vendor/` in this repo contains only **AgentMesh** forks
-(SDK, relay, registry) — documented with numbered patches against upstream
-bugs that block our use case. There is **no OpenClaw fork.**
+A quick check: kars does **not** vendor an OpenClaw fork. The only vendored AGT
+artifact is the pinned upstream Agent Governance Toolkit build (`vendor/agt/`, a
+tarball + pin, plus locally-built AGT Python wheels) — used while two pre-release
+fixes are in review, switching to the published releases once they land. There is
+**no in-tree fork** of OpenClaw or of AGT.
 
 If upstream OpenClaw ever removes `tools.deny` or the `api.registerTool()`
 contract, **that** is the point at which alignment would need to be

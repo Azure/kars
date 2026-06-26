@@ -106,7 +106,7 @@ profile digest matches what the controller compiled.
 Same wire contract as `ToolPolicy`. Per-request token budgets are
 enforced today; aggregate (`dailyTokens` / `monthlyTokens`) is
 accepted and surfaced but not yet aggregated — see
-[`docs/roadmap.md`](../roadmap.md#v11--topology--signed-crd-upgrades).
+[`docs/roadmap.md`](../roadmap.md#trust-topology-end-to-end).
 
 ## KarsMemory
 

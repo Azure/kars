@@ -39,7 +39,7 @@ Giving an AI agent real tools means giving it real credentials and a real networ
 kars runs agents with the same operational discipline as the rest of your services:
 
 - **Zero-trust agent process** — the agent runs under a different UID than the router and never sees an Azure key. The inference router holds the credential and brokers every call.
-- **Cross-framework E2E mesh** — agents on different frameworks (Hermes, LangGraph, OpenClaw, and the other supported runtimes) communicate over AgentMesh using the Signal Protocol. The relay sees only ciphertext.
+- **Cross-framework E2E mesh** — agents on different frameworks talk over AgentMesh using the Signal Protocol; the relay sees only ciphertext. **OpenClaw ↔ Hermes** is wired and exercised end-to-end on every push (`tests/e2e/interop/hermes_openclaw_bidi.sh`); the other adapters bundle the mesh client and are being brought to the same bar ([roadmap](docs/roadmap.md)).
 - **Declarative operations** — fleet operations are GitOps-native and observable through the Headlamp plugin: a Kubernetes dashboard for agent sandboxes, policy CRDs, and trust topology.
 - **Real Kubernetes dev loop** — `kars dev --target local-k8s` runs your agent in `kind` using the same Helm chart, NetworkPolicies, and sidecars as production AKS.
 
@@ -82,6 +82,23 @@ While no formal integrations or project discussions have taken place yet, `kars`
 ```
 
 **The agent has no network of its own.** Every byte that leaves the pod leaves through the Rust inference router. The `NetworkPolicy` and `egress-guard` iptables container are **safety nets** that contain blast radius if the router is bypassed. Compromise of the agent does not compromise the cloud account, the model, the audit log, or the peer mesh.
+
+### Spotlight: the inference router is the zero-trust core
+
+The per-pod router is the one component every external call passes through, and it carries most of the security model. It runs as a **separate container under a different UID (1001) than the agent (1000)**, holds the credentials the agent never sees, and is the single enforcement point for:
+
+- **Identity & token brokering** — exchanges the per-sandbox Entra Agent ID (or cluster Workload Identity) for backend tokens via federated OIDC / IMDS; refreshes them automatically. The agent process holds **no** long-lived key. *(`auth.rs`, `copilot_auth.rs`)*
+- **Inline content safety** — reads Foundry's `prompt_filter_results` on every completion (jailbreak / indirect-attack / hate / violence / self-harm / sexual), enforces a configurable severity floor, and feeds detections into a per-peer trust penalty. *(`safety.rs`)*
+- **Token budgets & rate limits** — per-tenant token ceilings and request rate limits, enforced before the call leaves the pod. *(`budget.rs`, `rate_limiter.rs`)*
+- **L7 egress allowlist + blocklist** — every outbound `CONNECT` is checked against the per-sandbox allowlist and the OISD + URLhaus blocklist (daily refresh); `EgressApproval` CRDs add time-boxed exceptions. *(`forward_proxy.rs`, `egress_allowlist_loader.rs`, `blocklist.rs`)*
+- **MCP gateway** — brokers calls to external MCP servers with OAuth and per-tool allowlists. *(`mcp/`)*
+- **Governance (AGT)** — policy decisions, per-peer trust scoring, and behaviour monitoring through the consumed Agent Governance Toolkit primitives. *(`governance/`, `behavior_monitor.rs`)*
+- **Tamper-evident audit** — every decision is written to an append-only, **SHA-256 hash-chained** audit log (AGT's `AuditLogger`: each entry's hash covers the prior entry's hash) in a stable JSONL format. *(consumed from `agentmesh::AuditLogger`; persisted via `audit_sink.rs` / `audit_jsonl.rs`)*
+- **A2A data plane** — the cross-org A2A surface, including AP2 mandate signing and the trust store. *(`a2a/`)*
+- **Sub-agent spawn & handoff** — creates/destroys `KarsSandbox` sub-agents and drains/migrates sessions, all through the pod's scoped ServiceAccount. *(`spawn/`, `handoff/`)*
+- **Mesh bridge** — WebSocket-bridges **opaque** Signal-Protocol ciphertext to the relay. The router holds no session keys and cannot decrypt. *(`mesh.rs`)*
+
+**Why this is not the same as a cluster-edge gateway (e.g. `agentgateway`).** A north-south gateway governs traffic at the cluster boundary; the kars router is an **in-pod policy enforcement point** that sits on `localhost` between the agent and everything else, so the agent has **no network path that bypasses it**. They operate at different layers and are **complementary, not interchangeable** — a cluster-edge gateway can front kars, and the per-pod router still does the per-agent identity, content-safety, budget, and audit enforcement that a shared edge cannot do per-sandbox. This is the structural core of the zero-trust model: the trust boundary is the pod, not the cluster perimeter.
 
 ---
 
@@ -135,7 +152,7 @@ The CLI on npm is **build-provenance attested** (SLSA) — verify with
 
 Run on Kubernetes instead with `kars dev --release --target local-k8s` — this
 runs the **same images on a local [kind](https://kind.sigs.k8s.io/) cluster**
-with the real pod shape (separate router pod, init container, `NetworkPolicy`,
+with the real pod shape (separate router **container**, init container, `NetworkPolicy`,
 seccomp). It behaves almost identically to AKS, so it's the **recommended dev
 loop** once you're past first-run. For a managed cluster, `kars up` provisions
 AKS (see [Getting started → Deploy to AKS](docs/getting-started.md#step-2--deploy-to-aks)).
@@ -198,9 +215,11 @@ kars up --name prod-agent --region swedencentral --release --mesh-trust=entra
 
 ## What is built in
 
-### Ten workload CRDs
+### Twelve CRDs (ten workload + two infrastructure)
 
-`KarsSandbox` is the unit of work — one CRD per agent. Everything else binds policy, identity, peer relationships, or operations to it.
+`KarsSandbox` is the unit of work — one CRD per agent. The other nine **workload** CRDs bind policy, identity, peer relationships, memory, evaluation, and operations to it. Two **infrastructure** CRDs are written by the platform, not authored per agent.
+
+**Ten workload CRDs** (you author these):
 
 | CRD | Purpose |
 |---|---|
@@ -215,9 +234,9 @@ kars up --name prod-agent --region swedencentral --release --mesh-trust=entra
 | **`EgressApproval`** | Ephemeral, TTL-bounded extra egress hosts overlaid on the baseline allowlist. |
 | **`KarsSREAction`** | Approval-gated, TTL-bounded write action proposed by the [autonomous SRE operator](docs/runbooks/sre.md). The controller executes it only when `spec.approval.state` is `Approved`, via a short-lived `TokenRequest` + scoped `ClusterRoleBinding` (least-privilege, auto-revoked). |
 
-Plus two infrastructure CRDs you don't author per agent: **`KarsAuthConfig`** (cluster-scoped singleton written by `kars mesh setup-trust` — the tenant-wide Entra Agent ID trust anchor) and the controller-internal **`KarsPairing`** record (binds sandboxes to AgentMesh registry IDs). **Twelve CRDs in total.**
+**Two infrastructure CRDs** (platform-written, not per-agent): **`KarsAuthConfig`** (cluster-scoped singleton written by `kars mesh setup-trust` — the tenant-wide Entra Agent ID trust anchor) and the controller-internal **`KarsPairing`** record (binds sandboxes to AgentMesh registry IDs).
 
-Full schema in **[`docs/api/crd-reference.md`](docs/api/crd-reference.md)**.
+That's **twelve CRDs in total** — ten you author, two the platform manages. Full schema in **[`docs/api/crd-reference.md`](docs/api/crd-reference.md)**.
 
 ### Eight agent runtimes (plus BYO)
 
@@ -225,7 +244,7 @@ You pick the runtime via `KarsSandbox.spec.runtime.kind`. The router, governance
 
 | Runtime | Language | Image dir | Status |
 |---|---|---|---|
-| **OpenClaw** (default) | Python | `sandbox-images/openclaw/` | ✅ |
+| **OpenClaw** (default) | TypeScript / Node | `sandbox-images/openclaw/` | ✅ |
 | **Hermes** (Nous Research) | Python | `sandbox-images/hermes/` | ✅ |
 | **OpenAI Agents SDK** | Python | `sandbox-images/openai-agents/` | ✅ |
 | **Microsoft Agent Framework** | Python | `sandbox-images/maf-python/` | ✅ (`.NET` deferred) |
@@ -239,7 +258,7 @@ The BYO contract is documented in **[`docs/runtimes.md`](docs/runtimes.md)**. Se
 
 ### One mesh, one gateway, one CLI
 
-- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. **The Signal session lives in the agent process**, not the router: the OpenClaw plugin layer (and every other supported runtime) bundles Microsoft's Agent Governance Toolkit TypeScript SDK (`@microsoft/agent-governance-sdk`) at sandbox-image build time and owns X3DH / Double Ratchet / KNOCK end to end. (That SDK is currently vendored from a pinned AGT revision — [`microsoft/agent-governance-toolkit@3322175d`](https://github.com/microsoft/agent-governance-toolkit), carrying two in-review pre-release fixes — and switches to the published npm release once those land; it is an upstream build, **not an in-tree fork**.) The inference router links Microsoft's [`agentmesh`](https://crates.io/crates/agentmesh) crate (`4.0.0`, temporarily patched to the same AGT revision via `[patch.crates-io]`) only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — **never for mesh crypto** — and acts as a transparent WebSocket bridge to the relay for the encrypted bytes.
+- **AgentMesh** — Signal Protocol (X3DH + Double Ratchet) inter-agent messaging with KNOCK trust handshake and per-message forward secrecy. No plaintext fallback. **The Signal session lives in the agent process**, not the router. Each runtime ships an AGT mesh client matched to its language: **OpenClaw** bundles the AGT **TypeScript SDK** (`@microsoft/agent-governance-sdk`), while **Hermes** uses the AGT **Python mesh client** (`kars-agt-mesh`, built on upstream `agentmesh-platform`); both own X3DH / Double Ratchet / KNOCK end to end and are wire-compatible (proven by `tests/e2e/interop/hermes_openclaw_bidi.sh`). The other Python adapters bundle the same client but do not yet expose the mesh tools (see [Known limitations](#known-limitations)). (The TS SDK is currently vendored from a pinned AGT revision — [`microsoft/agent-governance-toolkit@3322175d`](https://github.com/microsoft/agent-governance-toolkit), carrying two in-review pre-release fixes — and switches to the published npm release once those land; it is an upstream build, **not an in-tree fork**.) The inference router links Microsoft's [`agentmesh`](https://crates.io/crates/agentmesh) crate (`4.0.0`, temporarily patched to the same AGT revision via `[patch.crates-io]`) only for shared governance primitives (`AuditLogger`, `PolicyEngine`, `TrustManager`, MCP rate-limit / redactor) — **never for mesh crypto** — and acts as a transparent WebSocket bridge to the relay for the encrypted bytes.
 - **A2A gateway** — public-ingress for peer-to-peer agent traffic with tenant routing, audit, and rate limiting. AgentCard signature verification (`kars_a2a_core::verify_inbound_card`) ships as a library and is unit-tested; today the gateway authorises inbound traffic via the `X-A2A-Agent-Subject` header set by the upstream mTLS layer. Wiring the verifier as an axum layer inside the gateway binary is tracked in the [roadmap](docs/roadmap.md).
 - **CLI (`kars …`)** — 30+ commands covering the whole lifecycle: `dev`, `up`, `add`, `connect`, `handoff`, `mesh`, `policy`, `egress`, `eval`, `attest`, `audit`, `inspect`, `migrate`, `operator` (live TUI), `destroy`, and more. Full reference in **[`docs/cli-reference.md`](docs/cli-reference.md)**.
 
@@ -283,7 +302,7 @@ The full site index is in **[`docs/README.md`](docs/README.md)**.
 We would rather you find these in this list than in production. None of them block the core promise (one router, one audit chain, one CRD shape across runtimes), but they shape how you should run the rc:
 
 - **Mesh trust tiers default to anonymous.** Sub-agents register with the AgentMesh registry as the *anonymous* tier unless the operator passes `--mesh-trust=entra` to `kars up` AND holds the `Agent ID Developer` Entra directory role. Under the default, the relay accepts every peer at trust score `0`; KNOCK gating still happens but score-based admission is moot. Verified-tier registration (per-sandbox Entra Agent ID JWTs verified by the AGT relay against tenant JWKS) is fully wired in this repo; the AGT-side relay+registry patches are tracked upstream in [microsoft/agent-governance-toolkit#2659](https://github.com/microsoft/agent-governance-toolkit/pull/2659). One CLI flag (`--mesh-trust=entra`) is the whole opt-in; see **[`docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite`](docs/security.md#trust-tiers-and-the-apiagentmesh-prerequisite)** for the failure modes when the role / upstream patches are missing.
-- **Multi-runtime images are not yet published to a public registry.** OpenClaw runs out of the box; the other seven wired runtimes (Hermes, OpenAI Agents SDK, Microsoft Agent Framework Python, LangGraph, LangGraph.js, Anthropic, Pydantic-AI) currently require `kars push --build` against your own ACR before `kars add --runtime <kind>` will succeed. The build pipeline is in tree (`sandbox-images/<kind>/Dockerfile`); the public distribution is what's pending.
+- **Mesh/spawn/handoff is fully wired for OpenClaw and Hermes; partial for the other adapters.** The encrypted AgentMesh (and the sub-agent spawn / handoff tools that ride on it) is exercised end-to-end for **OpenClaw** and **Hermes** (`tests/e2e/interop/hermes_openclaw_bidi.sh`). The other adapter images (OpenAI Agents SDK, MAF-Python, LangGraph Py/TS, Anthropic, Pydantic-AI) are **published to `ghcr.io/azure` and imported by `--release`**, and run governed inference + the Foundry/MCP tool surface — but their `kars_mesh_*` / spawn / handoff tools are not yet exposed (pending the Python AGT mesh client reaching TS parity for those adapters). Use OpenClaw or Hermes when you need cross-agent mesh today; track the rest on the [roadmap](docs/roadmap.md).
 - **Semantic Kernel and MAF .NET runtimes are CRD-wired but adapter-incomplete.** The CRD enum accepts the values, the controller emits a `ShapeInvalid` condition, the agent does not start. Treat them as future work, not silent breakage.
 - **Attestation is router-and-audit only.** We sign and hash-chain audit entries; we do not yet emit cosign-signed runtime receipts (`attest sign`/`attest verify` are scaffolded — see `docs/roadmap.md`).
 - **No managed-service equivalent.** This is a runtime you operate. There is no hosted control plane.

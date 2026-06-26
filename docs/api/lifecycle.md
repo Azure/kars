@@ -15,7 +15,7 @@ If you only read one document about how kars fits together, read this one.
 - [`InferencePolicy` — the policy compile pattern](#inferencepolicy--the-policy-compile-pattern)
 - [`McpServer` — declared MCP backend](#mcpserver--declared-mcp-backend)
 - [`A2AAgent` — public-ingress endpoint](#a2aagent--public-ingress-endpoint)
-- [`ToolPolicy` / `KarsMemory` / `KarsEval` / `TrustGraph`](#toolpolicy--karsmemory--karsevaluation--trustgraph)
+- [`ToolPolicy` / `KarsMemory` / `KarsEval` / `TrustGraph`](#toolpolicy--karsmemory--karseval--trustgraph)
 - [Status, conditions, requeue](#status-conditions-requeue)
 - [Deletion & finalizers](#deletion--finalizers)
 
@@ -26,7 +26,7 @@ If you only read one document about how kars fits together, read this one.
 ```mermaid
 flowchart LR
   CLI["kars CLI<br/>or GitOps / kubectl"]
-  CRD[("CRD<br/>(9 kinds)")]
+  CRD[("CRD<br/>(12 kinds)")]
   Ctrl["kars-controller<br/>(kube-rs)"]
   Art[("Cluster artifacts<br/>Namespace · ServiceAccount · NetworkPolicy<br/>Deployment · Service · ConfigMap · Secret<br/>FederatedIdentityCredential")]
   Runtime["Runtime data plane<br/>inference-router · A2A gateway · sandbox pod"]

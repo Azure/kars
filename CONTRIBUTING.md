@@ -77,7 +77,7 @@ kars is a **community-supported, best-effort** project, and we love contribution
 - 🔌 **New MCP servers** that conform to the `McpServer` CRD and keep sandbox isolation intact
 - 💬 **New channels** (Telegram / Slack / Discord / WhatsApp pattern) or **web-search plugins** (Brave / Tavily / Exa / Firecrawl / Perplexity / OpenAI pattern)
 - 🧩 **New Tier-2 BYO runtime adapters** implementing the multi-runtime architecture per [`docs/runtimes.md`](docs/runtimes.md)
-- 🛡️ **Egress allowlist contributions** for the signed-OCI workflow (per S12 / `docs/internal/security-audits/`)
+- 🛡️ **Egress allowlist contributions** for the signed-OCI workflow (see [`docs/operations/supply-chain.md`](docs/operations/supply-chain.md) and [`docs/egress-proxy.md`](docs/egress-proxy.md))
 - 📚 **Documentation improvements** — use-case blueprints, troubleshooting guides, architecture clarifications
 - ✅ **Test coverage improvements** (chaos, conformance, unit tests) that increase confidence in isolation or governance
 - ⚡ **Performance fixes** that don't relax security invariants (latency, throughput, resource utilization)
@@ -106,7 +106,7 @@ This keeps users safe while we ship the fix, and makes sure you get the recognit
 |-----------|----------|------------|
 | `controller/` | Rust (kube-rs) | K8s operator — reconciles KarsSandbox CRDs into sandboxes |
 | `inference-router/` | Rust (axum) | Per-sandbox router — auth, safety, budgets, 18 Foundry APIs, native AGT governance |
-| `cli/` | TypeScript | 18 CLI commands + OpenClaw plugin + 10 Foundry skills |
+| `cli/` | TypeScript | 30+ CLI commands + OpenClaw plugin + 10 Foundry skills |
 | `runtimes/openclaw/skills/` | Markdown | 10 SKILL.md files teaching the OpenClaw agent to use kars + Foundry services |
 | `cli/profiles/agt/` | YAML | AGT policy profiles (default/offload) inlined by the CLI into `ToolPolicy.spec.agtProfile.inline` |
 | `deploy/bicep/` | Bicep | Azure infrastructure (AKS, ACR, KV, AOAI, Monitor) |
@@ -134,11 +134,24 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all           # format
 ```
 
-### Docker sandbox image
+### Local sandbox (kind-first)
+
+The recommended validation loop reproduces the real production pod shape on a
+local [kind](https://kind.sigs.k8s.io/) cluster — separate router container,
+`NetworkPolicy`, seccomp, the whole sandbox shape:
 
 ```bash
-kars dev --build          # build + run locally via Docker
+kars dev --build --target local-k8s   # build from source, run on a local kind cluster
 ```
+
+For a faster prompt/tool inner loop, the single-container Docker target builds
+and runs everything in one container (no K8s glue):
+
+```bash
+kars dev --build          # build + run locally in a single Docker container
+```
+
+Validate changes you intend to ship on `--target local-k8s` before opening a PR.
 
 ### Push to ACR
 
@@ -260,9 +273,9 @@ PRs that propose new CRDs, new runtimes, transport changes, or new direct depend
 
 1. An **Architecture Decision Record (ADR)** in `docs/adr/` (see existing ADRs for format)
 2. A public **RFC issue** discussing motivation, design trade-offs, and impact on existing users
-3. **Security audit documentation** in `docs/internal/security-audits/` with `Signed-off-by:` from at least one maintainer
+3. **Security review notes** captured in the PR (threat model touched, isolation/governance impact) with sign-off from at least one maintainer
 
-The maintainer team will not review implementation PRs for architecture changes without a prior ADR + RFC. Implementation PRs should follow the slice-train pattern (breaking large changes into reviewable chunks). See `docs/internal/security-audits/2026-04-*` for the audit format.
+The maintainer team will not review implementation PRs for architecture changes without a prior ADR + RFC. Implementation PRs should follow the slice-train pattern (breaking large changes into reviewable chunks).
 
 ### AgentMesh provider changes
 
