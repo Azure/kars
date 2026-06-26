@@ -147,53 +147,66 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .and_then(|s| s.conditions.clone())
         .unwrap_or_default();
     let prior_ready = conditions::find(&prior_conditions, TYPE_READY);
-    // Lineage is owned by the delegation-minting path; never clobber it here.
-    let lineage = task
-        .status
-        .as_ref()
-        .map(|s| s.lineage.clone())
-        .unwrap_or_default();
+
+    // Resolve delegation: a task with `spec.parentRef` is a child whose
+    // envelope must attenuate its parent's, and whose lineage the controller
+    // mints from the parent's ancestry. A root task has no parent and empty
+    // lineage. The controller is the *sole* writer of lineage.
+    let delegation = resolve_delegation(&tasks, &task).await?;
 
     let new_status = match check_envelope(&task) {
-        EnvelopeCheck::Valid => {
-            let digest = task.spec.envelope.digest();
-            let ready = conditions::preserve_transition_time(
+        EnvelopeCheck::Invalid(why) => degraded_status(
+            prior_ready,
+            generation,
+            &format!("invalid trust envelope: {why}"),
+            delegation.lineage(),
+        ),
+        EnvelopeCheck::Valid => match delegation {
+            Delegation::Root => ready_status(
                 prior_ready,
-                TYPE_READY,
-                cond_status::TRUE,
-                cond_reason::RECONCILED,
-                "trust envelope validated and digested",
                 generation,
-            );
-            tracing::info!(karstask = %name, ns = %ns, digest = %digest, "KarsTask ready");
-            KarsTaskStatus {
-                phase: Some(PHASE_READY.to_string()),
-                observed_generation: generation,
-                conditions: Some(vec![ready]),
-                envelope_digest: Some(digest),
-                lineage,
+                task.spec.envelope.digest(),
+                Vec::new(),
+            ),
+            Delegation::ParentMissing { parent } => {
+                tracing::warn!(karstask = %name, ns = %ns, %parent, "KarsTask parent not found");
+                degraded_status(
+                    prior_ready,
+                    generation,
+                    &format!("parentRef `{parent}` not found in namespace"),
+                    Vec::new(),
+                )
             }
-        }
-        EnvelopeCheck::Invalid(why) => {
-            let ready = conditions::preserve_transition_time(
-                prior_ready,
-                TYPE_READY,
-                cond_status::FALSE,
-                cond_reason::SPEC_INVALID,
-                &format!("invalid trust envelope: {why}"),
-                generation,
-            );
-            tracing::warn!(karstask = %name, ns = %ns, reason = %why, "KarsTask degraded");
-            KarsTaskStatus {
-                phase: Some(PHASE_DEGRADED.to_string()),
-                observed_generation: generation,
-                conditions: Some(vec![ready]),
-                // No digest is published for an invalid envelope — the
-                // receipt must never bind to authority that didn't validate.
-                envelope_digest: None,
+            Delegation::Child {
                 lineage,
+                violations,
+            } if violations.is_empty() => {
+                tracing::info!(karstask = %name, ns = %ns, depth = lineage.len(), "KarsTask delegated child ready");
+                ready_status(
+                    prior_ready,
+                    generation,
+                    task.spec.envelope.digest(),
+                    lineage,
+                )
             }
-        }
+            Delegation::Child {
+                lineage,
+                violations,
+            } => {
+                let why = violations
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                tracing::warn!(karstask = %name, ns = %ns, %why, "KarsTask delegation amplifies authority — rejected");
+                degraded_status(
+                    prior_ready,
+                    generation,
+                    &format!("delegation amplifies parent authority: {why}"),
+                    lineage,
+                )
+            }
+        },
     };
 
     let status_patch = json!({
@@ -210,6 +223,115 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .await?;
 
     Ok(Action::requeue(REQUEUE_OK))
+}
+
+/// Outcome of resolving a task's `parentRef`.
+enum Delegation {
+    /// No `parentRef` — this is a root task.
+    Root,
+    /// `parentRef` set but the parent does not exist.
+    ParentMissing { parent: String },
+    /// `parentRef` resolved; carries the minted lineage and any attenuation
+    /// violations (empty = valid subset).
+    Child {
+        lineage: Vec<String>,
+        violations: Vec<crate::kars_task::EnvelopeViolation>,
+    },
+}
+
+impl Delegation {
+    /// The lineage to persist for this outcome (empty unless a child resolved).
+    fn lineage(&self) -> Vec<String> {
+        match self {
+            Delegation::Child { lineage, .. } => lineage.clone(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Resolve `spec.parentRef`: fetch the parent, mint lineage from its ancestry,
+/// and compute whether this task's envelope attenuates the parent's.
+async fn resolve_delegation(
+    tasks: &Api<KarsTask>,
+    task: &KarsTask,
+) -> Result<Delegation, ReconcileError> {
+    let Some(parent_ref) = task.spec.parent_ref.as_ref() else {
+        return Ok(Delegation::Root);
+    };
+    let parent = match tasks.get_opt(&parent_ref.name).await? {
+        Some(p) => p,
+        None => {
+            return Ok(Delegation::ParentMissing {
+                parent: parent_ref.name.clone(),
+            });
+        }
+    };
+    // Minted lineage = parent's ancestry + the parent itself. The controller
+    // owns this; a client-supplied lineage is ignored.
+    let mut lineage = parent
+        .status
+        .as_ref()
+        .map(|s| s.lineage.clone())
+        .unwrap_or_default();
+    lineage.push(parent.name_any());
+
+    let violations = task
+        .spec
+        .envelope
+        .attenuation_violations(&parent.spec.envelope);
+    Ok(Delegation::Child {
+        lineage,
+        violations,
+    })
+}
+
+/// Build a `Ready` status with the given digest + lineage.
+fn ready_status(
+    prior_ready: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition>,
+    generation: Option<i64>,
+    digest: String,
+    lineage: Vec<String>,
+) -> KarsTaskStatus {
+    let ready = conditions::preserve_transition_time(
+        prior_ready,
+        TYPE_READY,
+        cond_status::TRUE,
+        cond_reason::RECONCILED,
+        "trust envelope validated and digested",
+        generation,
+    );
+    KarsTaskStatus {
+        phase: Some(PHASE_READY.to_string()),
+        observed_generation: generation,
+        conditions: Some(vec![ready]),
+        envelope_digest: Some(digest),
+        lineage,
+    }
+}
+
+/// Build a `Degraded` status with no digest — the receipt must never bind to
+/// authority that didn't validate or that amplified its parent.
+fn degraded_status(
+    prior_ready: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition>,
+    generation: Option<i64>,
+    message: &str,
+    lineage: Vec<String>,
+) -> KarsTaskStatus {
+    let ready = conditions::preserve_transition_time(
+        prior_ready,
+        TYPE_READY,
+        cond_status::FALSE,
+        cond_reason::SPEC_INVALID,
+        message,
+        generation,
+    );
+    KarsTaskStatus {
+        phase: Some(PHASE_DEGRADED.to_string()),
+        observed_generation: generation,
+        conditions: Some(vec![ready]),
+        envelope_digest: None,
+        lineage,
+    }
 }
 
 /// True iff the task carries our cleanup finalizer.
@@ -292,6 +414,7 @@ mod tests {
                     delegation_depth,
                     ..TaskEnvelope::default()
                 },
+                parent_ref: None,
                 display_name: None,
             },
         );

@@ -877,6 +877,79 @@ EOF
     kubectl delete karstask e2e-karstask -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
+# KarsTask capability-attenuating delegation (Bridge V0, slice 2 — Pillar A).
+# A child task references a parent; the controller verifies the child's
+# envelope attenuates the parent's and mints lineage. An amplifying child is
+# self-valid (passes CEL) but rejected by the cross-object subset check, with
+# NO envelope digest published — a receipt can never bind to amplified authority.
+test_crd_kars_task_delegation() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "KarsTask delegation parent apply rejected"; return; }
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsTask
+metadata: { name: e2e-deleg-parent, namespace: kars-system }
+spec:
+  objective: "orchestrate a governed migration"
+  envelope: { tier: 5, authorityCeiling: 4, delegationDepth: 3, budget: { tokens: 1000000 } }
+EOF
+    # Wait for the parent to be Ready (children verify against it).
+    local pphase
+    for _ in $(seq 1 20); do
+        pphase=$(kubectl get karstask e2e-deleg-parent -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        [[ "$pphase" == "Ready" ]] && break
+        sleep 2
+    done
+
+    # Valid child: attenuates on every axis.
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "KarsTask valid child apply rejected"; return; }
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsTask
+metadata: { name: e2e-deleg-child-ok, namespace: kars-system }
+spec:
+  objective: "a bounded sub-step"
+  parentRef: { name: e2e-deleg-parent }
+  envelope: { tier: 4, authorityCeiling: 3, delegationDepth: 2, budget: { tokens: 100000 } }
+EOF
+    # Amplifying child: tier 5 exceeds parent's delegated ceiling of 4.
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "KarsTask amplifying child apply rejected"; return; }
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsTask
+metadata: { name: e2e-deleg-child-amp, namespace: kars-system }
+spec:
+  objective: "attempt to amplify authority"
+  parentRef: { name: e2e-deleg-parent }
+  envelope: { tier: 5, authorityCeiling: 5, delegationDepth: 2, budget: { tokens: 100000 } }
+EOF
+
+    local ok_phase ok_lineage amp_phase amp_digest
+    for _ in $(seq 1 20); do
+        ok_phase=$(kubectl get karstask e2e-deleg-child-ok -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        amp_phase=$(kubectl get karstask e2e-deleg-child-amp -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        [[ "$ok_phase" == "Ready" && "$amp_phase" == "Degraded" ]] && break
+        sleep 2
+    done
+
+    ok_lineage=$(kubectl get karstask e2e-deleg-child-ok -n kars-system -o jsonpath='{.status.lineage[0]}' 2>/dev/null || true)
+    if [[ "$ok_phase" == "Ready" && "$ok_lineage" == "e2e-deleg-parent" ]]; then
+        pass "KarsTask delegation: valid child Ready with controller-minted lineage ($ok_lineage)"
+    else
+        dump_cr_diagnostics karstask e2e-deleg-child-ok kars-system
+        fail "KarsTask delegation: valid child expected Ready+lineage (got phase=$ok_phase lineage=$ok_lineage)"
+    fi
+
+    amp_digest=$(kubectl get karstask e2e-deleg-child-amp -n kars-system -o jsonpath='{.status.envelopeDigest}' 2>/dev/null || true)
+    if [[ "$amp_phase" == "Degraded" && -z "$amp_digest" ]]; then
+        pass "KarsTask delegation: amplifying child Degraded with NO digest (authority cannot be amplified)"
+    else
+        dump_cr_diagnostics karstask e2e-deleg-child-amp kars-system
+        fail "KarsTask delegation: amplifying child expected Degraded+no-digest (got phase=$amp_phase digest=$amp_digest)"
+    fi
+
+    kubectl delete karstask e2e-deleg-child-ok e2e-deleg-child-amp e2e-deleg-parent -n kars-system --wait=false >/dev/null 2>&1 || true
+}
+
 # McpServer (dev-mode, no OAuth). The reconciler can't fetch JWKS in
 # Kind (no real issuer), so we assert only that the CR is admitted
 # and reaches a terminal status (Ready or Degraded — both indicate
@@ -2990,6 +3063,7 @@ main() {
     test_crd_kars_eval || true
     test_crd_kars_eval_lifecycle || true
     test_crd_kars_task || true
+    test_crd_kars_task_delegation || true
     test_crd_mcp_server || true
     test_crd_trustgraph_reconcile || true
     test_crd_karspairing_lifecycle || true
