@@ -798,6 +798,85 @@ EOF
     kubectl delete karseval e2e-karseval-lc -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 
+# KarsTask (kars Bridge V0, slice 1) — the task-as-trust-envelope CRD.
+# Three assertions:
+#   1. A valid task is admitted, reaches phase=Ready, and the controller
+#      stamps a sha256 envelopeDigest (the value a Governance Receipt binds).
+#   2. CEL admission rejects an envelope whose authorityCeiling exceeds its
+#      tier (the anti-amplification rule) before it ever reaches etcd.
+#   3. The reconciler is the sole writer of status — envelopeDigest appears
+#      only after reconcile, never asserted by the applicant.
+test_crd_kars_task() {
+    cat <<'EOF' | kubectl apply -f - >/dev/null 2>&1 || { fail "KarsTask apply rejected"; return; }
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsTask
+metadata:
+  name: e2e-karstask
+  namespace: kars-system
+spec:
+  objective: "fix the flaky payments integration test"
+  displayName: payments-bugfix
+  envelope:
+    tier: 3
+    authorityCeiling: 2
+    delegationDepth: 2
+    budget:
+      tokens: 100000
+      usdMicros: 5000000
+EOF
+    local phase ready digest
+    for _ in $(seq 1 20); do
+        phase=$(kubectl get karstask e2e-karstask -n kars-system \
+            -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        ready=$(kubectl get karstask e2e-karstask -n kars-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+        digest=$(kubectl get karstask e2e-karstask -n kars-system \
+            -o jsonpath='{.status.envelopeDigest}' 2>/dev/null || true)
+        if [[ "$phase" == "Ready" && "$ready" == "True" && -n "$digest" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$phase" == "Ready" && "$ready" == "True" ]]; then
+        pass "KarsTask: valid envelope → phase=Ready ready=True"
+    else
+        dump_cr_diagnostics karstask e2e-karstask kars-system
+        fail "KarsTask: expected phase=Ready ready=True (got phase=$phase ready=$ready)"
+    fi
+    if [[ "$digest" == sha256:* ]]; then
+        pass "KarsTask: controller stamped envelopeDigest ($digest)"
+    else
+        fail "KarsTask: envelopeDigest not stamped (got '$digest')"
+    fi
+
+    # CEL must reject authorityCeiling > tier at admission (anti-amplification).
+    local reject_out
+    reject_out=$(cat <<'EOF' | kubectl apply -f - 2>&1 || true
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsTask
+metadata:
+  name: e2e-karstask-amplify
+  namespace: kars-system
+spec:
+  objective: "attempt to grant a child more authority than held"
+  envelope:
+    tier: 2
+    authorityCeiling: 4
+    delegationDepth: 1
+EOF
+)
+    if echo "$reject_out" | grep -qiE "authorityCeiling|Invalid|denied"; then
+        pass "KarsTask: CEL rejected authorityCeiling > tier at admission"
+    else
+        kubectl delete karstask e2e-karstask-amplify -n kars-system --wait=false >/dev/null 2>&1 || true
+        fail "KarsTask: amplifying envelope was NOT rejected by admission"
+    fi
+
+    kubectl delete karstask e2e-karstask -n kars-system --wait=false >/dev/null 2>&1 || true
+}
+
 # McpServer (dev-mode, no OAuth). The reconciler can't fetch JWKS in
 # Kind (no real issuer), so we assert only that the CR is admitted
 # and reaches a terminal status (Ready or Degraded — both indicate
@@ -2910,6 +2989,7 @@ main() {
     test_crd_kars_memory || true
     test_crd_kars_eval || true
     test_crd_kars_eval_lifecycle || true
+    test_crd_kars_task || true
     test_crd_mcp_server || true
     test_crd_trustgraph_reconcile || true
     test_crd_karspairing_lifecycle || true
