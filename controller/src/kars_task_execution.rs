@@ -24,7 +24,7 @@ use kube::core::ApiResource;
 use kube::{Client, ResourceExt};
 use serde_json::json;
 
-use crate::kars_task::{KarsTask, TaskEnvelope};
+use crate::kars_task::{KarsTask, TaskBlueprint, TaskEnvelope};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_TASK;
 
@@ -106,6 +106,17 @@ fn default_model() -> (String, String) {
     (deployment, provider)
 }
 
+/// Build the agent's standing instructions (system prompt) from the task
+/// objective plus any blueprint instructions. Pure + testable.
+fn build_instructions(objective: &str, extra: Option<&str>) -> String {
+    let mut out = format!("Your objective:\n{}", objective.trim());
+    if let Some(extra) = extra.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str("\n\nAdditional instructions:\n");
+        out.push_str(extra);
+    }
+    out
+}
+
 /// Materialize (or re-apply) the InferencePolicy + KarsSandbox for a launched
 /// task, then read back the sandbox phase. Idempotent via server-side apply.
 pub async fn materialize(
@@ -116,21 +127,34 @@ pub async fn materialize(
     let task_name = task.name_any();
     let inference_name = format!("{task_name}-inference");
     let envelope = &task.spec.envelope;
-    let runtime_kind = task
-        .spec
-        .execution
-        .as_ref()
-        .and_then(|e| e.runtime.clone())
+    let blueprint = task.spec.blueprint.clone().unwrap_or_default();
+    // Runtime: blueprint wins, then execution.runtime, then OpenClaw.
+    let runtime_kind = blueprint
+        .runtime
+        .clone()
         .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            task.spec
+                .execution
+                .as_ref()
+                .and_then(|e| e.runtime.clone())
+                .filter(|s| !s.trim().is_empty())
+        })
         .unwrap_or_else(|| "OpenClaw".to_string());
 
-    // 1. InferencePolicy scoped to this sandbox. Token budget mirrors the
-    //    envelope when present (the router's TokenBudgetTracker enforces).
-    //    A model preference is REQUIRED — without it the sandbox reconciler
-    //    degrades the pod (no deployment to call). We default it from the
-    //    controller's configured model so a launched task actually runs, and
-    //    let an operator override the defaults via env.
-    let (model_deployment, model_provider) = default_model();
+    // 1. InferencePolicy scoped to this sandbox. Model: blueprint wins, else
+    //    the controller default (required — without it the sandbox degrades).
+    let (model_deployment, model_provider) = match &blueprint.model {
+        Some(m) if !m.deployment.trim().is_empty() => {
+            let provider = if m.provider.trim().is_empty() {
+                "azure-openai".to_string()
+            } else {
+                m.provider.clone()
+            };
+            (m.deployment.clone(), provider)
+        }
+        _ => default_model(),
+    };
     let mut inference_spec = json!({
         "appliesTo": { "sandboxName": task_name },
         "modelPreference": {
@@ -153,21 +177,63 @@ pub async fn materialize(
     )
     .await?;
 
-    // 2. KarsSandbox bounded by the envelope. Tool policy from the envelope is
-    //    wired into governance; egress allow-list (when present) rides the
-    //    existing per-sandbox egress machinery via the same-named ref.
+    // 2. KarsSandbox bounded by the envelope + shaped by the blueprint. Each
+    //    blueprint field drives a real sandbox field; unset → safe default.
+    let isolation = blueprint
+        .isolation
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "standard".to_string());
     let mut sandbox_spec = json!({
         "runtime": {
             "kind": runtime_kind,
             runtime_variant_key(&runtime_kind): {},
         },
         "inferenceRef": { "name": inference_name },
-        "sandbox": { "isolation": "standard" },
+        "sandbox": { "isolation": isolation },
         "networkPolicy": { "defaultDeny": true },
     });
-    governance_block(envelope).inspect(|g| {
-        sandbox_spec["governance"] = g.clone();
-    });
+
+    // Egress: when the blueprint names destinations, bound the sandbox to
+    // exactly those hosts in strict mode (the substance of "what it can reach").
+    if !blueprint.egress.is_empty() {
+        let endpoints: Vec<serde_json::Value> = blueprint
+            .egress
+            .iter()
+            .map(|e| match e.port {
+                Some(p) => json!({ "host": e.host, "port": p }),
+                None => json!({ "host": e.host }),
+            })
+            .collect();
+        sandbox_spec["networkPolicy"] = json!({
+            "defaultDeny": true,
+            "egressMode": "Strict",
+            "allowedEndpoints": endpoints,
+        });
+    }
+
+    // Agent instructions (the system prompt) — combine the objective with any
+    // standing instructions the blueprint carries, so the agent knows both
+    // *what* to do and *how* to behave.
+    let instructions = build_instructions(&task.spec.objective, blueprint.instructions.as_deref());
+    sandbox_spec["agent"] = json!({ "instructions": instructions });
+
+    // Governance: tools = an existing ToolPolicy (composed by reference), from
+    // the blueprint or the envelope; MCP servers (connected services) ride on
+    // top, bounded by that policy. See `governance_spec`.
+    sandbox_spec["governance"] = governance_spec(&blueprint, envelope);
+
+    // Shared team memory: reference an existing KarsMemory so the agent
+    // reads/writes the team's shared knowledge (persistent teams share memory
+    // across members and over time).
+    if let Some(mem) = blueprint
+        .memory
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        sandbox_spec["memoryRef"] = json!({ "name": mem });
+    }
     // Task attribution for router metering: the task id and its lineage *root*
     // (the oldest ancestor, or the task itself when it is a root). The main
     // reconciler forwards these to the router as KARS_TASK_ID / KARS_TASK_ROOT
@@ -241,14 +307,35 @@ pub async fn teardown(
     Ok(())
 }
 
-/// Build the governance block from the envelope's tool-policy ref, if any.
-fn governance_block(envelope: &TaskEnvelope) -> Option<serde_json::Value> {
-    envelope.tool_policy_ref.as_ref().map(|r| {
-        json!({
-            "enabled": true,
-            "toolPolicyRef": { "name": r.name },
-        })
-    })
+/// Build the sandbox governance block by composing an existing `ToolPolicy`
+/// (from the blueprint or the envelope) plus any MCP server refs. Tools are a
+/// `ToolPolicy` reference rather than a duplicated allow-list, so the AGT
+/// profile + `appliesTo` scope stay authoritative. MCP refs only attach when a
+/// tool policy bounds them; without a policy governance stays `enabled: false`
+/// (a valid, un-governed sandbox) instead of an invalid `enabled: true` with no
+/// `toolPolicyRef`.
+fn governance_spec(blueprint: &TaskBlueprint, envelope: &TaskEnvelope) -> serde_json::Value {
+    let tool_policy = blueprint
+        .tool_policy
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| envelope.tool_policy_ref.as_ref().map(|r| r.name.clone()));
+    match tool_policy {
+        Some(tp) => {
+            let mut g = json!({ "enabled": true, "toolPolicyRef": { "name": tp } });
+            if !blueprint.mcp_servers.is_empty() {
+                let refs: Vec<serde_json::Value> = blueprint
+                    .mcp_servers
+                    .iter()
+                    .map(|name| json!({ "name": name }))
+                    .collect();
+                g["mcpServerRefs"] = json!(refs);
+            }
+            g
+        }
+        None => json!({ "enabled": false }),
+    }
 }
 
 /// Map a `KarsSandbox` phase to the task's execution phase + honest detail.
@@ -312,7 +399,23 @@ async fn apply_dynamic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kars_task::TaskBudget;
+
+    #[test]
+    fn build_instructions_includes_objective_and_extra() {
+        let only_obj = build_instructions("Summarize the doc", None);
+        assert!(only_obj.contains("Summarize the doc"));
+        assert!(only_obj.contains("Your objective"));
+        assert!(!only_obj.contains("Additional instructions"));
+
+        let with_extra = build_instructions("Summarize the doc", Some("Be concise. Cite sources."));
+        assert!(with_extra.contains("Summarize the doc"));
+        assert!(with_extra.contains("Additional instructions"));
+        assert!(with_extra.contains("Be concise"));
+
+        // Blank extra is ignored.
+        let blank = build_instructions("X", Some("   "));
+        assert!(!blank.contains("Additional instructions"));
+    }
 
     #[test]
     fn default_model_resolution() {
@@ -351,22 +454,56 @@ mod tests {
     }
 
     #[test]
-    fn governance_block_present_only_with_tool_policy() {
-        let mut e = TaskEnvelope {
+    fn governance_disabled_without_tool_policy() {
+        let e = TaskEnvelope {
             tier: 3,
             authority_ceiling: 2,
             delegation_depth: 1,
-            budget: Some(TaskBudget {
-                tokens: Some(1000),
-                usd_micros: None,
-            }),
+            budget: None,
             tool_policy_ref: None,
             egress_allowlist_ref: None,
         };
-        assert!(governance_block(&e).is_none());
-        e.tool_policy_ref = Some(crate::mcp_server::LocalObjectRef { name: "tp".into() });
-        let g = governance_block(&e).expect("present");
+        let bp = TaskBlueprint::default();
+        let g = governance_spec(&bp, &e);
+        assert_eq!(g["enabled"], false);
+        assert!(g.get("toolPolicyRef").is_none());
+    }
+
+    #[test]
+    fn governance_uses_envelope_tool_policy() {
+        let e = TaskEnvelope {
+            tier: 3,
+            authority_ceiling: 2,
+            delegation_depth: 1,
+            budget: None,
+            tool_policy_ref: Some(crate::mcp_server::LocalObjectRef { name: "tp".into() }),
+            egress_allowlist_ref: None,
+        };
+        let g = governance_spec(&TaskBlueprint::default(), &e);
+        assert_eq!(g["enabled"], true);
         assert_eq!(g["toolPolicyRef"]["name"], "tp");
+    }
+
+    #[test]
+    fn governance_blueprint_tool_policy_carries_mcp_refs() {
+        let e = TaskEnvelope {
+            tier: 3,
+            authority_ceiling: 2,
+            delegation_depth: 1,
+            budget: None,
+            tool_policy_ref: None,
+            egress_allowlist_ref: None,
+        };
+        let bp = TaskBlueprint {
+            tool_policy: Some("eng-tools".into()),
+            mcp_servers: vec!["docs-index".into(), "jira".into()],
+            ..Default::default()
+        };
+        let g = governance_spec(&bp, &e);
+        assert_eq!(g["enabled"], true);
+        assert_eq!(g["toolPolicyRef"]["name"], "eng-tools");
+        assert_eq!(g["mcpServerRefs"][0]["name"], "docs-index");
+        assert_eq!(g["mcpServerRefs"][1]["name"], "jira");
     }
 
     #[test]
