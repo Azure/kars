@@ -70,6 +70,12 @@ This causes the sandbox to:
 
 Persistent peer-to-peer trust scores survive rotation as long as the agent's DID (registry identifier) is unchanged.
 
+> **Cross-Framework Secure Mesh.** The same rotation applies uniformly to
+> **Hermes**, **OpenClaw**, and **LangGraph** sandboxes — they share one
+> AgentMesh fabric and the same Signal-Protocol (X3DH + Double Ratchet)
+> session model, so rolling any one agent re-keys only its own E2E sessions
+> without disrupting peers in other frameworks.
+
 ---
 
 ## 5. Azure / Foundry credential rotation

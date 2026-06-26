@@ -151,9 +151,9 @@ flowchart TD
   AL -->|yes| ALLOW["Tunnel / forward request"]
   AL -->|no| PEND["Append to PendingApproval<br/>(deduped) → 403 'awaiting approval'"]
 
-  classDef bad fill:#fde2e1,stroke:#c0392b
-  classDef good fill:#dff5e1,stroke:#27ae60
-  classDef wait fill:#fff3cd,stroke:#d68910
+  classDef bad fill:#fde2e1,stroke:#c0392b,color:#0b1220
+  classDef good fill:#dff5e1,stroke:#27ae60,color:#0b1220
+  classDef wait fill:#fff3cd,stroke:#d68910,color:#0b1220
   class DENY,PEND bad
   class ALLOW,LOG good
   class MODE,BL,TLD,PRIV,AL wait

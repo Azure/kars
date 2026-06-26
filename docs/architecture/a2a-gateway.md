@@ -1,5 +1,13 @@
 # A2A public-ingress gateway
 
+> **Status — partial (library-complete, edge-wiring in progress).** The inbound
+> `AgentCard` JWS verifier is **library-complete and unit-tested in-binary**, and
+> the router accepts the `A2A_MTLS_ENABLED=1` env plus cert/key/CA paths today.
+> The dedicated public TLS listener (the axum layer that terminates external A2A
+> traffic on port 8445) is **not yet wired** — it is on the [roadmap](../roadmap.md).
+> Treat cross-org A2A ingress as a forward-looking capability, not a shipped
+> production edge. Internal mesh A2A between kars sandboxes works today.
+
 ## Why this component exists
 
 Before this component existed the inference router exposed A2A

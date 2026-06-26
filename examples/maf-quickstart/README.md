@@ -1,7 +1,7 @@
 # Microsoft Agent Framework (MAF) — Quickstart
 
 This blueprint hosts a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework)
-(Python) agent inside an kars sandbox. The agent runs unmodified —
+(Python) agent inside a kars sandbox. The agent runs unmodified —
 kars provides isolation, governance, and egress control without
 touching MAF code.
 

@@ -3,6 +3,14 @@
 **Status**: stable contract; runtimes adopting this spec are first-class peers of OpenClaw.
 **Audience**: implementers of new kars runtime adapters (Hermes, future agent frameworks).
 
+> **What "stable" means here.** The *contract surface* (the HTTP / env / file
+> interface below) is stable — you can build against it. Two injection details are
+> still being generalised from the OpenClaw reference branch to every runtime kind
+> (tracked as **A1.2** and called out inline below); the **"Status (today)"**
+> columns mark exactly what is wired now versus the target v1 state. Nothing in the
+> stable surface will change incompatibly — A1.2 only widens where the existing
+> envs/mounts are injected.
+
 ---
 
 ## What a "runtime" is in kars

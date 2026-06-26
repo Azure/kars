@@ -48,7 +48,7 @@ not credit. Hash-pinning is tracked in #410.
 
 ### Socket.dev "obfuscated code" — `execa@9.6.1`
 **False positive — reviewed & accepted.** Socket flags `lib/methods/create.js`
-in [`execa`](https://socket.dev/npm/package/@kars-runtime/cli/alerts/0.1.1)
+in [`execa`](https://socket.dev/npm/package/execa)
 as "obfuscated code". `execa` (by sindresorhus) is a benign, ubiquitous
 process-execution wrapper; the flagged file is its argument-dispatch shim. The
 Socket reviewer note itself concludes there are "no signs of obfuscation,

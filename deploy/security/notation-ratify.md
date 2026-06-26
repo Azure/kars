@@ -79,5 +79,12 @@ spec:
 ```
 
 ## Automation
-The `kars up` flow will include Notation signing + Ratify deployment
-when `--sign-images` flag is provided.
+
+> **Status: manual / roadmap.** The Notation signing + Ratify admission steps
+> in this document are applied **manually** today (the `az`/`kubectl` commands
+> above). There is **no** `kars up --sign-images` flag in the CLI — automating
+> this into the `kars up` flow is tracked on the [roadmap](../../docs/roadmap.md).
+> Note that the **public release pipeline already cosign-signs every image**
+> (keyless OIDC) with an SPDX SBOM and SLSA provenance; the Notation/Ratify path
+> here is an *additional*, optional in-cluster enforcement layer for operators who
+> standardise on Notation.

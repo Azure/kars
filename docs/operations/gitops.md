@@ -149,6 +149,23 @@ The marker annotation `kars.io/applied-via-gitops=true` is
 written so cluster-side audit tools can distinguish GitOps-applied
 allowlists from `kubectl patch`-applied ones.
 
+## Inspecting allowlists in Headlamp
+
+The **kars Headlamp plugin** renders GitOps allowlist state visually, so
+you don't have to read `kubectl get karssandbox -o yaml` by hand:
+
+- A per-sandbox **Egress** panel shows the active `allowlistRef` digest,
+  the signer identity, and the live `AllowlistVerified` condition
+  (`True` / `False` + reason).
+- GitOps-applied allowlists are badged from the
+  `kars.io/applied-via-gitops=true` annotation, so you can tell at a glance
+  which sandboxes are git-reconciled vs `kubectl patch`-applied.
+- Drift between the committed manifest digest and the live cluster digest
+  is surfaced in red while Argo CD / Flux is mid-sync.
+
+Headlamp is deployed automatically by `kars dev --target local-k8s` and on
+every AKS cluster; open it via the port-forward URL the CLI prints.
+
 ## CI integration (GitHub Actions)
 
 ```yaml

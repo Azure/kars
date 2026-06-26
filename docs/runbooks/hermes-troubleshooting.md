@@ -1,6 +1,6 @@
 # Hermes runtime — troubleshooting runbook
 
-A short, scoped runbook for the most common Hermes-specific issues. For the broader kars operator surface (sandboxes, mesh, governance) see [`docs/troubleshooting.md`](../troubleshooting.md) and the [Operator TUI](../operator-tui.md) guide.
+A short, scoped runbook for the most common Hermes-specific issues. For the broader kars operator surface (sandboxes, mesh, governance) see the [Operations guide](../operations/README.md) and the [Operator TUI](../operator-tui.md) guide.
 
 > **Healthy baseline.** A working Hermes sandbox shows these lines in `kubectl logs <pod> -c agent` within ~30 seconds of `Started` (timestamps elided):
 > ```

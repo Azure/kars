@@ -1,6 +1,6 @@
 # `@kars/mesh` — the local-OpenClaw companion plugin (`mesh-plugin/`)
 
-`@kars/mesh` is an **independently published npm package** that turns any local OpenClaw install into a mesh-federated client of a kars cluster. You install it on your laptop, pair it once to a kars cluster with a token, and from then on your local agent can:
+`@kars/mesh` is the **local-OpenClaw companion plugin** that turns any local OpenClaw install into a mesh-federated client of a kars cluster. It is **not yet published on npm** — today you build it from source (`mesh-plugin/`) and load it into your local OpenClaw (see [Building and testing locally](#building-and-testing-locally)). The `@kars` npm scope is reserved for a future release. You build it on your laptop, pair it once to a kars cluster with a token, and from then on your local agent can:
 
 1. Delegate heavy / long-running tasks to a governed cloud sandbox (GPU, Foundry, Content Safety, AGT — all the kars guarantees)
 2. Send end-to-end-encrypted messages to other agents on the kars mesh (Signal Protocol)
@@ -10,7 +10,7 @@
 | Property | Value |
 |---|---|
 | **Plugin ID** | `kars-mesh` (manifest: `mesh-plugin/openclaw.plugin.json`) |
-| **npm package** | `@kars/mesh` |
+| **npm package (planned)** | `@kars/mesh` — reserved scope, **not yet published**; build from source today |
 | **Source** | `mesh-plugin/src/` |
 | **Required environment** | OpenClaw (vanilla or `nemoclaw`); Node.js 22+ |
 | **No Azure account required on the laptop** | Pairing token comes from the kars cluster's operator. |
@@ -59,7 +59,7 @@ The plugin ships a single agent-facing skill at `mesh-plugin/skills/mesh-federat
 | **Tool set** | 24 tools (kars_*, foundry_*, http_fetch, channels) | 8 tools (pair/offload/mesh-send/discover) — a strict subset focused on outbound federation |
 | **Mesh-session ownership** | Owns the local Signal session via `@microsoft/agent-governance-sdk` | Owns its own Signal session via `mesh-plugin/src/agt-transport.ts` |
 | **Manifest ID** | `kars` | `kars-mesh` |
-| **Installs into** | The sandbox image at build time | The user's `~/.openclaw-data/extensions/` via `npm install -g` or `npx kars-mesh` |
+| **Installs into** | The sandbox image at build time | The user's `~/.openclaw-data/extensions/` — built from source (`cd mesh-plugin && npm install && npm run build`), not yet published to npm |
 | **Auth** | Sandbox-level (Entra Agent ID via auth-sidecar) | One-time pairing token (`kars pair generate`) → local Ed25519 identity |
 
 ---
@@ -76,7 +76,7 @@ sequenceDiagram
   Op->>Cls: kars pair generate --name alice-laptop --slots 3 --capabilities offload,handoff
   Cls-->>Op: prints a pairing token: kars-pair-…
   Op->>User: share token (Slack, encrypted email, etc.)
-  User->>Lcl: npm install -g @kars/mesh
+  User->>Lcl: git clone Azure/kars && cd mesh-plugin && npm install && npm run build  (build from source)
   User->>Lcl: openclaw → ask agent: "pair with kars using kars-pair-…"
   Lcl->>Cls: POST /v1/pair (token, generated DID + pubkey)
   Cls-->>Lcl: 200 OK (relay URL, registry URL, AMID)
@@ -97,7 +97,7 @@ cd mesh-plugin
 npm install
 npm run build       # tsc + copy skills/ + openclaw.plugin.json to dist/
 npm test            # vitest (includes live agt-transport test gated on AGT_LIVE_TEST=1)
-npm pack            # produces a publishable .tgz
+npm pack            # produces a local .tgz (not yet published to npm — the @kars scope is reserved for a future release)
 ```
 
 A `nemoclaw` flavored build lives under `mesh-plugin/nemoclaw/` for NVIDIA NeMo / `nemoclaw` users — same TypeScript source, different policy presets, different `setup.sh` to fit the nemoclaw container shape.

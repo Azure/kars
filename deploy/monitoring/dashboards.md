@@ -58,6 +58,11 @@ InsightsMetrics
 | summarize TotalCost = sum(CostUSD) by sandbox, model, bin(TimeGenerated, 1d)
 ```
 
+> **Note — illustrative pricing.** The per-1K-token rates in the `case()` above
+> are placeholders for demonstration. Substitute your account's actual model
+> prices (they vary by model, region, and deployment SKU, and change over time);
+> see the [Azure OpenAI / Foundry pricing page](https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/).
+
 ## Mesh message counters
 
 The router exports two `IntCounter` metrics, scraped by the

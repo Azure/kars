@@ -26,7 +26,7 @@ Eight end-to-end examples live under [`examples/`](https://github.com/Azure/kars
 
 Every example assumes:
 
-1. `kars up` (or `kars dev` for the laptop path) has been run.
+1. `kars up` (or, for the laptop path, `kars dev --release --target local-k8s` — the preferred inner loop: a `kind`-based local Kubernetes cluster that mirrors real AKS behaviour far more faithfully than plain Docker) has been run.
 2. Your control plane has resolved the sandbox image (the controller sets `SANDBOX_IMAGE` to the image it built or pulled — see [Operations → Image versioning](operations/image-versioning.md)).
 3. For Foundry-backed runs, the `InferencePolicy` references a model deployment that actually exists in your Foundry project.
 

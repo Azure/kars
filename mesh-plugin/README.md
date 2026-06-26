@@ -1,6 +1,12 @@
 # @kars/mesh — OpenClaw Federation Plugin
 
-Connect any OpenClaw agent to an kars cluster for secure cloud offload and inter-agent communication via E2E encrypted AgentMesh.
+> **Status — build from source (not yet published).** This plugin is **not yet
+> published to npm**; `@kars-runtime/cli` is currently the only kars package on
+> npm. Install it by building from source (below). The `npm install -g @kars/mesh`
+> command is shown for when the package is published — track this on the
+> [roadmap](../docs/roadmap.md).
+
+Connect any OpenClaw agent to a kars cluster for secure cloud offload and inter-agent communication via E2E encrypted AgentMesh.
 
 **No Docker, no Rust, no kars CLI required on the client side.**
 
@@ -22,11 +28,11 @@ Connect any OpenClaw agent to an kars cluster for secure cloud offload and inter
 ## Install
 
 ```bash
-# From npm (when published)
+# From npm (when published — not yet available)
 npm install -g @kars/mesh
 
-# From source
-git clone https://github.com/kars/kars.git
+# From source (the supported path today)
+git clone https://github.com/Azure/kars.git
 cd kars/mesh-plugin
 npm install && npm run build
 ```
@@ -114,7 +120,7 @@ The plugin automatically receives status updates and the final result via the me
 
 | Tool | Description |
 |------|-------------|
-| `mesh_pair` | One-time pairing with an kars cluster |
+| `mesh_pair` | One-time pairing with a kars cluster |
 | `cloud_offload` | Delegate a task to a governed cloud sandbox |
 | `offload_status` | Check progress of an active offload |
 | `mesh_send` | Send an E2E encrypted message to another agent |

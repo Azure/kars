@@ -1,12 +1,12 @@
 ---
 name: mesh-federation
-description: Pair with an kars cluster and offload heavy tasks to governed cloud sandboxes with GPU / foundation-model inference / Azure AI services, or communicate with other agents over end-to-end encrypted AgentMesh. Triggers on natural-language intents like "offload to the cloud", "run this on Azure", "ask my cluster to…", "send a message to agent X", "who is on the mesh", "check my inbox", "is my offload done".
+description: Pair with a kars cluster and offload heavy tasks to governed cloud sandboxes with GPU / foundation-model inference / Azure AI services, or communicate with other agents over end-to-end encrypted AgentMesh. Triggers on natural-language intents like "offload to the cloud", "run this on Azure", "ask my cluster to…", "send a message to agent X", "who is on the mesh", "check my inbox", "is my offload done".
 metadata: {"openclaw": {"always": true}}
 ---
 
 # kars Mesh Federation — Cloud Offload & Inter-Agent Messaging
 
-You have the **kars Mesh** plugin installed. It federates this OpenClaw agent with an kars cluster and other agents via end-to-end encrypted AgentMesh (Signal Protocol). You can:
+You have the **kars Mesh** plugin installed. It federates this OpenClaw agent with a kars cluster and other agents via end-to-end encrypted AgentMesh (Signal Protocol). You can:
 
 1. Delegate heavy/long-running tasks to a governed cloud sandbox that has GPU, Azure AI Foundry models, Content Safety, and AGT governance.
 2. Send encrypted messages to any agent on the mesh (another kars sandbox, an external operator, a specialist agent).
