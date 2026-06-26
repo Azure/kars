@@ -154,7 +154,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // lineage. The controller is the *sole* writer of lineage.
     let delegation = resolve_delegation(&tasks, &task).await?;
 
-    let new_status = match check_envelope(&task) {
+    let mut new_status = match check_envelope(&task) {
         EnvelopeCheck::Invalid(why) => degraded_status(
             prior_ready,
             generation,
@@ -208,6 +208,12 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             }
         },
     };
+
+    // Execution bridge (§20 launch gate). Only a governance-Ready task may
+    // execute. Launch materializes a governed sandbox; un-launch tears it down.
+    // Any execution error is surfaced (Degraded) but never fails the whole
+    // reconcile — the governance status is already durable.
+    reconcile_execution(&ctx.client, &ns, &task, &mut new_status).await;
 
     let status_patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
@@ -306,6 +312,7 @@ fn ready_status(
         conditions: Some(vec![ready]),
         envelope_digest: Some(digest),
         lineage,
+        ..Default::default()
     }
 }
 
@@ -331,6 +338,62 @@ fn degraded_status(
         conditions: Some(vec![ready]),
         envelope_digest: None,
         lineage,
+        ..Default::default()
+    }
+}
+
+/// Reconcile the execution bridge (§20 launch gate) and fold the result into
+/// `status`. Rules:
+/// - Only a governance-`Ready` task may execute.
+/// - `execution.launch == true` → materialize a governed `KarsSandbox` and
+///   reflect its phase as `executionPhase` (Launching/Running/Degraded).
+/// - Otherwise → ensure any prior sandbox is torn down; `executionPhase=Idle`.
+///
+/// Execution errors degrade *execution* only; the governance status stands.
+async fn reconcile_execution(
+    client: &kube::Client,
+    ns: &str,
+    task: &KarsTask,
+    status: &mut KarsTaskStatus,
+) {
+    let launched = task
+        .spec
+        .execution
+        .as_ref()
+        .map(|e| e.launch)
+        .unwrap_or(false);
+    let governance_ready = status.phase.as_deref() == Some(PHASE_READY);
+
+    if launched && governance_ready {
+        match crate::kars_task_execution::materialize(client, ns, task).await {
+            Ok(outcome) => {
+                status.execution_phase = Some(outcome.phase);
+                status.sandbox_ref = Some(crate::mcp_server::LocalObjectRef {
+                    name: outcome.sandbox_name,
+                });
+                status.execution_detail = Some(outcome.detail);
+            }
+            Err(e) => {
+                tracing::warn!(karstask = %task.name_any(), ns = %ns, error = %e, "KarsTask execution materialize failed");
+                status.execution_phase = Some(PHASE_DEGRADED.to_string());
+                status.execution_detail = Some(format!("failed to materialize sandbox: {e}"));
+            }
+        }
+    } else {
+        // Not launched (or not Ready): ensure no sandbox lingers from a prior
+        // launch, and report Idle.
+        if task
+            .status
+            .as_ref()
+            .and_then(|s| s.sandbox_ref.as_ref())
+            .is_some()
+            && let Err(e) = crate::kars_task_execution::teardown(client, ns, task).await
+        {
+            tracing::warn!(karstask = %task.name_any(), ns = %ns, error = %e, "KarsTask execution teardown failed");
+        }
+        status.execution_phase = Some("Idle".to_string());
+        status.sandbox_ref = None;
+        status.execution_detail = None;
     }
 }
 
@@ -415,6 +478,7 @@ mod tests {
                     ..TaskEnvelope::default()
                 },
                 parent_ref: None,
+                execution: None,
                 display_name: None,
             },
         );

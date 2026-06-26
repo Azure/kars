@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.executionPhase
+      name: Execution
+      type: string
     - jsonPath: .spec.envelope.delegationDepth
       name: Depth
       type: integer
@@ -112,6 +115,30 @@ spec:
                 required:
                 - authorityCeiling
                 - tier
+                type: object
+              execution:
+                description: |-
+                  Execution gate (plan §20). A task is *governed-but-idle* by default —
+                  validated and digested, but not running. Execution begins only on an
+                  explicit launch, mirroring the "review the package, then launch"
+                  principle: the human reviews the trust envelope, then opts in. When
+                  `execution.launch` is `true` and the envelope is valid, the controller
+                  materializes a governed `KarsSandbox` (the running agent) bounded by
+                  the envelope.
+                nullable: true
+                properties:
+                  launch:
+                    default: false
+                    description: |-
+                      When `true`, the controller materializes a governed `KarsSandbox` from
+                      this task. Defaults to `false` — review before launch.
+                    type: boolean
+                  runtime:
+                    description: |-
+                      Runtime to launch the agent on. Defaults to `OpenClaw`. Must match the
+                      controller's `RuntimeKind` enum.
+                    nullable: true
+                    type: string
                 type: object
               objective:
                 description: |-
@@ -212,6 +239,22 @@ spec:
                   envelope; recomputed whenever the spec changes.
                 nullable: true
                 type: string
+              executionDetail:
+                description: |-
+                  Human-readable detail about the execution state — surfaced verbatim in
+                  the product so a user understands *why* (e.g. the kind/Foundry caveat).
+                nullable: true
+                type: string
+              executionPhase:
+                description: |-
+                  Execution phase (the §20 launch lifecycle), distinct from the
+                  governance `phase`:
+                  - `Idle` — governed but not launched (the default).
+                  - `Launching` — a `KarsSandbox` has been materialized; awaiting it.
+                  - `Running` — the sandbox reports Running.
+                  - `Degraded` — the sandbox degraded (e.g. no inference endpoint).
+                nullable: true
+                type: string
               lineage:
                 description: |-
                   Ancestry of this task, oldest-first: the chain of parent task names
@@ -231,6 +274,15 @@ spec:
                 description: 'One of: `Pending`, `Ready`, `Degraded`.'
                 nullable: true
                 type: string
+              sandboxRef:
+                description: Name of the `KarsSandbox` materialized for this task, when launched.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
             type: object
         required:
         - spec

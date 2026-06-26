@@ -46,6 +46,7 @@ mod kars_memory_reconciler;
 mod kars_sre_action;
 mod kars_sre_action_reconciler;
 mod kars_task;
+mod kars_task_execution;
 mod kars_task_reconciler;
 mod leader_election;
 mod mcp_server;

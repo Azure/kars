@@ -58,6 +58,7 @@ pub const TIER_MAX: i32 = 5;
     shortname = "ctask",
     printcolumn = r#"{"name":"Tier","type":"integer","jsonPath":".spec.envelope.tier"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Execution","type":"string","jsonPath":".status.executionPhase"}"#,
     printcolumn = r#"{"name":"Depth","type":"integer","jsonPath":".spec.envelope.delegationDepth"}"#,
     printcolumn = r#"{"name":"EnvelopeDigest","type":"string","jsonPath":".status.envelopeDigest"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
@@ -84,9 +85,36 @@ pub struct KarsTaskSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ref: Option<LocalObjectRef>,
 
+    /// Execution gate (plan §20). A task is *governed-but-idle* by default —
+    /// validated and digested, but not running. Execution begins only on an
+    /// explicit launch, mirroring the "review the package, then launch"
+    /// principle: the human reviews the trust envelope, then opts in. When
+    /// `execution.launch` is `true` and the envelope is valid, the controller
+    /// materializes a governed `KarsSandbox` (the running agent) bounded by
+    /// the envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<TaskExecution>,
+
     /// Optional short label surfaced in CLI / UI listings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+}
+
+/// Execution settings for a `KarsTask`. The launch flag is the §20 gate
+/// between *governed* (validated, digested, idle) and *executing* (a real
+/// sandbox/agent materialized).
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskExecution {
+    /// When `true`, the controller materializes a governed `KarsSandbox` from
+    /// this task. Defaults to `false` — review before launch.
+    #[serde(default)]
+    pub launch: bool,
+
+    /// Runtime to launch the agent on. Defaults to `OpenClaw`. Must match the
+    /// controller's `RuntimeKind` enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 /// The trust envelope carried by a `KarsTask`.
@@ -427,6 +455,24 @@ pub struct KarsTaskStatus {
     /// a root task. Populated by the delegation minting path (next slice).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lineage: Vec<String>,
+
+    /// Execution phase (the §20 launch lifecycle), distinct from the
+    /// governance `phase`:
+    /// - `Idle` — governed but not launched (the default).
+    /// - `Launching` — a `KarsSandbox` has been materialized; awaiting it.
+    /// - `Running` — the sandbox reports Running.
+    /// - `Degraded` — the sandbox degraded (e.g. no inference endpoint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_phase: Option<String>,
+
+    /// Name of the `KarsSandbox` materialized for this task, when launched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_ref: Option<LocalObjectRef>,
+
+    /// Human-readable detail about the execution state — surfaced verbatim in
+    /// the product so a user understands *why* (e.g. the kind/Foundry caveat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_detail: Option<String>,
 }
 
 #[cfg(test)]
@@ -485,6 +531,7 @@ mod tests {
             objective: "fix the flaky test in payments".into(),
             envelope: sample_envelope(),
             parent_ref: None,
+            execution: None,
             display_name: Some("payments-bugfix".into()),
         };
         let yaml = serde_yaml::to_string(&spec).expect("serializes");
