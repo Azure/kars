@@ -18,6 +18,7 @@ cd "$REPO_ROOT"
 
 ALLOW_PATHS=(
   'controller/src/providers/signing.rs'
+  'controller/src/kars_receipt_log.rs'  # receipt inclusion log — Sha256 Merkle-style hash chaining of receipt payload digests (transparency-log precursor); standard linkage, no bespoke crypto protocol. Tracked for the V2 external-witness upgrade.
   'controller/src/kars_task.rs'  # KarsTask envelope digest — Sha256 content-hash over canonical JSON (authority-binding identifier), not a crypto protocol. The Governance Receipt (kars_receipt.rs) binds its subject to this digest; signing itself stays in providers/signing.rs.
   'controller/src/providers/mesh.rs'
   'controller/src/mesh_peer/'  # in-tree controller-side mesh peer hashing/signing — uses ed25519-dalek::SigningKey + Sha256 only; tracked for SigningProvider extraction in plan §4.1

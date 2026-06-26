@@ -132,6 +132,16 @@ pub struct KarsReceiptStatus {
     /// The task `metadata.generation` this receipt was minted from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_task_generation: Option<i64>,
+
+    /// Sequence number of this receipt's entry in the `kars-receipt-log`
+    /// inclusion log (the cross-receipt tamper-evidence chain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inclusion_seq: Option<i64>,
+
+    /// Hash of this receipt's inclusion-log entry. An auditor checks the log
+    /// chain is intact and that this hash is present (`kars receipt verify`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inclusion_entry_hash: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -181,8 +191,43 @@ pub struct Predicate {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<PredicateApproval>,
     pub conformance: PredicateConformance,
+    /// Which completeness-floor controls (design note §24b) the controller
+    /// observed enforced when the receipt was minted. This is what makes the
+    /// `completeness` claim concrete rather than a bare label.
+    pub completeness: PredicateCompleteness,
     pub claims: Vec<Claim>,
     pub issuer: PredicateIssuer,
+}
+
+/// The enforced-controls evidence behind the `completeness` claim. Every field
+/// is an observation the controller can verify from cluster state, so an
+/// auditor can re-derive it. The *runtime* iptables-ruleset hash and the eBPF
+/// kernel-datapath witness are deliberately absent in V0 (named V1/V2 in the
+/// claim detail) — we never imply we captured them.
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PredicateCompleteness {
+    /// The CREATE-time task-namespace floor VAP is installed.
+    pub task_namespace_floor_vap: bool,
+    /// The exec/attach ban VAP is installed.
+    pub exec_ban_vap: bool,
+    /// The posture-lock (UPDATE downgrade) VAP is installed.
+    pub posture_lock_vap: bool,
+    /// A cluster-default-deny egress NetworkPolicy is installed.
+    pub default_deny_egress: bool,
+    /// `true` once **all** of the above floor controls are present.
+    pub floor_enforced: bool,
+}
+
+impl PredicateCompleteness {
+    /// Compute the rollup flag from the individual observations.
+    pub fn with_rollup(mut self) -> Self {
+        self.floor_enforced = self.task_namespace_floor_vap
+            && self.exec_ban_vap
+            && self.posture_lock_vap
+            && self.default_deny_egress;
+        self
+    }
 }
 
 /// One human decision bound into the receipt. Built from a decided
@@ -272,6 +317,7 @@ pub fn build_statement(
     status: &KarsTaskStatus,
     key_id: &str,
     approvals: &[PredicateApproval],
+    completeness: PredicateCompleteness,
 ) -> Option<Statement> {
     let digest = status.envelope_digest.clone()?;
     let namespace = task
@@ -300,6 +346,15 @@ pub fn build_statement(
     } else {
         "Trust envelope validated; root task with no delegation to attenuate."
     };
+    // The completeness claim stays PARTIAL in V0 (the runtime iptables-ruleset
+    // hash, the token/cost audit chain, and the eBPF witness are not yet
+    // bound), but its detail now reflects *which* enforced floor controls the
+    // controller actually observed — concrete, re-derivable, never overstated.
+    let completeness_detail = if completeness.floor_enforced {
+        "Completeness-floor controls observed enforced (CREATE-time task-namespace VAP, exec-ban VAP, posture-lock VAP, default-deny egress). NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1), the router token/cost audit chain (V1), and the eBPF kernel-datapath witness (V2)."
+    } else {
+        "Some completeness-floor controls were not observed enforced (see predicate.completeness). NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1), the router token/cost audit chain (V1), and the eBPF kernel-datapath witness (V2)."
+    };
     let claims = vec![
         Claim::new(
             "integrity",
@@ -307,11 +362,7 @@ pub fn build_statement(
             "DSSE/Ed25519 signature binds this payload to the trust-envelope digest.",
         ),
         Claim::new("conformance", "PASS", conformance_detail),
-        Claim::new(
-            "completeness",
-            "PARTIAL",
-            "Covers governance facts (envelope, lineage, launch decision). The runtime token/cost audit chain emitted by the inference router is not yet bound into this receipt (V1).",
-        ),
+        Claim::new("completeness", "PARTIAL", completeness_detail),
         Claim::new(
             "regulatory",
             "OMITTED",
@@ -349,6 +400,7 @@ pub fn build_statement(
             envelope_valid: true,
             attenuates_parent,
         },
+        completeness,
         claims: claims.clone(),
         issuer: PredicateIssuer {
             component: "kars-controller".to_string(),
@@ -480,13 +532,13 @@ mod tests {
     fn no_receipt_without_digest() {
         let (task, mut status) = ready_task(false);
         status.envelope_digest = None;
-        assert!(build_statement(&task, &status, "kid", &[]).is_none());
+        assert!(build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).is_none());
     }
 
     #[test]
     fn root_statement_shape() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid123", &[]).unwrap();
+        let st = build_statement(&task, &status, "kid123", &[], PredicateCompleteness::default().with_rollup()).unwrap();
         assert_eq!(st.typ, STATEMENT_TYPE);
         assert_eq!(st.predicate_type, PREDICATE_TYPE);
         assert_eq!(st.subject[0].name, "kars-system/demo");
@@ -500,7 +552,7 @@ mod tests {
     #[test]
     fn child_statement_records_attenuation_and_lineage() {
         let (task, status) = ready_task(true);
-        let st = build_statement(&task, &status, "kid", &[]).unwrap();
+        let st = build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap();
         assert!(st.predicate.delegation.is_child);
         assert_eq!(st.predicate.delegation.parent_ref.as_deref(), Some("parent"));
         assert_eq!(st.predicate.delegation.depth_from_root, 2);
@@ -511,7 +563,7 @@ mod tests {
     #[test]
     fn claim_matrix_is_honest() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid", &[]).unwrap();
+        let st = build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap();
         let by = |c: &str| {
             st.predicate
                 .claims
@@ -530,8 +582,8 @@ mod tests {
     #[test]
     fn canonical_json_is_stable() {
         let (task, status) = ready_task(true);
-        let a = canonical_json(&build_statement(&task, &status, "kid", &[]).unwrap());
-        let b = canonical_json(&build_statement(&task, &status, "kid", &[]).unwrap());
+        let a = canonical_json(&build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap());
+        let b = canonical_json(&build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap());
         assert_eq!(a, b);
         // Sanity: it really is the in-toto envelope.
         let s = String::from_utf8(a).unwrap();
@@ -542,7 +594,7 @@ mod tests {
     #[test]
     fn launched_execution_is_recorded() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid", &[]).unwrap();
+        let st = build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap();
         assert!(st.predicate.execution.launched);
         assert_eq!(st.predicate.execution.phase.as_deref(), Some("Degraded"));
     }
@@ -559,7 +611,7 @@ mod tests {
             decided_at: "2026-06-26T10:00:00+00:00".to_string(),
             requested_tier: Some(4),
         }];
-        let st = build_statement(&task, &status, "kid", &approvals).unwrap();
+        let st = build_statement(&task, &status, "kid", &approvals, PredicateCompleteness::default().with_rollup()).unwrap();
         assert_eq!(st.predicate.approvals.len(), 1);
         assert_eq!(st.predicate.approvals[0].verdict, "approve");
         assert_eq!(st.predicate.approvals[0].requested_tier, Some(4));
@@ -611,5 +663,67 @@ mod tests {
         assert_eq!(facts[0].verdict, "deny");
         assert_eq!(facts[1].name, "zebra");
         assert_eq!(facts[1].verdict, "approve");
+    }
+
+    #[test]
+    fn completeness_rollup_requires_all_controls() {
+        let none = PredicateCompleteness::default().with_rollup();
+        assert!(!none.floor_enforced);
+
+        let all = PredicateCompleteness {
+            task_namespace_floor_vap: true,
+            exec_ban_vap: true,
+            posture_lock_vap: true,
+            default_deny_egress: true,
+            floor_enforced: false,
+        }
+        .with_rollup();
+        assert!(all.floor_enforced);
+
+        let partial = PredicateCompleteness {
+            task_namespace_floor_vap: true,
+            exec_ban_vap: true,
+            posture_lock_vap: false,
+            default_deny_egress: true,
+            floor_enforced: false,
+        }
+        .with_rollup();
+        assert!(!partial.floor_enforced);
+    }
+
+    #[test]
+    fn completeness_claim_detail_reflects_enforcement() {
+        let (task, status) = ready_task(false);
+        let enforced = PredicateCompleteness {
+            task_namespace_floor_vap: true,
+            exec_ban_vap: true,
+            posture_lock_vap: true,
+            default_deny_egress: true,
+            floor_enforced: false,
+        }
+        .with_rollup();
+        let st = build_statement(&task, &status, "kid", &[], enforced).unwrap();
+        assert!(st.predicate.completeness.floor_enforced);
+        let c = st
+            .predicate
+            .claims
+            .iter()
+            .find(|x| x.class == "completeness")
+            .unwrap();
+        // Still PARTIAL (runtime hash + token/cost + eBPF unbound), but the
+        // detail must reflect the enforced controls — never overstated.
+        assert_eq!(c.status, "PARTIAL");
+        assert!(c.detail.contains("observed enforced"));
+
+        // When a control is missing, the detail flips to the not-enforced wording.
+        let weak = PredicateCompleteness::default().with_rollup();
+        let st2 = build_statement(&task, &status, "kid", &[], weak).unwrap();
+        let c2 = st2
+            .predicate
+            .claims
+            .iter()
+            .find(|x| x.class == "completeness")
+            .unwrap();
+        assert!(c2.detail.contains("not observed enforced"));
     }
 }

@@ -217,6 +217,18 @@ admission:
     # handled by the controller's own pod template).
     # Requires Kubernetes >= 1.30 (VAP GA).
     enabled: true
+  taskNamespaceFloor:
+    # Deploy ValidatingAdmissionPolicy that enforces the CREATE-time
+    # completeness floor (design note §24b) on pods in sandbox / task
+    # namespaces (kars.azure.com/isolated=strict): deny hostNetwork /
+    # hostPID / hostIPC, privileged, allowPrivilegeEscalation,
+    # ephemeralContainers at create, and hostPath volumes. Complements
+    # the UPDATE-only sandboxPostureLock by making the receipt's
+    # no-bypass completeness claim hold against a compromised controller
+    # or a direct `kubectl apply`, not just posture drift.
+    # Break-glass: kars.azure.com/break-glass=true on the namespace
+    # (audited). Requires Kubernetes >= 1.30 (VAP GA).
+    enabled: true
   seccompAutoStamp:
     # Deploy MutatingAdmissionPolicy that auto-stamps the
     # kars-strict seccomp profile onto sandbox-namespace pods that

@@ -27,10 +27,11 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
-import { createPublicKey, verify as cryptoVerify } from "node:crypto";
+import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
 
 const ANCHOR_NAMESPACE = "kars-system";
 const ANCHOR_CONFIGMAP = "kars-receipt-pubkey";
+const LOG_CONFIGMAP = "kars-receipt-log";
 const DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json";
 // Fixed ASN.1/DER SubjectPublicKeyInfo prefix for an Ed25519 public key
 // (RFC 8410). Prepending it to the 32 raw key bytes yields a SPKI DER that
@@ -241,6 +242,96 @@ async function fetchAnchor(): Promise<TrustAnchor | null> {
   };
 }
 
+interface InclusionEntry {
+  seq: number;
+  receipt: string;
+  payloadSha256: string;
+  prevHash: string;
+  entryHash: string;
+}
+
+/** Entry-hash recipe, byte-identical to the controller (kars_receipt_log.rs). */
+export function inclusionEntryHash(
+  seq: number,
+  receipt: string,
+  payloadSha256: string,
+  prevHash: string,
+): string {
+  return createHash("sha256")
+    .update(`${seq}|${receipt}|${payloadSha256}|${prevHash}`)
+    .digest("hex");
+}
+
+/** Verify chain integrity; returns the broken seq, or null if intact. */
+export function verifyInclusionChain(chain: InclusionEntry[]): number | null {
+  let prev = "genesis";
+  for (let i = 0; i < chain.length; i++) {
+    const e = chain[i];
+    if (e.seq !== i) return i;
+    if (e.prevHash !== prev) return e.seq;
+    if (inclusionEntryHash(e.seq, e.receipt, e.payloadSha256, e.prevHash) !== e.entryHash) {
+      return e.seq;
+    }
+    prev = e.entryHash;
+  }
+  return null;
+}
+
+async function fetchInclusionChain(): Promise<InclusionEntry[] | null> {
+  const cm = (await kubectlGetJson([
+    "get",
+    "configmap",
+    LOG_CONFIGMAP,
+    "-n",
+    ANCHOR_NAMESPACE,
+  ])) as { data?: Record<string, string> } | null;
+  const raw = cm?.data?.["chain.json"];
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as InclusionEntry[];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check the receipt is included in the intact hash-chained log. Returns a
+ * check row; `ok=false` if the chain is broken or the receipt is absent.
+ */
+function checkInclusion(
+  receipt: ReceiptCr,
+  chain: InclusionEntry[],
+): { name: string; ok: boolean; detail: string } {
+  const broken = verifyInclusionChain(chain);
+  if (broken !== null) {
+    return {
+      name: "inclusion",
+      ok: false,
+      detail: `inclusion log chain is BROKEN at seq ${broken} (a receipt was deleted, altered, or reordered)`,
+    };
+  }
+  const ns = receipt.metadata?.namespace ?? "";
+  const name = receipt.metadata?.name ?? "";
+  const ref = `${ns}/${name}`;
+  const payload = receipt.spec?.dsse?.payload ?? "";
+  const payloadSha = createHash("sha256")
+    .update(Buffer.from(payload, "base64"))
+    .digest("hex");
+  const entry = chain.find((e) => e.receipt === ref && e.payloadSha256 === payloadSha);
+  if (!entry) {
+    return {
+      name: "inclusion",
+      ok: false,
+      detail: `receipt not found in the inclusion log (chain intact, ${chain.length} entries) — this exact receipt was not logged`,
+    };
+  }
+  return {
+    name: "inclusion",
+    ok: true,
+    detail: `included at seq ${entry.seq} in the intact ${chain.length}-entry log (cross-receipt tamper-evidence; external witness is V2)`,
+  };
+}
+
 function statusBadge(status: string): string {
   switch (status) {
     case "PASS":
@@ -333,6 +424,14 @@ export function receiptCommand(): Command {
       }
 
       const result = verifyReceipt(receipt, anchor);
+
+      // Inclusion check: cross-receipt tamper-evidence via the hash-chained log.
+      const chain = await fetchInclusionChain();
+      if (chain) {
+        result.checks.push(checkInclusion(receipt, chain));
+        result.ok = result.ok && result.checks.every((c) => c.ok);
+      }
+
       if (options.format === "json") {
         console.log(JSON.stringify(result, null, 2));
       } else {
@@ -366,7 +465,53 @@ export function receiptCommand(): Command {
       console.log(JSON.stringify(receipt, null, 2));
     });
 
+  cmd
+    .command("log")
+    .description(
+      "Show the hash-chained receipt inclusion log and verify its integrity " +
+        "(cross-receipt tamper-evidence). Exits non-zero if the chain is broken.",
+    )
+    .option("--format <fmt>", "Output format: 'human' (default) or 'json'", "human")
+    .action(async (options: { format: string }) => {
+      const chain = await fetchInclusionChain();
+      if (!chain) {
+        process.stderr.write(
+          chalk.yellow(
+            `No inclusion log found (${LOG_CONFIGMAP} in ${ANCHOR_NAMESPACE}). ` +
+              `It is created when the first Governance Receipt is emitted.\n`,
+          ),
+        );
+        return;
+      }
+      const broken = verifyInclusionChain(chain);
+      if (options.format === "json") {
+        console.log(JSON.stringify({ entries: chain, intact: broken === null, brokenAt: broken }, null, 2));
+      } else {
+        console.log("");
+        console.log(`  ${chalk.bold("Receipt inclusion log")}  ${chain.length} entries`);
+        const verdict =
+          broken === null
+            ? chalk.green.bold("✓ chain intact")
+            : chalk.red.bold(`✗ chain BROKEN at seq ${broken}`);
+        console.log(`  ${chalk.bold("Integrity:")}  ${verdict}`);
+        console.log(chalk.dim("  Operator-controlled tamper-evidence; external witness is V2."));
+        console.log("");
+        for (const e of chain) {
+          console.log(`    ${String(e.seq).padStart(4)}  ${chalk.bold(e.receipt)}`);
+          console.log(`          ${chalk.dim(`payload ${e.payloadSha256.slice(0, 16)}… · entry ${e.entryHash.slice(0, 16)}…`)}`);
+        }
+        console.log("");
+      }
+      if (broken !== null) process.exit(2);
+    });
+
   return cmd;
 }
 
-export const __test = { pae, verifyReceipt, importEd25519PublicKey };
+export const __test = {
+  pae,
+  verifyReceipt,
+  importEd25519PublicKey,
+  inclusionEntryHash,
+  verifyInclusionChain,
+};
