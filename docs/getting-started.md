@@ -381,7 +381,7 @@ Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [m
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `kars dev` hangs on first run | Docker Desktop is not running | Start Docker. |
+| `kars dev` hangs on first run | The container runtime isn't running | Start your container runtime (Docker Desktop, `podman machine start`, or colima). |
 | `kars up` fails on `az login` | Stale CLI session | `az logout && az login --use-device-code`. |
 | `kars connect` fails with `address already in use` | Leftover `kubectl port-forward` from a previous session is still holding the local port | `lsof -ti:18789 \| xargs kill` (or restart your terminal). Then retry. |
 | `kars dev` errors with `Unsupported engine` on `npm ci` | Node.js < 22 | Install Node 22+ (we test against the LTS line; see [`cli/package.json`](../cli/package.json) for the exact engines pin). |
