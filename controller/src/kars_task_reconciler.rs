@@ -34,6 +34,8 @@ use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_TASK;
 const FINALIZER: &str = "kars.azure.com/karstask-cleanup";
+/// Server-Side Apply field manager for Governance Receipt writes.
+const RECEIPT_FIELD_MANAGER: &str = "kars-controller/receipt";
 
 const REQUEUE_OK: Duration = Duration::from_secs(300);
 
@@ -94,6 +96,9 @@ fn check_envelope(task: &KarsTask) -> EnvelopeCheck {
 
 struct Ctx {
     client: Client,
+    /// Receipt-signing identity, loaded once at startup. Used to emit a signed
+    /// Governance Receipt for each governance-`Ready` task.
+    signer: crate::providers::signing::ReceiptSigner,
 }
 
 async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -227,6 +232,13 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             &Patch::Apply(status_patch),
         )
         .await?;
+
+    // Governance Receipt (Inc 3). A governance-`Ready` task — one whose
+    // envelope validated and (if delegated) attenuated its parent — gets a
+    // signed, independently-verifiable receipt. A `Degraded` task never does:
+    // there is no validated authority to attest. The receipt is deterministic,
+    // so this is idempotent across requeues.
+    reconcile_receipt(&ctx.client, &ns, &task, &new_status, &ctx.signer).await;
 
     Ok(Action::requeue(REQUEUE_OK))
 }
@@ -397,6 +409,108 @@ async fn reconcile_execution(
     }
 }
 
+/// Emit (or retract) the Governance Receipt for a task.
+///
+/// - Governance-`Ready` (an `envelopeDigest` is present) → build the in-toto
+///   Statement, sign it with DSSE/Ed25519, and Server-Side-Apply a
+///   `KarsReceipt` owned by the task. Deterministic ⇒ idempotent.
+/// - Otherwise → ensure no stale receipt remains; a `Degraded` task has no
+///   validated authority to attest.
+///
+/// Receipt errors are surfaced in logs but never fail the reconcile — the
+/// governance status is already durable.
+async fn reconcile_receipt(
+    client: &kube::Client,
+    ns: &str,
+    task: &KarsTask,
+    status: &KarsTaskStatus,
+    signer: &crate::providers::signing::ReceiptSigner,
+) {
+    use crate::kars_receipt::{KarsReceipt, build_spec, build_statement, canonical_json};
+
+    let name = task.name_any();
+    let receipts: Api<KarsReceipt> = Api::namespaced(client.clone(), ns);
+
+    let Some(statement) = build_statement(task, status, &signer.key_id) else {
+        // No digest → no receipt. Retract any prior one.
+        match receipts
+            .delete(&name, &kube::api::DeleteParams::default())
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => {
+                tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to retract stale KarsReceipt");
+            }
+        }
+        return;
+    };
+
+    let digest = status
+        .envelope_digest
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let payload = canonical_json(&statement);
+    let dsse = signer.sign_statement(&payload);
+    let claims = statement.predicate.claims.clone();
+    let spec = build_spec(&name, &digest, &signer.key_id, dsse, claims);
+
+    // Owner reference to the task so the receipt is GC'd with it.
+    let owner = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsTask",
+        "name": name,
+        "uid": task.metadata.uid.clone().unwrap_or_default(),
+        "controller": true,
+        "blockOwnerDeletion": true,
+    });
+    let receipt = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsReceipt",
+        "metadata": {
+            "name": name,
+            "namespace": ns,
+            "ownerReferences": [owner],
+        },
+        "spec": spec,
+    });
+
+    if let Err(e) = receipts
+        .patch(
+            &name,
+            &PatchParams::apply(RECEIPT_FIELD_MANAGER).force(),
+            &Patch::Apply(&receipt),
+        )
+        .await
+    {
+        tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to emit KarsReceipt");
+        return;
+    }
+
+    // Informational status echo (unsigned). Stamp issuance time on first write;
+    // observedTaskGeneration tracks freshness.
+    let status_patch = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsReceipt",
+        "status": {
+            "issuedAt": chrono::Utc::now().to_rfc3339(),
+            "observedTaskGeneration": task.metadata.generation,
+        },
+    });
+    if let Err(e) = receipts
+        .patch_status(
+            &name,
+            &PatchParams::apply(RECEIPT_FIELD_MANAGER).force(),
+            &Patch::Apply(&status_patch),
+        )
+        .await
+    {
+        tracing::debug!(karstask = %name, ns = %ns, error = %e, "KarsReceipt status echo failed (non-fatal)");
+    }
+
+    tracing::info!(karstask = %name, ns = %ns, key_id = %signer.key_id, "Governance Receipt emitted");
+}
+
 /// True iff the task carries our cleanup finalizer.
 fn has_finalizer(task: &KarsTask) -> bool {
     task.metadata
@@ -438,7 +552,19 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
-    let ctx = Arc::new(Ctx { client });
+    let signer = match crate::providers::signing::load_or_create(&client).await {
+        Ok(s) => {
+            tracing::info!(key_id = %s.key_id, "Governance Receipt signer ready");
+            s
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to initialise receipt signer — KarsTask reconciler disabled");
+            std::future::pending::<()>().await;
+            #[allow(unreachable_code)]
+            return Ok(());
+        }
+    };
+    let ctx = Arc::new(Ctx { client, signer });
     Controller::new(tasks, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {

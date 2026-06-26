@@ -33,7 +33,8 @@
 #[cfg(test)]
 use crate::crd_validations::{
     a2a_agent_crd, egress_approval_crd, inference_policy_crd, kars_eval_crd, kars_memory_crd,
-    kars_sre_action_crd, kars_task_crd, mcp_server_crd, tool_policy_crd, trust_graph_crd,
+    kars_receipt_crd, kars_sre_action_crd, kars_task_crd, mcp_server_crd, tool_policy_crd,
+    trust_graph_crd,
 };
 
 const MCP_HELM_CRD_PATH: &str = concat!(
@@ -69,6 +70,11 @@ const CLAWEVAL_HELM_CRD_PATH: &str = concat!(
 const KARSTASK_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../deploy/helm/kars/templates/crd-karstask.yaml"
+);
+
+const KARSRECEIPT_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/kars/templates/crd-karsreceipt.yaml"
 );
 
 const TRUSTGRAPH_HELM_CRD_PATH: &str = concat!(
@@ -286,6 +292,27 @@ mod tests {
         let rust_crd_value =
             serde_json::to_value(kars_task_crd()).expect("rust crd serializes to JSON");
         assert_helm_matches_rust(KARSTASK_HELM_CRD_PATH, rust_crd_value, "karstask");
+    }
+
+    /// One-shot dumper for the karsreceipt CRD. Run via:
+    ///
+    ///   DUMP_KARSRECEIPT_CRD_YAML=1 cargo test --bin kars-controller \
+    ///       helm_drift::tests::dump_karsreceipt_crd_yaml -- --nocapture
+    #[test]
+    fn dump_karsreceipt_crd_yaml() {
+        if std::env::var("DUMP_KARSRECEIPT_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = kars_receipt_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    #[test]
+    fn helm_karsreceipt_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(kars_receipt_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(KARSRECEIPT_HELM_CRD_PATH, rust_crd_value, "karsreceipt");
     }
 
     /// One-shot dumper for the trustgraph CRD. Run via:
