@@ -30,16 +30,16 @@ We acknowledge receipt within 24 hours and respond within 72 hours.
 
 ## Security Design
 
-Nine independent defense-in-depth layers, all active by default:
+Nine defense-in-depth layers — eight active by default, plus opt-in per-pod confidential-VM isolation:
 
 1. **Azure Infrastructure** — NSG, AKS API server IP allowlist, DDoS protection
 2. **Azure Linux** — SELinux-enforcing nodes, automatic security patching
-3. **Kata VM** (confidential) — per-pod dedicated kernel
+3. **Kata VM (confidential) — opt-in** — per-pod dedicated kernel + AMD SEV-SNP, enabled with `KarsSandbox.spec.isolation: confidential` (`kars up`'s default isolation is `enhanced`: runc + the `kars-strict` seccomp profile). Not on by default.
 4. **Container Hardening** — read-only rootfs, non-root (UID 1000), drop ALL capabilities
 5. **Kernel Confinement** — custom seccomp profile (`kars-strict`) with a deny-by-default syscall allowlist
-6. **Network Segmentation** — iptables UID-based egress + egress proxy with allowlist/learn mode + a large domain blocklist (tens of thousands of entries; see [`blocklists/`](blocklists/))
+6. **Network Segmentation** — iptables UID-based egress + egress proxy with allowlist/learn mode + a large domain blocklist (tens of thousands of entries; see [`cli/blocklists/`](cli/blocklists/))
 7. **Inference Safety** — Content Safety + Prompt Shields (Foundry-side guardrails, parsed from model responses) + per-sandbox token budgets
-8. **AGT Governance** — PolicyEngine (YAML rules) gates tool execution pre-call, TrustManager (Ed25519-signed scoring), SHA-256 Merkle audit chain, RateLimiter, BehaviorMonitor. Denies sensitive file access, recon tools, cloud metadata, destructive commands.
+8. **AGT Governance** — PolicyEngine (YAML rules) gates tool execution pre-call, TrustManager (Ed25519-signed scoring), SHA-256 hash-chained audit log (AGT's `AuditLogger`), RateLimiter, BehaviorMonitor. Denies sensitive file access, recon tools, cloud metadata, destructive commands.
 9. **E2E Encrypted Mesh** — Signal Protocol (X3DH + Double Ratchet), KNOCK trust handshake, per-message forward secrecy via AgentMesh relay/registry
 
 See [docs/security.md](docs/security.md) for the full breakdown.

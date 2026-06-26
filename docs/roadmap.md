@@ -12,7 +12,7 @@ The current public surface — exercised by CI (Kind E2E + manual matrix) on eve
 - **E2E-encrypted inter-agent messaging** via AgentMesh (Signal Protocol — X3DH + Double Ratchet). The Signal session is owned end-to-end by the agent processes; the inference router only WebSocket-bridges opaque ciphertext.
 - **Defense-in-depth sandbox:** read-only rootfs, UID-1000 + UID-1001 split, drop-ALL caps, custom seccomp (`kars-strict`), Landlock, iptables UID-based egress, optional Kata.
 - **AGT integration:** `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` consumed via four provider traits (`MeshProvider`, `PolicyDecisionProvider`, `AuditSink`, `SigningProvider`).
-- **Operator UX:** `kars up / add / dev / connect / handoff / mesh / policy learn / migrate / convert / claw attest` plus the operator TUI.
+- **Operator UX:** `kars up / upgrade / add / dev / connect / handoff / mesh / policy / migrate / convert / attest` plus the operator TUI.
 - **Supply chain:** cosign keyless OIDC signatures, SBOM (CycloneDX) per image, Trivy + Container Image Scan + Rust Supply-Chain Gate (cargo-deny) + RustSec advisory audit in CI.
 
 ## What we're working on next

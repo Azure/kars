@@ -19,7 +19,7 @@ same spec must still pass against the refactored code.
 2. **`kars up`** — AKS provisioning preflight → provision → helm.
 3. **`kars connect`** — attach to running sandbox.
 4. **`kars handoff`** — warm handoff between sibling agents.
-5. **`kars offload`** — cloud offload from local to AKS.
+5. **Cloud offload** — local agent offloads work to an AKS sandbox over the mesh, via `kars pair` + the `@kars/mesh` plugin (there is no `kars offload` command).
 6. **`kars operator`** — headless operator TUI (blessed dashboard).
 7. **OpenClaw → kars inter-agent** — E2E Signal protocol via router.
 8. **Plugin lifecycle** — OpenClaw plugin load + tool registration.

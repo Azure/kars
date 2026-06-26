@@ -6,9 +6,9 @@ compromised via a poisoned legal document, and kars's nine
 security layers containing the attack while the other two tenants
 keep working.
 
-The full timed walkthrough — phases, talking points, expected output,
-threat-model table mapping each phase to a real-world CVE / paper —
-lives in [`docs/internal/DEMO.md`](../../docs/internal/DEMO.md).
+This README plus the manifests in this directory are the demo. (A longer
+timed walkthrough with talking points and a threat-model citation table is
+maintained separately by the kars maintainers.)
 
 > **Picking between this and `lethal-trifecta-demo`?** This one
 > showcases **multi-tenant isolation** (cross-namespace, runc/Kata
@@ -73,8 +73,6 @@ kubectl delete -f examples/demo-clawshield/
 
 ## See also
 
-- [`docs/internal/DEMO.md`](../../docs/internal/DEMO.md) — full timed
-  walkthrough with talking points + threat-model citations
 - [`examples/lethal-trifecta-demo`](../lethal-trifecta-demo/) — focused
   prompt-injection / inference-data-path demo (recommended launch demo)
 - [`docs/security.md`](../../docs/security.md) — the nine-layer security

@@ -156,8 +156,8 @@ trail.
 `docs/security.md` §Governance (lines ~153-170) and `CHANGELOG.md`.
 
 **Plan.** Planned (see roadmap): OTel GenAI SemConv 1.x emission on every router
-span. `kubectl claw attest <name>` returns fresh
-attestation including AGT audit-receipt id.
+span. `kars attest <name>` is shipped today (CRD spec attestation); emitting a
+fresh AGT audit-receipt id as part of that attestation is on the roadmap.
 
 ### MCP09 — Shadow MCP servers
 

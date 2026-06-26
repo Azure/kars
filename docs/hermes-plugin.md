@@ -1,6 +1,6 @@
 # kars Hermes plugin (`runtimes/hermes/`)
 
-The **kars Hermes plugin** is the agent-side runtime surface for kars on top of the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT) — a Python 3.11+ agent harness with **20+ messaging channels**, **18+ inference providers**, **70+ built-in tools**, and a native MCP client. When a Hermes sandbox boots, the Hermes gateway auto-discovers the kars plugin from `$HERMES_HOME/plugins/kars/` and loads it; from that point on the agent's tool surface is the **17 governance-aware kars tools** (16 in local-registry mode) the plugin registers plus the 5 Hermes built-ins kars explicitly denies.
+The **kars Hermes plugin** is the agent-side runtime surface for kars on top of the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT) — a Python 3.11+ agent harness with **20+ messaging channels**, **18+ inference providers**, **70+ built-in tools**, and a native MCP client. When a Hermes sandbox boots, the Hermes gateway auto-discovers the kars plugin from `$HERMES_HOME/plugins/kars/` and loads it; from that point on the agent's tool surface is the governance-aware kars tools the plugin registers plus the 6 Hermes built-ins kars explicitly denies.
 
 > **Parity vs OpenClaw — ~all major surfaces shipped.** OpenClaw's kars plugin registers 24 tools; Hermes registers 16 native + 5 via the platform MCP gateway = 21 LLM-reachable Foundry/kars tools. Surfaces:
 > - **`kars_handoff_*`** (status / request / confirm) — implemented (`handoff.py`). `kars_handoff_status` always-on; the two mutation tools register only when `AGT_REGISTRY_MODE=global` (same gate OpenClaw uses; in local mode the router refuses mutations).
@@ -21,9 +21,9 @@ For the conceptual split between plugin-owned mesh and router-owned governance/a
 
 ---
 
-## Registered tools (11 total) — NOT yet at OpenClaw parity
+## Registered tools
 
-Authoritative source: each `register()` call across `runtimes/hermes/src/kars_runtime_hermes/plugin/*.py`. Verified by `kubectl logs <hermes-pod> -c agent | grep "registered"` on any running Hermes sandbox.
+Authoritative source: each `register()` call across `runtimes/hermes/src/kars_runtime_hermes/plugin/*.py`. Verified by `kubectl logs <hermes-pod> -c agent | grep "registered"` on any running Hermes sandbox. The spawn, mesh, discovery, handoff, Foundry, and governance surfaces are all wired; the remaining gap vs OpenClaw is that nine of the operator-tier Foundry tools reach the agent via the platform MCP gateway (as `mcp__platform__foundry_*`) rather than as native `foundry_*` names.
 
 ### Sub-agent spawn (4) — parity with OpenClaw
 
@@ -34,14 +34,14 @@ Authoritative source: each `register()` call across `runtimes/hermes/src/kars_ru
 | `kars_spawn_status` | Pod / runtime / mesh status for one sub-agent. |
 | `kars_spawn_destroy` | Graceful tear-down of a sub-agent. |
 
-### Mesh (3 functional + 1 stub) — partial parity
+### Mesh (4) — parity with OpenClaw
 
 | Tool | What it does |
 |---|---|
 | `kars_mesh_send` | Send a message to a sibling. Encryption is via Double Ratchet inside the plugin; the router sees ciphertext only. Returns `delivered_via_agt_relay` (fire-and-forget) or `delivered_and_replied` (sync round-trip when the peer auto-responder is enabled). |
 | `kars_mesh_inbox` | Drain the local inbox (decrypted plugin-side) without blocking. |
 | `kars_mesh_await` | Block until a message arrives from a specific sender (with timeout). |
-| `kars_mesh_transfer_file` ⚠ **stub** | Returns `"kars_mesh_transfer_file not yet implemented in mesh v0.1 (small-messages only). Use kars_mesh_send with chunked content."` — see follow-up `hermes-mesh-transfer-file`. |
+| `kars_mesh_transfer_file` | Send a file to a sibling over the encrypted mesh (sender + receiver auto-save). The file arrives at `/sandbox/incoming/<file_name>` and the LLM sees a short summary instead of the base64 blob (`mesh.py`). |
 
 The `mesh_worker` background loop (`KARS_MESH_AUTO_RESPONDER=1`, set by the controller on sub-agent containers) auto-decrypts every inbound and dispatches to the agent's LLM, publishing the resulting reply back through `kars_mesh_send`.
 
@@ -51,9 +51,15 @@ The `mesh_worker` background loop (`KARS_MESH_AUTO_RESPONDER=1`, set by the cont
 |---|---|
 | `kars_discover` | Look up sibling agents on the AGT registry by display name or capability. |
 
-### Handoff (0) ❌ **NOT IMPLEMENTED**
+### Handoff (3) — parity with OpenClaw
 
-`runtimes/hermes/src/kars_runtime_hermes/plugin/handoff.py` is currently `def register(ctx): pass`. The three OpenClaw tools `kars_handoff_request / kars_handoff_confirm / kars_handoff_status` are missing on the Hermes side. Tracked: `hermes-handoff-impl`.
+| Tool | What it does |
+|---|---|
+| `kars_handoff_status` | Check live-migration progress for this agent (always registered). |
+| `kars_handoff_request` | Request a live handoff (migration) of this agent — creates a PENDING handoff and returns a confirmation code. |
+| `kars_handoff_confirm` | Confirm a pending handoff with the code. |
+
+Implemented in `runtimes/hermes/src/kars_runtime_hermes/plugin/handoff.py`. `kars_handoff_status` is always on; the two mutation tools (`request` / `confirm`) register only when `AGT_REGISTRY_MODE=global` — the same gate OpenClaw uses; in local-registry mode the router refuses handoff mutations. The handoff state machine itself lives in the inference router under `/agt/handoff/*`; the plugin forwards the agent's tool calls to it.
 
 ### Foundry data plane (1 native + 9 via MCP) — partial parity
 
@@ -75,9 +81,9 @@ The `mesh_worker` background loop (`KARS_MESH_AUTO_RESPONDER=1`, set by the cont
 | `pre_tool_call` | AGT governance gate — every tool call is screened against the active policy profile (`developer` / `web` / `azure` / `minimal`) before the kernel executes it. Fail-closed with a 3-call grace window if the policy service is briefly unreachable. |
 | `post_tool_call` | Telemetry — emits the standard kars OTel spans (`kars.tool.invocation`) so the operator-CLI topology and Headlamp mesh dashboard pick up Hermes-side tool activity identically to OpenClaw. |
 
-### Multi-agent peer roster — ❌ NOT IMPLEMENTED
+### Multi-agent peer roster — parity with OpenClaw
 
-OpenClaw auto-prepends `Peer roster: name — role` to every outbound `kars_mesh_send` / `kars_mesh_transfer_file` when 2+ siblings exist. Hermes does not yet. In multi-agent pipelines (`analyst → viz → writer`), Hermes agents must resolve sibling names themselves. Tracked: `hermes-peer-roster`.
+Like OpenClaw, Hermes auto-prepends an authoritative `Peer roster: name — role` block to every outbound `kars_mesh_send` / `kars_mesh_transfer_file` when 2+ siblings are tracked in the spawn roster, so the recipient resolves sibling names unambiguously. Implemented in `mesh.py::_maybe_prepend_peer_roster` (matching OpenClaw's behaviour at `agt-tools/agt.ts`).
 
 ### Denied Hermes built-ins (6)
 

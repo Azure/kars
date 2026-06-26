@@ -192,6 +192,8 @@ sequenceDiagram
 
 For cross-organisation peers that are not in your AgentMesh.
 
+> **Status — partial (forward-looking).** The inbound `AgentCard` JWS verifier is library-complete and the router accepts the mTLS env + cert paths, but the dedicated public TLS listener is **not yet wired** (see [A2A gateway](architecture/a2a-gateway.md)). The diagram below shows the intended production edge; internal-mesh A2A between kars sandboxes works today, cross-org public ingress is on the [roadmap](roadmap.md).
+
 ```mermaid
 flowchart LR
   subgraph Internet

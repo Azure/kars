@@ -1,10 +1,10 @@
 # Getting started
 
-One `npm i`, one `kars dev`, and you're talking to a secured AI agent on your laptop — about five minutes, no Azure account and no Kubernetes required.
+One `npm i` and one `kars dev`, and you're talking to a secured AI agent on your laptop in about five minutes — no Azure account required.
 
 This guide takes you from a clean machine to a working kars agent (v0.1.18) in two steps:
 
-1. **[Local — five minutes](#step-1--local-five-minutes)** — `kars dev` runs a sandbox in one Docker container on your laptop. No Azure subscription, no AKS, no Kubernetes. This is where everyone should start.
+1. **[Local — five minutes](#step-1--local-five-minutes)** — `kars dev` runs a real sandbox on your laptop. The **recommended dev loop is a local [kind](https://kind.sigs.k8s.io/) cluster** (`--target local-k8s`) because it reproduces the production pod shape — separate router container, `NetworkPolicy`, seccomp — and behaves almost identically to AKS. A single-container **Docker** target is also available for the fastest possible smoke test. No Azure subscription either way.
 2. **[AKS — half an hour](#step-2--deploy-to-aks)** — when you're ready for production, `kars up` provisions AKS + ACR + Foundry + the kars control plane in your subscription, and runs the same sandbox under Workload Identity, NetworkPolicies, and the egress guard.
 
 The sandbox YAML you wrote in step 1 runs **unchanged** in step 2 — build locally, ship to production with no rewrites.
@@ -16,7 +16,7 @@ The sandbox YAML you wrote in step 1 runs **unchanged** in step 2 — build loca
 
 </div>
 
-> **Want production-shaped Kubernetes on your laptop?** Between these two there is a local-Kubernetes middle ground: `kars dev --target local-k8s` runs the same controller, CRDs, Helm chart, and NetworkPolicies on a [kind](https://kind.sigs.k8s.io/) cluster — no Azure, no AKS. Use it when you are changing the controller, the chart, or the CRDs and want to validate the Kubernetes glue before you touch AKS. Full walkthrough: **[Blueprint 02 — Local Kubernetes dev loop](blueprints/02-local-k8s-dev-loop.md)**.
+> 💡 **Which local target?** Use **`--target local-k8s`** (kind) for anything you intend to ship — it exercises the real controller, CRDs, Helm chart, and NetworkPolicies, so you catch Kubernetes-only issues before AKS. Use the **default Docker** target for the quickest prompt/tool iteration when you don't need the K8s glue. Same images, same router, same governance either way. Full kind walkthrough: **[Blueprint 02 — Local Kubernetes dev loop](blueprints/02-local-k8s-dev-loop.md)**.
 
 ---
 
@@ -128,7 +128,7 @@ kars dev --release --target local-k8s   # local kind cluster, real K8s posture
 > **Why `--target local-k8s` matters.** Plain Docker is the fastest way to a
 > running agent, but it co-locates the agent and router in one container. The
 > `local-k8s` target runs the *same* published images on a real [kind](https://kind.sigs.k8s.io/)
-> cluster — separate router pod, init container, NetworkPolicy, seccomp profile,
+> cluster — separate router container, init container, NetworkPolicy, seccomp profile,
 > the whole sandbox shape. It is behaviourally the closest mirror of AKS you can
 > run on a laptop, so it's the recommended dev loop once you move past first-run.
 
@@ -193,7 +193,7 @@ To switch providers later (or rotate keys), run **`kars credentials`** — the s
 
 After the provider picker, `kars dev` also prompts for an **agent name** (default `dev-agent` — hit Enter to accept) and offers any saved channel tokens for one-tap wiring.
 
-The CLI then builds (or pulls cached) the local sandbox image and starts a single container. In dev mode the agent runtime and the inference router are co-located in that one image — there is no separate router pod, no init container, no NetworkPolicy. You get the same router code path, the same governance profile, the same audit format.
+The CLI then builds (or pulls cached) the local sandbox image and starts a single container. In dev mode the agent runtime and the inference router are co-located in that one image — there is no separate router container, no init container, no NetworkPolicy. You get the same router code path, the same governance profile, the same audit format.
 
 > 💡 **Picking a model with Copilot.** Claude Opus 4.7 is the largest-context option and the best default for tool-heavy agents. Sonnet 4.5 is faster and cheaper for routine tasks. GPT-5 is comparable on reasoning. Switching is `kars credentials` → re-pick — the saved OAuth token is reused, only the model selection changes.
 
@@ -329,6 +329,18 @@ kars add hermes-helper --runtime Hermes --model gpt-4.1 \
 
 The Hermes adapter ships its own plugin (mesh tools, governance hook, Foundry tool wrappers, sub-agent spawn) and joins the AGT mesh identically to OpenClaw — so `kars_mesh_send` works in either direction between OpenClaw and Hermes peers. Full reference: **[Hermes plugin](hermes-plugin.md)**.
 
+### 2.5b Upgrade the cluster to a new release
+
+When a newer kars release ships, move your cluster to it with one failsafe command:
+
+```bash
+kars upgrade --dry-run   # preview from→to and the images that would be imported
+kars upgrade             # import signed images, atomic Helm upgrade, rolling restart, verify
+kars upgrade --rollback  # revert to the previous Helm revision if needed
+```
+
+`kars upgrade` records a rollback point and uses an atomic Helm upgrade, so the cluster never lands half-migrated. Full runbook: **[Operations → Upgrades & rollback](operations/upgrades.md)**.
+
 ### 2.6 Tear it down
 
 ```bash
@@ -379,6 +391,6 @@ Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [m
 | GitHub Copilot provider returns `401` | The token is a classic PAT, not a Copilot-enabled OAuth token; or your Copilot seat is inactive | Verify your seat at [github.com/settings/copilot](https://github.com/settings/copilot). See [`cli-reference.md#kars-dev`](cli-reference.md#kars-dev) for the OAuth flow. |
 | Sandbox stays `Pending` | Foundry quota / model not deployed | `kubectl describe karssandbox <name>` — the controller surfaces the cause as a `Condition`. |
 | Agent gets `403` on tool call | `ToolPolicy` denies it | `kars policy show <name>` and adjust. See [`cli-reference.md#kars-policy`](cli-reference.md#kars-policy). |
-| Mesh KNOCK fails | Trust score below threshold | See **[AGT boundary](architecture/agt-boundary.md#trust-scoring)**. |
+| Mesh KNOCK fails | Trust score below threshold | See **[AGT boundary](architecture/agt-boundary.md#agt-owns)**. |
 
 The complete operational runbook is in **[`docs/operations/`](operations/)**.

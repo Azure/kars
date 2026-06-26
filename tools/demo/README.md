@@ -5,7 +5,7 @@ three substrates we support: local Docker (`kars dev`), local Kind
 (`kars up` flow exercised through the E2E infra helpers), and a
 real AKS cluster (`kars up`).
 
-The narrative companion is **[`docs/demo-script.md`](../../docs/demo-script.md)** —
+The narrative companion is **[`docs/use-cases/exec-brief-walkthrough.md`](../../docs/use-cases/exec-brief-walkthrough.md)** —
 that doc is what a human reads/delivers; this directory is what
 automation runs.
 
