@@ -227,7 +227,7 @@ The CI gate `ci/check-copyright-headers.sh` enforces this on every PR. Add the h
 
 #### Rust
 
-Source files **should stay under 1500 LOC**. Files over that threshold tend to hide bugs, slow down reviews, and make refactoring risky. Today the following files are over budget and are candidates for incremental splitting (see plan.md Q1):
+Source files **should stay under 1500 LOC**. Files over that threshold tend to hide bugs, slow down reviews, and make refactoring risky. Today the following files are over budget and are candidates for incremental splitting:
 
 | File | LOC | Suggested split |
 |---|---|---|
@@ -238,7 +238,7 @@ Source files **should stay under 1500 LOC**. Files over that threshold tend to h
 | `inference-router/src/governance.rs` | ~1250 | Near budget — watch before extending |
 | `inference-router/src/spawn.rs` | ~1160 | Near budget — watch before extending |
 
-**Rule of thumb:** a PR that pushes any file over 1500 LOC should either (a) split the file in the same PR, or (b) include a follow-up tracking item in plan.md. Reviewers are expected to flag this.
+**Rule of thumb:** a PR that pushes any file over 1500 LOC should either (a) split the file in the same PR, or (b) open a follow-up tracking issue. Reviewers are expected to flag this.
 
 This is a soft rule — edge cases exist (e.g., generated code, large lookup tables). Use judgement; call it out in the PR description when you exceed it intentionally.
 
