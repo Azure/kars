@@ -95,9 +95,98 @@ pub struct KarsTaskSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<TaskExecution>,
 
+    /// The **run blueprint** — the concrete, editable shape of the agent that
+    /// will run this task: which harness, which model, the system prompt, the
+    /// connected services (MCP) and tools it may use, the network destinations
+    /// it may reach, and the sandbox isolation. This is the substance a human
+    /// reviews and edits on the §20 launch package; every field here drives a
+    /// real field on the materialized `InferencePolicy` / `KarsSandbox`. When a
+    /// field is unset the controller falls back to a safe default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blueprint: Option<TaskBlueprint>,
+
     /// Optional short label surfaced in CLI / UI listings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+}
+
+/// The concrete, editable run blueprint reviewed on the launch package.
+/// Every field maps to a real field on the materialized resources.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskBlueprint {
+    /// Harness/runtime the agent runs on (`OpenClaw`, `OpenAIAgents`, `MAF`,
+    /// `Hermes`, `BYO`). Drives `KarsSandbox.spec.runtime.kind`. Defaults to
+    /// `OpenClaw`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+
+    /// The model the agent reasons with. Drives
+    /// `InferencePolicy.spec.modelPreference.primary`. Defaults from controller
+    /// env when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<TaskModel>,
+
+    /// System prompt / standing instructions for the agent, in addition to the
+    /// objective. Drives `KarsSandbox.spec.agent.instructions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+
+    /// Tools the agent may call, expressed as the name of an existing
+    /// same-namespace `ToolPolicy`. Drives `KarsSandbox.spec.governance`
+    /// (`enabled: true` + `toolPolicyRef`). Composing the existing `ToolPolicy`
+    /// CRD keeps the AGT profile + `appliesTo` scope authoritative rather than
+    /// duplicating an allow-list here. Required whenever `mcpServers` is set —
+    /// governed MCP access is meaningless without a tool policy to bound it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<String>,
+
+    /// Connected services (MCP server names, same namespace) the mission may
+    /// use. Drives `KarsSandbox.spec.governance.mcpServerRefs`. Requires
+    /// `toolPolicy` to be set (governed MCP access is bounded by the tool
+    /// policy).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+
+    /// Network destinations the mission may reach. Drives
+    /// `KarsSandbox.spec.networkPolicy.allowedEndpoints`. When non-empty the
+    /// sandbox runs in strict egress mode bounded to exactly these hosts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress: Vec<TaskEgress>,
+
+    /// Sandbox isolation level (`standard`, `enhanced`, `confidential`). Drives
+    /// `KarsSandbox.spec.sandbox.isolation`. Defaults to `standard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+
+    /// Shared team memory — the name of a same-namespace `KarsMemory` the agent
+    /// reads/writes. Drives `KarsSandbox.spec.memoryRef`. This is how a
+    /// persistent team shares knowledge across members and over time; a short
+    /// one-off task usually leaves it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+}
+
+/// A model route: provider tag + deployment name.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskModel {
+    /// Provider tag: `azure-openai`, `anthropic`, `gemini`, `bedrock`,
+    /// `ollama`, `github-models`.
+    pub provider: String,
+    /// Deployment / model name as the provider advertises it.
+    pub deployment: String,
+}
+
+/// A network destination the mission may reach.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskEgress {
+    /// Hostname, e.g. `api.github.com`.
+    pub host: String,
+    /// Optional TCP port (e.g. `443`); any port when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 /// Execution settings for a `KarsTask`. The launch flag is the §20 gate
@@ -112,7 +201,8 @@ pub struct TaskExecution {
     pub launch: bool,
 
     /// Runtime to launch the agent on. Defaults to `OpenClaw`. Must match the
-    /// controller's `RuntimeKind` enum.
+    /// controller's `RuntimeKind` enum. Superseded by `blueprint.runtime` when
+    /// both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
 }
@@ -532,6 +622,7 @@ mod tests {
             envelope: sample_envelope(),
             parent_ref: None,
             execution: None,
+            blueprint: None,
             display_name: Some("payments-bugfix".into()),
         };
         let yaml = serde_yaml::to_string(&spec).expect("serializes");
