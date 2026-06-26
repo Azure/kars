@@ -137,6 +137,12 @@ Same CRDs. Same router code path. Same audit format. Same governance profiles. T
 the images are multi-arch (`amd64` + `arm64`, native on Apple Silicon) and
 cosign-signed; `--release` pulls them, so there's no Rust, no clone, no build.
 
+<p align="center">
+  <img src="docs/assets/kars-dev-firstrun.gif" alt="kars first run: kars dev --release --target local-k8s brings up a governed agent on a local kind cluster" width="100%" />
+  <br />
+  <em><code>kars dev --release --target local-k8s</code> — first run: pick a provider, and kars brings up the controller, the encrypted mesh, and a sandboxed agent on a local kind cluster.</em>
+</p>
+
 Install the CLI:
 
 ```bash
