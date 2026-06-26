@@ -31,6 +31,7 @@ import { convertCommand } from "./commands/convert.js";
 import { a2aCommand, a2aAgentCommand } from "./commands/a2a.js";
 import { attestCommand } from "./commands/attest.js";
 import { receiptCommand } from "./commands/receipt.js";
+import { approvalCommand } from "./commands/approval.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { toolPolicyCommand } from "./commands/toolpolicy.js";
 import { inferencePolicyCommand } from "./commands/inferencepolicy.js";
@@ -106,6 +107,9 @@ export function createCli(): Command {
   // Self-management
   program.addCommand(updateCommand());
 
+  // Steering
+  program.addCommand(approvalCommand());
+
   program.addHelpText("after", `
 Command groups:
   Lifecycle       up, dev, add, push, destroy
@@ -117,6 +121,7 @@ Command groups:
   Governance      toolpolicy, inferencepolicy, mcp, memory
   Attestation     attest, receipt
   Self            update
+  Steering        approval
 
 Quick start:
   kars up                    # Provision Azure + deploy controller + first sandbox
