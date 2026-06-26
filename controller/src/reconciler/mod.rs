@@ -2453,18 +2453,24 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         // KarsMemory (optional, Slice 3a): if the sandbox references
         // one via `spec.memoryRef`, mirror its compiled binding
-        // ConfigMap and mount it into the inference-router. The
-        // router's `memory_binding_loader` reads the file, registers
-        // the digest under `PolicyKind::Memory`, and echoes it via
-        // `/internal/policy-status` so the `kars_memory_reconciler`
-        // can close the §3 Ready ⇔ router-echo loop.
+        // ConfigMap and mount it into the inference-router. The router's
+        // `memory_binding_loader` reads the file, registers the digest
+        // under `PolicyKind::Memory`, and echoes it via
+        // `/internal/policy-status` so the `kars_memory_reconciler` can
+        // close the §3 Ready ⇔ router-echo loop.
+        //
+        // The agent container does NOT need this mount: memory is a
+        // router-owned capability. Both runtime plugins (OpenClaw and
+        // Hermes) are thin clients — they forward `foundry.memory`
+        // intent to the router's platform MCP server and the router
+        // resolves the store name + scope from this binding, applies the
+        // Memory Store REST contract, auto-provisions, and retries. The
+        // agent process therefore carries no Foundry contract knowledge
+        // and never reads `binding.json` directly.
         //
         // Failure mode: source missing → mount omitted, router boots
         // without a binding loaded (digest absent in
         // `/internal/policy-status`, KarsMemory stays `Compiled`).
-        // Memory consumption today still runs through the existing
-        // env-driven `FOUNDRY_MEMORY_STORE_ID` path (Slice 3b will
-        // rewire to the binding).
         if let Some(memory_ref) = spec.memory_ref.as_ref() {
             let memory_name = memory_ref.name.trim();
             if !memory_name.is_empty() {
