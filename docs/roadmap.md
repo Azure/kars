@@ -1,13 +1,13 @@
 # kars Roadmap
 
-> Living document. The project is at **`v0.1.0`** — see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped. This roadmap lists the themes we are evolving the platform towards. Versions and ordering may change as we learn from production deployments.
+> Living document. The project is at **`v0.1.18`** — see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped. This roadmap lists the themes we are evolving the platform towards. Versions and ordering may change as we learn from production deployments.
 
-## What ships today (`v0.1.0`)
+## What ships today (`v0.1.18`)
 
 The current public surface — exercised by CI (Kind E2E + manual matrix) on every push to `main`:
 
-- **`KarsSandbox` CRD** (`kars.azure.com/v1alpha1`) plus eight sibling CRDs covering inference policy, tool policy, A2A agents, MCP servers, memory, evaluation, egress approval, and trust topology.
-- **Seven first-class agent runtime adapters:** OpenClaw, OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python **and** TypeScript — two adapters), Pydantic-AI. Plus a documented **BYO runtime** path with strict-mode admission gating ([`operations/byo-strict.md`](operations/byo-strict.md)). See [`runtimes.md`](runtimes.md) for the authoritative table.
+- **`KarsSandbox` CRD** (`kars.azure.com/v1alpha1`) plus nine sibling workload CRDs covering inference policy, tool policy, A2A agents, MCP servers, memory, evaluation, egress approval, trust topology, and approval-gated SRE remediation actions (`KarsSREAction`). Two infrastructure CRDs (`KarsAuthConfig`, `KarsPairing`) bring the registered total to twelve. Full schema in [`api/crd-reference.md`](api/crd-reference.md).
+- **Eight first-class agent runtime adapters:** OpenClaw, Hermes (Nous Research), OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python **and** TypeScript — two adapters), Pydantic-AI. Plus a documented **BYO runtime** path with strict-mode admission gating ([`operations/byo-strict.md`](operations/byo-strict.md)). See [`runtimes.md`](runtimes.md) for the authoritative table.
 - **Inference router** with IMDS / Workload-Identity broker, content-safety floor, per-sandbox token budgets, the full Foundry data-plane API surface, MCP Streamable-HTTP + SSE compat, A2A transport.
 - **E2E-encrypted inter-agent messaging** via AgentMesh (Signal Protocol — X3DH + Double Ratchet). The Signal session is owned end-to-end by the agent processes; the inference router only WebSocket-bridges opaque ciphertext.
 - **Defense-in-depth sandbox:** read-only rootfs, UID-1000 + UID-1001 split, drop-ALL caps, custom seccomp (`kars-strict`), Landlock, iptables UID-based egress, optional Kata.

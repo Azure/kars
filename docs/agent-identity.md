@@ -165,7 +165,7 @@ Entra principals from Foundry's perspective. This means:
   same reconcile pass; their agent identities are then reaped by the
   controller's finalizer.
 
-The `kars handoff` command (see [`handoff.md`](handoff.md)) uses the
+The `kars handoff` command (see [CLI reference → `kars handoff`](cli-reference.md#kars-handoff)) uses the
 same machinery — handoff'd sandboxes receive distinct agent
 identities and their permission set is migrated separately.
 

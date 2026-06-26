@@ -5,7 +5,8 @@ Messaging channels (Telegram, Slack, Discord, WhatsApp) and **third-party** sear
 > **Looking for the kars-owned plugins?** This page is about **external** integrations. For the kars-owned components:
 > - **[kars OpenClaw plugin](openclaw-plugin.md)** — the in-sandbox plugin (24 governance-aware tools, 10 skills) shipped with every OpenClaw-runtime sandbox.
 > - **[kars Hermes plugin](hermes-plugin.md)** — the in-sandbox plugin (9 governance-aware tools + hooks) shipped with every Hermes-runtime sandbox.
-> - **[`@kars/mesh` plugin](mesh-plugin.md)** — the companion npm package for pairing a **local** OpenClaw with a remote kars cluster (8 federation tools, 1 skill).
+> - **[`@kars/mesh` plugin](mesh-plugin.md)** — the companion local plugin (built from source, not yet published on npm) for pairing a **local** OpenClaw with a remote kars cluster (8 federation tools, 1 skill).
+> - **Cross-Framework Secure Mesh** — Hermes, OpenClaw, and LangGraph agents communicate over one AgentMesh fabric, every hop end-to-end encrypted with the Signal Protocol. See [mesh-plugin.md](mesh-plugin.md) and the [`kars mesh` reference](cli-reference.md#kars-mesh).
 
 The channels and plugins documented below work identically with both runtimes — same CLI flag, same secret name (`<sandbox>-credentials`), same auto-config flow inside the entrypoint. The only difference is the config-file shape inside the agent container: OpenClaw writes to `~/.openclaw-data/config.yaml`, Hermes writes to `$HERMES_HOME/config.yaml`. The CLI hides that detail.
 

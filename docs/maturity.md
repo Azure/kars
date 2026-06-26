@@ -1,6 +1,6 @@
 # Feature maturity & enforcement status
 
-kars is `v0.1.0`. Most of the control plane is enforced at runtime today, but some
+kars is `v0.1.18`. Most of the control plane is enforced at runtime today, but some
 capabilities are reconciled-but-not-yet-gated, ship as a library that is not yet wired
 into the request path, or are still on the [roadmap](roadmap.md). This page is the
 **single, honest source of truth** for where each capability sits, so reviewers do not
@@ -107,7 +107,7 @@ closed — not that the field merely exists on a CRD.
 
 | Capability | Status | Notes |
 |---|---|---|
-| OpenClaw, OpenAI Agents (Py), Microsoft Agent Framework (Py), Anthropic Claude Agent SDK, LangGraph (Py + TS), Pydantic-AI | ✅ Enforced | Seven first-class adapters (LangGraph ships Python + TypeScript) + BYO. [runtimes.md](runtimes.md) |
+| Hermes, OpenClaw, OpenAI Agents (Py), Microsoft Agent Framework (Py), Anthropic Claude Agent SDK, LangGraph (Py + TS), Pydantic-AI | ✅ Enforced | Eight first-class adapters (LangGraph ships Python + TypeScript) + BYO. [runtimes.md](runtimes.md) |
 | CrewAI, Microsoft Agent Framework (.NET), Strands / Google ADK | ⚪ Roadmap | [roadmap](roadmap.md#more-runtimes) — .NET returns when AGT ships `AgentMeshClient` for .NET |
 
 ## Multi-cluster & DR

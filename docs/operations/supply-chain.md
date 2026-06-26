@@ -5,6 +5,10 @@ for container images and Rust dependencies. It is the operator's
 reference for what `cargo deny`, `cosign verify`, and the CI rows
 actually check, and how to extend them.
 
+> **See also:** [Supply-chain posture & OpenSSF Scorecard notes](../security/supply-chain-posture.md)
+> records how kars addresses (or deliberately accepts) each Scorecard finding —
+> the *policy* counterpart to this *pipeline* reference.
+
 ## At a glance
 
 | Layer                | Tool                  | Where it runs                          | Required |

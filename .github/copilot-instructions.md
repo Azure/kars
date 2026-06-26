@@ -12,7 +12,7 @@ Four components, two languages:
 |-----------|----------|-------------|------|
 | **Controller** | Rust (kube-rs) | `kars-controller` | K8s operator — reconciles `KarsSandbox` CRDs into isolated sandboxes (namespace, deployment, service, NetworkPolicy, ConfigMap) |
 | **Inference Router** | Rust (axum) | `kars-inference-router` | Per-sandbox proxy — the **only** network path for agents. Handles IMDS auth, Content Safety, token budgets, the full Foundry data-plane API surface, AGT governance, sub-agent spawn |
-| **CLI** | TypeScript | `@kars/cli` | 18 CLI commands (`kars up/add/dev/connect/handoff/mesh/...`) + OpenClaw plugin + 10 Foundry skills |
+| **CLI** | TypeScript | `@kars-runtime/cli` | 30+ CLI commands (`kars up/add/dev/connect/handoff/mesh/...`) + OpenClaw plugin + 10 Foundry skills |
 | **Policy Engine** | YAML profiles | — | AGT governance policy profiles (allow/deny/approval/rate-limit) |
 
 **External dependencies:** [OpenClaw](https://openclaw.ai) (agent framework), [Azure AI Foundry](https://learn.microsoft.com/azure/ai-studio/) (managed AI services), [AGT](https://github.com/microsoft/agent-governance-toolkit) (governance layer).

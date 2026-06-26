@@ -133,8 +133,8 @@ flowchart LR
   BM -->|anomaly| AL[("emit alert<br/>(does not block)")]
   BM -->|normal| OK[("→ proceed")]
 
-  classDef deny fill:#fde2e1,stroke:#c0392b
-  classDef ok fill:#dff5e1,stroke:#27ae60
+  classDef deny fill:#fde2e1,stroke:#c0392b,color:#0b1220
+  classDef ok fill:#dff5e1,stroke:#27ae60,color:#0b1220
   class D1,D2 deny
   class OK ok
 ```

@@ -112,7 +112,7 @@ kars up [options]
 | `--skip-infra` | `false` | Skip infrastructure provisioning (reuse existing cluster) |
 | `--force-infra` | `false` | Force Bicep deployment even if AKS cluster already exists |
 | `--source-acr <server>` | `karsacr.azurecr.io` | Source ACR for pre-built images (customer deployments) |
-| `--release [version]` | — | Import the **public, cosign-signed GHCR release images** (`ghcr.io/azure/*`) into your ACR — no local build, no Rust toolchain. Bare `--release` uses `:latest`; pass a tag (e.g. `v0.1.4`) to pin. Takes precedence over `--build`. |
+| `--release [version]` | — | Import the **public, cosign-signed GHCR release images** (`ghcr.io/azure/*`) into your ACR — no local build, no Rust toolchain. Bare `--release` uses `:latest`; pass a tag (e.g. `v0.1.18`) to pin. Takes precedence over `--build`. |
 | `--build` | `false` | Build images locally from source and push to ACR (developer mode). Compiles Rust in-Docker on macOS/arm64 via the `*.multistage` Dockerfiles. |
 | `--skip-runtime-images` | `false` | Skip building/importing the 7 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
 | `--foundry-endpoint <url>` | — | Existing Azure AI Foundry project endpoint (`services.ai.azure.com`) |
@@ -171,9 +171,26 @@ The state is invalidated automatically when:
 
 ### `kars dev`
 
-Runs a fully-policy-enforced sandbox locally via Docker for inner-loop
-development. Same model routing, same egress policies, and the same
-AGT governance layer as AKS — but on your laptop.
+Runs a fully-policy-enforced sandbox locally for inner-loop development —
+same model routing, same egress policies, and the same AGT governance
+layer as AKS, but on your laptop.
+
+> **Recommended dev flow:** `kars dev --release --target local-k8s`. The
+> `local-k8s` target spins up a **kind** cluster and deploys the full
+> control plane (controller, AgentMesh relay + registry, Headlamp) exactly
+> as it runs on AKS, so what you test locally mirrors real Kubernetes
+> behaviour — NetworkPolicy, the controller reconcile path, and pod-level
+> isolation all included. Adding `--release` pulls the public,
+> cosign-signed GHCR images, so no local Rust toolchain is needed. Plain
+> `--target docker` is the faster bare inner loop, but it does **not**
+> exercise any of the Kubernetes machinery, so prefer `local-k8s` once you
+> are validating real behaviour.
+
+> **Operational UX — Headlamp.** `--target local-k8s` (and every AKS
+> deploy) ships the **kars Headlamp plugin**: a point-and-click dashboard
+> for sandboxes, egress allowlists, AGT receipts, and live inference-router
+> metrics. `kars dev --target local-k8s` auto-port-forwards Headlamp and
+> prints its URL; tear it down again with `kars dev down`.
 
 **Three inference providers** are supported. On first run you'll be asked
 to pick one; your choice is saved to `~/.kars/config.json` and
@@ -199,6 +216,7 @@ kars dev [options]
 | `--target <target>` | `docker` | Where to run the sandbox: `docker` (fast inner loop) or `local-k8s` (kind + Helm, mirrors AKS layout). |
 | `--cluster-name <name>` | `kars-dev` | Kind cluster name (only used with `--target local-k8s`). |
 | `--ephemeral` | `false` | (local-k8s only) destroy the kind cluster on exit. |
+| `--release [version]` | — | Import the **public, cosign-signed GHCR release images** (`ghcr.io/azure/*`) into the local cluster instead of building from source — no Rust toolchain. Bare `--release` uses `:latest`; pass a tag (e.g. `v0.1.18`) to pin. Pairs with `--target local-k8s`. |
 | `--github-token <pat>` | — | One-off GitHub Models override (does NOT save). Use for ephemeral runs that shouldn't overwrite your saved provider. To save Copilot/GitHub-Models as your default, run `kars dev` (or `kars credentials`) without this flag and pick at the prompt. |
 | `--image <image>` | `kars-sandbox:dev` | Sandbox container image |
 | `--build` | `false` | Build sandbox image locally from Dockerfile |
@@ -472,7 +490,7 @@ kars migrate <subcommand> [arguments] [options]
 | `to-translate <name>` | Accept upstream SandboxClaim semantics on inbound (schema-only translation). |
 | `to-observe <name>` | Mirror status of an upstream Sandbox CR without overlay. |
 | `to-native <name>` | Reset to default native mode (kars owns the workload). |
-| `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into an kars resource bundle. Use `-` to read from stdin. |
+| `from-kagent <input>` | Translate a `kagent.dev/v1alpha2` Agent YAML into a kars resource bundle. Use `-` to read from stdin. |
 
 **Common options (all subcommands except `from-kagent`):**
 | Flag | Default | Description |
@@ -1250,6 +1268,13 @@ Manages AgentMesh identity and authentication for cross-environment agent
 handoff and federation. Controls the Ed25519 mesh identity (stored
 AES-256-GCM encrypted at `~/.kars/mesh-identity.json`), relay
 registration enforcement, and cluster federation peer state.
+
+> **Cross-Framework Secure Mesh.** kars meshes agents written in *different*
+> frameworks — **Hermes**, **OpenClaw**, and **LangGraph** — over a single
+> AgentMesh fabric. Every hop is **end-to-end encrypted with the Signal
+> Protocol** (X3DH + Double Ratchet), so a Hermes agent can KNOCK and
+> exchange messages with an OpenClaw or LangGraph agent without either side
+> sharing keys or having to trust the relay.
 
 **Usage:**
 ```

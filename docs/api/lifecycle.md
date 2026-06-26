@@ -50,12 +50,13 @@ This is the whole loop. Everything else on this page is detail.
 
 ## Two reconcile patterns
 
-kars's nine user-facing CRDs split into two operational shapes:
+kars's ten user-facing CRDs split into two operational shapes:
 
 | Pattern | CRDs | What gets produced |
 |---|---|---|
 | **Compile-to-artifact** | `InferencePolicy`, `ToolPolicy`, `A2AAgent`, `McpServer`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval` | A deterministic `ConfigMap` (and sometimes a `Secret`) that the router or gateway mounts. The CRD spec is hashed; the hash is stored in `status.versionHash` or equivalent. |
 | **Heavyweight namespace** | `KarsSandbox` | A whole tenant namespace: `Namespace` + `ServiceAccount` + Workload-Identity federated credential + `NetworkPolicy` + governance `ConfigMap` + `Deployment` + `Service`. |
+| **Propose-approve-execute** | `KarsSREAction` | No mounted artifact. The reconciler gates on `spec.approval.state`, and on `Approved` mints a one-shot writer token (`TokenRequest` + scoped `ClusterRoleBinding`) to execute a single typed cluster action, then revokes it. Phase advances `Proposed → Approved → Applied → Recovered`. |
 
 ### The reconciler map
 
@@ -77,6 +78,7 @@ graph TD
       R7["KarsEval<br/>fm: karseval"]
       R8["TrustGraph<br/>fm: trustgraph"]
       R9["EgressApproval<br/>fm: egressapproval"]
+      R11["KarsSREAction<br/>fm: karssreaction"]
     end
     R10["KarsPairing reconciler<br/>(internal — bound by KarsSandbox)"]
     MESH["mesh-peer reconciler<br/>(own lease — agentmesh-mesh-peer-leader)"]

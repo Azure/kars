@@ -11,7 +11,7 @@ Six fully-shipped use cases covering every deployment pattern from laptop inner-
 | 3 | **kars ↔ kars mesh** | Two AKS-hosted agents, single or multiple clusters | Cluster ↔ cluster via AgentMesh relay (E2E-encrypted) | ✅ Shipping | See § 3 below |
 | 4 | **Multi-runtime hosting** | AKS (same operator, different agent stacks) | Cluster-internal per sandbox | ✅ Shipping (OpenClaw, OpenAIAgents, MAF Python, LangGraph Py+TS, Anthropic, PydanticAi, BYO) | [`docs/runtimes.md`](runtimes.md) |
 | 5 | **A2A federation across organisations** | Foreign agent anywhere; inbound via public a2a-gateway | Internet → A2A gateway → per-sandbox router (mTLS-pinned) | ✅ Shipping | [`docs/adr/0001-a2a-ingress-front-edge.md`](adr/0001-a2a-ingress-front-edge.md) |
-| 6 | **Migration from kagent or `sigs/agent-sandbox`** | Source cluster (any) → kars cluster | Translate + apply | ✅ Shipping | See § 6 below |
+| 6 | **Alignment with kagent ** | Source cluster (any) → kars cluster | Convert + apply | ✅ Shipping | See § 6 below |
 
 All use cases share the same trust boundary:
 
@@ -19,7 +19,7 @@ All use cases share the same trust boundary:
 - All external traffic flows through the per-sandbox **inference router** (UID 1001).
 - All inter-agent traffic flows through the **AgentMesh relay** (Signal Protocol — X3DH + Double Ratchet); the relay sees only ciphertext.
 - Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture.md#four-seam-provider-architecture).
-- The nine workload CRDs (`KarsSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval`) are first-class and reconciled. The operator TUI (`kars operator`) renders live panels for the sandbox, its policy / peer / memory / eval CRDs, and `KarsPairing`; `TrustGraph` and `EgressApproval` are inspected via `kubectl` and `kars egress` rather than a dedicated panel. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
+- The ten workload CRDs (`KarsSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval`, `KarsSREAction`) are first-class and reconciled. The operator TUI (`kars operator`) renders live panels for the sandbox, its policy / peer / memory / eval CRDs, and `KarsPairing`; `TrustGraph` and `EgressApproval` are inspected via `kubectl` and `kars egress`, and `KarsSREAction` proposals via `kars sre actions` / `kars sre show`, rather than a dedicated panel. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
 
 ---
 
@@ -393,7 +393,7 @@ spec:
 
 ### What the operator wants — now SHIPPED
 
-Today the platform supports seven first-class runtimes and a BYO contract for everything else. The same `KarsSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `KarsMemory` / `KarsEval` CRDs, and the same operator TUI apply regardless of runtime kind.
+Today the platform supports eight first-class runtimes and a BYO contract for everything else. The same `KarsSandbox` CRD shape, the same `InferencePolicy` / `ToolPolicy` / `A2AAgent` / `KarsMemory` / `KarsEval` CRDs, and the same operator TUI apply regardless of runtime kind.
 
 | `spec.runtime.kind` | Status |
 |---|---|
@@ -731,17 +731,21 @@ spec:
 
 ---
 
-## 6. Migration from kagent or `sigs/agent-sandbox`
+## 6. Alignment with kagent 
 
 > "My team already uses `kagent.dev/v1alpha2 Agent` YAMLs or
 > `agents.x-k8s.io/v1alpha1 Sandbox` manifests. I want to run them on
 > kars without rewriting YAML from scratch."
 
+### How kars complements these projects
+
+- **kars** adds the piece neither provides: a **zero-trust inference router inside the pod**, so no Azure credentials ever live in the agent process. The agent (UID 1000) never holds a key; the router (UID 1001) brokers every call via Workload Identity.
+
 ### What the operator wants
 
-A translator that converts existing agent manifests into kars resource bundles, with explicit warnings for lossy fields and a dry-run path. The full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`) are documented in the translator source under `cli/src/commands/migrate/`.
+A converter that maps existing agent manifests into kars resource bundles, with explicit warnings for lossy fields and a dry-run path. The full field-mapping table and the three compatibility modes (`Native`, `Translate`, `Overlay`) are documented in the converter source under `cli/src/commands/migrate/`.
 
-### Topology — migration flow
+### Topology — conversion flow
 
 ```mermaid
 graph LR
@@ -767,7 +771,7 @@ graph LR
     CONVERT --> CS
 ```
 
-### CLI walkthrough — migrate from kagent
+### CLI walkthrough — convert from kagent
 
 ```bash
 # Dry run first — see what would be emitted and any lossy warnings
@@ -794,7 +798,6 @@ kubectl apply -f ./manifests/
 kars status my-agent
 ```
 
-### CLI walkthrough — convert from `sigs/agent-sandbox`
 
 ```bash
 # Convert an upstream Sandbox YAML to a KarsSandbox (no cluster required)
@@ -851,7 +854,7 @@ spec:
 
 | Mode | What kars does | When to use |
 |---|---|---|
-| `Native` (default) | kars owns all objects. No upstream CR involved. | Fresh migrations; kagent YAML fully converted. |
+| `Native` (default) | kars owns all objects. No upstream CR involved. | Fresh conversions; kagent YAML fully converted. |
 | `Translate` (opt-in) | kars emits an upstream `Sandbox` CR as a subresource. | Co-existence with an existing upstream controller. |
 | `Overlay` (opt-in) | kars adds only governance overlay; upstream CR owns the pod. | Upstream controller must remain; add governance without pod re-ownership. |
 | `Observe` | kars mirrors status of an upstream CR without overlay. | Read-only integration for auditing. |

@@ -41,7 +41,7 @@ The `KarsSandbox` references the `InferencePolicy` by name via
 ## Deploy
 
 ```bash
-# Prereq: an kars cluster (kars up) with kubectl context set
+# Prereq: a kars cluster (kars up) with kubectl context set
 kubectl apply -f examples/basic-agent/karssandbox.yaml
 
 # Watch the controller reconcile the sandbox
