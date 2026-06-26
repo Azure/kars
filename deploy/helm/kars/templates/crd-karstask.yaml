@@ -118,6 +118,25 @@ spec:
                   Human-readable statement of the task to be performed. This is the
                   instruction a task-giver writes; the agent fleet works to satisfy it.
                 type: string
+              parentRef:
+                description: |-
+                  Optional reference to a parent `KarsTask` in the **same namespace**.
+
+                  When set, this task is a *delegated child*: the controller verifies
+                  that this task's `envelope` is a strict subset of the parent's
+                  (capability-attenuating delegation — a child may narrow authority but
+                  never amplify it), and mints `status.lineage` from the parent's
+                  ancestry. A child whose envelope exceeds its parent on any axis is
+                  rejected as `Degraded` and never receives an envelope digest. This is
+                  the substrate enforcement of OWASP ASI-08 (cascading authority) — done
+                  by the controller, not asked of the model.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
             required:
             - envelope
             - objective
