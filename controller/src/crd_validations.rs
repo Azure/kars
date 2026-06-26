@@ -561,6 +561,42 @@ pub fn kars_task_validations() -> Vec<ValidationRule> {
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.runtime) || self.blueprint.runtime in ['OpenClaw','OpenAIAgents','MAF','MicrosoftAgentFramework','Hermes','BYO']".into(),
+            message: Some("spec.blueprint.runtime must be one of OpenClaw, OpenAIAgents, MAF, MicrosoftAgentFramework, Hermes, BYO".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.isolation) || self.blueprint.isolation in ['standard','enhanced','confidential']".into(),
+            message: Some("spec.blueprint.isolation must be one of standard, enhanced, confidential".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.instructions) || size(self.blueprint.instructions) <= 8192".into(),
+            message: Some("spec.blueprint.instructions, when set, must be <= 8192 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.mcpServers) || size(self.blueprint.mcpServers) <= 8".into(),
+            message: Some("spec.blueprint.mcpServers may list at most 8 connected services".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.mcpServers) || size(self.blueprint.mcpServers) == 0 || has(self.blueprint.toolPolicy)".into(),
+            message: Some("spec.blueprint.mcpServers requires spec.blueprint.toolPolicy — governed MCP access must be bounded by a tool policy".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.egress) || size(self.blueprint.egress) <= 32".into(),
+            message: Some("spec.blueprint.egress may list at most 32 destinations".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
     ]
 }
 
