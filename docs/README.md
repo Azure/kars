@@ -1,6 +1,28 @@
-# kars documentation
+<div align="center">
 
-A secure runtime for AI agents on Azure Kubernetes Service. This is the documentation index. The top-level [`README`](../README.md) is a faster on-ramp; come here when you need depth.
+<img src="assets/logo.png" alt="kars logo" width="128" />
+
+# kars — Agent Reference Stack for Kubernetes
+
+**The secure, Kubernetes-native runtime for AI agents: one hardened sandbox per agent, zero credentials in the agent, every call governed.**
+
+[![npm](https://img.shields.io/npm/v/@kars-runtime/cli?logo=npm&label=%40kars-runtime%2Fcli&color=CB3837)](https://www.npmjs.com/package/@kars-runtime/cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-0078D4.svg)](../LICENSE)
+[![CI](https://github.com/Azure/kars/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Azure/kars/actions/workflows/ci.yml)
+[![Azure](https://img.shields.io/badge/Azure-AKS%20%7C%20Foundry-0078D4)](https://azure.microsoft.com)
+
+This is the documentation index. The top-level [`README`](../README.md) is a faster on-ramp; come here when you need depth.
+
+</div>
+
+<div class="cta-row">
+
+<a href="getting-started.md#step-1--local-five-minutes" class="btn-primary">Try it on local Kubernetes</a>
+<a href="getting-started.md#step-2--deploy-to-aks" class="btn-primary">Run it on AKS</a>
+<a href="architecture.md" class="btn-primary">Architecture</a>
+<a href="blueprints/00-index.md" class="btn-primary">Blueprints</a>
+
+</div>
 
 ## Choose your path
 
@@ -34,7 +56,7 @@ This section mirrors the chapter groups in **[`SUMMARY.md`](SUMMARY.md)**, which
 - [Egress proxy](egress-proxy.md) — outbound network controls.
 
 ### API & policy
-- [CRD reference](api/crd-reference.md) — all eleven CRDs with schema and examples.
+- [CRD reference](api/crd-reference.md) — all twelve CRDs with schema and examples.
 - [KarsEval operator guide](api/karseval.md) — replaying the signed attack corpus against a sandbox.
 - [Lifecycle & reconciliation](api/lifecycle.md) — what happens, end to end, when you apply each CRD.
 - [Conditions reference](api/conditions.md) — every status condition the controller emits.
@@ -42,12 +64,11 @@ This section mirrors the chapter groups in **[`SUMMARY.md`](SUMMARY.md)**, which
 
 ### Agent capabilities
 - [kars OpenClaw plugin](openclaw-plugin.md) — the in-sandbox plugin (24 governance-aware tools, 10 skills) every kars-managed agent loads.
-- [`@kars/mesh` plugin](mesh-plugin.md) — the companion npm package for pairing a local OpenClaw with a remote kars cluster.
+- [`@kars/mesh` plugin](mesh-plugin.md) — the companion local plugin (built from source, not yet published on npm) for pairing a local OpenClaw with a remote kars cluster.
 - [Channels & external plugins](channels-plugins.md) — Telegram / Slack / Discord / WhatsApp channels + 3rd-party search/scrape API integrations via CLI flags.
 - [Operator TUI](operator-tui.md) — `kars operator`, the live cluster dashboard.
 - [Permissions model](permissions.md) — the Azure RBAC `kars up` needs, enumerated.
 - [Per-sandbox identity](agent-identity.md) — each sandbox runs under its own Entra Agent ID.
-- [Demo script](demo-script.md) — the three-act live walkthrough.
 - [Examples catalogue](examples.md) — every `examples/` blueprint, each a `kubectl apply` after `kars up`.
 
 ### Blueprints
