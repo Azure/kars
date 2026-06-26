@@ -1035,7 +1035,7 @@ pub async fn run(client: Client) -> Result<()> {
     let api: Api<KarsSREAction> = Api::all(client.clone());
     let ctx = Arc::new(Ctx { client });
 
-    Controller::new(api, kube::runtime::watcher::Config::default())
+    Controller::new(api, crate::watch_config::bounded())
         .run(reconcile, error_policy, ctx)
         .for_each(|res| async move {
             match res {

@@ -159,7 +159,7 @@ pub async fn run(client: Client) -> Result<()> {
 
     let ctx = Arc::new(PairingContext { client });
 
-    Controller::new(pairings, kube::runtime::watcher::Config::default())
+    Controller::new(pairings, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("KarsPairing", reconcile_pairing(x, ctx)).await

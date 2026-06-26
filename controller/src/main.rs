@@ -66,6 +66,7 @@ mod tool_policy_reconciler;
 mod trust_graph;
 mod trust_graph_compile;
 mod trust_graph_reconciler;
+mod watch_config;
 
 use anyhow::Result;
 use kube::Client;

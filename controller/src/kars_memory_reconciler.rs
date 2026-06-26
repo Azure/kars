@@ -88,7 +88,6 @@ use kube::{
     api::{Api, ListParams, ObjectMeta, Patch, PatchParams},
     runtime::controller::{Action, Controller},
     runtime::reflector::ObjectRef,
-    runtime::watcher,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -876,10 +875,10 @@ pub async fn run(client: Client) -> Result<()> {
     // — without this we'd wait up to REQUEUE_OK (5 min) for the next
     // periodic resweep to flip NoSandboxesReferencing → RouterEnforcing.
     let sandboxes: Api<crate::crd::KarsSandbox> = Api::all(client);
-    Controller::new(memories, watcher::Config::default())
+    Controller::new(memories, crate::watch_config::bounded())
         .watches(
             sandboxes,
-            watcher::Config::default(),
+            crate::watch_config::bounded(),
             |sb: crate::crd::KarsSandbox| {
                 let ns = sb.namespace().unwrap_or_default();
                 sb.spec
