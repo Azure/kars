@@ -128,6 +128,16 @@ impl ReceiptSigner {
             }],
         }
     }
+
+    /// Sign raw note bytes with Ed25519, returning the base64 signature.
+    ///
+    /// Used for the inclusion-log **signed checkpoint** (a "signed tree head"):
+    /// a compact, signed commitment to the log's size + head hash that clients
+    /// and an external witness can pin without the full chain. Deterministic
+    /// (Ed25519) so re-signing the same note is byte-identical.
+    pub fn sign_note(&self, note: &[u8]) -> String {
+        BASE64.encode(self.signing_key.sign(note).to_bytes())
+    }
 }
 
 /// Hex SHA-256 fingerprint of an Ed25519 public key.
