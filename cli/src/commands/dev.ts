@@ -19,14 +19,17 @@ import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
  * `kars dev` takes ~5–10 min on a cold first run; bailing halfway
  * through with "helm: command not found" is a bad first impression.
  */
-export async function preflightTools(
+/** Pure helper: the external tools required for a given dev invocation.
+ *  Rust (`cargo`) is required ONLY when we build images locally from source.
+ *  `--release` pulls pre-built, signed images from ghcr.io/azure and compiles
+ *  nothing, so it must NOT require a Rust toolchain — that's the whole point of
+ *  the no-compile path (and the README/quickstart "no Rust" promise). Exported
+ *  for tests. */
+export function requiredToolsFor(
   target: "docker" | "local-k8s",
-  agtRepo: string,
-  opts: { build: boolean; noMesh: boolean },
-): Promise<void> {
-  // Per-target tool requirements:
-  //   docker     → just docker (single container, no kind/helm/kubectl)
-  //   local-k8s  → docker + kind + kubectl + helm
+  opts: { build: boolean; noMesh: boolean; release?: boolean },
+): Array<{ bin: string; install: string }> {
+  const buildsLocally = !opts.release;
   const required: Array<{ bin: string; install: string }> =
     target === "local-k8s"
       ? [
@@ -34,12 +37,26 @@ export async function preflightTools(
           { bin: "kind",    install: "https://kind.sigs.k8s.io/docs/user/quick-start/#installation" },
           { bin: "kubectl", install: "https://kubernetes.io/docs/tasks/tools/" },
           { bin: "helm",    install: "https://helm.sh/docs/intro/install/" },
-          { bin: "cargo",   install: "https://rustup.rs/" },
         ]
       : [
           { bin: "docker", install: "https://docs.docker.com/get-docker/" },
-          { bin: "cargo",  install: "https://rustup.rs/" },
         ];
+  if (buildsLocally) {
+    required.push({ bin: "cargo", install: "https://rustup.rs/" });
+  }
+  return required;
+}
+
+export async function preflightTools(
+  target: "docker" | "local-k8s",
+  agtRepo: string,
+  opts: { build: boolean; noMesh: boolean; release?: boolean },
+): Promise<void> {
+  // Per-target tool requirements:
+  //   docker     → just docker (single container, no kind/helm/kubectl)
+  //   local-k8s  → docker + kind + kubectl + helm
+  // Rust (`cargo`) is added only for local source builds — see requiredToolsFor.
+  const required = requiredToolsFor(target, opts);
 
   const missing: typeof required = [];
   for (const t of required) {
@@ -349,7 +366,7 @@ Notes:
       await preflightTools(
         options.target as "docker" | "local-k8s",
         options.agtRepo ?? process.env.KARS_AGT_REPO ?? DEFAULT_AGT_REPO,
-        { build: options.build === true, noMesh: options.noMesh === true },
+        { build: options.build === true, noMesh: options.noMesh === true, release: releaseMode },
       );
 
       // ── First-run common prompts (apply to BOTH targets) ──────────
