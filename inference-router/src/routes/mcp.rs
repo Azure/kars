@@ -658,6 +658,95 @@ mod tests {
         );
     }
 
+    /// END-TO-END server proof for the Foundry memory path: a `tools/call`
+    /// for `foundry.memory` sent to `/platform/mcp` WITH the required Accept
+    /// header must traverse the pipeline, reach the real `PlatformDispatcher`,
+    /// and hit the upstream Foundry `:update_memories` with the correct
+    /// contract body. Pairs with the OpenClaw/Hermes thin-client tests (which
+    /// prove the client sends that Accept header) to cover the full path the
+    /// runtime memory bug lived in.
+    #[tokio::test]
+    async fn platform_foundry_memory_dispatches_to_upstream_with_accept() {
+        use wiremock::matchers::{method as wm_method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let upstream = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(path_regex(r"^/memory_stores/.*:update_memories$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "queued"})))
+            .mount(&upstream)
+            .await;
+
+        // Real platform dispatcher, pointed at the mock upstream.
+        let state = McpRouteState {
+            config: Arc::new(InitializeConfig::default()),
+            minter: Arc::new(FixedMinter("platform-session-001")),
+            tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
+                upstream.uri(),
+            )),
+        };
+        let app = platform_mcp_route().with_state(state);
+
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "foundry.memory",
+                "arguments": { "operation": "update", "text": "likes dark roast" }
+            }
+        });
+        let req = platform_post_body(
+            req_body.to_string().as_bytes(),
+            Some("application/json, text/event-stream"),
+        );
+        let (status, _, text) = body_text(app.oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(v["error"].is_null(), "no JSON-RPC envelope error: {v}");
+        assert_eq!(
+            v["result"]["isError"], false,
+            "memory update should succeed: {v}"
+        );
+
+        // The dispatcher actually called the upstream with the real contract.
+        let reqs = upstream.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1, "exactly one upstream memory call");
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert!(
+            body.get("messages").is_none(),
+            "must use items[], not legacy messages: {body}"
+        );
+        assert_eq!(body["update_delay"], json!(0));
+        assert_eq!(
+            body["items"][0]["content"][0]["text"],
+            json!("likes dark roast")
+        );
+        let scope = body["scope"].as_str().unwrap();
+        assert!(
+            !scope.is_empty() && !scope.contains(':'),
+            "valid scope: {scope}"
+        );
+    }
+
+    /// The same call WITHOUT the Accept header is rejected 406 — i.e. the
+    /// exact failure the runtime hit ("Accept must include both
+    /// application/json and text/event-stream"). Guards against a regression
+    /// where the server stops enforcing (which would mask a broken client).
+    #[tokio::test]
+    async fn platform_foundry_memory_without_accept_is_406() {
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": { "name": "foundry.memory", "arguments": { "operation": "search" } }
+        });
+        let req = platform_post_body(req_body.to_string().as_bytes(), None);
+        let (status, _, text) = body_text(platform_app().oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+        assert!(text.contains("Accept must include both"), "got: {text}");
+    }
+
     // ----------------------------------------------------------------
     // protected_mcp_route — OAuth 2.1 wiring tests
     // ----------------------------------------------------------------
