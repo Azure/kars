@@ -367,6 +367,7 @@ import { TASK_TOOLS } from "./core/agt-task-tools.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 import { processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
+import { createHarvestMarker, collectAndShipArtifacts, latin1Safe } from "./core/artifact-collect.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
 import { registerFoundryTools } from "./core/agt-tools/foundry.js";
@@ -1057,6 +1058,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             agtSandboxName,
             log,
           );
+          // Harvest marker BEFORE the loop runs so we only ship artifacts the
+          // task actually produced (not pre-existing workspace scaffold).
+          const harvestMarker = await createHarvestMarker();
           let llmResponse: string;
           try {
             llmResponse = await processTaskWithTools(taskContent, log);
@@ -1064,15 +1068,40 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             cancelHeartbeat();
           }
 
-          // Send the response back via E2E encrypted relay
+          // Collect the full set of workspace artifacts the task produced and
+          // ship them to the requester (the controller) as file_transfer frames
+          // — harness-neutral, same wire shape the offload path uses. Falls back
+          // to saving the text reply as a markdown artifact so the deliverable
+          // set is never empty.
+          const reqId = (message?.request_id as string) || crypto.randomUUID();
+          let artifactManifest: Array<{ name: string; path: string; size_bytes: number }> = [];
+          try {
+            artifactManifest = await collectAndShipArtifacts(
+              { meshClient: agtMeshClient, toAmid: fromAmid, fromAgent: agtSandboxName },
+              harvestMarker,
+              llmResponse,
+              true,
+              reqId,
+              log,
+            );
+          } catch (artErr: any) {
+            log.warn(`Artifact collection failed (continuing): ${artErr.message}`);
+          }
+
+          // Send the response back via E2E encrypted relay, including the
+          // artifact manifest so the requester knows the complete set it should
+          // have received over the preceding file_transfer frames.
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
-            content: llmResponse,
+            content: latin1Safe(llmResponse),
+            artifacts: artifactManifest,
             from_agent: agtSandboxName,
-            in_reply_to: taskContent,
+            in_reply_to: latin1Safe(taskContent),
             timestamp: new Date().toISOString(),
           });
-          log.info(`AGT relay: reply sent to ${fromName} via E2E encrypted relay`);
+          log.info(
+            `AGT relay: reply + ${artifactManifest.length} artifact(s) sent to ${fromName} via E2E encrypted relay`,
+          );
           // Sub-agent rates parent — this bumps the parent's feedback_count.
           // The sub-agent is still alive and registered here (just sent a relay
           // message above), so the registry should accept the review.
@@ -1089,7 +1118,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           try {
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
-              content: `Error processing task: ${replyErr.message}`,
+              content: latin1Safe(`Error processing task: ${replyErr.message}`),
               from_agent: agtSandboxName,
               timestamp: new Date().toISOString(),
             });

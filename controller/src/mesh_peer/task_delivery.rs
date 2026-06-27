@@ -26,7 +26,8 @@
 //! untouched.
 
 use super::{
-    DEFAULT_REGISTRY_URL, FederationMessage, MeshPeerState, enqueue_outbound, is_lease_holder,
+    DEFAULT_REGISTRY_URL, FederationMessage, MeshPeerState, ReceivedArtifact, TaskReply,
+    enqueue_outbound, is_lease_holder,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -163,12 +164,14 @@ async fn deliver_for_task(
 
     // Register a waiter keyed by the agent DID *before* sending, so a fast
     // reply can't race ahead of the registration.
-    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<TaskReply>();
     state
         .pending_tasks
         .lock()
         .await
         .insert(agent_did.clone(), tx);
+    // Clear any stale artifact buffer for this DID from a prior run.
+    state.pending_artifacts.lock().await.remove(&agent_did);
 
     let epoch = state.leader_epoch.load(Ordering::Acquire);
     let send_result = enqueue_outbound(
@@ -187,46 +190,117 @@ async fn deliver_for_task(
     }
 
     // Await the agent's task_response (or time out).
-    let (content, ok) = match tokio::time::timeout(Duration::from_secs(TASK_TIMEOUT_SECS), rx).await
-    {
-        Ok(Ok(reply)) => (reply, true),
-        Ok(Err(_)) => (
-            "mesh task delivery channel closed before a reply arrived".to_string(),
-            false,
-        ),
-        Err(_) => {
-            // Drop the stale waiter so a late reply isn't misattributed.
-            state.pending_tasks.lock().await.remove(&agent_did);
-            (
-                format!(
-                    "timed out after {TASK_TIMEOUT_SECS}s waiting for the agent's task_response"
-                ),
+    let (content, artifact_count, ok) =
+        match tokio::time::timeout(Duration::from_secs(TASK_TIMEOUT_SECS), rx).await {
+            Ok(Ok(reply)) => (reply.content, reply.artifact_count, true),
+            Ok(Err(_)) => (
+                "mesh task delivery channel closed before a reply arrived".to_string(),
+                0,
                 false,
-            )
-        }
-    };
+            ),
+            Err(_) => {
+                // Drop the stale waiter so a late reply isn't misattributed.
+                state.pending_tasks.lock().await.remove(&agent_did);
+                (
+                    format!(
+                        "timed out after {TASK_TIMEOUT_SECS}s waiting for the agent's task_response"
+                    ),
+                    0,
+                    false,
+                )
+            }
+        };
 
-    write_mission_output(state, &name, &objective, &content, ok).await?;
+    // The artifact `file_transfer` frames are independent relay messages; a few
+    // may still be in flight when the task_response lands. Wait briefly for the
+    // buffered set to reach the manifest count before flushing.
+    let artifacts = drain_artifacts(state, &agent_did, artifact_count).await;
+
+    write_mission_output(state, &name, &objective, &content, ok, &artifacts).await?;
+    if !artifacts.is_empty() {
+        write_mission_artifacts(state, &name, &artifacts).await?;
+    }
     mark_completed(state, &namespace, &name, nonce).await?;
 
     tracing::info!(
         task = %name,
         ok,
         len = content.len(),
+        artifacts = artifacts.len(),
         "task-delivery: persisted mesh run result"
     );
     Ok(())
 }
 
+/// Wait up to a short window for the agent's `file_transfer` frames to land,
+/// then take whatever artifacts were buffered for this agent DID. `expected` is
+/// the manifest count from the `task_response`; we stop early once it's reached.
+async fn drain_artifacts(
+    state: &Arc<MeshPeerState>,
+    agent_did: &str,
+    expected: usize,
+) -> Vec<ReceivedArtifact> {
+    if expected > 0 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let have = state
+                .pending_artifacts
+                .lock()
+                .await
+                .get(agent_did)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            if have >= expected || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+    state
+        .pending_artifacts
+        .lock()
+        .await
+        .remove(agent_did)
+        .unwrap_or_default()
+}
+
+/// Buffer an artifact file received over `file_transfer` under its sender DID.
+pub(super) async fn buffer_artifact(
+    state: &Arc<MeshPeerState>,
+    from_amid: &str,
+    name: String,
+    bytes: Vec<u8>,
+) {
+    state
+        .pending_artifacts
+        .lock()
+        .await
+        .entry(from_amid.to_string())
+        .or_default()
+        .push(ReceivedArtifact { name, bytes });
+}
+
 /// Resolve an in-flight delivery when the matching `task_response` arrives.
 /// Correlation is by the responding agent's DID (`from_amid`): in this flow an
 /// agent runs one delivered task at a time, so the first reply from that DID
-/// belongs to the outstanding request.
-pub(super) async fn resolve_pending(state: &Arc<MeshPeerState>, from_amid: &str, content: String) {
+/// belongs to the outstanding request. `artifact_count` is the manifest length
+/// so the waiter knows how many `file_transfer` frames to expect.
+pub(super) async fn resolve_pending(
+    state: &Arc<MeshPeerState>,
+    from_amid: &str,
+    content: String,
+    artifact_count: usize,
+) {
     let waiter = state.pending_tasks.lock().await.remove(from_amid);
     match waiter {
         Some(tx) => {
-            if tx.send(content).is_err() {
+            if tx
+                .send(TaskReply {
+                    content,
+                    artifact_count,
+                })
+                .is_err()
+            {
                 tracing::debug!(from = %from_amid, "task_response arrived after the waiter was dropped");
             }
         }
@@ -277,13 +351,16 @@ async fn discover_agent_did(sandbox: &str) -> Option<String> {
 
 /// Persist the run result to `kars-mission-output-<task>` in the controller's
 /// namespace — the same durable ConfigMap the rest of the system reads as the
-/// mission deliverable. Server-side apply, idempotent per task.
+/// mission deliverable. Server-side apply, idempotent per task. Records the
+/// artifact manifest (names + sizes) so the deliverable advertises the full
+/// set even when individual files live in the companion artifacts ConfigMap.
 async fn write_mission_output(
     state: &Arc<MeshPeerState>,
     task: &str,
     objective: &str,
     output: &str,
     ok: bool,
+    artifacts: &[ReceivedArtifact],
 ) -> Result<()> {
     let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let cms: Api<k8s_openapi::api::core::v1::ConfigMap> =
@@ -301,6 +378,17 @@ async fn write_mission_output(
         "status".into(),
         if ok { "ok".into() } else { "error".into() },
     );
+    if !artifacts.is_empty() {
+        let manifest: Vec<serde_json::Value> = artifacts
+            .iter()
+            .map(|a| json!({ "name": a.name, "size_bytes": a.bytes.len() }))
+            .collect();
+        data.insert(
+            "artifacts".into(),
+            serde_json::to_string(&manifest).unwrap_or_else(|_| "[]".into()),
+        );
+        data.insert("artifactCount".into(), artifacts.len().to_string());
+    }
 
     let patch = json!({
         "apiVersion": "v1",
@@ -315,6 +403,80 @@ async fn write_mission_output(
     )
     .await
     .context("write mission-output ConfigMap")?;
+    Ok(())
+}
+
+/// Persist the full artifact set to `kars-mission-artifacts-<task>`. Text
+/// artifacts go in `data` (directly readable); binary artifacts go in
+/// `binaryData` (base64). A ConfigMap caps at ~1 MiB total — artifacts are
+/// added until the budget is reached, largest-last, so the set is never
+/// silently corrupted. This is the minimal §16 artifact record: a durable,
+/// cluster-native object holding the complete deliverable set, readable on a
+/// plain kars cluster with `kubectl get configmap` — no Bridge required.
+async fn write_mission_artifacts(
+    state: &Arc<MeshPeerState>,
+    task: &str,
+    artifacts: &[ReceivedArtifact],
+) -> Result<()> {
+    use k8s_openapi::ByteString;
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+    let cms: Api<k8s_openapi::api::core::v1::ConfigMap> =
+        Api::namespaced(state.client.clone(), &namespace);
+    let name = format!("kars-mission-artifacts-{task}");
+
+    // ConfigMap hard limit is ~1 MiB; keep a margin for metadata.
+    const BUDGET: usize = 900 * 1024;
+    let mut used = 0usize;
+    let mut text: BTreeMap<String, String> = BTreeMap::new();
+    let mut binary: BTreeMap<String, ByteString> = BTreeMap::new();
+
+    for a in artifacts {
+        // Sanitize to a valid ConfigMap key (alnum, '-', '_', '.').
+        let key: String = a
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let key = if key.is_empty() {
+            "artifact".into()
+        } else {
+            key
+        };
+        if used + a.bytes.len() > BUDGET {
+            tracing::warn!(task = %task, file = %a.name, "artifact set exceeds ConfigMap budget — truncating set");
+            break;
+        }
+        used += a.bytes.len();
+        match String::from_utf8(a.bytes.clone()) {
+            Ok(s) => {
+                text.insert(key, s);
+            }
+            Err(_) => {
+                binary.insert(key, ByteString(a.bytes.clone()));
+            }
+        }
+    }
+
+    let patch = json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": { "name": name, "labels": { "kars.azure.com/mission-artifacts": task } },
+        "data": text,
+        "binaryData": binary,
+    });
+    cms.patch(
+        &name,
+        &PatchParams::apply(crate::field_managers::MESH_PEER).force(),
+        &Patch::Apply(patch),
+    )
+    .await
+    .context("write mission-artifacts ConfigMap")?;
     Ok(())
 }
 
