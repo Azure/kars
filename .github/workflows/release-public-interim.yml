@@ -501,7 +501,11 @@ jobs:
       matrix:
         runtime:
           - { name: langgraph,     ghcr: kars-runtime-langgraph }
-          - { name: langgraph-ts,  ghcr: kars-runtime-langgraph-ts }
+          # NOTE: langgraph-ts is intentionally NOT published yet — its image
+          # fails to compile (src/otel.ts uses removed OpenTelemetry APIs:
+          # `Resource` / `addSpanProcessor`). The CLI lists it as an OPTIONAL
+          # import (required:false) so its absence never breaks a deploy. Re-add
+          # this matrix entry once the runtime builds again. Tracked in #474.
           - { name: hermes,        ghcr: kars-runtime-hermes }
           - { name: maf-python,    ghcr: kars-runtime-maf-python }
           - { name: anthropic,     ghcr: kars-runtime-anthropic }
