@@ -34,10 +34,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::Duration;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-
 mod agt_wire;
 mod offload;
 mod pair;
+mod task_delivery;
 
 use agt_wire::{AgtFrame, AgtRegisterAgentRequest};
 
@@ -309,6 +309,24 @@ pub(crate) fn agt_did_for_identity(identity: &MeshIdentity) -> String {
     format!("did:mesh:{hex}")
 }
 
+/// The controller's own mesh DID, resolved once and cached for the life of the
+/// process. Used by the reconciler to advertise the controller as a trusted
+/// plaintext peer to freshly-materialized sandboxes (`KARS_CONTROLLER_AMID`),
+/// which is what lets the controller deliver governed `task_request`s straight
+/// into a running agent's loop. Returns `None` if the mesh identity Secret
+/// can't be read yet (e.g. a transient race at first boot) — the caller simply
+/// omits the env and a later reconcile picks it up.
+pub async fn controller_did(client: &Client) -> Option<String> {
+    static DID: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    DID.get_or_try_init(|| async {
+        let identity = load_or_create_identity(client).await?;
+        Ok::<String, anyhow::Error>(agt_did_for_identity(&identity))
+    })
+    .await
+    .ok()
+    .cloned()
+}
+
 /// Acquire an Entra access token for the AGT mesh audience.
 ///
 /// Reads `AZURE_FEDERATED_TOKEN_FILE` (mounted by AKS Workload Identity
@@ -553,6 +571,34 @@ enum FederationMessage {
         #[serde(default)]
         timestamp: Option<String>,
     },
+
+    /// Harness-neutral governed task delivery. The controller sends this to a
+    /// running agent's mesh DID; the agent's runtime adapter runs the message
+    /// through its native agent loop (gated by the `task:execute` AGT policy)
+    /// and replies with a `TaskResponse`. The wire shape (`type`/`content`)
+    /// matches every runtime adapter's existing `task_request` handler, so no
+    /// harness-specific code is involved.
+    #[serde(rename = "task_request")]
+    TaskRequest {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<String>,
+    },
+
+    /// The agent's reply to a `TaskRequest`, carrying the run result. Resolved
+    /// by `handle_peer_message` against the pending-delivery registry.
+    #[serde(rename = "task_response")]
+    TaskResponse {
+        content: String,
+        #[serde(default)]
+        in_reply_to: Option<String>,
+        #[serde(default)]
+        from_agent: Option<String>,
+        #[serde(default)]
+        timestamp: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -611,6 +657,13 @@ struct MeshPeerState {
     /// before the AAD-issued 1-hour expiry. None = not yet acquired or
     /// WI not configured (AKS opt-in only).
     entra_token_cache: Arc<tokio::sync::RwLock<Option<CachedEntraToken>>>,
+    /// In-flight mesh task deliveries awaiting a `task_response`, keyed by the
+    /// target agent's mesh DID. Resolved by the inbound `TaskResponse` arm in
+    /// `handle_peer_message`. Used only by the harness-neutral task-delivery
+    /// path (`task_delivery`); empty on a plain cluster with no run requests.
+    pending_tasks: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<String>>>,
+    >,
 }
 
 /// Cached Entra access token + acquisition time. Refreshed when the cached
@@ -651,6 +704,34 @@ const RECONNECT_BACKOFF_RESET_AFTER_SECS: u64 = 120;
 /// Get a unique holder identity for this pod (hostname or random fallback).
 fn holder_identity() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| format!("mesh-peer-{}", std::process::id()))
+}
+
+/// Read-only check of whether this pod currently holds the mesh-peer leader
+/// Lease. Unlike `try_acquire_lease` this never patches the Lease, so it is
+/// safe to call from background tasks (e.g. the task-delivery watcher) without
+/// interfering with the main loop's lease renewal cadence. Returns false on
+/// any read error or if the lease has expired / is held by another pod.
+async fn is_lease_holder(client: &Client, namespace: &str) -> bool {
+    let leases: Api<Lease> = Api::namespaced(client.clone(), namespace);
+    match leases.get(LEASE_NAME).await {
+        Ok(existing) => {
+            let spec = existing.spec.as_ref();
+            let current_holder = spec
+                .and_then(|s| s.holder_identity.as_deref())
+                .unwrap_or("");
+            if current_holder != holder_identity() {
+                return false;
+            }
+            let duration = spec
+                .and_then(|s| s.lease_duration_seconds)
+                .unwrap_or(LEASE_DURATION_SECS);
+            match spec.and_then(|s| s.renew_time.as_ref()) {
+                Some(t) => (Utc::now().timestamp() - t.0.as_second()) <= i64::from(duration),
+                None => false,
+            }
+        }
+        Err(_) => false,
+    }
 }
 
 /// Try to acquire or renew the mesh-peer leader Lease.
@@ -793,7 +874,15 @@ pub async fn run(client: Client) -> Result<()> {
         outbox_tx,
         leader_epoch: AtomicU64::new(0),
         entra_token_cache: Arc::new(tokio::sync::RwLock::new(None)),
+        pending_tasks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
+
+    // Harness-neutral mesh task delivery: watch KarsTasks for a run-request
+    // annotation and deliver the objective straight into the running agent's
+    // loop over the mesh. Spawned once for the life of the process; it gates
+    // its own work on lease ownership so only the leader drives delivery.
+    // No-op on clusters where nothing sets the run-request annotation.
+    tokio::spawn(task_delivery::watch_run_requests(state.clone()));
 
     // Reconnect-backoff state — preserved across iterations so successive
     // failures escalate the sleep, and successful long-lived connections reset
@@ -1170,7 +1259,9 @@ async fn serialize_and_send_outbound(
         to: out.to.clone(),
         from: agt_did_for_identity(&state.identity),
         id: format!("ctrl-{}", new_msg_id()),
-        payload,
+        payload: Some(payload.clone()),
+        ciphertext: Some(payload),
+        plaintext: Some(true),
     };
     let frame_json = serde_json::to_string(&frame)?;
     ws_stream.send(WsMessage::Text(frame_json.into())).await?;
@@ -1240,7 +1331,11 @@ async fn handle_agt_frame(
     };
     match frame {
         AgtFrame::Message {
-            from, id, payload, ..
+            from,
+            id,
+            payload,
+            ciphertext,
+            ..
         } => {
             // The AGT relay forwards `message` frames verbatim, so `from`
             // is whatever the sender claimed. AGT's trust model assumes
@@ -1249,7 +1344,11 @@ async fn handle_agt_frame(
             // upstream impl currently does not). We trust the field for
             // now — federation message handlers re-verify pairing tokens
             // independently.
-            handle_peer_message(state, out_tx, &from, &payload).await?;
+            //
+            // Prefer `ciphertext` (the AGT SDK's plaintext field, set by
+            // SDK-backed agents) and fall back to the legacy `payload`.
+            let payload_b64 = ciphertext.or(payload).unwrap_or_default();
+            handle_peer_message(state, out_tx, &from, &payload_b64).await?;
 
             // ACK so the relay drops this message from its inbox. Without
             // an ack, AGT redelivers on every reconnect → duplicate
@@ -1372,6 +1471,20 @@ async fn handle_peer_message(
                 );
             }
         }
+        FederationMessage::TaskResponse { content, .. } => {
+            tracing::info!(
+                from = %from_amid,
+                len = content.len(),
+                "Received task_response — resolving pending mesh task delivery"
+            );
+            task_delivery::resolve_pending(state, from_amid, content).await;
+        }
+        FederationMessage::TaskRequest { .. } => {
+            tracing::debug!(
+                from = %from_amid,
+                "Ignoring task_request (the controller delivers tasks, it does not execute them)"
+            );
+        }
         _ => {
             tracing::debug!(from = %from_amid, "Ignoring unhandled federation message");
         }
@@ -1402,7 +1515,9 @@ async fn send_to_peer(
         to: to_amid.to_string(),
         from: agt_did_for_identity(&state.identity),
         id: format!("ctrl-{}", new_msg_id()),
-        payload,
+        payload: Some(payload.clone()),
+        ciphertext: Some(payload),
+        plaintext: Some(true),
     };
     let frame_json = serde_json::to_string(&frame)?;
     out_tx

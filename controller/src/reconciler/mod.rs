@@ -1791,6 +1791,16 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             // Plugin also needs relay/registry URLs for direct AgentMesh SDK connections
             openclaw_env.push(json!({"name": "AGT_RELAY_URL", "value": "ws://agentmesh-relay.agentmesh.svc.cluster.local:8765"}));
             openclaw_env.push(json!({"name": "AGT_REGISTRY_URL", "value": "http://agentmesh-registry.agentmesh.svc.cluster.local:8080"}));
+            // Advertise the controller as a trusted plaintext mesh peer so it
+            // can deliver a governed `task_request` straight into this agent's
+            // loop (harness-neutral mesh task delivery). The runtime only
+            // trusts this DID when the env is present; the agent still
+            // re-verifies the sender and the `task:execute` AGT policy still
+            // gates whether the task runs. Additive — agents that don't speak
+            // the contract ignore it.
+            if let Some(did) = crate::mesh_peer::controller_did(client).await {
+                openclaw_env.push(json!({"name": "KARS_CONTROLLER_AMID", "value": did}));
+            }
             // Router needs governance vars too (handoff auth, policy enforcement)
             router_agt_env.push(json!({"name": "AGT_GOVERNANCE_ENABLED", "value": "true"}));
             router_agt_env.push(json!({"name": "AGT_TRUST_THRESHOLD", "value": governance_config.trust_threshold.to_string()}));

@@ -71,12 +71,26 @@ pub enum AgtFrame {
     },
     /// Bidirectional message envelope. The relay forwards this frame
     /// verbatim to the recipient, so the sender's `from` is preserved.
-    /// `payload` carries base64-encoded JSON of a `FederationMessage`.
+    ///
+    /// Two payload encodings coexist for plaintext interop:
+    /// - `payload` — the controller's historical base64(JSON) field.
+    /// - `ciphertext` + `plaintext` — the field names the AGT SDK
+    ///   (`@microsoft/agent-governance-sdk`) uses for *plaintext* peers. The
+    ///   SDK reads `ciphertext` (base64(JSON)) and ignores `payload`, so to
+    ///   deliver a frame into an SDK-backed agent the controller mirrors its
+    ///   payload into `ciphertext` and sets `plaintext: true`. On receive the
+    ///   controller prefers `ciphertext` (an SDK agent's reply only sets that)
+    ///   and falls back to `payload` for legacy senders.
     Message {
         to: String,
         from: String,
         id: String,
-        payload: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ciphertext: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plaintext: Option<bool>,
     },
     /// Per-message ack — the recipient sends this after successfully
     /// processing a `Message` so the relay can purge it from the inbox.
@@ -161,9 +175,15 @@ mod tests {
             to: "did:mesh:peer".into(),
             from: "did:mesh:me".into(),
             id: "msg-1".into(),
-            payload: "base64data".into(),
+            payload: Some("base64data".into()),
+            ciphertext: Some("base64data".into()),
+            plaintext: Some(true),
         };
         let json = serde_json::to_string(&f).unwrap();
+        // The AGT SDK reads `ciphertext` + `plaintext` for legacy plaintext
+        // peers; both must be on the wire alongside the historical `payload`.
+        assert!(json.contains("\"ciphertext\":\"base64data\""));
+        assert!(json.contains("\"plaintext\":true"));
         let decoded: AgtFrame = serde_json::from_str(&json).unwrap();
         match decoded {
             AgtFrame::Message {
@@ -171,11 +191,34 @@ mod tests {
                 from,
                 id,
                 payload,
+                ciphertext,
+                plaintext,
             } => {
                 assert_eq!(to, "did:mesh:peer");
                 assert_eq!(from, "did:mesh:me");
                 assert_eq!(id, "msg-1");
-                assert_eq!(payload, "base64data");
+                assert_eq!(payload.as_deref(), Some("base64data"));
+                assert_eq!(ciphertext.as_deref(), Some("base64data"));
+                assert_eq!(plaintext, Some(true));
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn message_frame_accepts_sdk_ciphertext_only() {
+        // An AGT SDK-backed agent replies with `ciphertext` + `plaintext` and
+        // no legacy `payload`. The controller must still decode it.
+        let wire = r#"{"type":"message","to":"did:mesh:me","from":"did:mesh:agent","id":"r1","ciphertext":"Zm9v","plaintext":true}"#;
+        let decoded: AgtFrame = serde_json::from_str(wire).unwrap();
+        match decoded {
+            AgtFrame::Message {
+                payload,
+                ciphertext,
+                ..
+            } => {
+                assert_eq!(payload, None);
+                assert_eq!(ciphertext.as_deref(), Some("Zm9v"));
             }
             _ => panic!("Wrong variant"),
         }
