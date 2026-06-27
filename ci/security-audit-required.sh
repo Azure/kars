@@ -5,8 +5,11 @@
 # ci/security-audit-required.sh — enforces internal Phase 1 plan §0.2 #9.
 #
 # If the PR touches a capability-introducing file, require a matching
-# docs/internal/security-audits/<YYYY-MM-DD>-<slug>.md with two distinct sign-off
+# docs/security-audits/<YYYY-MM-DD>-<slug>.md with two distinct sign-off
 # blocks (two lines matching /^Signed-off-by: .+<.+@.+>/ on different emails).
+#
+# Note: audit docs live in the TRACKED `docs/security-audits/` folder (not the
+# gitignored `docs/internal/`), so they are committed normally as part of the PR.
 set -euo pipefail
 
 BASE_REF="${BASE_REF:-origin/main}"
@@ -27,13 +30,13 @@ if [ -z "$touches_cap" ]; then
   exit 0
 fi
 
-# Is at least one docs/internal/security-audits/*.md added in this PR?
-added_audit=$(printf '%s\n' "$changed" | grep -E '^docs/internal/security-audits/[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\.md$' || true)
+# Is at least one docs/security-audits/*.md added in this PR?
+added_audit=$(printf '%s\n' "$changed" | grep -E '^docs/security-audits/[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\.md$' || true)
 if [ -z "$added_audit" ]; then
-  echo "fail: capability-introducing files touched but no docs/internal/security-audits/YYYY-MM-DD-<slug>.md added." >&2
+  echo "fail: capability-introducing files touched but no docs/security-audits/YYYY-MM-DD-<slug>.md added." >&2
   echo "      touched capabilities:" >&2
   printf '        %s\n' $touches_cap >&2
-  echo "      Copy docs/internal/security-audits/_template.md and fill it in (see implementation-plan §5.5)." >&2
+  echo "      Copy docs/security-audits/_template.md and fill it in (see docs/security-audits/README.md)." >&2
   exit 1
 fi
 
