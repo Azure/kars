@@ -67,14 +67,25 @@ def _client() -> httpx.Client:
     )
 
 
-def call(method: str, path: str, *, json: Any | None = None, params: dict | None = None) -> httpx.Response:
+def call(
+    method: str,
+    path: str,
+    *,
+    json: Any | None = None,
+    params: dict | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
     """Call the router. Path is a leading-slash absolute path under base URL.
 
     Returns the raw httpx.Response so callers can branch on .status_code
     (some kars endpoints intentionally return 4xx as part of normal flow,
     e.g. /sandbox/{name}/status returns 404 while a sub-agent is booting).
+
+    ``headers`` are merged onto (and override) the per-process defaults — used
+    e.g. to send the MCP ``Accept: application/json, text/event-stream`` header
+    required by the router's ``/platform/mcp`` Streamable-HTTP endpoint.
     """
-    return _client().request(method, path, json=json, params=params)
+    return _client().request(method, path, json=json, params=params, headers=headers)
 
 
 def call_json(method: str, path: str, *, json: Any | None = None, params: dict | None = None) -> dict[str, Any]:

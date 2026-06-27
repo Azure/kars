@@ -62,7 +62,17 @@ def _call_platform_tool(name: str, arguments: dict[str, Any]) -> str:
         "params": {"name": name, "arguments": arguments},
     }
     try:
-        resp = router_client.call("POST", "/platform/mcp", json=rpc)
+        resp = router_client.call(
+            "POST",
+            "/platform/mcp",
+            json=rpc,
+            # The router's /platform/mcp is an MCP Streamable-HTTP endpoint and
+            # REQUIRES the Accept header to advertise both JSON and SSE, else it
+            # replies 406 "Accept must include both application/json and
+            # text/event-stream". Mirrors the maf-python / openai-agents
+            # runtimes' MCP client.
+            headers={"Accept": "application/json, text/event-stream"},
+        )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"{name} request failed: {exc}"})
     if resp.status_code >= 400:

@@ -290,7 +290,15 @@ export async function callPlatformTool(
     params: { name, arguments: args },
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const resp: any = await routerCall("POST", "/platform/mcp", rpc, timeoutMs);
+  const resp: any = await routerCall("POST", "/platform/mcp", rpc, timeoutMs, {
+    // The router's /platform/mcp is an MCP Streamable-HTTP endpoint: it
+    // REQUIRES the Accept header to advertise both JSON and SSE, else it
+    // replies 406 "Accept must include both application/json and
+    // text/event-stream". (It actually returns application/json here, but the
+    // spec-mandated negotiation still applies.) Mirrors the maf-python /
+    // openai-agents runtimes.
+    Accept: "application/json, text/event-stream",
+  });
   if (resp && typeof resp === "object" && resp.error) {
     const reason =
       resp.error?.data?.reason || resp.error?.message || "unknown error";

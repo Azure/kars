@@ -237,3 +237,28 @@ def test_http_fetch_register_wires_tool() -> None:
     ctx = _FakeCtx()
     http_fetch.register(ctx)
     assert "http_fetch" in ctx.tools
+
+
+# ── foundry_memory — MCP Accept negotiation (regression) ───────────
+
+
+def test_foundry_memory_sends_mcp_accept_header() -> None:
+    """The router's /platform/mcp REQUIRES Accept: application/json +
+    text/event-stream, else it 406s. The thin client must send it —
+    this is the bug that broke memory end-to-end."""
+    captured: dict[str, Any] = {}
+
+    def fake_call(method: str, path: str, **kwargs: Any) -> httpx.Response:
+        captured["path"] = path
+        captured["headers"] = kwargs.get("headers")
+        return _mock_response(200, _rpc_ok('{"memories": []}'))
+
+    with mock.patch.object(foundry.router_client, "call", side_effect=fake_call):
+        foundry._foundry_memory({"operation": "search", "query": "x"})
+
+    assert captured["path"] == "/platform/mcp"
+    headers = captured["headers"]
+    assert headers is not None, "thin client must pass headers"
+    accept = headers.get("Accept", "")
+    assert "application/json" in accept
+    assert "text/event-stream" in accept
