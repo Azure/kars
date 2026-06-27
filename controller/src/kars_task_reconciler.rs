@@ -339,7 +339,10 @@ fn task_is_ready(task: &KarsTask) -> bool {
     let Some(status) = task.status.as_ref() else {
         return false;
     };
-    let digest_ok = status.envelope_digest.as_ref().is_some_and(|d| !d.is_empty());
+    let digest_ok = status
+        .envelope_digest
+        .as_ref()
+        .is_some_and(|d| !d.is_empty());
     let ready_ok = status
         .conditions
         .iter()
@@ -498,7 +501,9 @@ async fn reconcile_receipt(
     signer: &crate::providers::signing::ReceiptSigner,
 ) {
     use crate::kars_approval::KarsApproval;
-    use crate::kars_receipt::{KarsReceipt, approval_facts, build_spec, build_statement, canonical_json};
+    use crate::kars_receipt::{
+        KarsReceipt, approval_facts, build_spec, build_statement, canonical_json,
+    };
 
     let name = task.name_any();
     let receipts: Api<KarsReceipt> = Api::namespaced(client.clone(), ns);
@@ -524,9 +529,10 @@ async fn reconcile_receipt(
     // a read failure yields a conservative "not enforced" observation, never a
     // false positive). This is what makes the receipt's completeness claim
     // concrete and re-derivable by an auditor.
-    let completeness = gather_completeness(client).await;
+    let completeness = gather_completeness(client, ns, &name).await;
 
-    let Some(statement) = build_statement(task, status, &signer.key_id, &facts, completeness) else {
+    let Some(statement) = build_statement(task, status, &signer.key_id, &facts, completeness)
+    else {
         // No digest → no receipt. Retract any prior one.
         match receipts
             .delete(&name, &kube::api::DeleteParams::default())
@@ -646,13 +652,19 @@ async fn reconcile_receipt(
 /// yields a conservative `false` (we never claim a control is enforced unless
 /// we positively observed it). The runtime egress-guard iptables hash and the
 /// eBPF witness are intentionally NOT gathered here — they are V1/V2.
-async fn gather_completeness(client: &kube::Client) -> crate::kars_receipt::PredicateCompleteness {
+async fn gather_completeness(
+    client: &kube::Client,
+    ns: &str,
+    task_name: &str,
+) -> crate::kars_receipt::PredicateCompleteness {
     use k8s_openapi::api::admissionregistration::v1::ValidatingAdmissionPolicy;
+    use k8s_openapi::api::core::v1::ConfigMap;
     use k8s_openapi::api::networking::v1::NetworkPolicy;
 
     let vaps: Api<ValidatingAdmissionPolicy> = Api::all(client.clone());
     let vap_present = |name: &str, list: &[ValidatingAdmissionPolicy]| -> bool {
-        list.iter().any(|p| p.metadata.name.as_deref() == Some(name))
+        list.iter()
+            .any(|p| p.metadata.name.as_deref() == Some(name))
     };
     let vap_list = vaps
         .list(&ListParams::default())
@@ -676,12 +688,39 @@ async fn gather_completeness(client: &kube::Client) -> crate::kars_receipt::Pred
         })
         .unwrap_or(false);
 
+    // V1 token/cost-audit binding: read the durable run records for this task.
+    // The router-metered token totals land on `kars-mission-output-<task>` and
+    // the per-round/per-tool execution trace on `kars-mission-trace-<task>`.
+    // Their presence (with a real total) is the re-derivable audit chain; their
+    // absence simply means the task hasn't run yet (the binding is honestly
+    // unset, never faked).
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+    let run_total_tokens = cms
+        .get_opt(&format!("kars-mission-output-{task_name}"))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|cm| cm.data)
+        .and_then(|d| d.get("totalTokens").and_then(|t| t.parse::<u64>().ok()))
+        .filter(|t| *t > 0);
+    let trace_event_count = cms
+        .get_opt(&format!("kars-mission-trace-{task_name}"))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|cm| cm.data)
+        .and_then(|d| d.get("eventCount").and_then(|c| c.parse::<u64>().ok()));
+    let token_cost_audit_bound = run_total_tokens.is_some();
+
     crate::kars_receipt::PredicateCompleteness {
         task_namespace_floor_vap: vap_present("kars-task-namespace-floor", &vap_list),
         exec_ban_vap: vap_present("kars-sandbox-exec-ban", &vap_list),
         posture_lock_vap: vap_present("kars-sandbox-posture-lock", &vap_list),
         default_deny_egress,
         floor_enforced: false,
+        token_cost_audit_bound,
+        run_total_tokens,
+        trace_event_count,
     }
     .with_rollup()
 }
