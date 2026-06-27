@@ -501,6 +501,7 @@ jobs:
       matrix:
         runtime:
           - { name: langgraph,     ghcr: kars-runtime-langgraph }
+          - { name: langgraph-ts,  ghcr: kars-runtime-langgraph-ts }
           - { name: hermes,        ghcr: kars-runtime-hermes }
           - { name: maf-python,    ghcr: kars-runtime-maf-python }
           - { name: anthropic,     ghcr: kars-runtime-anthropic }

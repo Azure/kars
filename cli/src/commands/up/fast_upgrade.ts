@@ -11,6 +11,8 @@ import ora from "ora";
 import { execa } from "execa";
 import { loadContext } from "../../config.js";
 import { requireBundledAsset } from "../../lib/repo-assets.js";
+import { cliReleaseTag } from "../../lib/version.js";
+import { rolloutRestartAll } from "../upgrade.js";
 
 export interface UpOptionsForUpgrade {
   upgrade?: boolean;
@@ -45,6 +47,10 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           "upgrade", "--install", "kars", helmPath,
           "--namespace", "kars-system",
           "--create-namespace",
+          // Preserve values set by the original `kars up` (runtime images,
+          // fedcred, mesh, …) that this fast path doesn't re-specify; the
+          // `--set` flags below still override the image repos/tags.
+          "--reuse-values",
           "--set", `controller.image.repository=${ctx.acrLoginServer}/kars-controller`,
           "--set", `controller.image.tag=latest`,
           "--set", `inferenceRouter.image.repository=${ctx.acrLoginServer}/kars-inference-router`,
@@ -54,8 +60,13 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           "--set", `sandbox.image.tag=latest`,
           "--set", `azure.workloadIdentity.clientId=${ctx.wiClientId || ""}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${ctx.keyVaultName || ""}`,
+          // Stamp the CLI's version as the deployed release so `kars upgrade`
+          // can read back an accurate current version (the chart appVersion is
+          // a static sentinel value).
+          "--set", `karsRelease=${cliReleaseTag()}`,
+          "--atomic",
           "--wait",
-          "--timeout", "5m",
+          "--timeout", "8m",
         ];
         if (ctx.foundryEndpoint) {
           helmArgs.push("--set", `foundry.endpoint=${ctx.foundryEndpoint}`);
@@ -114,11 +125,14 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         await execa("helm", helmArgs, { stdio: "pipe" });
         spin.succeed("Helm upgraded");
 
-        // Rollout restart
-        spin = ora("Restarting controller...").start();
-        await execa("kubectl", ["rollout", "restart", "deployment/kars-controller", "-n", "kars-system"], { stdio: "pipe" }).catch(() => {});
-        await execa("kubectl", ["rollout", "status", "deployment/kars-controller", "-n", "kars-system", "--timeout=120s"], { stdio: "pipe" }).catch(() => {});
-        spin.succeed("Controller restarted");
+        // Rollout restart — refresh ALL kars workloads, not just the
+        // controller. `kars up --upgrade` re-runs Helm against the `:latest`
+        // images in ACR, so (like `kars upgrade`) a rolling restart of the
+        // sandboxes + the standalone AgentMesh relay/registry is what actually
+        // pulls the new bits; restarting only the controller left them stale.
+        spin = ora("Restarting kars workloads (controller, sandboxes, mesh)...").start();
+        await rolloutRestartAll(execa);
+        spin.succeed("Workloads restarted");
 
         // Ensure controller SA has a fedcred (so it can get ARM tokens via WI to create sandbox fedcreds)
         if (ctx.oidcIssuerUrl && ctx.identityName) {

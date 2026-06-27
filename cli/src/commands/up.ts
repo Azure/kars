@@ -11,6 +11,7 @@ import { isValidAzureHost } from "./up/preflight.js";
 import { acquireImages } from "./up/images.js";
 import { requireBundledAsset } from "../lib/repo-assets.js";
 import { resolveVmSizes } from "../lib/vm-size.js";
+import { cliReleaseTag } from "../lib/version.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -765,6 +766,10 @@ Auto-resume:
           "--set", `azure.workloadIdentity.clientId=${wiClientId}`,
           "--set", `azure.keyVaultCsi.keyVaultName=${kvName}`,
           "--set", `mesh.provider=${(options.meshProvider as string | undefined) ?? "agt"}`,
+          // Stamp the CLI's version as the deployed release so `kars upgrade`
+          // reports an accurate current version (the chart appVersion is a
+          // static `0.1.0` sentinel, not the deployed release).
+          "--set", `karsRelease=${cliReleaseTag()}`,
           "--wait",
           // Cold-cluster first install: the controller + inference-router pull
           // their (Rust) images with pullPolicy=Always and the controller
