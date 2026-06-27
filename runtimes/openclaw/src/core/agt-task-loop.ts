@@ -26,6 +26,42 @@ import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js"
 type AnyMeshClient = any;
 type Logger = { info: (m: string) => void; warn: (m: string) => void };
 
+/// A single event in the agent's execution trace — the honest, real record of
+/// what the agent loop did. Emitted live as the loop runs (not reconstructed),
+/// so it can be surfaced as live Activity and persisted as a clean audit path.
+export type TraceEvent =
+  | {
+      kind: "round";
+      /** 0-based round index in the tool-calling loop. */
+      round: number;
+      /** Real token usage reported by the model for this round's call. */
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+      /** Why the model stopped this turn (stop | tool_calls | length | …). */
+      finish_reason: string;
+      /** Number of tool calls the model requested this round. */
+      tool_calls: number;
+      /** Wall-clock ms the model call took. */
+      ms: number;
+      ts: string;
+    }
+  | {
+      kind: "tool";
+      round: number;
+      /** Tool name the model invoked (file_write, web_search, …). */
+      name: string;
+      /** Short, sanitized preview of the call arguments (never full payloads). */
+      args_preview: string;
+      /** Short preview of the tool result. */
+      result_preview: string;
+      /** Wall-clock ms the tool call took. */
+      ms: number;
+      /** False when the tool returned/raised an error. */
+      ok: boolean;
+      ts: string;
+    };
+
 export interface TaskLoopDeps {
   /** Returns the current AGT mesh client, or null if not connected. */
   meshClient: () => AnyMeshClient | null;
@@ -61,6 +97,58 @@ export interface TaskLoopDeps {
    * absent, blocking tools fall back to a single immediate read.
    */
   waitForInbox?: (timeoutMs: number) => Promise<boolean>;
+  /**
+   * Optional live execution-trace sink. When provided, the loop emits a
+   * `round` event after each model call (with real token usage) and a `tool`
+   * event after each tool call (with a sanitized args/result preview and
+   * duration). This is the source of the Bridge's live Activity stream and the
+   * clean per-tool audit path. Absent by default — pure-tool runs (offload,
+   * sub-agent) pass nothing and the loop behaves exactly as before.
+   */
+  onTrace?: (event: TraceEvent) => void;
+}
+
+/// Sanitized, length-bounded preview of a tool's arguments or result. Strips
+/// base64 blobs and collapses whitespace so the audit trail stays readable and
+/// never leaks multi-KB payloads (file contents travel as artifacts, not trace).
+function tracePreview(value: unknown, max = 180): string {
+  let s: string;
+  if (typeof value === "string") {
+    s = value;
+  } else {
+    try {
+      s = JSON.stringify(value);
+    } catch {
+      s = String(value);
+    }
+  }
+  s = s.replace(/[A-Za-z0-9+/]{120,}={0,2}/g, "<base64>").replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/// Emit a `tool` trace event for one completed tool call. Centralizes the
+/// args/result sanitization so both the parse-fail and normal push sites record
+/// the same shape.
+function emitToolTrace(
+  deps: TaskLoopDeps,
+  round: number,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tc: any,
+  result: string,
+  ok: boolean,
+  ms: number,
+): void {
+  if (!deps.onTrace) return;
+  deps.onTrace({
+    kind: "tool",
+    round,
+    name: String(tc?.function?.name ?? "unknown"),
+    args_preview: tracePreview(tc?.function?.arguments ?? ""),
+    result_preview: tracePreview(result),
+    ms,
+    ok,
+    ts: new Date().toISOString(),
+  });
 }
 
 export async function processTaskWithTools(
@@ -156,6 +244,7 @@ export async function processTaskWithTools(
     }
 
     const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
+    const roundStart = Date.now();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request(routerUrl("/v1/chat/completions"), {
@@ -192,11 +281,31 @@ export async function processTaskWithTools(
 
     const msg = choice.message;
 
+    // Emit a real per-round trace event with the model's reported token usage.
+    // This is the source of the Bridge's live activity + token telemetry; it is
+    // never reconstructed after the fact.
+    if (deps.onTrace) {
+      const u = response?.usage ?? {};
+      deps.onTrace({
+        kind: "round",
+        round,
+        prompt_tokens: Number(u.prompt_tokens ?? 0),
+        completion_tokens: Number(u.completion_tokens ?? 0),
+        total_tokens: Number(u.total_tokens ?? 0),
+        finish_reason: String(choice.finish_reason ?? ""),
+        tool_calls: Array.isArray(msg.tool_calls) ? msg.tool_calls.length : 0,
+        ms: Date.now() - roundStart,
+        ts: new Date().toISOString(),
+      });
+    }
+
     // If the model wants to call tools, execute them and continue
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       messages.push(msg);
       for (const tc of msg.tool_calls) {
+        const toolStart = Date.now();
         let result: string = "";
+        let toolOk = true;
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let args: any;
@@ -210,6 +319,7 @@ export async function processTaskWithTools(
               : "";
             result = `${fn} error: invalid tool-call arguments JSON (${argLen} bytes, parse failed: ${(parseErr as Error).message})${hint}`;
             log.warn(`AGT sub-agent ${fn} arguments-parse failed: ${argLen} bytes, ${(parseErr as Error).message}`);
+            emitToolTrace(deps, round, tc, result, false, Date.now() - toolStart);
             messages.push({ role: "tool", tool_call_id: tc.id, content: result });
             continue;
           }
@@ -1468,7 +1578,9 @@ export async function processTaskWithTools(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (e: any) {
           result = e.stderr || e.stdout || e.message || "Command failed";
+          toolOk = false;
         }
+        emitToolTrace(deps, round, tc, result, toolOk, Date.now() - toolStart);
         messages.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
       continue;

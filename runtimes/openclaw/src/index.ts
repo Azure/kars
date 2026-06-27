@@ -386,6 +386,7 @@ let foundryInitialized = false;
 async function processTaskWithTools(
   taskContent: any,
   log: { info: (m: string) => void; warn: (m: string) => void },
+  onTrace?: (event: import("./core/agt-task-loop.js").TraceEvent) => void,
 ): Promise<string> {
   return _processTaskWithTools(taskContent, {
     meshClient: () => agtMeshClient,
@@ -404,6 +405,7 @@ async function processTaskWithTools(
       }
     },
     waitForInbox,
+    onTrace,
   }, log);
 }
 
@@ -1061,11 +1063,45 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // Harvest marker BEFORE the loop runs so we only ship artifacts the
           // task actually produced (not pre-existing workspace scaffold).
           const harvestMarker = await createHarvestMarker();
+          // Live execution trace — the real per-round + per-tool record the
+          // loop emits as it runs. This is the source of the Bridge's live
+          // activity stream, the real token telemetry, and the clean per-tool
+          // audit path. Bounded previews only; file payloads travel as
+          // artifacts, never in the trace.
+          const trace: import("./core/agt-task-loop.js").TraceEvent[] = [];
           let llmResponse: string;
           try {
-            llmResponse = await processTaskWithTools(taskContent, log);
+            llmResponse = await processTaskWithTools(taskContent, log, (ev) => {
+              // Sanitize the free-text previews to Latin1 — the whole
+              // task_response (trace included) is btoa-encoded on the SDK's
+              // plaintext-peer path, which throws on any Unicode code point.
+              if (ev.kind === "tool") {
+                ev.args_preview = latin1Safe(ev.args_preview);
+                ev.result_preview = latin1Safe(ev.result_preview);
+              } else if (ev.kind === "round") {
+                ev.finish_reason = latin1Safe(ev.finish_reason);
+              }
+              if (trace.length < 500) trace.push(ev);
+            });
           } finally {
             cancelHeartbeat();
+          }
+
+          // Aggregate the real token cost + tool/round counts from the trace.
+          let promptTokens = 0;
+          let completionTokens = 0;
+          let totalTokens = 0;
+          let rounds = 0;
+          let toolCalls = 0;
+          for (const ev of trace) {
+            if (ev.kind === "round") {
+              promptTokens += ev.prompt_tokens;
+              completionTokens += ev.completion_tokens;
+              totalTokens += ev.total_tokens;
+              rounds += 1;
+            } else {
+              toolCalls += 1;
+            }
           }
 
           // Collect the full set of workspace artifacts the task produced and
@@ -1090,17 +1126,26 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
           // Send the response back via E2E encrypted relay, including the
           // artifact manifest so the requester knows the complete set it should
-          // have received over the preceding file_transfer frames.
+          // have received over the preceding file_transfer frames, plus the
+          // real execution trace + token telemetry for the audit record.
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
             content: latin1Safe(llmResponse),
             artifacts: artifactManifest,
+            trace,
+            telemetry: {
+              prompt_tokens: promptTokens,
+              completion_tokens: completionTokens,
+              total_tokens: totalTokens,
+              rounds,
+              tool_calls: toolCalls,
+            },
             from_agent: agtSandboxName,
             in_reply_to: latin1Safe(taskContent),
             timestamp: new Date().toISOString(),
           });
           log.info(
-            `AGT relay: reply + ${artifactManifest.length} artifact(s) sent to ${fromName} via E2E encrypted relay`,
+            `AGT relay: reply + ${artifactManifest.length} artifact(s) + ${trace.length} trace event(s) (${totalTokens} tokens) sent to ${fromName} via E2E encrypted relay`,
           );
           // Sub-agent rates parent — this bumps the parent's feedback_count.
           // The sub-agent is still alive and registered here (just sent a relay

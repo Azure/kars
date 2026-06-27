@@ -26,8 +26,8 @@
 //! untouched.
 
 use super::{
-    DEFAULT_REGISTRY_URL, FederationMessage, MeshPeerState, ReceivedArtifact, TaskReply,
-    enqueue_outbound, is_lease_holder,
+    DEFAULT_REGISTRY_URL, FederationMessage, MeshPeerState, ReceivedArtifact, RunTelemetry,
+    TaskReply, enqueue_outbound, is_lease_holder,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -144,6 +144,17 @@ async fn deliver_for_task(
         .map(str::to_string)
         .context("KarsTask has no spec.objective")?;
 
+    // The model the blueprint asked for — recorded on the deliverable so the
+    // scorecard attributes the run's real token cost to a real model.
+    let model = task
+        .data
+        .get("spec")
+        .and_then(|s| s.get("blueprint"))
+        .and_then(|b| b.get("model"))
+        .and_then(|m| m.get("deployment"))
+        .and_then(|d| d.as_str())
+        .map(str::to_string);
+
     let sandbox = task
         .data
         .get("status")
@@ -190,12 +201,20 @@ async fn deliver_for_task(
     }
 
     // Await the agent's task_response (or time out).
-    let (content, artifact_count, ok) =
+    let (content, artifact_count, trace, telemetry, ok) =
         match tokio::time::timeout(Duration::from_secs(TASK_TIMEOUT_SECS), rx).await {
-            Ok(Ok(reply)) => (reply.content, reply.artifact_count, true),
+            Ok(Ok(reply)) => (
+                reply.content,
+                reply.artifact_count,
+                reply.trace,
+                reply.telemetry,
+                true,
+            ),
             Ok(Err(_)) => (
                 "mesh task delivery channel closed before a reply arrived".to_string(),
                 0,
+                Vec::new(),
+                None,
                 false,
             ),
             Err(_) => {
@@ -206,6 +225,8 @@ async fn deliver_for_task(
                         "timed out after {TASK_TIMEOUT_SECS}s waiting for the agent's task_response"
                     ),
                     0,
+                    Vec::new(),
+                    None,
                     false,
                 )
             }
@@ -216,9 +237,26 @@ async fn deliver_for_task(
     // buffered set to reach the manifest count before flushing.
     let artifacts = drain_artifacts(state, &agent_did, artifact_count).await;
 
-    write_mission_output(state, &name, &objective, &content, ok, &artifacts).await?;
+    write_mission_output(
+        state,
+        &name,
+        &objective,
+        &content,
+        ok,
+        &artifacts,
+        telemetry.as_ref(),
+        model.as_deref(),
+    )
+    .await?;
     if !artifacts.is_empty() {
         write_mission_artifacts(state, &name, &artifacts).await?;
+    }
+    if !trace.is_empty() {
+        // The execution trace is the clean per-tool audit record. Persist it
+        // verbatim so it's independently inspectable (kubectl get configmap).
+        if let Err(e) = write_mission_trace(state, &name, &trace).await {
+            tracing::warn!(task = %name, err = %format!("{e:#}"), "failed to persist execution trace");
+        }
     }
     mark_completed(state, &namespace, &name, nonce).await?;
 
@@ -227,6 +265,8 @@ async fn deliver_for_task(
         ok,
         len = content.len(),
         artifacts = artifacts.len(),
+        trace = trace.len(),
+        tokens = telemetry.as_ref().map(|t| t.total_tokens).unwrap_or(0),
         "task-delivery: persisted mesh run result"
     );
     Ok(())
@@ -290,6 +330,8 @@ pub(super) async fn resolve_pending(
     from_amid: &str,
     content: String,
     artifact_count: usize,
+    trace: Vec<serde_json::Value>,
+    telemetry: Option<RunTelemetry>,
 ) {
     let waiter = state.pending_tasks.lock().await.remove(from_amid);
     match waiter {
@@ -298,6 +340,8 @@ pub(super) async fn resolve_pending(
                 .send(TaskReply {
                     content,
                     artifact_count,
+                    trace,
+                    telemetry,
                 })
                 .is_err()
             {
@@ -361,6 +405,8 @@ async fn write_mission_output(
     output: &str,
     ok: bool,
     artifacts: &[ReceivedArtifact],
+    telemetry: Option<&RunTelemetry>,
+    model: Option<&str>,
 ) -> Result<()> {
     let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let cms: Api<k8s_openapi::api::core::v1::ConfigMap> =
@@ -371,6 +417,9 @@ async fn write_mission_output(
     data.insert("output".into(), output.to_string());
     data.insert("objective".into(), objective.to_string());
     data.insert("finishedAt".into(), Utc::now().to_rfc3339());
+    if let Some(m) = model {
+        data.insert("model".into(), m.to_string());
+    }
     // Distinguishes the agent-loop deliverable (tools + delegation over the
     // mesh) from the single-turn router path, and records success/failure.
     data.insert("source".into(), "mesh-task".into());
@@ -388,6 +437,21 @@ async fn write_mission_output(
             serde_json::to_string(&manifest).unwrap_or_else(|_| "[]".into()),
         );
         data.insert("artifactCount".into(), artifacts.len().to_string());
+    }
+    // Real token telemetry — same key names the single-turn run path uses, so
+    // the Bridge scorecard reads them uniformly regardless of run path.
+    if let Some(t) = telemetry {
+        if t.total_tokens > 0 {
+            data.insert("totalTokens".into(), t.total_tokens.to_string());
+        }
+        if t.prompt_tokens > 0 {
+            data.insert("promptTokens".into(), t.prompt_tokens.to_string());
+        }
+        if t.completion_tokens > 0 {
+            data.insert("completionTokens".into(), t.completion_tokens.to_string());
+        }
+        data.insert("rounds".into(), t.rounds.to_string());
+        data.insert("toolCalls".into(), t.tool_calls.to_string());
     }
 
     let patch = json!({
@@ -477,6 +541,55 @@ async fn write_mission_artifacts(
     )
     .await
     .context("write mission-artifacts ConfigMap")?;
+    Ok(())
+}
+
+/// Persist the agent's execution trace to `kars-mission-trace-<task>` — the
+/// clean per-tool audit record. The trace is a JSON array of `round`/`tool`
+/// events emitted live by the agent loop (real token usage, tool names,
+/// sanitized arg/result previews, durations). Stored verbatim under a single
+/// `trace.json` key so it is independently inspectable on a plain kars cluster
+/// (`kubectl get configmap kars-mission-trace-<task> -o jsonpath='{.data.trace\.json}'`),
+/// and consumed by the Bridge to render the live activity timeline. Capped at
+/// the ConfigMap budget; on overflow the oldest events are dropped so the most
+/// recent activity is always retained.
+async fn write_mission_trace(
+    state: &Arc<MeshPeerState>,
+    task: &str,
+    trace: &[serde_json::Value],
+) -> Result<()> {
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+    let cms: Api<k8s_openapi::api::core::v1::ConfigMap> =
+        Api::namespaced(state.client.clone(), &namespace);
+    let name = format!("kars-mission-trace-{task}");
+
+    // Keep within the ConfigMap ~1 MiB budget; drop oldest events if needed.
+    const BUDGET: usize = 900 * 1024;
+    let mut events = trace.to_vec();
+    let mut serialized = serde_json::to_string(&events).unwrap_or_else(|_| "[]".into());
+    while serialized.len() > BUDGET && events.len() > 1 {
+        events.remove(0);
+        serialized = serde_json::to_string(&events).unwrap_or_else(|_| "[]".into());
+    }
+
+    let mut data: BTreeMap<String, String> = BTreeMap::new();
+    data.insert("trace.json".into(), serialized);
+    data.insert("eventCount".into(), trace.len().to_string());
+    data.insert("capturedAt".into(), Utc::now().to_rfc3339());
+
+    let patch = json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": { "name": name, "labels": { "kars.azure.com/mission-trace": task } },
+        "data": data,
+    });
+    cms.patch(
+        &name,
+        &PatchParams::apply(crate::field_managers::MESH_PEER).force(),
+        &Patch::Apply(patch),
+    )
+    .await
+    .context("write mission-trace ConfigMap")?;
     Ok(())
 }
 
