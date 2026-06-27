@@ -598,7 +598,40 @@ enum FederationMessage {
         from_agent: Option<String>,
         #[serde(default)]
         timestamp: Option<String>,
+        /// Manifest of artifact files the agent shipped over preceding
+        /// `file_transfer` frames. Lets the receiver know the complete set to
+        /// expect. Absent for agents that don't produce artifacts.
+        #[serde(default)]
+        artifacts: Vec<ArtifactManifestEntry>,
     },
+
+    /// A single artifact file produced by a running agent and shipped back over
+    /// the mesh (base64). Same wire shape the offload path uses. The controller
+    /// buffers these per sender DID and flushes them into the mission's
+    /// artifact set when the matching `task_response` arrives.
+    #[serde(rename = "file_transfer")]
+    FileTransfer {
+        file_name: String,
+        #[serde(default)]
+        file_path: Option<String>,
+        file_data: String,
+        #[serde(default)]
+        size_bytes: Option<u64>,
+        #[serde(default)]
+        from_agent: Option<String>,
+        #[serde(default)]
+        timestamp: Option<String>,
+    },
+}
+
+/// One entry in a `task_response` artifact manifest.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ArtifactManifestEntry {
+    name: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -662,8 +695,31 @@ struct MeshPeerState {
     /// `handle_peer_message`. Used only by the harness-neutral task-delivery
     /// path (`task_delivery`); empty on a plain cluster with no run requests.
     pending_tasks: Arc<
-        tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<String>>>,
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, tokio::sync::oneshot::Sender<TaskReply>>,
+        >,
     >,
+    /// Artifact files received from running agents over `file_transfer`,
+    /// buffered per sender DID until the matching `task_response` flushes them
+    /// into the mission's artifact set. Empty unless a mesh task is in flight.
+    pending_artifacts:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<ReceivedArtifact>>>>,
+}
+
+/// The payload delivered to a waiting mesh task: the agent's text reply plus
+/// the count of artifacts its manifest declared (so the receiver can wait for
+/// the matching `file_transfer` frames to land before persisting).
+#[derive(Debug, Clone)]
+pub(super) struct TaskReply {
+    pub content: String,
+    pub artifact_count: usize,
+}
+
+/// A single artifact file received from an agent over the mesh.
+#[derive(Debug, Clone)]
+pub(super) struct ReceivedArtifact {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Cached Entra access token + acquisition time. Refreshed when the cached
@@ -875,6 +931,7 @@ pub async fn run(client: Client) -> Result<()> {
         leader_epoch: AtomicU64::new(0),
         entra_token_cache: Arc::new(tokio::sync::RwLock::new(None)),
         pending_tasks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_artifacts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     // Harness-neutral mesh task delivery: watch KarsTasks for a run-request
@@ -1471,13 +1528,38 @@ async fn handle_peer_message(
                 );
             }
         }
-        FederationMessage::TaskResponse { content, .. } => {
+        FederationMessage::TaskResponse {
+            content, artifacts, ..
+        } => {
             tracing::info!(
                 from = %from_amid,
                 len = content.len(),
+                artifacts = artifacts.len(),
                 "Received task_response — resolving pending mesh task delivery"
             );
-            task_delivery::resolve_pending(state, from_amid, content).await;
+            task_delivery::resolve_pending(state, from_amid, content, artifacts.len()).await;
+        }
+        FederationMessage::FileTransfer {
+            file_name,
+            file_data,
+            ..
+        } => {
+            // Buffer the artifact under the sender DID; the matching
+            // task_response flushes the complete set into the mission output.
+            match BASE64.decode(&file_data) {
+                Ok(bytes) => {
+                    tracing::info!(
+                        from = %from_amid,
+                        file = %file_name,
+                        size = bytes.len(),
+                        "Received artifact file_transfer — buffering for mission output"
+                    );
+                    task_delivery::buffer_artifact(state, from_amid, file_name, bytes).await;
+                }
+                Err(e) => {
+                    tracing::warn!(from = %from_amid, file = %file_name, err = %e, "artifact file_data not valid base64 — dropping");
+                }
+            }
         }
         FederationMessage::TaskRequest { .. } => {
             tracing::debug!(
