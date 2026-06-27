@@ -603,6 +603,16 @@ enum FederationMessage {
         /// expect. Absent for agents that don't produce artifacts.
         #[serde(default)]
         artifacts: Vec<ArtifactManifestEntry>,
+        /// The agent's live execution trace — the real per-round and per-tool
+        /// record emitted as the loop ran. Carried opaquely as JSON so the
+        /// wire stays forward-compatible with new event shapes; the controller
+        /// persists it verbatim as the clean audit record. Absent for agents
+        /// that don't emit a trace.
+        #[serde(default)]
+        trace: Vec<serde_json::Value>,
+        /// Aggregated real token + round/tool counts for the run.
+        #[serde(default)]
+        telemetry: Option<RunTelemetry>,
     },
 
     /// A single artifact file produced by a running agent and shipped back over
@@ -632,6 +642,23 @@ struct ArtifactManifestEntry {
     path: Option<String>,
     #[serde(default)]
     size_bytes: Option<u64>,
+}
+
+/// Aggregated real telemetry for a mesh task run — the actual token cost and
+/// round/tool counts the agent reported. Persisted to the mission output so the
+/// Bridge scorecard shows real numbers, not estimates.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub(super) struct RunTelemetry {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub rounds: u64,
+    #[serde(default)]
+    pub tool_calls: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -708,11 +735,14 @@ struct MeshPeerState {
 
 /// The payload delivered to a waiting mesh task: the agent's text reply plus
 /// the count of artifacts its manifest declared (so the receiver can wait for
-/// the matching `file_transfer` frames to land before persisting).
+/// the matching `file_transfer` frames to land before persisting), and the run
+/// trace + telemetry for the audit record.
 #[derive(Debug, Clone)]
 pub(super) struct TaskReply {
     pub content: String,
     pub artifact_count: usize,
+    pub trace: Vec<serde_json::Value>,
+    pub telemetry: Option<RunTelemetry>,
 }
 
 /// A single artifact file received from an agent over the mesh.
@@ -1529,15 +1559,28 @@ async fn handle_peer_message(
             }
         }
         FederationMessage::TaskResponse {
-            content, artifacts, ..
+            content,
+            artifacts,
+            trace,
+            telemetry,
+            ..
         } => {
             tracing::info!(
                 from = %from_amid,
                 len = content.len(),
                 artifacts = artifacts.len(),
+                trace = trace.len(),
                 "Received task_response — resolving pending mesh task delivery"
             );
-            task_delivery::resolve_pending(state, from_amid, content, artifacts.len()).await;
+            task_delivery::resolve_pending(
+                state,
+                from_amid,
+                content,
+                artifacts.len(),
+                trace,
+                telemetry,
+            )
+            .await;
         }
         FederationMessage::FileTransfer {
             file_name,
