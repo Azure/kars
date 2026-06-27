@@ -562,6 +562,15 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           return ws;
         };
       }
+      // The kars controller is a mesh peer that speaks legacy base64(JSON)
+      // frames, not Signal E2E. To let it deliver a governed `task_request`
+      // straight into this agent's loop (harness-neutral mesh task delivery),
+      // route its AMID through the SDK's plaintext-compat bypass. The controller
+      // passes its AMID via `KARS_CONTROLLER_AMID` at sandbox materialization;
+      // the receiver still re-verifies the sender via the registry, and the
+      // `task:execute` AGT policy still gates whether the task runs.
+      const controllerAmid = (process.env.KARS_CONTROLLER_AMID || "").trim();
+      const plaintextPeers = controllerAmid ? [controllerAmid] : undefined;
       agtMeshClient = await meshMod.createMeshTransport({
         relayUrl,
         registryUrl,
@@ -573,7 +582,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         },
         displayName: agtSandboxName,
         wsFactory,
+        plaintextPeers,
       });
+      if (controllerAmid) {
+        log.info(`AGT mesh: controller ${controllerAmid.slice(0, 16)}… trusted as a plaintext peer (mesh task delivery)`);
+      }
       log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @kars/mesh)${meshToken ? " + Entra-verified WS (connect.token)" : ""}`);
     } catch (swapErr: any) {
       log.warn?.(`mesh transport init failed: ${swapErr?.message ?? swapErr}`);
