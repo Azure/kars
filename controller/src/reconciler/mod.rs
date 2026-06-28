@@ -178,6 +178,28 @@ pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
     cmd
 }
 
+/// The `sha256:`-prefixed digest of the egress-guard's authored iptables
+/// ruleset (the exact OUTPUT filter + NAT rules `build_egress_guard_command`
+/// emits for the given sandbox kind). This is the V1 egress-guard ruleset
+/// binding (design note §24b): the controller is the authority that defines the
+/// datapath posture, so hashing the authored ruleset pins *which* rules the
+/// egress-guard enforces. It is re-derivable — an auditor running the same
+/// controller version + sandbox kind reproduces the exact bytes and digest, so
+/// a weakened ruleset would surface as a different hash on the receipt. (The
+/// kernel-datapath *witness* that the node actually applied these rules is the
+/// separate, node-level eBPF control, correctly deferred to V2.)
+#[must_use]
+pub(crate) fn egress_guard_ruleset_hash(is_sre_sandbox: bool) -> String {
+    use sha2::{Digest, Sha256};
+    let cmd = build_egress_guard_command(is_sre_sandbox);
+    let full = Sha256::digest(cmd.as_bytes());
+    let mut out = String::from("sha256:");
+    for b in &full[..16] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod egress_guard_tests {
@@ -253,6 +275,18 @@ mod egress_guard_tests {
                 "filter-chain DROP missing for is_sre={is_sre}"
             );
         }
+    }
+
+    #[test]
+    fn ruleset_hash_is_stable_prefixed_and_kind_sensitive() {
+        use super::egress_guard_ruleset_hash;
+        let standard = egress_guard_ruleset_hash(false);
+        // Stable + correctly prefixed (re-derivable digest).
+        assert!(standard.starts_with("sha256:"));
+        assert_eq!(standard, egress_guard_ruleset_hash(false));
+        // A different sandbox kind (SRE) authors a different ruleset → a
+        // different hash, so the binding actually pins the datapath posture.
+        assert_ne!(standard, egress_guard_ruleset_hash(true));
     }
 }
 #[derive(Debug, thiserror::Error)]
