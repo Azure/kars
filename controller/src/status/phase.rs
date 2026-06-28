@@ -109,6 +109,12 @@ pub const PHASE_FAILED: &str = "Failed";
 #[allow(dead_code)]
 pub const PHASE_ACTIVE: &str = "Active";
 
+/// `.status.phase = "Hibernating"` — `KarsTeam` durability-axis phase. The
+/// standing team is paused/idle: its members stay governed-but-idle and the
+/// charter loop does not tick (idle-scaled, budget-preserving, design note §11).
+/// Distinct from `Degraded` (which is an authority/validation failure).
+pub const PHASE_HIBERNATING: &str = "Hibernating";
+
 /// `.status.phase = "Expired"` — grant-lane terminal phase. The
 /// TTL elapsed; the reconciler dropped any mount it created and
 /// the grant no longer affects the data plane. The CR persists

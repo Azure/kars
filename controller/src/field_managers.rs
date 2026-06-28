@@ -57,6 +57,11 @@ pub const CLAW_EVAL: &str = "kars-controller/karseval";
 /// envelope digest + lifecycle phase on status.
 pub const CLAW_TASK: &str = "kars-controller/karstask";
 
+/// `KarsTeam` reconciler — the standing-team primitive. Authors the principal +
+/// member `KarsTask`s and the charter-loop task-force tasks; sole writer of
+/// `KarsTeam.status`.
+pub const CLAW_TEAM: &str = "kars-controller/karsteam";
+
 /// `TrustGraph` reconciler (Phase F1) — verifies signed trust edges
 /// and publishes a `ConfigMap` projection to `kars-system`.
 pub const TRUST_GRAPH: &str = "kars-controller/trustgraph";

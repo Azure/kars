@@ -52,6 +52,8 @@ mod kars_sre_action_reconciler;
 mod kars_task;
 mod kars_task_execution;
 mod kars_task_reconciler;
+mod kars_team;
+mod kars_team_reconciler;
 mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
@@ -255,6 +257,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { kars_task_reconciler::run(client).await })
     };
+    let kars_team_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { kars_team_reconciler::run(client).await })
+    };
     let kars_approval_handle = {
         let client = client.clone();
         tokio::spawn(async move { kars_approval_reconciler::run(client).await })
@@ -412,6 +418,9 @@ async fn main() -> Result<()> {
             res??;
         }
         res = kars_task_handle => {
+            res??;
+        }
+        res = kars_team_handle => {
             res??;
         }
         res = kars_approval_handle => {
