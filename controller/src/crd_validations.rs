@@ -57,6 +57,7 @@ use crate::kars_memory::KarsMemory;
 use crate::kars_receipt::KarsReceipt;
 use crate::kars_sre_action::KarsSREAction;
 use crate::kars_task::KarsTask;
+use crate::kars_team::KarsTeam;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
 
@@ -607,6 +608,59 @@ pub fn kars_task_validations() -> Vec<ValidationRule> {
 pub fn kars_task_crd() -> CustomResourceDefinition {
     inject_spec_validations(KarsTask::crd(), kars_task_validations())
         .expect("kube-rs derive must produce a spec property on KarsTask")
+}
+
+/// Admission CEL for `KarsTeam` — the standing-team envelope must obey the same
+/// anti-amplification rules as a task (tier range, ceiling <= tier, depth >= 0),
+/// plus a non-empty charter (the mandate that generates the team's work).
+pub fn kars_team_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.charter) > 0 && size(self.charter) <= 8192".into(),
+            message: Some("spec.charter must be 1-8192 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.tier >= 1 && self.envelope.tier <= 5".into(),
+            message: Some("spec.envelope.tier must be in 1..5".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.authorityCeiling >= 1 && self.envelope.authorityCeiling <= 5".into(),
+            message: Some("spec.envelope.authorityCeiling must be in 1..5".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.authorityCeiling <= self.envelope.tier".into(),
+            message: Some(
+                "spec.envelope.authorityCeiling must be <= spec.envelope.tier (a team cannot grant a member more authority than it holds)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.delegationDepth >= 0 && self.envelope.delegationDepth <= 16".into(),
+            message: Some("spec.envelope.delegationDepth must be in 0..16".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.cadence) || !has(self.cadence.everyMinutes) || self.cadence.everyMinutes >= 1".into(),
+            message: Some("spec.cadence.everyMinutes, when set, must be >= 1".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `KarsTeam` CRD — the standing-team / org primitive (design note §11).
+#[must_use]
+pub fn kars_team_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsTeam::crd(), kars_team_validations())
+        .expect("kube-rs derive must produce a spec property on KarsTeam")
 }
 
 /// `KarsReceipt` CRD. The Governance Receipt is written solely by the

@@ -1,0 +1,584 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karsteams.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: KarsTeam
+    plural: karsteams
+    shortNames:
+    - cteam
+    singular: karsteam
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.envelope.tier
+      name: Tier
+      type: integer
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.memberCount
+      name: Members
+      type: integer
+    - jsonPath: .status.generatedTaskCount
+      name: Generated
+      type: integer
+    - jsonPath: .status.lastRunAt
+      name: LastRun
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KarsTeamSpec via `CustomResource`
+        properties:
+          spec:
+            description: '`KarsTeam.spec` — a standing org with a persistent mandate + trust envelope.'
+            properties:
+              blueprint:
+                description: |-
+                  The default run blueprint for the principal + generated task-force tasks
+                  (harness/model/instructions/tools/egress/isolation). Member roles may
+                  override their own blueprint via `TeamRole.blueprint`.
+                nullable: true
+                properties:
+                  egress:
+                    description: |-
+                      Network destinations the mission may reach. Drives
+                      `KarsSandbox.spec.networkPolicy.allowedEndpoints`. When non-empty the
+                      sandbox runs in strict egress mode bounded to exactly these hosts.
+                    items:
+                      description: A network destination the mission may reach.
+                      properties:
+                        host:
+                          description: Hostname, e.g. `api.github.com`.
+                          type: string
+                        port:
+                          description: Optional TCP port (e.g. `443`); any port when omitted.
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          nullable: true
+                          type: integer
+                      required:
+                      - host
+                      type: object
+                    type: array
+                  instructions:
+                    description: |-
+                      System prompt / standing instructions for the agent, in addition to the
+                      objective. Drives `KarsSandbox.spec.agent.instructions`.
+                    nullable: true
+                    type: string
+                  isolation:
+                    description: |-
+                      Sandbox isolation level (`standard`, `enhanced`, `confidential`). Drives
+                      `KarsSandbox.spec.sandbox.isolation`. Defaults to `standard`.
+                    nullable: true
+                    type: string
+                  mcpServers:
+                    description: |-
+                      Connected services (MCP server names, same namespace) the mission may
+                      use. Drives `KarsSandbox.spec.governance.mcpServerRefs`. Requires
+                      `toolPolicy` to be set (governed MCP access is bounded by the tool
+                      policy).
+                    items:
+                      type: string
+                    type: array
+                  memory:
+                    description: |-
+                      Shared team memory — the name of a same-namespace `KarsMemory` the agent
+                      reads/writes. Drives `KarsSandbox.spec.memoryRef`. This is how a
+                      persistent team shares knowledge across members and over time; a short
+                      one-off task usually leaves it unset.
+                    nullable: true
+                    type: string
+                  model:
+                    description: |-
+                      The model the agent reasons with. Drives
+                      `InferencePolicy.spec.modelPreference.primary`. Defaults from controller
+                      env when unset.
+                    nullable: true
+                    properties:
+                      deployment:
+                        description: Deployment / model name as the provider advertises it.
+                        type: string
+                      provider:
+                        description: |-
+                          Provider tag: `azure-openai`, `anthropic`, `gemini`, `bedrock`,
+                          `ollama`, `github-models`.
+                        type: string
+                    required:
+                    - deployment
+                    - provider
+                    type: object
+                  runtime:
+                    description: |-
+                      Harness/runtime the agent runs on (`OpenClaw`, `OpenAIAgents`, `MAF`,
+                      `Hermes`, `BYO`). Drives `KarsSandbox.spec.runtime.kind`. Defaults to
+                      `OpenClaw`.
+                    nullable: true
+                    type: string
+                  toolPolicy:
+                    description: |-
+                      Tools the agent may call, expressed as the name of an existing
+                      same-namespace `ToolPolicy`. Drives `KarsSandbox.spec.governance`
+                      (`enabled: true` + `toolPolicyRef`). Composing the existing `ToolPolicy`
+                      CRD keeps the AGT profile + `appliesTo` scope authoritative rather than
+                      duplicating an allow-list here. Required whenever `mcpServers` is set —
+                      governed MCP access is meaningless without a tool policy to bound it.
+                    nullable: true
+                    type: string
+                type: object
+              cadence:
+                description: |-
+                  The standing-operation cadence — how often the charter loop mints a
+                  task-force task (autonomous monitoring). Absent ⇒ the team is a passive
+                  org (members exist, but no autonomous tick).
+                nullable: true
+                properties:
+                  everyMinutes:
+                    description: |-
+                      Tick interval in **minutes**. On each tick the charter loop mints one
+                      task-force `KarsTask`. Kept as a simple interval so the standing loop is
+                      honest and reproducible on a plain (kind) cluster. Must be `>= 1`.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+              charter:
+                description: |-
+                  The **charter** — the team's standing mandate in plain language. This is
+                  the durable instruction that *generates* the team's work: each cadence
+                  tick mints a task-force `KarsTask` whose objective is derived from this
+                  charter. E.g. *"Keep the kars repo healthy: triage new issues, run tests
+                  on open PRs, and draft fixes for failing checks."*
+                type: string
+              displayName:
+                description: Optional short label surfaced in CLI / UI listings.
+                nullable: true
+                type: string
+              envelope:
+                description: |-
+                  The team's full trust envelope — the ceiling of authority any member or
+                  generated task may hold. Reuses the `KarsTask` envelope so attenuation,
+                  digesting, and the org-as-topology lattice apply unchanged.
+                properties:
+                  authorityCeiling:
+                    description: |-
+                      The maximum autonomy tier any *descendant* task may hold. Must be in
+                      `1..5` and `<= tier` — a task can never authorize a child to act with
+                      more authority than it holds itself.
+                    format: int32
+                    type: integer
+                  budget:
+                    description: Optional resource budget for the whole task subtree.
+                    nullable: true
+                    properties:
+                      tokens:
+                        description: |-
+                          Maximum total tokens the task subtree may consume. `0`/absent means
+                          "no token cap declared" (governance still applies at the router).
+                        format: int64
+                        nullable: true
+                        type: integer
+                      usdMicros:
+                        description: |-
+                          Maximum total spend in micro-USD (1e-6 USD) for the task subtree.
+                          Integer micro-USD avoids floating-point in an audit-bound field.
+                        format: int64
+                        nullable: true
+                        type: integer
+                    type: object
+                  delegationDepth:
+                    default: 0
+                    description: |-
+                      Remaining number of delegation hops this task may still spawn. A child
+                      task is minted with `delegationDepth = parent.delegationDepth - 1`;
+                      at `0` no further delegation is permitted. Must be `>= 0`.
+                    format: int32
+                    type: integer
+                  egressAllowlistRef:
+                    description: |-
+                      Optional reference to a same-namespace `EgressAllowlist`-style CR that
+                      bounds the network destinations this task (and its descendants) may
+                      reach through the inference router.
+                    nullable: true
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  tier:
+                    description: Autonomy tier (1..5). See the module docs for the taxonomy.
+                    format: int32
+                    type: integer
+                  toolPolicyRef:
+                    description: |-
+                      Optional reference to a same-namespace `ToolPolicy` CR that bounds
+                      which tools/MCP servers this task (and its descendants) may call.
+                    nullable: true
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - authorityCeiling
+                - tier
+                type: object
+              knowledgeCommons:
+                description: |-
+                  Name of the team's **knowledge commons** (shared, provenance-tracked
+                  memory, §14). Defaults to the team name when unset.
+                nullable: true
+                type: string
+              paused:
+                default: false
+                description: |-
+                  When `true` the team **hibernates**: members stay governed-but-idle and
+                  the charter loop does not tick (idle-scaled, budget-preserving, §11).
+                type: boolean
+              reportingTo:
+                description: |-
+                  The human owner this team reports to (the apex of the org chart, §12).
+                  Surfaced verbatim; digests + escalations route here.
+                nullable: true
+                type: string
+              roster:
+                description: |-
+                  The roster of member roles. Each role holds a strict *subset* of the
+                  team envelope (capability-attenuating delegation, §12). Materialized as
+                  member `KarsTask`s parented to the principal.
+                items:
+                  description: |-
+                    A member role in the team roster — a named seat in the org chart holding an
+                    attenuated subset of the team's authority.
+                  properties:
+                    blueprint:
+                      description: |-
+                        Optional per-role run blueprint override (model/tools/egress). Falls back
+                        to the team blueprint when unset.
+                      nullable: true
+                      properties:
+                        egress:
+                          description: |-
+                            Network destinations the mission may reach. Drives
+                            `KarsSandbox.spec.networkPolicy.allowedEndpoints`. When non-empty the
+                            sandbox runs in strict egress mode bounded to exactly these hosts.
+                          items:
+                            description: A network destination the mission may reach.
+                            properties:
+                              host:
+                                description: Hostname, e.g. `api.github.com`.
+                                type: string
+                              port:
+                                description: Optional TCP port (e.g. `443`); any port when omitted.
+                                format: uint16
+                                maximum: 65535.0
+                                minimum: 0.0
+                                nullable: true
+                                type: integer
+                            required:
+                            - host
+                            type: object
+                          type: array
+                        instructions:
+                          description: |-
+                            System prompt / standing instructions for the agent, in addition to the
+                            objective. Drives `KarsSandbox.spec.agent.instructions`.
+                          nullable: true
+                          type: string
+                        isolation:
+                          description: |-
+                            Sandbox isolation level (`standard`, `enhanced`, `confidential`). Drives
+                            `KarsSandbox.spec.sandbox.isolation`. Defaults to `standard`.
+                          nullable: true
+                          type: string
+                        mcpServers:
+                          description: |-
+                            Connected services (MCP server names, same namespace) the mission may
+                            use. Drives `KarsSandbox.spec.governance.mcpServerRefs`. Requires
+                            `toolPolicy` to be set (governed MCP access is bounded by the tool
+                            policy).
+                          items:
+                            type: string
+                          type: array
+                        memory:
+                          description: |-
+                            Shared team memory — the name of a same-namespace `KarsMemory` the agent
+                            reads/writes. Drives `KarsSandbox.spec.memoryRef`. This is how a
+                            persistent team shares knowledge across members and over time; a short
+                            one-off task usually leaves it unset.
+                          nullable: true
+                          type: string
+                        model:
+                          description: |-
+                            The model the agent reasons with. Drives
+                            `InferencePolicy.spec.modelPreference.primary`. Defaults from controller
+                            env when unset.
+                          nullable: true
+                          properties:
+                            deployment:
+                              description: Deployment / model name as the provider advertises it.
+                              type: string
+                            provider:
+                              description: |-
+                                Provider tag: `azure-openai`, `anthropic`, `gemini`, `bedrock`,
+                                `ollama`, `github-models`.
+                              type: string
+                          required:
+                          - deployment
+                          - provider
+                          type: object
+                        runtime:
+                          description: |-
+                            Harness/runtime the agent runs on (`OpenClaw`, `OpenAIAgents`, `MAF`,
+                            `Hermes`, `BYO`). Drives `KarsSandbox.spec.runtime.kind`. Defaults to
+                            `OpenClaw`.
+                          nullable: true
+                          type: string
+                        toolPolicy:
+                          description: |-
+                            Tools the agent may call, expressed as the name of an existing
+                            same-namespace `ToolPolicy`. Drives `KarsSandbox.spec.governance`
+                            (`enabled: true` + `toolPolicyRef`). Composing the existing `ToolPolicy`
+                            CRD keeps the AGT profile + `appliesTo` scope authoritative rather than
+                            duplicating an allow-list here. Required whenever `mcpServers` is set —
+                            governed MCP access is meaningless without a tool policy to bound it.
+                          nullable: true
+                          type: string
+                      type: object
+                    envelope:
+                      description: |-
+                        The role's attenuated trust envelope — a strict subset of the team
+                        envelope. When unset the member inherits a safe attenuation of the team
+                        envelope (one tier below the team, no further delegation).
+                      nullable: true
+                      properties:
+                        authorityCeiling:
+                          description: |-
+                            The maximum autonomy tier any *descendant* task may hold. Must be in
+                            `1..5` and `<= tier` — a task can never authorize a child to act with
+                            more authority than it holds itself.
+                          format: int32
+                          type: integer
+                        budget:
+                          description: Optional resource budget for the whole task subtree.
+                          nullable: true
+                          properties:
+                            tokens:
+                              description: |-
+                                Maximum total tokens the task subtree may consume. `0`/absent means
+                                "no token cap declared" (governance still applies at the router).
+                              format: int64
+                              nullable: true
+                              type: integer
+                            usdMicros:
+                              description: |-
+                                Maximum total spend in micro-USD (1e-6 USD) for the task subtree.
+                                Integer micro-USD avoids floating-point in an audit-bound field.
+                              format: int64
+                              nullable: true
+                              type: integer
+                          type: object
+                        delegationDepth:
+                          default: 0
+                          description: |-
+                            Remaining number of delegation hops this task may still spawn. A child
+                            task is minted with `delegationDepth = parent.delegationDepth - 1`;
+                            at `0` no further delegation is permitted. Must be `>= 0`.
+                          format: int32
+                          type: integer
+                        egressAllowlistRef:
+                          description: |-
+                            Optional reference to a same-namespace `EgressAllowlist`-style CR that
+                            bounds the network destinations this task (and its descendants) may
+                            reach through the inference router.
+                          nullable: true
+                          properties:
+                            name:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        tier:
+                          description: Autonomy tier (1..5). See the module docs for the taxonomy.
+                          format: int32
+                          type: integer
+                        toolPolicyRef:
+                          description: |-
+                            Optional reference to a same-namespace `ToolPolicy` CR that bounds
+                            which tools/MCP servers this task (and its descendants) may call.
+                          nullable: true
+                          properties:
+                            name:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - authorityCeiling
+                      - tier
+                      type: object
+                    name:
+                      description: |-
+                        The role name (e.g. `bugfix-engineer`, `compliance-screener`). Becomes
+                        the materialized member `KarsTask` name suffix.
+                      type: string
+                    systemPrompt:
+                      description: |-
+                        The role's standing instructions (its system prompt), in addition to the
+                        charter. Drives the member sandbox's `instructions`.
+                      nullable: true
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+            required:
+            - charter
+            - envelope
+            type: object
+            x-kubernetes-validations:
+            - message: spec.charter must be 1-8192 characters
+              reason: FieldValueInvalid
+              rule: size(self.charter) > 0 && size(self.charter) <= 8192
+            - message: spec.envelope.tier must be in 1..5
+              reason: FieldValueInvalid
+              rule: self.envelope.tier >= 1 && self.envelope.tier <= 5
+            - message: spec.envelope.authorityCeiling must be in 1..5
+              reason: FieldValueInvalid
+              rule: self.envelope.authorityCeiling >= 1 && self.envelope.authorityCeiling <= 5
+            - message: spec.envelope.authorityCeiling must be <= spec.envelope.tier (a team cannot grant a member more authority than it holds)
+              reason: FieldValueInvalid
+              rule: self.envelope.authorityCeiling <= self.envelope.tier
+            - message: spec.envelope.delegationDepth must be in 0..16
+              reason: FieldValueInvalid
+              rule: self.envelope.delegationDepth >= 0 && self.envelope.delegationDepth <= 16
+            - message: spec.cadence.everyMinutes, when set, must be >= 1
+              reason: FieldValueInvalid
+              rule: '!has(self.cadence) || !has(self.cadence.everyMinutes) || self.cadence.everyMinutes >= 1'
+          status:
+            description: '`KarsTeam.status` — the controller is the sole writer.'
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              detail:
+                description: Human-readable detail surfaced verbatim in the product.
+                nullable: true
+                type: string
+              envelopeDigest:
+                description: '`sha256:` digest of the validated team envelope (reuses the task digest).'
+                nullable: true
+                type: string
+              generatedTaskCount:
+                default: 0
+                description: How many task-force tasks the charter loop has generated so far.
+                format: int64
+                type: integer
+              lastGeneratedTask:
+                description: The most recent task-force task the charter loop minted.
+                nullable: true
+                type: string
+              lastRunAt:
+                description: When the charter loop last ticked (RFC3339).
+                nullable: true
+                type: string
+              memberCount:
+                description: Number of members materialized (printcolumn convenience).
+                format: int64
+                nullable: true
+                type: integer
+              memberRefs:
+                description: The materialized **member** `KarsTask`s (the roster as cluster state).
+                items:
+                  description: |-
+                    Minimal `LocalObjectReference`-shaped struct with `name` only — the
+                    emitted Secret/ConfigMap always lives in the same namespace as the
+                    CR, so namespace plumbing would be redundant. Mirrors the
+                    `corev1.LocalObjectReference` Kubernetes API shape.
+                  properties:
+                    name:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              nextRunAt:
+                description: When the charter loop is next due to tick (RFC3339).
+                nullable: true
+                type: string
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: |-
+                  Lifecycle phase: `Forming` (validating + materializing), `Active`
+                  (running, cadence ticking), `Hibernating` (paused/idle), `Degraded`
+                  (envelope invalid — no authority to operate), `Retired`.
+                nullable: true
+                type: string
+              principalRef:
+                description: The materialized **principal** `KarsTask` (the org apex + authority root).
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+            type: object
+        required:
+        - spec
+        title: KarsTeam
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
