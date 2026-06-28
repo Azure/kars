@@ -233,6 +233,43 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     let commons_entry_count = crate::team_commons::entry_count(&ctx.client, &commons).await;
 
+    // Daily digest (§20): publish a periodic standing report to the steering
+    // inbox when the digest interval has elapsed. This is the autonomous-
+    // monitoring report — the team tells you how it's doing without being asked.
+    let digest_every = team
+        .spec
+        .cadence
+        .as_ref()
+        .and_then(|c| c.digest_every_minutes)
+        .filter(|m| *m >= 1);
+    let mut last_digest_at = prior.last_digest_at.clone();
+    if let Some(dmin) = digest_every {
+        let due = match prior.last_digest_at.as_deref().and_then(parse_rfc3339) {
+            Some(prev) => now >= prev + chrono::Duration::minutes(dmin as i64),
+            None => generated > 0, // first digest once there's something to report
+        };
+        if !paused && due {
+            let summary = format!(
+                "{health}: {} run(s) generated, {} delivered, {} tokens spent, {} knowledge entries.",
+                generated, stats.succeeded, stats.tokens_total, commons_entry_count,
+            );
+            crate::team_digest::publish(
+                &ctx.client,
+                &name,
+                team.spec.reporting_to.as_deref(),
+                health,
+                &summary,
+                generated,
+                stats.succeeded,
+                stats.tokens_total,
+                commons_entry_count,
+            )
+            .await
+            .ok();
+            last_digest_at = Some(now.to_rfc3339());
+        }
+    }
+
     let detail = if paused {
         "Team hibernating — members governed-but-idle; charter loop paused.".to_string()
     } else if every.is_some() {
@@ -268,6 +305,7 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             tokens_spent_total: Some(stats.tokens_total),
             commons_entry_count: Some(commons_entry_count),
             last_success_at,
+            last_digest_at,
             ..Default::default()
         },
     )
