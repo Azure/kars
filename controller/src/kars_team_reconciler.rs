@@ -55,6 +55,11 @@ const REQUEUE_PENDING: Duration = Duration::from_secs(10);
 const ANNOT_TEAM: &str = "kars.azure.com/team";
 /// Annotation marking a task's role within a team (`principal` | `member` | `taskforce`).
 const ANNOT_TEAM_ROLE: &str = "kars.azure.com/team-role";
+/// Annotation the mesh task-delivery loop watches to drive an autonomous run.
+const ANNOT_RUN_REQUESTED: &str = "kars.azure.com/run-requested";
+/// Cap on concurrently-executing standing-operation runs per team, so the
+/// charter loop never floods the cluster faster than runs complete + retire.
+const MAX_CONCURRENT_RUNS: usize = 2;
 
 #[derive(thiserror::Error, Debug)]
 enum ReconcileError {
@@ -133,6 +138,20 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // charter loop does not tick. We still keep the principal/members present.
     let paused = team.spec.paused;
 
+    // Ensure the team's knowledge commons exists (shared, provenance-tracked
+    // memory, §14). Owned by the team so it is GC'd on deletion.
+    let commons = team.commons_name();
+    crate::team_commons::ensure_commons(&ctx.client, &commons, owner_ref(&team))
+        .await
+        .ok();
+
+    // Write path: harvest any completed standing-operation run whose deliverable
+    // is not yet in the commons, then retire its (now-finished) sandbox so runs
+    // never pile up. This is what makes the team *accumulate* knowledge across
+    // ticks — each run deposits what it learned, with provenance, into the
+    // shared store. Returns the count of runs still executing.
+    let active_runs = harvest_and_retire_runs(&ctx.client, &tasks, &team, &commons).await;
+
     // 2. Materialize the org: principal + members as KarsTasks.
     let principal_name = format!("{name}-principal");
     materialize_principal(&tasks, &team, &principal_name).await?;
@@ -164,9 +183,15 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             Some(prev) => now >= prev + chrono::Duration::minutes(every_min as i64),
             None => true, // never run → due immediately
         };
-        if !paused && due {
+        // Backpressure: only mint when the cluster isn't already saturated with
+        // in-flight runs from this team. Skipping a tick keeps the standing
+        // operation honest without flooding — the next reconcile re-checks.
+        if !paused && due && active_runs < MAX_CONCURRENT_RUNS {
             let tf_name = format!("{name}-run-{}", now.format("%Y%m%d%H%M%S"));
-            mint_taskforce(&tasks, &team, &principal_name, &tf_name).await?;
+            // Read path: inject the team's accumulated knowledge so the run
+            // builds on prior ticks instead of starting cold.
+            let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
+            mint_taskforce(&tasks, &team, &principal_name, &tf_name, &prior).await?;
             generated += 1;
             last_generated = Some(tf_name);
             last_run_at = Some(now.to_rfc3339());
@@ -296,6 +321,7 @@ async fn mint_taskforce(
     team: &KarsTeam,
     principal_name: &str,
     tf_name: &str,
+    prior_knowledge: &str,
 ) -> Result<(), ReconcileError> {
     // The task-force runs under an attenuation of the team envelope (one tier
     // below, no further delegation) so a generated run can never hold more
@@ -303,9 +329,10 @@ async fn mint_taskforce(
     let envelope = default_member_envelope(&team.spec.envelope);
     let spec = KarsTaskSpec {
         objective: format!(
-            "Standing-operation run for team '{}'. Charter: {}",
+            "Standing-operation run for team '{}'. Charter: {}{}",
             team.name_any(),
-            team.spec.charter
+            team.spec.charter,
+            prior_knowledge
         ),
         envelope,
         parent_ref: Some(LocalObjectRef { name: principal_name.to_string() }),
@@ -319,8 +346,101 @@ async fn mint_taskforce(
     apply_task(tasks, team, tf_name, spec, "taskforce").await
 }
 
-/// SSA-apply a KarsTask owned by the team, tagged with team annotations.
-#[allow(clippy::too_many_arguments)]
+/// Write path for the knowledge commons + run lifecycle: scan the team's
+/// standing-operation run tasks and, for any whose deliverable has landed,
+/// harvest the output into a provenance-tracked commons entry (idempotent — a
+/// run contributes at most one entry) and then **retire** the run by un-launching
+/// it, which tears down the now-finished sandbox so runs never pile up. Returns
+/// the count of runs still executing (deliverable not yet landed), used as
+/// backpressure for the charter loop. Best-effort: a transient read failure just
+/// defers the work to the next reconcile, never failing the team.
+async fn harvest_and_retire_runs(
+    client: &Client,
+    tasks: &Api<KarsTask>,
+    team: &KarsTeam,
+    commons: &str,
+) -> usize {
+    let team_name = team.name_any();
+    let lp = ListParams::default().labels(&format!("kars.azure.com/team={team_name}"));
+    let Ok(list) = tasks.list(&lp).await else {
+        return 0;
+    };
+    let ns = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+    let cms: Api<k8s_openapi::api::core::v1::ConfigMap> = Api::namespaced(client.clone(), &ns);
+
+    let mut active = 0usize;
+    for task in &list.items {
+        // Only standing-operation runs deposit knowledge (members/principal are
+        // standing authority, not run deliverables).
+        let is_run = task
+            .annotations()
+            .get(ANNOT_TEAM_ROLE)
+            .is_some_and(|r| r == "taskforce");
+        if !is_run {
+            continue;
+        }
+        let run = task.name_any();
+        let launched = task
+            .spec
+            .execution
+            .as_ref()
+            .map(|e| e.launch)
+            .unwrap_or(false);
+
+        let output_cm = format!("kars-mission-output-{run}");
+        let landed = cms.get_opt(&output_cm).await.ok().flatten();
+        let Some(cm) = landed else {
+            // Deliverable not landed yet — still executing while launched.
+            if launched {
+                active += 1;
+            }
+            continue;
+        };
+        let data = cm.data.unwrap_or_default();
+        let ok = data.get("status").map(String::as_str) == Some("ok");
+        // A *substantive* deliverable did real inference work — harness-neutral
+        // signal: tokens were spent or artifacts were produced. This keeps the
+        // commons free of empty/error runs (e.g. a model that rejected the
+        // request) that would otherwise pollute the team's prior knowledge.
+        let did_work = data
+            .get("totalTokens")
+            .and_then(|t| t.parse::<i64>().ok())
+            .is_some_and(|t| t > 0)
+            || data
+                .get("artifactCount")
+                .and_then(|c| c.parse::<i64>().ok())
+                .is_some_and(|c| c > 0);
+        if did_work
+            && let Some(output) = data.get("output").filter(|s| ok && !s.trim().is_empty())
+        {
+            // Title the entry by the team's mandate (clean), not the verbose
+            // run objective (which carries the injected prior-knowledge preamble).
+            let title = team
+                .spec
+                .charter
+                .lines()
+                .next()
+                .unwrap_or(&team.spec.charter)
+                .to_string();
+            let _ = crate::team_commons::record_entry(
+                client, commons, &run, &title, &run, &run, output,
+            )
+            .await;
+        }
+        // Deliverable has landed (ok or error) — retire the sandbox so the run
+        // doesn't keep consuming a pod. The task record + output ConfigMap
+        // remain for history; the knowledge lives on in the commons.
+        if launched {
+            let retire = json!({ "spec": { "execution": { "launch": false } } });
+            let _ = tasks.patch(&run, &PatchParams::default(), &Patch::Merge(retire)).await;
+        }
+    }
+    active
+}
+
+/// SSA-apply a KarsTask owned by the team, tagged with team annotations. For a
+/// `taskforce` run, also stamps the run-request annotation the mesh delivery
+/// loop watches, so the standing-operation run executes autonomously.
 async fn apply_task(
     tasks: &Api<KarsTask>,
     team: &KarsTeam,
@@ -328,16 +448,21 @@ async fn apply_task(
     spec: KarsTaskSpec,
     role: &str,
 ) -> Result<(), ReconcileError> {
+    let mut annotations = serde_json::Map::new();
+    annotations.insert(ANNOT_TEAM.into(), json!(team.name_any()));
+    annotations.insert(ANNOT_TEAM_ROLE.into(), json!(role));
+    if role == "taskforce" {
+        // Stable nonce = run name, so the run is dispatched once and not
+        // re-triggered on subsequent reconciles.
+        annotations.insert(ANNOT_RUN_REQUESTED.into(), json!(task_name));
+    }
     let obj = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsTask",
         "metadata": {
             "name": task_name,
             "ownerReferences": [owner_ref(team)],
-            "annotations": {
-                ANNOT_TEAM: team.name_any(),
-                ANNOT_TEAM_ROLE: role,
-            },
+            "annotations": annotations,
             "labels": { "kars.azure.com/team": team.name_any() },
         },
         "spec": spec,
