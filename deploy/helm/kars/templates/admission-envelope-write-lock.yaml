@@ -1,0 +1,89 @@
+{{- /*
+  Envelope-write lockdown (design note arch-D / §7).
+
+  ValidatingAdmissionPolicy that makes a KarsTask / KarsTeam's *governance*
+  fields controller-writable-only. The controller is the sole authority that
+  validates, attenuates, and materializes a trust envelope; once an object
+  exists, no other principal (a compromised agent workload identity, a stray
+  automation, a direct kubectl patch) may:
+
+    * write or mutate `.status`         — the controller-owned governance facts
+                                          (envelope digest, lineage, phase,
+                                          execution, generated-task counters)
+    * RAISE `.spec.envelope.tier`,
+      `.spec.envelope.authorityCeiling`,
+      or `.spec.envelope.delegationDepth` — i.e. self-escalate authority
+
+  Lowering envelope fields (voluntary attenuation) and editing non-authority
+  spec fields (objective, paused, execution.launch, annotations) remain allowed
+  for ordinary principals, so the Bridge BFF and operators keep working. The
+  controller service account is exempt — it is the writer of all of the above.
+
+  Applies on UPDATE only (CREATE-time envelope bounds are enforced by the CRD's
+  own CEL: tier/ceiling ranges + ceiling<=tier). Requires Kubernetes >= 1.30.
+*/}}
+{{- if .Values.admission.envelopeWriteLock.enabled -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-envelope-write-lock
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   ["kars.azure.com"]
+        apiVersions: ["v1alpha1"]
+        operations:  ["UPDATE"]
+        resources:   ["karstasks", "karsteams", "karstasks/status", "karsteams/status"]
+  matchConditions:
+    # The controller is the sole legitimate writer of status + envelope — exempt
+    # it entirely so reconciliation (status patches, materialization) proceeds.
+    - name: not-the-controller
+      expression: >-
+        request.userInfo.username != 'system:serviceaccount:{{ .Release.Namespace }}:kars-controller'
+  variables:
+    - name: oldEnv
+      expression: "oldObject.spec.?envelope.orValue({})"
+    - name: newEnv
+      expression: "object.spec.?envelope.orValue({})"
+    - name: tierRaised
+      expression: >-
+        variables.newEnv.?tier.orValue(0) > variables.oldEnv.?tier.orValue(0)
+    - name: ceilingRaised
+      expression: >-
+        variables.newEnv.?authorityCeiling.orValue(0) > variables.oldEnv.?authorityCeiling.orValue(0)
+    - name: depthRaised
+      expression: >-
+        variables.newEnv.?delegationDepth.orValue(0) > variables.oldEnv.?delegationDepth.orValue(0)
+    - name: statusChanged
+      expression: >-
+        has(object.status) != has(oldObject.status) ||
+        (has(object.status) && has(oldObject.status) && object.status != oldObject.status)
+  validations:
+    - expression: "!variables.tierRaised"
+      message: "spec.envelope.tier cannot be raised by a non-controller principal (self-escalation blocked)"
+      reason: Forbidden
+    - expression: "!variables.ceilingRaised"
+      message: "spec.envelope.authorityCeiling cannot be raised by a non-controller principal (self-escalation blocked)"
+      reason: Forbidden
+    - expression: "!variables.depthRaised"
+      message: "spec.envelope.delegationDepth cannot be raised by a non-controller principal (self-escalation blocked)"
+      reason: Forbidden
+    - expression: "!variables.statusChanged"
+      message: ".status is controller-writable-only — a non-controller principal cannot write governance status"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-envelope-write-lock-binding
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: admission
+spec:
+  policyName: kars-envelope-write-lock
+  validationActions: [Deny, Audit]
+{{- end }}
