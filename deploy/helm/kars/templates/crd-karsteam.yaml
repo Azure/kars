@@ -262,12 +262,38 @@ spec:
                   When `true` the team **hibernates**: members stay governed-but-idle and
                   the charter loop does not tick (idle-scaled, budget-preserving, §11).
                 type: boolean
+              profileRef:
+                description: |-
+                  Optional **profile** this team is instantiated from (`KarsProfile` name,
+                  same namespace, §17). When set, the team inherits the profile's charter
+                  template (if `charter` is empty) and roster (if `roster` is empty) and is
+                  recorded as profile-derived on the receipt. The platform stays
+                  domain-blind; the domain lives in the referenced profile.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
               reportingTo:
                 description: |-
                   The human owner this team reports to (the apex of the org chart, §12).
                   Surfaced verbatim; digests + escalations route here.
                 nullable: true
                 type: string
+              requestedTier:
+                description: |-
+                  A **requested promotion** — a target autonomy tier the team's principal
+                  wants to operate at (§12). When greater than `envelope.tier`, the
+                  controller opens a human `KarsApproval` (a `tierRaise`); only on approval
+                  does the controller widen the team envelope to this tier. Promotion is
+                  therefore always human-approved and ledgered (the approval is bound into
+                  the principal's receipt). Widening is controller-only — a non-controller
+                  principal cannot raise the envelope (enforced by the envelope-write VAP).
+                format: int32
+                nullable: true
+                type: integer
               roster:
                 description: |-
                   The roster of member roles. Each role holds a strict *subset* of the
@@ -449,6 +475,16 @@ spec:
                         The role name (e.g. `bugfix-engineer`, `compliance-screener`). Becomes
                         the materialized member `KarsTask` name suffix.
                       type: string
+                    skills:
+                      description: |-
+                        **Skills** (`KarsSkill` names, same namespace, §13) this role acquires.
+                        The team reconciler merges each Ready skill's bounding tool policy, MCP
+                        servers, and recipe into the materialized member blueprint — so the grant
+                        is a real authority fact (the member runs with the skill's bounded tools),
+                        not a label.
+                      items:
+                        type: string
+                      type: array
                     systemPrompt:
                       description: |-
                         The role's standing instructions (its system prompt), in addition to the

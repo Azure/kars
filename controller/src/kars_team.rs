@@ -105,6 +105,24 @@ pub struct KarsTeamSpec {
     /// Optional short label surfaced in CLI / UI listings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+
+    /// Optional **profile** this team is instantiated from (`KarsProfile` name,
+    /// same namespace, §17). When set, the team inherits the profile's charter
+    /// template (if `charter` is empty) and roster (if `roster` is empty) and is
+    /// recorded as profile-derived on the receipt. The platform stays
+    /// domain-blind; the domain lives in the referenced profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_ref: Option<LocalObjectRef>,
+
+    /// A **requested promotion** — a target autonomy tier the team's principal
+    /// wants to operate at (§12). When greater than `envelope.tier`, the
+    /// controller opens a human `KarsApproval` (a `tierRaise`); only on approval
+    /// does the controller widen the team envelope to this tier. Promotion is
+    /// therefore always human-approved and ledgered (the approval is bound into
+    /// the principal's receipt). Widening is controller-only — a non-controller
+    /// principal cannot raise the envelope (enforced by the envelope-write VAP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_tier: Option<i32>,
 }
 
 /// A member role in the team roster — a named seat in the org chart holding an
@@ -131,6 +149,14 @@ pub struct TeamRole {
     /// to the team blueprint when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blueprint: Option<TaskBlueprint>,
+
+    /// **Skills** (`KarsSkill` names, same namespace, §13) this role acquires.
+    /// The team reconciler merges each Ready skill's bounding tool policy, MCP
+    /// servers, and recipe into the materialized member blueprint — so the grant
+    /// is a real authority fact (the member runs with the skill's bounded tools),
+    /// not a label.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
 }
 
 /// The team's standing-operation cadence.
@@ -328,6 +354,8 @@ mod tests {
                 knowledge_commons: None,
                 paused: false,
                 display_name: None,
+                profile_ref: None,
+                requested_tier: None,
             },
         );
         t.metadata.namespace = Some("kars-system".into());
@@ -352,6 +380,7 @@ mod tests {
                 authority_ceiling: 2,
             }),
             blueprint: None,
+            skills: vec![],
         }]);
         assert!(t.validation_errors().is_empty(), "{:?}", t.validation_errors());
     }
@@ -371,6 +400,7 @@ mod tests {
                 authority_ceiling: 5,
             }),
             blueprint: None,
+            skills: vec![],
         }]);
         let errs = t.validation_errors();
         assert!(errs.iter().any(|e| e.contains("over")), "{errs:?}");

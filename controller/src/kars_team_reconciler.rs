@@ -43,6 +43,8 @@ use crate::kars_task::{
     KarsTask, KarsTaskSpec, TaskBlueprint, TaskEnvelope, TaskExecution,
 };
 use crate::kars_team::{KarsTeam, KarsTeamStatus, TeamRole};
+use crate::kars_profile::KarsProfile;
+use crate::kars_skill::KarsSkill;
 use crate::mcp_server::LocalObjectRef;
 use crate::status::phase::{PHASE_ACTIVE, PHASE_DEGRADED, PHASE_HIBERNATING};
 
@@ -115,6 +117,13 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
+    // Resolve a referenced profile (§17) and acquired skills (§13) into an
+    // effective team: inherit the profile's charter + roster when unset, and
+    // merge each role's skills (bounding tool policy + MCP + recipe) into its
+    // member blueprint. Everything downstream operates on this effective team,
+    // so a profile-instantiated team materializes exactly as a hand-written one.
+    let team = effective_team(&ctx.client, &ns, team).await;
+
     // 1. Validate the team envelope + roster attenuation.
     let errors = team.validation_errors();
     if !errors.is_empty() {
@@ -158,6 +167,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let principal_name = format!("{name}-principal");
     materialize_principal(&tasks, &team, &principal_name).await?;
 
+    // Governed promotion (§12): when a higher tier is requested, open a human
+    // approval and only widen the envelope once it is approved — controller-only,
+    // human-approved, ledgered via the principal's receipt.
+    process_promotion(&ctx.client, &ns, &team, &principal_name).await;
+
     let mut member_refs: Vec<LocalObjectRef> = Vec::new();
     for role in &team.spec.roster {
         let member_name = format!("{name}-{}", sanitize(&role.name));
@@ -180,6 +194,13 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     let now = Utc::now();
     let mut next_run_at = None;
+    // Capability-readiness gate (§19): a run must not be dispatched into a
+    // sandbox whose required capabilities aren't actually ready. We check the
+    // effective team blueprint's MCP servers exist and are Ready *before*
+    // minting. If a capability is missing, we pause-with-reason (skip the tick
+    // and record why) rather than launching a doomed run that loops on a tool
+    // that never answers.
+    let cap_gate = capability_readiness(&ctx.client, &ns, &team).await;
     if let Some(every_min) = every {
         let due = match prior.last_run_at.as_deref().and_then(parse_rfc3339) {
             Some(prev) => now >= prev + chrono::Duration::minutes(every_min as i64),
@@ -188,7 +209,7 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         // Backpressure: only mint when the cluster isn't already saturated with
         // in-flight runs from this team. Skipping a tick keeps the standing
         // operation honest without flooding — the next reconcile re-checks.
-        if !paused && due && active_runs < MAX_CONCURRENT_RUNS {
+        if !paused && due && active_runs < MAX_CONCURRENT_RUNS && cap_gate.is_none() {
             let tf_name = format!("{name}-run-{}", now.format("%Y%m%d%H%M%S"));
             // Read path: inject the team's accumulated knowledge so the run
             // builds on prior ticks instead of starting cold.
@@ -272,6 +293,8 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     let detail = if paused {
         "Team hibernating — members governed-but-idle; charter loop paused.".to_string()
+    } else if let Some(reason) = &cap_gate {
+        format!("Standing operation paused — capability not ready: {reason}. Will resume automatically once it is.")
     } else if every.is_some() {
         format!(
             "Standing operation {} — {} run(s) generated, {} delivered ({} tokens), {} knowledge entries accumulated.",
@@ -332,6 +355,234 @@ fn owner_ref(team: &KarsTeam) -> serde_json::Value {
         "controller": true,
         "blockOwnerDeletion": true,
     })
+}
+
+/// Resolve a team's referenced profile (§17) + acquired skills (§13) into an
+/// effective team. Profile inheritance: when the team references a Ready
+/// `KarsProfile`, an empty charter inherits the profile's charter template and
+/// an empty roster inherits the profile's roles. Skill acquisition: each role's
+/// skills (Ready `KarsSkill`s) are merged into its member blueprint — the first
+/// skill's bounding tool policy becomes the member's tool policy, all skills'
+/// MCP servers are unioned, and the recipes are appended to the instructions.
+/// Best-effort: a missing/Degraded profile or skill is skipped (the team still
+/// materializes from what it has), never failing the reconcile.
+async fn effective_team(client: &Client, ns: &str, team: Arc<KarsTeam>) -> Arc<KarsTeam> {
+    let needs_profile = team.spec.profile_ref.is_some()
+        && (team.spec.charter.trim().is_empty() || team.spec.roster.is_empty());
+    let has_skills = team.spec.roster.iter().any(|r| !r.skills.is_empty());
+    if !needs_profile && !has_skills {
+        return team; // nothing to resolve — fast path
+    }
+
+    let mut eff = (*team).clone();
+
+    // 1. Profile inheritance.
+    if let Some(pref) = team.spec.profile_ref.clone() {
+        let profiles: Api<KarsProfile> = Api::namespaced(client.clone(), ns);
+        if let Ok(Some(profile)) = profiles.get_opt(&pref.name).await {
+            let ready = profile
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .map(|p| p == crate::status::phase::PHASE_READY)
+                .unwrap_or(false);
+            if ready {
+                if eff.spec.charter.trim().is_empty() {
+                    eff.spec.charter = profile.spec.charter_template.clone();
+                }
+                if eff.spec.roster.is_empty() {
+                    eff.spec.roster = profile
+                        .spec
+                        .roles
+                        .iter()
+                        .map(|r| TeamRole {
+                            name: r.name.clone(),
+                            system_prompt: r.system_prompt.clone(),
+                            envelope: None,
+                            blueprint: None,
+                            skills: r.skills.clone(),
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
+
+    // 2. Skill acquisition — merge each role's skills into its blueprint.
+    let skills_api: Api<KarsSkill> = Api::namespaced(client.clone(), ns);
+    for role in &mut eff.spec.roster {
+        if role.skills.is_empty() {
+            continue;
+        }
+        let mut bp = role.blueprint.clone().unwrap_or_default();
+        let mut recipes: Vec<String> = Vec::new();
+        for skill_name in &role.skills {
+            let Ok(Some(skill)) = skills_api.get_opt(skill_name).await else {
+                continue;
+            };
+            let ready = skill
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .map(|p| p == crate::status::phase::PHASE_READY)
+                .unwrap_or(false);
+            if !ready {
+                continue;
+            }
+            // The first skill's bounding policy bounds the member's tools.
+            if bp.tool_policy.is_none() {
+                bp.tool_policy = Some(skill.spec.bounding_policy.clone());
+            }
+            for m in &skill.spec.mcp_servers {
+                if !bp.mcp_servers.contains(m) {
+                    bp.mcp_servers.push(m.clone());
+                }
+            }
+            if let Some(recipe) = &skill.spec.recipe {
+                recipes.push(format!("[skill: {}] {}", skill_name, recipe));
+            }
+        }
+        if !recipes.is_empty() {
+            let prefix = bp.instructions.clone().unwrap_or_default();
+            let joined = recipes.join("\n");
+            bp.instructions = Some(if prefix.trim().is_empty() {
+                joined
+            } else {
+                format!("{prefix}\n{joined}")
+            });
+        }
+        role.blueprint = Some(bp);
+    }
+
+    Arc::new(eff)
+}
+
+/// Process a governed promotion request (§12). When `spec.requested_tier`
+/// exceeds the team's current envelope tier, ensure a human `KarsApproval`
+/// (`tierRaise`) exists against the principal; once that approval is `Approved`,
+/// the controller widens the team envelope to the requested tier (controller is
+/// the only principal permitted to raise an envelope — enforced by the
+/// envelope-write VAP). The approval is bound into the principal's receipt, so
+/// the promotion is human-approved AND ledgered. Best-effort: API blips defer to
+/// the next reconcile.
+async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal_name: &str) {
+    use crate::kars_approval::{ApprovalAction, KarsApproval};
+
+    let Some(target) = team.spec.requested_tier else {
+        return;
+    };
+    let current = team.spec.envelope.tier;
+    if target <= current || !(1..=5).contains(&target) {
+        return; // nothing to promote (or out of range)
+    }
+
+    let team_name = team.name_any();
+    let approval_name = format!("{team_name}-promote-t{target}");
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+
+    // If the approval exists and is Approved, widen the envelope.
+    if let Ok(Some(appr)) = approvals.get_opt(&approval_name).await {
+        let approved = appr
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .map(|p| p == "Approved")
+            .unwrap_or(false);
+        if approved {
+            let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+            let patch = json!({
+                "apiVersion": "kars.azure.com/v1alpha1",
+                "kind": "KarsTeam",
+                "spec": { "envelope": { "tier": target, "authorityCeiling": target } }
+            });
+            let _ = teams
+                .patch(&team_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(patch))
+                .await;
+            tracing::info!(team = %team_name, tier = target, "promotion approved — envelope widened");
+        }
+        return; // approval already exists; nothing more to author
+    }
+
+    // Otherwise open the human approval (idempotent create).
+    let appr = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsApproval",
+        "metadata": {
+            "name": approval_name,
+            "ownerReferences": [owner_ref(team)],
+            "labels": { "kars.azure.com/team": team_name },
+        },
+        "spec": {
+            "taskRef": { "name": principal_name },
+            "action": ApprovalAction {
+                kind: "tierRaise".into(),
+                summary: format!(
+                    "Promote team '{team_name}' from Tier {current} to Tier {target}"
+                ),
+                detail: Some(format!(
+                    "The standing team is requesting a wider authority envelope (Tier {target}). \
+                     Approving grants every generated run up to Tier {target} authority."
+                )),
+                requested_tier: Some(target),
+            },
+        },
+    });
+    let _ = approvals
+        .patch(
+            &approval_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(appr),
+        )
+        .await;
+}
+
+/// Capability-readiness gate (§19): verify the effective team's required
+/// capabilities are actually usable before a run is dispatched. Checks every
+/// MCP server referenced by the team blueprint or any member blueprint exists
+/// and is `Ready`. Returns `Some(reason)` when a capability is missing/not
+/// ready (the charter loop pauses-with-reason), or `None` when all clear.
+/// Best-effort: a transient API error returns `None` (don't block on a blip).
+async fn capability_readiness(client: &Client, ns: &str, team: &KarsTeam) -> Option<String> {
+    use crate::mcp_server::McpServer;
+
+    // Collect the distinct MCP servers the team will actually use.
+    let mut wanted: Vec<String> = Vec::new();
+    let mut collect = |bp: &Option<TaskBlueprint>| {
+        if let Some(b) = bp {
+            for m in &b.mcp_servers {
+                if !wanted.contains(m) {
+                    wanted.push(m.clone());
+                }
+            }
+        }
+    };
+    collect(&team.spec.blueprint);
+    for role in &team.spec.roster {
+        collect(&role.blueprint);
+    }
+    if wanted.is_empty() {
+        return None; // no external capabilities required → always ready
+    }
+
+    let api: Api<McpServer> = Api::namespaced(client.clone(), ns);
+    for server in &wanted {
+        match api.get_opt(server).await {
+            Ok(Some(s)) => {
+                let ready = s
+                    .status
+                    .as_ref()
+                    .and_then(|st| st.phase.as_deref())
+                    .map(|p| p == crate::status::phase::PHASE_READY)
+                    .unwrap_or(false);
+                if !ready {
+                    return Some(format!("MCP server '{server}' is not Ready"));
+                }
+            }
+            Ok(None) => return Some(format!("MCP server '{server}' is not provisioned")),
+            Err(_) => return None, // transient — don't block
+        }
+    }
+    None
 }
 
 /// Materialize (SSA, idempotent) the **principal** task — the org apex holding
