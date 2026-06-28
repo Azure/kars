@@ -181,6 +181,12 @@ pub struct SubjectDigest {
 #[serde(rename_all = "camelCase")]
 pub struct Predicate {
     pub task: PredicateTask,
+    /// The validated launch package recorded at the head of the receipt (design
+    /// note §20): the editable composition the operator reviewed and approved —
+    /// runtime/model/tool-policy/isolation — pinned by a deterministic digest.
+    /// Absent for a governed-but-never-composed task (no blueprint).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_package: Option<PredicateLaunchPackage>,
     pub envelope: PredicateEnvelope,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lineage: Vec<String>,
@@ -297,6 +303,28 @@ pub struct PredicateDelegation {
     pub depth_from_root: usize,
 }
 
+/// The validated launch package — the editable composition the operator
+/// reviewed before launch, recorded at the head of the receipt (§20). Every
+/// field maps to a real materialized setting; `digest` pins the exact package.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PredicateLaunchPackage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+    /// `sha256:` digest over the canonical launch package — re-derivable.
+    pub digest: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PredicateExecution {
@@ -325,6 +353,44 @@ pub struct PredicateIssuer {
     pub component: String,
     pub key_id: String,
     pub scheme: String,
+}
+
+/// Build the validated launch package for the receipt head from the task's
+/// blueprint (the editable composition). Returns `None` when no blueprint was
+/// composed. The digest is a stable `sha256:` over the canonical package, so a
+/// verifier can confirm the receipt binds the exact composition that was run.
+fn build_launch_package(task: &KarsTask) -> Option<PredicateLaunchPackage> {
+    let bp = task.spec.blueprint.as_ref()?;
+    let model = bp
+        .model
+        .as_ref()
+        .map(|m| format!("{}/{}", m.provider, m.deployment));
+    // Canonical, order-stable representation hashed into the digest.
+    let canonical = serde_json::json!({
+        "runtime": bp.runtime,
+        "model": model,
+        "toolPolicy": bp.tool_policy,
+        "mcpServers": bp.mcp_servers,
+        "isolation": bp.isolation,
+        "memory": bp.memory,
+        "instructions": bp.instructions,
+    });
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    use sha2::Digest;
+    let full = sha2::Sha256::digest(&bytes);
+    let mut digest = String::from("sha256:");
+    for b in &full[..16] {
+        digest.push_str(&format!("{b:02x}"));
+    }
+    Some(PredicateLaunchPackage {
+        runtime: bp.runtime.clone(),
+        model,
+        tool_policy: bp.tool_policy.clone(),
+        mcp_servers: bp.mcp_servers.clone(),
+        isolation: bp.isolation.clone(),
+        memory: bp.memory.clone(),
+        digest,
+    })
 }
 
 /// Build the in-toto Statement for a governed task. Pure and deterministic —
@@ -443,6 +509,7 @@ pub fn build_statement(
             name: name.clone(),
             objective: task.spec.objective.clone(),
         },
+        launch_package: build_launch_package(task),
         envelope: PredicateEnvelope {
             tier: env.tier,
             authority_ceiling: env.authority_ceiling,
