@@ -398,6 +398,7 @@ async fn discover_agent_did(sandbox: &str) -> Option<String> {
 /// mission deliverable. Server-side apply, idempotent per task. Records the
 /// artifact manifest (names + sizes) so the deliverable advertises the full
 /// set even when individual files live in the companion artifacts ConfigMap.
+#[allow(clippy::too_many_arguments)]
 async fn write_mission_output(
     state: &Arc<MeshPeerState>,
     task: &str,
