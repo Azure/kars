@@ -500,9 +500,9 @@ spec:
             - envelope
             type: object
             x-kubernetes-validations:
-            - message: spec.charter must be 1-8192 characters
+            - message: spec.charter must be 1-8192 characters (or empty when spec.profileRef is set, to inherit the profile's charter)
               reason: FieldValueInvalid
-              rule: size(self.charter) > 0 && size(self.charter) <= 8192
+              rule: (has(self.profileRef) && size(self.charter) == 0) || (size(self.charter) > 0 && size(self.charter) <= 8192)
             - message: spec.envelope.tier must be in 1..5
               reason: FieldValueInvalid
               rule: self.envelope.tier >= 1 && self.envelope.tier <= 5

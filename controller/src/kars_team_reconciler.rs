@@ -490,13 +490,14 @@ async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal
             .unwrap_or(false);
         if approved {
             let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+            // Merge-patch only the two envelope fields so the other envelope
+            // settings (budget, policy refs, depth) are preserved — an SSA apply
+            // would drop unmanaged siblings and fail CRD validation.
             let patch = json!({
-                "apiVersion": "kars.azure.com/v1alpha1",
-                "kind": "KarsTeam",
                 "spec": { "envelope": { "tier": target, "authorityCeiling": target } }
             });
             let _ = teams
-                .patch(&team_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(patch))
+                .patch(&team_name, &PatchParams::default(), &Patch::Merge(patch))
                 .await;
             tracing::info!(team = %team_name, tier = target, "promotion approved — envelope widened");
         }
