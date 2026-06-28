@@ -55,6 +55,7 @@ mod kars_task_reconciler;
 mod kars_team;
 mod kars_team_reconciler;
 mod team_commons;
+mod team_digest;
 mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
