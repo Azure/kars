@@ -663,6 +663,19 @@ pub fn kars_team_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on KarsTeam")
 }
 
+/// `KarsSkill` CRD (§13) — a reusable, versioned capability bundle. The
+/// controller is the sole writer of status; no admission CEL beyond the schema.
+#[must_use]
+pub fn kars_skill_crd() -> CustomResourceDefinition {
+    crate::kars_skill::KarsSkill::crd()
+}
+
+/// `KarsProfile` CRD (§17) — a vetted team template.
+#[must_use]
+pub fn kars_profile_crd() -> CustomResourceDefinition {
+    crate::kars_profile::KarsProfile::crd()
+}
+
 /// `KarsReceipt` CRD. The Governance Receipt is written solely by the
 /// controller (never by users), so it carries no admission CEL rules — its
 /// integrity comes from the DSSE/Ed25519 signature, not from schema gates.

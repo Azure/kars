@@ -54,6 +54,10 @@ mod kars_task_execution;
 mod kars_task_reconciler;
 mod kars_team;
 mod kars_team_reconciler;
+mod kars_skill;
+mod kars_skill_reconciler;
+mod kars_profile;
+mod kars_profile_reconciler;
 mod team_commons;
 mod team_digest;
 mod leader_election;
@@ -256,6 +260,14 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { kars_team_reconciler::run(client).await })
     };
+    let kars_skill_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { kars_skill_reconciler::run(client).await })
+    };
+    let kars_profile_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { kars_profile_reconciler::run(client).await })
+    };
     let kars_approval_handle = {
         let client = client.clone();
         tokio::spawn(async move { kars_approval_reconciler::run(client).await })
@@ -416,6 +428,12 @@ async fn main() -> Result<()> {
             res??;
         }
         res = kars_team_handle => {
+            res??;
+        }
+        res = kars_skill_handle => {
+            res??;
+        }
+        res = kars_profile_handle => {
             res??;
         }
         res = kars_approval_handle => {
