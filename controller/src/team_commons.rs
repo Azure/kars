@@ -237,6 +237,17 @@ pub async fn prior_knowledge(client: &Client, commons: &str) -> String {
     out
 }
 
+/// Number of entries currently in a team's commons (shared-memory size).
+pub async fn entry_count(client: &Client, commons: &str) -> i64 {
+    let ns = namespace();
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &ns);
+    let name = commons_cm_name(commons);
+    match cms.get_opt(&name).await {
+        Ok(Some(cm)) => read_index(&cm).len() as i64,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

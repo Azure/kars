@@ -475,6 +475,11 @@ spec:
             description: '`KarsTeam.status` — the controller is the sole writer.'
             nullable: true
             properties:
+              commonsEntryCount:
+                description: Number of entries in the team's knowledge commons (shared memory size).
+                format: int64
+                nullable: true
+                type: integer
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
@@ -521,12 +526,25 @@ spec:
                 description: How many task-force tasks the charter loop has generated so far.
                 format: int64
                 type: integer
+              health:
+                description: |-
+                  Operational health of the standing operation, computed from run outcomes:
+                  `Healthy` (recent substantive runs), `Watching` (active, awaiting first
+                  result), `Degraded` (recent runs produced no deliverable), or `Stalled`
+                  (cadence set but overdue). The autonomous-monitoring signal — proof the
+                  team is actually doing its job, not just scheduled.
+                nullable: true
+                type: string
               lastGeneratedTask:
                 description: The most recent task-force task the charter loop minted.
                 nullable: true
                 type: string
               lastRunAt:
                 description: When the charter loop last ticked (RFC3339).
+                nullable: true
+                type: string
+              lastSuccessAt:
+                description: When the team last produced a substantive deliverable (RFC3339).
                 nullable: true
                 type: string
               memberCount:
@@ -573,6 +591,16 @@ spec:
                 required:
                 - name
                 type: object
+              runsSucceeded:
+                description: Count of standing-operation runs that produced a substantive deliverable.
+                format: int64
+                nullable: true
+                type: integer
+              tokensSpentTotal:
+                description: Total tokens spent across all of the team's standing-operation runs.
+                format: int64
+                nullable: true
+                type: integer
             type: object
         required:
         - spec
