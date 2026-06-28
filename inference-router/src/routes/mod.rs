@@ -46,6 +46,8 @@ pub use mesh::mesh_routes;
 
 mod mesh_token;
 pub use mesh_token::mesh_token_routes;
+mod github_token;
+pub use github_token::routes as github_token_routes;
 
 mod egress;
 pub use egress::egress_routes;

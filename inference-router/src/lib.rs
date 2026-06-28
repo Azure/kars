@@ -31,6 +31,7 @@ pub mod egress_blocked;
 pub mod errors;
 pub mod failover;
 pub mod forward_proxy;
+pub mod github_app;
 pub mod governance;
 pub mod handoff;
 pub mod inference_policy_loader;
