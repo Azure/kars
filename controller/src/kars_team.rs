@@ -195,6 +195,30 @@ pub struct KarsTeamStatus {
     /// Human-readable detail surfaced verbatim in the product.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+
+    /// Operational health of the standing operation, computed from run outcomes:
+    /// `Healthy` (recent substantive runs), `Watching` (active, awaiting first
+    /// result), `Degraded` (recent runs produced no deliverable), or `Stalled`
+    /// (cadence set but overdue). The autonomous-monitoring signal — proof the
+    /// team is actually doing its job, not just scheduled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<String>,
+
+    /// Count of standing-operation runs that produced a substantive deliverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_succeeded: Option<i64>,
+
+    /// Total tokens spent across all of the team's standing-operation runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_spent_total: Option<i64>,
+
+    /// Number of entries in the team's knowledge commons (shared memory size).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commons_entry_count: Option<i64>,
+
+    /// When the team last produced a substantive deliverable (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<String>,
 }
 
 impl KarsTeam {
