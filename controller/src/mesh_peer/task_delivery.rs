@@ -40,6 +40,14 @@ use tokio::time::Duration;
 
 const RUN_REQUESTED_ANNOTATION: &str = "kars.azure.com/run-requested";
 const RUN_COMPLETED_ANNOTATION: &str = "kars.azure.com/run-completed";
+/// Tracks transient delivery attempts (timeout/unreachable) per run-request, so
+/// a run whose agent wasn't ready yet is retried a bounded number of times
+/// rather than recorded as a permanent timeout on the first miss.
+const RUN_ATTEMPTS_ANNOTATION: &str = "kars.azure.com/run-attempts";
+/// Max transient delivery attempts before a timeout is recorded as terminal.
+/// A freshly-launched sandbox can take ~30-90s to bring its agent onto the mesh;
+/// retrying every poll interval covers that warm-up window before giving up.
+const MAX_DELIVERY_ATTEMPTS: u32 = 6;
 /// How long to wait for the agent's `task_response` before recording a timeout.
 /// The native agent loop (tools + delegation) can take a while; this matches
 /// the order of magnitude of the offload watchers' patience.
@@ -166,12 +174,36 @@ async fn deliver_for_task(
 
     tracing::info!(task = %name, sandbox = %sandbox, "task-delivery: dispatching objective over mesh");
 
+    // How many transient (not-ready) attempts this run-request has already made.
+    let attempts = task
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(RUN_ATTEMPTS_ANNOTATION))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+
     // Discover the running agent's mesh DID from the registry. The runtime
     // adapter registers under the sandbox name as a capability — harness
-    // neutral, same discovery the Bridge BFF uses.
-    let agent_did = discover_agent_did(&sandbox)
-        .await
-        .context("agent not discoverable on the mesh registry (is the sandbox Ready?)")?;
+    // neutral, same discovery the Bridge BFF uses. A freshly-launched sandbox
+    // may not be on the mesh yet; treat that as a transient miss and retry on
+    // the next poll until the warm-up budget is exhausted (then record it).
+    let agent_did = match discover_agent_did(&sandbox).await {
+        Some(did) => did,
+        None => {
+            return handle_transient_miss(
+                state,
+                &namespace,
+                &name,
+                &objective,
+                nonce,
+                attempts,
+                model.as_deref(),
+                "agent not yet discoverable on the mesh registry (sandbox still warming up)",
+            )
+            .await;
+        }
+    };
 
     // Register a waiter keyed by the agent DID *before* sending, so a fast
     // reply can't race ahead of the registration.
@@ -201,7 +233,7 @@ async fn deliver_for_task(
     }
 
     // Await the agent's task_response (or time out).
-    let (content, artifact_count, trace, telemetry, ok) =
+    let (content, artifact_count, trace, telemetry, ok, transient) =
         match tokio::time::timeout(Duration::from_secs(TASK_TIMEOUT_SECS), rx).await {
             Ok(Ok(reply)) => (
                 reply.content,
@@ -209,6 +241,7 @@ async fn deliver_for_task(
                 reply.trace,
                 reply.telemetry,
                 true,
+                false,
             ),
             Ok(Err(_)) => (
                 "mesh task delivery channel closed before a reply arrived".to_string(),
@@ -216,6 +249,7 @@ async fn deliver_for_task(
                 Vec::new(),
                 None,
                 false,
+                true,
             ),
             Err(_) => {
                 // Drop the stale waiter so a late reply isn't misattributed.
@@ -228,9 +262,24 @@ async fn deliver_for_task(
                     Vec::new(),
                     None,
                     false,
+                    true,
                 )
             }
         };
+
+    // A transient miss (the agent wasn't ready to reply) is retried on the next
+    // poll until the warm-up budget is exhausted — only then is it recorded as a
+    // terminal timeout. This is what makes an auto-launched standing-operation
+    // run reliable: the run-request can be stamped at launch without racing the
+    // sandbox's mesh warm-up.
+    if transient && attempts + 1 < MAX_DELIVERY_ATTEMPTS {
+        bump_attempts(state, &namespace, &name, attempts + 1).await?;
+        tracing::info!(
+            task = %name, attempt = attempts + 1, max = MAX_DELIVERY_ATTEMPTS,
+            "task-delivery: agent not ready — will retry on next poll"
+        );
+        return Ok(());
+    }
 
     // The artifact `file_transfer` frames are independent relay messages; a few
     // may still be in flight when the task_response lands. Wait briefly for the
@@ -623,5 +672,78 @@ async fn mark_completed(
     )
     .await
     .context("annotate run-completed")?;
+    Ok(())
+}
+
+/// Record a transient (not-yet-ready) delivery attempt on the run-request, so
+/// the next poll retries instead of giving up.
+async fn bump_attempts(
+    state: &Arc<MeshPeerState>,
+    namespace: &str,
+    task: &str,
+    attempts: u32,
+) -> Result<()> {
+    let api_resource = kube::api::ApiResource {
+        group: "kars.azure.com".into(),
+        version: "v1alpha1".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: "KarsTask".into(),
+        plural: "karstasks".into(),
+    };
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(state.client.clone(), namespace, &api_resource);
+    let patch = json!({
+        "metadata": {
+            "annotations": { RUN_ATTEMPTS_ANNOTATION: attempts.to_string() }
+        }
+    });
+    api.patch(
+        task,
+        &PatchParams::apply(crate::field_managers::MESH_PEER),
+        &Patch::Merge(patch),
+    )
+    .await
+    .context("annotate run-attempts")?;
+    Ok(())
+}
+
+/// Handle a transient delivery miss (agent not yet on the mesh). Retries on the
+/// next poll until the warm-up budget is spent; only then records a terminal
+/// "agent never came online" deliverable so the run doesn't hang forever.
+#[allow(clippy::too_many_arguments)]
+async fn handle_transient_miss(
+    state: &Arc<MeshPeerState>,
+    namespace: &str,
+    task: &str,
+    objective: &str,
+    nonce: &str,
+    attempts: u32,
+    model: Option<&str>,
+    reason: &str,
+) -> Result<()> {
+    if attempts + 1 < MAX_DELIVERY_ATTEMPTS {
+        bump_attempts(state, namespace, task, attempts + 1).await?;
+        tracing::info!(
+            task = %task, attempt = attempts + 1, max = MAX_DELIVERY_ATTEMPTS, reason,
+            "task-delivery: agent not ready — will retry on next poll"
+        );
+        return Ok(());
+    }
+    tracing::warn!(
+        task = %task, attempts = attempts + 1, reason,
+        "task-delivery: warm-up budget exhausted — recording terminal miss"
+    );
+    write_mission_output(
+        state,
+        task,
+        objective,
+        &format!("agent did not come online after {MAX_DELIVERY_ATTEMPTS} attempts: {reason}"),
+        false,
+        &[],
+        None,
+        model,
+    )
+    .await?;
+    mark_completed(state, namespace, task, nonce).await?;
     Ok(())
 }

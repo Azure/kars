@@ -440,11 +440,21 @@ async fn harvest_and_retire_runs(
             .as_ref()
             .map(|e| e.launch)
             .unwrap_or(false);
-
+        // Delivery is terminal once the mesh peer has stamped run-completed to
+        // match the run-request. Until then a run may still be retrying its
+        // mesh warm-up, so we must not retire its sandbox out from under it.
+        let ann = task.annotations();
+        let terminal = match (
+            ann.get(ANNOT_RUN_REQUESTED),
+            ann.get("kars.azure.com/run-completed"),
+        ) {
+            (Some(req), Some(done)) => req == done,
+            _ => false,
+        };
         let output_cm = format!("kars-mission-output-{run}");
         let landed = cms.get_opt(&output_cm).await.ok().flatten();
         let Some(cm) = landed else {
-            // Deliverable not landed yet — still executing while launched.
+            // No deliverable yet — still executing or retrying its mesh warm-up.
             if launched {
                 stats.active += 1;
             }
@@ -492,12 +502,15 @@ async fn harvest_and_retire_runs(
         } else {
             stats.barren += 1;
         }
-        // Deliverable has landed — retire the sandbox so the run doesn't keep
-        // consuming a pod. The task record + output ConfigMap remain for
-        // history; the knowledge lives on in the commons.
-        if launched {
+        // Retire the sandbox only once delivery is terminal — the deliverable
+        // landed AND the mesh peer stamped run-completed. This tears down the
+        // finished run's pod so runs don't pile up, while never pulling a
+        // sandbox from under a run that's still warming up / retrying.
+        if launched && terminal {
             let retire = json!({ "spec": { "execution": { "launch": false } } });
             let _ = tasks.patch(&run, &PatchParams::default(), &Patch::Merge(retire)).await;
+        } else if launched {
+            stats.active += 1;
         }
     }
     stats
