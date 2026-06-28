@@ -149,8 +149,10 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // is not yet in the commons, then retire its (now-finished) sandbox so runs
     // never pile up. This is what makes the team *accumulate* knowledge across
     // ticks — each run deposits what it learned, with provenance, into the
-    // shared store. Returns the count of runs still executing.
-    let active_runs = harvest_and_retire_runs(&ctx.client, &tasks, &team, &commons).await;
+    // shared store. Returns aggregate run stats (active + health signal).
+    let stats = harvest_and_retire_runs(&ctx.client, &tasks, &team, &commons).await;
+
+    let active_runs = stats.active;
 
     // 2. Materialize the org: principal + members as KarsTasks.
     let principal_name = format!("{name}-principal");
@@ -203,12 +205,44 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     let phase = if paused { PHASE_HIBERNATING } else { PHASE_ACTIVE };
     let member_count = member_refs.len() as i64;
+
+    // Health — the autonomous-monitoring signal. Computed from run outcomes +
+    // cadence punctuality, so the operator can tell at a glance whether the
+    // standing operation is actually producing, not merely scheduled.
+    let last_success_at = stats
+        .last_success_at
+        .clone()
+        .or_else(|| prior.last_success_at.clone());
+    let overdue = matches!(
+        (every, next_run_at.as_deref().and_then(parse_rfc3339)),
+        (Some(m), Some(next)) if now > next + chrono::Duration::minutes(2 * m as i64)
+    );
+    let health = if paused {
+        "Hibernating"
+    } else if generated == 0 {
+        "Watching"
+    } else if overdue {
+        "Stalled"
+    } else if stats.succeeded > 0 || last_success_at.is_some() {
+        "Healthy"
+    } else if stats.barren > 0 {
+        "Unproductive"
+    } else {
+        "Watching"
+    };
+
+    let commons_entry_count = crate::team_commons::entry_count(&ctx.client, &commons).await;
+
     let detail = if paused {
         "Team hibernating — members governed-but-idle; charter loop paused.".to_string()
     } else if every.is_some() {
         format!(
-            "Standing operation active — {} task-force task(s) generated from the charter.",
-            generated
+            "Standing operation {} — {} run(s) generated, {} delivered ({} tokens), {} knowledge entries accumulated.",
+            health.to_lowercase(),
+            generated,
+            stats.succeeded,
+            stats.tokens_total,
+            commons_entry_count,
         )
     } else {
         "Team active — no cadence set; members run on demand.".to_string()
@@ -229,6 +263,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             last_run_at,
             next_run_at,
             detail: Some(detail),
+            health: Some(health.to_string()),
+            runs_succeeded: Some(stats.succeeded),
+            tokens_spent_total: Some(stats.tokens_total),
+            commons_entry_count: Some(commons_entry_count),
+            last_success_at,
             ..Default::default()
         },
     )
@@ -346,29 +385,44 @@ async fn mint_taskforce(
     apply_task(tasks, team, tf_name, spec, "taskforce").await
 }
 
+/// Aggregate outcome of a harvest pass — the autonomous-operation health signal.
+#[derive(Default)]
+struct RunStats {
+    /// Runs still executing (deliverable not yet landed).
+    active: usize,
+    /// Runs that produced a substantive deliverable (tokens or artifacts).
+    succeeded: i64,
+    /// Runs whose deliverable landed but did no substantive work (e.g. a model
+    /// rejection) — the signal the team is scheduled but not actually producing.
+    barren: i64,
+    /// Total tokens spent across all of the team's runs.
+    tokens_total: i64,
+    /// Newest substantive-deliverable timestamp (RFC3339), if any.
+    last_success_at: Option<String>,
+}
+
 /// Write path for the knowledge commons + run lifecycle: scan the team's
 /// standing-operation run tasks and, for any whose deliverable has landed,
 /// harvest the output into a provenance-tracked commons entry (idempotent — a
 /// run contributes at most one entry) and then **retire** the run by un-launching
 /// it, which tears down the now-finished sandbox so runs never pile up. Returns
-/// the count of runs still executing (deliverable not yet landed), used as
-/// backpressure for the charter loop. Best-effort: a transient read failure just
-/// defers the work to the next reconcile, never failing the team.
+/// aggregate run stats (active count for backpressure + health signal). Best-
+/// effort: a transient read failure just defers the work to the next reconcile.
 async fn harvest_and_retire_runs(
     client: &Client,
     tasks: &Api<KarsTask>,
     team: &KarsTeam,
     commons: &str,
-) -> usize {
+) -> RunStats {
+    let mut stats = RunStats::default();
     let team_name = team.name_any();
     let lp = ListParams::default().labels(&format!("kars.azure.com/team={team_name}"));
     let Ok(list) = tasks.list(&lp).await else {
-        return 0;
+        return stats;
     };
     let ns = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let cms: Api<k8s_openapi::api::core::v1::ConfigMap> = Api::namespaced(client.clone(), &ns);
 
-    let mut active = 0usize;
     for task in &list.items {
         // Only standing-operation runs deposit knowledge (members/principal are
         // standing authority, not run deliverables).
@@ -392,27 +446,35 @@ async fn harvest_and_retire_runs(
         let Some(cm) = landed else {
             // Deliverable not landed yet — still executing while launched.
             if launched {
-                active += 1;
+                stats.active += 1;
             }
             continue;
         };
         let data = cm.data.unwrap_or_default();
         let ok = data.get("status").map(String::as_str) == Some("ok");
+        let tokens = data
+            .get("totalTokens")
+            .and_then(|t| t.parse::<i64>().ok())
+            .unwrap_or(0);
+        let artifacts = data
+            .get("artifactCount")
+            .and_then(|c| c.parse::<i64>().ok())
+            .unwrap_or(0);
+        stats.tokens_total += tokens.max(0);
         // A *substantive* deliverable did real inference work — harness-neutral
         // signal: tokens were spent or artifacts were produced. This keeps the
         // commons free of empty/error runs (e.g. a model that rejected the
         // request) that would otherwise pollute the team's prior knowledge.
-        let did_work = data
-            .get("totalTokens")
-            .and_then(|t| t.parse::<i64>().ok())
-            .is_some_and(|t| t > 0)
-            || data
-                .get("artifactCount")
-                .and_then(|c| c.parse::<i64>().ok())
-                .is_some_and(|c| c > 0);
-        if did_work
-            && let Some(output) = data.get("output").filter(|s| ok && !s.trim().is_empty())
-        {
+        let did_work = tokens > 0 || artifacts > 0;
+        if did_work && ok && data.get("output").is_some_and(|s| !s.trim().is_empty()) {
+            stats.succeeded += 1;
+            let finished = data.get("finishedAt").cloned();
+            if let Some(f) = finished {
+                stats.last_success_at = match stats.last_success_at.take() {
+                    Some(prev) if prev >= f => Some(prev),
+                    _ => Some(f),
+                };
+            }
             // Title the entry by the team's mandate (clean), not the verbose
             // run objective (which carries the injected prior-knowledge preamble).
             let title = team
@@ -422,20 +484,23 @@ async fn harvest_and_retire_runs(
                 .next()
                 .unwrap_or(&team.spec.charter)
                 .to_string();
+            let output = data.get("output").map(String::as_str).unwrap_or_default();
             let _ = crate::team_commons::record_entry(
                 client, commons, &run, &title, &run, &run, output,
             )
             .await;
+        } else {
+            stats.barren += 1;
         }
-        // Deliverable has landed (ok or error) — retire the sandbox so the run
-        // doesn't keep consuming a pod. The task record + output ConfigMap
-        // remain for history; the knowledge lives on in the commons.
+        // Deliverable has landed — retire the sandbox so the run doesn't keep
+        // consuming a pod. The task record + output ConfigMap remain for
+        // history; the knowledge lives on in the commons.
         if launched {
             let retire = json!({ "spec": { "execution": { "launch": false } } });
             let _ = tasks.patch(&run, &PatchParams::default(), &Patch::Merge(retire)).await;
         }
     }
-    active
+    stats
 }
 
 /// SSA-apply a KarsTask owned by the team, tagged with team annotations. For a
