@@ -142,6 +142,14 @@ pub struct TeamCadence {
     /// honest and reproducible on a plain (kind) cluster. Must be `>= 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every_minutes: Option<u32>,
+
+    /// How often (in **minutes**) the team publishes a **digest** to the
+    /// steering inbox — a periodic standing report (runs generated/delivered,
+    /// tokens spent, knowledge accumulated, health). Absent ⇒ no digest is
+    /// published. Named per the design's *daily* digest (§20); kept as a minute
+    /// interval so it is demoable on a plain cluster without waiting a day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest_every_minutes: Option<u32>,
 }
 
 /// `KarsTeam.status` — the controller is the sole writer.
@@ -219,6 +227,10 @@ pub struct KarsTeamStatus {
     /// When the team last produced a substantive deliverable (RFC3339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_success_at: Option<String>,
+
+    /// When the team last published a digest to the steering inbox (RFC3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_digest_at: Option<String>,
 }
 
 impl KarsTeam {
@@ -309,6 +321,7 @@ mod tests {
                 roster,
                 cadence: Some(TeamCadence {
                     every_minutes: Some(60),
+                    digest_every_minutes: None,
                 }),
                 blueprint: None,
                 reporting_to: Some("alice@corp".into()),

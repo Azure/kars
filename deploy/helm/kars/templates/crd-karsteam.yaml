@@ -146,6 +146,17 @@ spec:
                   org (members exist, but no autonomous tick).
                 nullable: true
                 properties:
+                  digestEveryMinutes:
+                    description: |-
+                      How often (in **minutes**) the team publishes a **digest** to the
+                      steering inbox — a periodic standing report (runs generated/delivered,
+                      tokens spent, knowledge accumulated, health). Absent ⇒ no digest is
+                      published. Named per the design's *daily* digest (§20); kept as a minute
+                      interval so it is demoable on a plain cluster without waiting a day.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
                   everyMinutes:
                     description: |-
                       Tick interval in **minutes**. On each tick the charter loop mints one
@@ -533,6 +544,10 @@ spec:
                   result), `Degraded` (recent runs produced no deliverable), or `Stalled`
                   (cadence set but overdue). The autonomous-monitoring signal — proof the
                   team is actually doing its job, not just scheduled.
+                nullable: true
+                type: string
+              lastDigestAt:
+                description: When the team last published a digest to the steering inbox (RFC3339).
                 nullable: true
                 type: string
               lastGeneratedTask:
