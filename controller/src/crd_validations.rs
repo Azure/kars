@@ -616,8 +616,8 @@ pub fn kars_task_crd() -> CustomResourceDefinition {
 pub fn kars_team_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule: "size(self.charter) > 0 && size(self.charter) <= 8192".into(),
-            message: Some("spec.charter must be 1-8192 characters".into()),
+            rule: "(has(self.profileRef) && size(self.charter) == 0) || (size(self.charter) > 0 && size(self.charter) <= 8192)".into(),
+            message: Some("spec.charter must be 1-8192 characters (or empty when spec.profileRef is set, to inherit the profile's charter)".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
