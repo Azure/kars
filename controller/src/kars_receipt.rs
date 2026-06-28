@@ -231,6 +231,14 @@ pub struct PredicateCompleteness {
     /// when present — the per-tool audit depth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_event_count: Option<u64>,
+    /// `true` once the egress-guard's authored iptables ruleset has been bound
+    /// into the receipt (the V1 datapath-posture binding, design note §24b).
+    #[serde(default)]
+    pub egress_guard_ruleset_bound: bool,
+    /// The `sha256:` digest of the authored egress-guard iptables ruleset, when
+    /// bound — re-derivable from the controller for the task's sandbox kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress_guard_ruleset_hash: Option<String>,
 }
 
 impl PredicateCompleteness {
@@ -374,18 +382,44 @@ pub fn build_statement(
     } else {
         String::new()
     };
-    let not_bound = if completeness.token_cost_audit_bound {
-        "NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1) and the eBPF kernel-datapath witness (V2)."
+    let egress_audit = if completeness.egress_guard_ruleset_bound {
+        let hash = completeness
+            .egress_guard_ruleset_hash
+            .clone()
+            .unwrap_or_default();
+        format!(
+            " The egress-guard iptables ruleset IS bound: authored datapath posture pinned at {hash} (re-derivable from the controller for this sandbox kind)."
+        )
     } else {
-        "NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1), the router token/cost audit chain (V1, binds once the task has run), and the eBPF kernel-datapath witness (V2)."
+        String::new()
+    };
+    // What remains genuinely unbound. The egress-guard *ruleset* binds at mint;
+    // the only remaining gap is the node-level kernel-datapath *witness* (eBPF),
+    // which is hardware/node-gated and correctly deferred to V2.
+    let not_bound = match (
+        completeness.token_cost_audit_bound,
+        completeness.egress_guard_ruleset_bound,
+    ) {
+        (true, true) => {
+            "NOT yet bound: the eBPF kernel-datapath witness (V2) — node-level proof the kernel applied the bound ruleset."
+        }
+        (false, true) => {
+            "NOT yet bound: the router token/cost audit chain (V1, binds once the task has run) and the eBPF kernel-datapath witness (V2)."
+        }
+        (true, false) => {
+            "NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1) and the eBPF kernel-datapath witness (V2)."
+        }
+        (false, false) => {
+            "NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1), the router token/cost audit chain (V1, binds once the task has run), and the eBPF kernel-datapath witness (V2)."
+        }
     };
     let completeness_detail = if completeness.floor_enforced {
         format!(
-            "Completeness-floor controls observed enforced (CREATE-time task-namespace VAP, exec-ban VAP, posture-lock VAP, default-deny egress).{token_audit} {not_bound}"
+            "Completeness-floor controls observed enforced (CREATE-time task-namespace VAP, exec-ban VAP, posture-lock VAP, default-deny egress).{token_audit}{egress_audit} {not_bound}"
         )
     } else {
         format!(
-            "Some completeness-floor controls were not observed enforced (see predicate.completeness).{token_audit} {not_bound}"
+            "Some completeness-floor controls were not observed enforced (see predicate.completeness).{token_audit}{egress_audit} {not_bound}"
         )
     };
     let claims = vec![

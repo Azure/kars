@@ -712,6 +712,12 @@ async fn gather_completeness(
         .and_then(|d| d.get("eventCount").and_then(|c| c.parse::<u64>().ok()));
     let token_cost_audit_bound = run_total_tokens.is_some();
 
+    // V1 egress-guard ruleset binding: hash the authored iptables ruleset the
+    // egress-guard enforces for a task-materialized (non-SRE) sandbox. Bound at
+    // mint — it pins the datapath posture independent of whether the task has
+    // run yet. (The node-level eBPF witness that the kernel applied it is V2.)
+    let egress_guard_ruleset_hash = Some(crate::reconciler::egress_guard_ruleset_hash(false));
+
     crate::kars_receipt::PredicateCompleteness {
         task_namespace_floor_vap: vap_present("kars-task-namespace-floor", &vap_list),
         exec_ban_vap: vap_present("kars-sandbox-exec-ban", &vap_list),
@@ -721,6 +727,8 @@ async fn gather_completeness(
         token_cost_audit_bound,
         run_total_tokens,
         trace_event_count,
+        egress_guard_ruleset_bound: true,
+        egress_guard_ruleset_hash,
     }
     .with_rollup()
 }
