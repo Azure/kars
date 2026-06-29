@@ -161,8 +161,8 @@ async fn policy_status(State(state): State<AppState>) -> impl IntoResponse {
 // Slice 5a — surfaced egress blocked buffer
 //
 // Operator-facing companion to the existing `/egress/learned/blocked`
-// endpoint (which keeps its old shape for the
-// `kars egress … --pending`/`--approve` workflow). The `/internal`
+// endpoint (the observability surface backing `kars egress <name> --pending`,
+// i.e. learned domains not yet in the allowlist). The `/internal`
 // variants are the canonical surface the `kars egress blocked` CLI
 // and the headlamp plugin consume:
 //

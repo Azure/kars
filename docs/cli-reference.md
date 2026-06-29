@@ -1241,13 +1241,15 @@ kars policy sign \
 
 ### `kars egress`
 
-Full egress lifecycle management: learn mode (observe domains without
-blocking), pending approvals, allowlist management, and signed OCI artifact
-generation + cosign signing. With `--enforce`, all learned domains are
-promoted to the allowlist and enforcement mode is activated. Signing is
-on by default when combined with `--enforce` or `--approve`; the controller
-will refuse to use unsigned artifacts in authoritative mode
-(`SignerPolicyMissing`).
+Egress lifecycle management: learn mode (observe domains without blocking),
+baseline allowlist management on the `KarsSandbox` CRD, and signed OCI artifact
+generation + cosign signing. `--enforce` switches the sandbox to **Strict**
+egress mode and signs the current baseline (`allowedEndpoints`); it does **not**
+auto-promote learned domains — approve the ones you want with `--approve` first.
+Signing is on by default when combined with `--approve`, `--deny`, or
+`--enforce`; the controller refuses unsigned artifacts in authoritative mode
+(`SignerPolicyMissing`). For temporary, TTL-scoped grants use the
+`allow-extra` subcommand (an `EgressApproval` CR).
 
 **Usage:**
 ```
@@ -1263,16 +1265,16 @@ kars egress [name] [options]
 | Flag | Default | Description |
 |---|---|---|
 | `--namespace <ns>` | — | Kubernetes namespace |
-| `--learn` | — | Enable learn mode (log all accessed domains) |
-| `--no-learn` | — | Disable learn mode |
+| `--learn` | — | Enable learn mode (durable: patches `egressMode=Learn` in k8s) |
+| `--no-learn` | — | Disable learn mode (switches `egressMode` to Strict) |
 | `--learned` | — | Show domains discovered during learn mode |
-| `--pending` | — | Show domains pending operator approval |
-| `--approve <domain>` | — | Approve a domain for egress |
-| `--deny <domain>` | — | Deny and remove a pending domain request |
+| `--pending` | — | Show learned domains not yet in the allowlist |
+| `--approve <domain[:port]>` | — | Add a domain to the baseline allowlist (default port 443) and re-sign |
+| `--deny <domain>` | — | Remove a domain from the baseline allowlist and re-sign |
 | `--allowlist` | — | Show currently approved domains |
-| `--enforce` | — | Graduate: promote all learned domains to allowlist, switch to enforcement mode |
+| `--enforce` | — | Seal: switch to Strict egress mode and sign the current baseline |
 | `--status` | — | Show blocklist and learn mode status |
-| `--sign` | *(on with `--enforce`/`--approve`)* | Build canonical allowlist artifact, push to OCI registry, sign with cosign, patch `allowlistRef` |
+| `--sign` | *(on with `--enforce`/`--approve`/`--deny`)* | Build canonical allowlist artifact, push to OCI registry, sign with cosign, patch `allowlistRef` |
 | `--no-sign` | — | Skip signing (controller refuses the artifact in authoritative mode) |
 | `--sign-mode <mode>` | *(auto-detect)* | Cosign mode: `keyless`, `identity-token`, `keyed` |
 | `--sign-key <ref>` | — | Cosign key reference (path or KMS URI like `azurekms://...`) — required for `--sign-mode keyed` |
@@ -1280,6 +1282,9 @@ kars egress [name] [options]
 | `--repository <repo>` | `policy/egress-allowlist/<sandbox>` | Repository path within the registry |
 | `--emit-manifest <path>` | — | GitOps mode: write the KarsSandbox patch to `<path>` instead of running `kubectl patch` |
 | `--force` | `false` | With `--emit-manifest`, overwrite an existing file |
+
+See also the `kars egress allow-extra`, `kars egress approvals`, and
+`kars egress revoke` subcommands for TTL-scoped `EgressApproval` grants.
 
 **Examples:**
 ```bash
@@ -1289,10 +1294,10 @@ kars egress my-agent --learn
 # Review discovered domains
 kars egress my-agent --learned
 
-# Approve a domain (signs the updated allowlist automatically)
+# Approve a domain into the baseline (default :443; signs automatically)
 kars egress my-agent --approve api.github.com
 
-# Graduate to enforcement mode (signs + patches)
+# Seal: Strict mode + sign the baseline
 kars egress my-agent --enforce
 
 # GitOps mode: emit patch file instead of applying

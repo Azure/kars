@@ -145,11 +145,11 @@ flowchart TD
   TLD -->|no| PRIV{"DNS resolves to<br/>private/loopback IP?<br/>(rebinding guard)"}
   PRIV -->|yes| DENY
   PRIV -->|no| MODE{"Egress mode"}
-  MODE -->|learn| LOG["Append to learned set<br/>→ operator review queue"]
+  MODE -->|learn| LOG["Append to learned set<br/>→ operator review (kars egress --learned)"]
   LOG --> ALLOW
-  MODE -->|enforce| AL{"Domain on allowlist?<br/>(parent-domain match)"}
+  MODE -->|strict| AL{"Domain on signed allowlist?<br/>(parent-domain match)"}
   AL -->|yes| ALLOW["Tunnel / forward request"]
-  AL -->|no| PEND["Append to PendingApproval<br/>(deduped) → 403 'awaiting approval'"]
+  AL -->|no| PEND["403 denied<br/>recorded in BlockedBuffer (/egress/learned/blocked)"]
 
   classDef bad fill:#fde2e1,stroke:#c0392b,color:#0b1220
   classDef good fill:#dff5e1,stroke:#27ae60,color:#0b1220
@@ -161,8 +161,9 @@ flowchart TD
 
 Verified against `inference-router/src/forward_proxy.rs` and
 `inference-router/src/blocklist.rs` (`check_egress`, the high-risk TLD list,
-the parent-domain allowlist match, the DNS rebinding guard, and
-`PendingApproval` deduplication).
+the parent-domain allowlist match, and the DNS rebinding guard). Denied attempts
+under Strict mode are recorded in the slice-5a `BlockedBuffer`
+(`GET /egress/learned/blocked`) — there is no in-process pending-approval queue.
 
 ## Learn → enforce lifecycle
 
@@ -179,67 +180,86 @@ stateDiagram-v2
   end note
   note right of Review
     kars egress <name> --learned
-    operator approves / denies per domain
+    operator approves into the baseline:
+    kars egress <name> --approve <host>
   end note
   note right of Enforce
-    kars egress <name> --no-learn
-    Only allowlisted domains pass
-    New domains → PendingApproval
+    kars egress <name> --enforce
+    (egressMode=Strict + signed bundle)
+    Only allowlisted hosts pass (host match)
+    New domains → denied (not queued)
   end note
   Learn --> Review: operator inspects learned set
-  Review --> Review: approve / deny
-  Review --> Enforce: --enforce / --no-learn
+  Review --> Review: --approve / --deny (baseline + re-sign)
+  Review --> Enforce: --enforce (seal: Strict + sign)
   Enforce --> Learn: --learn (rare; debugging only)
 ```
 
 
 ## Operator Workflow
 
+Egress is driven by the `KarsSandbox` CRD and a cosign-signed allowlist bundle —
+there is **no in-router approval queue**. "Approve" means *add to the baseline
+`allowedEndpoints` and re-sign*; "enforce" means *switch `egressMode` to Strict
+and sign the baseline*. For a temporary, time-boxed grant, use an
+`EgressApproval` CR via `kars egress allow-extra` (see below).
+
 ### 1. Deploy with Learn Mode (default)
 
-Learn mode is enabled by default (`network_policy.learn_egress = true` in the
-sandbox spec). The blocklist is still enforced — learn mode only affects
-unknown, non-malicious domains.
+Learn mode is the default (`spec.networkPolicy.egressMode: Learn`). The blocklist
+is still enforced — learn mode only affects unknown, non-malicious domains.
 
 ### 2. Review Discovered Domains
 
 ```bash
 kars egress <name>           # Show status + summary
 kars egress <name> --learned # Detailed list of discovered domains
+kars egress <name> --pending # Learned domains not yet in the allowlist
 ```
 
-### 3. Approve Trusted Domains
+### 3. Approve Trusted Domains (into the signed baseline)
 
 ```bash
-kars egress <name> --approve api.telegram.org
+kars egress <name> --approve api.telegram.org        # defaults to :443; re-signs
+kars egress <name> --approve example.com:8443        # explicit port
 ```
 
-Approving a parent domain (e.g., `telegram.org`) covers all subdomains
-(e.g., `api.telegram.org`).
+`--approve` adds the host (default port `443`) to `spec.networkPolicy.allowedEndpoints`
+and re-signs the bundle by default (pass `--no-sign` only for local dev). Approving
+a parent domain (e.g. `telegram.org`) covers its subdomains.
 
-### 4. Lock Down
+For a **temporary** grant that expires on its own (no re-sign needed):
 
 ```bash
-kars egress <name> --no-learn
+kars egress allow-extra <name> --host api.telegram.org --ttl PT4H --reason "incident INC-123"
 ```
 
-After disabling learn mode, only explicitly allowlisted domains are reachable.
-Any new domain the agent tries to reach will be denied and added to the pending
-approval queue.
+### 4. Lock Down (seal)
+
+```bash
+kars egress <name> --enforce     # egressMode=Strict + sign the baseline
+```
+
+After sealing, only allowlisted `host:port` pairs are reachable. Any new domain
+the agent tries to reach is **denied** (it is still recorded in the learn buffer
+for review via `--pending`, but there is no pending-approval queue that widens
+egress automatically).
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `kars egress <name>` | Show egress status (blocklist, learn mode, counts) |
-| `kars egress <name> --pending` | Show domains pending operator approval |
-| `kars egress <name> --approve <domain>` | Approve a domain for egress |
-| `kars egress <name> --deny <domain>` | Deny and remove a pending domain request |
+| `kars egress <name> --pending` | Show learned domains not yet in the allowlist |
+| `kars egress <name> --approve <domain[:port]>` | Add a domain to the baseline allowlist (default port 443) and re-sign |
+| `kars egress <name> --deny <domain>` | Remove a domain from the baseline allowlist and re-sign |
 | `kars egress <name> --allowlist` | Show currently approved domains |
 | `kars egress <name> --learned` | Show domains discovered during learn mode |
-| `kars egress <name> --learn` | Enable learn mode |
-| `kars egress <name> --no-learn` | Disable learn mode |
+| `kars egress <name> --enforce` | Seal: switch to Strict egress mode and sign the baseline |
+| `kars egress <name> --learn` | Enable learn mode (durable: patches `egressMode`) |
+| `kars egress <name> --no-learn` | Disable learn mode (switches to Strict) |
 | `kars egress <name> --status` | Show blocklist and learn mode status |
+| `kars egress allow-extra <name> --host <h> --ttl <dur> --reason <r>` | Grant a temporary, TTL-scoped egress host via an `EgressApproval` CR |
 | `kars egress <name> --namespace <ns>` | Target a specific Kubernetes namespace |
 
 The CLI discovers the running pod via `kubectl get pods` and executes `curl`
@@ -251,15 +271,22 @@ All endpoints are served by the inference router on `127.0.0.1:8443`.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/egress/fetch` | POST | Proxy an HTTP request (blocklist → allowlist → learn/pending) |
-| `/egress/pending` | GET | List pending approval requests |
-| `/egress/approve` | POST | Approve a domain (`{"domain": "..."}`) |
-| `/egress/deny` | POST | Deny and remove a pending request (`{"domain": "..."}`) |
-| `/egress/allowlist` | GET | List approved domains |
+| `/egress/fetch` | POST | Proxy an HTTP request (blocklist → allowlist → learn) |
+| `/egress/allowlist` | GET | List approved domains (from the compiled bundle) |
 | `/egress/learned` | GET | List domains discovered in learn mode |
 | `/egress/learned/clear` | POST | Clear learned domains (after export/review) |
+| `/egress/learned/blocked` | GET | List egress attempts blocked under Strict mode |
+| `/egress/learn` | POST | Toggle learn mode at runtime (`{"enabled": true|false}`) |
 | `/blocklist/status` | GET | Blocklist status (enabled, domain count, learn mode) |
 | `/blocklist/check` | POST | Check if a domain is blocklisted |
+
+> **Removed (Slice 5c.1):** the in-process approval endpoints `/egress/approve`,
+> `/egress/deny`, `/egress/pending`, and `/egress/enforce` no longer exist. The
+> allowlist is now sourced exclusively from the controller-published,
+> cosign-verified bundle (`spec.networkPolicy.allowlistRef`), built from
+> `allowedEndpoints`; runtime widening is an `EgressApproval` CR. The CLI flags
+> `--approve`/`--deny`/`--enforce` operate on the CRD + signing pipeline, not
+> these routes.
 
 ### `/egress/fetch` Request/Response
 
@@ -285,9 +312,9 @@ All endpoints are served by the inference router on `127.0.0.1:8443`.
 **Denied (403):**
 ```json
 {
-  "error": "Domain 'evil.com' not on allowlist — pending operator approval",
+  "error": "Domain 'evil.com' not on allowlist — denied under Strict egress",
   "url": "https://evil.com/exfil",
-  "action": "Run 'kars egress <name> --pending' to see pending requests, then 'kars egress <name> --approve <domain>' to allow."
+  "action": "If legitimate, add it to the baseline: 'kars egress <name> --approve evil.com' (re-signs), or grant temporarily with 'kars egress allow-extra <name> --host evil.com --ttl PT1H --reason ...'."
 }
 ```
 
@@ -343,7 +370,7 @@ decisions are recorded in the governance audit log.
 
 | File | Description |
 |------|-------------|
-| `inference-router/src/blocklist.rs` | Blocklist engine, allowlist, pending approvals, learn mode |
+| `inference-router/src/blocklist.rs` | Blocklist engine, allowlist, learn mode |
 | `inference-router/src/routes/egress.rs` | HTTP handlers for `/egress/*` endpoints |
 | `cli/src/commands/egress.ts` | CLI `kars egress` command |
 | `controller/src/reconciler/mod.rs` | iptables init container + NetworkPolicy generation |
