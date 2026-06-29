@@ -6,8 +6,10 @@ import {
   parseVersionTag,
   compareVersions,
   releaseImagePlan,
+  releasesBetween,
+  type ReleaseNote,
 } from "./release.js";
-import { buildHelmUpgradeArgs } from "../commands/upgrade.js";
+import { buildHelmUpgradeArgs, summarizeChangelog } from "../commands/upgrade.js";
 
 describe("parseVersionTag", () => {
   it("parses stable + prerelease tags (v optional)", () => {
@@ -83,5 +85,55 @@ describe("buildHelmUpgradeArgs", () => {
   it("omits the foundry endpoint when absent", () => {
     const args = buildHelmUpgradeArgs({ ...ctx, foundryEndpoint: undefined }, "/chart");
     expect(args.join(" ")).not.toContain("inferenceRouter.azure.openai.endpoint");
+  });
+});
+
+describe("releasesBetween", () => {
+  const rels: ReleaseNote[] = [
+    { tag: "v0.1.18", name: "v0.1.18", body: "" },
+    { tag: "v0.1.17", name: "v0.1.17", body: "" },
+    { tag: "v0.1.16", name: "v0.1.16", body: "" },
+    { tag: "v0.1.15", name: "v0.1.15", body: "" },
+    { tag: "v0.1.14", name: "v0.1.14", body: "" },
+  ];
+  it("returns releases newer than current up to target, oldest→newest", () => {
+    expect(releasesBetween(rels, "v0.1.15", "v0.1.18").map((r) => r.tag))
+      .toEqual(["v0.1.16", "v0.1.17", "v0.1.18"]);
+  });
+  it("excludes the current version and anything above target", () => {
+    const got = releasesBetween(rels, "v0.1.16", "v0.1.17").map((r) => r.tag);
+    expect(got).toEqual(["v0.1.17"]);
+    expect(got).not.toContain("v0.1.16");
+    expect(got).not.toContain("v0.1.18");
+  });
+  it("with no known current, includes everything up to target", () => {
+    expect(releasesBetween(rels, "", "v0.1.16").map((r) => r.tag))
+      .toEqual(["v0.1.14", "v0.1.15", "v0.1.16"]);
+  });
+});
+
+describe("summarizeChangelog", () => {
+  it("extracts bullet lines and skips the title + boilerplate", () => {
+    const msg = [
+      "kars v0.1.17",
+      "",
+      "- First feature",
+      "* Second feature",
+      "",
+      "## Container images",
+      "- ghcr.io/azure/kars-controller:v0.1.17",
+    ].join("\n");
+    const out = summarizeChangelog(msg);
+    expect(out).toEqual(["• First feature", "• Second feature"]);
+  });
+  it("falls back to prose when there are no bullets", () => {
+    const out = summarizeChangelog("kars v0.1.5\n\nJust a prose summary line.");
+    expect(out).toEqual(["Just a prose summary line."]);
+  });
+  it("caps the number of bullet lines", () => {
+    const many = ["kars v1.0.0", ...Array.from({ length: 20 }, (_, i) => `- item ${i}`)].join("\n");
+    const out = summarizeChangelog(many, 8);
+    expect(out.length).toBeLessThanOrEqual(9); // 8 + the "…" marker
+    expect(out[out.length - 1]).toBe("…");
   });
 });
