@@ -62,6 +62,9 @@ struct GitHubAppInner {
     app_id: String,
     installation_id: String,
     private_key_pem: Vec<u8>,
+    /// The repos the minted token is scoped to (least privilege). Empty ⇒ all
+    /// repos in the installation (only when no scope is configured).
+    repositories: Vec<String>,
     cached: Mutex<Option<CachedToken>>,
 }
 
@@ -69,7 +72,9 @@ impl GitHubApp {
     /// Build from the ambient environment. Returns `None` (feature off) unless
     /// all three of `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and
     /// `GITHUB_APP_PRIVATE_KEY` are set — so a router with no App configured
-    /// behaves exactly as before.
+    /// behaves exactly as before. `GITHUB_APP_REPOS` (comma-separated repo
+    /// names, e.g. "kars,kars-bridge") scopes the minted token to least
+    /// privilege; absent ⇒ installation default.
     #[must_use]
     pub fn from_env() -> Option<Self> {
         let app_id = std::env::var("GITHUB_APP_ID").ok().filter(|s| !s.is_empty())?;
@@ -79,17 +84,27 @@ impl GitHubApp {
         let private_key_pem = std::env::var("GITHUB_APP_PRIVATE_KEY")
             .ok()
             .filter(|s| !s.is_empty())?;
-        Some(Self::new(app_id, installation_id, private_key_pem.into_bytes()))
+        let repositories = std::env::var("GITHUB_APP_REPOS")
+            .ok()
+            .map(|s| s.split(',').map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect())
+            .unwrap_or_default();
+        Some(Self::new(app_id, installation_id, private_key_pem.into_bytes(), repositories))
     }
 
     /// Construct explicitly (used by `from_env` and tests).
     #[must_use]
-    pub fn new(app_id: String, installation_id: String, private_key_pem: Vec<u8>) -> Self {
+    pub fn new(
+        app_id: String,
+        installation_id: String,
+        private_key_pem: Vec<u8>,
+        repositories: Vec<String>,
+    ) -> Self {
         Self {
             inner: Arc::new(GitHubAppInner {
                 app_id,
                 installation_id,
                 private_key_pem,
+                repositories,
                 cached: Mutex::new(None),
             }),
         }
@@ -142,6 +157,14 @@ impl GitHubApp {
             "https://api.github.com/app/installations/{}/access_tokens",
             self.inner.installation_id
         );
+        // Least-privilege scoping: bound the token to the configured repos and a
+        // minimal permission set (contents+PRs read/write only — no admin, no
+        // secrets, no org). Absent repo config ⇒ installation default. Never
+        // request the full installation surface.
+        let body = serde_json::json!({
+            "repositories": self.inner.repositories,
+            "permissions": { "contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read" },
+        });
         let client = reqwest::Client::new();
         let resp = client
             .post(&url)
@@ -149,6 +172,7 @@ impl GitHubApp {
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "kars-inference-router")
             .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&body)
             .send()
             .await
             .context("GitHub installation token request failed")?;
@@ -205,9 +229,15 @@ mod tests {
 
     #[test]
     fn invalid_pem_is_rejected() {
-        let app = GitHubApp::new("123".into(), "456".into(), b"not a pem".to_vec());
+        let app = GitHubApp::new("123".into(), "456".into(), b"not a pem".to_vec(), vec![]);
         // Minting must fail clearly rather than panic.
         assert!(app.mint_app_jwt(1_700_000_000).is_err());
+    }
+
+    #[test]
+    fn repos_default_empty_unless_configured() {
+        let app = GitHubApp::new("1".into(), "2".into(), b"k".to_vec(), vec!["kars".into()]);
+        assert_eq!(app.inner.repositories, vec!["kars".to_string()]);
     }
 
     #[test]
