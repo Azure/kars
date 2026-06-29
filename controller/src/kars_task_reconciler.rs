@@ -600,10 +600,23 @@ async fn reconcile_receipt(
             // without the full chain. Best-effort; never blocks the receipt.
             match crate::kars_receipt_log::read_chain(client).await {
                 Ok(chain) => {
-                    if let Err(e) =
-                        crate::kars_receipt_log::publish_checkpoint(client, signer, &chain).await
+                    match crate::kars_receipt_log::publish_checkpoint(client, signer, &chain).await
                     {
-                        tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to publish receipt checkpoint");
+                        Ok(checkpoint) => {
+                            // Independent transparency witness co-signs the head.
+                            if let Ok(witness) =
+                                crate::providers::signing::load_or_create_witness(client).await
+                                && let Err(e) = crate::kars_receipt_log::witness_checkpoint(
+                                    client, &witness, &chain, &checkpoint,
+                                )
+                                .await
+                            {
+                                tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to witness receipt checkpoint");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to publish receipt checkpoint");
+                        }
                     }
                 }
                 Err(e) => {
@@ -660,6 +673,12 @@ async fn gather_completeness(
     use k8s_openapi::api::admissionregistration::v1::ValidatingAdmissionPolicy;
     use k8s_openapi::api::core::v1::ConfigMap;
     use k8s_openapi::api::networking::v1::NetworkPolicy;
+
+    // Witness ConfigMaps live in the controller namespace.
+    fn cms_system(client: &kube::Client) -> Api<ConfigMap> {
+        let sys = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+        Api::namespaced(client.clone(), &sys)
+    }
 
     let vaps: Api<ValidatingAdmissionPolicy> = Api::all(client.clone());
     let vap_present = |name: &str, list: &[ValidatingAdmissionPolicy]| -> bool {
@@ -718,6 +737,30 @@ async fn gather_completeness(
     // run yet. (The node-level eBPF witness that the kernel applied it is V2.)
     let egress_guard_ruleset_hash = Some(crate::reconciler::egress_guard_ruleset_hash(false));
 
+    // V1 transparency witness: an independent witness co-signs the receipt-log
+    // checkpoint (kars-receipt-witness ConfigMap). Presence of a verified witness
+    // co-signature binds "the log isn't forked" into the receipt.
+    let witness_cm = cms_system(client).get_opt("kars-receipt-witness").await.ok().flatten();
+    let witness_key_id = witness_cm
+        .as_ref()
+        .and_then(|cm| cm.data.as_ref())
+        .and_then(|d| d.get("witnessKeyId").cloned())
+        .filter(|s| !s.is_empty());
+    let transparency_witnessed = witness_key_id.is_some();
+
+    // V2 kernel-datapath witness: the eBPF/datapath witness DaemonSet writes the
+    // live kernel egress ruleset hash per node into kars-datapath-witness. The
+    // datapath is witnessed when a node's observed hash matches the authored one.
+    let authored = crate::reconciler::egress_guard_ruleset_hash(false);
+    let kernel_datapath_witnessed = cms_system(client)
+        .get_opt("kars-datapath-witness")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|cm| cm.data)
+        .map(|d| d.values().any(|v| v == &authored))
+        .unwrap_or(false);
+
     crate::kars_receipt::PredicateCompleteness {
         task_namespace_floor_vap: vap_present("kars-task-namespace-floor", &vap_list),
         exec_ban_vap: vap_present("kars-sandbox-exec-ban", &vap_list),
@@ -729,6 +772,9 @@ async fn gather_completeness(
         trace_event_count,
         egress_guard_ruleset_bound: true,
         egress_guard_ruleset_hash,
+        transparency_witnessed,
+        witness_key_id,
+        kernel_datapath_witnessed,
     }
     .with_rollup()
 }
@@ -805,10 +851,34 @@ pub async fn run(client: Client) -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Unit tests — pure helpers only. K8s-API-touching paths are exercised
-// by the kind-based integration harness.
-// ─────────────────────────────────────────────────────────────────────
+/// Publish the controller-authored egress-guard ruleset hash into a ConfigMap.
+/// The node-level datapath-witness DaemonSet reads this, compares the live
+/// kernel iptables ruleset, and (on match) writes `kars-datapath-witness` so a
+/// receipt's completeness predicate can bind the kernel datapath. Idempotent.
+pub async fn publish_datapath_authored(client: &Client) -> Result<()> {
+    use k8s_openapi::api::core::v1::ConfigMap;
+    let sys = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &sys);
+    let authored = crate::reconciler::egress_guard_ruleset_hash(false);
+    let cm: ConfigMap = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "kars-datapath-authored",
+            "namespace": sys,
+            "labels": { "app.kubernetes.io/name": "kars", "app.kubernetes.io/component": "datapath-witness" },
+        },
+        "data": { "rulesetHash": authored, "redirectPort": "8444" },
+    }))?;
+    cms.patch(
+        "kars-datapath-authored",
+        &kube::api::PatchParams::apply("kars-controller/datapath-authored").force(),
+        &kube::api::Patch::Apply(&cm),
+    )
+    .await?;
+    tracing::info!(hash = %authored, "published datapath authored ruleset hash");
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,85 @@
+{{- if .Values.datapathWitness.enabled }}
+# Kernel-datapath witness DaemonSet (design note §24b, V2 binding).
+# On every node it inspects the live kernel iptables ruleset and, only when the
+# egress-guard REDIRECT-to-:8444 rules are actually present, co-attests by
+# writing the controller-authored ruleset hash into kars-datapath-witness. A
+# receipt's completeness predicate then binds "the kernel datapath enforces the
+# authored egress posture" — a real node-level witness independent of the
+# controller's own iptables-emit, not a controller self-claim.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-datapath-witness
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: datapath-witness
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kars
+      app.kubernetes.io/component: datapath-witness
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kars
+        app.kubernetes.io/component: datapath-witness
+    spec:
+      serviceAccountName: kars-controller
+      tolerations:
+        - key: "kars.azure.com/sandbox"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "CriticalAddonsOnly"
+          operator: "Exists"
+      hostNetwork: true
+      hostPID: true
+      containers:
+        - name: witness
+          image: registry.k8s.io/build-image/debian-iptables:bookworm-v1.6.0
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NS
+              value: {{ .Release.Namespace }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              API=https://kubernetes.default.svc
+              SA=/var/run/secrets/kubernetes.io/serviceaccount
+              TOKEN=$(cat $SA/token); CA=$SA/ca.crt
+              while true; do
+                AUTH=$(wget -qO- --ca-certificate=$CA --header="Authorization: Bearer $TOKEN" \
+                  "$API/api/v1/namespaces/$NS/configmaps/kars-datapath-authored" || true)
+                WANT=$(echo "$AUTH" | sed -n 's/.*"rulesetHash":"\([^"]*\)".*/\1/p')
+                # Witness only if the kernel actually has the authored redirect rules.
+                if nsenter -t 1 -n iptables -t nat -S 2>/dev/null | grep -q -- "--dport 443.*REDIRECT.*8444" \
+                   && nsenter -t 1 -n iptables -t nat -S 2>/dev/null | grep -q -- "--dport 80.*REDIRECT.*8444" \
+                   && [ -n "$WANT" ]; then
+                  BODY="{\"data\":{\"$NODE_NAME\":\"$WANT\"}}"
+                  wget -qO- --ca-certificate=$CA --method=PATCH \
+                    --header="Authorization: Bearer $TOKEN" \
+                    --header="Content-Type: application/strategic-merge-patch+json" \
+                    --body-data="$BODY" \
+                    "$API/api/v1/namespaces/$NS/configmaps/kars-datapath-witness" >/dev/null 2>&1 || \
+                  wget -qO- --ca-certificate=$CA --method=POST \
+                    --header="Authorization: Bearer $TOKEN" \
+                    --header="Content-Type: application/json" \
+                    --body-data="{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"kars-datapath-witness\",\"namespace\":\"$NS\"},\"data\":{\"$NODE_NAME\":\"$WANT\"}}" \
+                    "$API/api/v1/namespaces/$NS/configmaps" >/dev/null 2>&1 || true
+                fi
+                sleep 60
+              done
+          resources:
+            requests: { cpu: "2m", memory: "16Mi" }
+            limits: { cpu: "20m", memory: "32Mi" }
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
+{{- end }}

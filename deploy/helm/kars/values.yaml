@@ -187,6 +187,11 @@ monitoring:
       traceDns: true        # DNS snooping for policy bypass detection
       traceMount: true      # Detect mount attempts (should be blocked)
 
+# Kernel-datapath witness: per-node DaemonSet that inspects live iptables and
+# co-attests the egress posture into kars-datapath-witness (design note §24b V2).
+datapathWitness:
+  enabled: true
+
 # Admission policies shipped with the chart.
 admission:
   envelopeWriteLock:

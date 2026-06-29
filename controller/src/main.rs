@@ -256,6 +256,17 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { kars_task_reconciler::run(client).await })
     };
+    {
+        // Publish the controller-authored egress-guard ruleset hash so the
+        // node-level datapath-witness DaemonSet can compare the live kernel
+        // ruleset against it and co-attest the kernel datapath.
+        let client = client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = kars_task_reconciler::publish_datapath_authored(&client).await {
+                tracing::warn!(error = %e, "failed to publish datapath authored-hash");
+            }
+        });
+    }
     let kars_team_handle = {
         let client = client.clone();
         tokio::spawn(async move { kars_team_reconciler::run(client).await })
