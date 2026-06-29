@@ -102,5 +102,29 @@ the authoritative CRD + signed-allowlist pipeline; strengthens revocation
 (deny re-signs), keeps signing fail-closed, and removes the last callers of the
 deleted in-router approval endpoints. No security control weakened.
 
+## Review rounds (rubber-duck, k8s + architecture)
+Three independent review passes; all blocking findings addressed:
+- R1/R2: deny-not-signed fail-open (deny now in signing context), enforce not
+  live-disabling learn, port-less drop (normalize to :443 before signing),
+  Docker-mode regression, manual-E2E dead endpoints.
+- R3: (a) `--deny` of the **last** endpoint can't sign an empty baseline — now
+  detected and the operator is told the empty inline list already denies all
+  egress under Strict (no confusing deep signer error); (b) operator
+  `learnEgress`/`enforceEgress` no longer early-return when the pod is down — the
+  authoritative CRD patch runs regardless (you must be able to flip mode to
+  recover a crashing sandbox), only the live probe is pod-gated; (c)
+  `discoverKarsSandboxNamespace` now **fails on an ambiguous** cross-namespace
+  name match instead of silently patching the first; (d) host:port messaging
+  softened to reflect that the router enforces an **L7 host match** today (per-
+  endpoint port enforcement is reserved for a later slice; the signed bundle
+  already carries ports); (e) the manual E2E now **fails** (not skips) the core
+  learn/enforce/approve/revoke assertions after prerequisites pass, using a
+  bounded poll to tolerate reconcile/NetworkPolicy propagation lag.
+
+Known limitation (non-blocking): the operator TUI actions target the CR in
+`kars-system` (the default operator release namespace); a non-default release
+surfaces a clear "not found" error rather than a wrong-namespace mutation. The
+scriptable `kars egress` path resolves the CR namespace and guards ambiguity.
+
 Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
 Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>

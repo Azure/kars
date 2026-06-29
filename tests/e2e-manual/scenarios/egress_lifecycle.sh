@@ -109,6 +109,34 @@ agent_curl() {
         --connect-timeout "$timeout" "$url" 2>/dev/null || true
 }
 
+poll_blocked() {
+    # Poll until the agent's request to $1 is blocked (HTTP 000 / empty),
+    # tolerating reconcile + NetworkPolicy propagation lag. Returns 0 if it
+    # becomes blocked within ~${2:-40}s, 1 otherwise. The LAST observed code is
+    # echoed so the caller can report it on failure.
+    local url="$1" budget="${2:-40}" http=""
+    local deadline=$(( SECONDS + budget ))
+    while (( SECONDS < deadline )); do
+        http=$(agent_curl "$url" 6)
+        if [[ "$http" == "000" || -z "$http" ]]; then echo "$http"; return 0; fi
+        sleep 3
+    done
+    echo "$http"; return 1
+}
+
+poll_allowed() {
+    # Poll until the agent's request to $1 succeeds (2xx/3xx), tolerating
+    # reconcile lag. Returns 0 if allowed within ~${2:-40}s, 1 otherwise.
+    local url="$1" budget="${2:-40}" http=""
+    local deadline=$(( SECONDS + budget ))
+    while (( SECONDS < deadline )); do
+        http=$(agent_curl "$url" 8)
+        if [[ "$http" == "200" || "$http" == "301" || "$http" == "302" ]]; then echo "$http"; return 0; fi
+        sleep 3
+    done
+    echo "$http"; return 1
+}
+
 # ── [1/4] learn ───────────────────────────────────────────────────────
 log_step "[1/4] learn: agent touches example.com → expect to see it in /egress/learned"
 metric_start "egress_learn_touch"
@@ -142,13 +170,14 @@ fi
 # Best-effort live toggle so Strict applies without waiting for a pod roll.
 _=$(router_curl POST "/egress/learn" '{"enabled":false}')
 metric_finish "egress_enforce_switch" egress_lifecycle enforceSwitchLatency
-sleep 3
 # example.org should not have been seen during learn — should now be blocked.
-http=$(agent_curl "https://example.org" 6)
-if [[ "$http" == "000" || -z "$http" ]]; then
+# This is a core assertion: poll (tolerate propagation lag) then FAIL if it
+# never blocks.
+http=$(poll_blocked "https://example.org" 45)
+if [[ $? -eq 0 ]]; then
     log_pass "previously-unseen domain (example.org) blocked under Strict"
 else
-    log_skip "example.org returned HTTP ${http} — egress NetworkPolicy may not have refreshed yet"
+    log_fail "example.org still reachable under Strict (last HTTP=${http}) — enforcement did not take effect"
 fi
 
 # ── [3/4] approve ─────────────────────────────────────────────────────
@@ -169,28 +198,30 @@ spec:
   ttl: PT15M
 EOF
 then
+    # Prerequisite failure (CRD not installed / admission rejected) → skip, not fail.
     log_skip "could not create EgressApproval/${appr} — CRD may not be installed in this build"
 else
-    sleep 6
-    http=$(agent_curl "https://example.org" 8)
-    if [[ "$http" == "200" || "$http" == "301" || "$http" == "302" ]]; then
+    http=$(poll_allowed "https://example.org" 45)
+    if [[ $? -eq 0 ]]; then
         log_pass "EgressApproval allowlisted example.org (HTTP ${http})"
     else
-        log_skip "EgressApproval applied but probe got HTTP=${http} — reconcile/propagation lag or upstream issue"
+        log_fail "EgressApproval applied but example.org still blocked (last HTTP=${http}) — grant did not take effect"
     fi
 fi
 
 # ── [4/4] deny ────────────────────────────────────────────────────────
 log_step "[4/4] deny: delete the EgressApproval CR, re-probe → expect block"
-if ! kubectl delete egressapproval "$appr" -n "$ns" >/dev/null 2>&1; then
-    log_skip "could not delete EgressApproval/${appr} — may not have been created"
+if ! kubectl get egressapproval "$appr" -n "$ns" >/dev/null 2>&1; then
+    # The approval was never created (step 3 skipped) — nothing to revoke.
+    log_skip "EgressApproval/${appr} absent — revoke step not applicable"
+elif ! kubectl delete egressapproval "$appr" -n "$ns" >/dev/null 2>&1; then
+    log_skip "could not delete EgressApproval/${appr}"
 else
-    sleep 6
-    http=$(agent_curl "https://example.org" 6)
-    if [[ "$http" == "000" || -z "$http" ]]; then
+    http=$(poll_blocked "https://example.org" 45)
+    if [[ $? -eq 0 ]]; then
         log_pass "revoking the EgressApproval blocked example.org again"
     else
-        log_skip "EgressApproval deleted but probe got HTTP=${http} — propagation lag"
+        log_fail "EgressApproval deleted but example.org still reachable (last HTTP=${http}) — revocation did not take effect"
     fi
 fi
 

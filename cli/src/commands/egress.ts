@@ -337,6 +337,19 @@ export function egressCommand(): Command {
             // signed bundle is the authoritative artifact, not the inline list).
             console.log(chalk.dim(`\n  ${host} is not in the baseline allowlist for '${name}' — re-signing the current baseline to ensure the revocation is authoritative.`));
           }
+          // Removing the LAST endpoint leaves an empty baseline, which the
+          // canonical signer refuses (`--sign` cannot publish an empty bundle).
+          // Skip signing and tell the operator how to make the revocation
+          // authoritative, rather than failing deep in runSignFlow.
+          if (next.length === 0) {
+            console.log(chalk.yellow(
+              `\n  ⚠ '${host}' was the last endpoint — the baseline is now empty, which \`--sign\` cannot publish.\n` +
+              `    The inline allowlist is empty, so under Strict mode the router already denies all egress for '${name}'.\n` +
+              `    To make this authoritative via a signed bundle, keep at least one endpoint, or seal with\n` +
+              `    \`kars egress ${name} --enforce\` once an endpoint is re-added. (Use \`kubectl edit karssandbox ${name} -n ${crNs}\` to inspect.)\n`,
+            ));
+            return;
+          }
         } catch (e: any) {
           console.log(chalk.red(`\n  Failed to deny: ${e.message}\n`));
           return;
@@ -374,7 +387,7 @@ export function egressCommand(): Command {
             await routerPost("/egress/learn", { enabled: false }).catch(() => {});
           }
           console.log(chalk.green(`\n  🔒 Enforcement (Strict) mode set for '${name}'`));
-          console.log(chalk.dim(`     Only allowlisted host:port pairs will pass; the blocklist still applies.`));
+          console.log(chalk.dim(`     Only allowlisted hosts will pass (L7 host match; port enforcement is reserved for a later slice); the blocklist still applies.`));
           console.log(chalk.dim(`     (The controller may roll the sandbox pod to apply the new mode.)\n`));
         } catch (e: any) {
           console.log(chalk.red(`\n  Failed to enforce: ${e.message}\n`));
@@ -474,7 +487,7 @@ export function egressCommand(): Command {
             await patchEgressMode(crNs, name, "Strict");
             await routerPost("/egress/learn", { enabled: false }).catch(() => {});
             console.log(chalk.yellow(`\n  Learn mode disabled for '${name}' (egress mode is now Strict).`));
-            console.log(chalk.dim(`     Only allowlisted host:port pairs will pass. Seal the baseline with ${chalk.white(`kars egress ${name} --enforce`)} to (re)sign it.\n`));
+            console.log(chalk.dim(`     Only allowlisted hosts will pass. Seal the baseline with ${chalk.white(`kars egress ${name} --enforce`)} to (re)sign it.\n`));
           } else {
             await routerPost("/egress/learn", { enabled: false });
             console.log(chalk.yellow(`\n  Learn mode disabled for '${name}'.\n`));
@@ -852,15 +865,25 @@ async function discoverKarsSandboxNamespace(name: string, podNs: string): Promis
   } catch {
     /* fall through */
   }
-  // 2) Cross-namespace lookup — handles non-default operator releases.
+  // 2) Cross-namespace lookup — handles non-default operator releases. Treat
+  //    multiple matches as ambiguous: silently patching the first would risk
+  //    mutating the wrong sandbox when a name is reused across namespaces.
   try {
     const { stdout } = await execa("kubectl", [
       "get", "karssandbox", "-A", "-o",
       `jsonpath={range .items[?(@.metadata.name=="${name}")]}{.metadata.namespace}{"\\n"}{end}`,
     ], { stdio: "pipe", timeout: 5_000 });
-    const ns = stdout.trim().split("\n").map((s) => s.trim()).filter(Boolean)[0];
-    if (ns) return ns;
-  } catch {
+    const matches = stdout.trim().split("\n").map((s) => s.trim()).filter(Boolean);
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      throw new Error(
+        `KarsSandbox '${name}' exists in multiple namespaces (${matches.join(", ")}). ` +
+        `Pass --namespace <ns> to disambiguate which one to target.`,
+      );
+    }
+  } catch (e: any) {
+    // Re-throw the ambiguity error; swallow only the kubectl lookup failure.
+    if (typeof e?.message === "string" && e.message.includes("multiple namespaces")) throw e;
     /* fall through */
   }
   // 3) Last-ditch: pod ns. Will likely fail downstream with a clear

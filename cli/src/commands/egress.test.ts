@@ -224,3 +224,10 @@ describe("unionEndpoint — port-less existing entries", () => {
     expect(out.find((e) => e.host === "keep.example.com")).toEqual({ host: "keep.example.com" });
   });
 });
+
+describe("removeHost — last-endpoint edge", () => {
+  it("can reduce the baseline to empty (deny of the last host)", () => {
+    const single = [{ host: "only.example.com", port: 443 }];
+    expect(removeHost(single, "only.example.com")).toEqual([]);
+  });
+});

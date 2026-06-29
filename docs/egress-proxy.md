@@ -186,7 +186,7 @@ stateDiagram-v2
   note right of Enforce
     kars egress <name> --enforce
     (egressMode=Strict + signed bundle)
-    Only allowlisted host:port pass
+    Only allowlisted hosts pass (host match)
     New domains → denied (not queued)
   end note
   Learn --> Review: operator inspects learned set
