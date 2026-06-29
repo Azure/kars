@@ -123,6 +123,14 @@ pub struct KarsTeamSpec {
     /// principal cannot raise the envelope (enforced by the envelope-write VAP).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_tier: Option<i32>,
+
+    /// Optional **cumulative lifetime token budget** for the whole standing
+    /// operation. The charter loop refuses to mint a new run once the team's
+    /// total tokens spent reaches this cap, and surfaces a `BudgetExhausted`
+    /// state. Absent ⇒ uncapped (each run is still bounded by its own envelope
+    /// budget). This is the headline "budget-capped standing team" control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_token_budget: Option<i64>,
 }
 
 /// A member role in the team roster — a named seat in the org chart holding an
@@ -356,6 +364,7 @@ mod tests {
                 display_name: None,
                 profile_ref: None,
                 requested_tier: None,
+                total_token_budget: None,
             },
         );
         t.metadata.namespace = Some("kars-system".into());

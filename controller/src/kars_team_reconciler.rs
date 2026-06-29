@@ -28,6 +28,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use futures::StreamExt;
 use kube::{
     Api, Client, ResourceExt,
@@ -46,7 +47,7 @@ use crate::kars_team::{KarsTeam, KarsTeamStatus, TeamRole};
 use crate::kars_profile::KarsProfile;
 use crate::kars_skill::KarsSkill;
 use crate::mcp_server::LocalObjectRef;
-use crate::status::phase::{PHASE_ACTIVE, PHASE_DEGRADED, PHASE_HIBERNATING};
+use crate::status::phase::{PHASE_ACTIVE, PHASE_DEGRADED, PHASE_HIBERNATING, PHASE_READY};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_TEAM;
 const FINALIZER: &str = "kars.azure.com/karsteam-cleanup";
@@ -150,7 +151,7 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // Ensure the team's knowledge commons exists (shared, provenance-tracked
     // memory, §14). Owned by the team so it is GC'd on deletion.
     let commons = team.commons_name();
-    crate::team_commons::ensure_commons(&ctx.client, &commons, owner_ref(&team))
+    crate::team_commons::ensure_commons(&ctx.client, &commons, &ns, owner_ref(&team))
         .await
         .ok();
 
@@ -201,16 +202,29 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // and record why) rather than launching a doomed run that loops on a tool
     // that never answers.
     let cap_gate = capability_readiness(&ctx.client, &ns, &team).await;
+    // Cumulative budget gate: a standing team with a lifetime token cap stops
+    // minting once spent reaches it (each run still has its own envelope budget).
+    let budget_exhausted = team
+        .spec
+        .total_token_budget
+        .is_some_and(|cap| stats.tokens_total >= cap);
     if let Some(every_min) = every {
         let due = match prior.last_run_at.as_deref().and_then(parse_rfc3339) {
             Some(prev) => now >= prev + chrono::Duration::minutes(every_min as i64),
             None => true, // never run → due immediately
         };
+        // Idempotent mint: name the task-force task by the cadence WINDOW (epoch
+        // floored to the interval), not the wall-clock second. A re-mint for the
+        // same window is a no-op SSA apply, so a status-write failure can't cause
+        // a duplicate run on the next reconcile (the old timestamp-second name
+        // could). Skip if the window task already exists.
+        let window = (now.timestamp() / (every_min as i64 * 60)) * (every_min as i64 * 60);
+        let tf_name = format!("{name}-run-{window}");
+        let exists = tasks.get_opt(&tf_name).await.ok().flatten().is_some();
         // Backpressure: only mint when the cluster isn't already saturated with
         // in-flight runs from this team. Skipping a tick keeps the standing
         // operation honest without flooding — the next reconcile re-checks.
-        if !paused && due && active_runs < MAX_CONCURRENT_RUNS && cap_gate.is_none() {
-            let tf_name = format!("{name}-run-{}", now.format("%Y%m%d%H%M%S"));
+        if !paused && due && !exists && active_runs < MAX_CONCURRENT_RUNS && cap_gate.is_none() && !budget_exhausted {
             // Read path: inject the team's accumulated knowledge so the run
             // builds on prior ticks instead of starting cold.
             let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
@@ -293,6 +307,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     let detail = if paused {
         "Team hibernating — members governed-but-idle; charter loop paused.".to_string()
+    } else if budget_exhausted {
+        format!(
+            "BudgetExhausted — {} tokens spent meets the team's lifetime cap; no new runs will be minted until the cap is raised.",
+            stats.tokens_total
+        )
     } else if let Some(reason) = &cap_gate {
         format!("Standing operation paused — capability not ready: {reason}. Will resume automatically once it is.")
     } else if every.is_some() {
@@ -306,6 +325,28 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         )
     } else {
         "Team active — no cadence set; members run on demand.".to_string()
+    };
+
+    // Machine-readable Ready condition for kubectl wait / alerting (the health
+    // string is human-only). Ready iff active and not capability-gated/exhausted.
+    let ready = !paused && cap_gate.is_none() && !budget_exhausted;
+    let condition = Condition {
+        type_: PHASE_READY.into(),
+        status: if ready { "True" } else { "False" }.into(),
+        reason: if budget_exhausted {
+            "BudgetExhausted".into()
+        } else if cap_gate.is_some() {
+            "CapabilityNotReady".into()
+        } else if paused {
+            "Hibernating".into()
+        } else {
+            health.to_string()
+        },
+        message: detail.clone(),
+        last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            k8s_openapi::jiff::Timestamp::now(),
+        ),
+        observed_generation: team.metadata.generation,
     };
 
     write_status(
@@ -329,19 +370,17 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             commons_entry_count: Some(commons_entry_count),
             last_success_at,
             last_digest_at,
-            ..Default::default()
+            conditions: Some(vec![condition]),
         },
     )
     .await?;
 
     // Requeue cadence: short while a tick is pending, otherwise the standing
-    // poll interval. We always requeue so the charter loop keeps ticking.
-    let requeue = if every.is_some() && !paused {
-        // Re-check at most once a minute so a due tick fires promptly.
-        Duration::from_secs(30)
-    } else {
-        REQUEUE_OK
-    };
+    // poll interval. Add ±20% jitter so N teams created together don't reconcile
+    // in lockstep (synchronized API-call spikes). We always requeue so the
+    // charter loop keeps ticking.
+    let base = if every.is_some() && !paused { 30 } else { REQUEUE_OK.as_secs() };
+    let requeue = crate::backoff::requeue_secs_with_jitter(base);
     Ok(Action::requeue(requeue))
 }
 
@@ -410,12 +449,14 @@ async fn effective_team(client: &Client, ns: &str, team: Arc<KarsTeam>) -> Arc<K
 
     // 2. Skill acquisition — merge each role's skills into its blueprint.
     let skills_api: Api<KarsSkill> = Api::namespaced(client.clone(), ns);
+    let eff_name = eff.name_any();
     for role in &mut eff.spec.roster {
         if role.skills.is_empty() {
             continue;
         }
         let mut bp = role.blueprint.clone().unwrap_or_default();
         let mut recipes: Vec<String> = Vec::new();
+        let mut bound_policy: Option<String> = bp.tool_policy.clone();
         for skill_name in &role.skills {
             let Ok(Some(skill)) = skills_api.get_opt(skill_name).await else {
                 continue;
@@ -429,9 +470,21 @@ async fn effective_team(client: &Client, ns: &str, team: Arc<KarsTeam>) -> Arc<K
             if !ready {
                 continue;
             }
-            // The first skill's bounding policy bounds the member's tools.
-            if bp.tool_policy.is_none() {
-                bp.tool_policy = Some(skill.spec.bounding_policy.clone());
+            // SECURITY: a role's skills must share ONE bounding tool policy. If a
+            // later skill names a DIFFERENT policy, applying it while unioning its
+            // MCP servers would run those tools under the first skill's (possibly
+            // narrower or wrong) policy — an attenuation hole. Skip the divergent
+            // skill rather than under-bound it.
+            match &bound_policy {
+                None => bound_policy = Some(skill.spec.bounding_policy.clone()),
+                Some(p) if p != &skill.spec.bounding_policy => {
+                    tracing::warn!(
+                        team = %eff_name, role = %role.name, skill = %skill_name,
+                        "skipping skill — bounding policy differs from the role's first; multi-policy roles are not composable"
+                    );
+                    continue;
+                }
+                _ => {}
             }
             for m in &skill.spec.mcp_servers {
                 if !bp.mcp_servers.contains(m) {
@@ -451,6 +504,7 @@ async fn effective_team(client: &Client, ns: &str, team: Arc<KarsTeam>) -> Arc<K
                 format!("{prefix}\n{joined}")
             });
         }
+        bp.tool_policy = bound_policy;
         role.blueprint = Some(bp);
     }
 
@@ -482,12 +536,28 @@ async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal
 
     // If the approval exists and is Approved, widen the envelope.
     if let Ok(Some(appr)) = approvals.get_opt(&approval_name).await {
-        let approved = appr
-            .status
+        // SECURITY: only honor an approval the CONTROLLER created (owner-referenced
+        // to this team). A name-matched approval planted by some other principal
+        // must NOT be able to drive an envelope widen — this closes the
+        // "request + self-approve via the unauthenticated BFF" escalation.
+        let controller_owned = appr
+            .metadata
+            .owner_references
             .as_ref()
-            .and_then(|s| s.phase.as_deref())
-            .map(|p| p == "Approved")
-            .unwrap_or(false);
+            .is_some_and(|refs| {
+                refs.iter()
+                    .any(|r| r.kind == "KarsTeam" && r.name == team_name && r.controller == Some(true))
+            });
+        let approved = controller_owned
+            && appr
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .map(|p| p == "Approved")
+                .unwrap_or(false);
+        if !controller_owned {
+            tracing::warn!(team = %team_name, "ignoring promote approval not owned by this team (forgery guard)");
+        }
         if approved {
             let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
             // Merge-patch only the two envelope fields so the other envelope
@@ -656,11 +726,24 @@ async fn mint_taskforce(
     // below, no further delegation) so a generated run can never hold more
     // authority than the charter.
     let envelope = default_member_envelope(&team.spec.envelope);
+    // Capability manifest + operating contract: tell the agent what tools/MCP it
+    // has and how a standing run should behave — build on prior knowledge, don't
+    // redo settled work, do nothing if nothing changed, escalate when blocked.
+    let bp = team.spec.blueprint.as_ref();
+    let tools = bp.and_then(|b| b.tool_policy.clone()).unwrap_or_else(|| "model only".into());
+    let mcp = bp.map(|b| b.mcp_servers.join(", ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "none".into());
+    let manifest = format!(
+        "\n\nYour capabilities: tool policy = {tools}; connected services = {mcp}. \
+         Operating contract: this is a recurring standing run — review the reference data above, \
+         act ONLY on what has changed or is not yet done, do not repeat work already completed, and \
+         if you are blocked or a tool is unavailable, report that clearly instead of looping."
+    );
     let spec = KarsTaskSpec {
         objective: format!(
-            "Standing-operation run for team '{}'. Charter: {}{}",
+            "Standing-operation run for team '{}'. Charter: {}{}{}",
             team.name_any(),
             team.spec.charter,
+            manifest,
             prior_knowledge
         ),
         envelope,
@@ -689,6 +772,8 @@ struct RunStats {
     tokens_total: i64,
     /// Newest substantive-deliverable timestamp (RFC3339), if any.
     last_success_at: Option<String>,
+    /// Runs refused from the commons as likely memory-poisoning payloads.
+    poisoned: i64,
 }
 
 /// Write path for the knowledge commons + run lifecycle: scan the team's
@@ -785,10 +870,25 @@ async fn harvest_and_retire_runs(
                 .unwrap_or(&team.spec.charter)
                 .to_string();
             let output = data.get("output").map(String::as_str).unwrap_or_default();
-            let _ = crate::team_commons::record_entry(
-                client, commons, &run, &title, &run, &run, output,
-            )
-            .await;
+            // Provenance gate (memory-poisoning defense): a deliverable whose
+            // text is densely laced with injection markers is treated as a
+            // poisoned run and NOT harvested into shared memory — it would
+            // otherwise re-surface to future runs. The write path also sanitizes,
+            // but a high marker count means the run was likely hijacked, so we
+            // refuse it wholesale and flag it.
+            let markers = crate::team_commons::injection_marker_count(output);
+            if markers >= 3 {
+                tracing::warn!(
+                    team = %team.name_any(), run = %run, markers,
+                    "refusing to harvest run output into commons — possible memory-poisoning payload"
+                );
+                stats.poisoned += 1;
+            } else {
+                let _ = crate::team_commons::record_entry(
+                    client, commons, &run, &title, &run, &run, output,
+                )
+                .await;
+            }
         } else {
             stats.barren += 1;
         }
@@ -797,6 +897,9 @@ async fn harvest_and_retire_runs(
         // finished run's pod so runs don't pile up, while never pulling a
         // sandbox from under a run that's still warming up / retrying.
         if launched && terminal {
+            // Retire via merge-patch (preserves all other spec fields). Mixed
+            // with SSA-apply elsewhere, but launch is only ever toggled here, so
+            // there is no competing writer to conflict with.
             let retire = json!({ "spec": { "execution": { "launch": false } } });
             let _ = tasks.patch(&run, &PatchParams::default(), &Patch::Merge(retire)).await;
         } else if launched {

@@ -49,9 +49,10 @@ const RUN_ATTEMPTS_ANNOTATION: &str = "kars.azure.com/run-attempts";
 /// retrying every poll interval covers that warm-up window before giving up.
 const MAX_DELIVERY_ATTEMPTS: u32 = 6;
 /// How long to wait for the agent's `task_response` before recording a timeout.
-/// The native agent loop (tools + delegation) can take a while; this matches
-/// the order of magnitude of the offload watchers' patience.
-const TASK_TIMEOUT_SECS: u64 = 180;
+/// The native agent loop (tools + delegation) can take a while; this is generous
+/// so legitimate long runs aren't killed. Terminal-timeout runs are retired (not
+/// counted as active), so a slow run never permanently freezes the team's ticks.
+const TASK_TIMEOUT_SECS: u64 = 600;
 const POLL_INTERVAL_SECS: u64 = 5;
 
 /// Process-local set of KarsTasks currently being delivered, so the 5s poll

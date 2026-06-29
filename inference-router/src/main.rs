@@ -330,8 +330,7 @@ async fn main() -> Result<()> {
             .merge(routes::health_routes())
             .merge(routes::metrics_routes())
             .merge(routes::mesh_routes())
-            .merge(routes::mesh_token_routes())
-            .merge(routes::github_token_routes());
+            .merge(routes::mesh_token_routes());
 
         // Protected routes — require admin token when configured
         let protected = Router::new()
@@ -339,6 +338,11 @@ async fn main() -> Result<()> {
             .merge(routes::egress_routes())
             .merge(routes::spawn_routes())
             .merge(routes::sensitive_agt_routes())
+            // GitHub App token minting is admin-protected: UID 1000 (the agent)
+            // must NOT be able to fetch a broad installation token. Only an
+            // admin-authenticated caller (the sandbox entrypoint, UID 1001) may
+            // wire it as a git credential helper.
+            .merge(routes::github_token_routes())
             .merge(routes::internal_routes());
 
         let protected = if let Some(ref token) = admin_token {
