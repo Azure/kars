@@ -361,6 +361,12 @@ pub async fn witness_checkpoint(
             controller = %checkpoint.root_hash, witness = %recomputed,
             "transparency witness DECLINES — root mismatch (possible fork)"
         );
+        // Hard signal: a fork must NOT leave a stale witness co-signature
+        // standing — withdraw it so receipts stop binding "log not forked".
+        let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+        let _ = cms
+            .delete(WITNESS_CONFIGMAP_NAME, &kube::api::DeleteParams::default())
+            .await;
         return Ok(());
     }
     let note = checkpoint_note(checkpoint.tree_size, &recomputed);

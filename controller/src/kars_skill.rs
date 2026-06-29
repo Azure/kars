@@ -149,7 +149,9 @@ impl KarsSkill {
                 (true, format!("attestation {aref} verified — digest binds content {d}"))
             }
             Some(d) => (false, format!("attestation digest {d} != content {}", self.version_digest())),
-            None => (true, format!("attestation {aref} present (ref verified; no content digest to bind)")),
+            // A ref without a content digest cannot be verified — recorded as
+            // honest-but-unverified provenance, never green-lit as verified.
+            None => (false, format!("attestation {aref} present but unverified — declare attestationDigest to bind content")),
         }
     }
 }

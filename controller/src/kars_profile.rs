@@ -113,9 +113,9 @@ impl KarsProfile {
                 markers += crate::team_commons::injection_marker_count(sp);
             }
         }
-        if markers >= 2 {
+        if markers >= 1 {
             errs.push(format!(
-                "spec templates carry {markers} prompt-injection markers — profile rejected by admission scan"
+                "spec templates carry {markers} prompt-injection marker(s) — profile rejected by admission scan"
             ));
         }
         errs
@@ -232,7 +232,7 @@ mod tests {
         assert!(
             p.validation_errors()
                 .iter()
-                .any(|e| e.contains("prompt-injection markers"))
+                .any(|e| e.contains("prompt-injection marker"))
         );
     }
 }

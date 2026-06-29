@@ -1,4 +1,41 @@
 {{- if .Values.datapathWitness.enabled }}
+# Dedicated, minimally-scoped identity for the datapath witness — distinct from
+# the controller SA so a node-level observer can only read the authored hash and
+# write its own witness, never reconcile or sign. Independence by RBAC.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-datapath-witness
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-datapath-witness
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kars-datapath-authored", "kars-datapath-witness"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-datapath-witness
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-datapath-witness
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-datapath-witness
+    namespace: {{ .Release.Namespace }}
+---
 # Kernel-datapath witness DaemonSet (design note §24b, V2 binding).
 # On every node it inspects the live kernel iptables ruleset and, only when the
 # egress-guard REDIRECT-to-:8444 rules are actually present, co-attests by
@@ -25,7 +62,7 @@ spec:
         app.kubernetes.io/name: kars
         app.kubernetes.io/component: datapath-witness
     spec:
-      serviceAccountName: kars-controller
+      serviceAccountName: {{ .Release.Name }}-datapath-witness
       tolerations:
         - key: "kars.azure.com/sandbox"
           operator: "Exists"
