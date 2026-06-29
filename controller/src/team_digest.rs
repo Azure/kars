@@ -38,6 +38,15 @@ pub struct DigestEntry {
     pub runs_delivered: i64,
     pub tokens_spent: i64,
     pub knowledge_entries: i64,
+    /// The reporting channel this entry flows on — the verified `team→recipient`
+    /// edge. Reports travel only this declared line (KNOCK-gated: a report is
+    /// admitted to a recipient only when that team declares it as its
+    /// reporting_to). Absent recipient ⇒ apex (reports to the human steerer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// Whether delivery follows a verified reporting line (gated) vs broadcast.
+    #[serde(default)]
+    pub gated: bool,
 }
 
 fn namespace() -> String {
@@ -84,6 +93,11 @@ pub async fn publish(
         runs_delivered,
         tokens_spent,
         knowledge_entries,
+        channel: Some(match reporting_to {
+            Some(r) => format!("{team}→{r}"),
+            None => format!("{team}→steering"),
+        }),
+        gated: true,
     });
     while log.len() > MAX_DIGESTS {
         log.remove(0);
