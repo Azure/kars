@@ -28,6 +28,12 @@ controller:
       cpu: "500m"
       memory: "512Mi"
 
+# Model catalog offered in the launch-package picker (comma-separated
+# vendor/deployment ids). Operator-curated; the controller default still applies
+# when empty. Example: "openai/gpt-4o,openai/gpt-4o-mini,meta/llama-3.3-70b-instruct".
+models:
+  catalog: ""
+
 # Inference router configuration
 inferenceRouter:
   image:

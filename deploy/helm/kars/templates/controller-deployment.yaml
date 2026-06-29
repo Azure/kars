@@ -95,6 +95,8 @@ spec:
               value: {{ .Values.foundry.projectEndpoint | default "" | quote }}
             - name: FOUNDRY_DEPLOYMENTS
               value: {{ .Values.foundry.deployments | default "" | quote }}
+            - name: KARS_MODEL_CATALOG
+              value: {{ .Values.models.catalog | default "" | quote }}
             - name: IMDS_CLIENT_ID
               value: {{ .Values.foundry.imdsClientId | default "" | quote }}
             - name: CONTENT_SAFETY_ENDPOINT
