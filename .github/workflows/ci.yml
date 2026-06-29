@@ -22,6 +22,37 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ── Change classifier ─────────────────────────────────────────────
+  # Emits `code=true` when anything other than docs/assets is touched.
+  # Docs-only PRs (markdown, docs/, screencast .cast/.gif) skip the
+  # ~19min Rust build, E2E, chaos and bench rows. Required jobs still
+  # RUN (so their status reports) but short-circuit their expensive
+  # steps. Non-PR events (push/dispatch/call) always run the full set.
+  changes:
+    name: Detect change scope
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - id: scope
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
+          changed="$(git diff --name-only "$base" "$head" 2>/dev/null)"
+          # Strip docs/asset-only paths; anything left means code changed.
+          code="$(echo "$changed" | grep -vE '^(docs/|.*\.md$|README\.md|mkdocs\.ya?ml|book\.toml)' || true)"
+          if [ -n "$code" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Docs/asset-only change — skipping Rust build, E2E, chaos, bench"
+          fi
+
   # ── ONE Rust compile per CI run ───────────────────────────────────
   # This job is the SINGLE source of compiled Rust artefacts for the
   # entire workflow. Every other job that needs a Rust binary
@@ -33,6 +64,7 @@ jobs:
   # used by every kars Rust Dockerfile.
   build-rust:
     name: Rust Build & Test (Controller + Inference Router)
+    needs: changes
     # Pinned to ubuntu-22.04 for glibc 2.35 — binaries produced here
     # run inside `mcr.microsoft.com/azurelinux/distroless/base:3.0`
     # which ships glibc 2.38. Newer runners (ubuntu-24.04, glibc 2.39)
@@ -40,24 +72,30 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - if: needs.changes.outputs.code == 'true'
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - if: needs.changes.outputs.code == 'true'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # Single shared cache key for the whole workflow. Downstream
           # jobs (chaos-tier, bench-regression, e2e-kind) restore from
           # this with save-if: false so the host target/ stays warm.
           shared-key: rust-glibc-release
       - name: Install cargo-nextest
+        if: needs.changes.outputs.code == 'true'
         uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: cargo-nextest
       - name: cargo fmt
+        if: needs.changes.outputs.code == 'true'
         run: cargo fmt --all -- --check
       - name: cargo clippy
+        if: needs.changes.outputs.code == 'true'
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: cargo build --release (host glibc — single workspace compile)
+        if: needs.changes.outputs.code == 'true'
         # ONE cargo invocation produces every Rust binary kars ships.
         # Targets the host glibc (ubuntu-22.04 = glibc 2.35); the
         # binaries run inside `mcr.microsoft.com/azurelinux/distroless/base:3.0`
@@ -68,10 +106,12 @@ jobs:
         # runner's gcc.
         run: cargo build --release --workspace
       - name: cargo nextest run (release)
+        if: needs.changes.outputs.code == 'true'
         # Reuses the target/release/ artefacts the previous step just
         # compiled. Only the test harnesses need to link (~30-60s).
         run: cargo nextest run --workspace --release --no-fail-fast
       - name: Stage binaries (per-arch layout matches release-internal.yml Dockerfiles)
+        if: needs.changes.outputs.code == 'true'
         run: |
           # CI runner is always amd64. release-internal.yml additionally
           # builds arm64; the per-arch subdir layout matches the
@@ -84,6 +124,7 @@ jobs:
           file ./bin/amd64/*
           ( cd ./bin && sha256sum amd64/* | tee SHA256SUMS )
       - name: Upload binaries
+        if: needs.changes.outputs.code == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: kars-binaries-${{ github.sha }}
@@ -450,7 +491,8 @@ jobs:
 
   chaos-tier:
     name: Chaos Tier (fault injection)
-    needs: build-rust
+    needs: [changes, build-rust]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # Phase 2 S16. Default `cargo test --all` does NOT run these tests; this
     # job runs them in parallel so PR signal stays fast. See
@@ -470,7 +512,7 @@ jobs:
 
   e2e-kind:
     name: E2E (Kind)
-    needs: build-rust
+    needs: [changes, build-rust]
     # Phase 3 S4: closes the audit gap "make test-e2e is not in CI".
     # Runs on every push to dev/main, manual dispatch, and PRs that
     # touch the runtime surface area (controller, router, helm chart,
@@ -484,10 +526,11 @@ jobs:
       # (cache-to: type=gha) used by the image pre-build steps below.
       actions: write
     if: |
+      needs.changes.outputs.code == 'true' && (
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'workflow_call' ||
-      github.event_name == 'pull_request'
+      github.event_name == 'pull_request' )
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -626,7 +669,8 @@ jobs:
 
   bench-regression:
     name: Bench Regression (criterion)
-    needs: build-rust
+    needs: [changes, build-rust]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # Phase 2 S16. Compiles + runs criterion benches and fails if median
     # exceeds the value in `<crate>/benches/baselines.json` by more than 25%.
