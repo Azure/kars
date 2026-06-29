@@ -58,6 +58,20 @@ spec:
     - name: depthRaised
       expression: >-
         variables.newEnv.?delegationDepth.orValue(0) > variables.oldEnv.?delegationDepth.orValue(0)
+    - name: tokenBudgetRaised
+      expression: >-
+        variables.newEnv.?budget.?tokens.orValue(0) > variables.oldEnv.?budget.?tokens.orValue(0)
+    - name: usdBudgetRaised
+      expression: >-
+        variables.newEnv.?budget.?usdMicros.orValue(0) > variables.oldEnv.?budget.?usdMicros.orValue(0)
+    - name: toolPolicyChanged
+      expression: >-
+        has(oldObject.spec.envelope.toolPolicyRef) &&
+        variables.newEnv.?toolPolicyRef.?name.orValue('') != variables.oldEnv.?toolPolicyRef.?name.orValue('')
+    - name: egressRefChanged
+      expression: >-
+        has(oldObject.spec.envelope.egressAllowlistRef) &&
+        variables.newEnv.?egressAllowlistRef.?name.orValue('') != variables.oldEnv.?egressAllowlistRef.?name.orValue('')
     - name: statusChanged
       expression: >-
         has(object.status) != has(oldObject.status) ||
@@ -71,6 +85,18 @@ spec:
       reason: Forbidden
     - expression: "!variables.depthRaised"
       message: "spec.envelope.delegationDepth cannot be raised by a non-controller principal (self-escalation blocked)"
+      reason: Forbidden
+    - expression: "!variables.tokenBudgetRaised"
+      message: "spec.envelope.budget.tokens cannot be raised by a non-controller principal (budget escalation blocked)"
+      reason: Forbidden
+    - expression: "!variables.usdBudgetRaised"
+      message: "spec.envelope.budget.usdMicros cannot be raised by a non-controller principal (budget escalation blocked)"
+      reason: Forbidden
+    - expression: "!variables.toolPolicyChanged"
+      message: "spec.envelope.toolPolicyRef cannot be repointed by a non-controller principal (lateral authority change blocked)"
+      reason: Forbidden
+    - expression: "!variables.egressRefChanged"
+      message: "spec.envelope.egressAllowlistRef cannot be repointed by a non-controller principal (lateral authority change blocked)"
       reason: Forbidden
     - expression: "!variables.statusChanged"
       message: ".status is controller-writable-only — a non-controller principal cannot write governance status"
