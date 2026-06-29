@@ -52,8 +52,10 @@ async fn reconcile(skill: Arc<KarsSkill>, ctx: Arc<Ctx>) -> Result<Action, Recon
     let errors = skill.validation_errors();
     let (att_verified, att_detail) = skill.verify_attestation();
     let att_declared = skill.spec.attestation_ref.is_some();
-    // A declared-but-mismatched attestation is a hard supply-chain failure.
-    let att_fail = att_declared && !att_verified;
+    // A declared attestation with a digest that does not bind the content is a
+    // hard supply-chain failure. A ref WITHOUT a digest is unverified-but-ok
+    // (honest provenance, not grant-blocking) — only a mismatch degrades.
+    let att_fail = att_declared && skill.spec.attestation_digest.is_some() && !att_verified;
     let status = if errors.is_empty() && !att_fail {
         KarsSkillStatus {
             phase: Some(PHASE_READY.into()),
