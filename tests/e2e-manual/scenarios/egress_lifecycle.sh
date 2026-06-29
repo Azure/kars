@@ -9,18 +9,20 @@
 #   [1/4] learn        — sandbox in learn mode records outbound domains
 #                         when the agent (here: an exec-driven curl)
 #                         touches them. Probe via /egress/learned.
-#   [2/4] enforce      — switch to enforce mode via /egress/enforce.
-#                         Probe a previously-unseen domain → expect
-#                         block (NetworkPolicy denies, curl times out).
-#   [3/4] approve      — POST /egress/approve to allowlist a new domain,
-#                         re-probe → expect success.
-#   [4/4] deny         — POST /egress/deny to block a learned domain,
-#                         re-probe → expect block.
+#   [2/4] enforce      — switch to Strict via the KarsSandbox CRD
+#                         (spec.networkPolicy.egressMode). Probe a
+#                         previously-unseen domain → expect block
+#                         (NetworkPolicy denies, curl times out).
+#   [3/4] approve      — grant example.org via an EgressApproval CR
+#                         (the runtime widening mechanism), re-probe →
+#                         expect success.
+#   [4/4] deny         — delete the EgressApproval CR, re-probe → expect
+#                         block.
 #
-# We never invoke `kars egress … --sign` here — the cosign+ACR
-# signing path has its own integration coverage in the controller crate
-# and would require a writable ACR + cosign keys for E2E. This
-# scenario validates the in-cluster control plane only.
+# Slice 5c.1 removed the in-router /egress/approve|deny|enforce|pending
+# endpoints; the allowlist is now driven by the KarsSandbox CRD (baseline
+# + signed bundle) and EgressApproval CRs (TTL-scoped grants). This
+# scenario exercises the CRD control plane only (no cosign/ACR signing).
 
 set -euo pipefail
 
@@ -46,7 +48,7 @@ metric_start "admit_${name}"
 cr_dispatch openclaw "$name" "$ns" \
   | yq eval '
         select(.kind == "KarsSandbox")
-            | .spec.egress.mode = "learn"
+            | .spec.networkPolicy.egressMode = "Learn"
         ,
         select(.kind != "KarsSandbox")
     ' - \
@@ -129,51 +131,66 @@ else
 fi
 
 # ── [2/4] enforce ─────────────────────────────────────────────────────
-log_step "[2/4] enforce: graduate to enforce, probe an unseen domain → expect block"
+log_step "[2/4] enforce: switch the KarsSandbox to Strict, probe an unseen domain → expect block"
 metric_start "egress_enforce_switch"
-code=$(router_curl POST "/egress/enforce")
-metric_finish "egress_enforce_switch" egress_lifecycle enforceSwitchLatency
-if [[ "$code" != "200" && "$code" != "204" ]]; then
-    log_skip "/egress/enforce returned ${code} — endpoint may not be wired; remaining steps depend on it"
+if ! kubectl patch karssandbox "$name" -n "$ns" --type merge \
+        -p '{"spec":{"networkPolicy":{"egressMode":"Strict"}}}' >/dev/null 2>&1; then
+    log_skip "could not patch egressMode=Strict on KarsSandbox/${name} — remaining steps depend on it"
     scenario_summary "Egress allowlist lifecycle"
     exit 0
 fi
-sleep 2
+# Best-effort live toggle so Strict applies without waiting for a pod roll.
+_=$(router_curl POST "/egress/learn" '{"enabled":false}')
+metric_finish "egress_enforce_switch" egress_lifecycle enforceSwitchLatency
+sleep 3
 # example.org should not have been seen during learn — should now be blocked.
 http=$(agent_curl "https://example.org" 6)
 if [[ "$http" == "000" || -z "$http" ]]; then
-    log_pass "previously-unseen domain (example.org) blocked under enforce"
+    log_pass "previously-unseen domain (example.org) blocked under Strict"
 else
     log_skip "example.org returned HTTP ${http} — egress NetworkPolicy may not have refreshed yet"
 fi
 
 # ── [3/4] approve ─────────────────────────────────────────────────────
-log_step "[3/4] approve: allowlist example.org via /egress/approve, re-probe"
-code=$(router_curl POST "/egress/approve" '{"domain":"example.org"}')
-if [[ "$code" != "200" && "$code" != "204" ]]; then
-    log_skip "/egress/approve returned ${code} — endpoint may not be wired"
+log_step "[3/4] approve: grant example.org via an EgressApproval CR, re-probe"
+appr="${name}-allow-exampleorg"
+if ! kubectl apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: kars.azure.com/v1alpha1
+kind: EgressApproval
+metadata:
+  name: ${appr}
+  namespace: ${ns}
+spec:
+  sandbox: ${name}
+  hosts:
+    - host: example.org
+      port: 443
+  reason: "manual e2e egress_lifecycle approve step"
+  ttl: PT15M
+EOF
+then
+    log_skip "could not create EgressApproval/${appr} — CRD may not be installed in this build"
 else
-    sleep 5
+    sleep 6
     http=$(agent_curl "https://example.org" 8)
     if [[ "$http" == "200" || "$http" == "301" || "$http" == "302" ]]; then
-        log_pass "approve allowlisted example.org (HTTP ${http})"
+        log_pass "EgressApproval allowlisted example.org (HTTP ${http})"
     else
-        log_skip "approve returned 200 but probe got HTTP=${http} — propagation lag or upstream issue"
+        log_skip "EgressApproval applied but probe got HTTP=${http} — reconcile/propagation lag or upstream issue"
     fi
 fi
 
 # ── [4/4] deny ────────────────────────────────────────────────────────
-log_step "[4/4] deny: revoke example.com via /egress/deny, re-probe"
-code=$(router_curl POST "/egress/deny" '{"domain":"example.com"}')
-if [[ "$code" != "200" && "$code" != "204" ]]; then
-    log_skip "/egress/deny returned ${code} — endpoint may not be wired"
+log_step "[4/4] deny: delete the EgressApproval CR, re-probe → expect block"
+if ! kubectl delete egressapproval "$appr" -n "$ns" >/dev/null 2>&1; then
+    log_skip "could not delete EgressApproval/${appr} — may not have been created"
 else
-    sleep 5
-    http=$(agent_curl "https://example.com" 6)
+    sleep 6
+    http=$(agent_curl "https://example.org" 6)
     if [[ "$http" == "000" || -z "$http" ]]; then
-        log_pass "deny revoked example.com (probe blocked)"
+        log_pass "revoking the EgressApproval blocked example.org again"
     else
-        log_skip "deny returned 200 but probe got HTTP=${http} — propagation lag"
+        log_skip "EgressApproval deleted but probe got HTTP=${http} — propagation lag"
     fi
 fi
 
