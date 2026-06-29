@@ -24,6 +24,10 @@ import {
   releaseImagePlan,
   compareVersions,
   fetchLatestReleaseTag,
+  fetchRecentReleases,
+  releasesBetween,
+  fetchTagMessage,
+  ghcrManifestDigests,
   parseVersionTag,
 } from "../lib/release.js";
 
@@ -176,11 +180,13 @@ export function upgradeCommand(): Command {
     .option("--rollback", "Roll the cluster back to the previous Helm revision.", false)
     .option("--skip-runtime-images", "Skip the 7 multi-runtime adapter images (faster).", false)
     .option("--force", "Re-run the upgrade even if already at the target version.", false)
+    .option("--yes", "Skip the confirmation prompt (assume yes).", false)
     .addHelpText("after", `
 Examples:
   kars upgrade                     # Upgrade to the latest GitHub release
   kars upgrade --to v0.1.16        # Pin a specific release
-  kars upgrade --dry-run           # Show what would change
+  kars upgrade --dry-run           # Show changelog + impact + plan, make no changes
+  kars upgrade --yes               # Skip the confirmation prompt
   kars upgrade --rollback          # Revert to the previous Helm revision
 `)
     .action(async (options) => {
@@ -231,6 +237,24 @@ Examples:
         }
         stepper.done(`Connected — kars release at revision ${karsRel.revision}`);
 
+        // ── Pre-flight: cluster must be able to run the upgrade ────────
+        // Fail fast on a degraded/stopped cluster (e.g. all nodes NotReady)
+        // BEFORE the image import + Helm --wait that would only time out and
+        // roll back. Read-only; only hard-blocks when NO node is Ready. The
+        // existing post-upgrade health gate still guards correctness.
+        if (!options.rollback) {
+          const pre = await assertClusterUpgradeable(execa);
+          if (!pre.ok) {
+            stepper.stop();
+            console.error(chalk.red(`\n  ✗ Cluster is not in a state to upgrade — no changes made.`));
+            console.error(chalk.red(`  ${pre.reason}\n`));
+            for (const hint of pre.hints) console.error(chalk.dim(`  ${hint}`));
+            console.error();
+            process.exit(1);
+          }
+          for (const hint of pre.hints) stepper.detail("info", hint);
+        }
+
         // ── Rollback path ─────────────────────────────────────────────
         if (options.rollback) {
           stepper.step("Rolling back to the previous Helm revision...");
@@ -276,6 +300,8 @@ Examples:
         const images = releaseImagePlan(target, { includeRuntimes: !options.skipRuntimeImages });
         if (options.dryRun) {
           stepper.stop();
+          await printChangelog(current, target);
+          await printImpactTable(execa);
           section("Upgrade plan (dry-run — no changes made)");
           kvLine("Cluster", ctx.aksCluster);
           kvLine("ACR", ctx.acrLoginServer);
@@ -287,6 +313,31 @@ Examples:
           }
           console.log(chalk.dim(`\n  Then: helm upgrade --atomic, rolling restart of controller/router/sandboxes, verify.\n`));
           process.exit(0);
+        }
+
+        // ── Changelog summary + impact + confirmation ─────────────────
+        // Show what's about to change and the blast radius, then confirm
+        // before any write. The dry-run above already exited; this only runs
+        // for a real upgrade. Auto-proceeds under --yes or a non-TTY stdin.
+        stepper.stop();
+        await printChangelog(current, target);
+        await printImpactTable(execa);
+
+        const interactive = !options.yes && process.stdin.isTTY === true;
+        if (interactive) {
+          const { default: inquirer } = await import("inquirer");
+          const { proceed } = await inquirer.prompt([{
+            type: "confirm",
+            name: "proceed",
+            message: `Upgrade ${ctx.aksCluster} from ${current || "unknown"} to ${target}?`,
+            default: true,
+          }]);
+          if (!proceed) {
+            console.log(chalk.dim("\n  Upgrade cancelled — no changes made.\n"));
+            process.exit(0);
+          }
+        } else {
+          console.log(chalk.dim(`  Non-interactive — proceeding with upgrade to ${target}.\n`));
         }
 
         // ── Step 3: Import target release images into ACR ─────────────
@@ -411,7 +462,12 @@ type Execa = typeof import("execa").execa;
  *     a version tag, not `:latest`). Only accepted when it parses as a version
  *     (a `:latest`-era cluster has no version here and falls through).
  *  2. The `karsRelease` Helm value stamped by `kars up` / `kars upgrade`.
- *  3. The chart `appVersion` — but the chart ships a static `0.1.0` sentinel
+ *  3. **Image-digest match** — the controller's running image digest matched
+ *     against published release digests. Recovers the real version on a cluster
+ *     deployed before the stamp existed and still on `:latest` (where 1 and 2
+ *     both come up empty), since `az acr import` preserves content-addressed
+ *     digests. Best-effort network call; never overrides 1 or 2.
+ *  4. The chart `appVersion` — but the chart ships a static `0.1.0` sentinel
  *     that is never bumped, so that exact value is treated as "unknown".
  *
  *  Returns "" when genuinely unknown — important so a freshly-provisioned or
@@ -435,9 +491,42 @@ export async function detectCurrentVersion(execa: Execa, appVersion?: string): P
     const vals = JSON.parse(stdout || "{}") as { karsRelease?: string };
     if (vals.karsRelease) return vals.karsRelease;
   } catch { /* ignore */ }
-  // 3. Chart appVersion, ignoring the static `0.1.0` sentinel.
+  // 3. Image-digest match (recovers an old `:latest` cluster's real version).
+  const byDigest = await detectVersionByImageDigest(execa).catch(() => undefined);
+  if (byDigest) return byDigest;
+  // 4. Chart appVersion, ignoring the static `0.1.0` sentinel.
   const av = (appVersion ?? "").replace(/^v/, "");
   return av && av !== "0.1.0" ? `v${av}` : "";
+}
+
+/** Resolve the deployed version by matching the controller pod's running image
+ *  digest to the digests of recent published `kars-controller` release tags.
+ *  Read-only + best-effort: any failure returns undefined so the caller falls
+ *  through to the appVersion sentinel. */
+async function detectVersionByImageDigest(execa: Execa): Promise<string | undefined> {
+  // Scan kars-controller container statuses for a running image digest
+  // (`imageID` is like `…/kars-controller@sha256:<digest>`). Skips Pending pods
+  // (empty imageID) and tolerates rollouts with multiple replicas.
+  const { stdout: ids } = await execa("kubectl", [
+    "get", "pods", "-n", NS, "-l", "app.kubernetes.io/name=kars",
+    "-o", "jsonpath={range .items[*]}{range .status.containerStatuses[*]}{.image}{\"|\"}{.imageID}{\"\\n\"}{end}{end}",
+  ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+
+  let runningDigest: string | undefined;
+  for (const line of ids.split("\n")) {
+    if (!line.includes("kars-controller")) continue;
+    const m = line.match(/@(sha256:[a-f0-9]{64})/);
+    if (m) { runningDigest = m[1]; break; }
+  }
+  if (!runningDigest) return undefined;
+
+  // Compare against recent release tags (newest first → report the newest match).
+  const releases = await fetchRecentReleases(20);
+  for (const r of releases) {
+    const digests = await ghcrManifestDigests("azure/kars-controller", r.tag);
+    if (digests.has(runningDigest)) return r.tag;
+  }
+  return undefined;
 }
 
 /** `az acr import --force` one image. Returns true on success. */
@@ -504,4 +593,199 @@ export async function verifyHealth(execa: Execa): Promise<HealthResult> {
     }
   }
   return { healthy: true, reason: "" };
+}
+
+/** Read the cluster and print a table of every kars workload the upgrade would
+ *  restart (controller + sandboxes), with namespace, readiness, and the running
+ *  image — the blast radius, shown before the confirm. Best-effort: a read
+ *  failure prints a note rather than aborting. */
+async function printImpactTable(execa: Execa): Promise<void> {
+  section("Impact — workloads that will be restarted");
+
+  interface Row { component: string; namespace: string; name: string; ready: string; image: string }
+  const rows: Row[] = [];
+
+  const shortImage = (img: string): string => {
+    if (!img) return "—";
+    // ".../openclaw-sandbox:latest" → "openclaw-sandbox:latest"; strip digest.
+    const noDigest = img.split("@")[0];
+    const parts = noDigest.split("/");
+    return parts[parts.length - 1] || noDigest;
+  };
+
+  interface DeployJson {
+    metadata?: { name?: string; namespace?: string };
+    spec?: { replicas?: number; template?: { spec?: { containers?: Array<{ name?: string; image?: string }> } } };
+    status?: { readyReplicas?: number; replicas?: number };
+  }
+  const readyOf = (d: DeployJson): string => {
+    const ready = d.status?.readyReplicas ?? 0;
+    const desired = d.spec?.replicas ?? d.status?.replicas ?? 0;
+    return `${ready}/${desired}`;
+  };
+  const firstImage = (d: DeployJson, prefer?: string): string => {
+    const cs = d.spec?.template?.spec?.containers ?? [];
+    const pick = prefer ? cs.find((c) => c.name?.includes(prefer)) : undefined;
+    return shortImage((pick ?? cs[0])?.image ?? "");
+  };
+
+  try {
+    // Controller.
+    const { stdout: ctrlJson } = await execa("kubectl", [
+      "get", "deployment", "kars-controller", "-n", NS, "-o", "json",
+    ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+    if (ctrlJson.trim()) {
+      const d = JSON.parse(ctrlJson) as DeployJson;
+      rows.push({ component: "controller", namespace: NS, name: "kars-controller", ready: readyOf(d), image: firstImage(d, "controller") });
+    }
+
+    // Sandboxes across all namespaces (the inference-router rides inside these).
+    const { stdout: sbJson } = await execa("kubectl", [
+      "get", "deployment", "-A", "-l", "kars.azure.com/component=sandbox", "-o", "json",
+    ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+    if (sbJson.trim()) {
+      const list = JSON.parse(sbJson) as { items?: DeployJson[] };
+      for (const d of list.items ?? []) {
+        rows.push({
+          component: "sandbox",
+          namespace: d.metadata?.namespace ?? "?",
+          name: d.metadata?.name ?? "?",
+          ready: readyOf(d),
+          image: firstImage(d, "openclaw"),
+        });
+      }
+    }
+  } catch {
+    console.log(chalk.dim("\n  (could not read cluster workloads — continuing)\n"));
+    return;
+  }
+
+  if (rows.length === 0) {
+    console.log(chalk.dim("\n  (no kars workloads found)\n"));
+    return;
+  }
+
+  // Render a simple aligned table.
+  const headers = { component: "TYPE", namespace: "NAMESPACE", name: "NAME", ready: "READY", image: "IMAGE" };
+  const w = {
+    component: Math.max(headers.component.length, ...rows.map((r) => r.component.length)),
+    namespace: Math.max(headers.namespace.length, ...rows.map((r) => r.namespace.length)),
+    name: Math.max(headers.name.length, ...rows.map((r) => r.name.length)),
+    ready: Math.max(headers.ready.length, ...rows.map((r) => r.ready.length)),
+    image: Math.max(headers.image.length, ...rows.map((r) => r.image.length)),
+  };
+  const pad = (s: string, n: number) => s.padEnd(n);
+  console.log();
+  console.log(
+    "  " + chalk.dim(
+      `${pad(headers.component, w.component)}  ${pad(headers.namespace, w.namespace)}  ${pad(headers.name, w.name)}  ${pad(headers.ready, w.ready)}  ${headers.image}`,
+    ),
+  );
+  for (const r of rows) {
+    const notReady = (() => {
+      const [a, b] = r.ready.split("/").map((n) => parseInt(n, 10));
+      return !(b > 0 && a === b);
+    })();
+    const readyCell = notReady ? chalk.yellow(pad(r.ready, w.ready)) : chalk.green(pad(r.ready, w.ready));
+    console.log(
+      `  ${pad(r.component, w.component)}  ${pad(r.namespace, w.namespace)}  ${pad(r.name, w.name)}  ${readyCell}  ${chalk.dim(r.image)}`,
+    );
+  }
+  const sandboxCount = rows.filter((r) => r.component === "sandbox").length;
+  const controllerCount = rows.length - sandboxCount;
+  console.log(chalk.dim(`\n  ${rows.length} workload(s) will be rolling-restarted (${controllerCount} controller + ${sandboxCount} sandbox(es)).`));
+  console.log(chalk.dim(`  Each sandbox restarts its agent pod; in-flight agent work is interrupted briefly.\n`));
+}
+
+/** Print a concise changelog of the releases between current and target. Reads
+ *  public GitHub release/tag APIs; best-effort and never throws. */
+async function printChangelog(current: string, target: string): Promise<void> {
+  section("What's changing");
+  kvLine("From", current || "unknown");
+  kvLine("To", target);
+
+  const releases = await fetchRecentReleases(20);
+  const between = current
+    ? releasesBetween(releases, current, target)
+    : releases.filter((r) => compareVersions(r.tag, target) <= 0).slice(0, 1);
+  if (between.length === 0) {
+    console.log(chalk.dim(`\n  (no release notes found between ${current || "?"} and ${target})\n`));
+    return;
+  }
+  console.log();
+  // Newest first reads best in a terminal. Prefer the annotated tag message
+  // (real changelog) over the auto-generated release body (boilerplate).
+  for (const r of [...between].reverse()) {
+    const tagMsg = await fetchTagMessage(r.tag);
+    console.log(`  ${chalk.bold(r.tag)}${r.name && r.name !== r.tag ? chalk.dim(` — ${r.name}`) : ""}`);
+    for (const line of summarizeChangelog(tagMsg || r.body)) {
+      console.log(chalk.dim(`    ${line}`));
+    }
+  }
+  console.log();
+}
+
+/** Pull human-meaningful lines (bullets, or the first prose lines) from an
+ *  annotated tag message or release body, skipping install/verification
+ *  boilerplate and the leading "kars vX.Y.Z" title line. */
+export function summarizeChangelog(text: string, maxLines = 8): string[] {
+  const lines = text.split("\n").map((l) => l.trim());
+  const bullets: string[] = [];
+  const prose: string[] = [];
+  for (const l of lines) {
+    if (!l) continue;
+    if (/^#+\s*(container images|runtime adapter|verification|integrity|install)/i.test(l)) break;
+    if (l.startsWith("```")) continue;
+    if (/^kars v\d/i.test(l)) continue; // title line
+    if (/^[-*]\s+/.test(l)) {
+      bullets.push("• " + l.replace(/^[-*]\s+/, "").slice(0, 100));
+    } else if (/^#+\s+/.test(l)) {
+      bullets.push(l.replace(/^#+\s+/, "").slice(0, 100));
+    } else {
+      prose.push(l.slice(0, 100));
+    }
+    if (bullets.length >= maxLines) { bullets.push("…"); break; }
+  }
+  // Prefer bullets; if none, fall back to the first couple of prose lines.
+  if (bullets.length > 0) return bullets;
+  return prose.slice(0, 3);
+}
+
+/** Pre-flight: can this cluster actually accept an upgrade right now? The upgrade
+ *  reimports images and runs `helm upgrade --wait`, which needs schedulable,
+ *  Ready nodes. A stopped/degraded cluster (all nodes NotReady — e.g. an AKS
+ *  cluster whose VMSS was deallocated, or a broken CNI) would burn minutes and
+ *  then time out + roll back. Detect it up front. Read-only. */
+export async function assertClusterUpgradeable(
+  execa: Execa,
+): Promise<{ ok: boolean; reason: string; hints: string[] }> {
+  const { stdout } = await execa("kubectl", [
+    "get", "nodes",
+    "-o", "jsonpath={range .items[*]}{.metadata.name}{\"|\"}{range .status.conditions[?(@.type=='Ready')]}{.status}{end}{\"\\n\"}{end}",
+  ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+
+  const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    // Couldn't read nodes — don't hard-block on an unexpected API shape; the
+    // later `helm --wait` still guards correctness.
+    return { ok: true, reason: "", hints: [] };
+  }
+  const total = lines.length;
+  const ready = lines.filter((l) => l.endsWith("|True")).length;
+
+  if (ready === 0) {
+    return {
+      ok: false,
+      reason: `All ${total} cluster node(s) are NotReady — the upgrade can't schedule new pods and would time out.`,
+      hints: [
+        "Check node health:   kubectl get nodes",
+        "If the AKS cluster is stopped, start it:   az aks start -g <rg> -n <cluster>",
+        "If nodes are stuck (CNI/kubelet), check:   kubectl describe nodes",
+        "Re-run `kars upgrade` once nodes are Ready.",
+      ],
+    };
+  }
+  // Some-but-not-all Ready is allowed (the upgrade can still proceed) but worth
+  // surfacing — the controller wants 2 replicas and `helm --wait` needs them.
+  return { ok: true, reason: "", hints: ready < total ? [`Note: ${ready}/${total} nodes Ready.`] : [] };
 }

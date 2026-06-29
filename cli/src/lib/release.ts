@@ -128,3 +128,133 @@ export async function fetchLatestReleaseTag(
     return null;
   }
 }
+
+export interface ReleaseNote {
+  tag: string;
+  name: string;
+  /** Raw release body (markdown). */
+  body: string;
+}
+
+/**
+ * Fetch recent published releases (newest first). Used for the changelog
+ * summary and the image-digest version fallback. Never throws.
+ */
+export async function fetchRecentReleases(
+  limit = 20,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ReleaseNote[]> {
+  try {
+    const res = await fetchImpl(
+      `https://api.github.com/repos/Azure/kars/releases?per_page=${limit}`,
+      { headers: { Accept: "application/vnd.github+json", "User-Agent": "kars-cli" } },
+    );
+    if (!res.ok) return [];
+    const body = (await res.json()) as Array<{ tag_name?: string; name?: string; body?: string }>;
+    return body
+      .filter((r) => r.tag_name)
+      .map((r) => ({ tag: r.tag_name as string, name: r.name || (r.tag_name as string), body: r.body || "" }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The set of releases strictly newer than `current` and up to (and including)
+ * `target`, oldest→newest — i.e. exactly what an upgrade would apply. Used for
+ * the changelog summary.
+ */
+export function releasesBetween(
+  releases: ReleaseNote[],
+  current: string,
+  target: string,
+): ReleaseNote[] {
+  return releases
+    .filter((r) => {
+      const gtCurrent = current ? compareVersions(r.tag, current) > 0 : true;
+      const leTarget = compareVersions(r.tag, target) <= 0;
+      return gtCurrent && leTarget;
+    })
+    .sort((a, b) => compareVersions(a.tag, b.tag));
+}
+
+/**
+ * Fetch the annotated tag message for a release tag — this carries the real,
+ * human-written changelog (feature bullets) for kars releases, unlike the
+ * auto-generated release body. Returns null when the tag is lightweight /
+ * unreachable. Never throws.
+ */
+export async function fetchTagMessage(
+  tag: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+  try {
+    const refRes = await fetchImpl(
+      `https://api.github.com/repos/Azure/kars/git/refs/tags/${tag}`,
+      { headers: { Accept: "application/vnd.github+json", "User-Agent": "kars-cli" } },
+    );
+    if (!refRes.ok) return null;
+    const ref = (await refRes.json()) as { object?: { sha?: string; type?: string } };
+    // Lightweight tags point straight at a commit (no annotation message).
+    if (ref.object?.type !== "tag" || !ref.object.sha) return null;
+    const tagRes = await fetchImpl(
+      `https://api.github.com/repos/Azure/kars/git/tags/${ref.object.sha}`,
+      { headers: { Accept: "application/vnd.github+json", "User-Agent": "kars-cli" } },
+    );
+    if (!tagRes.ok) return null;
+    return ((await tagRes.json()) as { message?: string }).message ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Anonymous GHCR pull token for a public repo (e.g. "azure/kars-controller"). */
+async function ghcrToken(repo: string, fetchImpl: typeof fetch): Promise<string | null> {
+  try {
+    const res = await fetchImpl(`https://ghcr.io/token?scope=repository:${repo}:pull`, {
+      headers: { "User-Agent": "kars-cli" },
+    });
+    if (!res.ok) return null;
+    return ((await res.json()) as { token?: string }).token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Collect every manifest digest (the multi-arch index digest plus each per-arch
+ * sub-manifest digest) for `ghcr.io/azure/<repo>:<tag>`. A running pod's
+ * `imageID` is a per-arch digest, while `:latest` resolves to the index digest —
+ * gathering both lets a caller match either. Digests are content-addressed, so
+ * GHCR and an `az acr import`-copied ACR share identical values. Never throws.
+ */
+export async function ghcrManifestDigests(
+  repo: string,
+  tag: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const token = await ghcrToken(repo, fetchImpl);
+  if (!token) return out;
+  const accept = [
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+  ].join(", ");
+  try {
+    const res = await fetchImpl(`https://ghcr.io/v2/${repo}/manifests/${tag}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: accept, "User-Agent": "kars-cli" },
+    });
+    if (!res.ok) return out;
+    const indexDigest = res.headers.get("docker-content-digest");
+    if (indexDigest) out.add(indexDigest);
+    const body = (await res.json()) as { manifests?: Array<{ digest?: string }> };
+    for (const m of body.manifests ?? []) {
+      if (m.digest) out.add(m.digest);
+    }
+  } catch {
+    /* ignore — best-effort */
+  }
+  return out;
+}
