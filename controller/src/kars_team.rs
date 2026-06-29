@@ -268,6 +268,13 @@ pub struct KarsTeamStatus {
 }
 
 impl KarsTeam {
+    /// True when the team's lifetime token budget is set and `spent` meets/exceeds
+    /// it — the charter loop must not mint a new run. Pure for unit testing.
+    #[must_use]
+    pub fn budget_exhausted(&self, spent: i64) -> bool {
+        self.spec.total_token_budget.is_some_and(|cap| spent >= cap)
+    }
+
     /// The team's knowledge-commons name (explicit or defaulted to the team).
     /// Consumed by the BFF + the knowledge-commons write path.
     #[allow(dead_code)]
@@ -426,5 +433,15 @@ mod tests {
     fn commons_name_defaults_to_team() {
         let t = sample_team(vec![]);
         assert_eq!(t.commons_name(), "eng");
+    }
+
+    #[test]
+    fn budget_exhausted_only_when_cap_met() {
+        let mut t = sample_team(vec![]);
+        assert!(!t.budget_exhausted(1_000_000)); // no cap → never exhausted
+        t.spec.total_token_budget = Some(10_000);
+        assert!(!t.budget_exhausted(9_999));
+        assert!(t.budget_exhausted(10_000));
+        assert!(t.budget_exhausted(20_000));
     }
 }

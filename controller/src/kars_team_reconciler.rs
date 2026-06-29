@@ -204,10 +204,7 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let cap_gate = capability_readiness(&ctx.client, &ns, &team).await;
     // Cumulative budget gate: a standing team with a lifetime token cap stops
     // minting once spent reaches it (each run still has its own envelope budget).
-    let budget_exhausted = team
-        .spec
-        .total_token_budget
-        .is_some_and(|cap| stats.tokens_total >= cap);
+    let budget_exhausted = team.budget_exhausted(stats.tokens_total);
     if let Some(every_min) = every {
         let due = match prior.last_run_at.as_deref().and_then(parse_rfc3339) {
             Some(prev) => now >= prev + chrono::Duration::minutes(every_min as i64),
