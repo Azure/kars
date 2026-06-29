@@ -3,9 +3,6 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: karsskills.kars.azure.com
-  labels:
-    app.kubernetes.io/name: kars
-    app.kubernetes.io/component: crd
 spec:
   group: kars.azure.com
   names:
@@ -38,6 +35,14 @@ spec:
           spec:
             description: '`KarsSkill.spec` — a governed, versioned capability bundle.'
             properties:
+              attestationDigest:
+                description: |-
+                  Optional content digest the attestation vouches for. When present it is
+                  verified to equal the controller-computed `version_digest`, so the
+                  signed bundle provably matches what runs (binds supply-chain provenance
+                  to the exact content). Format: `sha256:<hex>`.
+                nullable: true
+                type: string
               attestationRef:
                 description: |-
                   Optional cosign attestation reference (an OCI ref / digest of the signed
@@ -94,6 +99,12 @@ spec:
                 description: The attestation reference the skill was published with, when declared.
                 nullable: true
                 type: string
+              attestationVerified:
+                description: |-
+                  Whether the cosign attestation verified (ref well-formed + digest binds
+                  content). False when none declared or a mismatch was detected.
+                nullable: true
+                type: boolean
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
@@ -151,3 +162,4 @@ spec:
     storage: true
     subresources:
       status: {}
+

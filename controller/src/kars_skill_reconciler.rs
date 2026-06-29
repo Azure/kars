@@ -50,25 +50,36 @@ async fn reconcile(skill: Arc<KarsSkill>, ctx: Arc<Ctx>) -> Result<Action, Recon
     let api: Api<KarsSkill> = Api::namespaced(ctx.client.clone(), &ns);
 
     let errors = skill.validation_errors();
-    let status = if errors.is_empty() {
+    let (att_verified, att_detail) = skill.verify_attestation();
+    let att_declared = skill.spec.attestation_ref.is_some();
+    // A declared-but-mismatched attestation is a hard supply-chain failure.
+    let att_fail = att_declared && !att_verified;
+    let status = if errors.is_empty() && !att_fail {
         KarsSkillStatus {
             phase: Some(PHASE_READY.into()),
             observed_generation: skill.metadata.generation,
             version_digest: Some(skill.version_digest()),
             attestation_ref: skill.spec.attestation_ref.clone(),
+            attestation_verified: att_declared.then_some(att_verified),
             detail: Some(format!(
-                "Skill v{} validated and grantable.",
+                "Skill v{} validated and grantable. {att_detail}.",
                 skill.spec.version
             )),
             conditions: None,
         }
     } else {
+        let why = if att_fail {
+            format!("attestation verification failed: {att_detail}")
+        } else {
+            format!("invalid skill: {}", errors.join("; "))
+        };
         KarsSkillStatus {
             phase: Some(PHASE_DEGRADED.into()),
             observed_generation: skill.metadata.generation,
             version_digest: None,
             attestation_ref: None,
-            detail: Some(format!("invalid skill: {}", errors.join("; "))),
+            attestation_verified: att_declared.then_some(false),
+            detail: Some(why),
             conditions: None,
         }
     };
