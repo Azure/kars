@@ -164,7 +164,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
     tags: true, style: { fg: "white", bg: "black" },
     content:
       `  Fleet egress at a glance. Each row is one sandbox.\n` +
-      `  L = learned (pending approval)   A = allowlist (approved)   sign = live spec.networkPolicy.allowlistRef + AllowlistAuthoritative`,
+      `  L = learned (not yet approved)   A = allowlist (approved)   sign = live spec.networkPolicy.allowlistRef + AllowlistAuthoritative`,
   });
 
   blessed.box({
@@ -208,7 +208,7 @@ export function openEgressDrawer(ctx: EgressDrawerContext): void {
         cur.signed === "unsigned"       ? `{gray-fg}unsigned{/} (inline allowedEndpoints — press [s] to sign)` :
                                           `{gray-fg}—{/}`;
       detail.setContent(
-        `  Selected: {bold}${cur.name}{/bold}    pending=${cur.learned}  allowlist=${cur.allowlist}  ` +
+        `  Selected: {bold}${cur.name}{/bold}    learned=${cur.learned}  allowlist=${cur.allowlist}  ` +
         `mode=${cur.mode}  ${sigDetail}\n` +
         (sec ? `  blocklist=${sec.blocklistDomains ?? 0}  blocklist-learn=${sec.blocklistLearnMode ? "yes" : "no"}` : ""),
       );

@@ -99,7 +99,9 @@ async fn egress_learned_clear(State(state): State<AppState>) -> impl IntoRespons
 /// Security model:
 /// 1. Blocklist → hard deny (threat intelligence)
 /// 2. Allowlist → approved domains pass through
-/// 3. Unknown domain → deny + create pending approval request
+/// 3. Unknown domain → deny (Strict) or log + allow (Learn). There is no
+///    in-process pending-approval queue — widening egress is an operator action
+///    on the signed allowlist bundle (Slice 5c.1).
 /// 4. Learn mode → log + allow (discovery phase only)
 /// 5. Private/internal IP → always deny (SSRF protection)
 /// 6. Redirects → returned as-is (never followed)
@@ -147,13 +149,13 @@ async fn egress_fetch(
 
     let sandbox: &str = &state.sandbox_name;
 
-    // Check egress access: blocklist → allowlist → pending
+    // Check egress access: blocklist → allowlist (Strict denies the rest).
     if let Err(reason) = state.blocklist.check_egress(url, sandbox).await {
         tracing::warn!(url = %url, reason = %reason, "Egress fetch denied");
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": reason,
             "url": url,
-            "action": "Run 'kars egress <name> --pending' to see pending requests, then 'kars egress <name> --approve <domain>' to allow.",
+            "action": "If legitimate, an operator can add the host to the baseline allowlist ('kars egress <name> --approve <host>', which re-signs) or grant it temporarily ('kars egress allow-extra <name> --host <host> --ttl <dur> --reason <why>').",
         }))).into_response();
     }
 

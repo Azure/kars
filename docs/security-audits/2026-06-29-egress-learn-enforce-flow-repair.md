@@ -1,8 +1,8 @@
 # Security Audit — Egress learn/enforce flow repair (operator toggle + CLI approve/deny/enforce)
 
 Date: 2026-06-29
-Scope: `cli/src/commands/egress.ts`, `cli/src/commands/operator/actions.ts`, `cli/src/commands/egress.test.ts`, `tests/e2e-manual/scenarios/egress_lifecycle.sh`.
-Gated paths: `cli/src/commands/egress.ts`, `cli/src/commands/operator/actions.ts`.
+Scope: `cli/src/commands/egress.ts`, `cli/src/commands/operator/actions.ts`, `cli/src/commands/operator/dialogs/egress.ts`, `cli/src/commands/egress.test.ts`, `inference-router/src/routes/egress.rs`, `inference-router/src/routes/internal.rs`, `tests/e2e-manual/scenarios/egress_lifecycle.sh`, plus docs (`docs/egress-proxy.md`, `docs/cli-reference.md`, `docs/operations/gitops.md`).
+Gated paths: `cli/src/commands/egress.ts`, `cli/src/commands/operator/actions.ts`, `inference-router/src/routes/egress.rs`, `inference-router/src/routes/internal.rs`.
 
 ## Summary
 
@@ -34,6 +34,17 @@ allowedEndpoints` compiled into a controller-published, cosign-verified bundle
      revocation).
    - `--enforce` patches `egressMode=Strict` and signs the baseline.
    - `--pending` and the status view show learned-but-not-allowlisted domains.
+
+3. **Stale runtime guidance + docs (CRD-move cleanup).** The router's
+   `/egress/fetch` 403 response (`inference-router/src/routes/egress.rs`) still
+   told agents to run the **removed** `kars egress --pending`/`--approve`
+   workflow; its action string + doc comment now describe the real remediation
+   (operator `--approve` re-sign, or a temporary `EgressApproval` via
+   `allow-extra`). A stale comment in `inference-router/src/routes/internal.rs`
+   and the operator drawer legend/label (`dialogs/egress.ts`) were corrected.
+   `docs/egress-proxy.md`, `docs/cli-reference.md`, and `docs/operations/gitops.md`
+   were updated to remove the deleted endpoints and the "enforce promotes all
+   learned" claim (enforce = Strict + sign; it does not auto-promote).
 
 ## Security analysis
 
