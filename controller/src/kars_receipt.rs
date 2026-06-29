@@ -245,6 +245,18 @@ pub struct PredicateCompleteness {
     /// bound — re-derivable from the controller for the task's sandbox kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub egress_guard_ruleset_hash: Option<String>,
+    /// `true` once an independent transparency witness has co-signed the receipt
+    /// inclusion-log checkpoint (a second party attesting the log isn't forked).
+    #[serde(default)]
+    pub transparency_witnessed: bool,
+    /// The witness key id that co-signed the checkpoint, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness_key_id: Option<String>,
+    /// `true` once a node eBPF/datapath witness reports the live kernel egress
+    /// ruleset hash matches the authored egress-guard ruleset (kernel actually
+    /// enforced the bound posture, not just that the controller authored it).
+    #[serde(default)]
+    pub kernel_datapath_witnessed: bool,
 }
 
 impl PredicateCompleteness {
@@ -459,35 +471,53 @@ pub fn build_statement(
     } else {
         String::new()
     };
-    // What remains genuinely unbound. The egress-guard *ruleset* binds at mint;
-    // the only remaining gap is the node-level kernel-datapath *witness* (eBPF),
-    // which is hardware/node-gated and correctly deferred to V2.
-    let not_bound = match (
-        completeness.token_cost_audit_bound,
-        completeness.egress_guard_ruleset_bound,
-    ) {
-        (true, true) => {
-            "NOT yet bound: the eBPF kernel-datapath witness (V2) — node-level proof the kernel applied the bound ruleset."
-        }
-        (false, true) => {
-            "NOT yet bound: the router token/cost audit chain (V1, binds once the task has run) and the eBPF kernel-datapath witness (V2)."
-        }
-        (true, false) => {
-            "NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1) and the eBPF kernel-datapath witness (V2)."
-        }
-        (false, false) => {
-            "NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1), the router token/cost audit chain (V1, binds once the task has run), and the eBPF kernel-datapath witness (V2)."
-        }
+    let transparency_audit = if completeness.transparency_witnessed {
+        let w = completeness.witness_key_id.clone().unwrap_or_default();
+        format!(" The receipt log checkpoint IS witnessed by an independent transparency witness (key {w}).")
+    } else {
+        String::new()
+    };
+    let kernel_audit = if completeness.kernel_datapath_witnessed {
+        " The kernel datapath IS witnessed: a node probe confirmed the live egress ruleset hash matches the authored posture.".to_string()
+    } else {
+        String::new()
+    };
+    // Tally the optional bindings; completeness is PASS only when every axis the
+    // platform can bind is bound (floor + token chain + egress ruleset +
+    // transparency witness + kernel datapath witness).
+    let all_bound = completeness.floor_enforced
+        && completeness.token_cost_audit_bound
+        && completeness.egress_guard_ruleset_bound
+        && completeness.transparency_witnessed
+        && completeness.kernel_datapath_witnessed;
+    let mut missing: Vec<&str> = Vec::new();
+    if !completeness.token_cost_audit_bound {
+        missing.push("the router token/cost audit chain (binds once the task has run)");
+    }
+    if !completeness.egress_guard_ruleset_bound {
+        missing.push("the egress-guard iptables-ruleset hash");
+    }
+    if !completeness.transparency_witnessed {
+        missing.push("an external transparency-log witness");
+    }
+    if !completeness.kernel_datapath_witnessed {
+        missing.push("the eBPF kernel-datapath witness");
+    }
+    let not_bound = if missing.is_empty() {
+        "All bindable completeness axes are bound.".to_string()
+    } else {
+        format!("NOT yet bound: {}.", missing.join(", "))
     };
     let completeness_detail = if completeness.floor_enforced {
         format!(
-            "Completeness-floor controls observed enforced (CREATE-time task-namespace VAP, exec-ban VAP, posture-lock VAP, default-deny egress).{token_audit}{egress_audit} {not_bound}"
+            "Completeness-floor controls observed enforced (CREATE-time task-namespace VAP, exec-ban VAP, posture-lock VAP, default-deny egress).{token_audit}{egress_audit}{transparency_audit}{kernel_audit} {not_bound}"
         )
     } else {
         format!(
-            "Some completeness-floor controls were not observed enforced (see predicate.completeness).{token_audit}{egress_audit} {not_bound}"
+            "Some completeness-floor controls were not observed enforced (see predicate.completeness).{token_audit}{egress_audit}{transparency_audit}{kernel_audit} {not_bound}"
         )
     };
+    let completeness_status = if all_bound { "PASS" } else { "PARTIAL" };
     let claims = vec![
         Claim::new(
             "integrity",
@@ -495,11 +525,11 @@ pub fn build_statement(
             "DSSE/Ed25519 signature binds this payload to the trust-envelope digest.",
         ),
         Claim::new("conformance", "PASS", conformance_detail),
-        Claim::new("completeness", "PARTIAL", completeness_detail),
+        Claim::new("completeness", completeness_status, completeness_detail),
         Claim::new(
             "regulatory",
-            "OMITTED",
-            "V0 uses local controller signing. No external transparency-log or KMS anchor yet (V1).",
+            if completeness.transparency_witnessed { "PARTIAL" } else { "OMITTED" },
+            "V0 uses local controller signing with an independent transparency witness. No external KMS anchor yet (V1).",
         ),
     ];
 

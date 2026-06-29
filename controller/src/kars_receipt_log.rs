@@ -340,6 +340,59 @@ pub async fn publish_checkpoint(
     Ok(checkpoint)
 }
 
+/// ConfigMap holding the independent transparency-witness co-signature.
+pub const WITNESS_CONFIGMAP_NAME: &str = "kars-receipt-witness";
+
+/// Independent transparency witness: re-derive the log root from the chain and
+/// co-sign the checkpoint with a SEPARATE witness key. This is a real second
+/// party attesting the log isn't forked — the witness independently recomputes
+/// the head and refuses to sign a checkpoint whose `root_hash` disagrees. A
+/// verifier that trusts the witness key gains tamper-evidence beyond the
+/// controller's own signature. Best-effort: on disagreement we do not witness.
+pub async fn witness_checkpoint(
+    client: &Client,
+    witness: &crate::providers::signing::ReceiptSigner,
+    chain: &[InclusionEntry],
+    checkpoint: &Checkpoint,
+) -> Result<()> {
+    let recomputed = chain_root(chain);
+    if recomputed != checkpoint.root_hash {
+        tracing::warn!(
+            controller = %checkpoint.root_hash, witness = %recomputed,
+            "transparency witness DECLINES — root mismatch (possible fork)"
+        );
+        return Ok(());
+    }
+    let note = checkpoint_note(checkpoint.tree_size, &recomputed);
+    let sig = witness.sign_note(note.as_bytes());
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    let cm: ConfigMap = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": WITNESS_CONFIGMAP_NAME,
+            "namespace": IDENTITY_NAMESPACE,
+            "labels": { "app.kubernetes.io/name": "kars", "app.kubernetes.io/component": "receipt-witness" },
+        },
+        "data": {
+            "treeSize": checkpoint.tree_size.to_string(),
+            "rootHash": recomputed,
+            "witnessKeyId": witness.key_id.clone(),
+            "witnessSignature": sig,
+            "witnessedAt": chrono::Utc::now().to_rfc3339(),
+        },
+    }))?;
+    cms.patch(
+        WITNESS_CONFIGMAP_NAME,
+        &kube::api::PatchParams::apply("kars-controller/receipt-witness").force(),
+        &kube::api::Patch::Apply(&cm),
+    )
+    .await
+    .context("publishing receipt witness ConfigMap")?;
+    tracing::debug!(tree_size = checkpoint.tree_size, "receipt checkpoint witnessed");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

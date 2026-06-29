@@ -206,6 +206,35 @@ pub async fn load_or_create(client: &Client) -> Result<ReceiptSigner> {
     Ok(signer)
 }
 
+/// Load-or-create an INDEPENDENT transparency-witness signer (a distinct key
+/// from the primary receipt signer) so the witness co-signature is a genuine
+/// second-party attestation. Stored in its own Secret.
+pub async fn load_or_create_witness(client: &Client) -> Result<ReceiptSigner> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    const WITNESS_SECRET: &str = "controller-receipt-witness-identity";
+    let signer = match secrets.get(WITNESS_SECRET).await {
+        Ok(secret) => secret
+            .data
+            .as_ref()
+            .and_then(|d| d.get("signing_key"))
+            .and_then(|b| <[u8; 32]>::try_from(b.0.as_slice()).ok())
+            .map(|bytes| ReceiptSigner::from_bytes(&bytes))
+            .unwrap_or_else(ReceiptSigner::generate),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            let signer = ReceiptSigner::generate();
+            let secret: Secret = serde_json::from_value(serde_json::json!({
+                "apiVersion": "v1", "kind": "Secret",
+                "metadata": { "name": WITNESS_SECRET, "namespace": IDENTITY_NAMESPACE },
+                "data": { "signing_key": BASE64.encode(signer.signing_key.to_bytes()) },
+            }))?;
+            let _ = secrets.create(&PostParams::default(), &secret).await;
+            signer
+        }
+        Err(e) => return Err(e).context("reading witness identity Secret"),
+    };
+    Ok(signer)
+}
+
 /// Generate a new identity and persist it to the Secret.
 async fn create_identity(secrets: &Api<Secret>) -> Result<ReceiptSigner> {
     let signer = ReceiptSigner::generate();
