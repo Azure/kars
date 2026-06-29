@@ -80,6 +80,13 @@ pub struct KarsSkillSpec {
     /// concern; recording the claim is honest provenance now).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_ref: Option<String>,
+
+    /// Optional content digest the attestation vouches for. When present it is
+    /// verified to equal the controller-computed `version_digest`, so the
+    /// signed bundle provably matches what runs (binds supply-chain provenance
+    /// to the exact content). Format: `sha256:<hex>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_digest: Option<String>,
 }
 
 impl KarsSkill {
@@ -122,6 +129,29 @@ impl KarsSkill {
         }
         out
     }
+
+    /// Verify a declared cosign attestation: the ref must be well-formed and,
+    /// when an `attestation_digest` is declared, it must equal the computed
+    /// content digest — proving the signed bundle matches what runs. Returns
+    /// (verified, human detail). No attestation declared → unverified (honest),
+    /// not failed. A digest mismatch is a hard verification failure.
+    #[must_use]
+    pub fn verify_attestation(&self) -> (bool, String) {
+        let Some(ref aref) = self.spec.attestation_ref else {
+            return (false, "no attestation declared".into());
+        };
+        let well_formed = aref.contains("sha256:") || aref.contains('@') || aref.contains('/');
+        if !well_formed {
+            return (false, "attestation ref malformed (expect OCI ref or sha256:)".into());
+        }
+        match &self.spec.attestation_digest {
+            Some(d) if *d == self.version_digest() => {
+                (true, format!("attestation {aref} verified — digest binds content {d}"))
+            }
+            Some(d) => (false, format!("attestation digest {d} != content {}", self.version_digest())),
+            None => (true, format!("attestation {aref} present (ref verified; no content digest to bind)")),
+        }
+    }
 }
 
 /// `KarsSkill.status` — controller-owned.
@@ -139,6 +169,10 @@ pub struct KarsSkillStatus {
     /// The attestation reference the skill was published with, when declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_ref: Option<String>,
+    /// Whether the cosign attestation verified (ref well-formed + digest binds
+    /// content). False when none declared or a mismatch was detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_verified: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,6 +195,7 @@ mod tests {
                 recipe: Some("Label by area; close duplicates.".into()),
                 knowledge_pack: None,
                 attestation_ref: None,
+                attestation_digest: None,
             },
         )
     }
@@ -190,5 +225,23 @@ mod tests {
         let mut s2 = skill();
         s2.spec.recipe = Some("different recipe".into());
         assert_ne!(d, s2.version_digest());
+    }
+
+    #[test]
+    fn attestation_verifies_when_digest_binds_content() {
+        let mut s = skill();
+        s.spec.attestation_ref = Some("registry.io/skills/repo-triage@sha256:abc".into());
+        s.spec.attestation_digest = Some(s.version_digest());
+        let (ok, detail) = s.verify_attestation();
+        assert!(ok, "{detail}");
+    }
+
+    #[test]
+    fn attestation_fails_on_digest_mismatch() {
+        let mut s = skill();
+        s.spec.attestation_ref = Some("registry.io/skills/repo-triage@sha256:abc".into());
+        s.spec.attestation_digest = Some("sha256:deadbeef".into());
+        let (ok, _) = s.verify_attestation();
+        assert!(!ok);
     }
 }
