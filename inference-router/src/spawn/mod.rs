@@ -20,6 +20,8 @@ mod docker;
 
 #[cfg(test)]
 mod dev_profile_test;
+#[cfg(test)]
+mod mcp_inherit_test;
 pub use docker::{delete_sandbox_docker, list_sandboxes_docker};
 
 fn default_true() -> bool {
@@ -216,19 +218,32 @@ pub async fn create_sandbox(
     // still enough for the sub-agent to be functional; inherited
     // tags are a quality-of-life feature for operators, not a
     // governance gate.
-    let parent_labels: BTreeMap<String, String> = match api.get(parent_name).await {
-        Ok(parent_obj) => parent_obj.metadata.labels.unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(
-                parent = %parent_name,
-                child = %req.agent_id,
-                "Could not fetch parent labels for inheritance (non-fatal): {e}"
-            );
-            BTreeMap::new()
-        }
-    };
+    //
+    // The same parent fetch also recovers the parent's effective
+    // `governance.mcpServerRefs` (honoring the deprecated singular shim) so a
+    // spawned sub-agent doesn't silently lose MCP access — e.g. a Playwright
+    // sandbox must spawn children that can also drive the browser. The refs
+    // are by-name into the child CR's namespace (the parent's namespace, where
+    // the McpServer CRs and `<parent>-inference`/`-toolpolicy` already live),
+    // so propagating them verbatim resolves and the controller mirrors the
+    // JWKS/signing material + derives the MCP egress rule for the child.
+    let (parent_labels, parent_mcp_refs): (BTreeMap<String, String>, Vec<serde_json::Value>) =
+        match api.get(parent_name).await {
+            Ok(parent_obj) => {
+                let labels = parent_obj.metadata.labels.clone().unwrap_or_default();
+                (labels, parent_mcp_server_refs(&parent_obj.data))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    parent = %parent_name,
+                    child = %req.agent_id,
+                    "Could not fetch parent CR for inheritance (non-fatal): {e}"
+                );
+                (BTreeMap::new(), Vec::new())
+            }
+        };
 
-    let crd = build_sub_agent_crd_with_labels(
+    let mut crd = build_sub_agent_crd_with_labels(
         parent_name,
         &namespace,
         isolation,
@@ -236,6 +251,24 @@ pub async fn create_sandbox(
         req,
         &parent_labels,
     );
+
+    // Additive overlay: copy inherited MCP refs onto the child's governance
+    // (the builder always emits `spec.governance`).
+    if !parent_mcp_refs.is_empty()
+        && let Some(gov) = crd
+            .get_mut("spec")
+            .and_then(|s| s.get_mut("governance"))
+            .filter(|g| g.is_object())
+    {
+        let count = parent_mcp_refs.len();
+        gov["mcpServerRefs"] = serde_json::Value::Array(parent_mcp_refs);
+        tracing::info!(
+            parent = %parent_name,
+            child = %req.agent_id,
+            count,
+            "Sub-agent inherits parent MCP server refs"
+        );
+    }
 
     let obj: kube::api::DynamicObject =
         serde_json::from_value(crd).map_err(|e| format!("Failed to build CRD: {e}"))?;
@@ -728,6 +761,26 @@ pub(crate) fn inherit_parent_labels(
         out.insert(k.clone(), v.clone());
     }
     out
+}
+
+/// Extract the parent sandbox's effective `governance.mcpServerRefs` so a
+/// spawned sub-agent inherits the same MCP server access. Honors the
+/// deprecated singular `mcpServerRef` (mirrors
+/// `GovernanceConfig::effective_mcp_server_refs`). Operates on a
+/// `DynamicObject`'s `data` value; empty when the parent references none.
+fn parent_mcp_server_refs(parent_data: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(gov) = parent_data.get("spec").and_then(|s| s.get("governance")) else {
+        return Vec::new();
+    };
+    if let Some(arr) = gov.get("mcpServerRefs").and_then(|v| v.as_array())
+        && !arr.is_empty()
+    {
+        return arr.clone();
+    }
+    if let Some(singular) = gov.get("mcpServerRef").filter(|v| v.is_object()) {
+        return vec![singular.clone()];
+    }
+    Vec::new()
 }
 
 pub(crate) fn build_sub_agent_crd_with_labels(
