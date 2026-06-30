@@ -11,6 +11,7 @@ import {
   fetchLatestVersion,
   fetchChangelogSummary,
   checkForCliUpdate,
+  sanitizeVersion,
   CLI_PACKAGE,
 } from "./update-check.js";
 
@@ -69,6 +70,24 @@ describe("summarizeReleaseBody", () => {
   it("returns undefined when nothing usable is present", () => {
     expect(summarizeReleaseBody(undefined, undefined)).toBeUndefined();
     expect(summarizeReleaseBody("", "   \n  \n")).toBeUndefined();
+  });
+});
+
+describe("sanitizeVersion", () => {
+  it("accepts well-formed semver tokens", () => {
+    expect(sanitizeVersion("0.1.24")).toBe("0.1.24");
+    expect(sanitizeVersion("10.20.30")).toBe("10.20.30");
+    expect(sanitizeVersion("1.2.3-interim.4")).toBe("1.2.3-interim.4");
+  });
+
+  it("rejects anything that isn't a clean version (no URLs, paths, junk)", () => {
+    expect(sanitizeVersion("../../etc/passwd")).toBeNull();
+    expect(sanitizeVersion("1.2")).toBeNull();
+    expect(sanitizeVersion("v1.2.3")).toBeNull(); // caller strips the leading v
+    expect(sanitizeVersion("1.2.3/evil")).toBeNull();
+    expect(sanitizeVersion("https://evil.example/1.2.3")).toBeNull();
+    expect(sanitizeVersion(42)).toBeNull();
+    expect(sanitizeVersion(undefined)).toBeNull();
   });
 });
 
@@ -142,7 +161,7 @@ describe("checkForCliUpdate", () => {
   it("reports an update when the registry has a newer version", async () => {
     globalThis.fetch = vi.fn(async (url: string | URL) => {
       const u = String(url);
-      if (u.includes("registry.npmjs.org")) {
+      if (u.startsWith("https://registry.npmjs.org/")) {
         return new Response(JSON.stringify({ version: "999.0.0" }), { status: 200 });
       }
       // changelog

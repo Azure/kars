@@ -79,7 +79,9 @@ async function readCache(): Promise<UpdateCache | null> {
     const parsed = JSON.parse(raw) as Partial<UpdateCache>;
     if (typeof parsed.checkedAt !== "number") return null;
     return {
-      latest: typeof parsed.latest === "string" ? parsed.latest : null,
+      // Re-validate the cached version on read: the file is untrusted input, so
+      // only a well-formed version token is allowed back into comparisons / URLs.
+      latest: sanitizeVersion(parsed.latest),
       checkedAt: parsed.checkedAt,
       notifiedAt: typeof parsed.notifiedAt === "number" ? parsed.notifiedAt : 0,
     };
@@ -98,15 +100,27 @@ async function writeCache(cache: UpdateCache): Promise<void> {
   }
 }
 
+/** Strict semver-ish token: `MAJOR.MINOR.PATCH` with an optional pre-release of
+ *  dot-separated alphanumerics/hyphens. This is the ONLY shape we ever accept
+ *  from the network, cache to disk, or interpolate into a URL — it sanitises
+ *  the registry/GitHub responses so untrusted bytes can't reach the filesystem
+ *  or an outbound request. Exported for tests. */
+export const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
+
+/** Return `v` iff it's a well-formed version token, else null. */
+export function sanitizeVersion(v: unknown): string | null {
+  return typeof v === "string" && VERSION_RE.test(v) ? v : null;
+}
+
 /** Fetch the `latest` dist-tag version from the npm registry. Best-effort:
- *  returns null on any error or timeout. Exported for tests. */
+ *  returns null on any error, timeout, or malformed version. Exported for tests. */
 export async function fetchLatestVersion(
   pkg: string = CLI_PACKAGE,
   timeoutMs: number = FETCH_TIMEOUT_MS,
 ): Promise<string | null> {
   // The `latest` endpoint returns just the dist-tag manifest — far smaller than
-  // the full packument.
-  const url = `https://registry.npmjs.org/${pkg.replace("/", "%2f")}/latest`;
+  // the full packument. Percent-encode every "/" in the (scoped) package name.
+  const url = `https://registry.npmjs.org/${pkg.replace(/\//g, "%2F")}/latest`;
   try {
     const resp = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
@@ -114,7 +128,9 @@ export async function fetchLatestVersion(
     });
     if (!resp.ok) return null;
     const body = (await resp.json()) as { version?: string };
-    return typeof body.version === "string" ? body.version : null;
+    // Only ever return a strictly-validated version — nothing else is allowed
+    // to flow on to the cache file or a downstream URL.
+    return sanitizeVersion(body.version);
   } catch {
     return null;
   }
@@ -126,7 +142,10 @@ export async function fetchChangelogSummary(
   version: string,
   timeoutMs: number = FETCH_TIMEOUT_MS,
 ): Promise<string | undefined> {
-  const tag = version.startsWith("v") ? version : `v${version}`;
+  // Guard: refuse to interpolate anything but a validated version into the URL.
+  const safe = sanitizeVersion(version.replace(/^v/, ""));
+  if (!safe) return undefined;
+  const tag = `v${safe}`;
   const url = `https://api.github.com/repos/Azure/kars/releases/tags/${tag}`;
   try {
     const resp = await fetch(url, {
