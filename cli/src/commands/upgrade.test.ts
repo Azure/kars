@@ -9,6 +9,8 @@ import {
   detectCurrentVersion,
   rolloutRestartAll,
   verifyHealth,
+  parseHelmFieldConflicts,
+  suggestConflictRemediation,
 } from "./upgrade.js";
 
 describe("isFoundryProjectHost", () => {
@@ -127,11 +129,106 @@ describe("buildHelmUpgradeArgs", () => {
     expect(args.slice(0, 4)).toEqual(["upgrade", "--install", "kars", "/chart"]);
   });
 
+  it("does NOT take ownership of foreign-managed fields by default (no --force-conflicts)", () => {
+    const args = buildHelmUpgradeArgs(ctx, "/chart", "v0.1.20");
+    expect(args).not.toContain("--force-conflicts");
+  });
+
+  it("adds --force-conflicts only when explicitly opted in", () => {
+    const args = buildHelmUpgradeArgs(ctx, "/chart", "v0.1.20", { forceConflicts: true });
+    expect(args).toContain("--force-conflicts");
+    // still a real, atomic upgrade
+    expect(args).toContain("--atomic");
+  });
+
+  it("builds a non-mutating server dry-run for the conflict pre-flight", () => {
+    const args = buildHelmUpgradeArgs(ctx, "/chart", "v0.1.20", { dryRunServer: true });
+    expect(args).toContain("--dry-run=server");
+    // dry-run must NOT carry --atomic/--wait (meaningless) nor force ownership
+    expect(args).not.toContain("--atomic");
+    expect(args).not.toContain("--wait");
+    expect(args).not.toContain("--force-conflicts");
+    // ...but still carries the real image values so the dry-run is representative
+    expect(args.join(" ")).toContain("controller.image.tag=v0.1.20");
+  });
+
   it("only sets the Foundry endpoint when one is configured", () => {
     const withFoundry = buildHelmUpgradeArgs({ ...ctx, foundryEndpoint: "https://x.services.ai.azure.com" }, "/chart", "v0.1.20").join(" ");
     expect(withFoundry).toContain("inferenceRouter.azure.openai.endpoint=https://x.services.ai.azure.com");
     const without = buildHelmUpgradeArgs(ctx, "/chart", "v0.1.20").join(" ");
     expect(without).not.toContain("inferenceRouter.azure.openai.endpoint");
+  });
+});
+
+describe("parseHelmFieldConflicts — failsafe field-manager conflict detection", () => {
+  // The real Helm v4 error that wedged the v0.1.18 → v0.1.23 upgrade on launch
+  // day, as printed to stderr (`Error: UPGRADE FAILED:` — quotes are bare here).
+  const realError =
+    "Error: UPGRADE FAILED: an error occurred while rolling back the release. " +
+    "original upgrade error: conflict occurred while applying object " +
+    "kars-system/kars-controller apps/v1, Kind=Deployment: Apply failed with 1 " +
+    'conflict: conflict with "kubectl-set" using apps/v1: ' +
+    '.spec.template.spec.containers[name="controller"].env[name="HERMES_RUNTIME_IMAGE"].value';
+
+  it("extracts the object, kind, manager, and field from a real conflict", () => {
+    const conflicts = parseHelmFieldConflicts(realError);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({
+      object: "kars-system/kars-controller",
+      kind: "Deployment",
+      manager: "kubectl-set",
+    });
+    expect(conflicts[0].field).toContain('env[name="HERMES_RUNTIME_IMAGE"].value');
+  });
+
+  it("also parses Go-%q escaped quotes from the structured WARN log line", () => {
+    const warn =
+      'level=WARN msg="upgrade failed" name=kars error="conflict occurred while ' +
+      'applying object kars-system/kars-controller apps/v1, Kind=Deployment: Apply ' +
+      'failed with 1 conflict: conflict with \\"kubectl-set\\" using apps/v1: ' +
+      '.spec.template.spec.containers[name=\\"controller\\"].env[name=\\"HERMES_RUNTIME_IMAGE\\"].value"';
+    const conflicts = parseHelmFieldConflicts(warn);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].manager).toBe("kubectl-set");
+  });
+
+  it("attributes multiple conflicting fields to the right object and de-dupes", () => {
+    const multi =
+      "conflict occurred while applying object ns/dep apps/v1, Kind=Deployment: " +
+      'Apply failed with 2 conflicts: conflict with "mgr-a" using apps/v1: .spec.foo, ' +
+      'conflict with "mgr-b" using apps/v1: .spec.bar; ' +
+      // a repeat of the same conflict must not double-count
+      'conflict with "mgr-a" using apps/v1: .spec.foo';
+    const conflicts = parseHelmFieldConflicts(multi);
+    expect(conflicts).toHaveLength(2);
+    expect(conflicts.map((c) => c.manager).sort()).toEqual(["mgr-a", "mgr-b"]);
+    expect(conflicts.every((c) => c.object === "ns/dep")).toBe(true);
+  });
+
+  it("returns nothing for output that has no conflict (a clean dry-run)", () => {
+    expect(parseHelmFieldConflicts("")).toEqual([]);
+    expect(parseHelmFieldConflicts("Release \"kars\" has been upgraded. Happy Helming!")).toEqual([]);
+  });
+});
+
+describe("suggestConflictRemediation — actionable copy-paste fix", () => {
+  it("turns an env-var conflict into the exact `kubectl set env … NAME-` command", () => {
+    const fix = suggestConflictRemediation({
+      object: "kars-system/kars-controller",
+      kind: "Deployment",
+      manager: "kubectl-set",
+      field: '.spec.template.spec.containers[name="controller"].env[name="HERMES_RUNTIME_IMAGE"].value',
+    });
+    expect(fix).toBe("kubectl set env deployment/kars-controller -n kars-system HERMES_RUNTIME_IMAGE-");
+  });
+
+  it("returns null for field shapes it can't safely auto-remediate", () => {
+    expect(suggestConflictRemediation({
+      object: "ns/cm",
+      kind: "ConfigMap",
+      manager: "kubectl-edit",
+      field: ".data.someKey",
+    })).toBeNull();
   });
 });
 
