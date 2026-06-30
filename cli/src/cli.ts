@@ -39,6 +39,7 @@ import { inspectCommand } from "./commands/inspect.js";
 import { auditCommand } from "./commands/audit.js";
 import { headlampCommand } from "./commands/headlamp.js";
 import { sreCommand } from "./commands/sre.js";
+import { updateCommand } from "./commands/update.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -100,6 +101,9 @@ export function createCli(): Command {
   // Attestation
   program.addCommand(attestCommand());
 
+  // Self-management
+  program.addCommand(updateCommand());
+
   program.addHelpText("after", `
 Command groups:
   Lifecycle       up, dev, add, push, destroy
@@ -110,6 +114,7 @@ Command groups:
   Interop         convert, a2a, a2a-agent, migrate
   Governance      toolpolicy, inferencepolicy, mcp, memory
   Attestation     attest
+  Self            update
 
 Quick start:
   kars up                    # Provision Azure + deploy controller + first sandbox
