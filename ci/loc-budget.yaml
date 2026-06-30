@@ -92,11 +92,11 @@ files:
 
   - path: inference-router/src/spawn/mod.rs
     baseline_2026_04_24: 1199
-    phase0_cap: 1400
+    phase0_cap: 1450
     phase1_cap: 900
     phase2_cap: 800
     allow_grow: true
-    notes: "Path was inference-router/src/spawn.rs; converted to module after extracting docker dev-mode submodule (PR 43). Phase 0 cap bumped to 1400 in Hermes-support PR to absorb RuntimeKind env inheritance (sub-agent inherits parent runtime kind, explicit override path) + 3 serial-env unit tests with an EnvGuard helper. allow_grow honored at phase0 only; phase1+ enforces shrink."
+    notes: "Path was inference-router/src/spawn.rs; converted to module after extracting docker dev-mode submodule (PR 43). Phase 0 cap bumped to 1400 in Hermes-support PR to absorb RuntimeKind env inheritance (sub-agent inherits parent runtime kind, explicit override path) + 3 serial-env unit tests with an EnvGuard helper. Bumped to 1450 for sub-agent MCP inheritance: the spawn path reads the parent CR's governance.mcpServerRefs (parent_mcp_server_refs helper, singular-shim aware) and overlays them onto the child so sub-agents inherit MCP tool access; tests live in the sibling mcp_inherit_test.rs submodule to limit growth. allow_grow honored at phase0 only; phase1+ enforces shrink."
 
   - path: cli/src/commands/handoff.ts
     baseline_2026_04_24: 1119

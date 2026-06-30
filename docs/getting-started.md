@@ -2,7 +2,7 @@
 
 One `npm i` and one `kars dev`, and you're talking to a secured AI agent on your laptop in about five minutes — no Azure account required.
 
-This guide takes you from a clean machine to a working kars agent (v0.1.18) in two steps:
+This guide takes you from a clean machine to a working kars agent in two steps:
 
 1. **[Local — five minutes](#step-1--local-five-minutes)** — `kars dev` runs a real sandbox on your laptop. The **recommended dev loop is a local [kind](https://kind.sigs.k8s.io/) cluster** (`--target local-k8s`) because it reproduces the production pod shape — separate router container, `NetworkPolicy`, seccomp — and behaves almost identically to AKS. A single-container **Docker** target is also available for the fastest possible smoke test. No Azure subscription either way.
 2. **[AKS — half an hour](#step-2--deploy-to-aks)** — when you're ready for production, `kars up` provisions AKS + ACR + Foundry + the kars control plane in your subscription, and runs the same sandbox under Workload Identity, NetworkPolicies, and the egress guard.
@@ -31,7 +31,7 @@ The sandbox YAML you wrote in step 1 runs **unchanged** in step 2 — build loca
 
 All four paths need an **inference provider** — you pick one on first run (see [Choosing an inference provider](#choosing-an-inference-provider)). The easiest is a **GitHub Copilot** seat (no Azure account, no PAT).
 
-> **Just want it running right now?** Use the [fastest path](#10-fastest-path--no-compile-published-images) — `npm i -g @kars-runtime/cli@0.1.18` then `kars dev --release`. Everything below about building from source and cloning AGT is **only** for contributors hacking on kars itself — skip it if that's not you.
+> **Just want it running right now?** Use the [fastest path](#10-fastest-path--no-compile-published-images) — `npm i -g @kars-runtime/cli@latest` then `kars dev --release`. Everything below about building from source and cloning AGT is **only** for contributors hacking on kars itself — skip it if that's not you.
 
 > **AGT mesh prerequisite — source builds only.** Inter-agent E2E
 > messaging uses the [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
@@ -102,7 +102,7 @@ No Rust toolchain, no AGT checkout, no GitHub auth, no waiting on a local build.
 
 ```bash
 # 1. Install the kars CLI from npm — public, signed (SLSA provenance), always the latest release
-npm i -g @kars-runtime/cli@0.1.18
+npm i -g @kars-runtime/cli@latest
 
 # 2. Launch a sandbox from the published images (defaults to :latest)
 kars dev --release
@@ -141,7 +141,8 @@ kars dev --release --target local-k8s   # local kind cluster, real K8s posture
 > sub-agents, E2E-encrypted relay) passes on a stock M-series Mac and on AKS.
 
 > **Pin a specific build (optional).** `kars dev --release` follows the newest
-> release; pass a tag — `kars dev --release v0.1.18` — to pin a
+> release; pass a tag — `kars dev --release <tag>` (e.g. the version shown on the
+> [latest release](https://github.com/Azure/kars/releases/latest)) — to pin a
 > specific build for reproducibility.
 
 Want to hack on the controller / router / plugin? Build from source —
@@ -263,7 +264,7 @@ kars up --name prod-agent --region swedencentral --release --mesh-trust=entra --
 
 > **`--release` vs `--build`:** `--release` imports the public, cosign-signed
 > `ghcr.io/azure/*` images into your ACR — no Rust, no Docker build, no source
-> checkout to compile (bare `--release` = latest, or pin `--release v0.1.18`).
+> checkout to compile (bare `--release` = latest, or pin `--release <tag>`).
 > Drop it to import from a source ACR, or pass `--build` to compile from source
 > (developer mode; compiles Rust in-Docker on macOS/arm64).
 

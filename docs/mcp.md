@@ -174,11 +174,35 @@ For the MCP-specific threat model (tool poisoning, confused-deputy, prompt
 injection through tool output), see the
 [MCP security top-10](security-mcp-top10.md).
 
+## Sub-agents inherit MCP access
+
+When an agent spawns a sub-agent (via the spawn/handoff tools or a skill that
+runs work as a child agent), the child **inherits the parent's
+`governance.mcpServerRefs`**. The spawn path reads the parent `KarsSandbox`,
+copies its effective MCP references (the deprecated singular `mcpServerRef` is
+lifted into the plural form), and writes them onto the child's
+`spec.governance.mcpServerRefs`.
+
+Because the child CR is created in the **same namespace** as the parent — the
+same place the `McpServer` CRs, `<parent>-inference`, and `<parent>-toolpolicy`
+live — the by-name references resolve without any extra wiring. The controller
+then does for the child exactly what it does for the parent: mirrors the
+`mcp-{name}-jwks` / `mcp-{name}-signing` material into the child namespace and
+[derives the MCP egress rule](#out-of-the-box-egress) from the `McpServer` URL.
+So a Playwright-MCP parent spawns children that can drive the browser too — no
+per-child `McpServer` CR or manifest edit required.
+
+This is additive: if the parent references no MCP servers, the child gets none.
+The child's `egressMode` still follows the spawn defaults (Strict in
+production), which is fine — the derived MCP egress rule is admitted regardless
+of mode.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Agent says the tool doesn't exist | Tool not in `allowedTools`, or sandbox label doesn't match `allowedSandboxes` | Add the tool / fix the label; re-apply the CR. |
+| Spawned **sub-agent** can't see the MCP tools the parent has | Parent's `mcpServerRefs` not inherited (pre-0.1.25) | Upgrade the router; inheritance is automatic. Confirm with `kubectl -n kars-<parent-ns> get karssandbox <child> -o jsonpath='{.spec.governance.mcpServerRefs}'`. |
 | `404 Session not found`, page resets to `about:blank` | Router not keeping the session alive (pre-0.1.24) | Upgrade the router; keepalive is automatic. |
 | Calls time out to an in-cluster MCP | Egress not admitted (e.g. `ipBlock` under Cilium) | Use the MCP's Service DNS `url` so the controller derives a `namespaceSelector` rule; check `kubectl -n kars-<sandbox> get networkpolicy`. |
 | `403`/`401` from a hosted MCP | OAuth/bearer misconfigured | Check `oauth.issuer`/`audience` or the `bearerFromEnv` secret. |
