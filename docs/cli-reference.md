@@ -85,6 +85,10 @@ All commands also inherit Commander.js built-in `--help`.
 - [mcp](#kars-mcp)
 - [memory](#kars-memory)
 
+### Self-management
+
+- [update](#kars-update)
+
 ---
 
 ## Lifecycle
@@ -233,6 +237,40 @@ runbook and **[Image versioning](operations/image-versioning.md)** for the
 tagging model.
 
 **See also:** [`kars up`](#kars-up) (initial bootstrap), [Operations → Upgrades & rollback](operations/upgrades.md)
+
+---
+
+### `kars update`
+
+Keep the **CLI itself** current. Every `kars` run also does a quiet, cached
+check (at most once per day) and prints a one-line notice when a newer
+`@kars-runtime/cli` has been published; `kars update` is the explicit,
+always-fresh version that shows the changelog and offers to install.
+
+> `kars upgrade` upgrades the **cluster** (controller, router, sandboxes).
+> `kars update` upgrades the **CLI npm package** on your machine. Different
+> things.
+
+```
+kars update [options]
+```
+
+| Option | Description |
+|---|---|
+| `--check` | Only check and report; never prompt or install. Exits non-zero when an update is available (handy in scripts). |
+| `--yes` | Install the latest version without prompting. |
+
+```bash
+kars update            # check, show changelog, offer to install
+kars update --check    # report only (CI-friendly)
+kars update --yes      # non-interactive install
+```
+
+The install runs `npm install -g @kars-runtime/cli@latest`. Disable the
+automatic background notice with `KARS_NO_UPDATE_CHECK=1` (also off in CI and
+when stdout isn't a TTY).
+
+**See also:** [`kars upgrade`](#kars-upgrade) (cluster upgrade)
 
 ---
 

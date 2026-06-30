@@ -67,6 +67,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 use super::registry::{DiscoveredMcpServer, McpServerRegistry};
 use super::tools::{
@@ -92,6 +93,27 @@ struct ForwarderEntry {
     /// outbound `tools/list` and `tools/call` POST. Resolved at
     /// discovery time from the env var named by `meta.bearer_from_env`.
     bearer_token: Option<String>,
+    /// Live MCP session for a STATEFUL upstream — the `Mcp-Session-Id` plus the
+    /// negotiated protocol version, established by the `initialize` handshake at
+    /// discovery and reused across every `tools/call` so servers that bind state
+    /// to the session (e.g. Playwright, whose browser context lives in the
+    /// session) keep that state between calls. Re-established on demand when an
+    /// upstream reports the session is gone (pod restart / TTL expiry).
+    session: Arc<Mutex<McpSession>>,
+    /// Background keepalive task for a STATEFUL session (see
+    /// [`run_session_keepalive`]). MCP servers such as Playwright run a
+    /// server-side heartbeat: they send the client a JSON-RPC `ping` over the
+    /// standalone `GET /mcp` SSE stream and, if no response (`pong`) arrives
+    /// within a few seconds (Playwright: `PLAYWRIGHT_MCP_PING_TIMEOUT_MS`,
+    /// default 5000), they tear the session down. A forwarder that only issues
+    /// request/response `tools/call` POSTs never receives those pings, so every
+    /// session silently dies ~5s after creation — the next call then 404s with
+    /// "Session not found", forcing a re-init onto a brand-new (blank) browser
+    /// context. The keepalive task holds the GET stream open and answers pings,
+    /// keeping the session — and the agent's live browser page — alive. Holds
+    /// the task's [`AbortHandle`] so it can be cancelled when the session is
+    /// re-initialized (replaced) or the dispatcher is dropped.
+    keepalive: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
 /// Namespaced MCP forwarder — the production-mode `AsyncToolDispatcher`
@@ -297,7 +319,15 @@ async fn build_entry_for(
         );
     }
 
-    let upstream_tools = fetch_upstream_tools(http, &meta.url, bearer_token.as_deref()).await?;
+    // MCP streamable-HTTP servers may be STATEFUL: they require an
+    // `initialize` handshake and bind subsequent requests to the
+    // `Mcp-Session-Id` they issue. Establish that session up front
+    // (best-effort: stateless servers simply return no session id and the
+    // `tools/list` below proceeds unauthenticated as before).
+    let session = initialize_session(http, &meta.url, bearer_token.as_deref()).await;
+
+    let upstream_tools =
+        fetch_upstream_tools(http, &meta.url, bearer_token.as_deref(), &session).await?;
 
     let filtered = filter_by_allowlist(&upstream_tools, &meta.allowed_tools);
     if filtered.is_empty() {
@@ -320,6 +350,20 @@ async fn build_entry_for(
         });
     }
 
+    // For a STATEFUL session, start the heartbeat-responder so the upstream
+    // doesn't reap the session (and the agent's live browser page) after its
+    // ping timeout. Stateless sessions (id: None) need no keepalive.
+    let keepalive: Arc<Mutex<Option<tokio::task::AbortHandle>>> = Arc::new(Mutex::new(None));
+    if session.id.is_some() {
+        let handle = spawn_session_keepalive(
+            http.clone(),
+            meta.url.clone(),
+            session.clone(),
+            bearer_token.clone(),
+        );
+        *keepalive.lock().await = Some(handle);
+    }
+
     Ok((
         ForwarderEntry {
             name: name.to_string(),
@@ -327,12 +371,318 @@ async fn build_entry_for(
             upstream_url: meta.url.clone(),
             tools: tools_map,
             bearer_token,
+            session: Arc::new(Mutex::new(session)),
+            keepalive,
         },
         namespaced_defs,
     ))
 }
 
-/// POST a JSON-RPC `tools/list` to `url` and parse the result. No
+/// The MCP protocol version the router advertises in its `initialize`
+/// handshake. Servers negotiate to a version they support; this is the
+/// version the router proposes and falls back to when the upstream doesn't
+/// echo one back.
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// A negotiated MCP streamable-HTTP session.
+///
+/// Two pieces of per-connection state survive the `initialize` handshake and
+/// MUST be replayed on every subsequent request for broad server
+/// compatibility:
+///
+/// - **`id`** — the `Mcp-Session-Id` a STATEFUL server issues (Playwright, the
+///   official TS-SDK servers, GitHub MCP, …). `None` for stateless servers,
+///   which simply don't return the header.
+/// - **`protocol_version`** — the version the server negotiated. Per MCP
+///   2025-06-18 the client MUST send it back in the `MCP-Protocol-Version`
+///   header on every post-initialize HTTP request; SDK-based servers reject
+///   requests that omit it with `400 Bad Request`. We default to the version
+///   we proposed when the server doesn't echo one (older servers ignore the
+///   header).
+#[derive(Clone, Debug)]
+struct McpSession {
+    id: Option<String>,
+    protocol_version: String,
+}
+
+impl McpSession {
+    /// A session for an upstream that did not complete a handshake (stateless,
+    /// or handshake unreachable): no session id, default protocol version.
+    fn stateless() -> Self {
+        Self {
+            id: None,
+            protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+        }
+    }
+
+    /// Apply this session's headers (`Mcp-Session-Id` when present, and always
+    /// `MCP-Protocol-Version`) to an outbound request builder.
+    fn apply(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        req = req.header("mcp-protocol-version", &self.protocol_version);
+        if let Some(sid) = self.id.as_deref() {
+            req = req.header("mcp-session-id", sid);
+        }
+        req
+    }
+}
+
+/// MCP `initialize` handshake — negotiates the protocol version and (for
+/// STATEFUL upstreams) establishes the `Mcp-Session-Id` reused across every
+/// subsequent request.
+///
+/// Best-effort by design: stateless servers (and servers that don't implement
+/// the handshake) return no session header, in which case the returned session
+/// has `id: None` and the caller proceeds without one — preserving the original
+/// `tools/list` behaviour. Stateful servers (e.g. Playwright MCP, which returns
+/// `400 "Server not initialized"` on a bare `tools/list`) issue a session id;
+/// for those we also send the required `notifications/initialized` to complete
+/// the handshake before any `tools/list` / `tools/call`.
+///
+/// Never returns an error: a failed handshake degrades to a stateless session
+/// and the real signal surfaces from the subsequent `tools/list` (which keeps
+/// error reporting in one place).
+async fn initialize_session(http: &reqwest::Client, url: &str, bearer: Option<&str>) -> McpSession {
+    let init_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {
+                "name": "kars-inference-router",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        },
+    });
+
+    let mut req = http
+        .post(url)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(&init_body);
+    if let Some(token) = bearer {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(url = %url, error = %e, "MCP initialize POST failed; treating upstream as stateless");
+            return McpSession::stateless();
+        }
+    };
+
+    let session_id = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // The initialize *result* carries the negotiated `protocolVersion`. The
+    // body may be plain JSON or an SSE event stream (official TS-SDK servers
+    // reply with SSE); `extract_jsonrpc_payload` handles both. If anything is
+    // missing we fall back to the version we proposed.
+    let protocol_version = match resp.text().await {
+        Ok(body) => extract_jsonrpc_payload(&content_type, &body)
+            .ok()
+            .and_then(|v| {
+                v.get("result")
+                    .and_then(|r| r.get("protocolVersion"))
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| MCP_PROTOCOL_VERSION.to_string()),
+        Err(_) => MCP_PROTOCOL_VERSION.to_string(),
+    };
+
+    let Some(sid) = session_id else {
+        // Stateless server: no session id, but still report the negotiated
+        // protocol version so we send the `MCP-Protocol-Version` header.
+        return McpSession {
+            id: None,
+            protocol_version,
+        };
+    };
+
+    // Stateful server: complete the handshake. Per the MCP spec the client
+    // MUST send `notifications/initialized` (carrying the session + protocol
+    // headers) before issuing requests. Best-effort: a transient hiccup here
+    // surfaces as a clear error on the following `tools/list`.
+    let session = McpSession {
+        id: Some(sid),
+        protocol_version,
+    };
+    let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let mut nreq = http
+        .post(url)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(&note);
+    nreq = session.apply(nreq);
+    if let Some(token) = bearer {
+        nreq = nreq.bearer_auth(token);
+    }
+    if let Err(e) = nreq.send().await {
+        tracing::debug!(url = %url, error = %e, "MCP notifications/initialized POST failed");
+    }
+
+    tracing::debug!(url = %url, protocol = %session.protocol_version, "Established MCP session with stateful upstream");
+    session
+}
+
+/// How long the keepalive holds a single `GET /mcp` SSE connection before
+/// proactively reconnecting. The connection normally stays open for the life
+/// of the session; this bound just guarantees we recycle a wedged TCP
+/// connection rather than block forever on a half-open socket.
+const KEEPALIVE_GET_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// Backoff before re-opening the standalone SSE stream after it ends. Short
+/// enough that a transient blip doesn't leave a ping unanswered past the
+/// upstream's timeout, long enough to avoid a hot loop if the server has
+/// actually torn the session down (in which case the next GET 404s and the
+/// task exits).
+const KEEPALIVE_RECONNECT_BACKOFF: Duration = Duration::from_millis(750);
+
+/// Spawn the [`run_session_keepalive`] task and return its [`AbortHandle`].
+fn spawn_session_keepalive(
+    http: reqwest::Client,
+    url: String,
+    session: McpSession,
+    bearer: Option<String>,
+) -> tokio::task::AbortHandle {
+    tokio::spawn(run_session_keepalive(http, url, session, bearer)).abort_handle()
+}
+
+/// Keep a STATEFUL MCP session alive by behaving as a well-formed MCP client:
+/// hold the standalone `GET /mcp` SSE stream open and answer the server's
+/// JSON-RPC `ping` requests with a `pong`.
+///
+/// # Why this is required
+///
+/// MCP servers may run a server-initiated heartbeat to detect dead clients.
+/// Playwright MCP does (HTTP transport, `runHeartbeat = true`): every ~3s it
+/// calls `server.ping()` and, if no response arrives within
+/// `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` (default 5000), it calls `server.close()`,
+/// which deletes the session. A forwarder that only POSTs `tools/call` and
+/// reads the immediate response never sees those pings, so the session — and
+/// the browser context bound to it — is reaped ~5s after creation. The next
+/// `tools/call` then gets `404 "Session not found"`, the forwarder re-inits,
+/// and the retry lands on a fresh blank page (`about:blank`). Holding the GET
+/// stream and ponging keeps the session (and the agent's page) alive.
+///
+/// # Behaviour
+///
+/// Loops for the life of the task (cancelled via its [`AbortHandle`] when the
+/// session is re-initialized or the dispatcher is dropped):
+///
+/// 1. Open `GET {url}` with `Accept: text/event-stream` + the session headers.
+/// 2. A non-2xx (e.g. `404 Session not found`, or `405` from a server that
+///    doesn't implement the standalone stream) means there's nothing to keep
+///    alive this way — exit; the normal `tools/call` path handles re-init.
+/// 3. Stream the SSE body. For each server→client JSON-RPC `ping`, POST a
+///    `{"result":{}}` response carrying the same id and the session headers.
+/// 4. If the stream ends while the session may still be valid, back off briefly
+///    and reconnect.
+async fn run_session_keepalive(
+    http: reqwest::Client,
+    url: String,
+    session: McpSession,
+    bearer: Option<String>,
+) {
+    use futures::StreamExt;
+
+    loop {
+        let mut req = http
+            .get(&url)
+            .header("accept", "text/event-stream")
+            .header("mcp-protocol-version", &session.protocol_version)
+            .timeout(KEEPALIVE_GET_TIMEOUT);
+        if let Some(sid) = session.id.as_deref() {
+            req = req.header("mcp-session-id", sid);
+        }
+        if let Some(token) = bearer.as_deref() {
+            req = req.bearer_auth(token);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(url = %url, error = %e, "MCP keepalive GET failed; retrying");
+                tokio::time::sleep(KEEPALIVE_RECONNECT_BACKOFF).await;
+                continue;
+            }
+        };
+
+        if !resp.status().is_success() {
+            // 404 → session already gone; 405 → server has no standalone SSE
+            // stream (so it can't be heartbeating us either). Either way, stop:
+            // there is nothing this task can keep alive.
+            tracing::debug!(
+                url = %url,
+                status = %resp.status(),
+                "MCP keepalive GET not available; stopping keepalive for this session"
+            );
+            return;
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        while let Some(chunk) = stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!(url = %url, error = %e, "MCP keepalive SSE read error; reconnecting");
+                    break;
+                }
+            };
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+            // SSE frames are newline-delimited; pull complete lines and act on
+            // `data:` lines that carry a server→client `ping` request.
+            while let Some(nl) = buf.find('\n') {
+                let line = buf[..nl].trim().to_string();
+                buf.drain(..=nl);
+                let Some(payload) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let Ok(msg) = serde_json::from_str::<Value>(payload.trim()) else {
+                    continue;
+                };
+                if msg.get("method").and_then(|m| m.as_str()) != Some("ping") {
+                    continue;
+                }
+                let Some(id) = msg.get("id").cloned() else {
+                    // A ping *notification* (no id) needs no response.
+                    continue;
+                };
+                let pong = json!({ "jsonrpc": "2.0", "id": id, "result": {} });
+                let mut preq = http
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .json(&pong);
+                preq = session.apply(preq);
+                if let Some(token) = bearer.as_deref() {
+                    preq = preq.bearer_auth(token);
+                }
+                if let Err(e) = preq.send().await {
+                    tracing::debug!(url = %url, error = %e, "MCP keepalive pong POST failed");
+                }
+            }
+        }
+
+        // Stream ended. Back off, then reconnect — if the session was reaped the
+        // next GET 404s and we exit; otherwise we resume answering pings.
+        tokio::time::sleep(KEEPALIVE_RECONNECT_BACKOFF).await;
+    }
+}
+
 /// pagination — Slice 4d.4 caps at one page; multi-page upstreams are
 /// truncated with a recorded warning. Multi-page support lands when
 /// we have a real consumer that hits the cap (principles §5).
@@ -340,6 +690,7 @@ async fn fetch_upstream_tools(
     http: &reqwest::Client,
     url: &str,
     bearer: Option<&str>,
+    session: &McpSession,
 ) -> Result<Vec<ToolDefinition>, String> {
     let body = json!({
         "jsonrpc": "2.0",
@@ -355,6 +706,7 @@ async fn fetch_upstream_tools(
     if let Some(token) = bearer {
         req = req.bearer_auth(token);
     }
+    req = session.apply(req);
     let resp = req
         .send()
         .await
@@ -421,12 +773,82 @@ fn filter_by_allowlist(upstream: &[ToolDefinition], allow: &[String]) -> Vec<Too
 }
 
 /// Forward one `tools/call` invocation to `entry.upstream_url`.
-async fn forward_tools_call(
+/// Outcome of a single `tools/call` POST attempt, distinguishing a stale
+/// session (which warrants one re-handshake + retry) from a terminal result.
+enum CallAttempt {
+    /// Upstream produced a usable response (success or a per-call isError).
+    Done(ToolCallOutput),
+    /// Upstream reported its session is gone (pod restart / TTL expiry).
+    /// The caller re-initializes the session and retries once. Carries the
+    /// triggering signal (HTTP status + trimmed body, or the JSON-RPC error)
+    /// so the re-init log line records *why* the session was deemed lost —
+    /// turning any future false-positive into a one-line diagnosis instead of
+    /// a guessing game.
+    SessionLost { reason: String },
+    /// Terminal failure — surface to the agent as-is.
+    Fatal(DispatchError),
+}
+
+/// Heuristic: does this upstream response indicate the MCP session is no
+/// longer valid (so a single re-handshake + retry is warranted)?
+///
+/// This MUST be conservative. A false positive is *destructive* for
+/// stateful servers: re-initializing throws away live per-session state
+/// (e.g. a Playwright server's open browser page) and the retry lands on
+/// a brand-new blank context. We therefore only treat a response as
+/// session-loss on the canonical, unambiguous signals:
+///
+///   - the MCP SDK's exact `Server not initialized` 400 (what Playwright
+///     and the official TypeScript SDK return once a session is gone), or
+///   - a body that explicitly couples "session" with an expiry/not-found
+///     qualifier (`expired`, `not found`, `invalid`, `unknown`, …).
+///
+/// Crucially we do NOT match the bare word "session": large tool
+/// responses (browser snapshots, `evaluate` output) routinely embed it
+/// (`sessionStorage`, page text), and matching it corrupted healthy
+/// sessions mid-flight.
+fn is_session_lost(status: reqwest::StatusCode, body: &str) -> bool {
+    let code = status.as_u16();
+    if code != 400 && code != 404 {
+        return false;
+    }
+    body_signals_session_loss(body)
+}
+
+/// Shared session-loss body classifier for both the HTTP-status path and
+/// the JSON-RPC-error path. Conservative by design (see [`is_session_lost`]).
+fn body_signals_session_loss(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    // Canonical MCP SDK signal — emitted verbatim by Playwright MCP and the
+    // official reference servers when the session they issued is gone.
+    if b.contains("not initialized") {
+        return true;
+    }
+    // Other servers phrase it as an expired/invalid/missing *session*. Require
+    // the word "session" AND an explicit invalidation qualifier so incidental
+    // occurrences of "session" in tool output never trigger a re-init.
+    if b.contains("session") {
+        const QUALIFIERS: [&str; 6] = [
+            "expired",
+            "not found",
+            "invalid",
+            "unknown",
+            "missing",
+            "no longer",
+        ];
+        return QUALIFIERS.iter().any(|q| b.contains(q));
+    }
+    false
+}
+
+async fn post_tools_call(
     http: &reqwest::Client,
     entry: &ForwarderEntry,
     upstream_name: &str,
     arguments: &Value,
-) -> Result<ToolCallOutput, DispatchError> {
+    session: &McpSession,
+) -> CallAttempt {
+    let tool_label = format!("{}.{}", entry.prefix, upstream_name);
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -445,13 +867,17 @@ async fn forward_tools_call(
     if let Some(token) = entry.bearer_token.as_deref() {
         req = req.bearer_auth(token);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| DispatchError::ExecutionFailed {
-            tool: format!("{}.{}", entry.prefix, upstream_name),
-            reason: format!("upstream POST failed: {e}"),
-        })?;
+    req = session.apply(req);
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return CallAttempt::Fatal(DispatchError::ExecutionFailed {
+                tool: tool_label,
+                reason: format!("upstream POST failed: {e}"),
+            });
+        }
+    };
 
     let status = resp.status();
     let content_type = resp
@@ -460,17 +886,28 @@ async fn forward_tools_call(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body_text = resp
-        .text()
-        .await
-        .map_err(|e| DispatchError::ExecutionFailed {
-            tool: format!("{}.{}", entry.prefix, upstream_name),
-            reason: format!("upstream body read failed: {e}"),
-        })?;
+    let body_text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            return CallAttempt::Fatal(DispatchError::ExecutionFailed {
+                tool: tool_label,
+                reason: format!("upstream body read failed: {e}"),
+            });
+        }
+    };
 
     if !status.is_success() {
-        return Err(DispatchError::ExecutionFailed {
-            tool: format!("{}.{}", entry.prefix, upstream_name),
+        if is_session_lost(status, &body_text) {
+            return CallAttempt::SessionLost {
+                reason: format!(
+                    "http {} body: {}",
+                    status,
+                    body_text.chars().take(160).collect::<String>()
+                ),
+            };
+        }
+        return CallAttempt::Fatal(DispatchError::ExecutionFailed {
+            tool: tool_label,
             reason: format!(
                 "upstream non-2xx: {} (body trimmed: {})",
                 status,
@@ -479,26 +916,43 @@ async fn forward_tools_call(
         });
     }
 
-    let json_payload = extract_jsonrpc_payload(&content_type, &body_text).map_err(|e| {
-        DispatchError::ExecutionFailed {
-            tool: format!("{}.{}", entry.prefix, upstream_name),
-            reason: format!("upstream response decode failed: {e}"),
+    let json_payload = match extract_jsonrpc_payload(&content_type, &body_text) {
+        Ok(v) => v,
+        Err(e) => {
+            return CallAttempt::Fatal(DispatchError::ExecutionFailed {
+                tool: tool_label,
+                reason: format!("upstream response decode failed: {e}"),
+            });
         }
-    })?;
-    let parsed: ToolsCallResponse =
-        serde_json::from_value(json_payload).map_err(|e| DispatchError::ExecutionFailed {
-            tool: format!("{}.{}", entry.prefix, upstream_name),
-            reason: format!("upstream tools/call parse failed: {e}"),
-        })?;
+    };
+    let parsed: ToolsCallResponse = match serde_json::from_value(json_payload) {
+        Ok(p) => p,
+        Err(e) => {
+            return CallAttempt::Fatal(DispatchError::ExecutionFailed {
+                tool: tool_label,
+                reason: format!("upstream tools/call parse failed: {e}"),
+            });
+        }
+    };
 
     if let Some(err) = parsed.error {
-        // Upstream protocol error → surface as an isError content
-        // entry, not a DispatchError. Per MCP spec, JSON-RPC errors
-        // from `tools/call` indicate the *protocol* failed; the
-        // semantic "tool ran but errored" path uses isError:true.
-        // We collapse them here because the agent-facing surface
-        // shouldn't distinguish (the audit layer can see both).
-        return Ok(ToolCallOutput {
+        // A JSON-RPC session error (code -32000/-32001 with an explicit
+        // session-loss message) also means the session is gone — retry once.
+        // We reuse the same conservative body classifier so an ordinary
+        // tool-level error whose message merely mentions "session" is NOT
+        // mistaken for a lost session.
+        if (err.code == -32000 || err.code == -32001) && body_signals_session_loss(&err.message) {
+            return CallAttempt::SessionLost {
+                reason: format!("jsonrpc error code={} message={}", err.code, err.message),
+            };
+        }
+        // Other upstream protocol error → surface as an isError content
+        // entry, not a DispatchError. Per MCP spec, JSON-RPC errors from
+        // `tools/call` indicate the *protocol* failed; the semantic "tool
+        // ran but errored" path uses isError:true. We collapse them here
+        // because the agent-facing surface shouldn't distinguish (the audit
+        // layer can see both).
+        return CallAttempt::Done(ToolCallOutput {
             content: vec![ToolContent::Text {
                 text: format!(
                     "upstream JSON-RPC error code={} message={}",
@@ -509,17 +963,76 @@ async fn forward_tools_call(
         });
     }
 
-    let result = parsed
-        .result
-        .ok_or_else(|| DispatchError::ExecutionFailed {
-            tool: format!("{}.{}", entry.prefix, upstream_name),
-            reason: "tools/call missing result".to_string(),
-        })?;
+    let result = match parsed.result {
+        Some(r) => r,
+        None => {
+            return CallAttempt::Fatal(DispatchError::ExecutionFailed {
+                tool: tool_label,
+                reason: "tools/call missing result".to_string(),
+            });
+        }
+    };
 
-    Ok(ToolCallOutput {
+    CallAttempt::Done(ToolCallOutput {
         content: result.content,
         is_error: result.is_error.unwrap_or(false),
     })
+}
+
+async fn forward_tools_call(
+    http: &reqwest::Client,
+    entry: &ForwarderEntry,
+    upstream_name: &str,
+    arguments: &Value,
+) -> Result<ToolCallOutput, DispatchError> {
+    // Reuse the session established at discovery so stateful upstreams keep
+    // their per-session state (e.g. the open browser page) across calls.
+    let session = entry.session.lock().await.clone();
+
+    match post_tools_call(http, entry, upstream_name, arguments, &session).await {
+        CallAttempt::Done(out) => Ok(out),
+        CallAttempt::Fatal(e) => Err(e),
+        CallAttempt::SessionLost { reason } => {
+            // Re-establish the session once and retry. Covers upstream pod
+            // restarts and session TTL expiry without failing the agent's call.
+            tracing::info!(
+                tool = %format!("{}.{}", entry.prefix, upstream_name),
+                reason = %reason,
+                "MCP upstream session lost; re-initializing and retrying once"
+            );
+            let new_session =
+                initialize_session(http, &entry.upstream_url, entry.bearer_token.as_deref()).await;
+            *entry.session.lock().await = new_session.clone();
+
+            // The old keepalive (if any) was bound to the now-dead session;
+            // cancel it and start a fresh one for the re-established session so
+            // the new session is likewise protected from the upstream's
+            // heartbeat reaper.
+            {
+                let mut guard = entry.keepalive.lock().await;
+                if let Some(old) = guard.take() {
+                    old.abort();
+                }
+                if new_session.id.is_some() {
+                    *guard = Some(spawn_session_keepalive(
+                        http.clone(),
+                        entry.upstream_url.clone(),
+                        new_session.clone(),
+                        entry.bearer_token.clone(),
+                    ));
+                }
+            }
+
+            match post_tools_call(http, entry, upstream_name, arguments, &new_session).await {
+                CallAttempt::Done(out) => Ok(out),
+                CallAttempt::Fatal(e) => Err(e),
+                CallAttempt::SessionLost { .. } => Err(DispatchError::ExecutionFailed {
+                    tool: format!("{}.{}", entry.prefix, upstream_name),
+                    reason: "upstream session could not be re-established after retry".to_string(),
+                }),
+            }
+        }
+    }
 }
 
 /// Decode an MCP Streamable HTTP response body into a JSON-RPC payload.
@@ -633,7 +1146,7 @@ mod tests {
         Json, Router,
         extract::State,
         http::{HeaderMap, StatusCode},
-        routing::{any, post},
+        routing::{any, get, post},
     };
     use std::collections::BTreeMap;
     use std::sync::Arc as StdArc;
@@ -1150,5 +1663,488 @@ mod tests {
             .unwrap();
         let ToolContent::Text { text: t2 } = &out2.content[0];
         assert!(t2.contains("called query"));
+    }
+
+    /// A configurable STATEFUL mock upstream covering the transport variants of
+    /// the popular MCP servers:
+    ///
+    /// - **Playwright MCP** — JSON `initialize` body, `Mcp-Session-Id`, rejects
+    ///   bare `tools/list` with `400 "Server not initialized"`.
+    /// - **Official TS-SDK servers / GitHub MCP** — SSE `initialize` body, a
+    ///   negotiated `protocolVersion`, and a hard requirement that every
+    ///   post-initialize request carries the `MCP-Protocol-Version` header
+    ///   (returns `400` otherwise).
+    /// - **Session expiry / pod restart** — one request fails with a session
+    ///   error, forcing a re-initialize + retry.
+    #[derive(Clone)]
+    struct StatefulState {
+        tools: Vec<ToolDefinition>,
+        session_id: String,
+        negotiated_version: String,
+        /// Return the `initialize` result as a `text/event-stream` body.
+        sse_init: bool,
+        /// Reject `tools/*` requests that omit the `MCP-Protocol-Version` header.
+        require_protocol_header: bool,
+        init_count: StdArc<AtomicUsize>,
+        call_count: StdArc<AtomicUsize>,
+        /// When set, the next `tools/call` returns a `400` session error once
+        /// (then clears the flag), simulating session expiry / pod restart.
+        fail_next_with_session_lost: StdArc<std::sync::atomic::AtomicBool>,
+        /// When set, every successful `tools/call` result embeds the word
+        /// "session" in its text (mimics Playwright `browser_evaluate` output
+        /// that references `sessionStorage`). A healthy 200 like this must
+        /// NEVER be misread as a lost session.
+        result_mentions_session: bool,
+    }
+
+    impl StatefulState {
+        fn new(session_id: &str, tools: Vec<ToolDefinition>) -> Self {
+            Self {
+                tools,
+                session_id: session_id.to_string(),
+                negotiated_version: MCP_PROTOCOL_VERSION.to_string(),
+                sse_init: false,
+                require_protocol_header: false,
+                init_count: StdArc::new(AtomicUsize::new(0)),
+                call_count: StdArc::new(AtomicUsize::new(0)),
+                fail_next_with_session_lost: StdArc::new(std::sync::atomic::AtomicBool::new(false)),
+                result_mentions_session: false,
+            }
+        }
+    }
+
+    async fn stateful_mock_handler(
+        State(state): State<StatefulState>,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let method = body.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        let id = body.get("id").cloned().unwrap_or(serde_json::json!(1));
+        let sid = headers
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let has_proto = headers.contains_key("mcp-protocol-version");
+
+        let session_lost = || {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": null,
+                    "error": {"code": -32000, "message": "Bad Request: Server not initialized"}
+                })),
+            )
+                .into_response()
+        };
+
+        match method {
+            "initialize" => {
+                state.init_count.fetch_add(1, Ordering::SeqCst);
+                let result = serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {"protocolVersion": state.negotiated_version, "capabilities": {}}
+                });
+                if state.sse_init {
+                    let sse = format!("event: message\ndata: {result}\n\n");
+                    (
+                        StatusCode::OK,
+                        [
+                            ("mcp-session-id", state.session_id.clone()),
+                            ("content-type", "text/event-stream".to_string()),
+                        ],
+                        sse,
+                    )
+                        .into_response()
+                } else {
+                    (
+                        StatusCode::OK,
+                        [("mcp-session-id", state.session_id.clone())],
+                        Json(result),
+                    )
+                        .into_response()
+                }
+            }
+            "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
+            "tools/list" | "tools/call" if sid != state.session_id => session_lost(),
+            "tools/list" | "tools/call" if state.require_protocol_header && !has_proto => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": null,
+                    "error": {"code": -32600, "message": "Missing MCP-Protocol-Version header"}
+                })),
+            )
+                .into_response(),
+            "tools/list" => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id, "result": {"tools": state.tools}
+                })),
+            )
+                .into_response(),
+            "tools/call" => {
+                state.call_count.fetch_add(1, Ordering::SeqCst);
+                if state
+                    .fail_next_with_session_lost
+                    .swap(false, Ordering::SeqCst)
+                {
+                    return session_lost();
+                }
+                let tool = body
+                    .pointer("/params/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let text = if state.result_mentions_session {
+                    format!("called {tool}; page has sessionStorage keys: [token]")
+                } else {
+                    format!("called {tool}")
+                };
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {"content": [{"type": "text", "text": text}], "isError": false}
+                    })),
+                )
+                    .into_response()
+            }
+            _ => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32601, "message": "method not found"}
+                })),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn stateful_mock_upstream(state: StatefulState) -> String {
+        let app = Router::new()
+            .route("/", post(stateful_mock_handler))
+            .route("/", any(method_block))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/")
+    }
+
+    /// Playwright-MCP shape: JSON `initialize`, session id, bare `tools/list`
+    /// rejected. Discovery + call must succeed and reuse one session.
+    #[tokio::test]
+    async fn stateful_playwright_shape_discovers_and_calls_with_reused_session() {
+        let state = StatefulState::new(
+            "sess-abc-123",
+            vec![tool_def("browser_navigate", "open a url")],
+        );
+        let init_count = state.init_count.clone();
+        let url = stateful_mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("playwright", &url, vec!["*"])]);
+
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .expect("discover");
+        assert_eq!(
+            dispatcher.len(),
+            1,
+            "stateful server tools must be discovered"
+        );
+        assert!(
+            dispatcher.skipped().is_empty(),
+            "stateful server must not be skipped"
+        );
+
+        let out = dispatcher
+            .invoke(
+                "playwright.browser_navigate",
+                &serde_json::json!({"url": "https://x"}),
+            )
+            .await
+            .expect("invoke");
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(text.contains("called browser_navigate"));
+        assert!(!out.is_error);
+
+        // Exactly one initialize: the session is reused, not re-created per call.
+        assert_eq!(
+            init_count.load(Ordering::SeqCst),
+            1,
+            "session must be reused across calls"
+        );
+    }
+
+    /// Official TS-SDK / GitHub-MCP shape: SSE `initialize` body, a negotiated
+    /// protocol version, and a hard requirement that the `MCP-Protocol-Version`
+    /// header is replayed on every request. Discovery succeeding proves the
+    /// router parses the SSE-negotiated version and sends the header.
+    #[tokio::test]
+    async fn stateful_sse_init_with_required_protocol_header() {
+        let mut state = StatefulState::new("gh-session-xyz", vec![tool_def("search_repos", "")]);
+        state.sse_init = true;
+        state.require_protocol_header = true;
+        state.negotiated_version = "2025-03-26".to_string();
+        let url = stateful_mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .expect("discover");
+        assert_eq!(
+            dispatcher.len(),
+            1,
+            "SSE-init server with required protocol header must be discovered"
+        );
+        assert!(dispatcher.skipped().is_empty());
+
+        let out = dispatcher
+            .invoke("github_mcp.search_repos", &serde_json::json!({"q": "kars"}))
+            .await
+            .expect("invoke");
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(text.contains("called search_repos"));
+    }
+
+    /// Session expiry / upstream pod restart: the first `tools/call` fails with
+    /// a session error; the router must re-initialize and retry transparently.
+    #[tokio::test]
+    async fn stateful_session_expiry_triggers_reinit_and_retry() {
+        let state = StatefulState::new("sess-1", vec![tool_def("do_thing", "")]);
+        let init_count = state.init_count.clone();
+        let fail_flag = state.fail_next_with_session_lost.clone();
+        let url = stateful_mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("svc", &url, vec!["*"])]);
+
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .expect("discover");
+        assert_eq!(
+            init_count.load(Ordering::SeqCst),
+            1,
+            "one initialize at discovery"
+        );
+
+        // Arm the upstream to drop the session on the next call.
+        fail_flag.store(true, Ordering::SeqCst);
+        let out = dispatcher
+            .invoke("svc.do_thing", &serde_json::json!({}))
+            .await
+            .expect("invoke should succeed after transparent re-init + retry");
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(text.contains("called do_thing"));
+
+        // The retry path re-established the session exactly once more.
+        assert_eq!(
+            init_count.load(Ordering::SeqCst),
+            2,
+            "session must be re-initialized once on expiry"
+        );
+    }
+
+    /// Regression: a HEALTHY `tools/call` whose 200 result merely mentions the
+    /// word "session" (e.g. Playwright `browser_evaluate` returning page text
+    /// that references `sessionStorage`) must NOT be misread as a lost session.
+    /// Re-initializing here is destructive — it drops the live browser context
+    /// and the retry lands on a blank `about:blank` page. The session must be
+    /// reused with ZERO re-initializations across many such calls.
+    #[tokio::test]
+    async fn healthy_call_mentioning_session_does_not_reinitialize() {
+        let mut state =
+            StatefulState::new("sess-keep", vec![tool_def("browser_evaluate", "run js")]);
+        state.result_mentions_session = true;
+        let init_count = state.init_count.clone();
+        let url = stateful_mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("pw", &url, vec!["*"])]);
+
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .expect("discover");
+        assert_eq!(
+            init_count.load(Ordering::SeqCst),
+            1,
+            "one init at discovery"
+        );
+
+        // Several calls in a row, each returning "session" in the result text.
+        for _ in 0..5 {
+            let out = dispatcher
+                .invoke(
+                    "pw.browser_evaluate",
+                    &serde_json::json!({"function": "() => 1"}),
+                )
+                .await
+                .expect("invoke");
+            let ToolContent::Text { text } = &out.content[0];
+            assert!(text.contains("sessionStorage"), "result text preserved");
+            assert!(!out.is_error);
+        }
+
+        // The single discovery session must have been reused for every call —
+        // no false-positive session-loss re-init.
+        assert_eq!(
+            init_count.load(Ordering::SeqCst),
+            1,
+            "healthy 'session'-mentioning results must not trigger re-initialization"
+        );
+    }
+
+    #[test]
+    fn session_loss_classifier_is_conservative() {
+        use reqwest::StatusCode;
+
+        // Canonical MCP SDK signal — Playwright / official servers.
+        assert!(is_session_lost(
+            StatusCode::BAD_REQUEST,
+            "Bad Request: Server not initialized"
+        ));
+        // Explicit session invalidation phrasings.
+        assert!(is_session_lost(StatusCode::NOT_FOUND, "session not found"));
+        assert!(is_session_lost(
+            StatusCode::BAD_REQUEST,
+            "Mcp-Session-Id expired"
+        ));
+        assert!(is_session_lost(
+            StatusCode::BAD_REQUEST,
+            "this session is no longer valid"
+        ));
+
+        // Incidental "session" mentions in error bodies must NOT match — this
+        // is exactly the false positive that corrupted live browser sessions.
+        assert!(!is_session_lost(
+            StatusCode::BAD_REQUEST,
+            "Error: page.evaluate failed; sessionStorage is empty"
+        ));
+        assert!(!is_session_lost(
+            StatusCode::BAD_REQUEST,
+            "invalid arguments: missing 'url'"
+        ));
+        // Non-4xx never qualifies regardless of body.
+        assert!(!is_session_lost(StatusCode::OK, "Server not initialized"));
+        assert!(!is_session_lost(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session expired"
+        ));
+    }
+
+    /// Mock upstream that mimics a heartbeating MCP server (Playwright shape):
+    /// it issues a session on `initialize`, serves a `tools/list`, and — on the
+    /// standalone `GET /` SSE stream — pushes a server→client `ping` then holds
+    /// the stream open. A correct client MUST answer that ping with a `pong`
+    /// POST or the real server would reap the session after its ping timeout.
+    #[derive(Clone)]
+    struct HeartbeatState {
+        session_id: String,
+        tools: Vec<ToolDefinition>,
+        get_hits: StdArc<AtomicUsize>,
+        pong_hits: StdArc<AtomicUsize>,
+    }
+
+    async fn heartbeat_post(
+        State(state): State<HeartbeatState>,
+        Json(body): Json<serde_json::Value>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let method = body.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        let id = body.get("id").cloned().unwrap_or(serde_json::json!(1));
+        match method {
+            "initialize" => (
+                StatusCode::OK,
+                [("mcp-session-id", state.session_id.clone())],
+                Json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {}}
+                })),
+            )
+                .into_response(),
+            "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
+            "tools/list" => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id, "result": {"tools": state.tools}
+                })),
+            )
+                .into_response(),
+            // A `pong` is a JSON-RPC *response*: it has `result` + `id` and no
+            // `method`. That's the heartbeat reply we're asserting on.
+            "" if body.get("result").is_some() && body.get("id").is_some() => {
+                state.pong_hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::ACCEPTED.into_response()
+            }
+            _ => StatusCode::ACCEPTED.into_response(),
+        }
+    }
+
+    async fn heartbeat_get(State(state): State<HeartbeatState>) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        use futures::stream::{self, StreamExt};
+        state.get_hits.fetch_add(1, Ordering::SeqCst);
+        // Push one server→client ping, then hold the stream open forever.
+        let ping = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"ping\"}\n\n";
+        let body = axum::body::Body::from_stream(
+            stream::once(async move {
+                Ok::<_, std::io::Error>(axum::body::Bytes::from_static(ping.as_bytes()))
+            })
+            .chain(stream::pending()),
+        );
+        (
+            StatusCode::OK,
+            [("content-type", "text/event-stream")],
+            body,
+        )
+            .into_response()
+    }
+
+    /// A heartbeating upstream must not reap our session: the forwarder has to
+    /// hold the standalone `GET` SSE stream open and answer server pings with a
+    /// `pong`. This is the fix for the Playwright `about:blank` regression
+    /// (session reaped after the 5s ping timeout → re-init onto a blank page).
+    #[tokio::test]
+    async fn keepalive_holds_get_stream_and_pongs_server_ping() {
+        let state = HeartbeatState {
+            session_id: "hb-session-1".to_string(),
+            tools: vec![tool_def("browser_navigate", "go")],
+            get_hits: StdArc::new(AtomicUsize::new(0)),
+            pong_hits: StdArc::new(AtomicUsize::new(0)),
+        };
+        let get_hits = state.get_hits.clone();
+        let pong_hits = state.pong_hits.clone();
+
+        let app = Router::new()
+            .route("/", post(heartbeat_post))
+            .route("/", get(heartbeat_get))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}/");
+
+        let registry = registry_with(vec![discovered("browser", &url, vec!["*"])]);
+        let dispatcher =
+            RouterToolDispatcher::discover_with_client(registry, reqwest::Client::new())
+                .await
+                .unwrap();
+        assert_eq!(dispatcher.len(), 1, "stateful server should be discovered");
+
+        // The keepalive runs in the background; give it a moment to open the
+        // GET stream, receive the ping, and POST the pong.
+        for _ in 0..50 {
+            if pong_hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            get_hits.load(Ordering::SeqCst) >= 1,
+            "keepalive must open the standalone GET SSE stream"
+        );
+        assert!(
+            pong_hits.load(Ordering::SeqCst) >= 1,
+            "keepalive must answer the server's ping with a pong (else the upstream reaps the session)"
+        );
     }
 }

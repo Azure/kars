@@ -36,7 +36,10 @@ use crate::fedcred::{FedCredConfig, FedCredManager};
 pub(crate) mod byo_contract;
 mod dev_env;
 pub(crate) mod governance_mounts;
+mod mcp_egress;
 pub(crate) mod trustgraph_mount;
+
+use mcp_egress::mcp_egress_rule;
 
 /// Build pod security context, conditionally including SELinux options and
 /// choosing between RuntimeDefault and Localhost seccomp profiles.
@@ -252,8 +255,6 @@ mod egress_guard_tests {
         }
     }
 }
-
-/// Custom error type that bridges serde_json and kube errors.
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
     #[error("Kubernetes API error: {0}")]
@@ -1184,13 +1185,36 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     if let Some(endpoints) = allowlist_resolution.endpoints.as_ref() {
         for ep in endpoints {
             let port = ep.port.unwrap_or(443);
-            if port != 443 {
-                // Only add non-443 ports (443 is already covered by the blanket HTTPS rule)
-                egress_rules.push(json!({
-                    "to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}],
-                    "ports": [{"protocol": "TCP", "port": port}]
-                }));
+            if port == 443 {
+                // 443 is already covered by the blanket HTTPS rule.
+                continue;
             }
+            // In-cluster endpoints need a `namespaceSelector` (a `0.0.0.0/0`
+            // ipBlock doesn't match in-cluster pods under Cilium); external
+            // hosts keep the coarse ipBlock. `mcp_egress_rule` encodes both and
+            // only returns `None` for 443, already skipped above.
+            if let Some(rule) = mcp_egress_rule(&ep.host, port) {
+                egress_rules.push(rule);
+            }
+        }
+    }
+
+    // Auto-derive egress to every referenced McpServer so "apply an McpServer
+    // and reference it" just works — the router is the only path to it, so the
+    // default-deny NetworkPolicy must admit the router→server hop. De-duplicated.
+    match mcp_egress::derive_mcp_egress_rules(
+        client,
+        &sandbox_self_ns,
+        &governance_config.effective_mcp_server_refs(),
+        &name,
+        &egress_rules,
+    )
+    .await
+    {
+        Ok(rules) => egress_rules.extend(rules),
+        Err(e) => {
+            tracing::error!(error = %e, sandbox = %name, "MCP egress derivation failed");
+            return Ok(Action::requeue(Duration::from_secs(15)));
         }
     }
 
