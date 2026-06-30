@@ -12,6 +12,7 @@ End-to-end blueprints you can `kubectl apply -f` after running `kars up`.
 | [`openai-agents-quickstart`](openai-agents-quickstart/) | OpenAIAgents (Python) | Hosts an unmodified OpenAI Agents SDK app inside a kars sandbox. Same security as default. |
 | [`maf-quickstart`](maf-quickstart/) | MicrosoftAgentFramework (Python) | Hosts an unmodified Microsoft Agent Framework app inside a kars sandbox. |
 | [`byo-quickstart`](byo-quickstart/) | BYO | Brings any container image under the BYO contract (`spec.runtime.kind: BYO`). Same isolation, same router. |
+| [`playwright-mcp`](playwright-mcp/) | OpenClaw + MCP | Browser-automation agent on the official Playwright MCP. Shows zero-config MCP wiring, **out-of-the-box egress auto-derivation**, and reliable multi-step browsing (session keepalive). |
 
 All examples share the same control-plane install and isolation guarantees
 — only the agent runtime image changes. See

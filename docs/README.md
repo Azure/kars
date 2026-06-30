@@ -97,6 +97,7 @@ This section mirrors the chapter groups in **[`SUMMARY.md`](SUMMARY.md)**, which
 - [kars OpenClaw plugin](openclaw-plugin.md) — the in-sandbox plugin (24 governance-aware tools, 10 skills) every kars-managed agent loads.
 - [`@kars/mesh` plugin](mesh-plugin.md) — the companion local plugin (built from source, not yet published on npm) for pairing a local OpenClaw with a remote kars cluster.
 - [Channels & external plugins](channels-plugins.md) — Telegram / Slack / Discord / WhatsApp channels + 3rd-party search/scrape API integrations via CLI flags.
+- [MCP servers](mcp.md) — add an MCP server (`McpServer` CR + `mcpServerRefs`), how tool calls are governed, out-of-the-box egress + session keepalive.
 - [Operator TUI](operator-tui.md) — `kars operator`, the live cluster dashboard.
 - [Permissions model](permissions.md) — the Azure RBAC `kars up` needs, enumerated.
 - [Per-sandbox identity](agent-identity.md) — each sandbox runs under its own Entra Agent ID.

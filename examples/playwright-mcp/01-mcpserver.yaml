@@ -1,0 +1,53 @@
+# 01-mcpserver.yaml — register the Playwright MCP server with kars.
+#
+# The McpServer CR is the declarative "this MCP exists and these tools are
+# allowed" record. The controller mirrors it into any sandbox that references
+# it (02-karssandbox.yaml) and the per-pod inference router becomes the ONLY
+# path to it: the agent process calls tools on 127.0.0.1, the router dispatches
+# to this URL, and governance (trust, policy, audit, token budget) runs on the
+# way through. The agent never gets the raw network path or any credentials.
+#
+# Out-of-the-box egress: because `url` resolves to an in-cluster Service, the
+# controller derives the sandbox NetworkPolicy egress rule for the `kars-mcp`
+# namespace automatically. You do NOT add `playwright-mcp...:8931` to the
+# sandbox's `networkPolicy.allowedEndpoints` by hand.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: McpServer
+metadata:
+  name: playwright
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: browser
+spec:
+  # Streamable-HTTP MCP endpoint. In-cluster Service DNS → the controller
+  # auto-derives the matching egress rule. For a hosted MCP you'd use an
+  # https:// URL (e.g. https://mcp.example.com/mcp) and nothing else changes.
+  url: "http://playwright-mcp.kars-mcp.svc.cluster.local:8931/mcp"
+
+  # Pin the tool surface explicitly so an upstream change can't widen it
+  # without a CR edit. These are the browser-automation tools Playwright MCP
+  # advertises.
+  allowedTools:
+    - browser_navigate
+    - browser_click
+    - browser_type
+    - browser_snapshot
+    - browser_take_screenshot
+    - browser_evaluate
+    - browser_wait_for
+    - browser_press_key
+    - browser_select_option
+
+  # Which sandboxes may use this MCP. Empty = same-namespace only; here we
+  # gate on a label so only the browser sandbox(es) get it.
+  allowedSandboxes:
+    matchLabels:
+      kars.azure.com/sandbox: browser
+
+  # This MCP is unauthenticated (it's our own in-cluster Chromium). For a
+  # production/hosted MCP, set `productionMode: true` and an `oauth:` block;
+  # the controller then wires JWKS rotation + signed bearer tokens through the
+  # router and the agent still never sees a token.
+  productionMode: false
+  displayName: "Playwright (headless Chromium browser automation)"

@@ -1,0 +1,104 @@
+# 02-karssandbox.yaml — a browser-automation agent that consumes the
+# Playwright MCP. OpenClaw runtime, default kars hardening, governance on.
+#
+# The only MCP-specific line is `governance.mcpServerRefs` — it names the
+# McpServer CR (01-mcpserver.yaml). From that single reference the controller:
+#   1. mirrors the MCP's per-server config into this sandbox's namespace and
+#      mounts it into the inference router,
+#   2. AUTO-DERIVES the NetworkPolicy egress rule to reach the in-cluster
+#      Playwright Service (namespace `kars-mcp`, port 8931) — note there is no
+#      hand-written `allowedEndpoints` entry for it below, and
+#   3. exposes the allow-listed `browser_*` tools to the agent on loopback.
+#
+# Browser automation "just works": the router holds the MCP session alive
+# (answers the server's heartbeat pings), so multi-step flows — navigate →
+# click → snapshot → evaluate — keep the SAME live page instead of resetting
+# to about:blank mid-task.
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: browser-inference
+  namespace: kars-system
+  labels:
+    kars.azure.com/sandbox: browser
+spec:
+  appliesTo:
+    sandboxName: browser
+  modelPreference:
+    primary:
+      provider: azure-openai
+      deployment: gpt-4.1
+  contentSafety:
+    requirePromptShields: true
+  tokenBudget:
+    dailyTokens: 500000
+    perRequestTokens: 128000
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: browser
+  namespace: kars-system
+  labels:
+    # Matches McpServer.spec.allowedSandboxes.matchLabels so this sandbox is
+    # permitted to use the Playwright MCP.
+    kars.azure.com/sandbox: browser
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw: {}
+
+  agent:
+    instructions: |-
+      You are a browser-automation agent. You have Playwright MCP tools
+      (browser_navigate, browser_click, browser_type, browser_snapshot,
+      browser_take_screenshot, browser_evaluate). Use them to drive a real
+      Chromium browser to fulfil the user's web tasks. Read the accessibility
+      snapshot to understand the page before you act.
+
+  sandbox:
+    isolation: "enhanced"
+    seccompProfile: "kars-strict"
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    writablePaths:
+      - /sandbox
+      - /tmp
+
+  inferenceRef:
+    name: browser-inference
+
+  # Governance ON. `mcpServerRefs` is the consumer side of the McpServer CR.
+  governance:
+    enabled: true
+    toolPolicyRef:
+      name: kars-default
+    mcpServerRefs:
+      - name: playwright
+    # Demo trust threshold. Production should run `kars mesh setup-trust` and
+    # raise this to 500+.
+    trustThreshold: 0
+
+  # Egress is default-deny and actively enforced. We deliberately DO NOT list
+  # the Playwright Service here — the controller derives that rule from the
+  # referenced McpServer's URL. Everything the agent reaches goes through the
+  # router on loopback, so this list is for direct sandbox→external egress only
+  # (empty here: the browser runs inside the MCP server, not the agent pod).
+  networkPolicy:
+    defaultDeny: true
+    egressMode: Strict
+    allowedEndpoints: []
+
+  azureServices:
+    - service: ai-foundry
+      permissions: [inference]
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
