@@ -9,9 +9,16 @@
 //   1. detects current vs. target version (latest GHCR release, or --to <tag>),
 //   2. records a rollback point (Helm revision),
 //   3. imports the target release images into the user's ACR (pinned + :latest),
-//   4. `helm upgrade --atomic` (auto-rolls-back the release on failure),
-//   5. rolls the controller, router, and sandbox workloads to the new images,
-//   6. verifies health and prints what changed.
+//   4. pre-flights a server-side dry-run to detect fields owned by another field
+//      manager (e.g. a manual `kubectl set env`) — Helm v4 applies server-side,
+//      so such a field would make the real apply AND its atomic rollback fail
+//      with a conflict and wedge the release. On conflict the upgrade stops
+//      BEFORE any change and prints the offending fields + remediation options
+//      (`--force-conflicts` to take ownership, or a copy-paste command to hand
+//      the field back); it never silently overwrites a field a live operator owns,
+//   5. `helm upgrade --atomic` (auto-rolls-back the release on failure),
+//   6. rolls the controller, router, and sandbox workloads to the new images,
+//   7. verifies health and prints what changed.
 // `--dry-run` shows the plan with no writes; `--rollback` reverts to the
 // previous Helm revision.
 
@@ -129,7 +136,7 @@ export function buildHelmUpgradeArgs(
   ctx: UpgradeContext,
   helmPath: string,
   target?: string,
-  opts: { skipRuntimeImages?: boolean } = {},
+  opts: { skipRuntimeImages?: boolean; forceConflicts?: boolean; dryRunServer?: boolean } = {},
 ): string[] {
   const tag = target && target.length > 0 ? target : "latest";
   const args = [
@@ -155,7 +162,24 @@ export function buildHelmUpgradeArgs(
       args.push("--set", `${valueKey}=${ctx.acrLoginServer}/${repo}:${tag}`);
     }
   }
-  args.push("--atomic", "--wait", "--timeout", "8m");
+  // Execution mode:
+  //  - dryRunServer: a server-side apply in dry-run — mutates nothing but makes
+  //    the API server report field-manager (server-side apply) conflicts, which
+  //    is how the pre-flight detects fields another manager owns BEFORE we touch
+  //    the cluster. `--atomic`/`--wait` are meaningless here and omitted.
+  //  - otherwise: the real upgrade. `--atomic` auto-rolls-back a failed rollout.
+  //  - forceConflicts: opt-in. Makes server-side apply overwrite fields owned by
+  //    other field managers (e.g. a manual `kubectl set env`). Off by default so
+  //    we never silently clobber a field a live operator legitimately manages —
+  //    the pre-flight surfaces the conflict and the operator chooses.
+  if (opts.dryRunServer) {
+    args.push("--dry-run=server");
+  } else {
+    args.push("--atomic", "--wait", "--timeout", "8m");
+  }
+  if (opts.forceConflicts) {
+    args.push("--force-conflicts");
+  }
   if (ctx.foundryEndpoint) {
     args.push("--set", `inferenceRouter.azure.openai.endpoint=${ctx.foundryEndpoint}`);
   }
@@ -167,6 +191,153 @@ export function buildHelmUpgradeArgs(
   }
   return args;
 }
+
+/** A single server-side-apply field-manager conflict, parsed from Helm's error.
+ *  Helm v4 applies releases server-side, so a field another manager owns (e.g. a
+ *  manual `kubectl set env`) makes the apply fail with a structured conflict
+ *  instead of silently overwriting it. */
+export interface FieldManagerConflict {
+  /** `namespace/name` of the object, e.g. `kars-system/kars-controller`. */
+  object: string;
+  /** Kind of the object, e.g. `Deployment`. */
+  kind: string;
+  /** The field manager that owns the field, e.g. `kubectl-set`. */
+  manager: string;
+  /** The conflicting field path, e.g.
+   *  `.spec.template.spec.containers[name="controller"].env[name="HERMES_RUNTIME_IMAGE"].value`. */
+  field: string;
+}
+
+/** Parse server-side-apply field-manager conflicts out of a failed Helm
+ *  upgrade's stderr/stdout. Returns one entry per conflicting field. Exported
+ *  for tests. The shape we match (Helm v4 / Kubernetes SSA):
+ *
+ *    conflict occurred while applying object kars-system/kars-controller apps/v1,
+ *    Kind=Deployment: Apply failed with 1 conflict: conflict with "kubectl-set"
+ *    using apps/v1: .spec.template.spec.containers[name="controller"]
+ *    .env[name="HERMES_RUNTIME_IMAGE"].value
+ */
+export function parseHelmFieldConflicts(output: string): FieldManagerConflict[] {
+  if (!output) return [];
+  const conflicts: FieldManagerConflict[] = [];
+  const seen = new Set<string>();
+  // Each "applying object <ns/name> <group/version>, Kind=<Kind>:" header is
+  // followed by one or more `conflict with "<manager>" using <gv>: <field>`.
+  // Conflicts can repeat for the same object, so track the most recent header.
+  const objectRe = /applying object (\S+?) \S+, Kind=(\w+)/g;
+  // Manager quotes may be bare (`"x"`) or Go-%q escaped (`\"x\"`) depending on
+  // whether the line came from Helm's plain `Error:` output or its structured
+  // WARN log. Field is the last token; stop at whitespace or a `,`/`;` list
+  // separator so a multi-conflict list doesn't fold the separator into the path.
+  const conflictRe = /conflict with \\?"([^"\\]+)\\?" using [^:]+:\s*([^\s,;]+)/g;
+
+  // Walk the string, attributing each conflict to the nearest preceding object.
+  interface Header { index: number; object: string; kind: string }
+  const headers: Header[] = [];
+  for (let m = objectRe.exec(output); m; m = objectRe.exec(output)) {
+    headers.push({ index: m.index, object: m[1], kind: m[2] });
+  }
+  for (let m = conflictRe.exec(output); m; m = conflictRe.exec(output)) {
+    let header: Header | undefined;
+    for (const h of headers) {
+      if (h.index <= m.index) header = h;
+      else break;
+    }
+    const c: FieldManagerConflict = {
+      object: header?.object ?? "unknown",
+      kind: header?.kind ?? "unknown",
+      manager: m[1],
+      field: m[2],
+    };
+    const key = `${c.object}|${c.manager}|${c.field}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      conflicts.push(c);
+    }
+  }
+  return conflicts;
+}
+
+/** Suggest a precise, copy-pasteable command to hand a conflicting field back so
+ *  the upgrade can own it — when the field is a recognisable shape (a container
+ *  env var set by a manual `kubectl set env`). Returns null for field shapes we
+ *  can't safely auto-remediate; the caller then falls back to generic guidance. */
+export function suggestConflictRemediation(c: FieldManagerConflict): string | null {
+  // .spec.template.spec.containers[name="X"].env[name="ENV"].value  → kubectl set env … ENV-
+  const envMatch = c.field.match(/\.env\[name="([^"]+)"\]/);
+  if (envMatch && /Deployment/i.test(c.kind)) {
+    const [ns, name] = c.object.includes("/") ? c.object.split("/") : ["<namespace>", c.object];
+    return `kubectl set env deployment/${name} -n ${ns} ${envMatch[1]}-`;
+  }
+  return null;
+}
+
+/** Print the conflict report + the two remediation paths the operator can take.
+ *  Pure presentation; never mutates anything. */
+function reportFieldManagerConflicts(conflicts: FieldManagerConflict[]): void {
+  console.error(chalk.yellow(
+    `\n  ⚠ Pre-flight: ${conflicts.length} field(s) on this cluster are owned by another\n` +
+    `  field manager, not Helm. Server-side apply will NOT overwrite them, so the\n` +
+    `  upgrade was stopped before any change — exactly so it can't half-apply.\n`,
+  ));
+  for (const c of conflicts) {
+    console.error(chalk.yellow(`  • ${c.kind} ${c.object}`));
+    console.error(chalk.dim(`      field:   ${c.field}`));
+    console.error(chalk.dim(`      manager: ${c.manager}`));
+    const fix = suggestConflictRemediation(c);
+    if (fix) console.error(chalk.dim(`      release: ${fix}`));
+  }
+  const fixes = conflicts.map(suggestConflictRemediation).filter((f): f is string => f !== null);
+  console.error(chalk.cyan("\n  Choose one:\n"));
+  console.error(
+    "  A) Let kars take ownership (use only if no other operator manages these\n" +
+    "     fields — it overwrites them with the release's values):\n" +
+    chalk.bold("        kars upgrade --force-conflicts\n"),
+  );
+  if (fixes.length > 0) {
+    console.error(
+      "  B) Hand the field(s) back first (keeps the rest of that manager's\n" +
+      "     ownership intact), then re-run the upgrade:\n" +
+      fixes.map((f) => chalk.bold(`        ${f}`)).join("\n") +
+      chalk.bold(`\n        kars upgrade\n`),
+    );
+  } else {
+    console.error(chalk.dim(
+      "  B) Or remove the foreign field manager's ownership of those fields by\n" +
+      "     hand (e.g. revert the manual `kubectl` edit that set them), then\n" +
+      "     re-run `kars upgrade`.\n",
+    ));
+  }
+}
+
+/** Server-side dry-run pre-flight: detect field-manager conflicts WITHOUT
+ *  changing anything. Returns the parsed conflicts (empty if the dry-run
+ *  succeeds). A dry-run that fails for any *other* reason is reported as
+ *  `otherError` and is non-fatal: the real upgrade runs next and surfaces the
+ *  authoritative error rather than blocking on a flaky pre-flight. */
+async function preflightFieldManagerConflicts(
+  execa: Execa,
+  ctx: UpgradeContext,
+  helmPath: string,
+  target: string,
+  opts: { skipRuntimeImages?: boolean },
+): Promise<{ conflicts: FieldManagerConflict[]; otherError?: string }> {
+  const args = buildHelmUpgradeArgs(ctx, helmPath, target, {
+    skipRuntimeImages: opts.skipRuntimeImages,
+    dryRunServer: true,
+  });
+  try {
+    await execa("helm", args, { stdio: "pipe" });
+    return { conflicts: [] };
+  } catch (err) {
+    const e = err as { stderr?: string; stdout?: string; message?: string };
+    const blob = `${e.stderr ?? ""}\n${e.stdout ?? ""}\n${e.message ?? ""}`;
+    const conflicts = parseHelmFieldConflicts(blob);
+    if (conflicts.length > 0) return { conflicts };
+    return { conflicts: [], otherError: e.message ?? String(err) };
+  }
+}
+
 
 export function upgradeCommand(): Command {
   const cmd = new Command("upgrade");
@@ -180,6 +351,12 @@ export function upgradeCommand(): Command {
     .option("--rollback", "Roll the cluster back to the previous Helm revision.", false)
     .option("--skip-runtime-images", "Skip the 7 multi-runtime adapter images (faster).", false)
     .option("--force", "Re-run the upgrade even if already at the target version.", false)
+    .option(
+      "--force-conflicts",
+      "Take ownership of fields managed by another field manager (e.g. a manual " +
+      "`kubectl set env`). Only safe when no other operator manages those fields.",
+      false,
+    )
     .option("--yes", "Skip the confirmation prompt (assume yes).", false)
     .addHelpText("after", `
 Examples:
@@ -187,6 +364,7 @@ Examples:
   kars upgrade --to v0.1.16        # Pin a specific release
   kars upgrade --dry-run           # Show changelog + impact + plan, make no changes
   kars upgrade --yes               # Skip the confirmation prompt
+  kars upgrade --force-conflicts   # Take ownership of fields another manager owns
   kars upgrade --rollback          # Revert to the previous Helm revision
 `)
     .action(async (options) => {
@@ -374,8 +552,34 @@ Examples:
         // ── Step 4: Atomic Helm upgrade ───────────────────────────────
         stepper.step("Upgrading controller + CRDs (atomic Helm upgrade)...");
         const helmPath = requireBundledAsset("deploy/helm/kars");
+
+        // Pre-flight: a server-side dry-run detects fields owned by another
+        // field manager (e.g. a manual `kubectl set env`). Helm v4 applies
+        // server-side, so such a field makes the real apply — AND its atomic
+        // rollback — fail with a conflict, leaving the release wedged. Catch it
+        // here, before any mutation, and let the operator decide rather than
+        // silently overwriting a field a live operator may legitimately own.
+        const pf = await preflightFieldManagerConflicts(execa, ctx, helmPath, target, {
+          skipRuntimeImages: options.skipRuntimeImages,
+        });
+        if (pf.conflicts.length > 0 && !options.forceConflicts) {
+          stepper.fail("Field-manager conflict — upgrade stopped before any change");
+          reportFieldManagerConflicts(pf.conflicts);
+          process.exit(1);
+        }
+        if (pf.conflicts.length > 0 && options.forceConflicts) {
+          stepper.detail("info",
+            `Taking ownership of ${pf.conflicts.length} field(s) from another manager (--force-conflicts)`);
+        }
+        if (pf.otherError) {
+          // Non-conflict dry-run failure: don't block — the real upgrade below
+          // surfaces the authoritative error (and its --atomic rolls back).
+          stepper.detail("info", "Pre-flight dry-run inconclusive — proceeding (real upgrade will report any error)");
+        }
+
         await execa("helm", buildHelmUpgradeArgs(ctx, helmPath, target, {
           skipRuntimeImages: options.skipRuntimeImages,
+          forceConflicts: options.forceConflicts,
         }), { stdio: "pipe" });
         stepper.done("Helm upgrade applied (auto-rollback on failure via --atomic)");
 
@@ -440,7 +644,19 @@ Examples:
         process.exit(0);
       } catch (err) {
         stepper.stop();
+        const e = err as { stderr?: string; stdout?: string; message?: string };
         const msg = err instanceof Error ? err.message : String(err);
+        // If a field-manager conflict slipped past the pre-flight (e.g. a field
+        // that only appears once the apply runs), give the same actionable
+        // guidance instead of a raw Helm error.
+        const lateConflicts = parseHelmFieldConflicts(
+          `${e.stderr ?? ""}\n${e.stdout ?? ""}\n${msg}`,
+        );
+        if (lateConflicts.length > 0 && !options.forceConflicts) {
+          console.error(chalk.red(`\n  Upgrade failed: field-manager conflict\n`));
+          reportFieldManagerConflicts(lateConflicts);
+          process.exit(1);
+        }
         console.error(chalk.red(`\n  Upgrade failed: ${msg}\n`));
         console.error(chalk.yellow(
           "  The atomic Helm upgrade auto-rolls-back the release on failure. If workloads\n" +

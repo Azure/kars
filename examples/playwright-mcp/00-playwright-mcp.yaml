@@ -1,0 +1,85 @@
+# 00-playwright-mcp.yaml — the Playwright MCP server, in-cluster.
+#
+# This is an ordinary Deployment + Service running Microsoft's official
+# Playwright MCP image (a real Chromium driven over the Model Context
+# Protocol's Streamable-HTTP transport). It is NOT a kars component — it's
+# exactly the kind of third-party MCP server you'd bring yourself. kars treats
+# it as an untrusted upstream the agent reaches only through its per-pod
+# inference router.
+#
+# It lives in its own namespace (`kars-mcp`) so the example can show kars's
+# out-of-the-box egress: the controller parses the McpServer URL
+# (01-mcpserver.yaml) and auto-derives a NetworkPolicy rule admitting the
+# sandbox router to THIS namespace on :8931 — no hand-written egress needed.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kars-mcp
+  labels:
+    # Auto-added by Kubernetes (>=1.21); the controller's derived egress rule
+    # selects this namespace by this well-known label, which is the only form
+    # Cilium honours for in-cluster pod destinations.
+    kubernetes.io/metadata.name: kars-mcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playwright-mcp
+  namespace: kars-mcp
+  labels:
+    app: playwright-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: playwright-mcp
+  template:
+    metadata:
+      labels:
+        app: playwright-mcp
+    spec:
+      containers:
+        - name: mcp
+          image: mcr.microsoft.com/playwright/mcp:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --port=8931
+            - --host=0.0.0.0
+            - --headless
+            - --browser=chromium
+            - --no-sandbox
+            # Playwright MCP rejects requests whose Host header isn't allow-listed.
+            # The router connects via the Service's cluster DNS name, so list it
+            # (and the short forms) here.
+            - --allowed-hosts=playwright-mcp.kars-mcp.svc.cluster.local:8931,playwright-mcp.kars-mcp:8931,playwright-mcp:8931,localhost:8931,localhost
+          ports:
+            - containerPort: 8931
+              name: mcp
+          readinessProbe:
+            tcpSocket:
+              port: 8931
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playwright-mcp
+  namespace: kars-mcp
+  labels:
+    app: playwright-mcp
+spec:
+  selector:
+    app: playwright-mcp
+  ports:
+    - name: mcp
+      port: 8931
+      targetPort: 8931

@@ -12,6 +12,7 @@ Eight end-to-end examples live under [`examples/`](https://github.com/Azure/kars
 | [`openai-agents-quickstart`](https://github.com/Azure/kars/tree/main/examples/openai-agents-quickstart) | `OpenAIAgents` (Python) | YAMLs apply once you swap `REPLACE-ME/...` with your image | Hosts an unmodified [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) app. The adapter transparently routes `api.openai.com` through the local inference router. |
 | [`maf-quickstart`](https://github.com/Azure/kars/tree/main/examples/maf-quickstart) | `MicrosoftAgentFramework` (Python) | YAMLs apply once you swap `REPLACE-ME/...` with your image | Hosts an unmodified [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) app. |
 | [`byo-quickstart`](https://github.com/Azure/kars/tree/main/examples/byo-quickstart) | `BYO` | Builds + applies cleanly; runtime requires you to bring an image | Brings any container image under the BYO contract. Includes a tiny FastAPI reference agent. |
+| [`playwright-mcp`](https://github.com/Azure/kars/tree/main/examples/playwright-mcp) | `OpenClaw` + MCP | ✅ Verified live on AKS — browser flow (navigate → click → snapshot → evaluate) stays on one page; controller auto-derives the MCP egress rule | Browser-automation agent on the official [Playwright MCP](https://github.com/microsoft/playwright-mcp). Shows zero-config MCP wiring (one `mcpServerRefs` entry), out-of-the-box egress auto-derivation, and reliable multi-step browsing via router session keepalive. |
 
 ## Multi-agent attack-simulation demos
 
