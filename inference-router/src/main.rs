@@ -910,26 +910,37 @@ async fn admin_auth_middleware(
         }
     }
 
-    // Non-localhost: require bearer token
-    let auth_header = req
+    // Non-localhost: require the admin token. Accept it EITHER as
+    // `Authorization: Bearer <token>` (direct in-cluster callers) OR as
+    // `X-Kars-Admin-Token: <token>`. The latter exists because the Kubernetes
+    // apiserver pod-proxy (`/api/v1/.../pods/<pod>:<port>/proxy/...`), which the
+    // Bridge BFF uses to reach a sandbox router, CONSUMES the `Authorization`
+    // header for its own client auth and never forwards it to the backend pod —
+    // so a Bearer token can't survive that hop. Custom `X-*` headers are
+    // forwarded untouched, so the BFF passes the admin token there.
+    let provided_token = req
         .headers()
         .get("authorization")
-        .and_then(|v| v.to_str().ok());
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| {
+            req.headers()
+                .get("x-kars-admin-token")
+                .and_then(|v| v.to_str().ok())
+        });
 
-    match auth_header {
-        Some(value) if value.starts_with("Bearer ") => {
-            let provided = &value[7..];
-            if handoff::constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) {
-                next.run(req).await.into_response()
-            } else {
-                tracing::warn!(
-                    path = %req.uri().path(),
-                    "Admin auth: invalid token from non-localhost"
-                );
-                (StatusCode::UNAUTHORIZED, "Invalid admin token").into_response()
-            }
+    match provided_token {
+        Some(provided) if handoff::constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) => {
+            next.run(req).await.into_response()
         }
-        _ => {
+        Some(_) => {
+            tracing::warn!(
+                path = %req.uri().path(),
+                "Admin auth: invalid token from non-localhost"
+            );
+            (StatusCode::UNAUTHORIZED, "Invalid admin token").into_response()
+        }
+        None => {
             tracing::warn!(
                 path = %req.uri().path(),
                 "Admin auth: non-localhost request without token"
