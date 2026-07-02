@@ -1281,13 +1281,19 @@ summary of your deliverable (≤240 chars) when you finish, using the configured
 /// when a cadence tick found nothing new (so the team stays quiet instead of
 /// producing a redundant briefing every interval).
 fn operating_contract(tools: &str, mcp: &str) -> String {
-    let memory = if foundry_configured() {
-        " You have a SHARED TEAM MEMORY (the `foundry_memory` tool, scoped to this team): at the \
-         START of your work search it for relevant prior knowledge, and at the END update it with \
-         durable new findings. It is the team's knowledge-commons — persistent across every run."
-    } else {
-        ""
-    };
+    // Durable team memory ALWAYS works via the harvest, independent of Foundry:
+    // the controller captures each run's final reply into the team knowledge-
+    // commons and injects it back as reference data on the next run. The
+    // `foundry_memory` tool is an OPTIONAL richer store that is only present in
+    // some cluster modes (absent in GitHub-Copilot mode), so we never promise it
+    // as required — telling the agent it MUST use a tool it may not have caused a
+    // recurring false "I can't persist memory" clarification every run.
+    let memory = " Your DURABLE TEAM MEMORY works automatically: your final reply is captured into the \
+         team's knowledge-commons and returned to you as reference data on the next run — so put durable \
+         findings in your reply; you do NOT need to call any tool to persist them, and you can never be \
+         blocked from persisting. (If a `foundry_memory` tool happens to be in your toolset you may also \
+         use it for richer semantic recall, but it is optional and often absent — never block or raise a \
+         question over its availability.)";
     format!(
         "\n\nYour capabilities: tool policy = {tools}; connected services = {mcp}.{memory} \
          Operating contract: this is a recurring standing run — review the reference data above, \
