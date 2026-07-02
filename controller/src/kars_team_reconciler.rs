@@ -592,6 +592,37 @@ async fn effective_team(client: &Client, ns: &str, team: Arc<KarsTeam>) -> Arc<K
             if !ready {
                 continue;
             }
+            // SECURITY — OPERATOR TRUST GATE: a skill is grantable ONLY when an
+            // operator has approved it AND the approval is locked to the skill's
+            // CURRENT content digest. A user can upload a skill (it goes Ready on
+            // scan) and reference it in a role, but it must NOT confer its MCP
+            // servers / recipe / bounding policy until an operator has signed off
+            // — and if the skill changed since approval (locked digest no longer
+            // matches), the grant is withdrawn until re-approved. This mirrors the
+            // Bridge `usable` predicate; the controller enforces it independently
+            // so the gate can't be bypassed by writing the CRD directly.
+            let review_approved = skill
+                .annotations()
+                .get("kars.azure.com/skill-review")
+                .is_some_and(|v| v == "approved");
+            let live_digest = skill
+                .status
+                .as_ref()
+                .and_then(|s| s.version_digest.clone());
+            let locked_digest = skill
+                .annotations()
+                .get("kars.azure.com/skill-locked-digest")
+                .cloned();
+            let lock_matches =
+                locked_digest.is_some() && locked_digest == live_digest;
+            if !review_approved || !lock_matches {
+                tracing::warn!(
+                    team = %eff_name, role = %role.name, skill = %skill_name,
+                    review_approved, lock_matches,
+                    "skipping skill — not operator-approved + version-locked (trust gate); refusing to grant its capabilities"
+                );
+                continue;
+            }
             // SECURITY: a role's skills must share ONE bounding tool policy. If a
             // later skill names a DIFFERENT policy, applying it while unioning its
             // MCP servers would run those tools under the first skill's (possibly
@@ -667,8 +698,14 @@ async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal
             .owner_references
             .as_ref()
             .is_some_and(|refs| {
-                refs.iter()
-                    .any(|r| r.kind == "KarsTeam" && r.name == team_name && r.controller == Some(true))
+                refs.iter().any(|r| {
+                    r.kind == "KarsTeam"
+                        && r.name == team_name
+                        && r.controller == Some(true)
+                        // Bind to the team's UID too, so a same-named team
+                        // recreated after deletion can't inherit an old approval.
+                        && team.metadata.uid.as_ref().is_none_or(|u| &r.uid == u)
+                })
             });
         let approved = controller_owned
             && appr
@@ -684,14 +721,21 @@ async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal
             let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
             // Merge-patch only the two envelope fields so the other envelope
             // settings (budget, policy refs, depth) are preserved — an SSA apply
-            // would drop unmanaged siblings and fail CRD validation.
+            // would drop unmanaged siblings and fail CRD validation. Also CLEAR
+            // requestedTier in the same patch so the promotion is ONE-SHOT: a
+            // stale Approved approval can never re-widen the envelope on a later
+            // reconcile (e.g. after a manual downgrade) — a fresh raise needs a
+            // fresh request + fresh human approval.
             let patch = json!({
-                "spec": { "envelope": { "tier": target, "authorityCeiling": target } }
+                "spec": {
+                    "envelope": { "tier": target, "authorityCeiling": target },
+                    "requestedTier": null,
+                }
             });
             let _ = teams
                 .patch(&team_name, &PatchParams::default(), &Patch::Merge(patch))
                 .await;
-            tracing::info!(team = %team_name, tier = target, "promotion approved — envelope widened");
+            tracing::info!(team = %team_name, tier = target, "promotion approved — envelope widened (requestedTier cleared)");
         }
         return; // approval already exists; nothing more to author
     }
