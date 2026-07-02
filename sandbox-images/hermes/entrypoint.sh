@@ -867,6 +867,30 @@ if [ "$1" = "hermes" ]; then
   # SRE-mode sandboxes opt out: the SRE agent is intentionally
   # off-mesh (no kars_mesh_* tools, no relay egress allowlisted).
   if [ "${SRE_ENABLED:-}" != "true" ] && [ "${KARS_MESH_PROVIDER:-}" = "agt" ]; then
+    # The MeshClient dials the relay through the router sidecar's
+    # `/agt/relay` proxy on 127.0.0.1:8443. The sidecar can lag the
+    # agent's startup by a few seconds; if the FIRST dial happens
+    # before it is listening the connection fails. Previously the
+    # keepalive exited FATALLY on that first failure and NEVER retried,
+    # so an idle agent (waiting for mesh task delivery, making no tool
+    # call) stayed permanently unregistered + undiscoverable. Wait for
+    # the router relay proxy to be ready first, and (below) retry the
+    # client init with backoff so a transient early failure self-heals.
+    echo "[kars-hermes] waiting for router relay proxy (127.0.0.1:8443/agt/relay) …"
+    _RP_READY=0
+    for _i in $(seq 1 60); do
+      # A ready WS endpoint answers a plain GET with 400/426 (needs
+      # upgrade); connection-refused (curl exit 7) means not up yet.
+      _CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8443/agt/relay" 2>/dev/null || echo 000)"
+      if [ "$_CODE" != "000" ]; then
+        echo "[kars-hermes] router relay proxy ready (HTTP $_CODE) after ${_i}s"
+        _RP_READY=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$_RP_READY" = "1" ] || echo "[kars-hermes] WARN: router relay proxy not confirmed ready after 60s — keepalive will still retry"
+
     echo "[kars-hermes] starting persistent mesh-keepalive (background)"
     # KARS_MESH_AUTO_RESPONDER=1 ⇒ the auto-responder worker actually
     # invokes Hermes to generate replies to inbound mesh messages.
@@ -881,23 +905,32 @@ if [ "$1" = "hermes" ]; then
       python3 -c "
 import sys, threading, time
 print('[kars-mesh-keepalive] starting', flush=True)
-try:
-    from kars_runtime_hermes.plugin import mesh as _m
-    client = _m._get_or_init_client()
-    print('[kars-mesh-keepalive] mesh client registered + connected', flush=True)
+from kars_runtime_hermes.plugin import mesh as _m
+# Retry the connect with backoff — the router relay proxy may still be
+# warming up. Giving up on the first failure (the old behaviour) left an
+# idle agent permanently unregistered.
+_client = None
+for _attempt in range(1, 121):
     try:
-        from kars_runtime_hermes.plugin import mesh_worker as _w
-        _w.start_worker(_m._get_or_init_client)
-        print('[kars-mesh-keepalive] auto-responder worker started', flush=True)
+        _client = _m._get_or_init_client()
+        print(f'[kars-mesh-keepalive] mesh client registered + connected (attempt {_attempt})', flush=True)
+        break
     except Exception as e:
-        print(f'[kars-mesh-keepalive] worker skipped: {e!r}', flush=True)
-    # Park indefinitely — the MeshClient + worker live in our
-    # process; if we exit, the relay drops our socket and the
-    # registry marks us stale within ~90s.
-    threading.Event().wait()
+        if _attempt >= 120:
+            print(f'[kars-mesh-keepalive] FATAL after {_attempt} attempts: {e!r}', flush=True)
+            sys.exit(1)
+        print(f'[kars-mesh-keepalive] connect attempt {_attempt} failed ({e!r}); retrying in 3s', flush=True)
+        time.sleep(3)
+try:
+    from kars_runtime_hermes.plugin import mesh_worker as _w
+    _w.start_worker(_m._get_or_init_client)
+    print('[kars-mesh-keepalive] auto-responder worker started', flush=True)
 except Exception as e:
-    print(f'[kars-mesh-keepalive] FATAL: {e!r}', flush=True)
-    sys.exit(1)
+    print(f'[kars-mesh-keepalive] worker skipped: {e!r}', flush=True)
+# Park indefinitely — the MeshClient + worker live in our process; if we
+# exit, the relay drops our socket and the registry marks us stale
+# within ~90s.
+threading.Event().wait()
 " > /tmp/hermes-mesh-keepalive.log 2>&1 &
   fi
 
