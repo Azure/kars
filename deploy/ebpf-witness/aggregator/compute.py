@@ -8,9 +8,19 @@ each sandbox's controller-declared egress allowlist (the
 emits the witness document consumed by the Bridge and by
 `witness-verify.sh`. Verdict per sandbox:
 
-  COMPLIANT        every external host observed is in the declared allowlist
-  BEYOND-DECLARED  the kernel observed egress to a host NOT declared
-  LEARN            no host allowlist published (learn / unconstrained baseline)
+  COMPLIANT        enforcement is Strict and every external host observed is
+                   in the declared allowlist
+  BEYOND-DECLARED  enforcement is Strict but the kernel observed egress to a
+                   host NOT declared (a genuine completeness gap)
+  LEARN            the sandbox is in learning mode (egressMode != Strict) or no
+                   host allowlist is published — enforcement is not active, so
+                   reaching hosts beyond any baseline is EXPECTED, not a gap.
+
+Learning-mode awareness: a sandbox in `egressMode: Learn` (the default) is
+deliberately unconstrained while the router observes what it reaches; flagging
+those observations BEYOND-DECLARED would be wrong. Only a Strict-mode sandbox —
+where the boundary is actively enforced — can be COMPLIANT or BEYOND-DECLARED.
+The mode is read from `KarsSandbox.spec.networkPolicy.egressMode`.
 """
 import json
 import os
@@ -130,6 +140,24 @@ def main():
                 pass
         declared[ns] = {"sandbox": m.group(1), "hosts": hosts}
 
+    # Per-sandbox egress ENFORCEMENT MODE, from KarsSandbox
+    # spec.networkPolicy.egressMode (default "Learn"). Keyed by the sandbox's
+    # own namespace (`kars-<name>`) so it lines up with the observed/declared
+    # maps. Learning-mode sandboxes are unconstrained by design, so their
+    # observations must never be scored BEYOND-DECLARED.
+    modes = {}
+    sboxes = kubectl_json(["get", "karssandbox", "-A", "-o", "json"]) or {"items": []}
+    for item in sboxes.get("items", []):
+        name = (item.get("metadata", {}) or {}).get("name", "")
+        if not name:
+            continue
+        mode = (
+            ((item.get("spec", {}) or {}).get("networkPolicy", {}) or {}).get("egressMode")
+            or "Learn"
+        )
+        # A sandbox named <name> runs in namespace kars-<name>.
+        modes[f"kars-{name}"] = mode
+
     candidate_ns = set(declared) | set(observed_dns) | set(observed_connects)
     candidate_ns = {n for n in candidate_ns if n.startswith("kars-") or n in declared}
 
@@ -141,7 +169,11 @@ def main():
         connects = observed_connects.get(ns, 0)
         beyond = sorted(ohosts - dhosts)
         unused = sorted(dhosts - ohosts)
-        if ns not in declared or not dhosts:
+        mode = modes.get(ns, "Learn")
+        # Only a Strict-mode sandbox with a declared allowlist can be scored
+        # COMPLIANT / BEYOND-DECLARED. In learn mode (or with no allowlist) the
+        # boundary isn't enforced, so reaching novel hosts is expected → LEARN.
+        if str(mode).lower() != "strict" or not dhosts:
             verdict = "LEARN"
         elif beyond:
             verdict = "BEYOND-DECLARED"
@@ -150,6 +182,7 @@ def main():
         records.append({
             "namespace": ns,
             "sandbox": dec["sandbox"],
+            "egress_mode": mode,
             "declared_hosts": sorted(dhosts),
             "observed_dns": sorted(ohosts),
             "observed_connects": connects,
