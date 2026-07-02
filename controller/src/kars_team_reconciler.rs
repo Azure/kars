@@ -60,6 +60,10 @@ const ANNOT_TEAM: &str = "kars.azure.com/team";
 const ANNOT_TEAM_ROLE: &str = "kars.azure.com/team-role";
 /// Annotation the mesh task-delivery loop watches to drive an autonomous run.
 const ANNOT_RUN_REQUESTED: &str = "kars.azure.com/run-requested";
+/// Operator-set trigger annotation (Bridge "Run now"). When present + non-empty
+/// on a KarsTeam, the reconciler mints one immediate run and clears it — the
+/// only run path for a cadence-less team.
+const RUN_NOW_ANNOTATION: &str = "kars.azure.com/run-now";
 /// Cap on concurrently-executing standing-operation runs per team, so the
 /// charter loop never floods the cluster faster than runs complete + retire.
 const MAX_CONCURRENT_RUNS: usize = 2;
@@ -173,6 +177,18 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // human-approved, ledgered via the principal's receipt.
     process_promotion(&ctx.client, &ns, &team, &principal_name).await;
 
+    // Deliver any answered clarifications into the commons so the principal's
+    // next run reads the human's answer as prior knowledge (principal-driven HITL).
+    process_clarifications(&ctx.client, &ns, &team, &commons).await;
+
+    // Apply any approved agent-originated egress requests to the team blueprint,
+    // so the team's future runs can reach the newly-approved host.
+    process_egress_grants(&ctx.client, &ns, &team).await;
+
+    // Team-mode Foundry memory: ensure the team's shared knowledge-commons store
+    // exists (team-owned → GC'd with the team) when Foundry is connected.
+    ensure_team_memory(&ctx.client, &ns, &team).await;
+
     let mut member_refs: Vec<LocalObjectRef> = Vec::new();
     for role in &team.spec.roster {
         let member_name = format!("{name}-{}", sanitize(&role.name));
@@ -205,33 +221,136 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // Cumulative budget gate: a standing team with a lifetime token cap stops
     // minting once spent reaches it (each run still has its own envelope budget).
     let budget_exhausted = team.budget_exhausted(stats.tokens_total);
+    // Communication channels are part of a team's envelope: when the operator has
+    // wired one (secret `kars-team-channel-<team>`, propagated into each run
+    // sandbox by the sandbox reconciler), every run is told to report progress +
+    // its deliverable over that channel.
+    let channel_enabled = {
+        use k8s_openapi::api::core::v1::Secret;
+        let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+        secrets
+            .get_opt(&format!("kars-team-channel-{name}"))
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    // Team task backlog: the next pending task an idle team should pick up. Only
+    // one task runs at a time — if a task is already in flight we run the charter
+    // (or wait). `take()`n by the first mint path that fires so cadence + run-now
+    // can't double-claim the same task in one reconcile.
+    let team_task_list = crate::team_tasks::read_tasks(&ctx.client, &name).await;
+    let mut assigned_task: Option<crate::team_tasks::TeamTask> = if crate::team_tasks::has_active(&team_task_list) {
+        None
+    } else {
+        crate::team_tasks::next_pending(&team_task_list).cloned()
+    };
     if let Some(every_min) = every {
-        let due = match prior.last_run_at.as_deref().and_then(parse_rfc3339) {
-            Some(prev) => now >= prev + chrono::Duration::minutes(every_min as i64),
-            None => true, // never run → due immediately
-        };
-        // Idempotent mint: name the task-force task by the cadence WINDOW (epoch
-        // floored to the interval), not the wall-clock second. A re-mint for the
-        // same window is a no-op SSA apply, so a status-write failure can't cause
-        // a duplicate run on the next reconcile (the old timestamp-second name
-        // could). Skip if the window task already exists.
+        // The cadence WINDOW (epoch floored to the interval) names the run. A new
+        // window opens each interval; the run is minted once per window
+        // (idempotent). The single standing run is the team's PRINCIPAL — a live
+        // orchestrator that spawns member sub-agents and delegates over the mesh
+        // (see build_run_objective); the org chart is executed by the agent, not
+        // the controller.
         let window = (now.timestamp() / (every_min as i64 * 60)) * (every_min as i64 * 60);
-        let tf_name = format!("{name}-run-{window}");
-        let exists = tasks.get_opt(&tf_name).await.ok().flatten().is_some();
-        // Backpressure: only mint when the cluster isn't already saturated with
-        // in-flight runs from this team. Skipping a tick keeps the standing
-        // operation honest without flooding — the next reconcile re-checks.
-        if !paused && due && !exists && active_runs < MAX_CONCURRENT_RUNS && cap_gate.is_none() && !budget_exhausted {
+        let canonical = format!("{name}-run-{window}");
+        let canonical_exists = tasks.get_opt(&canonical).await.ok().flatten().is_some();
+        let due = match last_run_at.as_deref().and_then(parse_rfc3339) {
+            Some(prev) => now >= prev + chrono::Duration::minutes(every_min as i64),
+            None => true,
+        };
+        if !paused
+            && due
+            && !canonical_exists
+            && active_runs < MAX_CONCURRENT_RUNS
+            && cap_gate.is_none()
+            && !budget_exhausted
+        {
             // Read path: inject the team's accumulated knowledge so the run
             // builds on prior ticks instead of starting cold.
             let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
-            mint_taskforce(&tasks, &team, &principal_name, &tf_name, &prior).await?;
+            let assigned = assigned_task.take();
+            mint_taskforce(&tasks, &team, &principal_name, &canonical, &prior, assigned.as_ref(), channel_enabled).await?;
+            if let Some(t) = &assigned {
+                let _ = crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
+            }
             generated += 1;
-            last_generated = Some(tf_name);
+            last_generated = Some(canonical.clone());
             last_run_at = Some(now.to_rfc3339());
-            next_run_at = Some((now + chrono::Duration::minutes(every_min as i64)).to_rfc3339());
-        } else if let Some(prev) = prior.last_run_at.as_deref().and_then(parse_rfc3339) {
-            next_run_at = Some((prev + chrono::Duration::minutes(every_min as i64)).to_rfc3339());
+        }
+        // Advance the UI's "next check" to the start of the next window.
+        next_run_at = Some(
+            (chrono::DateTime::from_timestamp(window, 0).unwrap_or(now)
+                + chrono::Duration::minutes(every_min as i64))
+            .to_rfc3339(),
+        );
+    }
+
+    // On-demand run trigger (Bridge "Run now"). The ONLY way a cadence-less team
+    // ("run on demand") ever produces work — and a manual kick for cadenced teams
+    // too. Fires exactly once per request: an operator sets the `run-now`
+    // annotation, we mint a fresh run under the same readiness gates as a cadence
+    // tick, then clear the annotation so it can't re-fire on the next reconcile.
+    let run_now = team
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(RUN_NOW_ANNOTATION))
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if run_now {
+        if !paused
+            && active_runs < MAX_CONCURRENT_RUNS
+            && cap_gate.is_none()
+            && !budget_exhausted
+        {
+            let canonical = format!("{name}-run-{}", now.timestamp());
+            if tasks.get_opt(&canonical).await.ok().flatten().is_none() {
+                let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
+                let assigned = assigned_task.take();
+                mint_taskforce(&tasks, &team, &principal_name, &canonical, &prior, assigned.as_ref(), channel_enabled).await?;
+                if let Some(t) = &assigned {
+                    let _ = crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
+                }
+                generated += 1;
+                last_generated = Some(canonical.clone());
+                last_run_at = Some(now.to_rfc3339());
+            }
+        }
+        // Clear the trigger regardless of whether we minted (a gated-out request
+        // shouldn't stay armed forever) so "Run now" is a single-shot request.
+        let mut ann = serde_json::Map::new();
+        ann.insert(RUN_NOW_ANNOTATION.to_string(), serde_json::Value::Null);
+        let clear = json!({ "metadata": { "annotations": ann } });
+        let _ = teams
+            .patch(&name, &PatchParams::default(), &Patch::Merge(clear))
+            .await;
+    }
+
+    // Kickoff run: a team with NO cadence still does one INITIAL run when it is
+    // first created, so "spinning up a team" always produces visible work.
+    // Otherwise a cadence-less team sits silently idle until the operator finds
+    // "Run now" — the confusing "I made a team and nothing happened" dead-end.
+    // Guarded by last_run_at so it fires exactly once; afterwards the team is
+    // on-demand (Run now) or on its cadence.
+    if every.is_none()
+        && !paused
+        && last_run_at.is_none()
+        && active_runs < MAX_CONCURRENT_RUNS
+        && cap_gate.is_none()
+        && !budget_exhausted
+    {
+        let canonical = format!("{name}-run-{}", now.timestamp());
+        if tasks.get_opt(&canonical).await.ok().flatten().is_none() {
+            let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
+            let assigned = assigned_task.take();
+            mint_taskforce(&tasks, &team, &principal_name, &canonical, &prior, assigned.as_ref(), channel_enabled).await?;
+            if let Some(t) = &assigned {
+                let _ = crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
+            }
+            generated += 1;
+            last_generated = Some(canonical.clone());
+            last_run_at = Some(now.to_rfc3339());
         }
     }
 
@@ -312,12 +431,18 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     } else if let Some(reason) = &cap_gate {
         format!("Standing operation paused — capability not ready: {reason}. Will resume automatically once it is.")
     } else if every.is_some() {
+        let quiet_note = if stats.quiet > 0 {
+            format!(", {} quiet tick(s) (no change)", stats.quiet)
+        } else {
+            String::new()
+        };
         format!(
-            "Standing operation {} — {} run(s) generated, {} delivered ({} tokens), {} knowledge entries accumulated.",
+            "Standing operation {} — {} run(s) generated, {} delivered ({} tokens){}, {} knowledge entries accumulated.",
             health.to_lowercase(),
             generated,
             stats.succeeded,
             stats.tokens_total,
+            quiet_note,
             commons_entry_count,
         )
     } else {
@@ -604,9 +729,277 @@ async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal
         .await;
 }
 
-/// Capability-readiness gate (§19): verify the effective team's required
-/// capabilities are actually usable before a run is dispatched. Checks every
-/// MCP server referenced by the team blueprint or any member blueprint exists
+/// A short, stable id for a clarification question so the same unanswered
+/// question doesn't spawn a new approval on every reconcile (idempotency key).
+fn clarification_id(question: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    question.trim().to_lowercase().hash(&mut h);
+    format!("{:x}", h.finish())
+}
+
+/// Raise a **principal-driven** clarification: a `clarification` `KarsApproval`
+/// owned by the team (the principal), so a run's question to the human surfaces
+/// on the inbox exactly like other approvals. Idempotent per question — a
+/// repeated ask on a later run reuses the same open approval. The human's answer
+/// is recorded as the decision `reason` and consumed by [`process_clarifications`].
+async fn ensure_clarification_approval(
+    client: &Client,
+    ns: &str,
+    team: &KarsTeam,
+    run: &str,
+    question: &str,
+) {
+    use crate::kars_approval::{ApprovalAction, KarsApproval};
+    let team_name = team.name_any();
+    let approval_name = format!("{team_name}-clarify-{}", clarification_id(question));
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    // Idempotent: if it already exists (answered or pending), don't recreate it.
+    if let Ok(Some(_)) = approvals.get_opt(&approval_name).await {
+        return;
+    }
+    let appr = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsApproval",
+        "metadata": {
+            "name": approval_name,
+            "ownerReferences": [owner_ref(team)],
+            "labels": {
+                "kars.azure.com/team": team_name,
+                "kars.azure.com/clarification": "true",
+            },
+        },
+        "spec": {
+            "taskRef": { "name": run },
+            "action": ApprovalAction {
+                kind: "clarification".into(),
+                summary: question.to_string(),
+                detail: Some(format!(
+                    "A run of team '{team_name}' needs your input to proceed. Answer in the \
+                     decision reason; your answer is delivered to the team's next run."
+                )),
+                requested_tier: None,
+            },
+        },
+    });
+    let _ = approvals
+        .patch(
+            &approval_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(appr),
+        )
+        .await;
+    tracing::info!(team = %team_name, %run, "clarification raised for the human via the principal");
+}
+
+/// Consume answered clarifications: for each `clarification` approval owned by
+/// this team that a human has Approved (answer = decision reason) and that has
+/// not yet been delivered, deposit the Q+A into the team commons so the
+/// principal's next run reads it as prior knowledge, then mark it delivered.
+async fn process_clarifications(client: &Client, ns: &str, team: &KarsTeam, commons: &str) {
+    use crate::kars_approval::KarsApproval;
+    let team_name = team.name_any();
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default()
+        .labels(&format!("kars.azure.com/clarification=true,kars.azure.com/team={team_name}"));
+    let Ok(list) = approvals.list(&lp).await else {
+        return;
+    };
+    const DELIVERED: &str = "kars.azure.com/clarification-delivered";
+    for appr in list.items {
+        // Only honor an approval THIS team owns (forgery guard, matching promote).
+        let owned = appr.metadata.owner_references.as_ref().is_some_and(|refs| {
+            refs.iter()
+                .any(|r| r.kind == "KarsTeam" && r.name == team_name && r.controller == Some(true))
+        });
+        if !owned {
+            continue;
+        }
+        let approved = appr
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .map(|p| p == "Approved")
+            .unwrap_or(false);
+        if !approved {
+            continue;
+        }
+        let already = appr
+            .annotations()
+            .get(DELIVERED)
+            .is_some_and(|v| v == "true");
+        if already {
+            continue;
+        }
+        let question = appr.spec.action.summary.clone();
+        // The human's answer is the decision reason recorded on the approval.
+        let answer = appr
+            .spec
+            .decision
+            .as_ref()
+            .and_then(|d| d.reason.clone())
+            .unwrap_or_else(|| "(approved without a written answer)".to_string());
+        let name = appr.name_any();
+        let id = format!("clarify-{}", clarification_id(&question));
+        let content = format!(
+            "The human answered a clarification the team asked for.\n\nQuestion: {question}\n\nAnswer: {answer}"
+        );
+        let _ = crate::team_commons::record_entry(
+            client,
+            commons,
+            &id,
+            &format!("Answered: {}", crate::team_commons::derive_title(&question, &question)),
+            "human",
+            &name,
+            &content,
+        )
+        .await;
+        // Mark delivered so it's injected exactly once.
+        let patch = json!({ "metadata": { "annotations": { DELIVERED: "true" } } });
+        let _ = approvals
+            .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
+            .await;
+        tracing::info!(team = %team_name, approval = %name, "clarification answer delivered to team commons");
+    }
+}
+
+/// Raise an agent-originated egress request as a team-owned `egress`
+/// `KarsApproval`, idempotent per host:port. The host+reason are the summary so
+/// the human sees exactly what will be opened.
+#[allow(clippy::too_many_arguments)]
+async fn ensure_egress_request_approval(
+    client: &Client,
+    ns: &str,
+    team: &KarsTeam,
+    run: &str,
+    host: &str,
+    port: Option<u16>,
+    reason: &str,
+) {
+    use crate::kars_approval::{ApprovalAction, KarsApproval};
+    let team_name = team.name_any();
+    let hostport = match port {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_string(),
+    };
+    let approval_name = format!("{team_name}-egress-{}", clarification_id(&hostport));
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    if let Ok(Some(_)) = approvals.get_opt(&approval_name).await {
+        return;
+    }
+    let summary = if reason.is_empty() {
+        format!("Open egress to {hostport} for team '{team_name}'")
+    } else {
+        format!("Open egress to {hostport} for team '{team_name}' — {reason}")
+    };
+    let appr = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsApproval",
+        "metadata": {
+            "name": approval_name,
+            "ownerReferences": [owner_ref(team)],
+            "labels": {
+                "kars.azure.com/team": team_name,
+                "kars.azure.com/egress-request": "true",
+            },
+            "annotations": {
+                "kars.azure.com/egress-host": host,
+                "kars.azure.com/egress-port": port.map(|p| p.to_string()).unwrap_or_default(),
+            },
+        },
+        "spec": {
+            "taskRef": { "name": run },
+            "action": ApprovalAction {
+                kind: "egress".into(),
+                summary,
+                detail: Some(format!(
+                    "A run of team '{team_name}' needs to reach {hostport}. Approving adds it to the \
+                     team's egress allowlist for future runs; denying leaves the boundary closed."
+                )),
+                requested_tier: None,
+            },
+        },
+    });
+    let _ = approvals
+        .patch(&approval_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(appr))
+        .await;
+    tracing::info!(team = %team_name, %hostport, "agent-originated egress request raised for the human");
+}
+
+/// Apply approved egress requests: for each `egress-request` approval owned by
+/// this team that a human Approved and that hasn't been applied, add the host to
+/// the team blueprint egress (future runs inherit it), then mark it applied.
+async fn process_egress_grants(client: &Client, ns: &str, team: &KarsTeam) {
+    use crate::kars_approval::KarsApproval;
+    let team_name = team.name_any();
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default()
+        .labels(&format!("kars.azure.com/egress-request=true,kars.azure.com/team={team_name}"));
+    let Ok(list) = approvals.list(&lp).await else {
+        return;
+    };
+    const APPLIED: &str = "kars.azure.com/egress-applied";
+    for appr in list.items {
+        let owned = appr.metadata.owner_references.as_ref().is_some_and(|refs| {
+            refs.iter()
+                .any(|r| r.kind == "KarsTeam" && r.name == team_name && r.controller == Some(true))
+        });
+        if !owned {
+            continue;
+        }
+        let approved = appr
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .map(|p| p == "Approved")
+            .unwrap_or(false);
+        if !approved || appr.annotations().get(APPLIED).is_some_and(|v| v == "true") {
+            continue;
+        }
+        let host = appr.annotations().get("kars.azure.com/egress-host").cloned().unwrap_or_default();
+        if host.is_empty() {
+            continue;
+        }
+        let port: Option<u16> = appr
+            .annotations()
+            .get("kars.azure.com/egress-port")
+            .and_then(|p| p.parse().ok());
+        // Read the team's current blueprint egress, append the host (idempotent),
+        // and merge-patch it back — future runs' sandboxes inherit the allowlist.
+        let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+        let mut egress: Vec<serde_json::Value> = team
+            .spec
+            .blueprint
+            .as_ref()
+            .map(|b| {
+                b.egress
+                    .iter()
+                    .map(|e| match e.port {
+                        Some(p) => json!({ "host": e.host, "port": p }),
+                        None => json!({ "host": e.host }),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let already = egress.iter().any(|e| e.get("host").and_then(|h| h.as_str()) == Some(host.as_str()));
+        if !already {
+            egress.push(match port {
+                Some(p) => json!({ "host": host, "port": p }),
+                None => json!({ "host": host }),
+            });
+            let patch = json!({ "spec": { "blueprint": { "egress": egress } } });
+            let _ = teams
+                .patch(&team_name, &PatchParams::default(), &Patch::Merge(patch))
+                .await;
+            tracing::info!(team = %team_name, %host, "agent-requested egress approved — added to team blueprint");
+        }
+        let name = appr.name_any();
+        let patch = json!({ "metadata": { "annotations": { APPLIED: "true" } } });
+        let _ = approvals.patch(&name, &PatchParams::default(), &Patch::Merge(patch)).await;
+    }
+}
+
+
 /// and is `Ready`. Returns `Some(reason)` when a capability is missing/not
 /// ready (the charter loop pauses-with-reason), or `None` when all clear.
 /// Best-effort: a transient API error returns `None` (don't block on a blip).
@@ -653,6 +1046,110 @@ async fn capability_readiness(client: &Client, ns: &str, team: &KarsTeam) -> Opt
     None
 }
 
+/// The cluster-wide default AGT ToolPolicy, installed by the controller and
+/// scoped to every run sandbox via `system-default=true`. Used as the fallback
+/// governing policy for a team that declares none.
+const DEFAULT_TEAM_TOOL_POLICY: &str = "kars-default";
+
+/// The blueprint for a **launched** standing run. Clones the team blueprint and
+/// guarantees a governing `tool_policy`: a run sandbox created with no ToolPolicy
+/// boots its AGT engine with an empty policy set and *fails closed*, so the agent
+/// can never process the delivered task and the run hangs until the controller's
+/// dispatch idle-timeout fires — surfacing as a false "no progress heartbeat"
+/// timeout with no deliverable. The Bridge composer pins `kars-default`, but a
+/// team created directly via the CRD (the standalone-artifact path) would
+/// otherwise hang. Default the same policy here so every team runs.
+fn launched_run_blueprint(team: &KarsTeam) -> Option<TaskBlueprint> {
+    let mut bp = ensure_governing_tool_policy(team.spec.blueprint.clone());
+    // Team-mode Foundry memory: when a Foundry project is connected, every run
+    // shares ONE team memory store (scope team:<name>) so knowledge accumulates
+    // across runs — a real team knowledge-commons, not per-sandbox scratch.
+    if foundry_configured() && bp.memory.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        bp.memory = Some(team_memory_name(&team.name_any()));
+    }
+    Some(bp)
+}
+
+/// True when a Foundry project is connected on this cluster — the controller env
+/// carries the project endpoint the router uses for the memory data-plane
+/// (set by the operator Foundry onboarding).
+fn foundry_configured() -> bool {
+    std::env::var("FOUNDRY_PROJECT_ENDPOINT")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// The per-team shared-memory `KarsMemory` name.
+fn team_memory_name(team: &str) -> String {
+    format!("{team}-memory")
+}
+
+/// Ensure the team's shared Foundry memory exists (team-mode): ONE `KarsMemory`
+/// per team, **owned by the team** (so it lives for the team's lifecycle and is
+/// garbage-collected when the team is deleted), with a **shared scope**
+/// `team:<name>` so every run reads/writes the SAME partition — a knowledge-
+/// commons persisted across runs, not per-sandbox scratch. The Foundry store
+/// auto-creates on first agent use. No-op when Foundry isn't connected (teams
+/// then fall back to the ConfigMap commons).
+async fn ensure_team_memory(client: &Client, ns: &str, team: &KarsTeam) {
+    if !foundry_configured() {
+        return;
+    }
+    use crate::kars_memory::KarsMemory;
+    let team_name = team.name_any();
+    let mem_name = team_memory_name(&team_name);
+    let api: Api<KarsMemory> = Api::namespaced(client.clone(), ns);
+    let body = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsMemory",
+        "metadata": {
+            "name": mem_name,
+            "ownerReferences": [owner_ref(team)],
+            "labels": { "kars.azure.com/team": team_name },
+        },
+        "spec": {
+            // Per-team Foundry store (auto-created on first use by the runtime).
+            "storeName": team_name,
+            // A stable back-reference; the actual mount is driven per run by each
+            // sandbox's memoryRef, so many runs share this one store.
+            "sandboxRef": { "name": format!("{team_name}-principal") },
+            // SHARED scope: every run reads/writes team:<name>, not agent:<sandbox>.
+            "scope": format!("team:{team_name}"),
+            // Delete the store's data when the team (and thus this CR) is deleted.
+            "deleteOnSandboxDelete": true,
+            "displayName": format!("{team_name} team knowledge-commons"),
+        }
+    });
+    let obj: KarsMemory = match serde_json::from_value(body) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(team = %team_name, error = %e, "failed to build team KarsMemory");
+            return;
+        }
+    };
+    if let Err(e) = api
+        .patch(&mem_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(&obj))
+        .await
+    {
+        tracing::warn!(team = %team_name, error = %e, "failed to ensure team KarsMemory");
+    } else {
+        tracing::info!(team = %team_name, store = %team_name, "team-mode Foundry memory ensured (shared scope)");
+    }
+}
+
+
+/// Ensure a run blueprint carries a governing `tool_policy`, defaulting to the
+/// cluster-wide `kars-default` when absent/blank. Extracted from
+/// `launched_run_blueprint` so the fail-closed fallback is unit-testable without
+/// constructing a full `KarsTeam`.
+fn ensure_governing_tool_policy(blueprint: Option<TaskBlueprint>) -> TaskBlueprint {
+    let mut bp = blueprint.unwrap_or_default();
+    if bp.tool_policy.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        bp.tool_policy = Some(DEFAULT_TEAM_TOOL_POLICY.to_string());
+    }
+    bp
+}
+
 /// Materialize (SSA, idempotent) the **principal** task — the org apex holding
 /// the team's full charter envelope. Governed-but-idle by default; the charter
 /// loop is what produces *running* work, so the principal itself is a stable
@@ -666,6 +1163,7 @@ async fn materialize_principal(
         objective: format!("[principal] {}", team.spec.charter),
         envelope: team.spec.envelope.clone(),
         parent_ref: None,
+        requested_tier: None,
         execution: None,
         blueprint: team.spec.blueprint.clone(),
         display_name: Some(format!(
@@ -698,6 +1196,7 @@ async fn materialize_member(
             .unwrap_or_else(|| format!("[{}] {}", role.name, team.spec.charter)),
         envelope,
         parent_ref: Some(LocalObjectRef { name: principal_name.to_string() }),
+        requested_tier: None,
         execution: None,
         blueprint,
         display_name: Some(format!(
@@ -709,7 +1208,166 @@ async fn materialize_member(
     apply_task(tasks, team, member_name, spec, "member").await
 }
 
-/// Mint + launch a **task-force** task from the charter — the standing-operation
+/// Sentinel an agent emits when a standing run found no material change; the
+/// harvester treats it as a quiet tick (no commons entry, no new deliverable).
+pub const NO_CHANGE_SENTINEL: &str = "[[NO_MATERIAL_CHANGE]]";
+
+/// Whether a run's output is a no-op (agent reported no material change).
+fn is_no_change(output: &str) -> bool {
+    // A genuine no-change reply LEADS with the sentinel — the operating contract
+    // asks the agent to "reply with EXACTLY [[NO_MATERIAL_CHANGE]] and a one-line
+    // reason". A substantive report that merely *mentions* the sentinel deep in
+    // its body (e.g. a briefing that explains its own no-change protocol) must
+    // NOT be misread as a no-op, or it is silently dropped instead of harvested
+    // into the team's memory — breaking progressive run-to-run continuity.
+    let head = output.trim_start();
+    head.starts_with(NO_CHANGE_SENTINEL)
+}
+
+/// Appended to a team run's operating contract when the team has communication
+/// channels configured (Telegram/Slack/Discord/WhatsApp). Instructs the agent to
+/// proactively keep the operator in the loop over whatever channel is wired.
+const CHANNEL_DIRECTIVE: &str = "\n\nThis team has live communication channel(s) to its operator (Telegram/Slack/Discord/WhatsApp). \
+Keep the operator in the loop: post ONE short milestone when you start (e.g. '🚀 starting: <task>') and ONE concise \
+summary of your deliverable (≤240 chars) when you finish, using the configured channel's status/notify tool \
+(e.g. `telegram_status`). Keep messages terse; never post secrets or full document content — milestone summaries only.";
+
+/// The operating contract appended to every standing run's objective: build on
+/// prior knowledge, don't redo settled work, and emit the no-change sentinel
+/// when a cadence tick found nothing new (so the team stays quiet instead of
+/// producing a redundant briefing every interval).
+fn operating_contract(tools: &str, mcp: &str) -> String {
+    let memory = if foundry_configured() {
+        " You have a SHARED TEAM MEMORY (the `foundry_memory` tool, scoped to this team): at the \
+         START of your work search it for relevant prior knowledge, and at the END update it with \
+         durable new findings. It is the team's knowledge-commons — persistent across every run."
+    } else {
+        ""
+    };
+    format!(
+        "\n\nYour capabilities: tool policy = {tools}; connected services = {mcp}.{memory} \
+         Operating contract: this is a recurring standing run — review the reference data above, \
+         act ONLY on what has changed or is not yet done, and do not repeat work already completed. \
+         If nothing material has changed since the last run, do NOT write a full report — reply with \
+         exactly `{NO_CHANGE_SENTINEL}` and a one-line reason. If you need a decision or information \
+         only the human can provide (a credential, an access grant, a scope choice, a policy call), \
+         do NOT guess or stall — put a line `{CLARIFY_SENTINEL} <your one-line question>` anywhere in \
+         your reply. It is routed to the human via the team principal; their answer arrives as \
+         reference data on your next run. If you need to reach an external host the sandbox denies, \
+         put a line `{EGRESS_SENTINEL} host[:port] — why you need it` in your reply — once the human \
+         approves, the host is opened for the team's future runs. If you are blocked because your \
+         AUTONOMY is too low to act (e.g. you can only propose but need to act without per-step \
+         approval), put a line `{TIER_SENTINEL} <level 1-5> — why` in your reply — the human is asked \
+         to approve the raise; you can never escalate yourself. If you are blocked or a tool is \
+         unavailable, report that clearly instead of looping."
+    )
+}
+
+/// Sentinel a run uses to ask the human (via the principal) for a decision or
+/// information it cannot obtain itself. Principal-driven: the controller raises
+/// a `clarification` `KarsApproval` owned by the team (the principal), so the
+/// question surfaces on the human's inbox and the answer feeds the next run.
+pub const CLARIFY_SENTINEL: &str = "[[NEEDS_CLARIFICATION]]";
+
+/// Extract the one-line question following a `[[NEEDS_CLARIFICATION]]` marker in
+/// a run's reply, if present. Returns the trimmed, length-bounded question.
+pub fn extract_clarification(output: &str) -> Option<String> {
+    let idx = output.find(CLARIFY_SENTINEL)?;
+    let after = &output[idx + CLARIFY_SENTINEL.len()..];
+    // The question is the rest of that line.
+    let line = after.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return None;
+    }
+    Some(line.chars().take(280).collect())
+}
+
+/// Sentinel a run uses to ask (via the principal) for a NEW external host it
+/// needs but the envelope denies. Principal-driven + human-approved: the
+/// controller raises an `egress` `KarsApproval`; on approval the host is added
+/// to the TEAM blueprint egress, so the team's future runs reach it. This is the
+/// agent-originated counterpart to the human-initiated egress request.
+pub const EGRESS_SENTINEL: &str = "[[NEEDS_EGRESS]]";
+
+/// Extract `(host, port, reason)` from a `[[NEEDS_EGRESS]] host[:port] — reason`
+/// marker. Host is validated to look like a domain; `None` otherwise.
+pub fn extract_egress_request(output: &str) -> Option<(String, Option<u16>, String)> {
+    let idx = output.find(EGRESS_SENTINEL)?;
+    let line = output[idx + EGRESS_SENTINEL.len()..].lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return None;
+    }
+    // Split off the reason after an em-dash / hyphen / colon separator.
+    let (target, reason) = match line.split_once(['—', '-']).or_else(|| line.split_once(':').filter(|_| line.matches(':').count() > 1)) {
+        Some((t, r)) => (t.trim(), r.trim().to_string()),
+        None => (line, String::new()),
+    };
+    // Parse host[:port].
+    let (host, port) = match target.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
+            (h.trim(), p.parse::<u16>().ok())
+        }
+        _ => (target, None),
+    };
+    let host = host.trim().trim_matches('`').trim();
+    // Must look like a hostname: a dot-separated name with a TLD-ish tail.
+    let looks_like_host = host.contains('.')
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && host.split('.').last().is_some_and(|t| t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphabetic()));
+    if !looks_like_host {
+        return None;
+    }
+    Some((host.to_lowercase(), port, reason.chars().take(200).collect()))
+}
+
+/// Sentinel a run uses to ask (via the principal) for a HIGHER autonomy tier it
+/// needs but the envelope denies. Agent-originated + human-approved: the
+/// controller records the requested tier on the team spec, which the existing
+/// `process_promotion` path turns into a human `tierRaise` approval; only on
+/// approval is the envelope widened. The agent can never self-escalate.
+pub const TIER_SENTINEL: &str = "[[NEEDS_TIER]]";
+
+/// Extract `(tier, reason)` from a `[[NEEDS_TIER]] <1-5> — reason` marker in a
+/// run's reply. The tier must parse to 1..=5; `None` otherwise.
+pub fn extract_tier_request(output: &str) -> Option<(i32, String)> {
+    let idx = output.find(TIER_SENTINEL)?;
+    let line = output[idx + TIER_SENTINEL.len()..].lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return None;
+    }
+    let (target, reason) = match line.split_once(['—', '-', ':']) {
+        Some((t, r)) => (t.trim(), r.trim().to_string()),
+        None => (line, String::new()),
+    };
+    // Pull the first integer 1..=5 out of the target token (tolerates "Tier 4").
+    let tier: i32 = target
+        .split_whitespace()
+        .find_map(|tok| tok.trim_matches(|c: char| !c.is_ascii_digit()).parse::<i32>().ok())
+        .filter(|t| (1..=5).contains(t))?;
+    Some((tier, reason.chars().take(200).collect()))
+}
+
+/// Record an agent-originated autonomy request on the team spec. Only raises
+/// `spec.requested_tier` (never lowers), and never above tier 5; the existing
+/// `process_promotion` reconcile step then opens the human `tierRaise` approval.
+async fn request_tier_raise(client: &Client, ns: &str, team: &KarsTeam, tier: i32, reason: &str) {
+    let team_name = team.name_any();
+    let current = team.spec.envelope.tier;
+    // Only meaningful if it exceeds the current envelope AND any tier already
+    // requested — idempotent, and never a downgrade.
+    if tier <= current || team.spec.requested_tier.is_some_and(|r| r >= tier) {
+        return;
+    }
+    let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+    let patch = json!({ "spec": { "requestedTier": tier } });
+    if teams
+        .patch(&team_name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+        .is_ok()
+    {
+        tracing::info!(team = %team_name, tier, %reason, "agent-originated autonomy raise requested — pending human approval");
+    }
+}
 /// tick. Parented to the principal (attenuated under the charter) and launched
 /// so the existing mesh agent loop runs it autonomously.
 async fn mint_taskforce(
@@ -718,6 +1376,8 @@ async fn mint_taskforce(
     principal_name: &str,
     tf_name: &str,
     prior_knowledge: &str,
+    assigned: Option<&crate::team_tasks::TeamTask>,
+    channel_enabled: bool,
 ) -> Result<(), ReconcileError> {
     // The task-force runs under an attenuation of the team envelope (one tier
     // below, no further delegation) so a generated run can never hold more
@@ -727,32 +1387,125 @@ async fn mint_taskforce(
     // has and how a standing run should behave — build on prior knowledge, don't
     // redo settled work, do nothing if nothing changed, escalate when blocked.
     let bp = team.spec.blueprint.as_ref();
-    let tools = bp.and_then(|b| b.tool_policy.clone()).unwrap_or_else(|| "model only".into());
+    let tools = bp
+        .and_then(|b| b.tool_policy.clone())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_TEAM_TOOL_POLICY.into());
     let mcp = bp.map(|b| b.mcp_servers.join(", ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "none".into());
-    let manifest = format!(
-        "\n\nYour capabilities: tool policy = {tools}; connected services = {mcp}. \
-         Operating contract: this is a recurring standing run — review the reference data above, \
-         act ONLY on what has changed or is not yet done, do not repeat work already completed, and \
-         if you are blocked or a tool is unavailable, report that clearly instead of looping."
-    );
+    let mut manifest = operating_contract(&tools, &mcp);
+    if channel_enabled {
+        manifest.push_str(CHANNEL_DIRECTIVE);
+    }
+    let display = match assigned {
+        Some(t) => format!(
+            "{} — task: {}",
+            team.spec.display_name.clone().unwrap_or_else(|| team.name_any()),
+            t.title.chars().take(60).collect::<String>()
+        ),
+        None => format!(
+            "{} — standing run",
+            team.spec.display_name.clone().unwrap_or_else(|| team.name_any())
+        ),
+    };
     let spec = KarsTaskSpec {
-        objective: format!(
+        objective: build_run_objective(team, &manifest, prior_knowledge, assigned),
+        envelope,
+        parent_ref: Some(LocalObjectRef { name: principal_name.to_string() }),
+        requested_tier: None,
+        execution: Some(TaskExecution { launch: true, runtime: None }),
+        blueprint: launched_run_blueprint(team),
+        display_name: Some(display),
+    };
+    apply_task(tasks, team, tf_name, spec, "taskforce").await
+}
+
+/// The roster + spawn-orchestration contract, injected into the principal run's
+/// objective when the team has members. This is what makes the standing run a
+/// LIVE orchestrator: it names each member role and instructs the principal to
+/// spawn a real sub-agent per role (`kars_spawn`), delegate its task over the
+/// mesh (`kars_mesh_send` / `kars_mesh_transfer_file`), collect the results, and
+/// synthesize the team deliverable. Empty when the team has no members (the run
+/// is then a single charter agent).
+fn orchestration_contract(team: &KarsTeam) -> String {
+    if team.spec.roster.is_empty() {
+        return String::new();
+    }
+    let mut roster = String::new();
+    for r in &team.spec.roster {
+        let charge = r
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| "carry out this role's part of the charter".into());
+        roster.push_str(&format!("\n  - {}: {}", r.name, charge));
+    }
+    format!(
+        "\n\nYou are the PRINCIPAL of a team. Your members (roles):{roster}\n\
+         Orchestration contract: for each member role above, use `kars_spawn` to create a \
+         sub-agent, then delegate its task with `kars_mesh_send` (or ship data/files with \
+         `kars_mesh_transfer_file`). Let independent roles run in parallel; feed each one what it \
+         needs. Collect their results from your mesh inbox, then compile the team's deliverable per \
+         the charter. If a sub-agent fails or times out, note it and proceed with what you have — do \
+         not block the whole team on one member. Do the delegation yourself via these tools; do not \
+         attempt all the members' work alone unless spawning is unavailable."
+    )
+}
+
+/// Build the standing-run objective, bounded to the `KarsTask.spec.objective`
+/// CRD limit (1–4096 characters). The charter + capability manifest + roster
+/// orchestration contract are the stable head; the accumulated `prior_knowledge`
+/// grows every run as the team commons fills, so it is the part we truncate
+/// (tail-first) to fit. Without this cap a long-running team eventually emits an
+/// objective > 4096 chars and every new run fails CRD validation — silently
+/// halting the whole team.
+fn build_run_objective(
+    team: &KarsTeam,
+    manifest: &str,
+    prior_knowledge: &str,
+    task: Option<&crate::team_tasks::TeamTask>,
+) -> String {
+    const OBJ_MAX: usize = 4096;
+    const TRUNC_MARKER: &str = "\n[prior knowledge truncated to fit run objective]";
+    let head = match task {
+        // A discrete assigned task: THIS is the run's objective. The charter is
+        // demoted to standing context so the agent still respects the team's
+        // mandate, but its job is to complete + deliver the specific task.
+        Some(t) => format!(
+            "Assigned task for team '{}'.\nTASK: {}\n{}\n\
+             Deliver a complete result for THIS task. Team charter (standing context): {}{}{}",
+            team.name_any(),
+            t.title,
+            if t.description.trim().is_empty() {
+                String::new()
+            } else {
+                format!("DETAILS: {}", t.description)
+            },
+            team.spec.charter,
+            manifest,
+            orchestration_contract(team),
+        ),
+        None => format!(
             "Standing-operation run for team '{}'. Charter: {}{}{}",
             team.name_any(),
             team.spec.charter,
             manifest,
-            prior_knowledge
+            orchestration_contract(team),
         ),
-        envelope,
-        parent_ref: Some(LocalObjectRef { name: principal_name.to_string() }),
-        execution: Some(TaskExecution { launch: true, runtime: None }),
-        blueprint: team.spec.blueprint.clone(),
-        display_name: Some(format!(
-            "{} — standing run",
-            team.spec.display_name.clone().unwrap_or_else(|| team.name_any())
-        )),
     };
-    apply_task(tasks, team, tf_name, spec, "taskforce").await
+    let full = format!("{head}{prior_knowledge}");
+    if full.chars().count() <= OBJ_MAX {
+        return full;
+    }
+    // Reserve room for the head + truncation marker; truncate the prior-knowledge
+    // tail to whatever budget remains. If even the head overflows (pathological
+    // charter), hard-cap the whole string.
+    let head_len = head.chars().count();
+    let marker_len = TRUNC_MARKER.chars().count();
+    if head_len + marker_len >= OBJ_MAX {
+        return head.chars().take(OBJ_MAX).collect();
+    }
+    let budget = OBJ_MAX - head_len - marker_len;
+    let kept: String = prior_knowledge.chars().take(budget).collect();
+    format!("{head}{kept}{TRUNC_MARKER}")
 }
 
 /// Aggregate outcome of a harvest pass — the autonomous-operation health signal.
@@ -771,6 +1524,9 @@ struct RunStats {
     last_success_at: Option<String>,
     /// Runs refused from the commons as likely memory-poisoning payloads.
     poisoned: i64,
+    /// No-op ticks: runs that reported no material change (not harvested, not
+    /// counted as a delivery) — the signal a standing team is quietly on watch.
+    quiet: i64,
 }
 
 /// Write path for the knowledge commons + run lifecycle: scan the team's
@@ -848,7 +1604,35 @@ async fn harvest_and_retire_runs(
         // commons free of empty/error runs (e.g. a model that rejected the
         // request) that would otherwise pollute the team's prior knowledge.
         let did_work = tokens > 0 || artifacts > 0;
-        if did_work && ok && data.get("output").is_some_and(|s| !s.trim().is_empty()) {
+        let output = data.get("output").map(String::as_str).unwrap_or_default();
+        // Clarification: a run asked the human (via the principal) for a decision
+        // or information it cannot obtain itself. Raise a principal-owned
+        // `clarification` KarsApproval (idempotent per question) so it surfaces on
+        // the human inbox; the answer feeds the next run's prior knowledge.
+        if let Some(question) = extract_clarification(output) {
+            ensure_clarification_approval(client, &ns, team, &run, &question).await;
+        }
+        // Egress self-request: a run asked (via the principal) for an external
+        // host the sandbox denies. Raise a team-owned `egress` approval; on
+        // approval the host is added to the team blueprint for future runs.
+        if let Some((host, port, reason)) = extract_egress_request(output) {
+            ensure_egress_request_approval(client, &ns, team, &run, &host, port, &reason).await;
+        }
+        // Autonomy self-request: a run judged it needs a higher authority tier to
+        // do its job (e.g. act without per-step approval). Record the requested
+        // tier on the team spec; the existing `process_promotion` path then raises
+        // a human `tierRaise` approval and, once approved, widens the envelope.
+        // Agent-originated, human-approved — the agent can never self-escalate.
+        if let Some((tier, reason)) = extract_tier_request(output) {
+            request_tier_raise(client, &ns, team, tier, &reason).await;
+        }
+        // No-op tick: the agent reported no material change since the last run.
+        // Do NOT deposit a (redundant) commons entry or count it as a delivery —
+        // the standing team stays quiet instead of emitting a report every
+        // interval when nothing happened.
+        if is_no_change(output) {
+            stats.quiet += 1;
+        } else if did_work && ok && !output.trim().is_empty() {
             stats.succeeded += 1;
             let finished = data.get("finishedAt").cloned();
             if let Some(f) = finished {
@@ -857,16 +1641,18 @@ async fn harvest_and_retire_runs(
                     _ => Some(f),
                 };
             }
-            // Title the entry by the team's mandate (clean), not the verbose
-            // run objective (which carries the injected prior-knowledge preamble).
-            let title = team
+            // Title the entry by a real headline lifted from the deliverable, so
+            // the Knowledge surface shows distinct, scannable rows instead of the
+            // same charter line on every entry. Fall back to the team mandate
+            // (clean) only when the content yields nothing usable.
+            let charter_line = team
                 .spec
                 .charter
                 .lines()
                 .next()
                 .unwrap_or(&team.spec.charter)
                 .to_string();
-            let output = data.get("output").map(String::as_str).unwrap_or_default();
+            let title = crate::team_commons::derive_title(output, &charter_line);
             // Provenance gate (memory-poisoning defense): a deliverable whose
             // text is densely laced with injection markers is treated as a
             // poisoned run and NOT harvested into shared memory — it would
@@ -899,11 +1685,145 @@ async fn harvest_and_retire_runs(
             // there is no competing writer to conflict with.
             let retire = json!({ "spec": { "execution": { "launch": false } } });
             let _ = tasks.patch(&run, &PatchParams::default(), &Patch::Merge(retire)).await;
+            // A backlog task bound to this run is now complete — advance it to
+            // `done` so the team picks up the next pending task (and the queue
+            // never deadlocks on a task whose run already finished, even on a
+            // failed/timed-out delivery).
+            let _ =
+                crate::team_tasks::mark_done_for_run(client, &team_name, &run, &Utc::now().to_rfc3339())
+                    .await;
         } else if launched {
             stats.active += 1;
         }
     }
+
+    // Garbage-collect retired runs so they don't pile up unbounded. A standing
+    // team on a tight cadence mints a run every tick; the knowledge each one
+    // produced already lives durably in the commons (harvested above), so the
+    // retired KarsTask + its mission ConfigMaps are pure backlog. Left in place
+    // they make every harvest pass re-list and re-GET hundreds of dead runs —
+    // an O(runs) read+write amplification per reconcile that floods etcd. We
+    // keep the most recent `MAX_RETAINED_RUNS` retired runs (for the activity
+    // ledger / recent-history UI) and delete the rest, oldest first, together
+    // with their mission output/trace/artifacts/review ConfigMaps.
+    gc_retired_runs(tasks, &cms, &team_name, &list.items).await;
+
     stats
+}
+
+/// How many retired (un-launched) standing-operation runs to keep per team for
+/// the recent-history view. Older retired runs are garbage-collected; their
+/// knowledge is already preserved in the team commons.
+const MAX_RETAINED_RUNS: usize = 20;
+
+/// The mission ConfigMap kinds a run produces. Output/trace dominate volume
+/// (one each per run); artifacts/review are sparser. All four are keyed by the
+/// run name: `kars-mission-<kind>-<run>`.
+const MISSION_CM_KINDS: [&str; 4] = ["output", "trace", "artifacts", "review"];
+
+/// Garbage-collect a team's run backlog so etcd doesn't grow without bound.
+///
+/// Two passes, both enforcing one invariant — *a team-run KarsTask and its
+/// mission ConfigMaps exist iff the run is within the retained window*:
+///   1. Delete retired runs (KarsTask + CMs) beyond `MAX_RETAINED_RUNS`, oldest
+///      first.
+///   2. Sweep **orphaned** mission CMs — those whose run KarsTask no longer
+///      exists at all (left behind by pre-GC cleanups or a transient CM-delete
+///      failure on a prior pass). Without this, mission CMs (which carry no
+///      owner reference) would accumulate forever even though their runs are
+///      long gone.
+///
+/// Idempotent and best-effort: any delete failure just defers to the next
+/// reconcile. The run's knowledge is already durable in the team commons before
+/// it is eligible for collection, so deletion never loses deliverables.
+async fn gc_retired_runs(
+    tasks: &Api<KarsTask>,
+    cms: &Api<k8s_openapi::api::core::v1::ConfigMap>,
+    team_name: &str,
+    items: &[KarsTask],
+) {
+    // Pass 1 — retire-beyond-retention. Retired runs = taskforce runs that are
+    // no longer launched (harvested + un-launched, or never launched). Newest
+    // first so `skip(N)` keeps the N most recent for the history UI.
+    let mut retired: Vec<&KarsTask> = items
+        .iter()
+        .filter(|t| {
+            t.annotations().get(ANNOT_TEAM_ROLE).is_some_and(|r| r == "taskforce")
+                && !t.spec.execution.as_ref().map(|e| e.launch).unwrap_or(false)
+                && t.metadata.deletion_timestamp.is_none()
+        })
+        .collect();
+    retired.sort_by(|a, b| {
+        let ta = a.metadata.creation_timestamp.as_ref().map(|t| t.0);
+        let tb = b.metadata.creation_timestamp.as_ref().map(|t| t.0);
+        tb.cmp(&ta)
+    });
+
+    for task in retired.into_iter().skip(MAX_RETAINED_RUNS) {
+        let run = task.name_any();
+        delete_mission_cms(cms, &run).await;
+        match tasks.delete(&run, &kube::api::DeleteParams::default()).await {
+            Ok(_) => {
+                tracing::info!(run = %run, "GC: retired standing run deleted (knowledge preserved in commons)");
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => {
+                tracing::debug!(run = %run, error = %e, "GC: retired run delete failed (will retry)");
+            }
+        }
+    }
+
+    // Pass 2 — orphan sweep. Live run names for this team (the source of truth
+    // for which CMs may remain). Anything else under this team's run prefix is
+    // a stranded CM whose KarsTask is gone.
+    let live_runs: std::collections::HashSet<String> =
+        items.iter().map(|t| t.name_any()).collect();
+    let run_prefix = format!("{team_name}-run-");
+    // One list per kind keeps each response small; output/trace are the bulky
+    // ones. The label is set on write to exactly the run/mission id.
+    let mut swept = 0usize;
+    for kind in MISSION_CM_KINDS {
+        let lp = ListParams::default()
+            .labels(&format!("kars.azure.com/mission-{kind}"));
+        let Ok(list) = cms.list(&lp).await else { continue };
+        for cm in list.items {
+            let name = cm.name_any();
+            let Some(run) = name.strip_prefix(&format!("kars-mission-{kind}-")) else {
+                continue;
+            };
+            // Only this team's runs, and only those with no surviving KarsTask.
+            if !run.starts_with(&run_prefix) || live_runs.contains(run) {
+                continue;
+            }
+            match cms.delete(&name, &kube::api::DeleteParams::default()).await {
+                Ok(_) => swept += 1,
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+                Err(e) => {
+                    tracing::debug!(cm = %name, error = %e, "GC: orphan mission CM delete failed");
+                }
+            }
+        }
+    }
+    if swept > 0 {
+        tracing::info!(team = %team_name, swept, "GC: removed orphaned mission ConfigMaps");
+    }
+}
+
+/// Delete all four mission ConfigMaps for a run. Best-effort; missing is fine.
+async fn delete_mission_cms(
+    cms: &Api<k8s_openapi::api::core::v1::ConfigMap>,
+    run: &str,
+) {
+    for kind in MISSION_CM_KINDS {
+        let cm_name = format!("kars-mission-{kind}-{run}");
+        match cms.delete(&cm_name, &kube::api::DeleteParams::default()).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => {
+                tracing::debug!(run = %run, cm = %cm_name, error = %e, "GC: mission ConfigMap delete failed");
+            }
+        }
+    }
 }
 
 /// SSA-apply a KarsTask owned by the team, tagged with team annotations. For a
@@ -961,11 +1881,43 @@ fn default_member_envelope(team_env: &TaskEnvelope) -> TaskEnvelope {
     }
 }
 
-/// Resolve a member's blueprint: role override merged over the team default, so
-/// a role can specialise (its own prompt/tools) while inheriting team defaults.
+/// Resolve a member's blueprint: role override merged **field-by-field** over
+/// the team default, so a role can specialise (its own prompt/tools/model)
+/// while still inheriting team-level governance it does not restate. This is
+/// not a cosmetic nicety: a delegated member must carry the parent's bound
+/// `tool_policy`, otherwise the attenuation guard rejects it as
+/// `delegation amplifies parent authority` and the member goes Degraded — a
+/// team with Degraded members has no agent to deliver to. Merging the team's
+/// `tool_policy` (and other governance defaults) into a role that omits them
+/// keeps every member attenuated-consistent with the principal by default.
 fn member_blueprint(team: &KarsTeam, role: &TeamRole) -> Option<TaskBlueprint> {
-    match (&team.spec.blueprint, &role.blueprint) {
-        (_, Some(rb)) => Some(rb.clone()),
+    merge_blueprint(team.spec.blueprint.as_ref(), role.blueprint.as_ref())
+}
+
+/// Field-by-field merge of a role blueprint over a team blueprint. Role wins for
+/// every field it sets; the team fills the rest. Critically, a role that omits
+/// `tool_policy` inherits the team's so the member stays attenuated-consistent
+/// with the principal (see `member_blueprint`).
+fn merge_blueprint(
+    team_bp: Option<&TaskBlueprint>,
+    role_bp: Option<&TaskBlueprint>,
+) -> Option<TaskBlueprint> {
+    match (team_bp, role_bp) {
+        (Some(tb), Some(rb)) => Some(TaskBlueprint {
+            runtime: rb.runtime.clone().or_else(|| tb.runtime.clone()),
+            model: rb.model.clone().or_else(|| tb.model.clone()),
+            instructions: rb.instructions.clone().or_else(|| tb.instructions.clone()),
+            tool_policy: rb.tool_policy.clone().or_else(|| tb.tool_policy.clone()),
+            mcp_servers: if rb.mcp_servers.is_empty() {
+                tb.mcp_servers.clone()
+            } else {
+                rb.mcp_servers.clone()
+            },
+            egress: if rb.egress.is_empty() { tb.egress.clone() } else { rb.egress.clone() },
+            isolation: rb.isolation.clone().or_else(|| tb.isolation.clone()),
+            memory: rb.memory.clone().or_else(|| tb.memory.clone()),
+        }),
+        (None, Some(rb)) => Some(rb.clone()),
         (Some(tb), None) => Some(tb.clone()),
         (None, None) => None,
     }
@@ -1056,7 +2008,7 @@ pub async fn run(client: Client) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kars_task::{TaskBudget, TaskEnvelope};
+    use crate::kars_task::{TaskBudget, TaskEnvelope, TaskModel};
 
     fn team_env() -> TaskEnvelope {
         TaskEnvelope {
@@ -1104,10 +2056,143 @@ mod tests {
     }
 
     #[test]
+    fn no_change_sentinel_detected() {
+        // A genuine no-change reply LEADS with the sentinel.
+        assert!(is_no_change("[[NO_MATERIAL_CHANGE]] nothing new since 21:00."));
+        assert!(is_no_change("  \n[[NO_MATERIAL_CHANGE]] stars/forks static."));
+        assert!(!is_no_change("Here is a full briefing with real findings."));
+        // A substantive report that merely MENTIONS the sentinel deep in its
+        // body must NOT be misread as a no-op (it would be dropped from memory).
+        let report = "# Weekly briefing\n\nExecutive summary: lots happened.\n\n\
+            Next run will diff against this baseline and reply [[NO_MATERIAL_CHANGE]] \
+            if stars/forks/issues are static.";
+        assert!(!is_no_change(report));
+    }
+
+    #[test]
+    fn clarification_sentinel_extracted() {
+        // The question is the rest of the sentinel's line, wherever it appears.
+        assert_eq!(
+            extract_clarification("Working on it.\n[[NEEDS_CLARIFICATION]] Which AWS account should I use?\nmore text"),
+            Some("Which AWS account should I use?".to_string())
+        );
+        // Inline is fine too.
+        assert_eq!(
+            extract_clarification("[[NEEDS_CLARIFICATION]] Prod or staging?"),
+            Some("Prod or staging?".to_string())
+        );
+        // No sentinel → None; sentinel with an empty tail → None (nothing to ask).
+        assert_eq!(extract_clarification("a normal report with findings"), None);
+        assert_eq!(extract_clarification("[[NEEDS_CLARIFICATION]]   \nnext line"), None);
+    }
+
+    #[test]
+    fn egress_request_sentinel_extracted() {
+        assert_eq!(
+            extract_egress_request("Blocked. [[NEEDS_EGRESS]] api.github.com:443 — need to read PRs"),
+            Some(("api.github.com".to_string(), Some(443), "need to read PRs".to_string()))
+        );
+        // No port, hyphen reason.
+        assert_eq!(
+            extract_egress_request("[[NEEDS_EGRESS]] example.com - fetch docs"),
+            Some(("example.com".to_string(), None, "fetch docs".to_string()))
+        );
+        // Not a hostname → rejected (no silent bad grants).
+        assert_eq!(extract_egress_request("[[NEEDS_EGRESS]] localhost"), None);
+        assert_eq!(extract_egress_request("a normal report"), None);
+    }
+
+    #[test]
+    fn tier_request_sentinel_extracted() {
+        // "<n> — reason" form.
+        assert_eq!(
+            extract_tier_request("Can only propose. [[NEEDS_TIER]] 4 — need to open PRs directly"),
+            Some((4, "need to open PRs directly".to_string()))
+        );
+        // Tolerates "Tier N" and a colon separator.
+        assert_eq!(
+            extract_tier_request("[[NEEDS_TIER]] Tier 3: act without per-step approval"),
+            Some((3, "act without per-step approval".to_string()))
+        );
+        // Out-of-range / missing tier → None (never a silent escalation).
+        assert_eq!(extract_tier_request("[[NEEDS_TIER]] 9 — too high"), None);
+        assert_eq!(extract_tier_request("[[NEEDS_TIER]] soon"), None);
+        assert_eq!(extract_tier_request("a normal report"), None);
+    }
+
+    #[test]
+    fn team_memory_name_is_stable() {
+        assert_eq!(team_memory_name("repo-health"), "repo-health-memory");
+    }
+
+    #[test]
+    fn launched_run_defaults_tool_policy_when_absent() {
+        // A team with no blueprint (CRD-created directly) must still get a
+        // governing policy, or its run sandbox fails closed and hangs.
+        let bp = ensure_governing_tool_policy(None);
+        assert_eq!(bp.tool_policy.as_deref(), Some("kars-default"));
+
+        // A blank tool_policy is treated as absent.
+        let blank = ensure_governing_tool_policy(Some(TaskBlueprint {
+            tool_policy: Some("  ".into()),
+            ..Default::default()
+        }));
+        assert_eq!(blank.tool_policy.as_deref(), Some("kars-default"));
+    }
+
+    #[test]
+    fn launched_run_preserves_explicit_tool_policy() {
+        let bp = ensure_governing_tool_policy(Some(TaskBlueprint {
+            tool_policy: Some("my-strict-policy".into()),
+            ..Default::default()
+        }));
+        assert_eq!(bp.tool_policy.as_deref(), Some("my-strict-policy"));
+    }
+
+    #[test]
     fn parse_rfc3339_roundtrips() {
         let now = Utc::now();
         let s = now.to_rfc3339();
         let back = parse_rfc3339(&s).unwrap();
         assert!((back - now).num_seconds().abs() < 2);
+    }
+
+    #[test]
+    fn merge_blueprint_inherits_team_tool_policy() {
+        let team_bp = TaskBlueprint {
+            runtime: None,
+            model: Some(TaskModel {
+                provider: "github-copilot".into(),
+                deployment: "claude-opus-4.8".into(),
+            }),
+            instructions: None,
+            tool_policy: Some("kars-default".into()),
+            mcp_servers: vec!["github".into()],
+            egress: vec![],
+            isolation: None,
+            memory: None,
+        };
+        // Role specialises the model but omits tool_policy and mcp.
+        let role_bp = TaskBlueprint {
+            runtime: None,
+            model: Some(TaskModel {
+                provider: "github-copilot".into(),
+                deployment: "claude-sonnet-4.5".into(),
+            }),
+            instructions: Some("role prompt".into()),
+            tool_policy: None,
+            mcp_servers: vec![],
+            egress: vec![],
+            isolation: None,
+            memory: None,
+        };
+        let merged = merge_blueprint(Some(&team_bp), Some(&role_bp)).unwrap();
+        // tool_policy inherited from the team so the member stays attenuated.
+        assert_eq!(merged.tool_policy.as_deref(), Some("kars-default"));
+        // role specialisation preserved.
+        assert_eq!(merged.model.as_ref().unwrap().deployment, "claude-sonnet-4.5");
+        assert_eq!(merged.instructions.as_deref(), Some("role prompt"));
+        // mcp inherited from team since role left it empty.
+        assert_eq!(merged.mcp_servers, vec!["github".to_string()]);
     }
 }
