@@ -32,6 +32,7 @@ use tokio::time::Duration;
 
 use crate::crd::{KarsSandbox, SandboxConfig};
 use crate::fedcred::{FedCredConfig, FedCredManager};
+use crate::mcp_server::McpServer;
 
 pub(crate) mod byo_contract;
 mod dev_env;
@@ -90,6 +91,45 @@ pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'
         "confidential" => (Some("kata-vm-isolation"), "sandbox-kata"),
         _ => (None, "sandbox"), // standard + enhanced both on clawpool
     }
+}
+
+/// Parse an in-cluster MCP server URL into `(namespace, port)` for a
+/// NetworkPolicy egress rule. Returns `None` for external URLs (already covered
+/// by the blanket `:443` egress rule) or unparseable input. Recognizes
+/// Kubernetes service DNS of the form `<svc>.<namespace>.svc[.cluster.local][:port]`.
+fn parse_in_cluster_mcp_endpoint(url: &str) -> Option<(String, u16)> {
+    let scheme_end = url.find("://")?;
+    let scheme = &url[..scheme_end];
+    let rest = &url[scheme_end + 3..];
+    let authority = rest.split('/').next().unwrap_or(rest);
+    // Strip any userinfo (user@host) — MCP service URLs don't use it, but be safe.
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port_str) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    let host = host.strip_suffix('.').unwrap_or(host);
+    // Only in-cluster service DNS names get an explicit rule; everything else
+    // (public hostnames, bare IPs) is out of scope for a namespace-scoped rule.
+    if !host.ends_with(".svc.cluster.local") && !host.ends_with(".svc") {
+        return None;
+    }
+    // `<svc>.<namespace>.svc(.cluster.local)` → namespace is the 2nd label.
+    let namespace = host.split('.').nth(1)?.to_string();
+    if namespace.is_empty() {
+        return None;
+    }
+    let port: u16 = match port_str {
+        Some(p) => p.parse().ok()?,
+        None => {
+            if scheme.eq_ignore_ascii_case("https") {
+                443
+            } else {
+                80
+            }
+        }
+    };
+    Some((namespace, port))
 }
 
 /// Build the egress-guard init-container command.
@@ -204,6 +244,41 @@ pub(crate) fn egress_guard_ruleset_hash(is_sre_sandbox: bool) -> String {
 #[allow(clippy::module_inception)]
 mod egress_guard_tests {
     use super::build_egress_guard_command;
+    use super::parse_in_cluster_mcp_endpoint;
+
+    #[test]
+    fn mcp_endpoint_in_cluster_svc_dns_resolves_ns_and_port() {
+        assert_eq!(
+            parse_in_cluster_mcp_endpoint("http://playwright-mcp.default.svc.cluster.local:8931/mcp"),
+            Some(("default".to_string(), 8931))
+        );
+        // Short `.svc` form.
+        assert_eq!(
+            parse_in_cluster_mcp_endpoint("http://my-mcp.tools.svc:9000"),
+            Some(("tools".to_string(), 9000))
+        );
+        // Default ports by scheme when omitted.
+        assert_eq!(
+            parse_in_cluster_mcp_endpoint("https://sec.default.svc.cluster.local/mcp"),
+            Some(("default".to_string(), 443))
+        );
+        assert_eq!(
+            parse_in_cluster_mcp_endpoint("http://sec.default.svc.cluster.local/mcp"),
+            Some(("default".to_string(), 80))
+        );
+    }
+
+    #[test]
+    fn mcp_endpoint_external_urls_are_none() {
+        // External https MCP → covered by the blanket :443 rule, no NP rule.
+        assert_eq!(parse_in_cluster_mcp_endpoint("https://api.githubcopilot.com/mcp"), None);
+        assert_eq!(parse_in_cluster_mcp_endpoint("http://example.com:8080/mcp"), None);
+        // Garbage / empty.
+        assert_eq!(parse_in_cluster_mcp_endpoint(""), None);
+        assert_eq!(parse_in_cluster_mcp_endpoint("not-a-url"), None);
+        // Non-numeric port is rejected.
+        assert_eq!(parse_in_cluster_mcp_endpoint("http://a.b.svc.cluster.local:zzz/mcp"), None);
+    }
 
     #[test]
     fn standard_sandbox_has_no_apiserver_bypass() {
@@ -1052,6 +1127,48 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
+    // ── Step 2b': Propagate a standing team's channel credentials ─────────
+    // Team runs are ephemeral sandboxes (`<team>-run-<epoch>`) in their own
+    // namespaces, so an operator can't `kars credentials update` each one. If
+    // the team has a channel secret (`kars-team-channel-<team>` in kars-system,
+    // holding TELEGRAM_BOT_TOKEN etc.), copy it into this run's
+    // `<sandbox>-credentials` secret BEFORE the pod is created — the deployment
+    // already mounts that secret via `envFrom optional`, so the entrypoint sees
+    // the token and wires up the Telegram (or other) channel. This is what lets
+    // a standing "finance"/"marketing" team DM the operator its deliverables.
+    if let Some(team) = name.rsplit_once("-run-").map(|(t, _)| t.to_string()) {
+        let system_secrets: Api<Secret> = Api::namespaced(client.clone(), "kars-system");
+        if let Ok(Some(src)) = system_secrets
+            .get_opt(&format!("kars-team-channel-{team}"))
+            .await
+            && let Some(data) = src.data.clone()
+        {
+            let string_data: std::collections::BTreeMap<String, String> = data
+                .into_iter()
+                .filter_map(|(k, v)| String::from_utf8(v.0).ok().map(|s| (k, s)))
+                .collect();
+            let cred_name = format!("{name}-credentials");
+            let cred_secret: Secret = serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {
+                    "name": cred_name,
+                    "namespace": sandbox_ns,
+                    "labels": { "kars.azure.com/sandbox": name, "kars.azure.com/team": team },
+                },
+                "stringData": string_data,
+            }))?;
+            secret_api
+                .patch(
+                    &cred_name,
+                    &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                    &Patch::Apply(cred_secret),
+                )
+                .await?;
+            tracing::info!(sandbox = %name, team = %team, "propagated team channel credentials to run sandbox");
+        }
+    }
+
     // ── Step 2b: Generate per-sandbox admin token for router ───────────
     //
     // Protects sensitive router endpoints (/admin/*, /egress/*, /sandbox/*, /agt/audit, etc.)
@@ -1249,6 +1366,37 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         Err(e) => {
             tracing::error!(error = %e, sandbox = %name, "MCP egress derivation failed");
             return Ok(Action::requeue(Duration::from_secs(15)));
+        }
+    }
+
+    // Allow the inference-router to reach IN-CLUSTER MCP servers this sandbox
+    // uses. The blanket :443 egress rule above deliberately EXCLUDES the RFC1918
+    // ranges (anti-lateral-movement), so an in-cluster MCP endpoint such as
+    // `playwright-mcp.default.svc.cluster.local:8931` is otherwise unreachable
+    // and forwarder discovery silently fails ("tools/list POST failed"). We
+    // resolve each referenced McpServer's URL and, for in-cluster service DNS,
+    // add a scoped egress rule to that namespace + port. External https MCP
+    // servers (e.g. api.githubcopilot.com) are already covered by the :443 rule,
+    // so they add nothing here.
+    for mcp_ref in governance_config.effective_mcp_server_refs() {
+        let mcp_name = mcp_ref.name.trim();
+        if mcp_name.is_empty() {
+            continue;
+        }
+        let mcp_api: Api<McpServer> = Api::namespaced(client.clone(), &sandbox_self_ns);
+        let url = match mcp_api.get_opt(mcp_name).await {
+            Ok(Some(m)) => m.spec.url.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        if let Some((ns_label, port)) = parse_in_cluster_mcp_endpoint(&url) {
+            egress_rules.push(json!({
+                "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ns_label}}}],
+                "ports": [{"protocol": "TCP", "port": port}]
+            }));
+            tracing::info!(
+                sandbox = %name, mcp = %mcp_name, namespace = %ns_label, port = port,
+                "NetworkPolicy: allowing egress to in-cluster MCP server"
+            );
         }
     }
 
