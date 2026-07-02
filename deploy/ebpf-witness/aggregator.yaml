@@ -1,0 +1,145 @@
+# Kars datapath-witness aggregator — RBAC + Deployment.
+#
+# Runs in the Inspektor Gadget namespace and, using a dedicated least-privilege
+# ServiceAccount, reads the continuous headless gadgets (kubectl-gadget needs
+# apps/daemonsets:list + pods:list + pods/portforward:create), reads every
+# sandbox's declared egress allowlist (configmaps:get,list cluster-wide), and
+# publishes the verdict to the `kars-datapath-witness` ConfigMap in kars-system.
+#
+# Applied by install.sh --continuous. The script + compute step are supplied by
+# the `kars-witness-aggregator-script` ConfigMap (install.sh builds it from
+# aggregator/publish-witness.sh + aggregator/compute.py).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kars-witness-aggregator
+  namespace: gadget
+  labels:
+    app.kubernetes.io/name: kars-witness-aggregator
+    app.kubernetes.io/part-of: kars
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-witness-aggregator
+  labels:
+    app.kubernetes.io/part-of: kars
+rules:
+  # kubectl-gadget locates the gadget DaemonSet + port-forwards to its pods.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create", "get"]
+  # enumerate sandbox namespaces + read their declared egress allowlists.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-witness-aggregator
+  labels:
+    app.kubernetes.io/part-of: kars
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kars-witness-aggregator
+subjects:
+  - kind: ServiceAccount
+    name: kars-witness-aggregator
+    namespace: gadget
+---
+# Narrow write scope: only the witness ConfigMap in kars-system.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kars-witness-writer
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kars-witness-writer
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/part-of: kars
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kars-witness-writer
+subjects:
+  - kind: ServiceAccount
+    name: kars-witness-aggregator
+    namespace: gadget
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kars-witness-aggregator
+  namespace: gadget
+  labels:
+    app.kubernetes.io/name: kars-witness-aggregator
+    app.kubernetes.io/part-of: kars
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kars-witness-aggregator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kars-witness-aggregator
+        app.kubernetes.io/part-of: kars
+    spec:
+      serviceAccountName: kars-witness-aggregator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: aggregator
+          image: kars-datapath-witness-aggregator:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/opt/witness/publish-witness.sh"]
+          env:
+            - name: WITNESS_WINDOW
+              value: "15"
+            - name: WITNESS_INTERVAL
+              value: "30"
+            - name: WITNESS_GADGET_NAMESPACE
+              value: "gadget"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 48Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: script
+              mountPath: /opt/witness
+      volumes:
+        - name: script
+          configMap:
+            name: kars-witness-aggregator-script

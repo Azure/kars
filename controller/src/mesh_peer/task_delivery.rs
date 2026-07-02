@@ -34,7 +34,7 @@ use chrono::Utc;
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::time::Duration;
 
@@ -48,20 +48,53 @@ const RUN_ATTEMPTS_ANNOTATION: &str = "kars.azure.com/run-attempts";
 /// A freshly-launched sandbox can take ~30-90s to bring its agent onto the mesh;
 /// retrying every poll interval covers that warm-up window before giving up.
 const MAX_DELIVERY_ATTEMPTS: u32 = 6;
-/// How long to wait for the agent's `task_response` before recording a timeout.
-/// The native agent loop (tools + delegation) can take a while; this is generous
-/// so legitimate long runs aren't killed. Terminal-timeout runs are retired (not
-/// counted as active), so a slow run never permanently freezes the team's ticks.
-const TASK_TIMEOUT_SECS: u64 = 600;
+/// Idle timeout: how long the controller waits with NO signal from the agent
+/// (neither a `task_progress` heartbeat nor the terminal `task_response`)
+/// before recording a delivery as dead. The native agent loop emits a
+/// `task_progress` tick ~every 20s while it is actively working, so any
+/// genuinely-progressing run resets this clock long before it elapses; only an
+/// agent that has truly gone silent trips it. Terminal-timeout runs are retired
+/// (not counted as active), so a slow run never permanently freezes the team's
+/// ticks.
+const IDLE_TIMEOUT_SECS: i64 = 180;
+/// Absolute ceiling on a single delivery regardless of heartbeats. Bounds a
+/// runaway agent that keeps ticking forever but never returns a result.
+const ABS_MAX_SECS: u64 = 1800;
 const POLL_INTERVAL_SECS: u64 = 5;
 
 /// Process-local set of KarsTasks currently being delivered, so the 5s poll
 /// loop never double-dispatches a task whose delivery is still in flight (a
-/// delivery can take up to `TASK_TIMEOUT_SECS`). Single-leader, so a plain
+/// delivery can take up to `ABS_MAX_SECS`). Single-leader, so a plain
 /// in-memory guard is sufficient and avoids annotation churn.
 fn inflight() -> &'static StdMutex<HashSet<String>> {
     static INFLIGHT: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
     INFLIGHT.get_or_init(|| StdMutex::new(HashSet::new()))
+}
+
+/// Outcome of awaiting a single mesh task delivery.
+enum DeliveryOutcome {
+    /// The agent returned its terminal `task_response`.
+    Reply(TaskReply),
+    /// The oneshot channel closed before any reply (waiter dropped).
+    ChannelClosed,
+    /// No `task_progress`/`task_response` for `IDLE_TIMEOUT_SECS`.
+    IdleTimeout,
+    /// The delivery exceeded `ABS_MAX_SECS` overall despite heartbeats.
+    AbsoluteTimeout,
+}
+
+/// Bump the last-activity clock for the in-flight delivery to `agent_did`,
+/// called from the inbound `task_progress` handler. Returns true when a
+/// delivery to that DID is currently tracked (the heartbeat was meaningful);
+/// false when none is in flight (a late or duplicate tick).
+pub(super) async fn touch_progress(state: &Arc<MeshPeerState>, agent_did: &str) -> bool {
+    let guard = state.pending_progress.lock().await;
+    if let Some(clock) = guard.get(agent_did) {
+        clock.store(Utc::now().timestamp_millis(), Ordering::Release);
+        true
+    } else {
+        false
+    }
 }
 
 fn karstask_api(state: &MeshPeerState) -> Api<DynamicObject> {
@@ -153,8 +186,12 @@ async fn deliver_for_task(
         .map(str::to_string)
         .context("KarsTask has no spec.objective")?;
 
-    // The model the blueprint asked for — recorded on the deliverable so the
-    // scorecard attributes the run's real token cost to a real model.
+    // The model the run actually used, recorded on the deliverable so the
+    // scorecard + efficiency frontier attribute the run's real token cost to a
+    // real route. Team taskforce runs inherit the model (blueprint.model empty),
+    // so fall back to the controller's effective default — the model the
+    // sandbox's inference policy actually resolves to. Never left blank
+    // (blank => a useless "unknown" route in the frontier).
     let model = task
         .data
         .get("spec")
@@ -162,7 +199,31 @@ async fn deliver_for_task(
         .and_then(|b| b.get("model"))
         .and_then(|m| m.get("deployment"))
         .and_then(|d| d.as_str())
-        .map(str::to_string);
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("KARS_TASK_DEFAULT_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("AZURE_OPENAI_DEPLOYMENT")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+
+    // The harness (agent runtime) the run used — the second dimension of a
+    // route, so the frontier can compare harness efficiency, not just model.
+    // Empty blueprint runtime (inherited) resolves to the OpenClaw default.
+    let harness = task
+        .data
+        .get("spec")
+        .and_then(|s| s.get("blueprint"))
+        .and_then(|b| b.get("runtime"))
+        .and_then(|r| r.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("OpenClaw")
+        .to_string();
 
     let sandbox = task
         .data
@@ -200,6 +261,7 @@ async fn deliver_for_task(
                 nonce,
                 attempts,
                 model.as_deref(),
+                &harness,
                 "agent not yet discoverable on the mesh registry (sandbox still warming up)",
             )
             .await;
@@ -233,40 +295,82 @@ async fn deliver_for_task(
         return Err(e).context("failed to enqueue task_request");
     }
 
-    // Await the agent's task_response (or time out).
-    let (content, artifact_count, trace, telemetry, ok, transient) =
-        match tokio::time::timeout(Duration::from_secs(TASK_TIMEOUT_SECS), rx).await {
-            Ok(Ok(reply)) => (
-                reply.content,
-                reply.artifact_count,
-                reply.trace,
-                reply.telemetry,
-                true,
-                false,
-            ),
-            Ok(Err(_)) => (
-                "mesh task delivery channel closed before a reply arrived".to_string(),
+    // Await the agent's task_response, using an IDLE timeout that resets on
+    // every `task_progress` heartbeat. The agent ticks ~every 20s while it
+    // works, so a long-but-progressing run stays alive (up to the absolute
+    // ceiling); only an agent that goes silent for `IDLE_TIMEOUT_SECS` — or one
+    // that exceeds `ABS_MAX_SECS` overall — is reaped. Register the activity
+    // clock before sending so a fast first heartbeat can't race it.
+    let last_activity = Arc::new(AtomicI64::new(Utc::now().timestamp_millis()));
+    state
+        .pending_progress
+        .lock()
+        .await
+        .insert(agent_did.clone(), last_activity.clone());
+
+    let started = tokio::time::Instant::now();
+    let mut rx = rx;
+    let outcome = loop {
+        match tokio::time::timeout(Duration::from_secs(POLL_INTERVAL_SECS), &mut rx).await {
+            Ok(Ok(reply)) => break DeliveryOutcome::Reply(reply),
+            Ok(Err(_)) => break DeliveryOutcome::ChannelClosed,
+            Err(_) => {
+                let idle_ms = Utc::now().timestamp_millis() - last_activity.load(Ordering::Acquire);
+                if idle_ms >= IDLE_TIMEOUT_SECS * 1000 {
+                    break DeliveryOutcome::IdleTimeout;
+                }
+                if started.elapsed().as_secs() >= ABS_MAX_SECS {
+                    break DeliveryOutcome::AbsoluteTimeout;
+                }
+            }
+        }
+    };
+    // Stop tracking liveness for this delivery regardless of outcome.
+    state.pending_progress.lock().await.remove(&agent_did);
+
+    let (content, artifact_count, trace, telemetry, ok, transient) = match outcome {
+        DeliveryOutcome::Reply(reply) => (
+            reply.content,
+            reply.artifact_count,
+            reply.trace,
+            reply.telemetry,
+            reply.ok,
+            false,
+        ),
+        DeliveryOutcome::ChannelClosed => (
+            "mesh task delivery channel closed before a reply arrived".to_string(),
+            0,
+            Vec::new(),
+            None,
+            false,
+            true,
+        ),
+        DeliveryOutcome::IdleTimeout => {
+            // Drop the stale waiter so a late reply isn't misattributed.
+            state.pending_tasks.lock().await.remove(&agent_did);
+            (
+                format!(
+                    "timed out after {IDLE_TIMEOUT_SECS}s with no progress heartbeat from the agent"
+                ),
                 0,
                 Vec::new(),
                 None,
                 false,
                 true,
-            ),
-            Err(_) => {
-                // Drop the stale waiter so a late reply isn't misattributed.
-                state.pending_tasks.lock().await.remove(&agent_did);
-                (
-                    format!(
-                        "timed out after {TASK_TIMEOUT_SECS}s waiting for the agent's task_response"
-                    ),
-                    0,
-                    Vec::new(),
-                    None,
-                    false,
-                    true,
-                )
-            }
-        };
+            )
+        }
+        DeliveryOutcome::AbsoluteTimeout => {
+            state.pending_tasks.lock().await.remove(&agent_did);
+            (
+                format!("exceeded the {ABS_MAX_SECS}s maximum run time before returning a result"),
+                0,
+                Vec::new(),
+                None,
+                false,
+                true,
+            )
+        }
+    };
 
     // A transient miss (the agent wasn't ready to reply) is retried on the next
     // poll until the warm-up budget is exhausted — only then is it recorded as a
@@ -296,10 +400,17 @@ async fn deliver_for_task(
         &artifacts,
         telemetry.as_ref(),
         model.as_deref(),
+        &harness,
     )
     .await?;
     if !artifacts.is_empty() {
-        write_mission_artifacts(state, &name, &artifacts).await?;
+        // Non-fatal: the deliverable (mission-output) already landed above, so a
+        // transient artifact-CM write failure must NOT abort before
+        // `mark_completed` — doing so would re-dispatch and re-run the entire
+        // (expensive) mission on the next reconcile. Log and continue.
+        if let Err(e) = write_mission_artifacts(state, &name, &artifacts).await {
+            tracing::warn!(task = %name, err = %format!("{e:#}"), "failed to persist mission artifacts (continuing)");
+        }
     }
     if !trace.is_empty() {
         // The execution trace is the clean per-tool audit record. Persist it
@@ -382,6 +493,7 @@ pub(super) async fn resolve_pending(
     artifact_count: usize,
     trace: Vec<serde_json::Value>,
     telemetry: Option<RunTelemetry>,
+    ok: bool,
 ) {
     let waiter = state.pending_tasks.lock().await.remove(from_amid);
     match waiter {
@@ -392,6 +504,7 @@ pub(super) async fn resolve_pending(
                     artifact_count,
                     trace,
                     telemetry,
+                    ok,
                 })
                 .is_err()
             {
@@ -449,6 +562,31 @@ async fn discover_agent_did(sandbox: &str) -> Option<String> {
 /// artifact manifest (names + sizes) so the deliverable advertises the full
 /// set even when individual files live in the companion artifacts ConfigMap.
 #[allow(clippy::too_many_arguments)]
+/// ConfigMap `data` values must be valid UTF-8 free of control characters the
+/// API server's YAML decoder rejects: C0 (< 0x20, except tab/newline/CR), DEL
+/// (0x7F), and C1 (0x80–0x9F). Replace any disallowed control char with a space
+/// so the text stays readable.
+fn cm_safe(s: &str) -> String {
+    s.chars()
+        .map(|c| if is_disallowed_control(c) { ' ' } else { c })
+        .collect()
+}
+
+/// True when `s` carries a control character disallowed in ConfigMap `data`.
+fn cm_has_disallowed_control(s: &str) -> bool {
+    s.chars().any(is_disallowed_control)
+}
+
+/// A control char the K8s ConfigMap `data` YAML decoder rejects: C0 (< 0x20)
+/// except tab/newline/CR, DEL (0x7F), and the C1 block (0x80–0x9F).
+fn is_disallowed_control(c: char) -> bool {
+    if matches!(c, '\t' | '\n' | '\r') {
+        return false;
+    }
+    let u = c as u32;
+    u < 0x20 || u == 0x7f || (0x80..=0x9f).contains(&u)
+}
+
 async fn write_mission_output(
     state: &Arc<MeshPeerState>,
     task: &str,
@@ -458,6 +596,7 @@ async fn write_mission_output(
     artifacts: &[ReceivedArtifact],
     telemetry: Option<&RunTelemetry>,
     model: Option<&str>,
+    harness: &str,
 ) -> Result<()> {
     let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let cms: Api<k8s_openapi::api::core::v1::ConfigMap> =
@@ -465,11 +604,19 @@ async fn write_mission_output(
     let name = format!("kars-mission-output-{task}");
 
     let mut data: BTreeMap<String, String> = BTreeMap::new();
-    data.insert("output".into(), output.to_string());
-    data.insert("objective".into(), objective.to_string());
+    // Free-text fields can carry C0 control characters (the native agent's
+    // reply is not control-char-stripped); the K8s API server rejects those in
+    // ConfigMap `data`, so make them ConfigMap-safe.
+    data.insert("output".into(), cm_safe(output));
+    data.insert("objective".into(), cm_safe(objective));
     data.insert("finishedAt".into(), Utc::now().to_rfc3339());
     if let Some(m) = model {
         data.insert("model".into(), m.to_string());
+    }
+    // The harness (agent runtime) dimension — pairs with `model` so the
+    // efficiency frontier is a real (harness × model) route, not model-only.
+    if !harness.is_empty() {
+        data.insert("harness".into(), harness.to_string());
     }
     // Distinguishes the agent-loop deliverable (tools + delegation over the
     // mesh) from the single-turn router path, and records success/failure.
@@ -569,10 +716,14 @@ async fn write_mission_artifacts(
         }
         used += a.bytes.len();
         match String::from_utf8(a.bytes.clone()) {
-            Ok(s) => {
+            // Valid UTF-8 *and* free of disallowed control characters → store as
+            // readable text. Otherwise (binary, or text with embedded C0 control
+            // chars the API server rejects in `data`) preserve the exact bytes
+            // in `binaryData`.
+            Ok(s) if !cm_has_disallowed_control(&s) => {
                 text.insert(key, s);
             }
-            Err(_) => {
+            _ => {
                 binary.insert(key, ByteString(a.bytes.clone()));
             }
         }
@@ -720,6 +871,7 @@ async fn handle_transient_miss(
     nonce: &str,
     attempts: u32,
     model: Option<&str>,
+    harness: &str,
     reason: &str,
 ) -> Result<()> {
     if attempts + 1 < MAX_DELIVERY_ATTEMPTS {
@@ -743,6 +895,7 @@ async fn handle_transient_miss(
         &[],
         None,
         model,
+        harness,
     )
     .await?;
     mark_completed(state, namespace, task, nonce).await?;
