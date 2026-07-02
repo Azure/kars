@@ -210,18 +210,30 @@ async fn deliver_for_task(
             std::env::var("AZURE_OPENAI_DEPLOYMENT")
                 .ok()
                 .filter(|s| !s.is_empty())
-        });
+        })
+        // Match the full materialization resolver (kars_task_execution::
+        // default_model) so the recorded route is exactly what actually ran.
+        .or_else(|| std::env::var("DEFAULT_MODEL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| Some("gpt-4o-mini".to_string()));
 
-    // The harness (agent runtime) the run used — the second dimension of a
-    // route, so the frontier can compare harness efficiency, not just model.
-    // Empty blueprint runtime (inherited) resolves to the OpenClaw default.
+    // The harness (agent runtime) the run used — mirror the materialization
+    // resolver: blueprint.runtime → execution.runtime → OpenClaw. Empty/inherited
+    // resolves the same way the sandbox was actually built.
     let harness = task
         .data
         .get("spec")
         .and_then(|s| s.get("blueprint"))
         .and_then(|b| b.get("runtime"))
         .and_then(|r| r.as_str())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            task.data
+                .get("spec")
+                .and_then(|s| s.get("execution"))
+                .and_then(|e| e.get("runtime"))
+                .and_then(|r| r.as_str())
+                .filter(|s| !s.trim().is_empty())
+        })
         .unwrap_or("OpenClaw")
         .to_string();
 
