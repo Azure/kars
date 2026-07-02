@@ -29,9 +29,9 @@ yields a completeness proof:
 
 | Verdict | Meaning |
 |---|---|
-| `COMPLIANT` | Every external host the kernel observed is in the declared allowlist. |
-| `BEYOND-DECLARED` | The kernel observed egress to a host **not** in the declared allowlist. In `strict` mode the router's proxy should have blocked the *connect*; a DNS-only observation means intent without a connect (still worth surfacing). A TCP connect to an undeclared host is a real finding. |
-| `LEARN` / `UNCONSTRAINED` | The declared allowlist is empty (learn-mode / no host constraint). The witness records the observed set as the baseline you would promote into a `strict` allowlist. |
+| `COMPLIANT` | **Strict** enforcement and every external host the kernel observed is in the declared allowlist. |
+| `BEYOND-DECLARED` | **Strict** enforcement but the kernel observed egress to a host **not** in the declared allowlist. The router's proxy should have blocked the *connect*; a DNS-only observation means intent without a connect (still worth surfacing). A TCP connect to an undeclared host is a real finding. |
+| `LEARN` / `UNCONSTRAINED` | The sandbox is in **learning mode** (`spec.networkPolicy.egressMode` != `Strict`, the default) **or** the declared allowlist is empty. Enforcement is not active, so reaching hosts beyond any baseline is expected — the witness records the observed set as the baseline you would promote into a `strict` allowlist rather than flagging it. |
 
 **DNS = intent, TCP connect = actual datapath.** The witness reports both. The
 router proxy remains the enforcement point; the witness only *attests*.

@@ -181,6 +181,19 @@ for item in cms.get("items", []):
             pass
     declared[ns] = {"sandbox": sandbox, "hosts": hosts}
 
+# Per-sandbox egress ENFORCEMENT MODE (KarsSandbox spec.networkPolicy.egressMode,
+# default "Learn"), keyed by the sandbox namespace `kars-<name>`. A learning-mode
+# sandbox is unconstrained by design, so its observations must not be scored
+# BEYOND-DECLARED.
+modes = {}      # ns -> "Learn" | "Strict"
+sboxes = kubectl_json(["get", "karssandbox", "-A", "-o", "json"]) or {"items": []}
+for item in sboxes.get("items", []):
+    name = (item.get("metadata", {}) or {}).get("name", "")
+    if not name:
+        continue
+    mode = (((item.get("spec", {}) or {}).get("networkPolicy", {}) or {}).get("egressMode") or "Learn")
+    modes[f"kars-{name}"] = mode
+
 # ---- assemble report -------------------------------------------------------
 ns_filter = [x for x in os.environ.get("NS_FILTER", "").split(",") if x]
 candidate_ns = set(declared) | set(observed_dns) | set(observed_connects)
@@ -196,9 +209,12 @@ for ns in sorted(candidate_ns):
     connects = observed_connects.get(ns, 0)
     beyond = sorted(ohosts - dhosts)
     unused = sorted(dhosts - ohosts)
-    has_allowlist = ns in declared
-    if not has_allowlist or not dhosts:
-        verdict = "LEARN"          # no host constraint published (learn/unconstrained)
+    mode = modes.get(ns, "Learn")
+    # Only a Strict-mode sandbox with a declared allowlist can be scored
+    # COMPLIANT / BEYOND-DECLARED; in learn mode the boundary isn't enforced, so
+    # reaching novel hosts is expected, not a completeness gap.
+    if str(mode).lower() != "strict" or not dhosts:
+        verdict = "LEARN"          # learning / unconstrained — enforcement not active
     elif beyond:
         verdict = "BEYOND-DECLARED"
     else:
@@ -206,6 +222,7 @@ for ns in sorted(candidate_ns):
     records.append({
         "namespace": ns,
         "sandbox": dec["sandbox"],
+        "egress_mode": mode,
         "declared_hosts": sorted(dhosts),
         "observed_dns": sorted(ohosts),
         "observed_connects": connects,
@@ -231,9 +248,9 @@ for r in records:
           f"{len(r['declared_hosts']):<8} {len(r['observed_dns']):<7} "
           f"{r['observed_connects']:<8}  {', '.join(r['beyond_declared'][:4]) or '-'}")
 print()
-print("VERDICTS: OK = every external host observed is declared; "
-      "WARN = kernel saw egress beyond the declared allowlist; "
-      "LEARN = no host allowlist published (learn/unconstrained baseline).")
+print("VERDICTS: OK = Strict enforcement and every external host observed is declared; "
+      "WARN = Strict enforcement but the kernel saw egress beyond the declared allowlist; "
+      "LEARN = learning mode (egressMode != Strict) or no allowlist — enforcement not active.")
 print("DNS = host intent; CONNECTS = actual external TCP datapath events. "
       "Enforcement remains the router proxy; this witness only attests.")
 PY
