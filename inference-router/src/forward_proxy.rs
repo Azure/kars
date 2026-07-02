@@ -324,6 +324,11 @@ async fn handle_connect(
         return Ok(());
     }
 
+    // Allowed: in learn mode, record the domain the agent actually reached so
+    // the operator can review the observed egress and later pin an allowlist.
+    // No-op outside learn mode.
+    blocklist.record_learned(&domain).await;
+
     // Resolve DNS immediately after policy check and validate against private IPs
     let resolved = match resolve_and_validate(&domain, port, sandbox, blocked_egress).await {
         Ok(addr) => addr,
@@ -416,6 +421,9 @@ async fn handle_http(
         return Ok(());
     }
 
+    // Allowed: record the reached domain in learn mode (no-op otherwise).
+    blocklist.record_learned(&domain).await;
+
     // Resolve + validate (prevents DNS rebinding to private IPs)
     let (host, port) = parse_host_port(&domain, 80);
     let resolved = match resolve_and_validate(&host, port, sandbox, blocked_egress).await {
@@ -494,6 +502,11 @@ async fn handle_tls_redirect(
         blocked_egress.record(sandbox, &domain, 443);
         return Ok(());
     }
+
+    // Allowed: record the reached domain in learn mode (no-op otherwise). This
+    // is the dominant agent-egress path (transparent TLS redirect by SNI), so
+    // it is what populates "domains this agent has reached" for HTTPS traffic.
+    blocklist.record_learned(&domain).await;
 
     // Resolve + validate (prevents DNS rebinding to private IPs)
     let resolved = match resolve_and_validate(&domain, 443, sandbox, blocked_egress).await {
