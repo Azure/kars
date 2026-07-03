@@ -647,6 +647,22 @@ async fn effective_team(client: &Client, ns: &str, team: Arc<KarsTeam>) -> Arc<K
             if let Some(recipe) = &skill.spec.recipe {
                 recipes.push(format!("[skill: {}] {}", skill_name, recipe));
             }
+            // Deliver the skill package's scripts to the member as clearly-
+            // delimited file blocks, so the agent can materialize and run them.
+            if !skill.spec.scripts.is_empty() {
+                let mut block = format!(
+                    "[skill: {skill_name}] This skill ships {} file(s). Save each to the given path (chmod +x the executable ones) before using the recipe:",
+                    skill.spec.scripts.len()
+                );
+                for s in &skill.spec.scripts {
+                    let exec = if s.executable { " (executable)" } else { "" };
+                    block.push_str(&format!(
+                        "\n--- file: {}{} ---\n{}\n--- end file ---",
+                        s.path, exec, s.content
+                    ));
+                }
+                recipes.push(block);
+            }
         }
         if !recipes.is_empty() {
             let prefix = bp.instructions.clone().unwrap_or_default();

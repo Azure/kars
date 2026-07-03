@@ -87,6 +87,28 @@ pub struct KarsSkillSpec {
     /// to the exact content). Format: `sha256:<hex>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_digest: Option<String>,
+
+    /// Optional **scripts** the skill package ships — a skill can bundle helper
+    /// scripts (a shell/python helper, a lint config, a template), not just a
+    /// recipe. Each is delivered to a member that acquires the skill as a
+    /// clearly-delimited file block in its instructions, so the agent can
+    /// materialize and run it. They are part of the content `versionDigest`, so
+    /// the signed bundle covers the scripts too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<SkillScript>,
+}
+
+/// One file a skill package ships (a helper script, config, or template).
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillScript {
+    /// Relative path the agent should save it at (e.g. `scripts/triage.sh`).
+    pub path: String,
+    /// The file's text content.
+    pub content: String,
+    /// Whether it's meant to be executed (a hint for the agent; `chmod +x`).
+    #[serde(default)]
+    pub executable: bool,
 }
 
 impl KarsSkill {
@@ -120,6 +142,7 @@ impl KarsSkill {
             "mcpServers": self.spec.mcp_servers,
             "recipe": self.spec.recipe,
             "knowledgePack": self.spec.knowledge_pack,
+            "scripts": self.spec.scripts,
         });
         let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
         let full = Sha256::digest(&bytes);
@@ -198,6 +221,7 @@ mod tests {
                 knowledge_pack: None,
                 attestation_ref: None,
                 attestation_digest: None,
+                scripts: vec![],
             },
         )
     }
