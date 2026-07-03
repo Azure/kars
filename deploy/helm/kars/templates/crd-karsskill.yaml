@@ -78,6 +78,32 @@ spec:
                   merged into the instructions of a member that acquires this skill.
                 nullable: true
                 type: string
+              scripts:
+                description: |-
+                  Optional **scripts** the skill package ships — a skill can bundle helper
+                  scripts (a shell/python helper, a lint config, a template), not just a
+                  recipe. Each is delivered to a member that acquires the skill as a
+                  clearly-delimited file block in its instructions, so the agent can
+                  materialize and run it. They are part of the content `versionDigest`, so
+                  the signed bundle covers the scripts too.
+                items:
+                  description: One file a skill package ships (a helper script, config, or template).
+                  properties:
+                    content:
+                      description: The file's text content.
+                      type: string
+                    executable:
+                      default: false
+                      description: Whether it's meant to be executed (a hint for the agent; `chmod +x`).
+                      type: boolean
+                    path:
+                      description: Relative path the agent should save it at (e.g. `scripts/triage.sh`).
+                      type: string
+                  required:
+                  - content
+                  - path
+                  type: object
+                type: array
               summary:
                 description: What the skill does, in one or two plain-language sentences.
                 type: string
