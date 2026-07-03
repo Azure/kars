@@ -135,15 +135,23 @@ impl KarsSkill {
     /// receipt that records a skill grant pins the exact version that ran.
     #[must_use]
     pub fn version_digest(&self) -> String {
-        let canonical = serde_json::json!({
+        let mut canonical = serde_json::json!({
             "summary": self.spec.summary,
             "version": self.spec.version,
             "boundingPolicy": self.spec.bounding_policy,
             "mcpServers": self.spec.mcp_servers,
             "recipe": self.spec.recipe,
             "knowledgePack": self.spec.knowledge_pack,
-            "scripts": self.spec.scripts,
         });
+        // Fold scripts in ONLY when the package ships them. A pre-existing
+        // scriptless skill (serde defaults `scripts` to `[]`) must keep its
+        // original digest across this upgrade, or every already-attested skill
+        // would fail verification and go Degraded. So a skill that adds scripts
+        // gets a new digest (re-attestation required — correct), but one that
+        // never had them is byte-for-byte unchanged.
+        if !self.spec.scripts.is_empty() {
+            canonical["scripts"] = serde_json::json!(self.spec.scripts);
+        }
         let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
         let full = Sha256::digest(&bytes);
         let mut out = String::from("sha256:");
@@ -251,6 +259,20 @@ mod tests {
         let mut s2 = skill();
         s2.spec.recipe = Some("different recipe".into());
         assert_ne!(d, s2.version_digest());
+
+        // Regression: adding an EMPTY scripts vec must not change the digest —
+        // an already-attested scriptless skill keeps its digest across upgrade.
+        let mut s3 = skill();
+        s3.spec.scripts = vec![];
+        assert_eq!(d, s3.version_digest(), "empty scripts must not perturb the digest");
+        // But a skill that actually ships scripts gets a new digest (re-attest).
+        let mut s4 = skill();
+        s4.spec.scripts = vec![super::SkillScript {
+            path: "scripts/x.sh".into(),
+            content: "echo hi".into(),
+            executable: true,
+        }];
+        assert_ne!(d, s4.version_digest(), "shipping scripts must change the digest");
     }
 
     #[test]
