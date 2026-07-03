@@ -388,7 +388,8 @@ async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: s
 }
 import { discoverFoundryProject, type FoundryProjectInfo } from "./core/foundry-discovery.js";
 import { resolveMemoryStoreName, resolveMemoryScope } from "./core/memory-binding.js";
-import { delegateToNativeAgent } from "./core/agt-task-delegate.js";
+import { delegateToNativeAgent, extractNativeDeliverable } from "./core/agt-task-delegate.js";
+import { fetchTelemetryCursor, fetchTaskTrace } from "./core/router-telemetry.js";
 import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MESH_CHUNK_THRESHOLD, MESH_CHUNK_SIZE, MESH_MAX_CHUNKS, MESH_TRANSFER_TTL, type PendingMeshTransfer } from "./core/mesh-transport.js";
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
@@ -978,6 +979,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     await agtMeshClient.send(fromAmid, {
                       type: "task_response",
                       content: "Request denied: this agent requires verified identity tier (OAuth/Entra). Register with a verification token.",
+                      ok: false,
                       from_agent: agtSandboxName,
                       timestamp: new Date().toISOString(),
                     });
@@ -1015,6 +1017,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 await agtMeshClient.send(fromAmid, {
                   type: "task_response",
                   content: `Request denied by governance policy: ${evalData.reason}`,
+                  ok: false,
                   from_agent: agtSandboxName,
                   timestamp: new Date().toISOString(),
                 });
@@ -1068,6 +1071,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               await agtMeshClient.send(fromAmid, {
                 type: "task_response",
                 content: `Task denied by AGT governance: ${evalData.reason}`,
+                ok: false,
                 from_agent: agtSandboxName,
                 timestamp: new Date().toISOString(),
               });
@@ -1078,45 +1082,63 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         if (!taskAllowed) return;
 
         try {
-          // In-process tool-calling loop only. See offload path above for why
-          // we deliberately skip `delegateToNativeAgent` here.
+          // Execute the mission through the REAL OpenClaw agent harness — the
+          // same agent a human talks to via `kars connect` — not a hand-rolled
+          // in-process loop. The native agent uses the sandbox's configured
+          // provider (native Anthropic via the router), the full tool/skill
+          // catalog, AGENTS.md/SOUL.md, and AGT per-call governance. Its model
+          // calls all flow through the local inference router, which is the
+          // honest source of the per-task execution trace + token telemetry.
           //
-          // Heartbeat: send periodic `task_progress` pings to the originator
-          // so its mesh_send wait loop can extend the idle timer as long as
-          // we're making progress. Mirrors the offload path's
-          // `offload_progress` pings (`core/agt-offload.ts`). Cancel in
-          // finally — must run on success, failure, or thrown error.
+          // Heartbeat: send periodic `task_progress` pings to the originator so
+          // its delivery wait extends the idle timer while we make progress.
+          // Cancel in finally — success, failure, or thrown error.
           const cancelHeartbeat = startTaskProgressHeartbeat(
             fromAmid,
             agtMeshClient,
             agtSandboxName,
             log,
           );
-          // Harvest marker BEFORE the loop runs so we only ship artifacts the
-          // task actually produced (not pre-existing workspace scaffold).
+          // Harvest marker BEFORE the run so we only ship artifacts the task
+          // actually produced (not pre-existing workspace scaffold).
           const harvestMarker = await createHarvestMarker();
-          // Live execution trace — the real per-round + per-tool record the
-          // loop emits as it runs. This is the source of the Bridge's live
-          // activity stream, the real token telemetry, and the clean per-tool
-          // audit path. Bounded previews only; file payloads travel as
-          // artifacts, never in the trace.
-          const trace: import("./core/agt-task-loop.js").TraceEvent[] = [];
+          // Snapshot the router telemetry cursor so we can read back exactly the
+          // events this task generates (the router observes every model call the
+          // native agent makes).
+          const telemetryCursor = await fetchTelemetryCursor(log);
           let llmResponse: string;
           try {
-            llmResponse = await processTaskWithTools(taskContent, log, (ev) => {
-              // Sanitize the free-text previews to Latin1 — the whole
-              // task_response (trace included) is btoa-encoded on the SDK's
-              // plaintext-peer path, which throws on any Unicode code point.
-              if (ev.kind === "tool") {
-                ev.args_preview = latin1Safe(ev.args_preview);
-                ev.result_preview = latin1Safe(ev.result_preview);
-              } else if (ev.kind === "round") {
-                ev.finish_reason = latin1Safe(ev.finish_reason);
-              }
-              if (trace.length < 500) trace.push(ev);
-            });
+            llmResponse = await delegateToNativeAgent(
+              typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent),
+              fromName,
+              log,
+            );
           } finally {
             cancelHeartbeat();
+          }
+
+          // Unwrap the native agent's structured `--json` envelope to the human
+          // deliverable text, so both the shipped content and the harvested
+          // fallback artifact are clean prose (not raw escaped JSON, which also
+          // trips the control-char→binaryData path and shows as a binary blob).
+          llmResponse = extractNativeDeliverable(llmResponse);
+
+          // Router-sourced execution trace — the real per-round + per-tool record
+          // the router captured from the native agent's calls. This is the source
+          // of the Bridge's live activity stream, real token telemetry, and the
+          // per-tool audit path. Sanitize previews to Latin1 — the whole
+          // task_response (trace included) is btoa-encoded on the SDK's
+          // plaintext-peer path, which throws on any Unicode code point.
+          const rawTrace = await fetchTaskTrace(telemetryCursor, log);
+          const trace: import("./core/agt-task-loop.js").TraceEvent[] = [];
+          for (const ev of rawTrace) {
+            if (ev.kind === "tool") {
+              ev.args_preview = latin1Safe(ev.args_preview ?? "");
+              ev.result_preview = latin1Safe(ev.result_preview ?? "");
+            } else if (ev.kind === "round") {
+              ev.finish_reason = latin1Safe(ev.finish_reason ?? "");
+            }
+            if (trace.length < 500) trace.push(ev as unknown as import("./core/agt-task-loop.js").TraceEvent);
           }
 
           // Aggregate the real token cost + tool/round counts from the trace.
@@ -1125,11 +1147,11 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           let totalTokens = 0;
           let rounds = 0;
           let toolCalls = 0;
-          for (const ev of trace) {
+          for (const ev of rawTrace) {
             if (ev.kind === "round") {
-              promptTokens += ev.prompt_tokens;
-              completionTokens += ev.completion_tokens;
-              totalTokens += ev.total_tokens;
+              promptTokens += ev.prompt_tokens ?? 0;
+              completionTokens += ev.completion_tokens ?? 0;
+              totalTokens += ev.total_tokens ?? 0;
               rounds += 1;
             } else {
               toolCalls += 1;
@@ -1163,6 +1185,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
             content: latin1Safe(llmResponse),
+            ok: true,
             artifacts: artifactManifest,
             trace,
             telemetry: {
@@ -1196,6 +1219,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
               content: latin1Safe(`Error processing task: ${replyErr.message}`),
+              ok: false,
               from_agent: agtSandboxName,
               timestamp: new Date().toISOString(),
             });

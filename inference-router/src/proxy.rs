@@ -648,11 +648,67 @@ fn build_upstream_url(
                 include.retain(|s| s.as_str() != Some("reasoning.encrypted_content"));
             }
         }
+        // Migrate legacy manual extended thinking to adaptive thinking for the
+        // models that reject it. See `rewrite_unsupported_thinking`.
+        rewrite_unsupported_thinking(&mut body_json);
         serde_json::to_vec(&body_json)?.into()
     } else {
         request_body
     };
     Ok((url, body))
+}
+
+/// True for Anthropic models that reject manual extended thinking
+/// (`thinking: {type: "enabled", budget_tokens: N}`) with a 400 and instead
+/// require adaptive thinking (`thinking: {type: "adaptive"}`).
+///
+/// Verified against Anthropic's adaptive-thinking docs: Opus 4.7, Opus 4.8,
+/// Sonnet 5, and the Fable 5 / Mythos 5 / Mythos Preview family are
+/// adaptive-only. Older models (Sonnet 4.5, Opus 4.5, Haiku 4.5, and the
+/// 4.6 family) still accept — and Sonnet 4.5 / Opus 4.5 / Haiku 4.5 *require*
+/// — the legacy `enabled` form, so they must NOT be rewritten.
+pub(crate) fn model_requires_adaptive_thinking(model: &str) -> bool {
+    // Normalise `.`/`_` separators to `-` so `claude-opus-4.8`,
+    // `claude_opus_4_8`, and `claude-opus-4-8` all match identically.
+    let m = model.to_ascii_lowercase().replace(['.', '_'], "-");
+    m.contains("opus-4-8")
+        || m.contains("opus-4-7")
+        || m.contains("sonnet-5")
+        || m.contains("fable-5")
+        || m.contains("mythos-5")
+        || m.contains("mythos-preview")
+}
+
+/// Rewrite a legacy manual-extended-thinking request body into the adaptive
+/// form for models that no longer accept `{type: "enabled", budget_tokens}`.
+///
+/// OpenClaw (and other Anthropic-Messages clients baked into sandbox images)
+/// still emit `thinking: {type: "enabled", budget_tokens: N}`. Opus 4.8 and
+/// its adaptive-only peers 400 on that (`"thinking.type.enabled" is not
+/// supported for this model. Use "thinking.type.adaptive"...`), which strands
+/// every affected agent/team run. We convert it in-place to
+/// `thinking: {type: "adaptive"}` (dropping `budget_tokens`); adaptive defaults
+/// to ~high effort, so reasoning depth is preserved. The transform is a no-op
+/// unless the body carries an `enabled` `thinking` block AND the effective
+/// model is adaptive-only, so legacy-required models are left untouched.
+pub(crate) fn rewrite_unsupported_thinking(body_json: &mut serde_json::Value) {
+    let Some(obj) = body_json.as_object_mut() else {
+        return;
+    };
+    let model = obj
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if !model_requires_adaptive_thinking(&model) {
+        return;
+    }
+    if let Some(thinking) = obj.get_mut("thinking").and_then(|t| t.as_object_mut())
+        && thinking.get("type").and_then(|t| t.as_str()) == Some("enabled")
+    {
+        thinking.clear();
+        thinking.insert("type".into(), serde_json::Value::String("adaptive".into()));
+    }
 }
 
 // ── Retry-logic unit tests (R3) ──────────────────────────────────────────────
@@ -661,6 +717,83 @@ fn build_upstream_url(
 // `tests/proxy_fake_upstream.rs`. These inline tests pin the idempotency +
 // status classifier so adding a new endpoint can't silently make a
 // non-idempotent request retryable.
+
+#[cfg(test)]
+mod thinking_migration_tests {
+    use super::{model_requires_adaptive_thinking, rewrite_unsupported_thinking};
+    use serde_json::json;
+
+    #[test]
+    fn adaptive_only_models_detected() {
+        for m in [
+            "claude-opus-4.8",
+            "claude-opus-4-8",
+            "claude_opus_4_8",
+            "claude-opus-4.7",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-mythos-preview",
+        ] {
+            assert!(model_requires_adaptive_thinking(m), "{m} should be adaptive-only");
+        }
+    }
+
+    #[test]
+    fn legacy_thinking_models_not_flagged() {
+        // These still accept (and some require) enabled+budget_tokens — must
+        // NOT be rewritten.
+        for m in [
+            "claude-sonnet-4.5",
+            "claude-opus-4.5",
+            "claude-haiku-4.5",
+            "claude-sonnet-4.6",
+            "claude-opus-4.6",
+            "gpt-5.4",
+            "",
+        ] {
+            assert!(!model_requires_adaptive_thinking(m), "{m:?} must not be flagged");
+        }
+    }
+
+    #[test]
+    fn rewrites_enabled_to_adaptive_for_opus_4_8() {
+        let mut body = json!({
+            "model": "claude-opus-4.8",
+            "max_tokens": 16000,
+            "thinking": { "type": "enabled", "budget_tokens": 10000 }
+        });
+        rewrite_unsupported_thinking(&mut body);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(
+            body["thinking"].get("budget_tokens").is_none(),
+            "budget_tokens must be dropped for adaptive thinking"
+        );
+    }
+
+    #[test]
+    fn leaves_legacy_model_thinking_untouched() {
+        let mut body = json!({
+            "model": "claude-sonnet-4.5",
+            "thinking": { "type": "enabled", "budget_tokens": 8000 }
+        });
+        rewrite_unsupported_thinking(&mut body);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 8000);
+    }
+
+    #[test]
+    fn ignores_bodies_without_enabled_thinking() {
+        // Already adaptive → no-op.
+        let mut adaptive = json!({"model":"claude-opus-4.8","thinking":{"type":"adaptive"}});
+        rewrite_unsupported_thinking(&mut adaptive);
+        assert_eq!(adaptive["thinking"]["type"], "adaptive");
+        // No thinking block → no-op, no panic.
+        let mut none = json!({"model":"claude-opus-4.8","messages":[]});
+        rewrite_unsupported_thinking(&mut none);
+        assert!(none.get("thinking").is_none());
+    }
+}
 
 #[cfg(test)]
 mod retry_tests {

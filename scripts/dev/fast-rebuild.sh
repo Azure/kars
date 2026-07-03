@@ -47,8 +47,19 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
 cd "$REPO_ROOT"
 
-# Match the runtime image's arch (kind on Apple Silicon = arm64).
-HOST_ARCH=$(docker inspect "$BASE_IMAGE" --format '{{.Architecture}}' 2>/dev/null || echo "amd64")
+# Match the runtime image's arch (kind on Apple Silicon = arm64). Prefer an
+# explicit override, then the base image's arch, then the kind node's arch, then
+# the host's — so a pruned/absent base image no longer breaks the build.
+HOST_ARCH="${KARS_BUILD_ARCH:-}"
+if [ -z "$HOST_ARCH" ]; then
+    HOST_ARCH=$(docker inspect "$BASE_IMAGE" --format '{{.Architecture}}' 2>/dev/null || true)
+fi
+if [ -z "$HOST_ARCH" ]; then
+    HOST_ARCH=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || true)
+fi
+if [ -z "$HOST_ARCH" ]; then
+    HOST_ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+fi
 case "$HOST_ARCH" in
     arm64) RUST_TARGET=aarch64-unknown-linux-gnu; PLATFORM=linux/arm64 ;;
     amd64) RUST_TARGET=x86_64-unknown-linux-gnu;  PLATFORM=linux/amd64 ;;
@@ -63,7 +74,7 @@ docker run --rm --platform "$PLATFORM" \
     -v "$REPO_ROOT":/src:cached \
     -v "$CACHE_DIR":/src/target:delegated \
     -w /src \
-    rust:1.88 \
+    rust:1.90-bookworm \
     bash -c "apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev >/dev/null && cargo build --release --package $CRATE" 2>&1 | tail -10
 
 BIN="$CACHE_DIR/release/$CRATE"

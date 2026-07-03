@@ -85,6 +85,16 @@ pub struct KarsTaskSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ref: Option<LocalObjectRef>,
 
+    /// A **requested promotion** — a target autonomy tier this mission wants to
+    /// operate at (§12). When greater than `envelope.tier`, the controller opens
+    /// a human `KarsApproval` (a `tierRaise`); only on approval does the
+    /// controller widen this task's envelope to the requested tier. Promotion is
+    /// always human-approved and ledgered, and widening is controller-only (a
+    /// non-controller principal cannot raise the envelope — enforced by the
+    /// envelope-write VAP), so a mission cannot self-escalate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_tier: Option<i32>,
+
     /// Execution gate (plan §20). A task is *governed-but-idle* by default —
     /// validated and digested, but not running. Execution begins only on an
     /// explicit launch, mirroring the "review the package, then launch"
@@ -710,6 +720,7 @@ mod tests {
             objective: "fix the flaky test in payments".into(),
             envelope: sample_envelope(),
             parent_ref: None,
+            requested_tier: None,
             execution: None,
             blueprint: None,
             display_name: Some("payments-bugfix".into()),
@@ -921,6 +932,7 @@ mod tests {
             objective: "x".into(),
             envelope,
             parent_ref: None,
+            requested_tier: None,
             execution: None,
             blueprint: Some(TaskBlueprint {
                 tool_policy: tool_policy.map(str::to_string),

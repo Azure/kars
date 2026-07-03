@@ -250,6 +250,11 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // so this is idempotent across requeues.
     reconcile_receipt(&ctx.client, &ns, &task, &new_status, &ctx.signer).await;
 
+    // Governed self-promotion (§12): when the mission requests a higher tier,
+    // open a human `KarsApproval` and — only once approved — widen its envelope.
+    // Widening is controller-only; a mission cannot self-escalate.
+    process_task_promotion(&ctx.client, &ns, &task).await;
+
     // A child still waiting on its parent requeues quickly to converge.
     let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING) {
         REQUEUE_PENDING
@@ -594,36 +599,43 @@ async fn reconcile_receipt(
     let payload_sha = crate::kars_receipt_log::sha256_hex(&payload);
     let log_ref = format!("{ns}/{name}");
     let inclusion = match crate::kars_receipt_log::append(client, &log_ref, &payload_sha).await {
-        Ok(entry) => {
-            // Publish a fresh signed checkpoint (signed tree head) over the log
-            // so clients / an external witness can pin the log's size + head
-            // without the full chain. Best-effort; never blocks the receipt.
-            match crate::kars_receipt_log::read_chain(client).await {
-                Ok(chain) => {
-                    match crate::kars_receipt_log::publish_checkpoint(client, signer, &chain).await
-                    {
-                        Ok(checkpoint) => {
-                            // Independent transparency witness co-signs the head.
-                            if let Ok(witness) =
-                                crate::providers::signing::load_or_create_witness(client).await
-                                && let Err(e) = crate::kars_receipt_log::witness_checkpoint(
-                                    client, &witness, &chain, &checkpoint,
-                                )
-                                .await
-                            {
-                                tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to witness receipt checkpoint");
+        Ok((entry, appended)) => {
+            // Only when a NEW entry was actually written do we re-publish the
+            // signed checkpoint and witness it, and only then do we echo the
+            // receipt status. On the idempotent no-op path (the common case for
+            // a stable task requeued every few minutes) we skip ALL of these
+            // writes — otherwise every requeue of every task rewrites the shared
+            // checkpoint/witness ConfigMaps and the receipt status, flooding
+            // etcd with revisions until it hits its NOSPACE quota.
+            if appended {
+                match crate::kars_receipt_log::read_chain(client).await {
+                    Ok(chain) => {
+                        match crate::kars_receipt_log::publish_checkpoint(client, signer, &chain)
+                            .await
+                        {
+                            Ok(checkpoint) => {
+                                // Independent transparency witness co-signs the head.
+                                if let Ok(witness) =
+                                    crate::providers::signing::load_or_create_witness(client).await
+                                    && let Err(e) = crate::kars_receipt_log::witness_checkpoint(
+                                        client, &witness, &chain, &checkpoint,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to witness receipt checkpoint");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to publish receipt checkpoint");
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to publish receipt checkpoint");
-                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(karstask = %name, ns = %ns, error = %e, "could not read chain for checkpoint");
                     }
                 }
-                Err(e) => {
-                    tracing::debug!(karstask = %name, ns = %ns, error = %e, "could not read chain for checkpoint");
-                }
             }
-            Some(entry)
+            Some((entry, appended))
         }
         Err(e) => {
             tracing::warn!(karstask = %name, ns = %ns, error = %e, "failed to enter receipt in inclusion log");
@@ -631,33 +643,35 @@ async fn reconcile_receipt(
         }
     };
 
-    // Informational status echo (unsigned). Stamp issuance time on first write;
-    // observedTaskGeneration tracks freshness; inclusion fields bind to the log.
-    let mut status_obj = json!({
-        "issuedAt": chrono::Utc::now().to_rfc3339(),
-        "observedTaskGeneration": task.metadata.generation,
-    });
-    if let Some(entry) = &inclusion {
-        status_obj["inclusionSeq"] = json!(entry.seq as i64);
-        status_obj["inclusionEntryHash"] = json!(entry.entry_hash);
+    // Informational status echo (unsigned). Only written when the receipt's
+    // inclusion actually changed (a new log entry was appended) — on the
+    // idempotent no-op path we leave the prior echo (and its `issuedAt`) intact
+    // so we never churn the object. `issuedAt` is therefore the time of the
+    // last *material* receipt change, not of every requeue.
+    if let Some((entry, true)) = &inclusion {
+        let status_obj = json!({
+            "issuedAt": chrono::Utc::now().to_rfc3339(),
+            "observedTaskGeneration": task.metadata.generation,
+            "inclusionSeq": entry.seq as i64,
+            "inclusionEntryHash": entry.entry_hash,
+        });
+        let status_patch = json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsReceipt",
+            "status": status_obj,
+        });
+        if let Err(e) = receipts
+            .patch_status(
+                &name,
+                &PatchParams::apply(RECEIPT_FIELD_MANAGER).force(),
+                &Patch::Apply(&status_patch),
+            )
+            .await
+        {
+            tracing::debug!(karstask = %name, ns = %ns, error = %e, "KarsReceipt status echo failed (non-fatal)");
+        }
+        tracing::info!(karstask = %name, ns = %ns, key_id = %signer.key_id, "Governance Receipt emitted");
     }
-    let status_patch = json!({
-        "apiVersion": "kars.azure.com/v1alpha1",
-        "kind": "KarsReceipt",
-        "status": status_obj,
-    });
-    if let Err(e) = receipts
-        .patch_status(
-            &name,
-            &PatchParams::apply(RECEIPT_FIELD_MANAGER).force(),
-            &Patch::Apply(&status_patch),
-        )
-        .await
-    {
-        tracing::debug!(karstask = %name, ns = %ns, error = %e, "KarsReceipt status echo failed (non-fatal)");
-    }
-
-    tracing::info!(karstask = %name, ns = %ns, key_id = %signer.key_id, "Governance Receipt emitted");
 }
 
 /// Observe which completeness-floor controls (design note §24b) are enforced
@@ -809,6 +823,98 @@ fn error_policy(task: Arc<KarsTask>, error: &ReconcileError, _ctx: Arc<Ctx>) -> 
     Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
+/// Process a governed per-mission promotion (§12), mirroring the standing-team
+/// promotion but scoped to a single `KarsTask`. When `spec.requested_tier`
+/// exceeds the task's current envelope tier, ensure a human `KarsApproval`
+/// (`tierRaise`) owned by this task exists; once that approval is `Approved`,
+/// widen the task's envelope to the requested tier. Widening is controller-only
+/// (enforced by the envelope-write VAP), and only an approval THIS task owns is
+/// honored — closing the "request + self-approve via the BFF" escalation.
+async fn process_task_promotion(client: &Client, ns: &str, task: &KarsTask) {
+    use crate::kars_approval::{ApprovalAction, KarsApproval};
+
+    let Some(target) = task.spec.requested_tier else {
+        return;
+    };
+    let current = task.spec.envelope.tier;
+    if target <= current || !(crate::kars_task::TIER_MIN..=crate::kars_task::TIER_MAX).contains(&target) {
+        return; // nothing to promote (or out of range)
+    }
+
+    let task_name = task.name_any();
+    let approval_name = format!("{task_name}-promote-t{target}");
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+
+    // If the approval exists and is Approved (and owned by this task), widen.
+    if let Ok(Some(appr)) = approvals.get_opt(&approval_name).await {
+        let controller_owned = appr.metadata.owner_references.as_ref().is_some_and(|refs| {
+            refs.iter()
+                .any(|r| r.kind == "KarsTask" && r.name == task_name && r.controller == Some(true))
+        });
+        if !controller_owned {
+            tracing::warn!(karstask = %task_name, "ignoring promote approval not owned by this task (forgery guard)");
+            return;
+        }
+        let approved = appr
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .map(|p| p == "Approved")
+            .unwrap_or(false);
+        if approved && target > task.spec.envelope.tier {
+            let tasks: Api<KarsTask> = Api::namespaced(client.clone(), ns);
+            // Merge-patch only the two envelope fields so the other envelope
+            // settings are preserved (an SSA apply would drop unmanaged siblings).
+            let patch = json!({
+                "spec": { "envelope": { "tier": target, "authorityCeiling": target } }
+            });
+            let _ = tasks
+                .patch(&task_name, &PatchParams::default(), &Patch::Merge(patch))
+                .await;
+            tracing::info!(karstask = %task_name, tier = target, "mission promotion approved — envelope widened");
+        }
+        return;
+    }
+
+    // Otherwise open the human approval (idempotent create).
+    let owner = json!([{
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsTask",
+        "name": task_name,
+        "uid": task.uid().unwrap_or_default(),
+        "controller": true,
+        "blockOwnerDeletion": true,
+    }]);
+    let appr = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsApproval",
+        "metadata": {
+            "name": approval_name,
+            "ownerReferences": owner,
+            "labels": { "kars.azure.com/promote-task": task_name },
+        },
+        "spec": {
+            "taskRef": { "name": task_name },
+            "action": ApprovalAction {
+                kind: "tierRaise".into(),
+                summary: format!("Promote mission '{task_name}' from Tier {current} to Tier {target}"),
+                detail: Some(format!(
+                    "This mission is requesting a wider authority envelope (Tier {target}). \
+                     Approving grants it up to Tier {target} authority for the rest of its run."
+                )),
+                requested_tier: Some(target),
+            },
+        },
+    });
+    let _ = approvals
+        .patch(
+            &approval_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(appr),
+        )
+        .await;
+}
+
 pub async fn run(client: Client) -> Result<()> {
     let tasks: Api<KarsTask> = Api::all(client.clone());
     match tasks.list(&ListParams::default().limit(1)).await {
@@ -896,6 +1002,7 @@ mod tests {
                     ..TaskEnvelope::default()
                 },
                 parent_ref: None,
+                requested_tier: None,
                 execution: None,
                 blueprint: None,
                 display_name: None,

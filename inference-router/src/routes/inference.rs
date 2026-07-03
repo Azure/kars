@@ -98,6 +98,33 @@ pub fn inference_routes() -> Router<AppState> {
         // `/anthropic/v1/messages` (legacy) are accepted.
         .route("/anthropic/v1/messages", post(anthropic_messages))
         .route("/v1/messages", post(anthropic_messages))
+        // Per-task execution telemetry derived from proxied model traffic.
+        // The agent records the cursor before a task and reads the trace after,
+        // so the controller harvests a router-sourced (honest) mission trace.
+        .route("/telemetry/cursor", get(telemetry_cursor))
+        .route("/telemetry/trace", get(telemetry_trace))
+}
+
+/// Current telemetry sequence high-water mark. Returns `{"cursor": <u64>}`.
+async fn telemetry_cursor(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "cursor": state.task_telemetry.cursor() }))
+}
+
+/// Events with `seq > since` (default 0). Returns `{"events": [...]}` in the
+/// trace.json round/tool shape the Bridge renders.
+async fn telemetry_trace(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<TelemetryQuery>,
+) -> axum::Json<serde_json::Value> {
+    let events = state.task_telemetry.snapshot(q.since.unwrap_or(0));
+    axum::Json(serde_json::json!({ "events": events }))
+}
+
+#[derive(serde::Deserialize)]
+struct TelemetryQuery {
+    since: Option<u64>,
 }
 /// Foundry Agent API routes — agents, threads, runs (for tools needing agent execution).
 /// These are proxied to the Foundry project endpoint, authenticated via IMDS with ai.azure.com audience.

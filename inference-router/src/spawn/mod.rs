@@ -219,29 +219,51 @@ pub async fn create_sandbox(
     // tags are a quality-of-life feature for operators, not a
     // governance gate.
     //
-    // The same parent fetch also recovers the parent's effective
-    // `governance.mcpServerRefs` (honoring the deprecated singular shim) so a
-    // spawned sub-agent doesn't silently lose MCP access — e.g. a Playwright
-    // sandbox must spawn children that can also drive the browser. The refs
-    // are by-name into the child CR's namespace (the parent's namespace, where
-    // the McpServer CRs and `<parent>-inference`/`-toolpolicy` already live),
-    // so propagating them verbatim resolves and the controller mirrors the
-    // JWKS/signing material + derives the MCP egress rule for the child.
-    let (parent_labels, parent_mcp_refs): (BTreeMap<String, String>, Vec<serde_json::Value>) =
-        match api.get(parent_name).await {
-            Ok(parent_obj) => {
-                let labels = parent_obj.metadata.labels.clone().unwrap_or_default();
-                (labels, parent_mcp_server_refs(&parent_obj.data))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    parent = %parent_name,
-                    child = %req.agent_id,
-                    "Could not fetch parent CR for inheritance (non-fatal): {e}"
-                );
-                (BTreeMap::new(), Vec::new())
-            }
-        };
+    // The SAME parent fetch also recovers, in one round-trip:
+    //   - the parent's effective `governance.mcpServerRefs` (main's fix: so a
+    //     spawned sub-agent doesn't silently lose MCP access), and
+    //   - the parent's REAL `governance.toolPolicyRef`/`inferenceRef` names +
+    //     uid (kars-bridge: so team-run sub-agents point at policies that
+    //     actually exist and are garbage-collected when the parent goes away).
+    let (
+        parent_labels,
+        parent_mcp_refs,
+        parent_tool_policy,
+        parent_inference,
+        parent_uid,
+    ): (
+        BTreeMap<String, String>,
+        Vec<serde_json::Value>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = match api.get(parent_name).await {
+        Ok(parent_obj) => {
+            let labels = parent_obj.metadata.labels.clone().unwrap_or_default();
+            let uid = parent_obj.metadata.uid.clone();
+            let mcp_refs = parent_mcp_server_refs(&parent_obj.data);
+            let spec = parent_obj.data.get("spec");
+            let tool_policy = spec
+                .and_then(|s| s.pointer("/governance/toolPolicyRef/name"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty());
+            let inference = spec
+                .and_then(|s| s.pointer("/inferenceRef/name"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty());
+            (labels, mcp_refs, tool_policy, inference, uid)
+        }
+        Err(e) => {
+            tracing::warn!(
+                parent = %parent_name,
+                child = %req.agent_id,
+                "Could not fetch parent CRD for inheritance (non-fatal): {e}"
+            );
+            (BTreeMap::new(), Vec::new(), None, None, None)
+        }
+    };
 
     let mut crd = build_sub_agent_crd_with_labels(
         parent_name,
@@ -252,8 +274,8 @@ pub async fn create_sandbox(
         &parent_labels,
     );
 
-    // Additive overlay: copy inherited MCP refs onto the child's governance
-    // (the builder always emits `spec.governance`).
+    // main: additive overlay — copy inherited MCP refs onto the child's
+    // governance (the builder always emits `spec.governance`).
     if !parent_mcp_refs.is_empty()
         && let Some(gov) = crd
             .get_mut("spec")
@@ -268,6 +290,27 @@ pub async fn create_sandbox(
             count,
             "Sub-agent inherits parent MCP server refs"
         );
+    }
+
+    // kars-bridge: override the convention-derived refs with the parent's real
+    // ones so the child inherits policies that actually exist (e.g.
+    // `kars-default` shared by standing-team runs) rather than a 404-ing
+    // derived name. When the parent carries NO explicit tool policy (a valid
+    // posture — governance is still enforced via the AGT profile/trust
+    // threshold), the child must not point at a convention-derived
+    // `{parent}-toolpolicy` that does not exist, or it hangs
+    // `Degraded: ToolPolicy ... not found`.
+    apply_parent_refs(&mut crd, parent_tool_policy.as_deref(), parent_inference.as_deref());
+
+    // kars-bridge: own the child by its parent sandbox so K8s garbage-collects
+    // it when the parent goes away (run completes / task deleted / team
+    // deleted). Without this, agent-spawned sub-agents outlive their parent run
+    // as *orphans*. Skipped for handoff successors, which must OUTLIVE the
+    // predecessor by design.
+    if req.handoff.is_none()
+        && let Some(uid) = parent_uid
+    {
+        apply_owner_reference(&mut crd, parent_name, &uid);
     }
 
     let obj: kube::api::DynamicObject =
@@ -783,6 +826,71 @@ fn parent_mcp_server_refs(parent_data: &serde_json::Value) -> Vec<serde_json::Va
     Vec::new()
 }
 
+/// Stamp an ownerReference on a spawned child CRD so K8s garbage-collects it
+/// when the parent sandbox is deleted. Same-namespace only (spawn always
+/// creates the child in the parent's namespace), which is the requirement for
+/// owner-based GC. `controller:false` + `blockOwnerDeletion:false` — the parent
+/// doesn't reconcile the child, it only anchors its lifetime, and deleting the
+/// parent must never be blocked waiting on the child.
+pub(crate) fn apply_owner_reference(crd: &mut serde_json::Value, parent_name: &str, parent_uid: &str) {
+    if let Some(meta) = crd
+        .pointer_mut("/metadata")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        meta.insert(
+            "ownerReferences".to_string(),
+            serde_json::json!([{
+                "apiVersion": "kars.azure.com/v1alpha1",
+                "kind": "KarsSandbox",
+                "name": parent_name,
+                "uid": parent_uid,
+                "controller": false,
+                "blockOwnerDeletion": false,
+            }]),
+        );
+    }
+}
+
+/// Reconcile a freshly-built sub-agent CRD's governance/inference refs with
+/// the *parent's actual* refs.
+///
+/// The CRD builder derives `{parent_name}-toolpolicy` / `{parent_name}-inference`
+/// by convention and always stamps `governance.enabled = true`. That derivation
+/// holds for sandboxes with a dedicated per-sandbox policy, but breaks for:
+///   - standing-team runs / any sandbox that references a SHARED policy
+///     (e.g. `kars-default`) — the derived name then 404s and the child hangs
+///     `Degraded: ToolPolicy ... not found (cross-namespace refs not supported)`.
+///   - parents with NO governance block at all (team runs) — the derived
+///     `{parent}-toolpolicy` never exists, and the CRD's CEL rule
+///     (`toolPolicyRef.name must be set when governance.enabled=true`) forbids
+///     simply dropping it. We fall back to the cluster-wide default policy
+///     `kars-default`, a real, safe policy that is guaranteed present.
+///
+/// `parent_tool_policy`/`parent_inference` are the parent's real ref names (if any).
+pub(crate) fn apply_parent_refs(
+    crd: &mut serde_json::Value,
+    parent_tool_policy: Option<&str>,
+    parent_inference: Option<&str>,
+) {
+    // The cluster-wide default AGT ToolPolicy, always installed by the
+    // controller. Used when the parent carries no explicit policy so the
+    // child still satisfies the `enabled=true ⇒ toolPolicyRef set` CEL rule
+    // while pointing at a policy that actually exists.
+    const DEFAULT_TOOL_POLICY: &str = "kars-default";
+
+    let resolved = parent_tool_policy
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_TOOL_POLICY);
+    if let Some(gov) = crd.pointer_mut("/spec/governance/toolPolicyRef/name") {
+        *gov = serde_json::Value::String(resolved.to_string());
+    }
+    if let Some(name) = parent_inference.filter(|s| !s.is_empty()) {
+        if let Some(inf) = crd.pointer_mut("/spec/inferenceRef/name") {
+            *inf = serde_json::Value::String(name.to_string());
+        }
+    }
+}
+
 pub(crate) fn build_sub_agent_crd_with_labels(
     parent_name: &str,
     namespace: &str,
@@ -1020,6 +1128,64 @@ mod tests {
         let payload = r#"{"mode":"restore","predecessor":"p","extra":"smuggled"}"#;
         let err = serde_json::from_str::<HandoffMeta>(payload).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn apply_owner_reference_anchors_child_to_parent() {
+        let mut crd = serde_json::json!({
+            "metadata": { "name": "child", "namespace": "kars-system" }
+        });
+        apply_owner_reference(&mut crd, "orch-run-123", "uid-abc");
+        let owner = &crd["metadata"]["ownerReferences"][0];
+        assert_eq!(owner["kind"], "KarsSandbox");
+        assert_eq!(owner["name"], "orch-run-123");
+        assert_eq!(owner["uid"], "uid-abc");
+        assert_eq!(owner["controller"], false);
+        assert_eq!(owner["blockOwnerDeletion"], false);
+    }
+
+    #[test]
+    fn apply_parent_refs_inherits_shared_policy() {
+        // Parent references a SHARED policy (kars-default) — the child must
+        // inherit that real name, not the convention-derived phantom.
+        let mut crd = serde_json::json!({
+            "spec": {
+                "inferenceRef": { "name": "child-inference" },
+                "governance": { "toolPolicyRef": { "name": "child-toolpolicy" } }
+            }
+        });
+        apply_parent_refs(&mut crd, Some("kars-default"), Some("shared-inference"));
+        assert_eq!(
+            crd["spec"]["governance"]["toolPolicyRef"]["name"],
+            "kars-default"
+        );
+        assert_eq!(crd["spec"]["inferenceRef"]["name"], "shared-inference");
+    }
+
+    #[test]
+    fn apply_parent_refs_falls_back_to_default_when_parent_has_none() {
+        // Parent carries no explicit tool policy (team runs have no governance
+        // block). The child must NOT keep the derived `{parent}-toolpolicy`
+        // (which does not exist → 404 Degraded), nor drop it (the CRD CEL rule
+        // requires it when governance.enabled=true). It falls back to the
+        // cluster-wide `kars-default`, which is guaranteed present.
+        let mut crd = serde_json::json!({
+            "spec": {
+                "inferenceRef": { "name": "child-inference" },
+                "governance": {
+                    "enabled": true,
+                    "toolPolicyRef": { "name": "orch-run-123-toolpolicy" }
+                }
+            }
+        });
+        apply_parent_refs(&mut crd, None, None);
+        assert_eq!(
+            crd["spec"]["governance"]["toolPolicyRef"]["name"],
+            "kars-default",
+            "must fall back to kars-default, satisfying the enabled⇒policy CEL rule"
+        );
+        assert_eq!(crd["spec"]["governance"]["enabled"], true);
+        assert_eq!(crd["spec"]["inferenceRef"]["name"], "child-inference");
     }
 
     fn minimal_req(agent_id: &str) -> SpawnRequest {

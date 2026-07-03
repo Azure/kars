@@ -103,6 +103,11 @@ pub struct AppState {
     /// per source. Populated by the forward proxy's deny branches.
     pub blocked_egress: Arc<BlockedBuffer>,
     pub sandbox_name: Arc<String>,
+    /// Per-task execution telemetry derived from proxied model traffic
+    /// (`task_telemetry`). The honest, router-sourced trace that replaces the
+    /// retired in-process agent loop's self-reported `onTrace`. Queried via
+    /// `GET /telemetry/trace` + `/telemetry/cursor`.
+    pub task_telemetry: Arc<crate::task_telemetry::TaskTelemetry>,
     pub inbox: Arc<MeshInbox>,
     pub mesh_metrics: Arc<MeshMetrics>,
     /// Live model override (set via /admin/model). Takes priority over config.default_model.
@@ -325,6 +330,7 @@ impl AppState {
             blocklist,
             blocked_egress: Arc::new(BlockedBuffer::with_defaults()),
             sandbox_name: Arc::new(sandbox_name),
+            task_telemetry: Arc::new(crate::task_telemetry::TaskTelemetry::new()),
             inbox: Arc::new(MeshInbox::new()),
             mesh_metrics: Arc::new(MeshMetrics::new()),
             model_override: Arc::new(std::sync::RwLock::new(None)),

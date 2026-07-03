@@ -63,6 +63,7 @@ pub const ACTION_KINDS: &[&str] = &[
     "egress",
     "checkpoint",
     "tierRaise",
+    "clarification",
     "irreversible",
     "custom",
 ];
