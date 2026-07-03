@@ -3768,6 +3768,11 @@ pub async fn run(client: Client) -> Result<()> {
             crate::watch_config::bounded(),
             deployment_to_sandbox_ref,
         )
+        .watches(
+            Api::<crate::inference_policy::InferencePolicy>::all(ctx.client.clone()),
+            crate::watch_config::bounded(),
+            inference_policy_to_sandbox_ref,
+        )
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("KarsSandbox", reconcile(x, ctx)).await
@@ -3790,6 +3795,45 @@ pub async fn run(client: Client) -> Result<()> {
 mod tests;
 
 pub mod runtime;
+
+/// InferencePolicy → parent KarsSandbox mapper. Triggers a sandbox reconcile
+/// whenever its referenced InferencePolicy changes, so an operator editing a
+/// policy's token budget / model / content-safety takes effect promptly
+/// (deployment env + pod rollout) instead of lingering until the next 5-minute
+/// periodic requeue. The policy is created as `<run>-inference` in the
+/// sandbox's namespace (kars_task_execution::inference_name) and carries the
+/// `kars.azure.com/karstask` label = the run/sandbox name; the `-inference`
+/// suffix strip is the fallback for any policy missing that label.
+fn inference_policy_to_sandbox_ref(
+    p: crate::inference_policy::InferencePolicy,
+) -> Option<ObjectRef<KarsSandbox>> {
+    if p.metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("app.kubernetes.io/managed-by"))
+        .map(String::as_str)
+        != Some("kars-controller")
+    {
+        return None;
+    }
+    let ns = p.metadata.namespace.clone()?;
+    let sandbox = p
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("kars.azure.com/karstask"))
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| {
+            p.metadata
+                .name
+                .as_deref()
+                .and_then(|n| n.strip_suffix("-inference"))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })?;
+    Some(ObjectRef::<KarsSandbox>::new(&sandbox).within(&ns))
+}
 
 /// Phase G P1 #5 — Deployment-to-KarsSandbox parent mapper.
 ///
