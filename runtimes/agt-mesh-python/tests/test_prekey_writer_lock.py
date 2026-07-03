@@ -171,3 +171,72 @@ def test_connect_propagates_loud_failure(
     finally:
         fcntl.flock(holder_fd, fcntl.LOCK_UN)
         os.close(holder_fd)
+
+
+def test_acquire_is_idempotent_no_self_deadlock(tmp_path: Path) -> None:
+    """Calling the guard twice on the SAME client must be a no-op, not a
+    self-deadlock. A second open-file-description in the same process would
+    fail ``flock(LOCK_EX|LOCK_NB)`` against the first fd and misreport as
+    "another process holds the lock (pid=<self>)" — the exact failure mode
+    that stalled Hermes agents."""
+    cfg = _make_config(tmp_path, name="idempotent-agent")
+    from kars_agt_mesh.client import _SINGLETONS
+
+    _SINGLETONS.clear()
+    client = MeshClient(cfg)
+    try:
+        client._acquire_prekey_writer_lock()
+        first_fd = client._prekey_lock_fd
+        # Second acquire must NOT raise and must NOT open a new fd.
+        client._acquire_prekey_writer_lock()
+        assert client._prekey_lock_fd == first_fd
+    finally:
+        client._release_prekey_writer_lock()
+
+
+def test_failed_connect_releases_lock(tmp_path: Path) -> None:
+    """The regression that stalled Hermes: a connect() that fails PART-WAY
+    (relay/registry unreachable at sandbox startup) must release the
+    prekey-writer lock, so the retry — in the SAME process — can re-acquire
+    it cleanly instead of self-deadlocking on the leaked fd forever."""
+    import fcntl
+
+    cfg = _make_config(tmp_path, name="retry-agent")
+    from kars_agt_mesh.client import _SINGLETONS
+
+    _SINGLETONS.clear()
+    client = MeshClient(cfg)
+
+    # Make register_self() fail as if the registry weren't up yet — this
+    # happens AFTER the lock is acquired inside connect().
+    with patch("kars_agt_mesh.client.RegistryClient", autospec=True) as registry_cls:
+        registry_cls.return_value.register_self = AsyncMock(
+            side_effect=ConnectionError("registry not ready")
+        )
+        registry_cls.return_value.aclose = AsyncMock()
+        with pytest.raises(ConnectionError):
+            asyncio.run(client.connect())
+
+    # The lock MUST have been released: this client no longer holds an fd,
+    # and a fresh flock on the same file must succeed.
+    assert client._prekey_lock_fd is None
+    lock_path = cfg.identity_path.parent / ".mesh-prekeys.lock"
+    probe_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
+        fcntl.flock(probe_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(probe_fd)
+
+    # And a second connect attempt (same process) must get PAST the lock
+    # guard — proving the retry is no longer self-blocked.
+    with patch("kars_agt_mesh.client.RegistryClient", autospec=True) as registry_cls:
+        registry_cls.return_value.register_self = AsyncMock(
+            side_effect=ConnectionError("registry still not ready")
+        )
+        registry_cls.return_value.aclose = AsyncMock()
+        with pytest.raises(ConnectionError):
+            asyncio.run(client.connect())
+        # It reached register_self again — i.e. it re-acquired the lock and
+        # moved past the guard, rather than raising MeshTransportError.
+        registry_cls.return_value.register_self.assert_awaited()
