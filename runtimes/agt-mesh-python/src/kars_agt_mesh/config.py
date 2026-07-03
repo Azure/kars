@@ -59,6 +59,16 @@ class MeshConfig:
     (e.g. ``"kars-agt-mesh/0.1.0 (hermes/0.15.2)"``) to make
     server-side logs attribute traffic to the right framework."""
 
+    plaintext_peers: tuple[str, ...] = ()
+    """DIDs allowed to send us UNENCRYPTED (``plaintext: true``) message
+    frames — the kars control-plane path. The kars controller speaks a
+    plaintext bridge to agents (it duplicates the JSON into ``ciphertext``
+    and sets ``plaintext: true``) rather than full Signal E2E; the TS SDK
+    honours this via its own plaintext-peer allowlist, and this field is
+    the Python parity. A plaintext frame from any DID NOT in this set is
+    dropped — agent↔agent traffic stays E2E-only. The runtime populates
+    this from ``KARS_CONTROLLER_AMID`` at sandbox materialization."""
+
     def __post_init__(self) -> None:
         if not self.name or len(self.name) > 63:
             raise ValueError(

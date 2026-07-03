@@ -37,11 +37,80 @@ in the inbox, it has already cleared both layers.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger("kars.hermes.mesh_worker")
+
+
+def _utc_now_iso() -> str:
+    """RFC3339 UTC timestamp for task_response envelopes (matches OpenClaw)."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# Interval between task_progress heartbeats sent to the controller while a
+# delivered task runs. Must stay well under the controller's IDLE_TIMEOUT_SECS
+# (180s, controller/src/mesh_peer/task_delivery.rs) or a long-running run is
+# killed as "no progress heartbeat" — the original Hermes-mission failure mode.
+_HEARTBEAT_INTERVAL_S = 20.0
+
+
+async def _route_send(
+    client: Any, msg: Any, sender_name: str | None, payload: bytes
+) -> None:
+    """Send a frame back to the originator using the correct transport.
+
+    The kars controller is a PLAINTEXT control-plane peer (not registry-
+    discoverable), so reply to it by DID (a plaintext frame it can decode),
+    never by display-name lookup (which 404s). Real agent peers (a team
+    principal delivering to a Hermes sub-agent) reply by friendly name over
+    the established E2E secure channel, falling back to DID.
+    """
+    if client.is_plaintext_peer(msg.from_did):
+        await client.send_by_did(to=msg.from_did, payload=payload)
+    elif sender_name:
+        await client.send_by_name(to=sender_name, payload=payload)
+    else:
+        await client.send_by_did(to=msg.from_did, payload=payload)
+
+
+async def _heartbeat_loop(
+    client: Any, msg: Any, sender_name: str | None, from_agent: str
+) -> None:
+    """Tick a task_progress heartbeat to the originator every ~20s.
+
+    Runs concurrently with `hermes -z` for a delivered task so the
+    originator's idle timeout (the controller's 180s, or a team principal's
+    delivery wait) does not kill a run doing real work. Routed the same way
+    as the terminal reply. Cancelled by the caller once the run produces its
+    terminal reply.
+    """
+    tick = 0
+    while True:
+        await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+        tick += 1
+        frame = json.dumps(
+            {
+                "type": "task_progress",
+                "stage": "executing",
+                "tick": tick,
+                "elapsed_seconds": int(tick * _HEARTBEAT_INTERVAL_S),
+                "from_agent": from_agent,
+                "timestamp": _utc_now_iso(),
+            }
+        ).encode("utf-8")
+        try:
+            await _route_send(client, msg, sender_name, frame)
+            logger.debug(
+                "mesh_worker: task_progress heartbeat #%d → %s",
+                tick,
+                sender_name or msg.from_did,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("mesh_worker: heartbeat #%d send failed (non-fatal): %s", tick, exc)
 
 # Worker singleton (process-level). Set by `start_worker()`.
 _WORKER_TASK: asyncio.Task[None] | None = None
@@ -224,6 +293,33 @@ async def _handle_message(client: Any, msg: Any) -> None:
     # regardless of any opt-in env.
     payload_text = _maybe_save_file_transfer(payload_text, msg, client)
 
+    # ── Controller task-delivery protocol ────────────────────────────
+    # The kars controller delivers work as a JSON envelope
+    # {type:"task_request", content:<objective>, request_id:<id>} (see
+    # controller/src/mesh_peer FederationMessage + runtimes/openclaw
+    # index.ts onMessage). Extract the objective as the LLM prompt and
+    # remember the request_id so the reply is a MATCHING task_response —
+    # the exact shape the controller's task-delivery waiter parses
+    # (base64(json(FederationMessage))). A non-task payload (peer chat)
+    # passes through unchanged as the prompt and gets a raw reply.
+    prompt_text = payload_text
+    task_request_id: str | None = None
+    _envelope_is_task = False
+    try:
+        _envelope = json.loads(payload_text)
+    except (json.JSONDecodeError, ValueError):
+        _envelope = None
+    if isinstance(_envelope, dict) and _envelope.get("type") == "task_request":
+        _envelope_is_task = True
+        prompt_text = str(_envelope.get("content") or "")
+        _rid = _envelope.get("request_id")
+        task_request_id = str(_rid) if _rid is not None else None
+        logger.info(
+            "mesh_worker: parsed task_request (request_id=%s content[:120]=%r)",
+            task_request_id,
+            prompt_text[:120],
+        )
+
     # ── Publish peer to router trust store (operator panel feed) ──
     # Without this, the operator's per-sandbox AGT view stays empty
     # even after a successful KNOCK + decrypted MESSAGE, because the
@@ -251,18 +347,26 @@ async def _handle_message(client: Any, msg: Any) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.debug("mesh_worker: trust publish failed (non-fatal): %s", exc)
 
-    # LLM-spawning is opt-in via KARS_MESH_AUTO_RESPONDER. A top-level
-    # (channel-driven) Hermes agent must NOT auto-spawn hermes -z on
-    # every inbound or it would infinite-loop on its own replies. The
-    # controller sets the env var on sub-agent containers (where the
-    # parent expects a synchronous round-trip).
+    # LLM-spawning is opt-in via KARS_MESH_AUTO_RESPONDER for free-form peer
+    # chat: a top-level (channel-driven) Hermes agent must NOT auto-spawn
+    # hermes -z on every inbound or it would infinite-loop on its own replies.
+    #
+    # A delivered `task_request` is DIFFERENT: it is an explicit request to do
+    # work — the controller delivering a mission to a principal, or a principal
+    # delegating to a sub-agent — so it ALWAYS runs the LLM regardless of the
+    # opt-in. This is safe against the loop the opt-in guards: a sub-agent's
+    # reply is a `task_response` (not a `task_request`), so a principal receiving
+    # it still falls through to the drained/inbox path below and never re-runs.
+    # Without this, a Hermes MISSION principal (no parent label → no
+    # AUTO_RESPONDER) drains the controller's task_request without executing it,
+    # and the mission times out with "no progress heartbeat".
     auto_responder = os.environ.get(
         "KARS_MESH_AUTO_RESPONDER", "0"
     ) in {"1", "true", "True"}
-    if not auto_responder:
+    if not auto_responder and not _envelope_is_task:
         logger.info(
-            "mesh_worker: inbox drained from %s (AUTO_RESPONDER off; "
-            "structural envelopes saved, LLM response suppressed)",
+            "mesh_worker: inbox drained from %s (AUTO_RESPONDER off, not a "
+            "task_request; structural envelopes saved, LLM response suppressed)",
             msg.from_did,
         )
         return
@@ -271,12 +375,27 @@ async def _handle_message(client: Any, msg: Any) -> None:
     # worker forever. 25 min matches the parent's typical patience for
     # a sub-agent doing real Foundry work (research + code + image).
     timeout_seconds = float(os.environ.get("KARS_MESH_WORKER_TIMEOUT_S", "1500"))
+    # Resolve the friendly name once, up front, so both the heartbeat and the
+    # terminal reply route to the originator identically.
+    sender_name = await _resolve_sender_name(client, msg.from_did)
+    from_agent = (
+        os.environ.get("SANDBOX_NAME") or os.environ.get("HERMES_PROFILE") or ""
+    )
     proc = await asyncio.create_subprocess_exec(
-        *_hermes_cmd(payload_text),
+        *_hermes_cmd(prompt_text),
         env=_hermes_env(),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    # Keep the originator's delivery alive while hermes -z runs. Heartbeat for
+    # ANY delivered task (controller mission OR a team principal's sub-agent
+    # task) so a long run isn't killed as "no progress heartbeat" — the
+    # original Hermes-mission failure mode. Mirrors OpenClaw.
+    hb_task: asyncio.Task[None] | None = None
+    if _envelope_is_task:
+        hb_task = asyncio.create_task(
+            _heartbeat_loop(client, msg, sender_name, from_agent)
+        )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(), timeout=timeout_seconds
@@ -285,27 +404,52 @@ async def _handle_message(client: Any, msg: Any) -> None:
         proc.kill()
         await proc.wait()
         reply = f"WORKER_TIMEOUT after {timeout_seconds:.0f}s"
+        reply_ok = False
         logger.warning("mesh_worker: %s for inbound from %s", reply, msg.from_did)
     else:
         reply = stdout_b.decode("utf-8", errors="replace").strip()
+        reply_ok = proc.returncode == 0 and bool(reply)
         if proc.returncode != 0:
             reply = (
                 f"WORKER_ERROR rc={proc.returncode}\nstdout:\n{reply}"
                 f"\nstderr:\n{stderr_b.decode(errors='replace').strip()}"
             )
 
-    # Reply via the same MeshClient. Try the friendly name first
-    # (lets the sender match by display name), fall back to DID.
-    sender_name = await _resolve_sender_name(client, msg.from_did)
+    # Stop heartbeats now that the run has produced its terminal result.
+    if hb_task is not None:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+
+    # Wrap the reply for the delivery waiter (controller or team principal): it
+    # parses base64(json(FederationMessage)) — a TaskResponse matched by the
+    # sender DID — and reads content/ok (defaults true). A raw text reply is
+    # dropped. When the inbound was a task_request, reply with a task_response
+    # envelope mirroring OpenClaw's shape (content/ok/in_reply_to/from_agent);
+    # otherwise (peer chat) send the raw text.
+    if _envelope_is_task:
+        reply_payload = json.dumps(
+            {
+                "type": "task_response",
+                "content": reply,
+                "ok": reply_ok,
+                "in_reply_to": task_request_id or prompt_text[:256],
+                "from_agent": from_agent,
+                "timestamp": _utc_now_iso(),
+            }
+        ).encode("utf-8")
+    else:
+        reply_payload = reply.encode("utf-8")
+
     try:
-        if sender_name:
-            await client.send_by_name(to=sender_name, payload=reply.encode("utf-8"))
-        else:
-            await client.send_by_did(to=msg.from_did, payload=reply.encode("utf-8"))
+        await _route_send(client, msg, sender_name, reply_payload)
         logger.info(
-            "mesh_worker: replied %d bytes to %s",
-            len(reply),
+            "mesh_worker: replied %d bytes to %s (task_response=%s)",
+            len(reply_payload),
             sender_name or msg.from_did,
+            _envelope_is_task,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(

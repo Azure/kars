@@ -98,6 +98,10 @@ class MeshClient:
         # encapsulates X3DH + Double Ratchet, so we just keep one
         # channel per peer DID and let the channel own the state.
         self._channels: dict[str, SecureChannel] = {}
+        # DIDs allowed to send us plaintext (control-plane) frames — the kars
+        # controller. A copy of config.plaintext_peers, mutable at runtime via
+        # add_plaintext_peer() (parity with the TS SDK's addPlaintextPeer).
+        self._plaintext_peers: set[str] = set(config.plaintext_peers)
         # Inbox queue — drained by `inbox()` async iterator.
         self._inbox: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self._is_connected = False
@@ -413,6 +417,34 @@ class MeshClient:
         if self._relay is None or self._registry is None:
             raise MeshTransportError("Internal state corrupted: registry/relay missing")
 
+        # Control-plane plaintext bridge: replies to the kars controller (a
+        # plaintext peer) must be sent UNENCRYPTED — the controller does not run
+        # the Signal handshake and can't decrypt an E2E frame, so an encrypted
+        # reply would be silently dropped and the run would hang waiting for it.
+        # Mirror the controller's own frame shape (payload+ciphertext=b64(bytes),
+        # plaintext=true, no KNOCK). Agent↔agent sends stay fully E2E below.
+        if to in self._plaintext_peers:
+            b64 = _b64std(payload)
+            frame = {
+                "v": 1,
+                "type": "message",
+                "from": self._identity.did,
+                "to": to,
+                "id": str(uuid.uuid4()),
+                "ts": _iso_utc(),
+                "payload": b64,
+                "ciphertext": b64,
+                "plaintext": True,
+            }
+            await self._relay.send_frame(frame)
+            logger.debug(
+                "Sent PLAINTEXT message (%d bytes) to control-plane peer %s (id=%s)",
+                len(payload),
+                to,
+                frame["id"],
+            )
+            return
+
         channel = self._channels.get(to)
         if channel is None:
             channel, establishment = await self._initiate_session(to)
@@ -443,6 +475,20 @@ class MeshClient:
             to,
             message_frame["id"],
         )
+
+    def add_plaintext_peer(self, did: str) -> None:
+        """Allowlist ``did`` to send/receive UNENCRYPTED control-plane frames
+        (the kars controller). Parity with the TS SDK's ``addPlaintextPeer``.
+        Everyone NOT on this list must use full Signal E2E."""
+        self._plaintext_peers.add(did)
+
+    def remove_plaintext_peer(self, did: str) -> None:
+        """Remove ``did`` from the plaintext-peer allowlist."""
+        self._plaintext_peers.discard(did)
+
+    def is_plaintext_peer(self, did: str) -> bool:
+        """True when ``did`` is allowed to bypass E2E (control-plane peer)."""
+        return did in self._plaintext_peers
 
     def inbox(self) -> AsyncIterator[InboundMessage]:
         """Async iterator over decrypted inbound messages.
@@ -495,6 +541,39 @@ class MeshClient:
         from_did = frame.get("from")
         if not isinstance(from_did, str):
             logger.warning("Dropping message frame: missing 'from'")
+            return
+        # Control-plane plaintext bridge: the kars controller does NOT run the
+        # Signal handshake — it duplicates the JSON into `ciphertext` and marks
+        # the frame `plaintext: true`. Accept such a frame ONLY from a DID on the
+        # plaintext-peer allowlist (the controller's AMID); agent↔agent traffic
+        # is never plaintext, so a plaintext frame from anyone else is dropped.
+        # This mirrors the TS SDK's plaintext-peer allowlist exactly.
+        if frame.get("plaintext") is True:
+            if from_did not in self._plaintext_peers:
+                logger.warning(
+                    "Dropping PLAINTEXT message from non-allowlisted peer %s "
+                    "(only the kars controller may bypass E2E)",
+                    from_did,
+                )
+                return
+            raw = frame.get("ciphertext") or frame.get("payload")
+            if not isinstance(raw, str):
+                logger.warning("Dropping plaintext message from %s: no payload", from_did)
+                return
+            try:
+                plain = _b64std_decode(raw)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Malformed plaintext message from %s: %s", from_did, exc)
+                return
+            app_payload = _wire_bytes_to_payload(plain)
+            await self._inbox.put(
+                InboundMessage.new(
+                    from_did=from_did,
+                    from_display_name=None,
+                    payload=app_payload,
+                    message_id=str(frame.get("id", "")),
+                )
+            )
             return
         channel = self._channels.get(from_did)
         if channel is None:

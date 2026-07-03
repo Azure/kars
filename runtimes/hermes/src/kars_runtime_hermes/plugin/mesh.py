@@ -99,6 +99,17 @@ def _get_or_init_client() -> MeshClient:
         identity_path = hermes_home / ".agt" / "identity.json"
         trust_threshold = int(os.environ.get("AGT_TRUST_THRESHOLD", "0"))
 
+        # The kars controller speaks a plaintext control-plane bridge to agents
+        # (task delivery, offload brokering): it duplicates the JSON into
+        # `ciphertext` and sets `plaintext: true` rather than running the Signal
+        # handshake. Allowlist its AMID so we accept those frames AND reply in
+        # plaintext — exactly what the OpenClaw runtime does
+        # (runtimes/openclaw/src/index.ts via KARS_CONTROLLER_AMID). Without
+        # this, every controller task-delivery is dropped "no SecureChannel" and
+        # the run hangs. Agent↔agent traffic stays E2E-only.
+        controller_amid = os.environ.get("KARS_CONTROLLER_AMID", "").strip()
+        plaintext_peers = (controller_amid,) if controller_amid else ()
+
         config = MeshConfig(
             name=name,
             relay_url=relay_url,
@@ -106,6 +117,7 @@ def _get_or_init_client() -> MeshClient:
             identity_path=identity_path,
             trust_threshold=trust_threshold,
             user_agent=f"kars-agt-mesh/0.1.0 (hermes/{os.environ.get('HERMES_VERSION','0.15.2')})",
+            plaintext_peers=plaintext_peers,
         )
         client = MeshClient(config)
 
