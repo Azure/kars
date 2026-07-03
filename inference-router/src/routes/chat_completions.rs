@@ -224,6 +224,17 @@ pub(super) async fn chat_completions(
         .ok()
         .and_then(|v| v.get("model")?.as_str().map(String::from))
         .unwrap_or_else(|| upstream.deployment.clone());
+
+    // Telemetry: correlate any tool results this request carries back to the
+    // tool calls recorded on the prior round (OpenAI shape), so the router-
+    // sourced live trace (`/telemetry/trace`) shows each tool's outcome. Pure
+    // observer — reads the body, never mutates it. Mirrors the Anthropic path.
+    if let Ok(req_json) = serde_json::from_slice::<serde_json::Value>(&body) {
+        state
+            .task_telemetry
+            .record_request_results(&req_json, crate::task_telemetry::Shape::OpenAi);
+    }
+
     let is_responses_only = state
         .responses_only_models
         .read()
@@ -253,6 +264,7 @@ pub(super) async fn chat_completions(
             let upstream = upstream.clone();
             let headers = headers.clone();
             let budget = state.budget.clone();
+            let telem = state.task_telemetry.clone();
             let sandbox_owned = sandbox_name.to_string();
 
             tokio::spawn(async move {
@@ -285,13 +297,15 @@ pub(super) async fn chat_completions(
                 match result {
                     Ok((_resp_status, _, resp_body)) => {
                         let chat_body = responses_to_chat_body(&resp_body);
-                        if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
-                            && let Some(total) = bj
+                        if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body) {
+                            telem.record_response(&bj, crate::task_telemetry::Shape::OpenAi, 0);
+                            if let Some(total) = bj
                                 .get("usage")
                                 .and_then(|u| u.get("total_tokens"))
                                 .and_then(|v| v.as_u64())
-                        {
-                            budget.record_usage(&sandbox_owned, total).await;
+                            {
+                                budget.record_usage(&sandbox_owned, total).await;
+                            }
                         }
                         let sse_data = format!(
                             "data: {}\n\ndata: [DONE]\n\n",
@@ -339,13 +353,19 @@ pub(super) async fn chat_completions(
         {
             Ok((resp_status, resp_hdrs, resp_body)) => {
                 let chat_body = responses_to_chat_body(&resp_body);
-                if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
-                    && let Some(total) = bj
+                if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body) {
+                    state.task_telemetry.record_response(
+                        &bj,
+                        crate::task_telemetry::Shape::OpenAi,
+                        0,
+                    );
+                    if let Some(total) = bj
                         .get("usage")
                         .and_then(|u| u.get("total_tokens"))
                         .and_then(|v| v.as_u64())
-                {
-                    state.budget.record_usage(sandbox_name, total).await;
+                    {
+                        state.budget.record_usage(sandbox_name, total).await;
+                    }
                 }
                 let mut response = (resp_status, Body::from(chat_body)).into_response();
                 if let Some(ct) = resp_hdrs.get("content-type") {
@@ -440,13 +460,19 @@ pub(super) async fn chat_completions(
                     {
                         Ok((resp_status, _, resp_body)) => {
                             let chat_body = responses_to_chat_body(&resp_body);
-                            if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
-                                && let Some(total) = bj
+                            if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body) {
+                                state.task_telemetry.record_response(
+                                    &bj,
+                                    crate::task_telemetry::Shape::OpenAi,
+                                    0,
+                                );
+                                if let Some(total) = bj
                                     .get("usage")
                                     .and_then(|u| u.get("total_tokens"))
                                     .and_then(|v| v.as_u64())
-                            {
-                                state.budget.record_usage(sandbox_name, total).await;
+                                {
+                                    state.budget.record_usage(sandbox_name, total).await;
+                                }
                             }
                             // Wrap as SSE so the streaming client can parse it
                             let sse = format!(
@@ -658,12 +684,19 @@ pub(super) async fn chat_completions(
                         let chat_body = responses_to_chat_body(&resp_body);
                         if let Ok(body_json) =
                             serde_json::from_slice::<serde_json::Value>(&chat_body)
-                            && let Some(total) = body_json
+                        {
+                            state.task_telemetry.record_response(
+                                &body_json,
+                                crate::task_telemetry::Shape::OpenAi,
+                                0,
+                            );
+                            if let Some(total) = body_json
                                 .get("usage")
                                 .and_then(|u| u.get("total_tokens"))
                                 .and_then(|v| v.as_u64())
-                        {
-                            state.budget.record_usage(sandbox_name, total).await;
+                            {
+                                state.budget.record_usage(sandbox_name, total).await;
+                            }
                         }
                         let mut response = (resp_status, Body::from(chat_body)).into_response();
                         if let Some(ct) = resp_hdrs.get("content-type") {
@@ -709,6 +742,16 @@ pub(super) async fn chat_completions(
                 // On 400: error.innererror.content_filter_result
                 {
                     if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
+                        // Live trace: record the model's tool calls + tokens for
+                        // the router-sourced telemetry the Bridge streams. Pure
+                        // observer; success responses only (errors carry no round).
+                        if status.is_success() {
+                            state.task_telemetry.record_response(
+                                &body_json,
+                                crate::task_telemetry::Shape::OpenAi,
+                                0,
+                            );
+                        }
                         let flags = if status.is_success() {
                             safety::parse_prompt_filter_results(&body_json)
                         } else {
