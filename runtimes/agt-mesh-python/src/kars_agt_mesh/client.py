@@ -133,6 +133,14 @@ class MeshClient:
         ``fcntl`` (Windows): logs a warning and continues — the test
         scenarios this protects against don't occur on Windows pods.
         """
+        # Idempotent: if THIS client already holds the writer lock, do not
+        # open a second fd. Re-acquiring would open a new open-file-description
+        # and `flock(LOCK_EX|LOCK_NB)` would fail against our own held fd —
+        # a same-process self-deadlock that misreports as "another process
+        # holds the lock (pid=<self>)". Guard against connect() being re-entered
+        # while a prior connect() left the lock held.
+        if self._prekey_lock_fd is not None:
+            return
         try:
             import fcntl  # noqa: PLC0415  Linux-only
         except ImportError:
@@ -234,93 +242,120 @@ class MeshClient:
 
             # ── Single-writer flock guard ────────────────────────────────
             self._acquire_prekey_writer_lock()
-            self._registry = RegistryClient(
-                base_url=self._config.registry_url,
-                identity_signing_key=self._identity.signing_key,
-                identity_did=self._identity.did,
-                timeout_seconds=self._config.http_timeout_seconds,
-                user_agent=self._config.user_agent,
-            )
-            await self._registry.register_self(
-                # Display name is registered as a capability so other
-                # agents can discover us via /v1/discover. This is the
-                # convention the TS SDK adopted and what the kars
-                # operator UX queries.
-                capabilities=[self._config.name],
-                metadata={
-                    "display_name": self._config.name,
-                    "runtime": "python",
-                    "library": "kars-agt-mesh/0.1.0",
-                },
-            )
+            try:
+                self._registry = RegistryClient(
+                    base_url=self._config.registry_url,
+                    identity_signing_key=self._identity.signing_key,
+                    identity_did=self._identity.did,
+                    timeout_seconds=self._config.http_timeout_seconds,
+                    user_agent=self._config.user_agent,
+                )
+                await self._registry.register_self(
+                    # Display name is registered as a capability so other
+                    # agents can discover us via /v1/discover. This is the
+                    # convention the TS SDK adopted and what the kars
+                    # operator UX queries.
+                    capabilities=[self._config.name],
+                    metadata={
+                        "display_name": self._config.name,
+                        "runtime": "python",
+                        "library": "kars-agt-mesh/0.1.0",
+                    },
+                )
 
-            # X3DH bootstrap: build key manager from our persistent
-            # Ed25519 identity, generate a signed pre-key + a small
-            # batch of one-time pre-keys, then publish them so peers
-            # can initiate sessions to us. The signed pre-key signature
-            # is over the X25519 public key with our Ed25519 identity
-            # — the upstream `generate_signed_pre_key` handles this.
-            seed = self._identity.ed25519_seed
-            full_ed_private = bytes(self._identity.signing_key) + self._identity.verify_key_bytes
-            self._key_manager = X3DHKeyManager.from_ed25519_keys(
-                full_ed_private if len(full_ed_private) == 64 else seed,
-                self._identity.verify_key_bytes,
-            )
-            self._key_manager.generate_signed_pre_key()
-            otks = self._key_manager.generate_one_time_pre_keys(count=10)
-            spk = self._key_manager.signed_pre_key
-            assert spk is not None  # just generated
-            await self._registry.upload_prekeys(
-                identity_key_x25519=self._key_manager.identity_key.public_key,
-                identity_key_ed25519=self._identity.verify_key_bytes,
-                signed_pre_key={
-                    "key_id": spk.key_id,
-                    "public_key": _b64url(spk.key_pair.public_key),
-                    "signature": _b64url(spk.signature),
-                },
-                one_time_pre_keys=[
-                    {
-                        "key_id": otk.key_id,
-                        "public_key": _b64url(otk.key_pair.public_key),
-                    }
-                    for otk in otks
-                ],
-            )
+                # X3DH bootstrap: build key manager from our persistent
+                # Ed25519 identity, generate a signed pre-key + a small
+                # batch of one-time pre-keys, then publish them so peers
+                # can initiate sessions to us. The signed pre-key signature
+                # is over the X25519 public key with our Ed25519 identity
+                # — the upstream `generate_signed_pre_key` handles this.
+                seed = self._identity.ed25519_seed
+                full_ed_private = bytes(self._identity.signing_key) + self._identity.verify_key_bytes
+                self._key_manager = X3DHKeyManager.from_ed25519_keys(
+                    full_ed_private if len(full_ed_private) == 64 else seed,
+                    self._identity.verify_key_bytes,
+                )
+                self._key_manager.generate_signed_pre_key()
+                otks = self._key_manager.generate_one_time_pre_keys(count=10)
+                spk = self._key_manager.signed_pre_key
+                assert spk is not None  # just generated
+                await self._registry.upload_prekeys(
+                    identity_key_x25519=self._key_manager.identity_key.public_key,
+                    identity_key_ed25519=self._identity.verify_key_bytes,
+                    signed_pre_key={
+                        "key_id": spk.key_id,
+                        "public_key": _b64url(spk.key_pair.public_key),
+                        "signature": _b64url(spk.signature),
+                    },
+                    one_time_pre_keys=[
+                        {
+                            "key_id": otk.key_id,
+                            "public_key": _b64url(otk.key_pair.public_key),
+                        }
+                        for otk in otks
+                    ],
+                )
 
-            # Lazy-import to keep transport optional in unit tests.
-            from .relay_transport import RelayTransport
+                # Lazy-import to keep transport optional in unit tests.
+                from .relay_transport import RelayTransport
 
-            # Pass through the Entra-signed JWT so Entra-enforcing
-            # relays (AGENTMESH_ENTRA_ENFORCE=true) accept the WS
-            # connect frame. Mirror of the TS SDK's behaviour
-            # (mesh-client.ts passes the same token under the
-            # ``token`` key on the connect frame). The entrypoint
-            # script populates AGT_OAUTH_TOKEN via workload-identity
-            # exchange when the operator opts into Entra-verified mesh
-            # peers via `MESH_AUTH_BACKEND=EntraAgentIdentity` on the
-            # KarsAuthConfig.
-            import os as _os
-            _entra_token = _os.environ.get("AGT_OAUTH_TOKEN") or None
+                # Pass through the Entra-signed JWT so Entra-enforcing
+                # relays (AGENTMESH_ENTRA_ENFORCE=true) accept the WS
+                # connect frame. Mirror of the TS SDK's behaviour
+                # (mesh-client.ts passes the same token under the
+                # ``token`` key on the connect frame). The entrypoint
+                # script populates AGT_OAUTH_TOKEN via workload-identity
+                # exchange when the operator opts into Entra-verified mesh
+                # peers via `MESH_AUTH_BACKEND=EntraAgentIdentity` on the
+                # KarsAuthConfig.
+                import os as _os
+                _entra_token = _os.environ.get("AGT_OAUTH_TOKEN") or None
 
-            self._relay = RelayTransport(
-                url=self._config.relay_url,
-                identity_did=self._identity.did,
-                identity_signing_key=self._identity.signing_key,
-                identity_public_key=self._identity.verify_key_bytes,
-                user_agent=self._config.user_agent,
-                heartbeat_interval_seconds=self._config.heartbeat_interval_seconds,
-                reconnect_initial_seconds=self._config.reconnect_initial_seconds,
-                reconnect_max_seconds=self._config.reconnect_max_seconds,
-                on_frame=self._handle_frame,
-                entra_token=_entra_token,
-            )
-            await self._relay.connect()
-            self._is_connected = True
-            logger.info(
-                "MeshClient connected: name=%s did=%s",
-                self._config.name,
-                self._identity.did,
-            )
+                self._relay = RelayTransport(
+                    url=self._config.relay_url,
+                    identity_did=self._identity.did,
+                    identity_signing_key=self._identity.signing_key,
+                    identity_public_key=self._identity.verify_key_bytes,
+                    user_agent=self._config.user_agent,
+                    heartbeat_interval_seconds=self._config.heartbeat_interval_seconds,
+                    reconnect_initial_seconds=self._config.reconnect_initial_seconds,
+                    reconnect_max_seconds=self._config.reconnect_max_seconds,
+                    on_frame=self._handle_frame,
+                    entra_token=_entra_token,
+                )
+                await self._relay.connect()
+                self._is_connected = True
+                logger.info(
+                    "MeshClient connected: name=%s did=%s",
+                    self._config.name,
+                    self._identity.did,
+                )
+            except BaseException:
+                # A connect() that fails PART-WAY (very common at sandbox
+                # startup: the relay WS isn't ready yet, so `_relay.connect()`
+                # raises) must NOT leak the prekey-writer lock we took above.
+                # Without this teardown the fd stayed open and every retry in
+                # the same process self-deadlocked on its own held flock,
+                # misreported as "another mesh-client holds the lock
+                # (pid=<self>)" — so the agent's mesh responder never started
+                # and inbound task delivery (missions) was never processed.
+                # Release the lock + tear down any partial state, then re-raise
+                # so the caller retries from a clean slate.
+                if self._relay is not None:
+                    try:
+                        await self._relay.disconnect()
+                    except Exception:  # noqa: BLE001 — best-effort cleanup
+                        pass
+                    self._relay = None
+                if self._registry is not None:
+                    try:
+                        await self._registry.aclose()
+                    except Exception:  # noqa: BLE001 — best-effort cleanup
+                        pass
+                    self._registry = None
+                self._release_prekey_writer_lock()
+                self._is_connected = False
+                raise
 
     async def disconnect(self) -> None:
         """Close the relay WS and HTTP client. Per-peer ratchet state
