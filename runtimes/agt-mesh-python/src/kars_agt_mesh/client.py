@@ -104,6 +104,13 @@ class MeshClient:
         self._plaintext_peers: set[str] = set(config.plaintext_peers)
         # Inbox queue — drained by `inbox()` async iterator.
         self._inbox: asyncio.Queue[InboundMessage] = asyncio.Queue()
+        # Tool inbox — the single-owner fan-out buffer. The mesh worker is the
+        # sole consumer of `_inbox`; inbound frames it does NOT execute as a
+        # task_request (a peer's task_response reply, a task_progress tick,
+        # free-form chat) are re-queued here so the agent's kars_mesh_inbox /
+        # kars_mesh_await tools can read them without racing the worker for the
+        # same queue. Mirrors OpenClaw's onMessage→mesh_inbox buffer.
+        self._tool_inbox: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self._is_connected = False
         # Filesystem handle for the prekey-writer lock (acquired by
         # ``_acquire_prekey_writer_lock``, released on ``disconnect``
@@ -498,6 +505,16 @@ class MeshClient:
         underlying ``asyncio.Queue`` is unbounded by default; callers
         with strict memory budgets should consume in a tight loop."""
         return _InboxIterator(self._inbox)
+
+    def tool_inbox(self) -> AsyncIterator[InboundMessage]:
+        """Async iterator over the tool-inbox fan-out buffer.
+
+        The mesh worker re-queues here every inbound frame it does not itself
+        execute as a task_request (peer replies, progress ticks, chat), so the
+        agent's ``kars_mesh_inbox`` / ``kars_mesh_await`` tools drain this
+        instead of ``_inbox`` — avoiding a race with the worker over one queue.
+        """
+        return _InboxIterator(self._tool_inbox)
 
     # ── Internals ───────────────────────────────────────────────────────
 
