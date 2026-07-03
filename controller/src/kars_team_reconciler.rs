@@ -1496,7 +1496,10 @@ fn orchestration_contract(team: &KarsTeam) -> String {
          needs. Collect their results from your mesh inbox, then compile the team's deliverable per \
          the charter. If a sub-agent fails or times out, note it and proceed with what you have — do \
          not block the whole team on one member. Do the delegation yourself via these tools; do not \
-         attempt all the members' work alone unless spawning is unavailable."
+         attempt all the members' work alone unless spawning is unavailable.\n\
+         Loop inheritance: if your charter defines a LOOP (a cycle + success criteria), give EACH \
+         sub-agent the same loop and success criteria in its delegated task, so the whole team runs \
+         the loop — not just you."
     )
 }
 
