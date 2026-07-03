@@ -71,8 +71,7 @@ _DISCOVER_SCHEMA = {
         "or `did` (full DID like did:mesh:abc123…). Returns the agent record "
         "including AMID, capabilities, reputation score, trust tier, and "
         "(if applicable) verified Entra app ID. Use this to find peer agents "
-        "before you would send them messages via kars_mesh_send (NOTE: "
-        "kars_mesh_send is not available in Hermes v0.5.2)."
+        "before delegating work to them with kars_mesh_send."
     ),
     "parameters": {
         "type": "object",

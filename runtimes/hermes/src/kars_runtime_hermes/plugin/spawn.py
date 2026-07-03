@@ -6,10 +6,9 @@ router dispatches to the K8s API on AKS/local-k8s and to the Docker
 Engine API in docker dev.
 
 Mirror of OpenClaw's ``runtimes/openclaw/src/core/agt-tools/agt.ts``
-spawn family. Trust seeding from parent + siblings happens in Act 2
-once the Python AGT MeshClient lands; Act 1 spawns work without that
-(child can be spawned, just can't task-delegate via E2E mesh until
-Act 2).
+spawn family. Spawned sub-agents are task-delegated over the E2E
+encrypted mesh via ``kars_mesh_send`` (the parent spawns, then hands the
+child a task and awaits its reply) — the same pattern OpenClaw uses.
 """
 
 from __future__ import annotations
@@ -136,10 +135,9 @@ def _kars_spawn(args: dict[str, Any], **_kwargs: Any) -> str:
         )
     else:
         out["message"] = (
-            f"Sub-agent '{name}' is Running. NOTE: kars_mesh_* tools are not "
-            "available in Hermes v0.5.2 (Act 2 ships the Python AGT MeshClient). "
-            "Coordinate with the sub-agent via shared Foundry Memory Store or "
-            "Foundry Conversations until then."
+            f"Sub-agent '{name}' is Running and ready for mesh communication. "
+            f"Use kars_mesh_send(to_agent='{name}', content='<task>') to hand it "
+            "a task and receive its reply over the E2E encrypted mesh."
         )
     return json.dumps(out)
 
@@ -207,14 +205,16 @@ def _kars_spawn_list(_args: dict[str, Any], **_kwargs: Any) -> str:
 _SPAWN_SCHEMA = {
     "name": "kars_spawn",
     "description": (
-        "Spawn a secure isolated sub-agent. The sub-agent runs in its own "
-        "container with a SEPARATE filesystem — it CANNOT see your files. "
-        "Pass `role` describing the sub-agent's persona (e.g. 'data analyst', "
-        "'technical writer') so siblings can find it by role.\n\n"
-        "NOTE: Inter-agent E2E messaging (kars_mesh_*) is not available "
-        "in Hermes v0.5.2; the sub-agent will be running but cannot be "
-        "task-delegated via mesh. Use Foundry Memory Store or Foundry "
-        "Conversations to share data until Hermes v0.5.3."
+        "Spawn a secure isolated sub-agent on AKS with E2E encrypted mesh "
+        "communication (Signal Protocol). The sub-agent runs in its own "
+        "container with a SEPARATE filesystem — it CANNOT see your files. To "
+        "hand it a task and get its result back, spawn it then call "
+        "`kars_mesh_send(to_agent='<name>', content='<task>')` — that delivers "
+        "the task over the encrypted mesh and returns the sub-agent's reply. "
+        "ALWAYS pass `role` describing the sub-agent's persona (e.g. 'data "
+        "analyst', 'technical writer') so siblings can resolve role references "
+        "to names. Sub-agents can also message each other directly via "
+        "`kars_mesh_send`, so you don't have to relay everything yourself."
     ),
     "parameters": {
         "type": "object",

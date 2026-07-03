@@ -150,6 +150,65 @@ def _run_hermes_agent_inprocess(prompt: str) -> tuple[str, bool]:
         return f"WORKER_ERROR: in-process agent failed: {exc}", False
 
 
+def _telemetry_cursor() -> int:
+    """Current router task-telemetry cursor, so we can capture only the events
+    THIS run produces (the router is the honest source of token/round/tool
+    usage — every model call flows through it)."""
+    try:
+        from . import router_client  # noqa: PLC0415
+
+        data = router_client.call_json("GET", "/telemetry/cursor")
+        return int(data.get("cursor", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _telemetry_since(cursor: int) -> list[dict[str, Any]]:
+    """Router telemetry events recorded since `cursor` — the run's real
+    per-round + per-tool trace (the same shape the Bridge renders as activity)."""
+    try:
+        from . import router_client  # noqa: PLC0415
+
+        data = router_client.call_json(
+            "GET", "/telemetry/trace", params={"since": cursor}
+        )
+        events = data.get("events") or []
+        return events if isinstance(events, list) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _summarize_telemetry(
+    events: list[dict[str, Any]],
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    """Fold router telemetry events into (RunTelemetry dict, capped trace).
+
+    A run that produced tokens/rounds is `did_work` on the controller side, so
+    a real Hermes deliverable is scored as a substantive success (Healthy)
+    instead of `barren` ('low yield'); the trace powers the Activity tab.
+    """
+    prompt = completion = total = rounds = tool_calls = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("kind") == "round":
+            prompt += int(ev.get("prompt_tokens", 0) or 0)
+            completion += int(ev.get("completion_tokens", 0) or 0)
+            total += int(ev.get("total_tokens", 0) or 0)
+            rounds += 1
+        elif ev.get("kind") == "tool":
+            tool_calls += 1
+    telemetry = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "rounds": rounds,
+        "tool_calls": tool_calls,
+    }
+    # Bound the trace carried on the wire (the router already caps per task).
+    return telemetry, events[-400:]
+
+
 async def _resolve_sender_name(client: Any, did: str) -> str | None:
     """Reverse-lookup a peer DID → display name via the registry.
 
@@ -405,11 +464,16 @@ async def _handle_message(client: Any, msg: Any) -> None:
         hb_task = asyncio.create_task(
             _heartbeat_loop(client, msg, sender_name, from_agent)
         )
+    # Snapshot the router telemetry cursor so we can attribute exactly this
+    # run's rounds/tools/tokens to the reply (the router is the honest source).
+    loop = asyncio.get_running_loop()
+    tel_cursor = 0
+    if _envelope_is_task:
+        tel_cursor = await loop.run_in_executor(None, _telemetry_cursor)
     # Run the agent IN-PROCESS (in an executor thread so the mesh loop keeps
     # servicing heartbeats + the agent's own kars_mesh_* tool calls, which
     # schedule onto this same loop). This is the crux of the single-process
     # model: the agent's kars_mesh_send reuses the worker's MeshClient.
-    loop = asyncio.get_running_loop()
     try:
         reply, reply_ok = await asyncio.wait_for(
             loop.run_in_executor(None, _run_hermes_agent_inprocess, prompt_text),
@@ -430,11 +494,16 @@ async def _handle_message(client: Any, msg: Any) -> None:
 
     # Wrap the reply for the delivery waiter (controller or team principal): it
     # parses base64(json(FederationMessage)) — a TaskResponse matched by the
-    # sender DID — and reads content/ok (defaults true). A raw text reply is
+    # sender DID — and reads content/ok/telemetry/trace. A raw text reply is
     # dropped. When the inbound was a task_request, reply with a task_response
-    # envelope mirroring OpenClaw's shape (content/ok/in_reply_to/from_agent);
-    # otherwise (peer chat) send the raw text.
+    # envelope mirroring OpenClaw's shape — INCLUDING the real telemetry (token
+    # counts) + trace, so the controller scores the run as substantive work
+    # (did_work → Healthy, not 'low yield') and the Bridge Activity tab renders
+    # the run's rounds/tools. Otherwise (peer chat) send the raw text.
     if _envelope_is_task:
+        telemetry, trace = _summarize_telemetry(
+            await loop.run_in_executor(None, _telemetry_since, tel_cursor)
+        )
         reply_payload = json.dumps(
             {
                 "type": "task_response",
@@ -442,6 +511,8 @@ async def _handle_message(client: Any, msg: Any) -> None:
                 "ok": reply_ok,
                 "in_reply_to": task_request_id or prompt_text[:256],
                 "from_agent": from_agent,
+                "telemetry": telemetry,
+                "trace": trace,
                 "timestamp": _utc_now_iso(),
             }
         ).encode("utf-8")

@@ -23,6 +23,8 @@ import json
 import logging
 import os
 import threading
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -277,26 +279,87 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
     payload_raw = args.get("content")
     if payload_raw is None:
         payload_raw = args.get("payload", "")
-    if isinstance(payload_raw, str):
-        # Auto-prepend the Peer roster block when sending text to a
-        # sibling and 2+ spawned peers exist. Mirrors OpenClaw's
-        # `runtimes/openclaw/src/core/agt-tools/agt.ts:545` behaviour
-        # so a Hermes parent in an analyst→viz→writer pipeline gives
-        # its children the same authoritative name map that an
-        # OpenClaw parent does. Binary payloads (file_transfer
-        # envelopes etc.) are passed through untouched.
-        payload_raw = _maybe_prepend_peer_roster(payload_raw, peer)
-        payload = payload_raw.encode("utf-8")
-    else:
-        payload = bytes(payload_raw)
 
     loop = _get_or_init_loop()
+
+    # Binary payloads (file_transfer envelopes etc.) are fire-and-forget: send
+    # the raw bytes and return. Only TEXT content is a delegated task.
+    if not isinstance(payload_raw, str):
+        payload = bytes(payload_raw)
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                client.send_by_name(to=peer, payload=payload), loop
+            )
+            future.result(timeout=30.0)
+            return json.dumps({"ok": True, "to_agent": peer, "bytes": len(payload)})
+        except MeshPeerNotFoundError as exc:
+            return json.dumps({"error": f"Peer {peer!r} not found: {exc}"})
+        except MeshTransportError as exc:
+            return json.dumps({"error": f"Transport error: {exc}"})
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"error": f"send failed: {exc}"})
+
+    # Text task: deliver as a `task_request` so the receiving sub-agent's worker
+    # EXECUTES it (a raw frame is only buffered to its tool inbox, never run),
+    # then WAIT for its `task_response` and return the reply — one call to
+    # delegate + collect, exactly like OpenClaw's kars_mesh_send. Auto-prepend
+    # the Peer roster block so the child can resolve sibling role references.
+    content_text = _maybe_prepend_peer_roster(payload_raw, peer)
+    request_id = str(uuid.uuid4())
+    envelope = json.dumps(
+        {
+            "type": "task_request",
+            "content": content_text,
+            "request_id": request_id,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+    ).encode("utf-8")
+
+    # How long to await the sub-agent's reply. Matches OpenClaw's ~5.5 min
+    # patience for a child doing real work; overridable per call.
+    wait_seconds = float(args.get("timeout_seconds", 330))
+
+    async def _send_and_wait() -> dict[str, Any]:
+        # Resolve the peer's DID first so we can match its reply (the reply's
+        # from_did is the sub-agent's DID). Then send the task_request and drain
+        # the tool inbox (the worker's fan-out buffer) for the task_response.
+        peer_rec = await client._registry.find_by_display_name(peer)  # noqa: SLF001
+        if peer_rec is None:
+            return {"error": f"Peer {peer!r} not found in registry"}
+        peer_did = peer_rec.did
+        await client.send_by_did(to=peer_did, payload=envelope)
+
+        deadline = asyncio.get_event_loop().time() + wait_seconds
+        async for msg in client.tool_inbox():
+            if msg.from_did != peer_did:
+                # Not from our peer — put it back for whoever awaits it.
+                await client._tool_inbox.put(msg)  # noqa: SLF001
+                await asyncio.sleep(0.05)
+            else:
+                text = msg.payload.decode("utf-8", errors="replace")
+                content = text
+                ok = True
+                try:
+                    env = json.loads(text)
+                    if isinstance(env, dict) and env.get("type") == "task_response":
+                        content = str(env.get("content", ""))
+                        ok = bool(env.get("ok", True))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                return {"ok": ok, "from_agent": peer, "reply": content}
+            if asyncio.get_event_loop().time() >= deadline:
+                return {
+                    "ok": False,
+                    "to_agent": peer,
+                    "error": f"no reply from {peer!r} within {wait_seconds:.0f}s "
+                    "(task delivered; check kars_mesh_inbox later)",
+                }
+        return {"error": "mesh inbox closed"}
+
     try:
-        future = asyncio.run_coroutine_threadsafe(
-            client.send_by_name(to=peer, payload=payload), loop
-        )
-        future.result(timeout=30.0)
-        return json.dumps({"ok": True, "to_agent": peer, "bytes": len(payload)})
+        future = asyncio.run_coroutine_threadsafe(_send_and_wait(), loop)
+        result = future.result(timeout=wait_seconds + 30.0)
+        return json.dumps(result)
     except MeshPeerNotFoundError as exc:
         return json.dumps({"error": f"Peer {peer!r} not found: {exc}"})
     except MeshTransportError as exc:
@@ -552,8 +615,15 @@ def _iso_utc_no_tz() -> str:
 _MESH_TOOLS = [
     (
         "kars_mesh_send",
-        "Send an encrypted message to a peer agent by display name "
-        "(real impl, Act 2.1 — Python AGT MeshClient).",
+        "Delegate a task to a sub-agent (or peer) over the E2E encrypted mesh "
+        "and return its reply. Call kars_mesh_send(to_agent='<name>', "
+        "content='<task>') — the text is delivered as a governed task the "
+        "sub-agent EXECUTES, and this call blocks until the sub-agent replies "
+        "(up to ~5.5 min, override with timeout_seconds) and returns "
+        "{ok, from_agent, reply}. This is the way to hand a spawned sub-agent "
+        "work and collect its result. Sub-agents have isolated filesystems, so "
+        "put everything the agent needs in `content`. (Binary/file payloads are "
+        "fire-and-forget; use kars_mesh_transfer_file for files.)",
         _kars_mesh_send,
     ),
     (
