@@ -405,6 +405,46 @@ describe("tool parameter schemas", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 7b. Cross-runtime inbound payload normalization
+// ---------------------------------------------------------------------------
+
+describe("normalizeInboundMessage — cross-runtime payload parsing", () => {
+  it("parses a JSON-object string (Hermes/Python sender) into an object", async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const { normalizeInboundMessage } = await import("./index.js");
+    const raw = JSON.stringify({ type: "task_request", content: "hello", request_id: "abc" });
+    const out = normalizeInboundMessage(raw) as any;
+    expect(typeof out).toBe("object");
+    expect(out.type).toBe("task_request");
+    expect(out.content).toBe("hello");
+    delete process.env.AGT_SKIP_INIT;
+  });
+
+  it("passes a structured object (OpenClaw/TS sender) through unchanged", async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const { normalizeInboundMessage } = await import("./index.js");
+    const obj = { type: "task_request", content: "hi" };
+    expect(normalizeInboundMessage(obj)).toBe(obj);
+    delete process.env.AGT_SKIP_INIT;
+  });
+
+  it("leaves a plain (non-JSON) chat string untouched", async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const { normalizeInboundMessage } = await import("./index.js");
+    expect(normalizeInboundMessage("just a chat message")).toBe("just a chat message");
+    delete process.env.AGT_SKIP_INIT;
+  });
+
+  it("leaves a malformed JSON-looking string as the raw string (no throw)", async () => {
+    process.env.AGT_SKIP_INIT = "1";
+    const { normalizeInboundMessage } = await import("./index.js");
+    const broken = '{"type": "task_request", oops';
+    expect(normalizeInboundMessage(broken)).toBe(broken);
+    delete process.env.AGT_SKIP_INIT;
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 8. Tool execute error handling
 // ---------------------------------------------------------------------------
 
