@@ -186,24 +186,46 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
             import threading as _threading  # noqa: PLC0415
 
             def _eager_mesh_init() -> None:
-                try:
-                    _mesh_module._get_or_init_client()  # noqa: SLF001
-                    logger.info("MeshClient pre-connected at plugin load")
-                    # Now start the auto-responder worker (no-op unless
-                    # KARS_MESH_AUTO_RESPONDER=1, which the controller sets
-                    # on sub-agent containers — parent is not enabled to
-                    # avoid the parent looping on its own outbound).
-                    try:
-                        from . import mesh_worker as _worker  # noqa: PLC0415
+                # Own the single per-pod MeshClient + worker in THIS process —
+                # the plugin-loaded gateway — so the mesh worker can run the
+                # agent IN-PROCESS (its kars_* tools reuse this client). Retry
+                # with backoff until the router relay proxy is up (it may not be
+                # ready the instant the plugin loads): a single attempt used to
+                # fail on cold start and silently leave the agent off the mesh,
+                # which is why a separate keepalive daemon was bolted on. With a
+                # reliable retry here, the gateway is the sole mesh owner and no
+                # side-car process is needed.
+                import time as _time  # noqa: PLC0415
 
-                        _worker.start_worker(_mesh_module._get_or_init_client)  # noqa: SLF001
+                client = None
+                for _attempt in range(1, 121):
+                    try:
+                        client = _mesh_module._get_or_init_client()  # noqa: SLF001
+                        logger.info(
+                            "MeshClient connected at plugin load (attempt %d)",
+                            _attempt,
+                        )
+                        break
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning("Could not start mesh worker: %s", exc)
+                        if _attempt >= 120:
+                            logger.warning(
+                                "Eager MeshClient init failed after %d attempts: %s",
+                                _attempt,
+                                exc,
+                            )
+                            return
+                        _time.sleep(3)
+                if client is None:
+                    return
+                # Start the auto-responder worker — the sole `_inbox` consumer.
+                # It runs delivered task_requests via the in-process agent and
+                # fans everything else out to the tool inbox.
+                try:
+                    from . import mesh_worker as _worker  # noqa: PLC0415
+
+                    _worker.start_worker(_mesh_module._get_or_init_client)  # noqa: SLF001
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Eager MeshClient init failed (will retry on first tool call): %s",
-                        exc,
-                    )
+                    logger.warning("Could not start mesh worker: %s", exc)
 
             _threading.Thread(
                 target=_eager_mesh_init,

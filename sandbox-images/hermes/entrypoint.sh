@@ -866,73 +866,21 @@ if [ "$1" = "hermes" ]; then
   # just appear in directory listings.
   # SRE-mode sandboxes opt out: the SRE agent is intentionally
   # off-mesh (no kars_mesh_* tools, no relay egress allowlisted).
-  if [ "${SRE_ENABLED:-}" != "true" ] && [ "${KARS_MESH_PROVIDER:-}" = "agt" ]; then
-    # The MeshClient dials the relay through the router sidecar's
-    # `/agt/relay` proxy on 127.0.0.1:8443. The sidecar can lag the
-    # agent's startup by a few seconds; if the FIRST dial happens
-    # before it is listening the connection fails. Previously the
-    # keepalive exited FATALLY on that first failure and NEVER retried,
-    # so an idle agent (waiting for mesh task delivery, making no tool
-    # call) stayed permanently unregistered + undiscoverable. Wait for
-    # the router relay proxy to be ready first, and (below) retry the
-    # client init with backoff so a transient early failure self-heals.
-    echo "[kars-hermes] waiting for router relay proxy (127.0.0.1:8443/agt/relay) …"
-    _RP_READY=0
-    for _i in $(seq 1 60); do
-      # A ready WS endpoint answers a plain GET with 400/426 (needs
-      # upgrade); connection-refused (curl exit 7) means not up yet.
-      _CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8443/agt/relay" 2>/dev/null || echo 000)"
-      if [ "$_CODE" != "000" ]; then
-        echo "[kars-hermes] router relay proxy ready (HTTP $_CODE) after ${_i}s"
-        _RP_READY=1
-        break
-      fi
-      sleep 1
-    done
-    [ "$_RP_READY" = "1" ] || echo "[kars-hermes] WARN: router relay proxy not confirmed ready after 60s — keepalive will still retry"
-
-    echo "[kars-hermes] starting persistent mesh-keepalive (background)"
-    # KARS_MESH_AUTO_RESPONDER=1 ⇒ the auto-responder worker actually
-    # invokes Hermes to generate replies to inbound mesh messages.
-    # Without it, the worker drains the inbox and returns silently
-    # (great for "I exist on the mesh" presence, useless for actual
-    # cross-agent conversation). We set it INLINE on the env block
-    # below because the controller strips KARS_-prefixed user
-    # extraEnv (reserved-prefix guard in reconciler/mod.rs:1820),
-    # so it can't reach us via the KarsSandbox CR.
-    $AS_SANDBOX env HOME="$HOME" HERMES_HOME="$HERMES_HOME" \
-      KARS_MESH_AUTO_RESPONDER=1 \
-      python3 -c "
-import sys, threading, time
-print('[kars-mesh-keepalive] starting', flush=True)
-from kars_runtime_hermes.plugin import mesh as _m
-# Retry the connect with backoff — the router relay proxy may still be
-# warming up. Giving up on the first failure (the old behaviour) left an
-# idle agent permanently unregistered.
-_client = None
-for _attempt in range(1, 121):
-    try:
-        _client = _m._get_or_init_client()
-        print(f'[kars-mesh-keepalive] mesh client registered + connected (attempt {_attempt})', flush=True)
-        break
-    except Exception as e:
-        if _attempt >= 120:
-            print(f'[kars-mesh-keepalive] FATAL after {_attempt} attempts: {e!r}', flush=True)
-            sys.exit(1)
-        print(f'[kars-mesh-keepalive] connect attempt {_attempt} failed ({e!r}); retrying in 3s', flush=True)
-        time.sleep(3)
-try:
-    from kars_runtime_hermes.plugin import mesh_worker as _w
-    _w.start_worker(_m._get_or_init_client)
-    print('[kars-mesh-keepalive] auto-responder worker started', flush=True)
-except Exception as e:
-    print(f'[kars-mesh-keepalive] worker skipped: {e!r}', flush=True)
-# Park indefinitely — the MeshClient + worker live in our process; if we
-# exit, the relay drops our socket and the registry marks us stale
-# within ~90s.
-threading.Event().wait()
-" > /tmp/hermes-mesh-keepalive.log 2>&1 &
-  fi
+  # ── Mesh ownership: the gateway process owns it ───────────────────
+  # `hermes gateway run` (below) loads the Hermes plugins — including the kars
+  # plugin — during its own startup. The kars plugin's register() fires the
+  # eager-init (which retries until the router relay proxy is up), creating the
+  # ONE per-pod MeshClient + mesh worker and registering the agent on the mesh,
+  # all inside the gateway process. Because the tools, the MeshClient, and the
+  # worker now live in the SAME process, the worker runs each delivered
+  # task_request through the agent IN-PROCESS (hermes_cli.oneshot._run_agent) —
+  # exactly like OpenClaw's single always-on session. No side-car keepalive, no
+  # `hermes -z` subprocess, no second MeshClient, no prekey-lock contention, no
+  # ephemeral identity. A delegating principal's kars_mesh_send reuses this very
+  # client, so any-to-any runtime delegation works.
+  #
+  # SRE-mode sandboxes are intentionally off-mesh (no kars_mesh_* tools, no relay
+  # egress allowlisted); the plugin's register() no-ops the mesh init for them.
 
   exec $AS_SANDBOX hermes gateway run --accept-hooks
 else

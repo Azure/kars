@@ -117,21 +117,37 @@ _WORKER_TASK: asyncio.Task[None] | None = None
 _WORKER_LOOP: asyncio.AbstractEventLoop | None = None
 
 
-def _hermes_cmd(prompt: str) -> list[str]:
-    """Build the hermes -z command vector for one inbound message.
+def _run_hermes_agent_inprocess(prompt: str) -> tuple[str, bool]:
+    """Run the Hermes agent loop IN-PROCESS and return ``(output, ok)``.
 
-    Sets HOME=/sandbox + HERMES_HOME=/sandbox/.hermes by injecting them
-    into the child env (the parent's `hermes -z` daemon already runs
-    with them; subprocess workers need them explicitly because the
-    plugin-load environment isn't guaranteed to carry them through)."""
-    return ["hermes", "-z", prompt]
+    This executes inside the plugin-loaded process that owns the single
+    per-pod ``MeshClient``, so the agent's ``kars_*`` tools (``kars_mesh_send``,
+    ``kars_spawn``, ``kars_mesh_inbox``/``await``) reuse THIS process's client —
+    the same single-process model OpenClaw uses. No ``hermes -z`` subprocess, no
+    second ``MeshClient``, no prekey-lock contention, no ephemeral identity.
 
-
-def _hermes_env() -> dict[str, str]:
-    env = dict(os.environ)
-    env.setdefault("HOME", "/sandbox")
-    env.setdefault("HERMES_HOME", "/sandbox/.hermes")
-    return env
+    ``agent.chat`` is synchronous (it drives its own tool-calling loop), so the
+    caller must invoke this in an executor thread to keep the mesh event loop
+    responsive while the agent works.
+    """
+    # Non-interactive posture. hermes_cli.oneshot.run_oneshot sets these before
+    # calling _run_agent; we call _run_agent directly (run_oneshot also does a
+    # process-global stdout/stderr redirect + logging.disable that is unsafe for
+    # concurrent in-process use), so replicate just the env it relies on.
+    os.environ.setdefault("HERMES_YOLO_MODE", "1")
+    os.environ.setdefault("HERMES_ACCEPT_HOOKS", "1")
+    os.environ.setdefault("HOME", "/sandbox")
+    os.environ.setdefault("HERMES_HOME", "/sandbox/.hermes")
+    try:
+        from hermes_cli.oneshot import _run_agent  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return f"WORKER_ERROR: hermes oneshot API unavailable: {exc}", False
+    try:
+        out = (_run_agent(prompt) or "").strip()
+        return out, bool(out)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("mesh_worker: in-process hermes agent failed")
+        return f"WORKER_ERROR: in-process agent failed: {exc}", False
 
 
 async def _resolve_sender_name(client: Any, did: str) -> str | None:
@@ -347,26 +363,25 @@ async def _handle_message(client: Any, msg: Any) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.debug("mesh_worker: trust publish failed (non-fatal): %s", exc)
 
-    # LLM-spawning is opt-in via KARS_MESH_AUTO_RESPONDER for free-form peer
-    # chat: a top-level (channel-driven) Hermes agent must NOT auto-spawn
-    # hermes -z on every inbound or it would infinite-loop on its own replies.
-    #
-    # A delivered `task_request` is DIFFERENT: it is an explicit request to do
-    # work — the controller delivering a mission to a principal, or a principal
-    # delegating to a sub-agent — so it ALWAYS runs the LLM regardless of the
-    # opt-in. This is safe against the loop the opt-in guards: a sub-agent's
-    # reply is a `task_response` (not a `task_request`), so a principal receiving
-    # it still falls through to the drained/inbox path below and never re-runs.
-    # Without this, a Hermes MISSION principal (no parent label → no
-    # AUTO_RESPONDER) drains the controller's task_request without executing it,
-    # and the mission times out with "no progress heartbeat".
-    auto_responder = os.environ.get(
-        "KARS_MESH_AUTO_RESPONDER", "0"
-    ) in {"1", "true", "True"}
-    if not auto_responder and not _envelope_is_task:
+    # The mesh worker's job is task delivery: a `task_request` (controller→
+    # principal, or principal→sub-agent) is executed via the in-process agent.
+    # EVERY other inbound (a sub-agent's `task_response` reply, a `task_progress`
+    # tick, free-form peer chat) is NOT executed — it is buffered to the tool
+    # inbox so the in-process agent's kars_mesh_inbox / kars_mesh_await tools can
+    # read it. This single-owner fan-out mirrors OpenClaw's onMessage→mesh_inbox
+    # buffer: the worker is the sole `_inbox` consumer and never lets a reply the
+    # delegating agent is awaiting get dropped, and never re-executes a reply
+    # (which would loop). Channel chat reaches a Hermes agent through the
+    # gateway's own pipeline, not this mesh worker, so there is nothing else to
+    # auto-run here.
+    if not _envelope_is_task:
+        try:
+            client._tool_inbox.put_nowait(msg)  # noqa: SLF001 — internal but stable
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("mesh_worker: tool-inbox buffer failed (non-fatal): %s", exc)
         logger.info(
-            "mesh_worker: inbox drained from %s (AUTO_RESPONDER off, not a "
-            "task_request; structural envelopes saved, LLM response suppressed)",
+            "mesh_worker: buffered inbound from %s to tool inbox "
+            "(not a task_request; for kars_mesh_inbox/await)",
             msg.from_did,
         )
         return
@@ -381,39 +396,29 @@ async def _handle_message(client: Any, msg: Any) -> None:
     from_agent = (
         os.environ.get("SANDBOX_NAME") or os.environ.get("HERMES_PROFILE") or ""
     )
-    proc = await asyncio.create_subprocess_exec(
-        *_hermes_cmd(prompt_text),
-        env=_hermes_env(),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    # Keep the originator's delivery alive while hermes -z runs. Heartbeat for
+    # Keep the originator's delivery alive while the agent runs. Heartbeat for
     # ANY delivered task (controller mission OR a team principal's sub-agent
-    # task) so a long run isn't killed as "no progress heartbeat" — the
-    # original Hermes-mission failure mode. Mirrors OpenClaw.
+    # task) so a long run isn't killed as "no progress heartbeat". Mirrors
+    # OpenClaw.
     hb_task: asyncio.Task[None] | None = None
     if _envelope_is_task:
         hb_task = asyncio.create_task(
             _heartbeat_loop(client, msg, sender_name, from_agent)
         )
+    # Run the agent IN-PROCESS (in an executor thread so the mesh loop keeps
+    # servicing heartbeats + the agent's own kars_mesh_* tool calls, which
+    # schedule onto this same loop). This is the crux of the single-process
+    # model: the agent's kars_mesh_send reuses the worker's MeshClient.
+    loop = asyncio.get_running_loop()
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout_seconds
+        reply, reply_ok = await asyncio.wait_for(
+            loop.run_in_executor(None, _run_hermes_agent_inprocess, prompt_text),
+            timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
         reply = f"WORKER_TIMEOUT after {timeout_seconds:.0f}s"
         reply_ok = False
         logger.warning("mesh_worker: %s for inbound from %s", reply, msg.from_did)
-    else:
-        reply = stdout_b.decode("utf-8", errors="replace").strip()
-        reply_ok = proc.returncode == 0 and bool(reply)
-        if proc.returncode != 0:
-            reply = (
-                f"WORKER_ERROR rc={proc.returncode}\nstdout:\n{reply}"
-                f"\nstderr:\n{stderr_b.decode(errors='replace').strip()}"
-            )
 
     # Stop heartbeats now that the run has produced its terminal result.
     if hb_task is not None:

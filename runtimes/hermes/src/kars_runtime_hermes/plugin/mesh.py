@@ -318,8 +318,10 @@ def _kars_mesh_inbox(_args: dict[str, Any], **_kwargs: Any) -> str:
 
     async def _drain() -> None:
         # Non-blocking drain: try to pull as many messages as are
-        # immediately available, no waiting.
-        queue = client._inbox  # noqa: SLF001 — internal but stable
+        # immediately available, no waiting. Reads the TOOL inbox (the worker's
+        # fan-out buffer), NOT the raw _inbox — the worker is the sole consumer
+        # of _inbox and re-queues non-task frames here for us.
+        queue = client._tool_inbox  # noqa: SLF001 — internal but stable
         while not queue.empty():
             msg: InboundMessage = await queue.get()
             drained.append(
@@ -356,7 +358,7 @@ def _kars_mesh_await(args: dict[str, Any], **_kwargs: Any) -> str:
     async def _wait() -> None:
         deadline = asyncio.get_event_loop().time() + timeout
         seen_names: set[str] = set()
-        async for msg in client.inbox():
+        async for msg in client.tool_inbox():
             drained.append(
                 {
                     "from_did": msg.from_did,

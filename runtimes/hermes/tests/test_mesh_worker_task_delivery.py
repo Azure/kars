@@ -1,18 +1,19 @@
-"""Unit tests for the mesh_worker controller task-delivery protocol.
+"""Unit tests for the mesh_worker controller/principal task-delivery protocol.
 
-These guard the three fixes that make a Hermes agent deliver a mission
-end-to-end like OpenClaw over the plaintext control-plane channel:
+These guard the single-process, in-process-agent model that makes a Hermes
+agent deliver + delegate end-to-end like OpenClaw:
 
-1. A `task_request` envelope from the controller is UNWRAPPED — the LLM
-   prompt is the objective `content`, not the raw JSON envelope.
-2. The reply is a `task_response` FederationMessage (base64(json) on the
-   wire), matched by the controller's task-delivery waiter, carrying the
-   real `content` + `ok` flag — a raw text reply is dropped.
-3. While the (potentially long) run executes, the worker ticks
-   `task_progress` heartbeats so the controller's 180s idle timeout does
-   not kill a run doing real work (the original Hermes failure mode).
-
-A non-task peer chat still gets a raw (unwrapped) reply.
+1. A `task_request` envelope is UNWRAPPED — the agent prompt is the objective
+   `content`, not the raw JSON envelope — and executed via the IN-PROCESS Hermes
+   agent (no `hermes -z` subprocess), so its kars_* tools reuse the one client.
+2. The reply is a `task_response` FederationMessage (base64(json) on the wire)
+   matched by the delivery waiter, carrying the real `content` + `ok` flag.
+3. While the run executes, the worker ticks `task_progress` heartbeats so the
+   originator's idle timeout does not kill a long run.
+4. Single-owner fan-out: any inbound that is NOT a task_request (a peer's
+   task_response reply, progress tick, chat) is buffered to the client's
+   `_tool_inbox` for kars_mesh_inbox / kars_mesh_await — never dropped, never
+   re-executed (which would loop).
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from unittest import mock
 
 import pytest
 
@@ -56,6 +56,7 @@ class _FakeClient:
                  peer_did: str = "", peer_name: str = "") -> None:
         self._registry = _FakeRegistry(peer_did, peer_name)
         self._plaintext = plaintext_dids or set()
+        self._tool_inbox: asyncio.Queue[Any] = asyncio.Queue()
         self.sent: list[tuple[str, bytes]] = []
 
     def is_plaintext_peer(self, did: str) -> bool:
@@ -68,51 +69,39 @@ class _FakeClient:
         self.sent.append(("by_did:" + to, payload))
 
 
-def _stub_subprocess(monkeypatch: pytest.MonkeyPatch,
-                     stdout: bytes = b"the deliverable",
-                     returncode: int = 0) -> list[list[str]]:
-    """Stub asyncio.create_subprocess_exec; return a list that captures
-    the argv of each invocation (so the test can assert the prompt)."""
-    captured_argv: list[list[str]] = []
+def _stub_agent(monkeypatch: pytest.MonkeyPatch,
+                output: str = "the deliverable",
+                ok: bool = True) -> list[str]:
+    """Stub the in-process agent runner; capture the prompt(s) it receives."""
+    captured_prompts: list[str] = []
 
-    async def fake_exec(*args: Any, **_kwargs: Any) -> Any:
-        captured_argv.append(list(args))
-        proc = mock.Mock()
-        proc.returncode = returncode
+    def fake_run(prompt: str) -> tuple[str, bool]:
+        captured_prompts.append(prompt)
+        return output, ok
 
-        async def communicate() -> tuple[bytes, bytes]:
-            return (stdout, b"")
-
-        proc.communicate = communicate
-        return proc
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(mesh_worker, "_run_hermes_agent_inprocess", fake_run)
     monkeypatch.setattr(
         "kars_runtime_hermes.plugin.telemetry.submit_trust",
         lambda **_kw: True,
     )
-    return captured_argv
+    return captured_prompts
 
 
 @pytest.mark.asyncio
-async def test_task_request_unwrapped_and_wrapped_as_task_response(
+async def test_task_request_runs_inprocess_and_wraps_task_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KARS_MESH_AUTO_RESPONDER", "1")
     monkeypatch.setenv("SANDBOX_NAME", "hermes-run-1")
-    argv = _stub_subprocess(monkeypatch, stdout=b"the deliverable")
+    prompts = _stub_agent(monkeypatch, output="the deliverable")
 
     client = _FakeClient(plaintext_dids={CONTROLLER_DID})
     envelope = json.dumps(
         {"type": "task_request", "content": "Summarize the repo", "request_id": "r1"}
     ).encode("utf-8")
-    msg = _FakeMsg(from_did=CONTROLLER_DID, payload=envelope)
+    await mesh_worker._handle_message(client, _FakeMsg(CONTROLLER_DID, envelope))
 
-    await mesh_worker._handle_message(client, msg)
-
-    # 1) hermes -z got the OBJECTIVE, not the raw JSON envelope.
-    assert argv, "subprocess must be spawned for an auto-responder task"
-    assert argv[0] == ["hermes", "-z", "Summarize the repo"]
+    # 1) the in-process agent got the OBJECTIVE, not the raw JSON envelope.
+    assert prompts == ["Summarize the repo"]
 
     # 2) reply is a task_response FederationMessage sent by DID to the controller.
     assert len(client.sent) == 1
@@ -129,8 +118,7 @@ async def test_task_request_unwrapped_and_wrapped_as_task_response(
 async def test_task_request_failure_sets_ok_false(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KARS_MESH_AUTO_RESPONDER", "1")
-    _stub_subprocess(monkeypatch, stdout=b"", returncode=3)
+    _stub_agent(monkeypatch, output="", ok=False)
 
     client = _FakeClient(plaintext_dids={CONTROLLER_DID})
     envelope = json.dumps(
@@ -145,63 +133,26 @@ async def test_task_request_failure_sets_ok_false(
 
 
 @pytest.mark.asyncio
-async def test_non_task_peer_chat_replies_raw(
+async def test_non_task_frame_buffered_to_tool_inbox_not_executed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KARS_MESH_AUTO_RESPONDER", "1")
-    _stub_subprocess(monkeypatch, stdout=b"hi there")
+    """A sub-agent's task_response reply (or any non-task frame) must be
+    buffered to the tool inbox for kars_mesh_await — NOT executed (which would
+    loop) and NOT dropped (which would starve a delegating principal)."""
+    prompts = _stub_agent(monkeypatch, output="should-not-run")
 
-    # A real (non-plaintext) agent peer sending free-form chat.
     client = _FakeClient(peer_did=AGENT_DID, peer_name="peer-openclaw")
-    msg = _FakeMsg(from_did=AGENT_DID, payload=b"hello, how are you?")
-
-    await mesh_worker._handle_message(client, msg)
-
-    assert len(client.sent) == 1
-    target, payload = client.sent[0]
-    # Resolved to a friendly name, raw bytes (NOT a task_response envelope).
-    assert target == "by_name:peer-openclaw"
-    assert payload == b"hi there"
-
-
-@pytest.mark.asyncio
-async def test_task_request_runs_without_auto_responder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A Hermes MISSION principal has no KARS_MESH_AUTO_RESPONDER, yet the
-    controller's delivered task_request MUST still execute — otherwise the
-    mission times out with 'no progress heartbeat'."""
-    monkeypatch.delenv("KARS_MESH_AUTO_RESPONDER", raising=False)
-    argv = _stub_subprocess(monkeypatch, stdout=b"delivered")
-
-    client = _FakeClient(plaintext_dids={CONTROLLER_DID})
-    envelope = json.dumps(
-        {"type": "task_request", "content": "Do the mission", "request_id": "m1"}
+    reply_frame = json.dumps(
+        {"type": "task_response", "content": "sub-agent result", "ok": True}
     ).encode("utf-8")
-    await mesh_worker._handle_message(client, _FakeMsg(CONTROLLER_DID, envelope))
+    await mesh_worker._handle_message(client, _FakeMsg(AGENT_DID, reply_frame))
 
-    assert argv and argv[0] == ["hermes", "-z", "Do the mission"]
-    assert len(client.sent) == 1
-    reply = json.loads(client.sent[0][1].decode("utf-8"))
-    assert reply["type"] == "task_response"
-    assert reply["content"] == "delivered"
-
-
-@pytest.mark.asyncio
-async def test_non_task_chat_suppressed_without_auto_responder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Free-form peer chat is still gated by the opt-in: without
-    AUTO_RESPONDER the worker drains it (no LLM, no reply) so a
-    channel-driven top-level agent can't loop on its own replies."""
-    monkeypatch.delenv("KARS_MESH_AUTO_RESPONDER", raising=False)
-    argv = _stub_subprocess(monkeypatch, stdout=b"should-not-run")
-
-    client = _FakeClient(peer_did=AGENT_DID, peer_name="peer-openclaw")
-    await mesh_worker._handle_message(client, _FakeMsg(AGENT_DID, b"just chatting"))
-
-    assert argv == [], "chat must not spawn hermes -z when AUTO_RESPONDER is off"
-    assert client.sent == [], "no reply for suppressed chat"
+    assert prompts == [], "a task_response must not trigger the agent"
+    assert client.sent == [], "no reply is emitted for a buffered frame"
+    # Buffered for the agent's kars_mesh_inbox / kars_mesh_await tools.
+    assert client._tool_inbox.qsize() == 1
+    buffered = client._tool_inbox.get_nowait()
+    assert buffered.from_did == AGENT_DID
 
 
 @pytest.mark.asyncio

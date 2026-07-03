@@ -29,6 +29,10 @@ class _StubClient:
     def __init__(self):
         self.sent = []
         self._identity = type("Id", (), {"did": "did:mesh:receiver"})()
+        self._tool_inbox = asyncio.Queue()
+
+    def is_plaintext_peer(self, did):
+        return False
 
     async def send_by_name(self, *, to, payload):
         self.sent.append((to, payload))
@@ -76,34 +80,26 @@ def test_file_transfer_saved_when_auto_responder_off(tmp_path, monkeypatch):
     assert saved.read_bytes() == b"saved without auto-responder"
 
 
-def test_lll_response_runs_when_auto_responder_on(tmp_path, monkeypatch):
-    """When AUTO_RESPONDER=1 the LLM-spawning path still runs (we
-    don't accidentally short-circuit it)."""
+def test_task_request_runs_inprocess_agent(tmp_path, monkeypatch):
+    """A delivered task_request runs the IN-PROCESS Hermes agent (no
+    subprocess) — the single-process model that lets kars_mesh_send reuse the
+    one MeshClient. Free-form (non-task) chat is NOT executed here (it goes to
+    the tool inbox), matching OpenClaw."""
     incoming = tmp_path / "incoming"
     monkeypatch.setenv("KARS_INCOMING_DIR", str(incoming))
-    monkeypatch.setenv("KARS_MESH_AUTO_RESPONDER", "1")
     monkeypatch.setenv("KARS_MESH_WORKER_TIMEOUT_S", "5")
 
-    spawned = {"count": 0}
+    ran = {"prompts": []}
 
-    class _FakeProc:
-        returncode = 0
+    def _fake_agent(prompt):
+        ran["prompts"].append(prompt)
+        return "ok", True
 
-        async def communicate(self):
-            return b"ok", b""
+    monkeypatch.setattr(mesh_worker, "_run_hermes_agent_inprocess", _fake_agent)
 
-        def kill(self):
-            pass
-
-        async def wait(self):
-            return 0
-
-    async def _fake_spawn(*a, **kw):
-        spawned["count"] += 1
-        return _FakeProc()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn, raising=False)
-    payload = "plain task — please process".encode()
+    payload = json.dumps(
+        {"type": "task_request", "content": "please process"}
+    ).encode()
     msg = _FakeMsg(payload)
     client = _StubClient()
     with mock.patch(
@@ -115,7 +111,10 @@ def test_lll_response_runs_when_auto_responder_on(tmp_path, monkeypatch):
     ):
         asyncio.run(mesh_worker._handle_message(client, msg))
 
-    assert spawned["count"] == 1, "hermes -z must spawn when AUTO_RESPONDER on"
+    assert ran["prompts"] == ["please process"], (
+        "task_request must run the in-process agent with the objective"
+    )
+    assert client.sent, "a task_response reply must be sent"
 
 
 def test_file_transfer_unwraps_openclaw_task_request_envelope(tmp_path, monkeypatch):
@@ -128,10 +127,12 @@ def test_file_transfer_unwraps_openclaw_task_request_envelope(tmp_path, monkeypa
     msg = _FakeMsg(outer.encode())
     client = _StubClient()
 
-    async def _never_spawn(*a, **kw):
-        raise AssertionError("must NOT spawn hermes -z when off")
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _never_spawn, raising=False)
+    # task_request now runs the in-process agent; stub it so the test doesn't
+    # need the hermes_cli runtime. The file must still be saved (the unwrap +
+    # save happens before execution).
+    monkeypatch.setattr(
+        mesh_worker, "_run_hermes_agent_inprocess", lambda _p: ("ok", True)
+    )
     with mock.patch(
         "kars_runtime_hermes.plugin.telemetry.submit_trust"
     ), mock.patch(
