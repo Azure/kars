@@ -260,6 +260,33 @@ export function waitForInbox(timeoutMs: number): Promise<boolean> {
   });
 }
 
+/**
+ * Normalize an inbound mesh payload into a structured value.
+ *
+ * Cross-runtime interop: a TypeScript peer (OpenClaw) sends a structured
+ * object and the AGT SDK delivers it back as a parsed object. But a Python
+ * peer (Hermes) sends raw JSON *bytes* (`client.send_by_did(payload=json.dumps(
+ * {...}).encode())`), which the SDK surfaces to `onMessage` as a JSON *string*.
+ * Left as a string, `message?.type` is `undefined`, so the `task_request`
+ * handlers never fire and a delegated task is silently dropped to the inbox and
+ * never executed. This was observed live: a Hermes principal → OpenClaw
+ * sub-agent delegation hung — the sub-agent received the frame but replied to
+ * nothing. Parsing an object/array-looking string makes the receiver symmetric
+ * across runtimes. Non-JSON strings (plain chat) are returned unchanged.
+ */
+export function normalizeInboundMessage(message: unknown): unknown {
+  if (typeof message !== "string") return message;
+  const trimmed = message.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Not valid JSON — a plain chat string; leave it as-is.
+    }
+  }
+  return message;
+}
+
 // Centralised inbox push: keep counters in lockstep with array growth so
 // the inbox tool can report meaningful diagnostics without scanning every
 // entry. All onMessage / error / handoff sites must call this instead of
@@ -809,7 +836,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
     // Set up message handler — stores received messages in the AGT inbox buffer
     // AND auto-replies to task_request messages via AGT relay (E2E encrypted reply)
-    agtMeshClient.onMessage(async (fromAmid: string, message: any) => {
+    agtMeshClient.onMessage(async (fromAmid: string, rawMessage: any) => {
+      // Cross-runtime payload normalization — a Hermes (Python) peer sends raw
+      // JSON bytes that the SDK surfaces as a *string*; parse it back so the
+      // task_request handlers below see `message.type`. See
+      // normalizeInboundMessage for the full rationale + the live failure it fixes.
+      let message: any = normalizeInboundMessage(rawMessage);
       // Resolve sender name — check local cache first, then look up via registry
       let fromName = amidToName.get(fromAmid) || "";
       if (!fromName && message?.from_agent) {

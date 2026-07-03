@@ -318,17 +318,87 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
     # How long to await the sub-agent's reply. Matches OpenClaw's ~5.5 min
     # patience for a child doing real work; overridable per call.
     wait_seconds = float(args.get("timeout_seconds", 330))
+    # Budget the first slice of the window to LANDING the send (peer may still
+    # be booting), then spend the remainder awaiting the reply.
+    send_budget = min(max(wait_seconds * 0.5, 90.0), 240.0)
 
     async def _send_and_wait() -> dict[str, Any]:
         # Resolve the peer's DID first so we can match its reply (the reply's
         # from_did is the sub-agent's DID). Then send the task_request and drain
         # the tool inbox (the worker's fan-out buffer) for the task_response.
-        peer_rec = await client._registry.find_by_display_name(peer)  # noqa: SLF001
-        if peer_rec is None:
-            return {"error": f"Peer {peer!r} not found in registry"}
-        peer_did = peer_rec.did
-        await client.send_by_did(to=peer_did, payload=envelope)
+        #
+        # Resolve + send are RETRIED with backoff, mirroring OpenClaw's
+        # kars_mesh_send ("retry continuously while the sub-agent's pod is
+        # alive"). A freshly-spawned peer — especially a *cross-harness* child
+        # like an OpenClaw sub-agent, whose gateway + persistent agent session
+        # take much longer to boot than Hermes — may not yet be registered or
+        # may not have uploaded its prekey bundle at the instant of the first
+        # send. A single-shot send there fails hard ("send failed:") and the
+        # delegation is abandoned even though the peer comes up moments later.
+        send_deadline = asyncio.get_event_loop().time() + send_budget
+        peer_did: str | None = None
+        attempt = 0
+        last_exc: Exception | None = None
+        while True:
+            attempt += 1
+            try:
+                if peer_did is None:
+                    peer_rec = await client._registry.find_by_display_name(peer)  # noqa: SLF001
+                    if peer_rec is None:
+                        raise MeshPeerNotFoundError(
+                            f"{peer!r} not yet in registry"
+                        )
+                    peer_did = peer_rec.did
+                await client.send_by_did(to=peer_did, payload=envelope)
+                if attempt > 1:
+                    logger.info(
+                        "kars_mesh_send: delivered to %s on attempt %d",
+                        peer,
+                        attempt,
+                    )
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                # Drop any half-established Signal channel so the next attempt
+                # re-runs X3DH and re-sends the KNOCK (send_by_did caches the
+                # channel before the KNOCK is on the wire; a failure mid-way
+                # would otherwise leave a poisoned channel that never knocks).
+                if peer_did is not None:
+                    client._channels.pop(peer_did, None)  # noqa: SLF001
+                now = asyncio.get_event_loop().time()
+                if now >= send_deadline:
+                    logger.warning(
+                        "kars_mesh_send: giving up on %s after %d attempts "
+                        "(%.0fs): %s: %r",
+                        peer,
+                        attempt,
+                        send_budget,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    return {
+                        "ok": False,
+                        "to_agent": peer,
+                        "error": (
+                            f"could not deliver task to {peer!r} within "
+                            f"{send_budget:.0f}s over {attempt} attempts — "
+                            f"last error {type(exc).__name__}: {exc!r}. "
+                            "The sub-agent may still be booting; retry "
+                            "kars_mesh_send shortly or check kars_spawn_status."
+                        ),
+                    }
+                logger.info(
+                    "kars_mesh_send: attempt %d to %s failed (%s: %r) — "
+                    "retrying, peer likely still booting",
+                    attempt,
+                    peer,
+                    type(exc).__name__,
+                    exc,
+                )
+                await asyncio.sleep(min(2.0 * attempt, 8.0))
 
+        assert peer_did is not None
+        _ = last_exc  # retained for clarity; only used in the give-up branch
         deadline = asyncio.get_event_loop().time() + wait_seconds
         async for msg in client.tool_inbox():
             if msg.from_did != peer_did:
@@ -358,7 +428,7 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
 
     try:
         future = asyncio.run_coroutine_threadsafe(_send_and_wait(), loop)
-        result = future.result(timeout=wait_seconds + 30.0)
+        result = future.result(timeout=send_budget + wait_seconds + 30.0)
         return json.dumps(result)
     except MeshPeerNotFoundError as exc:
         return json.dumps({"error": f"Peer {peer!r} not found: {exc}"})
