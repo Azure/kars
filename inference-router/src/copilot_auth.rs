@@ -36,6 +36,11 @@ const TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/tok
 /// Refresh window: ask for a new JWT this long before the cached one expires.
 const REFRESH_BUFFER: Duration = Duration::from_secs(60);
 
+/// Re-validation window for direct-token mode (token used as the Copilot bearer
+/// without exchange). GitHub OAuth tokens are long-lived, but we still re-check
+/// periodically so a revoked token surfaces promptly.
+const DIRECT_REFRESH_SECS: u64 = 1500;
+
 /// Static integration headers Copilot expects on every request.
 /// Without these, Copilot returns 400 "missing required header" or, worse,
 /// silently degrades to a different model behind the scenes.
@@ -187,6 +192,31 @@ impl CopilotTokenCache {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            // Some GitHub tokens are *directly* usable against
+            // `api.githubcopilot.com` (the user's account has Copilot, but the
+            // token did not originate from an editor OAuth app, so it lacks the
+            // `copilot` scope required by the internal exchange). For those, the
+            // exchange returns a 4xx (typically 404/403) even though direct
+            // inference works. Fall back to using the GitHub token itself as the
+            // Copilot bearer instead of failing closed.
+            if status.is_client_error() {
+                tracing::warn!(
+                    "Copilot token exchange returned {status}; falling back to \
+                     direct-token mode (using the configured GitHub token as the \
+                     Copilot bearer). Exchange body: {body}"
+                );
+                let now_instant = Instant::now();
+                let cached = CachedJwt {
+                    token: gh.to_string(),
+                    // Long-lived GitHub tokens don't carry a Copilot TTL; re-check
+                    // periodically so a revoked token surfaces within ~25 min.
+                    refresh_at: now_instant + Duration::from_secs(DIRECT_REFRESH_SECS),
+                    expires_at: now_instant + Duration::from_secs(DIRECT_REFRESH_SECS + 300),
+                };
+                let token = cached.token.clone();
+                *self.cached.write().await = Some(cached);
+                return Ok(token);
+            }
             bail!("Copilot token exchange returned {status}: {body}");
         }
 
@@ -288,7 +318,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/copilot_internal/v2/token"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("bad credentials"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
             .mount(&server)
             .await;
 
@@ -298,7 +328,31 @@ mod tests {
             .await
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("401"), "expected 401 in error, got: {msg}");
+        assert!(msg.contains("503"), "expected 503 in error, got: {msg}");
+    }
+
+    /// A GitHub token that lacks the `copilot` scope cannot use the internal
+    /// exchange (it 404s/403s), but is often directly usable against
+    /// `api.githubcopilot.com`. On a 4xx exchange failure the cache must fall
+    /// back to using the GitHub token itself as the Copilot bearer.
+    #[tokio::test]
+    async fn falls_back_to_direct_token_on_client_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/copilot_internal/v2/token"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&server)
+            .await;
+
+        let c = CopilotTokenCache::with_token("gho_direct_token");
+        let jwt = c
+            .get_jwt_with_base(&format!("{}/copilot_internal/v2/token", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(
+            jwt, "gho_direct_token",
+            "expected the GitHub token to be used directly as the Copilot bearer"
+        );
     }
 
     /// Regression: when GitHub returns `refresh_in` LARGER than the actual

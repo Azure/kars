@@ -264,6 +264,18 @@ spec:
                 required:
                 - name
                 type: object
+              requestedTier:
+                description: |-
+                  A **requested promotion** — a target autonomy tier this mission wants to
+                  operate at (§12). When greater than `envelope.tier`, the controller opens
+                  a human `KarsApproval` (a `tierRaise`); only on approval does the
+                  controller widen this task's envelope to the requested tier. Promotion is
+                  always human-approved and ledgered, and widening is controller-only (a
+                  non-controller principal cannot raise the envelope — enforced by the
+                  envelope-write VAP), so a mission cannot self-escalate.
+                format: int32
+                nullable: true
+                type: integer
             required:
             - envelope
             - objective

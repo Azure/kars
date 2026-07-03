@@ -48,4 +48,5 @@ pub mod routes;
 pub mod safety;
 pub mod sidecar_client;
 pub mod spawn;
+pub mod task_telemetry;
 pub mod telemetry;

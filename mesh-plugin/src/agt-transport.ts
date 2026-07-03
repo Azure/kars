@@ -204,6 +204,35 @@ export interface AgtTransportOptions {
   capabilities?: string[];
 }
 
+/**
+ * Make a payload safe for the SDK's plaintext-peer send path.
+ *
+ * The AGT SDK btoa-encodes messages to plaintext-compat peers (e.g. the kars
+ * controller, which speaks a plaintext bridge rather than full Signal E2E).
+ * `btoa` throws `InvalidCharacterError: Invalid character` on any code point
+ * > 255 (U+2014 em-dash, curly quotes, ellipsis, emoji …), which LLM-authored
+ * deliverables, roster text, and task responses routinely contain. That aborts
+ * the send, so the controller never receives the heartbeat/result and the run
+ * is falsely reported as a delivery timeout.
+ *
+ * For plaintext peers only, downgrade string payloads to Latin1: map the common
+ * "smart" punctuation to ASCII (lossless for readability) and replace any
+ * remaining >255 code point with `?`. Full-E2E peers are untouched — they carry
+ * bytes, not btoa.
+ */
+export function plaintextSafePayload(payload: unknown, isPlaintextPeer: boolean): unknown {
+  if (!isPlaintextPeer || typeof payload !== "string") return payload;
+  return payload
+    .replace(/[\u2013\u2014]/g, "-") // en/em dash → hyphen
+    .replace(/[\u2018\u2019\u201A\u2032]/g, "'") // curly/prime single quotes → '
+    .replace(/[\u201C\u201D\u201E\u2033]/g, '"') // curly/prime double quotes → "
+    .replace(/\u2026/g, "...") // ellipsis → ...
+    .replace(/[\u00A0\u202F\u2007]/g, " ") // non-breaking spaces → space
+    // Anything still outside Latin1 (btoa's ceiling) becomes '?'. The `u` flag
+    // treats astral code points (emoji surrogate pairs) as a single unit.
+    .replace(/[^\u0000-\u00FF]/gu, "?");
+}
+
 export class AgtTransport implements IMeshTransport {
   private readonly options: AgtTransportOptions;
   private client: AgtMeshClient | null = null;
@@ -442,7 +471,7 @@ export class AgtTransport implements IMeshTransport {
         throw e instanceof Error ? e : new Error(String(e));
       }
     }
-    await this.client.send(toAmid, payload);
+    await this.client.send(toAmid, plaintextSafePayload(payload, this._plaintextPeers.has(toAmid)));
     return undefined;
   }
 

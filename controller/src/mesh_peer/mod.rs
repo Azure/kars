@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use tokio::time::Duration;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 mod agt_wire;
@@ -613,6 +613,33 @@ enum FederationMessage {
         /// Aggregated real token + round/tool counts for the run.
         #[serde(default)]
         telemetry: Option<RunTelemetry>,
+        /// Whether the agent considers the run a success. Agents that hit an
+        /// execution error (native-agent crash, empty output, runtime failure)
+        /// set this `false` so the controller records `status=error` instead of
+        /// silently persisting a failed run as a successful mission output.
+        /// Defaults to `true` for backward-compatibility with agents that don't
+        /// emit the field (their replies are deliverables by construction).
+        #[serde(default = "default_true")]
+        ok: bool,
+    },
+
+    /// A liveness heartbeat the agent emits periodically (~20s) while it is
+    /// actively executing a delivered `task_request`, before the terminal
+    /// `task_response`. The controller uses it purely as a keep-alive: each
+    /// one bumps the delivery's last-activity clock so an actively-working run
+    /// isn't killed by the idle timeout. Carries no result payload.
+    #[serde(rename = "task_progress")]
+    TaskProgress {
+        #[serde(default)]
+        stage: Option<String>,
+        #[serde(default)]
+        tick: Option<i64>,
+        #[serde(default)]
+        elapsed_seconds: Option<i64>,
+        #[serde(default)]
+        from_agent: Option<String>,
+        #[serde(default)]
+        timestamp: Option<String>,
     },
 
     /// A single artifact file produced by a running agent and shipped back over
@@ -731,6 +758,16 @@ struct MeshPeerState {
     /// into the mission's artifact set. Empty unless a mesh task is in flight.
     pending_artifacts:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<ReceivedArtifact>>>>,
+    /// Last-activity timestamps (unix millis) for in-flight mesh task
+    /// deliveries, keyed by the target agent's mesh DID. Bumped by inbound
+    /// `task_progress` heartbeats so the delivery await can use an *idle*
+    /// timeout (reset on every progress tick) instead of a hard wall-clock cap.
+    /// This is what lets a long, actively-working run (e.g. a deep-research
+    /// task that legitimately runs many minutes) stay alive, while a genuinely
+    /// stuck agent that stops ticking still times out. Empty unless a mesh task
+    /// is in flight.
+    pending_progress:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicI64>>>>,
 }
 
 /// The payload delivered to a waiting mesh task: the agent's text reply plus
@@ -743,6 +780,14 @@ pub(super) struct TaskReply {
     pub artifact_count: usize,
     pub trace: Vec<serde_json::Value>,
     pub telemetry: Option<RunTelemetry>,
+    /// Agent-reported success. `false` when the agent hit an execution error,
+    /// so the controller persists `status=error` rather than a fake success.
+    pub ok: bool,
+}
+
+/// serde default for the `task_response.ok` field — absent ⇒ success.
+fn default_true() -> bool {
+    true
 }
 
 /// A single artifact file received from an agent over the mesh.
@@ -962,6 +1007,7 @@ pub async fn run(client: Client) -> Result<()> {
         entra_token_cache: Arc::new(tokio::sync::RwLock::new(None)),
         pending_tasks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         pending_artifacts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_progress: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     // Harness-neutral mesh task delivery: watch KarsTasks for a run-request
@@ -1563,6 +1609,7 @@ async fn handle_peer_message(
             artifacts,
             trace,
             telemetry,
+            ok,
             ..
         } => {
             tracing::info!(
@@ -1570,6 +1617,7 @@ async fn handle_peer_message(
                 len = content.len(),
                 artifacts = artifacts.len(),
                 trace = trace.len(),
+                ok,
                 "Received task_response — resolving pending mesh task delivery"
             );
             task_delivery::resolve_pending(
@@ -1579,6 +1627,7 @@ async fn handle_peer_message(
                 artifacts.len(),
                 trace,
                 telemetry,
+                ok,
             )
             .await;
         }
@@ -1608,6 +1657,26 @@ async fn handle_peer_message(
             tracing::debug!(
                 from = %from_amid,
                 "Ignoring task_request (the controller delivers tasks, it does not execute them)"
+            );
+        }
+        FederationMessage::TaskProgress {
+            stage,
+            tick,
+            elapsed_seconds,
+            ..
+        } => {
+            // Keep-alive: bump the in-flight delivery's last-activity clock so
+            // the idle timeout (in `task_delivery`) doesn't kill a run that is
+            // actively working. No result is carried; the terminal
+            // `task_response` is what resolves the delivery.
+            let bumped = task_delivery::touch_progress(state, from_amid).await;
+            tracing::debug!(
+                from = %from_amid,
+                stage = stage.as_deref().unwrap_or("executing"),
+                tick = tick.unwrap_or_default(),
+                elapsed_seconds = elapsed_seconds.unwrap_or_default(),
+                tracked = bumped,
+                "task_progress heartbeat — refreshed delivery liveness"
             );
         }
         _ => {
@@ -1841,5 +1910,38 @@ mod tests {
             }
             _ => panic!("Wrong variant"),
         }
+    }
+
+    /// Regression: the agent emits `task_progress` heartbeats while it works.
+    /// Before these were modelled, the controller logged "unknown variant
+    /// `task_progress`" and dropped them, so long runs hit the hard timeout even
+    /// while actively progressing. The variant must deserialize from the exact
+    /// wire shape the runtime sends.
+    #[test]
+    fn task_progress_deserializes_from_runtime_wire_shape() {
+        let wire = r#"{"type":"task_progress","stage":"executing","tick":3,"elapsed_seconds":60,"from_agent":"landscape-watch-run-1","timestamp":"2026-06-29T21:47:27.557Z"}"#;
+        let decoded: FederationMessage = serde_json::from_str(wire).unwrap();
+        match decoded {
+            FederationMessage::TaskProgress {
+                stage,
+                tick,
+                elapsed_seconds,
+                from_agent,
+                ..
+            } => {
+                assert_eq!(stage.as_deref(), Some("executing"));
+                assert_eq!(tick, Some(3));
+                assert_eq!(elapsed_seconds, Some(60));
+                assert_eq!(from_agent.as_deref(), Some("landscape-watch-run-1"));
+            }
+            _ => panic!("Wrong variant — task_progress must parse"),
+        }
+
+        // The minimal "started" tick (all optional fields absent) must also parse.
+        let minimal = r#"{"type":"task_progress","stage":"started","tick":0,"elapsed_seconds":0,"from_agent":"x","timestamp":"t"}"#;
+        assert!(matches!(
+            serde_json::from_str::<FederationMessage>(minimal).unwrap(),
+            FederationMessage::TaskProgress { .. }
+        ));
     }
 }

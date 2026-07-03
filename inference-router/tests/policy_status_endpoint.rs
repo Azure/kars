@@ -73,6 +73,7 @@ fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
         blocklist: Blocklist::disabled(),
         blocked_egress: Arc::new(BlockedBuffer::with_defaults()),
         sandbox_name: Arc::new("sb-test".to_string()),
+        task_telemetry: Arc::new(kars_inference_router::task_telemetry::TaskTelemetry::new()),
         inbox: Arc::new(MeshInbox::new()),
         mesh_metrics: Arc::new(MeshMetrics::new()),
         model_override: Arc::new(std::sync::RwLock::new(None)),

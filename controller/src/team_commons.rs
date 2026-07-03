@@ -92,6 +92,49 @@ fn digest_of(s: &str) -> String {
     out
 }
 
+/// Derive a meaningful, distinct title for a commons entry from the run's
+/// deliverable. Titling every entry by the team charter (the old behavior) made
+/// the Knowledge surface show dozens of identical rows; instead we lift a real
+/// headline from the content — the first markdown heading near the top (briefings
+/// lead with a status line then a `## …` headline), else the first substantive
+/// line — stripped of markup/noise and capped. Falls back to `charter_line` only
+/// when the content yields nothing usable (e.g. an empty deliverable).
+#[must_use]
+pub fn derive_title(content: &str, charter_line: &str) -> String {
+    let clean = |line: &str| -> Option<String> {
+        let h = line
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .trim_start_matches("**")
+            .trim_end_matches("**")
+            .trim()
+            .trim_start_matches(|c: char| !c.is_alphanumeric())
+            .trim();
+        if !h.chars().any(char::is_alphanumeric) {
+            return None;
+        }
+        let t: String = h.chars().take(90).collect();
+        Some(if h.chars().count() > 90 {
+            format!("{}…", t.trim_end())
+        } else {
+            t
+        })
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    for line in lines.iter().take(14) {
+        if line.trim_start().starts_with('#')
+            && let Some(t) = clean(line)
+        {
+            return t;
+        }
+    }
+    lines
+        .iter()
+        .find_map(|l| clean(l))
+        .unwrap_or_else(|| charter_line.chars().take(120).collect())
+}
+
 /// Neutralize prompt-injection / memory-poisoning vectors in agent-authored
 /// content **before** it is stored in the commons and re-surfaced to a future
 /// run (defense against agentic memory poisoning / cross-prompt injection).
@@ -350,6 +393,25 @@ mod tests {
     #[test]
     fn commons_cm_name_is_stable() {
         assert_eq!(commons_cm_name("repo-watch"), "kars-commons-repo-watch");
+    }
+
+    #[test]
+    fn derive_title_prefers_markdown_heading() {
+        let content = "Delta confirmed clean across all buckets.\n\n## LANDSCAPE-WATCH BRIEFING - 2026-06-30\n\nbody";
+        assert_eq!(
+            derive_title(content, "charter line"),
+            "LANDSCAPE-WATCH BRIEFING - 2026-06-30"
+        );
+    }
+
+    #[test]
+    fn derive_title_strips_leading_noise_and_falls_back() {
+        // Stray "?" placeholder (emoji stripped upstream) and bullet noise are trimmed.
+        assert_eq!(derive_title("## ? Findings for today", "c"), "Findings for today");
+        // Empty content falls back to the charter line.
+        assert_eq!(derive_title("\n\n   \n", "Monitor the landscape"), "Monitor the landscape");
+        // No heading: first substantive line wins.
+        assert_eq!(derive_title("All buckets clean today.", "c"), "All buckets clean today.");
     }
 
     #[test]

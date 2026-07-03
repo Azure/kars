@@ -66,6 +66,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
             kars_inference_router::egress_blocked::BlockedBuffer::with_defaults(),
         ),
         sandbox_name: Arc::new(sandbox.to_string()),
+        task_telemetry: Arc::new(kars_inference_router::task_telemetry::TaskTelemetry::new()),
         inbox: Arc::new(MeshInbox::new()),
         mesh_metrics: Arc::new(MeshMetrics::new()),
         model_override: Arc::new(std::sync::RwLock::new(None)),

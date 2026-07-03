@@ -159,12 +159,17 @@ fn already_current(chain: &[InclusionEntry], receipt: &str, payload_sha256: &str
 
 /// Append an inclusion entry for a freshly-emitted receipt. Idempotent and
 /// concurrency-safe (optimistic resourceVersion retry). Returns the entry that
-/// represents this receipt's current inclusion (existing or newly appended).
+/// represents this receipt's current inclusion (existing or newly appended)
+/// together with a flag that is `true` only when a **new** entry was written.
+/// Callers use the flag to skip expensive, write-amplifying follow-on work
+/// (re-publishing the signed checkpoint, witnessing, status echoes) on the
+/// common idempotent no-op path — without it, every requeue of every task
+/// rewrites the shared checkpoint/witness ConfigMaps and floods etcd.
 pub async fn append(
     client: &Client,
     receipt: &str,
     payload_sha256: &str,
-) -> Result<InclusionEntry> {
+) -> Result<(InclusionEntry, bool)> {
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
 
     for _ in 0..MAX_APPEND_RETRIES {
@@ -183,12 +188,15 @@ pub async fn append(
         };
 
         if already_current(&chain, receipt, payload_sha256) {
-            // Nothing to do — return the current inclusion entry.
-            return Ok(chain
-                .into_iter()
-                .rev()
-                .find(|e| e.receipt == receipt)
-                .expect("already_current implies an entry exists"));
+            // Nothing to do — return the current inclusion entry, not appended.
+            return Ok((
+                chain
+                    .into_iter()
+                    .rev()
+                    .find(|e| e.receipt == receipt)
+                    .expect("already_current implies an entry exists"),
+                false,
+            ));
         }
 
         let mut new_chain = chain;
@@ -233,7 +241,7 @@ pub async fn append(
         match result {
             Ok(()) => {
                 tracing::debug!(receipt = %receipt, seq = entry.seq, "receipt entered in inclusion log");
-                return Ok(entry);
+                return Ok((entry, true));
             }
             // 409 Conflict (lost the optimistic race) → retry with a fresh read.
             Err(kube::Error::Api(ae)) if ae.code == 409 => continue,

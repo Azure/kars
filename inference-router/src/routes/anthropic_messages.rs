@@ -260,6 +260,13 @@ pub(super) async fn anthropic_messages(
         .unwrap_or("")
         .to_string();
 
+    // Telemetry: correlate any tool results this request carries back to the
+    // tool calls recorded on the prior round, so the router-sourced trace shows
+    // each tool's outcome. Cheap parse of the already-deserialized body.
+    state
+        .task_telemetry
+        .record_request_results(&req_json, crate::task_telemetry::Shape::Anthropic);
+
     let mut upstream = state.upstream_config(sandbox_name);
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
     crate::routes::apply_model_preference_override(&mut upstream, &policy);
@@ -337,6 +344,14 @@ pub(super) async fn anthropic_messages(
                 }
             };
             let anthropic_resp = openai_to_anthropic(&openai_resp, &requested_model);
+            // Record router-sourced telemetry on the translated path too, so
+            // non-Copilot (Foundry/GH Models) Anthropic runs get the same
+            // per-task trace + token telemetry as the native passthrough.
+            state.task_telemetry.record_response(
+                &anthropic_resp,
+                crate::task_telemetry::Shape::Anthropic,
+                0,
+            );
             (StatusCode::OK, Json(anthropic_resp)).into_response()
         }
         Err(e) => {
@@ -393,7 +408,53 @@ async fn forward_anthropic_passthrough(
         .await
         {
             Ok((status, resp_headers, stream)) => {
-                let body = Body::from_stream(stream.map(|c| c.map_err(std::io::Error::other)));
+                // Tap the SSE stream to derive the router-sourced per-task trace
+                // without altering the bytes forwarded to the agent. A shared
+                // accumulator folds Anthropic stream events into one synthetic
+                // response, recorded on `message_stop`.
+                let telem = state.task_telemetry.clone();
+                let acc = std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::task_telemetry::AnthropicStreamAcc::new(),
+                ));
+                // Carry buffer for SSE lines split across network chunks — a
+                // `data:` event is not guaranteed to align with a byte chunk, so
+                // we only parse complete newline-terminated lines and keep the
+                // trailing partial for the next chunk.
+                let carry = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+                let started = std::time::Instant::now();
+                let tapped = stream.map(move |chunk| {
+                    if let Ok(ref bytes) = chunk {
+                        let mut buf = carry.lock().unwrap_or_else(|p| p.into_inner());
+                        buf.push_str(&String::from_utf8_lossy(bytes));
+                        // Process every complete line; retain the remainder.
+                        loop {
+                            let Some(nl) = buf.find('\n') else { break };
+                            let line = buf[..nl].trim().to_string();
+                            buf.drain(..=nl);
+                            let Some(json_str) = line.strip_prefix("data:") else {
+                                continue;
+                            };
+                            let json_str = json_str.trim();
+                            if json_str.is_empty() || json_str == "[DONE]" {
+                                continue;
+                            }
+                            if let Ok(v) = serde_json::from_str::<Value>(json_str) {
+                                let mut a = acc.lock().unwrap_or_else(|p| p.into_inner());
+                                if a.feed(&v) {
+                                    a.finish(&telem, started.elapsed().as_millis() as u64);
+                                }
+                            }
+                        }
+                    } else {
+                        // Stream errored/ended — finalize whatever we accumulated
+                        // so a missed `message_stop` doesn't drop the trace.
+                        acc.lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .finish(&telem, started.elapsed().as_millis() as u64);
+                    }
+                    chunk
+                });
+                let body = Body::from_stream(tapped.map(|c| c.map_err(std::io::Error::other)));
                 let mut resp = axum::response::Response::builder().status(status);
                 if let Some(h) = resp.headers_mut() {
                     for (n, v) in resp_headers.iter() {
@@ -438,25 +499,51 @@ async fn forward_anthropic_passthrough(
                 // Best-effort token usage tracking for Anthropic-shape replies.
                 if status.is_success()
                     && let Ok(body_json) = serde_json::from_slice::<Value>(&resp_body)
-                    && let Some(usage) = body_json.get("usage")
                 {
-                    let input = usage
-                        .get("input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let output = usage
-                        .get("output_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let total = input + output;
-                    if total > 0 {
-                        state.budget.record_usage(sandbox_name, total).await;
+                    if let Some(usage) = body_json.get("usage") {
+                        let input = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let output = usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let total = input + output;
+                        if total > 0 {
+                            state.budget.record_usage(sandbox_name, total).await;
+                        }
                     }
+                    // Router-sourced per-task trace: one round + a tool event per
+                    // tool_use block. Buffered path, so the full response (tokens,
+                    // stop_reason, tool args) is available verbatim.
+                    state.task_telemetry.record_response(
+                        &body_json,
+                        crate::task_telemetry::Shape::Anthropic,
+                        0,
+                    );
                 }
 
                 let mut resp = axum::response::Response::builder().status(status);
                 if let Some(h) = resp.headers_mut() {
                     for (n, v) in resp_headers.iter() {
+                        // Skip hop-by-hop + framing headers: the body is buffered
+                        // here, so a copied `transfer-encoding: chunked` or stale
+                        // `content-length` from the upstream mismatches the actual
+                        // bytes and makes the connection EOF (seen via the API
+                        // server pods/proxy). hyper sets the correct length.
+                        let name = n.as_str().to_ascii_lowercase();
+                        if matches!(
+                            name.as_str(),
+                            "transfer-encoding"
+                                | "content-length"
+                                | "connection"
+                                | "keep-alive"
+                                | "trailer"
+                                | "upgrade"
+                        ) {
+                            continue;
+                        }
                         h.insert(n.clone(), v.clone());
                     }
                     if !h.contains_key(axum::http::header::CONTENT_TYPE) {

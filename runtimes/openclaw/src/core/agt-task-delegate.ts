@@ -44,7 +44,7 @@ export async function delegateToNativeAgent(
       "agent",
       "--message", taskText,
       "--session-id", sessionId,
-      "--timeout", "300",
+      "--timeout", "1500",
       "--json",
     ], {
       env: {
@@ -62,13 +62,18 @@ export async function delegateToNativeAgent(
     child.stderr.on("data", (chunk: Buffer) => chunks.push(chunk));
     child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
 
-    const timer = setTimeout(() => { child.kill("SIGTERM"); }, 120_000);
+    // External watchdog above the agent's own `--timeout` so a wedged child is
+    // still reaped, but generous enough for real multi-round missions (the
+    // controller's mesh delivery has its own absolute ceiling above this).
+    const timer = setTimeout(() => { child.kill("SIGTERM"); }, 1_530_000);
 
-    child.on("close", () => {
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       clearTimeout(timer);
       const output = Buffer.concat(chunks).toString("utf-8");
 
-      // Extract the JSON response by finding the last top-level { ... } block
+      // A parsed JSON result with real text is authoritative success even if the
+      // process then exited non-zero on teardown. Extract the last top-level
+      // { ... } block.
       const jsonMatch = output.match(/\n(\{[\s\S]*\})\s*$/);
       if (jsonMatch) {
         try {
@@ -81,7 +86,18 @@ export async function delegateToNativeAgent(
         } catch { /* fall through */ }
       }
 
-      // Fallback: strip log lines and return raw text
+      // No valid JSON result. If the process failed (non-zero exit or killed by
+      // signal — e.g. the watchdog SIGTERM, OOM, or a runtime crash), this is an
+      // ERROR, not a deliverable: rejecting makes the caller stamp the run
+      // `ok:false` instead of shipping scraped log noise as a successful mission.
+      if (code !== 0 || signal) {
+        const tail = output.slice(-800).trim();
+        log.warn(`Native agent exited abnormally (code=${code}, signal=${signal}); ${output.length} bytes captured`);
+        return reject(new Error(`native agent failed (code=${code}, signal=${signal}): ${tail || "no output"}`));
+      }
+
+      // Clean exit but no JSON envelope: fall back to the stripped textual
+      // output (older agent output shapes). Only treat non-empty text as success.
       const lines = output.split("\n").filter((l: string) =>
         !l.startsWith("[plugins]") && !l.startsWith("[") && l.trim());
       const response = lines.join("\n").trim();
@@ -99,4 +115,38 @@ export async function delegateToNativeAgent(
       reject(err);
     });
   });
+}
+
+/**
+ * The native agent's `--json` reply is a structured envelope
+ * (`{ runId, status, summary, result: { payloads: [ { text } ] } }`). Extract
+ * the human deliverable text so callers ship clean prose, not raw escaped JSON
+ * — which otherwise becomes both an ugly deliverable AND a control-char-laden
+ * "binary" fallback artifact. Plain-text replies (no envelope) pass through.
+ */
+export function extractNativeDeliverable(raw: string): string {
+  const t = (raw ?? "").trim();
+  if (!t.startsWith("{") && !t.startsWith("[")) return raw;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const v: any = JSON.parse(t);
+    const payloads = v?.result?.payloads;
+    if (Array.isArray(payloads)) {
+      const joined = payloads
+        .map((p: { text?: unknown }) => (typeof p?.text === "string" ? p.text : ""))
+        .filter(Boolean)
+        .join("\n\n");
+      if (joined.trim()) return joined;
+    }
+    for (const [a, b] of [["reply", "text"], ["result", "text"]] as const) {
+      const x = v?.[a]?.[b];
+      if (typeof x === "string" && x.trim()) return x;
+    }
+    for (const k of ["text", "output", "summary"]) {
+      if (typeof v?.[k] === "string" && v[k].trim()) return v[k];
+    }
+  } catch {
+    /* not JSON — a plain-text reply */
+  }
+  return raw;
 }

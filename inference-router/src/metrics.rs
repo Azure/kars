@@ -76,12 +76,15 @@ pub fn parse_task_attribution(
 /// Record token usage on both the per-sandbox and (when this is a task
 /// sandbox) the per-task-branch counters. `direction` is `input` or `output`.
 pub fn record_tokens(sandbox: &str, model: &str, direction: &str, count: u64) {
+    // Explicit `[..]` slicing keeps `with_label_values` type inference
+    // unambiguous across rustc versions (some reject coercing `&[&str; N]`
+    // to the generic `&[V]` parameter).
     TOKENS_USED
-        .with_label_values(&[sandbox, model, direction])
+        .with_label_values(&[sandbox, model, direction][..])
         .inc_by(count);
     if let Some((task, root)) = TASK_ATTRIBUTION.as_ref() {
         TASK_TOKENS_USED
-            .with_label_values(&[task, root, model, direction])
+            .with_label_values(&[task, root, model, direction][..])
             .inc_by(count);
     }
 }

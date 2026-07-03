@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect, beforeEach, vi, type Mock } from "vitest";
-import { AgtTransport, __setAgtSdkForTesting } from "./agt-transport.js";
+import { AgtTransport, __setAgtSdkForTesting, plaintextSafePayload } from "./agt-transport.js";
 import type { IMeshIdentity } from "./transport-interface.js";
 
 interface FakeClient {
@@ -265,3 +265,25 @@ describe("AgtTransport", () => {
   });
 });
 
+
+describe("plaintextSafePayload", () => {
+  it("downgrades non-Latin1 punctuation to ASCII for plaintext peers (btoa-safe)", () => {
+    const input = "Report \u2014 findings \u2018quoted\u2019 \u201Cx\u201D\u2026 caf\u00e9 \u{1F600}";
+    const out = plaintextSafePayload(input, true) as string;
+    expect(out).toBe('Report - findings \'quoted\' "x"... caf\u00e9 ?');
+    // Every code point must be <= 255 so btoa() cannot throw.
+    for (const ch of out) expect(ch.codePointAt(0)!).toBeLessThanOrEqual(0xff);
+    // btoa itself must not throw on the sanitized string.
+    expect(() => btoa(out)).not.toThrow();
+  });
+
+  it("leaves payloads untouched for full-E2E (non-plaintext) peers", () => {
+    const input = "em\u2014dash stays";
+    expect(plaintextSafePayload(input, false)).toBe(input);
+  });
+
+  it("passes through non-string payloads unchanged", () => {
+    const obj = { type: "task_progress", tick: 1 };
+    expect(plaintextSafePayload(obj, true)).toBe(obj);
+  });
+});
