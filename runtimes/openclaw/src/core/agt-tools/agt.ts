@@ -196,6 +196,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         model: { type: "string", description: "AI model deployment override. Omit to inherit the parent's model (recommended)." },
         governance: { type: "boolean", description: "Enable AGT governance + mesh communication (default: true)" },
         role: { type: "string", description: "Short persona/role description for this sub-agent (e.g. 'data analyst', 'visualization engineer', 'technical writer'). Used by the platform to build a Peer roster shared with siblings so they can resolve role references to canonical names." },
+        runtime: { type: "string", description: "Optional runtime/harness for the sub-agent — 'OpenClaw' (default), 'Hermes', etc. Omit to inherit this agent's own runtime. Use this to delegate a subtask to a different harness (e.g. an OpenClaw principal spawning a Hermes specialist). The sub-agent still communicates over the same E2E mesh regardless of harness." },
       },
       required: ["name"],
     },
@@ -242,6 +243,13 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           ...(params.model ? { model: params.model } : {}),
           governance: params.governance !== false,
           trust_threshold: 500,
+          // Cross-harness spawn: forward the optional runtime override as
+          // `runtime_kind` (the router's SpawnRequest field — deny_unknown_fields,
+          // so the key name must match exactly). When omitted the router falls
+          // back to KARS_RUNTIME_KIND (this agent's own runtime), so same-harness
+          // spawns are unaffected. This is what lets an OpenClaw principal spawn a
+          // Hermes sub-agent (and vice versa) — see inference-router/src/spawn/mod.rs.
+          ...(params.runtime ? { runtime_kind: String(params.runtime) } : {}),
           // Dev profile (docker / local-k8s) — propagate learn_egress
           // so the sub-agent CRD lands with egressMode=Learn even
           // before reaching the router's own KARS_DEV_PROFILE-gated

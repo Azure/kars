@@ -369,6 +369,15 @@ describe("tool parameter schemas", () => {
     expect(props.governance.type).toBe("boolean");
   });
 
+  it("kars_spawn exposes a cross-harness `runtime` override (OpenClaw can spawn Hermes)", () => {
+    const tool = tools.get("kars_spawn")!;
+    const props = tool.parameters.properties;
+    expect(props.runtime).toBeDefined();
+    expect(props.runtime.type).toBe("string");
+    // Must NOT be required — omitting it inherits the parent's runtime.
+    expect(tool.parameters.required).not.toContain("runtime");
+  });
+
   it("kars_mesh_send has to_agent and content properties", () => {
     const tool = tools.get("kars_mesh_send")!;
     const props = tool.parameters.properties;
