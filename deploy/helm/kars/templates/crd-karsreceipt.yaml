@@ -27,6 +27,9 @@ spec:
     - jsonPath: .spec.keyId
       name: KeyId
       type: string
+    - jsonPath: .status.conditions[-1:].type
+      name: State
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -130,12 +133,58 @@ spec:
             - scheme
             - taskRef
             type: object
+            x-kubernetes-validations:
+            - message: spec.claims must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.claims) > 0
+            - message: spec.envelopeDigest must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.envelopeDigest) > 0
           status:
             description: |-
               `KarsReceipt.status` — informational echo. The receipt's authority comes
               from its signature, not from this block.
             nullable: true
             properties:
+              conditions:
+                description: |-
+                  Standard Kubernetes conditions describing the receipt's lifecycle
+                  (e.g. `Ready`, `Anchored`). Advisory — the receipt's authority comes
+                  from its DSSE/Ed25519 signature, not this block; present so the CRD
+                  meets the conditions-array + status-state conformance criteria and gives
+                  operators a familiar lifecycle surface.
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
               inclusionEntryHash:
                 description: |-
                   Hash of this receipt's inclusion-log entry. An auditor checks the log
@@ -167,4 +216,3 @@ spec:
     storage: true
     subresources:
       status: {}
-

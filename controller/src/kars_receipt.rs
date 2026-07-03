@@ -42,6 +42,7 @@
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 
 use crate::kars_task::{KarsTask, KarsTaskStatus};
 use crate::mcp_server::LocalObjectRef;
@@ -66,6 +67,7 @@ pub const PREDICATE_TYPE: &str = "https://kars.azure.com/attestations/Governance
     printcolumn = r#"{"name":"Task","type":"string","jsonPath":".spec.taskRef.name"}"#,
     printcolumn = r#"{"name":"EnvelopeDigest","type":"string","jsonPath":".spec.envelopeDigest"}"#,
     printcolumn = r#"{"name":"KeyId","type":"string","jsonPath":".spec.keyId"}"#,
+    printcolumn = r#"{"name":"State","type":"string","jsonPath":".status.conditions[-1:].type"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +127,14 @@ impl Claim {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsReceiptStatus {
+    /// Standard Kubernetes conditions describing the receipt's lifecycle
+    /// (e.g. `Ready`, `Anchored`). Advisory — the receipt's authority comes
+    /// from its DSSE/Ed25519 signature, not this block; present so the CRD
+    /// meets the conditions-array + status-state conformance criteria and gives
+    /// operators a familiar lifecycle surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<Condition>>,
+
     /// RFC3339 issuance time (unsigned — not part of the attested payload).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issued_at: Option<String>,
