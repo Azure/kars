@@ -144,19 +144,54 @@ def test_roster_spawn_destroy_removes_entry(sender_env: None) -> None:
 def test_send_prefixes_payload_when_roster_populated(
     sender_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End-to-end through _kars_mesh_send: roster is applied to the
-    UTF-8 payload before it hits client.send_by_name. Critical
-    regression guard — the helper might do the right thing in
-    isolation but only matters when wired into the send path."""
+    """End-to-end through _kars_mesh_send: the roster is applied to the task
+    content, delivered as a `task_request` envelope (so the sub-agent executes
+    it), and the tool blocks for and returns the sub-agent's task_response."""
     spawn._record_in_roster("analyst", "data analyst")
     spawn._record_in_roster("writer", "technical writer")
+
+    class _Rec:
+        did = "did:mesh:writerwriterwriterwriterwr"
+
+    class _Reg:
+        async def find_by_display_name(self, name: str):  # noqa: ANN001
+            return _Rec()
+
+    class _Msg:
+        def __init__(self, from_did: str, payload: bytes) -> None:
+            self.from_did = from_did
+            self.payload = payload
+
+    class _ToolInboxIter:
+        def __init__(self, q: asyncio.Queue) -> None:
+            self._q = q
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self._q.get()
 
     class _Capture:
         def __init__(self) -> None:
             self.sent: list[tuple[str, bytes]] = []
+            self._registry = _Reg()
+            self._tool_inbox: asyncio.Queue = asyncio.Queue()
 
-        async def send_by_name(self, *, to: str, payload: bytes) -> None:
+        async def send_by_did(self, *, to: str, payload: bytes) -> None:
             self.sent.append((to, payload))
+            # Simulate the sub-agent executing + replying with a task_response.
+            await self._tool_inbox.put(
+                _Msg(
+                    _Rec.did,
+                    json.dumps(
+                        {"type": "task_response", "content": "brief done", "ok": True}
+                    ).encode("utf-8"),
+                )
+            )
+
+        def tool_inbox(self):
+            return _ToolInboxIter(self._tool_inbox)
 
     client = _Capture()
     monkeypatch.setattr(mesh, "_get_or_init_client", lambda: client)
@@ -167,10 +202,17 @@ def test_send_prefixes_payload_when_roster_populated(
     result = mesh._kars_mesh_send(
         {"to_agent": "writer", "content": "write the brief"}
     )
-    assert json.loads(result)["ok"] is True
-    sent_payload = client.sent[0][1].decode("utf-8")
-    assert sent_payload.startswith("Peer roster")
-    assert "analyst — data analyst" in sent_payload
-    assert "write the brief" in sent_payload
-    # bytes count reflects the prefixed payload, not just the original
-    assert json.loads(result)["bytes"] == len(sent_payload.encode("utf-8"))
+    parsed = json.loads(result)
+    # The tool returns the sub-agent's reply (send + wait, OpenClaw parity).
+    assert parsed["ok"] is True
+    assert parsed["reply"] == "brief done"
+    assert parsed["from_agent"] == "writer"
+
+    # The delivered frame is a task_request whose content carries the roster.
+    to_did, payload = client.sent[0]
+    assert to_did == _Rec.did
+    envelope = json.loads(payload.decode("utf-8"))
+    assert envelope["type"] == "task_request"
+    assert envelope["content"].startswith("Peer roster")
+    assert "analyst — data analyst" in envelope["content"]
+    assert "write the brief" in envelope["content"]

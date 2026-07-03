@@ -112,8 +112,8 @@ def test_spawn_calls_router_with_validated_body() -> None:
 
     parsed = json.loads(result)
     assert parsed["phase"] == "Running"
-    # Make sure we surface the mesh-not-available message
-    assert "Act 2" in parsed.get("message", "") or "Memory Store" in parsed.get("message", "")
+    # Surface the mesh-delegation guidance so the LLM uses kars_mesh_send.
+    assert "kars_mesh_send" in parsed.get("message", "")
 
 
 def test_spawn_dev_profile_injects_learn_egress(monkeypatch: pytest.MonkeyPatch) -> None:

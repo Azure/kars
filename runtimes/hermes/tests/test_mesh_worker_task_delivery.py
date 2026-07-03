@@ -80,6 +80,16 @@ def _stub_agent(monkeypatch: pytest.MonkeyPatch,
         return output, ok
 
     monkeypatch.setattr(mesh_worker, "_run_hermes_agent_inprocess", fake_run)
+    monkeypatch.setattr(mesh_worker, "_telemetry_cursor", lambda: 0)
+    monkeypatch.setattr(
+        mesh_worker,
+        "_telemetry_since",
+        lambda _c: [
+            {"kind": "round", "prompt_tokens": 100, "completion_tokens": 20,
+             "total_tokens": 120},
+            {"kind": "tool", "name": "kars_mesh_send"},
+        ],
+    )
     monkeypatch.setattr(
         "kars_runtime_hermes.plugin.telemetry.submit_trust",
         lambda **_kw: True,
@@ -112,6 +122,12 @@ async def test_task_request_runs_inprocess_and_wraps_task_response(
     assert reply["content"] == "the deliverable"
     assert reply["ok"] is True
     assert reply["from_agent"] == "hermes-run-1"
+    # Real telemetry + trace ride along so the controller scores the run as
+    # substantive work (not 'low yield') and the Activity tab renders it.
+    assert reply["telemetry"]["total_tokens"] == 120
+    assert reply["telemetry"]["rounds"] == 1
+    assert reply["telemetry"]["tool_calls"] == 1
+    assert len(reply["trace"]) == 2
 
 
 @pytest.mark.asyncio

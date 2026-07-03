@@ -71,19 +71,31 @@ def submit_signing_counter(action: str) -> bool:
     return resp.status_code < 400
 
 
-def _post_tool_call_hook(
-    tool_name: str,
-    _params: dict[str, Any],
-    result: Any,
-    **_kwargs: Any,
-) -> None:
+def _post_tool_call_hook(*args: Any, **kwargs: Any) -> None:
     """Hermes ``post_tool_call`` hook — record success/failure as trust signal.
 
-    Successful tool calls bump the agent's self-trust (interactions+1,
-    score steady at 0.8). Failures don't downgrade — that would amplify
-    false positives during transient router errors. Real trust loss
-    happens via mesh peer feedback (Act 2).
+    Signature-tolerant: Hermes' post_tool_call calling convention has drifted
+    across versions (positional vs keyword, with/without a params dict), and a
+    ``TypeError`` here fires on EVERY tool call and is swallowed by Hermes as a
+    warning — silently disabling the telemetry it guards. Extract the fields we
+    need defensively from whatever Hermes passes.
+
+    Successful kars_*/foundry_* tool calls bump the agent's self-trust
+    (interactions+1, score steady at 0.8). Failures don't downgrade — that would
+    amplify false positives during transient router errors.
     """
+    tool_name = kwargs.get("tool_name")
+    result = kwargs.get("result")
+    if tool_name is None and args:
+        tool_name = args[0]
+    if result is None:
+        # Common shapes: (tool_name, params, result) or (tool_name, result).
+        if len(args) >= 3:
+            result = args[2]
+        elif len(args) == 2:
+            result = args[1]
+    if not isinstance(tool_name, str):
+        return
     # Failures are signalled by tool handlers returning JSON with an
     # 'error' key. Don't treat those as positive interactions.
     if isinstance(result, str) and '"error"' in result[:100]:
@@ -92,7 +104,7 @@ def _post_tool_call_hook(
     # interaction tally. http_fetch + shell don't (they're agent-side
     # side effects, not peer interactions).
     if tool_name.startswith(("kars_", "foundry_")):
-        agent_id = _kwargs.get("agent_id") or _self_agent_id()
+        agent_id = kwargs.get("agent_id") or _self_agent_id()
         if agent_id:
             submit_trust(agent_id, score=0.8, interactions=1)
 
