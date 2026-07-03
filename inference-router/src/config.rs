@@ -107,9 +107,9 @@ impl Config {
                 .unwrap_or_else(|_| "gpt-4.1".into()),
 
             content_safety_enabled: std::env::var("CONTENT_SAFETY_ENABLED")
-                .unwrap_or_else(|_| "true".into())
+                .unwrap_or_else(|_| "false".into())
                 .parse()
-                .unwrap_or(true),
+                .unwrap_or(false),
 
             prompt_shields_enabled: std::env::var("PROMPT_SHIELDS_ENABLED")
                 .unwrap_or_else(|_| "true".into())

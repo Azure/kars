@@ -809,10 +809,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         .as_ref()
         .and_then(|c| c.require_prompt_shields)
         .unwrap_or(true);
-    // Content Safety always enabled at the router boundary; the policy
-    // CR's severity floors tighten the router's defaults but do not
-    // disable the feature.
-    let content_safety_enabled = true;
+    // Content Safety enforces at the router boundary ONLY when the operator has
+    // wired a dedicated Azure AI Content Safety endpoint (CONTENT_SAFETY_ENDPOINT).
+    // Default OFF — and therefore off for Foundry inference, whose endpoint hosts
+    // no Content Safety API. (Enabling it against a Foundry-fallback endpoint only
+    // produced false "Content Safety endpoint unreachable" readiness warnings.)
+    // Policy severity floors remain independently enforced per-request regardless
+    // of this flag — they gate on the compiled InferencePolicy, not this switch.
+    let content_safety_enabled = !ctx.content_safety_endpoint.trim().is_empty();
     let token_budget_daily = inference_policy_spec
         .token_budget
         .as_ref()
@@ -3630,10 +3634,12 @@ pub async fn run(client: Client) -> Result<()> {
     let foundry_project_endpoint = std::env::var("FOUNDRY_PROJECT_ENDPOINT").unwrap_or_default();
     let foundry_deployments = std::env::var("FOUNDRY_DEPLOYMENTS").unwrap_or_default();
     let imds_client_id = std::env::var("IMDS_CLIENT_ID").unwrap_or_default();
-    // Content Safety endpoint — defaults to Foundry endpoint if not set separately,
-    // since Azure AI Services multi-service resources host Content Safety at the same base URL.
-    let content_safety_endpoint =
-        std::env::var("CONTENT_SAFETY_ENDPOINT").unwrap_or_else(|_| foundry_endpoint.clone());
+    // Content Safety endpoint — an OPTIONAL, dedicated Azure AI Content Safety
+    // resource. NOT defaulted to the Foundry endpoint: Foundry hosts no Content
+    // Safety API, so a fallback would only produce false "unreachable" warnings
+    // and enable a feature that can never succeed. Empty (⇒ Content Safety
+    // disabled) unless an operator explicitly sets CONTENT_SAFETY_ENDPOINT.
+    let content_safety_endpoint = std::env::var("CONTENT_SAFETY_ENDPOINT").unwrap_or_default();
 
     if openai_endpoint.is_empty() && foundry_endpoint.is_empty() {
         tracing::warn!(
