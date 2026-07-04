@@ -114,6 +114,24 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // There is nothing cluster-side to clean up in V0.
     if task.metadata.deletion_timestamp.is_some() {
         if has_finalizer(&task) {
+            // Sweep the mission ConfigMaps the mesh peer wrote in the controller
+            // namespace (output / artifacts / trace / review). They carry no
+            // ownerReference (they live cross-namespace from the KarsTask), so
+            // without this they orphan on delete — for EVERY delete path (kubectl,
+            // GC, force-delete), not only the Bridge's own delete-mission sweep.
+            {
+                use k8s_openapi::api::core::v1::ConfigMap;
+                let sys = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+                let cms: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &sys);
+                for cm in [
+                    format!("kars-mission-output-{name}"),
+                    format!("kars-mission-artifacts-{name}"),
+                    format!("kars-mission-trace-{name}"),
+                    format!("kars-mission-review-{name}"),
+                ] {
+                    let _ = cms.delete(&cm, &kube::api::DeleteParams::default()).await;
+                }
+            }
             // Drop our finalizer with a merge patch. A server-side *apply* that
             // sets `finalizers: []` does not reliably remove a finalizer the
             // apiserver no longer attributes to this manager (it 400s with
