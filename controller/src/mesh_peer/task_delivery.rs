@@ -144,18 +144,32 @@ pub(super) async fn watch_run_requests(state: Arc<MeshPeerState>) {
                 continue;
             }
             // Claim this task for the life of the delivery so the next poll
-            // tick doesn't re-dispatch it.
-            if !inflight()
-                .lock()
-                .expect("inflight poisoned")
-                .insert(name.clone())
+            // tick doesn't re-dispatch it. Recover from a poisoned mutex instead
+            // of panicking — a panic here aborts the watch task permanently
+            // (it is never re-spawned), silently stopping ALL mesh delivery.
             {
-                continue;
+                let mut guard = match inflight().lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => {
+                        tracing::error!("inflight mutex poisoned — recovering");
+                        poisoned.into_inner()
+                    }
+                };
+                if !guard.insert(name.clone()) {
+                    continue;
+                }
             }
             let state = state.clone();
             tokio::spawn(async move {
                 let result = deliver_for_task(&state, &task, &requested).await;
-                inflight().lock().expect("inflight poisoned").remove(&name);
+                match inflight().lock() {
+                    Ok(mut g) => {
+                        g.remove(&name);
+                    }
+                    Err(poisoned) => {
+                        poisoned.into_inner().remove(&name);
+                    }
+                }
                 if let Err(e) = result {
                     tracing::warn!(task = %name, err = %format!("{e:#}"), "mesh task delivery failed");
                 }

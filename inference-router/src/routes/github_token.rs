@@ -15,10 +15,14 @@
 //! sandbox falls back to anonymous (public-repo) access. Configuring the App is
 //! a pure forward-rollout; nothing breaks when it's absent.
 
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Json, Router, extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse,
+    routing::get,
+};
 use serde::Serialize;
 
-use super::AppState;
+use super::{AppState, extract_admin_token};
+use crate::errors;
 use crate::github_app::GitHubApp;
 
 #[derive(Debug, Serialize)]
@@ -35,7 +39,33 @@ struct ErrorResponse {
     detail: String,
 }
 
-async fn github_token_handler(State(_state): State<AppState>) -> impl IntoResponse {
+async fn github_token_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Minting a live, write-scoped GitHub installation token MUST require the
+    // admin token — even over loopback. The router's same-pod auth exemption
+    // otherwise lets the sandboxed agent (UID 1000), which reaches the router on
+    // 127.0.0.1:8443, fetch a credential it must never hold (design note §14;
+    // this route sits in the admin-protected group precisely to withhold it from
+    // UID 1000). Mirrors the governance.rs trust-mutation guard, which likewise
+    // enforces even from localhost.
+    if let Some(ref expected) = state.admin_token {
+        match extract_admin_token(&headers).as_deref() {
+            Some(tok) if crate::handoff::constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {}
+            _ => {
+                tracing::warn!(
+                    "GET /v1/github-token denied: missing or invalid admin token (localhost is NOT exempt for credential minting)"
+                );
+                return errors::flat(
+                    StatusCode::FORBIDDEN,
+                    "Admin token required to mint a GitHub installation token",
+                )
+                .into_response();
+            }
+        }
+    }
+
     let Some(app) = GitHubApp::from_env() else {
         // 404: no App configured → feature off, sandbox falls back to anonymous.
         return (

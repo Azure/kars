@@ -299,11 +299,23 @@ pub async fn teardown(
         Api::namespaced_with(client.clone(), namespace, &sandbox_api_resource());
     let ip_api: Api<DynamicObject> =
         Api::namespaced_with(client.clone(), namespace, &inference_policy_api_resource());
-    // Best-effort: ignore 404s.
-    let _ = sb_api.delete(&task_name, &DeleteParams::default()).await;
-    let _ = ip_api
+    // Ignore 404 (already gone) but PROPAGATE any other error so the caller can
+    // requeue — silently swallowing a failed sandbox delete would leave the pod
+    // running and the agent still reachable on the mesh (it could keep receiving
+    // and answering delegated tasks as a "retired" agent).
+    match sb_api.delete(&task_name, &DeleteParams::default()).await {
+        Ok(_) => {}
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(e) => return Err(e),
+    }
+    match ip_api
         .delete(&format!("{task_name}-inference"), &DeleteParams::default())
-        .await;
+        .await
+    {
+        Ok(_) => {}
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(e) => return Err(e),
+    }
     Ok(())
 }
 
