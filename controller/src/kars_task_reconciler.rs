@@ -534,7 +534,17 @@ async fn reconcile_receipt(
     // a read failure yields a conservative "not enforced" observation, never a
     // false positive). This is what makes the receipt's completeness claim
     // concrete and re-derivable by an auditor.
-    let completeness = gather_completeness(client, ns, &name).await;
+    // A sandbox is materialized only when the task was launched AND a sandbox
+    // ref exists — the honest precondition for claiming the egress-guard datapath
+    // ruleset is bound (an un-launched governance-only receipt must not claim it).
+    let sandbox_materialized = task
+        .spec
+        .execution
+        .as_ref()
+        .map(|e| e.launch)
+        .unwrap_or(false)
+        && status.sandbox_ref.is_some();
+    let completeness = gather_completeness(client, ns, &name, sandbox_materialized).await;
 
     let Some(statement) = build_statement(task, status, &signer.key_id, &facts, completeness)
     else {
@@ -683,6 +693,7 @@ async fn gather_completeness(
     client: &kube::Client,
     ns: &str,
     task_name: &str,
+    sandbox_materialized: bool,
 ) -> crate::kars_receipt::PredicateCompleteness {
     use k8s_openapi::api::admissionregistration::v1::ValidatingAdmissionPolicy;
     use k8s_openapi::api::core::v1::ConfigMap;
@@ -746,10 +757,13 @@ async fn gather_completeness(
     let token_cost_audit_bound = run_total_tokens.is_some();
 
     // V1 egress-guard ruleset binding: hash the authored iptables ruleset the
-    // egress-guard enforces for a task-materialized (non-SRE) sandbox. Bound at
-    // mint — it pins the datapath posture independent of whether the task has
-    // run yet. (The node-level eBPF witness that the kernel applied it is V2.)
-    let egress_guard_ruleset_hash = Some(crate::reconciler::egress_guard_ruleset_hash(false));
+    // egress-guard enforces for a task-materialized (non-SRE) sandbox. Only
+    // meaningful once a sandbox was actually materialized (launched + a sandbox
+    // ref exists) — an un-launched task has no datapath to bind, so we must not
+    // pin a hash or claim it is bound. (The node-level eBPF witness that the
+    // kernel applied it is V2.)
+    let egress_guard_ruleset_hash =
+        sandbox_materialized.then(|| crate::reconciler::egress_guard_ruleset_hash(false));
 
     // V1 transparency witness: an independent witness co-signs the receipt-log
     // checkpoint (kars-receipt-witness ConfigMap). Presence of a verified witness
@@ -784,7 +798,7 @@ async fn gather_completeness(
         token_cost_audit_bound,
         run_total_tokens,
         trace_event_count,
-        egress_guard_ruleset_bound: true,
+        egress_guard_ruleset_bound: sandbox_materialized,
         egress_guard_ruleset_hash,
         transparency_witnessed,
         witness_key_id,
