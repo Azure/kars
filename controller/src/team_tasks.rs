@@ -34,6 +34,12 @@ pub struct TeamTask {
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_at: Option<String>,
+    /// When this task first became `active`. A run that dies without delivering
+    /// (mesh peer lost, agent crashed) would otherwise leave the task `active`
+    /// forever, blocking the whole backlog; this timestamp lets the reconciler
+    /// reset a stale `active` task back to `pending`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_since: Option<String>,
 }
 
 fn namespace() -> String {
@@ -101,14 +107,68 @@ pub async fn mark_active(
     task_id: &str,
     run: &str,
 ) -> Result<(), kube::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
     let mut tasks = read_tasks(client, team).await;
     for t in tasks.iter_mut() {
         if t.id == task_id {
             t.status = "active".into();
             t.run = Some(run.to_string());
+            t.stuck_since = Some(now.clone());
         }
     }
     write_tasks(client, team, &tasks).await
+}
+
+/// A task active longer than this (with its run still present) is treated as
+/// hung and requeued. Set comfortably above the mesh delivery ceiling
+/// (ABS_MAX_SECS = 1800s) plus harvest, so a legitimately long run is never
+/// reset out from under itself.
+const STUCK_TASK_TIMEOUT_MINS: i64 = 60;
+
+/// Requeue any `active` backlog task that is stuck: its bound run KarsTask no
+/// longer exists (GC'd / deleted / never materialized), or it has been active
+/// past STUCK_TASK_TIMEOUT_MINS without delivering. Without this, a run that
+/// dies (mesh peer lost, agent crash) leaves the task `active` forever, so
+/// `has_active()` stays true and the whole backlog is permanently blocked.
+/// Returns true if any task was reset. Best-effort per-task run lookups.
+pub async fn reset_stale_active_tasks(client: &Client, team: &str) -> Result<bool, kube::Error> {
+    use crate::kars_task::KarsTask;
+    let mut tasks = read_tasks(client, team).await;
+    if !tasks.iter().any(|t| t.status == "active") {
+        return Ok(false);
+    }
+    let runs: Api<KarsTask> = Api::namespaced(client.clone(), &namespace());
+    let now = chrono::Utc::now();
+    let mut changed = false;
+    for t in tasks.iter_mut() {
+        if t.status != "active" {
+            continue;
+        }
+        let run_exists = match &t.run {
+            Some(r) => runs.get_opt(r).await?.is_some(),
+            None => false,
+        };
+        let stuck_mins = t
+            .stuck_since
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|s| (now - s.with_timezone(&chrono::Utc)).num_minutes())
+            .unwrap_or(0);
+        if !run_exists || stuck_mins > STUCK_TASK_TIMEOUT_MINS {
+            t.status = "pending".into();
+            t.run = None;
+            t.stuck_since = None;
+            changed = true;
+        } else if t.stuck_since.is_none() {
+            // Legacy active task (pre-field) — start its clock now.
+            t.stuck_since = Some(now.to_rfc3339());
+            changed = true;
+        }
+    }
+    if changed {
+        write_tasks(client, team, &tasks).await?;
+    }
+    Ok(changed)
 }
 
 /// Mark the `active` task bound to `run` as `done`. No-op if none matches.
@@ -147,6 +207,7 @@ mod tests {
             run: run.map(String::from),
             created_at: None,
             done_at: None,
+            stuck_since: None,
         }
     }
 

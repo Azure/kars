@@ -239,6 +239,12 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // one task runs at a time — if a task is already in flight we run the charter
     // (or wait). `take()`n by the first mint path that fires so cadence + run-now
     // can't double-claim the same task in one reconcile.
+    // Requeue any hung `active` task (its run died / was GC'd) BEFORE reading the
+    // backlog, so a stuck task can't block the queue forever — has_active() below
+    // then reflects only genuinely in-flight work.
+    if let Err(e) = crate::team_tasks::reset_stale_active_tasks(&ctx.client, &name).await {
+        tracing::warn!(team = %name, err = %format!("{e:#}"), "failed to reset stale active tasks");
+    }
     let team_task_list = crate::team_tasks::read_tasks(&ctx.client, &name).await;
     let mut assigned_task: Option<crate::team_tasks::TeamTask> = if crate::team_tasks::has_active(&team_task_list) {
         None
