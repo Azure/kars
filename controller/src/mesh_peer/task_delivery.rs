@@ -40,6 +40,13 @@ use tokio::time::Duration;
 
 const RUN_REQUESTED_ANNOTATION: &str = "kars.azure.com/run-requested";
 const RUN_COMPLETED_ANNOTATION: &str = "kars.azure.com/run-completed";
+/// Stamped once this controller (the mesh-peer lease holder) has DISPATCHED the
+/// objective to the agent — i.e. it acknowledged and is actively delivering.
+/// Lets a client (the Bridge BFF) distinguish "the mesh peer picked this up and
+/// is working" from "nobody is processing this" (no lease holder / relay down),
+/// so it never silently falls back to a single model turn while the real agent
+/// loop is running (which would double-write the deliverable).
+const RUN_ACK_ANNOTATION: &str = "kars.azure.com/run-ack";
 /// Tracks transient delivery attempts (timeout/unreachable) per run-request, so
 /// a run whose agent wasn't ready yet is retried a bounded number of times
 /// rather than recorded as a permanent timeout on the first miss.
@@ -319,6 +326,14 @@ async fn deliver_for_task(
     if let Err(e) = send_result {
         state.pending_tasks.lock().await.remove(&agent_did);
         return Err(e).context("failed to enqueue task_request");
+    }
+
+    // ACK: the objective is dispatched to the agent over the mesh. Stamp it so a
+    // client can tell "actively delivering" apart from "never processed" and not
+    // race the deliverable with a single-turn fallback. Best-effort — a failed
+    // ack annotation must not abort a delivery that already left.
+    if let Err(e) = mark_ack(state, &namespace, &name, nonce).await {
+        tracing::warn!(task = %name, err = %format!("{e:#}"), "failed to stamp run-ack (delivery continues)");
     }
 
     // Await the agent's task_response, using an IDLE timeout that resets on
@@ -818,6 +833,38 @@ async fn write_mission_trace(
     )
     .await
     .context("write mission-trace ConfigMap")?;
+    Ok(())
+}
+
+/// Stamp `kars.azure.com/run-ack: <nonce>` once the objective has been
+/// dispatched to the agent — the "actively delivering" signal.
+async fn mark_ack(
+    state: &Arc<MeshPeerState>,
+    namespace: &str,
+    task: &str,
+    nonce: &str,
+) -> Result<()> {
+    let api_resource = kube::api::ApiResource {
+        group: "kars.azure.com".into(),
+        version: "v1alpha1".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: "KarsTask".into(),
+        plural: "karstasks".into(),
+    };
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(state.client.clone(), namespace, &api_resource);
+    let patch = json!({
+        "metadata": {
+            "annotations": { RUN_ACK_ANNOTATION: nonce }
+        }
+    });
+    api.patch(
+        task,
+        &PatchParams::apply(crate::field_managers::MESH_PEER),
+        &Patch::Merge(patch),
+    )
+    .await
+    .context("annotate run-ack")?;
     Ok(())
 }
 
