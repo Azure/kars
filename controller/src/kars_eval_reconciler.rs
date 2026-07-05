@@ -547,17 +547,32 @@ fn runner_pod_spec_json(
     cm_name: &str,
     runner_image: &str,
     target_url: &str,
-    corpus_label: &str,
+    _corpus_label: &str,
 ) -> serde_json::Value {
     json!({
         "restartPolicy": "Never",
+        // The runner Job lands in a namespace enforcing the `restricted` Pod
+        // Security Standard, so the pod + container MUST carry the hardened
+        // securityContext or admission rejects it (FailedCreate → the eval never
+        // runs). The runner image already runs as UID 1000, so this only formalises
+        // what the image guarantees.
+        "securityContext": {
+            "runAsNonRoot": true,
+            "runAsUser": 1000,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
         "containers": [{
             "name": "runner",
             "image": runner_image,
             "imagePullPolicy": "IfNotPresent",
+            "securityContext": {
+                "allowPrivilegeEscalation": false,
+                "runAsNonRoot": true,
+                "capabilities": {"drop": ["ALL"]},
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
             "args": [
                 "--corpus", "/etc/kars/eval-corpus/corpus.json",
-                "--corpus-label", corpus_label,
                 "--router-base", target_url,
                 "--output", "/dev/stdout",
             ],
@@ -739,14 +754,18 @@ async fn observe_completed_jobs(
     let lp = ListParams::default().labels(&format!("{LABEL_KEY_CLAW_EVAL}={eval_name}"));
     let job_list = jobs.list(&lp).await?;
 
-    // Collect (job, completion_time) pairs for jobs that have a
-    // succeeded count > 0. Sort by completion_time ascending so we
-    // ingest them in chronological order.
+    // Collect (job, completion_time) pairs for jobs that have reached a TERMINAL
+    // state — succeeded OR failed. The runner exits non-zero (Job "failed") when
+    // any eval case fails (drift), yet it STILL writes a full RunReport; treating
+    // only succeeded jobs as complete silently discarded every eval that actually
+    // found a security gap — the eval's whole purpose. The report parse below
+    // gates usability, so a fatal (exit 2, no report) job is skipped anyway.
     let mut completed: Vec<(String, String)> = Vec::new();
     for j in job_list.items {
         let job_name = j.name_any();
         let succeeded = j.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0);
-        if succeeded == 0 {
+        let failed = j.status.as_ref().and_then(|s| s.failed).unwrap_or(0);
+        if succeeded == 0 && failed == 0 {
             continue;
         }
         let completion_time = j
@@ -754,6 +773,14 @@ async fn observe_completed_jobs(
             .as_ref()
             .and_then(|s| s.completion_time.as_ref())
             .map(|t| timestamp_to_rfc3339(&t.0))
+            .or_else(|| {
+                // A failed Job carries no completionTime; fall back to the latest
+                // condition transition so ordering is still chronological.
+                j.status
+                    .as_ref()
+                    .and_then(|s| s.conditions.as_ref())
+                    .and_then(|cs| cs.iter().filter_map(|c| c.last_transition_time.as_ref()).map(|t| timestamp_to_rfc3339(&t.0)).max())
+            })
             .unwrap_or_else(rfc3339_now);
         completed.push((job_name, completion_time));
     }
@@ -1599,8 +1626,6 @@ mod tests {
         assert!(args.contains(&"/etc/kars/eval-corpus/corpus.json"));
         assert!(args.contains(&"--router-base"));
         assert!(args.contains(&"http://agent-1.kars-agent-1.svc.cluster.local:8443"));
-        assert!(args.contains(&"--corpus-label"));
-        assert!(args.contains(&"builtin:jailbreak-baseline"));
         let vol = &spec["volumes"][0];
         assert_eq!(vol["name"], "corpus");
         assert_eq!(vol["configMap"]["name"], "karseval-my-eval-corpus");
