@@ -1350,6 +1350,24 @@ if [ -d /opt/kars-plugin ]; then
   if [ -d /opt/clawhub-skills ] && [ "$(ls -A /opt/clawhub-skills 2>/dev/null)" ]; then
     mkdir -p "$WORKSPACE_DIR/skills"
     cp -r --no-preserve=mode /opt/clawhub-skills/* "$WORKSPACE_DIR/skills/" 2>/dev/null || true
+    # Reconstruct subdirectories from path-encoded ConfigMap keys. A k8s
+    # ConfigMap key can't contain '/', so a packaged skill's files ship with
+    # '/' encoded as '__' (e.g. 'scripts__run.sh'). Decode them back so the
+    # STANDARD subdirectoried Agent Skills layout (scripts/, references/,
+    # assets/) — and SKILL.md's relative references to it — work unchanged.
+    for f in "$WORKSPACE_DIR"/skills/*/*__*; do
+      [ -f "$f" ] || continue
+      base="${f##*/}"
+      case "$base" in
+        *__*) : ;;
+        *) continue ;;
+      esac
+      dir="${f%/*}"
+      decoded="${base//__//}"
+      target="$dir/$decoded"
+      mkdir -p "$(dirname "$target")"
+      mv "$f" "$target" 2>/dev/null || true
+    done
     CLAWHUB_COUNT=$(ls -d /opt/clawhub-skills/*/ 2>/dev/null | wc -l)
     echo "[kars] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
   fi
