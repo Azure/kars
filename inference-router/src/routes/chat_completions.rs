@@ -50,7 +50,11 @@ fn is_model_unavailable_error(status: axum::http::StatusCode, body: &[u8]) -> bo
         .and_then(|m| m.as_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if code.contains("deploymentnotfound") || code == "model_not_found" {
+    if code.contains("deploymentnotfound")
+        || code == "model_not_found"
+        || code == "model_not_supported"
+        || code == "invalid_model"
+    {
         return true;
     }
     let mentions_model = msg.contains("deployment") || msg.contains("model");
@@ -58,6 +62,8 @@ fn is_model_unavailable_error(status: axum::http::StatusCode, body: &[u8]) -> bo
         || msg.contains("not found")
         || msg.contains("unknown model")
         || msg.contains("invalid model")
+        || msg.contains("not supported")
+        || msg.contains("is not a valid model")
         || msg.contains("no deployment");
     mentions_model && mentions_absence
 }
@@ -578,28 +584,92 @@ pub(super) async fn chat_completions(
                             .into_response()
                         }
                     }
-                } else {
-                    // Foolproof (Option A): the upstream reported the model as
-                    // unavailable → cache it so the very next call (the agent
-                    // loop always retries a failed turn) transparently uses the
-                    // default model via the pre-flight override above. We don't
-                    // re-stream here (that would duplicate the guardrail wrapping);
-                    // the cache makes the retry self-heal in one round-trip.
-                    if is_model_unavailable_error(status, &err_bytes) {
-                        let default_model = state.config.default_model.clone();
-                        if !default_model.is_empty() && default_model != model_name {
-                            if let Ok(mut set) = state.unavailable_models.write() {
-                                set.insert(model_name.clone());
-                            }
-                            tracing::warn!(
-                                sandbox = %sandbox_name,
-                                requested = %model_name,
-                                fallback = %default_model,
-                                "streaming model unavailable on this provider — cached; the retry will use the default model"
-                            );
+                } else if is_model_unavailable_error(status, &err_bytes) {
+                    // Foolproof (Option A): the requested model is unavailable on
+                    // this provider. Retry THIS request against the default (served)
+                    // model and return the result as an SSE frame — so the agent's
+                    // streaming turn SUCCEEDS instead of failing fatally. (OpenClaw
+                    // treats a model error as terminal and won't retry, so caching
+                    // alone isn't enough — we must self-heal in-request.)
+                    let default_model = state.config.default_model.clone();
+                    if !default_model.is_empty() && default_model != model_name {
+                        if let Ok(mut set) = state.unavailable_models.write() {
+                            set.insert(model_name.clone());
                         }
+                        tracing::warn!(
+                            sandbox = %sandbox_name,
+                            requested = %model_name,
+                            fallback = %default_model,
+                            "streaming model unavailable — retrying this request against the default model"
+                        );
+                        let mut fb_upstream = upstream.clone();
+                        fb_upstream.deployment = default_model.clone();
+                        // Buffered (stream:false) fallback against the default model.
+                        let fb_body = {
+                            let mut v: serde_json::Value =
+                                serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
+                            if v.is_object() {
+                                v["model"] = serde_json::Value::String(default_model.clone());
+                                v["stream"] = serde_json::Value::Bool(false);
+                            }
+                            serde_json::to_vec(&v)
+                                .map(bytes::Bytes::from)
+                                .unwrap_or_else(|_| bytes::Bytes::copy_from_slice(&body))
+                        };
+                        match proxy::forward(
+                            &state.auth,
+                            Some(&state.copilot),
+                            &state.client,
+                            &fb_upstream,
+                            axum::http::Method::POST,
+                            "chat/completions",
+                            &headers,
+                            fb_body,
+                        )
+                        .await
+                        {
+                            Ok((resp_status, _, resp_body)) if resp_status.is_success() => {
+                                if let Ok(bj) =
+                                    serde_json::from_slice::<serde_json::Value>(&resp_body)
+                                {
+                                    state.task_telemetry.record_response(
+                                        &bj,
+                                        crate::task_telemetry::Shape::OpenAi,
+                                        0,
+                                    );
+                                    if let Some(total) = bj
+                                        .get("usage")
+                                        .and_then(|u| u.get("total_tokens"))
+                                        .and_then(|v| v.as_u64())
+                                    {
+                                        state.budget.record_usage(sandbox_name, total).await;
+                                    }
+                                }
+                                let sse = format!(
+                                    "data: {}\n\ndata: [DONE]\n\n",
+                                    String::from_utf8_lossy(&resp_body)
+                                );
+                                let mut response =
+                                    (StatusCode::OK, Body::from(sse)).into_response();
+                                response.headers_mut().insert(
+                                    "content-type",
+                                    axum::http::HeaderValue::from_static("text/event-stream"),
+                                );
+                                response
+                            }
+                            _ => {
+                                tracing::warn!(
+                                    sandbox = %sandbox_name,
+                                    "default-model fallback did not succeed — returning original error"
+                                );
+                                (status, Body::from(err_bytes)).into_response()
+                            }
+                        }
+                    } else {
+                        (status, Body::from(err_bytes)).into_response()
                     }
-                    // Return the genuine error with its real status.
+                } else {
+                    // Genuine error — return as-is with its real status.
                     (status, Body::from(err_bytes)).into_response()
                 }
             }
@@ -1300,6 +1370,11 @@ mod tests {
         assert!(is_model_unavailable_error(
             StatusCode::BAD_REQUEST,
             br#"{"error":{"message":"Unknown model: bogus-model"}}"#
+        ));
+        // Copilot / Foundry "model_not_supported" (the exact wording seen live).
+        assert!(is_model_unavailable_error(
+            StatusCode::BAD_REQUEST,
+            br#"{"error":{"message":"The requested model is not supported.","code":"model_not_supported","param":"model","type":"invalid_request_error"}}"#
         ));
         // Must NOT fire on unrelated errors.
         assert!(!is_model_unavailable_error(
