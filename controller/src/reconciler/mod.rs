@@ -218,6 +218,28 @@ pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
     cmd
 }
 
+/// The cluster's default served model, read from the controller's own
+/// environment (`KARS_TASK_DEFAULT_MODEL` → `AZURE_OPENAI_DEPLOYMENT` →
+/// `DEFAULT_MODEL`). Injected into every sandbox's inference-router as
+/// `DEFAULT_MODEL` so the router's model self-heal (Option A) has a KNOWN-served
+/// fallback target. Returns empty when the controller has no default configured;
+/// the router then keeps its own default and Option A stays permissive.
+pub(crate) fn cluster_default_model() -> String {
+    for key in [
+        "KARS_TASK_DEFAULT_MODEL",
+        "AZURE_OPENAI_DEPLOYMENT",
+        "DEFAULT_MODEL",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 /// The `sha256:`-prefixed digest of the egress-guard's authored iptables
 /// ruleset (the exact OUTPUT filter + NAT rules `build_egress_guard_command`
 /// emits for the given sandbox kind). This is the V1 egress-guard ruleset
@@ -2097,6 +2119,12 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "FOUNDRY_PROJECT_ENDPOINT", "value": &ctx.foundry_project_endpoint}),
             json!({"name": "IMDS_CLIENT_ID", "value": &ctx.imds_client_id}),
             json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": &inference_model}),
+            // The cluster's default served model — the router's fallback target
+            // for provider-agnostic model self-heal (Option A). If a sandbox's
+            // configured model is rejected by the provider as unavailable, the
+            // router retries against THIS (a known-served model), instead of the
+            // hardcoded "gpt-4o-mini" which may not be served on every provider.
+            json!({"name": "DEFAULT_MODEL", "value": cluster_default_model()}),
             json!({"name": "KARS_AUTH_MODE", "value": if ctx.dev_openai_api_key.is_empty() { "workload-identity" } else { "api-key" }}),
             json!({"name": "CONTENT_SAFETY_ENABLED", "value": content_safety_enabled.to_string()}),
             json!({"name": "PROMPT_SHIELDS_ENABLED", "value": prompt_shields_enabled.to_string()}),

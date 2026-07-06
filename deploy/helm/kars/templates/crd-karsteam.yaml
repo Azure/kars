@@ -128,6 +128,15 @@ spec:
                       `OpenClaw`.
                     nullable: true
                     type: string
+                  skills:
+                    description: |-
+                      Names of approved `KarsSkill` PACKAGES to install into the sandbox. Each
+                      is a `karsskill-<name>` ConfigMap (SKILL.md + scripts) the reconciler
+                      mounts into the agent's skills dir. Surfaced to the reconciler via the
+                      sandbox annotation `kars.azure.com/skills`.
+                    items:
+                      type: string
+                    type: array
                   toolPolicy:
                     description: |-
                       Tools the agent may call, expressed as the name of an existing
@@ -387,6 +396,15 @@ spec:
                             `OpenClaw`.
                           nullable: true
                           type: string
+                        skills:
+                          description: |-
+                            Names of approved `KarsSkill` PACKAGES to install into the sandbox. Each
+                            is a `karsskill-<name>` ConfigMap (SKILL.md + scripts) the reconciler
+                            mounts into the agent's skills dir. Surfaced to the reconciler via the
+                            sandbox annotation `kars.azure.com/skills`.
+                          items:
+                            type: string
+                          type: array
                         toolPolicy:
                           description: |-
                             Tools the agent may call, expressed as the name of an existing
