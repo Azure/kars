@@ -1801,6 +1801,19 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "KARS_RUNTIME_KIND", "value": format!("{:?}", runtime_spec.kind)}),
         );
         openclaw_env.push(json!({"name": "SANDBOX_NAME", "value": &name}));
+        // Keyless git write (§14): pull ONLY the enable flag + author identity
+        // from the operator-managed `<name>-git-write` secret into the agent —
+        // never the token (that goes to the router). optional → absent = off.
+        for (var, key) in [
+            ("KARS_GIT_WRITE", "KARS_GIT_WRITE"),
+            ("GIT_AUTHOR_NAME", "GIT_AUTHOR_NAME"),
+            ("GIT_AUTHOR_EMAIL", "GIT_AUTHOR_EMAIL"),
+        ] {
+            openclaw_env.push(json!({
+                "name": var,
+                "valueFrom": {"secretKeyRef": {"name": format!("{}-git-write", name), "key": key, "optional": true}}
+            }));
+        }
         if let Some(ref cluster) = ctx.cluster_name {
             openclaw_env.push(json!({"name": "CLUSTER_NAME", "value": cluster}));
         }
@@ -2498,6 +2511,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                                     {"containerPort": 9090, "name": "metrics"}
                                 ],
                                 "env": router_env,
+                                // Keyless git write (§14): the operator-managed
+                                // `<name>-git-write` secret carries the GitHub App
+                                // creds or a scoped PAT (GITHUB_APP_* / GIT_WRITE_TOKEN)
+                                // ONLY to the router — the agent never receives the
+                                // token. Optional → absent = feature off (fail-closed).
+                                "envFrom": [
+                                    {"secretRef": {"name": format!("{}-git-write", name), "optional": true}}
+                                ],
                                 "securityContext": {
                                     "runAsUser": 1001,
                                     "allowPrivilegeEscalation": false,

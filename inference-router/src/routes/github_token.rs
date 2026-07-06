@@ -67,12 +67,25 @@ async fn github_token_handler(
     }
 
     let Some(app) = GitHubApp::from_env() else {
-        // 404: no App configured → feature off, sandbox falls back to anonymous.
+        // No GitHub App configured. Fall back to a direct write token when the
+        // operator provided one (a fine-grained PAT scoped to the target repos).
+        // This is the simple, no-App path for keyless git write. Fail-closed:
+        // when neither is set, 404 → the sandbox stays read-only/anonymous.
+        if let Ok(tok) = std::env::var("GIT_WRITE_TOKEN") {
+            let tok = tok.trim().to_string();
+            if !tok.is_empty() {
+                return (
+                    StatusCode::OK,
+                    Json(GitHubTokenResponse { token: tok, token_type: "token" }),
+                )
+                    .into_response();
+            }
+        }
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: "github_app_not_configured",
-                detail: "GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID / GITHUB_APP_PRIVATE_KEY not set".into(),
+                detail: "GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID / GITHUB_APP_PRIVATE_KEY (or GIT_WRITE_TOKEN) not set".into(),
             }),
         )
             .into_response();
