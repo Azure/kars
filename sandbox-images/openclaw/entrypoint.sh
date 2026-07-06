@@ -1197,8 +1197,10 @@ Direct internet access is blocked by security policy. To make external HTTP requ
   Body: `{"url": "https://...", "method": "GET", "headers": {}, "body": ""}`
   Returns: `{"status": 200, "headers": {...}, "body": "..."}`
 
-If a domain is not on the allowlist, the request is denied and a pending approval is
-created. The operator can approve it with `kars egress <name> --approve <domain>`.
+If a domain is not on the allowlist, the request is denied AND automatically surfaced
+to the Bridge inbox as a pending approval — a user or operator can grant it there,
+after which your next fetch to that host will succeed. You do not need to do anything
+else for egress; just retry after it's approved.
 
 **Example:**
 ```bash
@@ -1209,6 +1211,39 @@ curl -s -X POST http://localhost:8443/egress/fetch \
 
 **IMPORTANT:** Do NOT use `curl https://...` directly — it will time out.
 Always use `curl http://localhost:8443/egress/fetch` with the target URL in the body.
+
+## Requesting a missing capability
+
+Your sandbox is deliberately least-privilege. If a task genuinely needs something you
+don't have — a **tool**, a **skill**, an **MCP server**, a **shell command**, broader
+**egress**, or a higher autonomy **tier** — do NOT give up or fake the result. Raise a
+request; it surfaces in the Bridge inbox for a human to approve or deny:
+
+```bash
+curl -s -X POST http://localhost:8443/v1/access-request \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"egress","target":"pypi.org","reason":"install the analysis dependency the task requires"}'
+```
+
+`kind` is one of: `egress` (target=host), `tool`, `skill`, `mcp`, `command`
+(target=the name), `permission`, or `tier` (add `"tier": <1-5>`). Always include a
+clear `reason` — the human sees it verbatim. This is a REQUEST, not a grant: it never
+widens access by itself; a person remains the gate.
+
+**Wait for the decision — do not give up after one try.** After raising a request (or
+after any egress denial), a human may take a little time to approve it. Poll for the
+outcome and continue once it's granted:
+
+```bash
+# See the status of your requests: each shows "pending", "approved", or "denied".
+curl -s http://localhost:8443/v1/access-requests
+```
+
+Recommended pattern: poll every ~20–30 seconds for up to ~5 minutes. The moment an
+egress request is **approved**, your next `egress/fetch` to that host simply succeeds —
+retry it and carry on. Only if the request is **denied**, or it's still pending after
+your wait budget, should you report that you couldn't complete that step and explain
+why. Never fabricate a result for something you were blocked from doing.
 TOOLSEOF
 
   cat > "$WORKSPACE_DIR/SOUL.md" << SOULEOF
