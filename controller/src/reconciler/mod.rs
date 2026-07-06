@@ -2686,10 +2686,92 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
+        // KarsSkill packages (skills-as-package): a sandbox may be granted
+        // uploaded skill PACKAGES — a bundle of files (SKILL.md + scripts) stored
+        // as a `karsskill-<name>` ConfigMap in the controller namespace. The set
+        // of granted skills is carried on the sandbox annotation
+        // `kars.azure.com/skills` (comma-separated), set from the task blueprint.
+        // For each, mirror the package ConfigMap into the sandbox namespace and
+        // mount it at `/opt/clawhub-skills/<name>` — the OpenClaw entrypoint
+        // already copies `/opt/clawhub-skills/*` into the agent's live skills
+        // dir ($WORKSPACE_DIR/skills), where OpenClaw AUTO-DISCOVERS each
+        // `<name>/SKILL.md` (its frontmatter `description` is what tells the LLM
+        // when to use it). So the agent genuinely understands + uses the skill,
+        // with no sandbox-image change. Only the agent container gets the mount.
+        //
+        // HARNESS AWARENESS: this file→workspace discovery is an OpenClaw
+        // convention. Other harnesses (Hermes uses git-based skill taps; SDK
+        // harnesses differ) do NOT read `/opt/clawhub-skills`, so mounting there
+        // would be dead weight the agent can't see. We therefore install skill
+        // packages ONLY on OpenClaw for now, and record an honest skip otherwise
+        // rather than pretend the skill is available.
+        let granted_skills: Vec<String> = sandbox
+            .annotations()
+            .get("kars.azure.com/skills")
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !granted_skills.is_empty() && !is_openclaw {
+            tracing::warn!(
+                sandbox = %name,
+                runtime = ?runtime_spec.kind,
+                skills = ?granted_skills,
+                "skill packages are granted but this harness has no file-based skill \
+                 discovery (only OpenClaw is supported today) — skipping install",
+            );
+        }
+        for skill in granted_skills.iter().filter(|_| is_openclaw) {
+            // K8s DNS-1123 guard — skill names are validated at upload, but never
+            // trust an annotation blindly when it drives a mount path + CM name.
+            if !skill
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                || skill.is_empty()
+                || skill.len() > 200
+            {
+                tracing::warn!(sandbox = %name, skill = %skill, "skipping skill with invalid name");
+                continue;
+            }
+            let skill_cm = format!("karsskill-{skill}");
+            let volume_name = format!("skill-{skill}");
+            let mount_path = format!("/opt/clawhub-skills/{skill}");
+            match governance_mounts::mirror_configmap(
+                client,
+                &skill_cm,
+                &sandbox_self_ns,
+                &sandbox_ns,
+                &name,
+                "KarsSkill",
+            )
+            .await
+            {
+                Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                    governance_mounts::inject_configmap_mount(
+                        &mut pod_spec,
+                        agent_container_name,
+                        &skill_cm,
+                        &volume_name,
+                        &mount_path,
+                        None,
+                    );
+                    tracing::info!(sandbox = %name, skill = %skill, "skill package mounted");
+                }
+                Ok(governance_mounts::MirrorOutcome::Skipped(reason)) => {
+                    tracing::warn!(sandbox = %name, skill = %skill, reason = %reason, "skill package ConfigMap not mirrored; skill omitted");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, sandbox = %name, skill = %skill, "skill package ConfigMap mirror failed");
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
+            }
+        }
+
         // KarsMemory (optional, Slice 3a): if the sandbox references
-        // one via `spec.memoryRef`, mirror its compiled binding
-        // ConfigMap and mount it into the inference-router. The router's
-        // `memory_binding_loader` reads the file, registers the digest
         // under `PolicyKind::Memory`, and echoes it via
         // `/internal/policy-status` so the `kars_memory_reconciler` can
         // close the §3 Ready ⇔ router-echo loop.

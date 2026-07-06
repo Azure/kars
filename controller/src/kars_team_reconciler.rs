@@ -1991,6 +1991,7 @@ fn merge_blueprint(
             egress: if rb.egress.is_empty() { tb.egress.clone() } else { rb.egress.clone() },
             isolation: rb.isolation.clone().or_else(|| tb.isolation.clone()),
             memory: rb.memory.clone().or_else(|| tb.memory.clone()),
+            skills: if rb.skills.is_empty() { tb.skills.clone() } else { rb.skills.clone() },
         }),
         (None, Some(rb)) => Some(rb.clone()),
         (Some(tb), None) => Some(tb.clone()),
@@ -2246,6 +2247,7 @@ mod tests {
             egress: vec![],
             isolation: None,
             memory: None,
+            skills: vec![],
         };
         // Role specialises the model but omits tool_policy and mcp.
         let role_bp = TaskBlueprint {
@@ -2260,6 +2262,7 @@ mod tests {
             egress: vec![],
             isolation: None,
             memory: None,
+            skills: vec![],
         };
         let merged = merge_blueprint(Some(&team_bp), Some(&role_bp)).unwrap();
         // tool_policy inherited from the team so the member stays attenuated.

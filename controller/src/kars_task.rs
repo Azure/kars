@@ -175,6 +175,13 @@ pub struct TaskBlueprint {
     /// one-off task usually leaves it unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+
+    /// Names of approved `KarsSkill` PACKAGES to install into the sandbox. Each
+    /// is a `karsskill-<name>` ConfigMap (SKILL.md + scripts) the reconciler
+    /// mounts into the agent's skills dir. Surfaced to the reconciler via the
+    /// sandbox annotation `kars.azure.com/skills`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
 }
 
 /// A model route: provider tag + deployment name.
