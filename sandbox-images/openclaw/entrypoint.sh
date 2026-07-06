@@ -1246,6 +1246,39 @@ your wait budget, should you report that you couldn't complete that step and exp
 why. Never fabricate a result for something you were blocked from doing.
 TOOLSEOF
 
+  # Append the git-write / pull-request section only when keyless git write is
+  # enabled, so the agent is never told about a capability it doesn't have.
+  if [ "${KARS_GIT_WRITE:-}" = "1" ]; then
+    cat >> "$WORKSPACE_DIR/TOOLS.md" << 'GITEOF'
+
+## Opening a pull request (keyless git write)
+
+Git write is enabled for this sandbox. You can clone a repo, make changes, and
+open a pull request — **without handling any credentials**. A router-managed,
+short-lived, repo-scoped token is injected automatically for github.com.
+
+Ensure the repo host is reachable (it must be on your egress allowlist — if a
+`git clone`/`git push` is denied, request it with the access-request flow above,
+then retry). Then:
+
+```bash
+git clone https://github.com/<owner>/<repo>.git && cd <repo>
+git checkout -b kars/<short-change-name>
+# ... make your edits ...
+git add -A && git commit -m "Describe the change"
+git push -u origin HEAD                 # auth is injected by the router; no token needed
+
+# Open the PR (gh authenticates via the same router-managed token):
+GH_TOKEN="$(/usr/local/bin/git-credential-kars token)" \
+  gh pr create --title "Your title" --body "What changed and why"
+```
+
+The token is scoped to the repositories the operator configured — you cannot push
+to arbitrary repos. If a push or PR fails with an auth error, the repo may be
+outside the configured scope; report that rather than retrying blindly.
+GITEOF
+  fi
+
   cat > "$WORKSPACE_DIR/SOUL.md" << SOULEOF
 # Soul
 
@@ -1370,6 +1403,24 @@ if [ -d /opt/kars-plugin ]; then
     done
     CLAWHUB_COUNT=$(ls -d /opt/clawhub-skills/*/ 2>/dev/null | wc -l)
     echo "[kars] ClawHub skills installed: ${CLAWHUB_COUNT} (pre-built)"
+  fi
+
+  # ── Keyless git write (§14) ───────────────────────────────────────────────
+  # When the operator enables git write (controller sets KARS_GIT_WRITE=1 and
+  # gives the router a GitHub App or a scoped PAT), wire git + gh to fetch a
+  # short-lived, repo-scoped token from the router via the credential helper.
+  # The agent never holds a credential; the token expires within the hour and is
+  # scoped to the operator-configured repos. Inert (git stays anonymous /
+  # read-only) when KARS_GIT_WRITE is unset — fail-closed.
+  if [ "${KARS_GIT_WRITE:-}" = "1" ]; then
+    _git_name="${GIT_AUTHOR_NAME:-kars-agent}"
+    _git_email="${GIT_AUTHOR_EMAIL:-kars-agent@users.noreply.github.com}"
+    $AS_SANDBOX git config --global user.name "$_git_name" 2>/dev/null || true
+    $AS_SANDBOX git config --global user.email "$_git_email" 2>/dev/null || true
+    # Route github.com HTTPS auth through the kars credential helper (git push
+    # authenticates without the agent ever storing a token).
+    $AS_SANDBOX git config --global credential.https://github.com.helper "/usr/local/bin/git-credential-kars" 2>/dev/null || true
+    echo "[kars] Keyless git write enabled — github.com auth via router credential helper"
   fi
   # Copy node_modules so the plugin can resolve runtime deps (ws, etc).
   # `-L` dereferences symlinks: the @kars/mesh entry is a `file:` dep
