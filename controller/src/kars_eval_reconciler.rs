@@ -839,14 +839,14 @@ async fn observe_completed_jobs(
         let first_failing_cases: Vec<String> = report
             .results
             .iter()
-            .filter(|c| c.verdict_pass.is_none() || c.verdict_pass == Some(false))
+            .filter(|c| c.verdict_pass == Some(false))
             .take(5)
             .map(|c| c.case_id.clone())
             .collect();
 
         // Persist the PER-CASE report durably so the Bridge can render a detailed
-        // report (which specific cases passed/failed, expected vs actual). The
-        // runner pod log is TTL'd away, so counts alone would lose the detail.
+        // report (which specific cases passed/failed/errored, expected vs actual).
+        // The runner pod log is TTL'd away, so counts alone would lose the detail.
         let per_case: Vec<serde_json::Value> = report
             .results
             .iter()
@@ -855,6 +855,7 @@ async fn observe_completed_jobs(
                     "caseId": c.case_id,
                     "tags": c.tags,
                     "pass": c.verdict_pass,
+                    "errored": c.verdict_errored,
                     "expected": c.expected,
                     "actual": c.actual,
                     "durationMs": c.duration_ms,
@@ -867,6 +868,7 @@ async fn observe_completed_jobs(
             "total": report.total,
             "passed": report.passed,
             "failed": report.failed,
+            "errored": report.errored,
             "completedAt": completion_time,
             "results": per_case,
         });
@@ -891,7 +893,14 @@ async fn observe_completed_jobs(
         let failed_u32 = u32::try_from(report.failed).unwrap_or(u32::MAX);
         let passed_u32 = u32::try_from(report.passed).unwrap_or(u32::MAX);
         let total_u32 = u32::try_from(report.total).unwrap_or(u32::MAX);
-        let errored_u32 = total_u32.saturating_sub(passed_u32.saturating_add(failed_u32));
+        // Prefer the runner's explicit errored count (target-unreachable /
+        // inconclusive cases). Older runners that don't emit it report 0, so
+        // fall back to deriving the remainder for backward compatibility.
+        let errored_u32 = if report.errored > 0 {
+            u32::try_from(report.errored).unwrap_or(u32::MAX)
+        } else {
+            total_u32.saturating_sub(passed_u32.saturating_add(failed_u32))
+        };
 
         let result = EvalResult {
             schema_version: report.schema_version,
@@ -953,6 +962,11 @@ struct ParsedReport {
     total: usize,
     passed: usize,
     failed: usize,
+    /// Cases that could not be evaluated (target unreachable). Inconclusive,
+    /// tracked separately from `failed`. Defaults to 0 for reports produced by
+    /// an older runner that predates the errored dimension.
+    #[serde(default)]
+    errored: usize,
     #[serde(default)]
     results: Vec<ParsedCase>,
 }
@@ -961,10 +975,16 @@ struct ParsedReport {
 struct ParsedCase {
     #[serde(rename = "caseId")]
     case_id: String,
-    /// Materialised from `verdict.result == "Pass"`. `None` for
-    /// malformed entries.
+    /// Materialised from `verdict.result`: `Some(true)` for `Pass`,
+    /// `Some(false)` for `Fail`, `None` for `Errored` (inconclusive) or a
+    /// malformed entry.
     #[serde(skip_deserializing, default)]
     verdict_pass: Option<bool>,
+    /// Materialised from `verdict.result == "Errored"` — the case could not be
+    /// evaluated (e.g. the target router was unreachable). Distinct from a
+    /// policy failure.
+    #[serde(skip_deserializing, default)]
+    verdict_errored: bool,
     /// Raw verdict object — used to populate `verdict_pass`.
     #[serde(default)]
     verdict: serde_json::Value,
@@ -1055,11 +1075,13 @@ fn parse_report_from_log(log: &str) -> Option<ParsedReport> {
                 continue;
             }
             for case in parsed.results.iter_mut() {
-                case.verdict_pass = case
-                    .verdict
-                    .get("result")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s == "Pass");
+                let result = case.verdict.get("result").and_then(|v| v.as_str());
+                case.verdict_pass = match result {
+                    Some("Pass") => Some(true),
+                    Some("Fail") => Some(false),
+                    _ => None,
+                };
+                case.verdict_errored = result == Some("Errored");
             }
             latest = Some(parsed);
         }
@@ -1073,11 +1095,13 @@ fn try_parse_report(s: &str) -> Option<ParsedReport> {
         return None;
     }
     for case in parsed.results.iter_mut() {
-        case.verdict_pass = case
-            .verdict
-            .get("result")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "Pass");
+        let result = case.verdict.get("result").and_then(|v| v.as_str());
+        case.verdict_pass = match result {
+            Some("Pass") => Some(true),
+            Some("Fail") => Some(false),
+            _ => None,
+        };
+        case.verdict_errored = result == Some("Errored");
     }
     Some(parsed)
 }
@@ -1173,6 +1197,10 @@ fn build_conditions(
         (None, _) => format!(
             "awaiting first run — corpus {} ({})",
             resolved.label, resolved.digest
+        ),
+        (Some(r), false) if r.errored > 0 => format!(
+            "{} of {} cases passed against corpus {} ({} could not be evaluated — target unreachable)",
+            r.passed, r.total, r.corpus_label, r.errored
         ),
         (Some(r), false) => format!(
             "all {} cases passed against corpus {}",
@@ -1556,6 +1584,32 @@ mod tests {
         assert_eq!(parsed.results.len(), 3);
         assert_eq!(parsed.results[0].verdict_pass, Some(true));
         assert_eq!(parsed.results[2].verdict_pass, Some(false));
+    }
+
+    #[test]
+    fn parse_report_classifies_errored_as_inconclusive_not_failed() {
+        // A transport-errored case must materialise as verdict_pass = None and
+        // verdict_errored = true — never Some(false). Otherwise an unreachable
+        // target reads as a policy failure and falsely marks the sandbox as
+        // "drifted" (the confusing "actual=Blocked but FAIL" the fix removes).
+        let log = r#"
+        {"schemaVersion":"v1","corpusName":"builtin:jailbreak-baseline","corpusDigest":"sha256:abc","startedAt":"2026-05-14T10:00:00Z","completedAt":"2026-05-14T10:00:05Z","durationMs":5000,"routerBase":"http://x:8443","total":3,"passed":1,"failed":1,"errored":1,"results":[
+          {"caseId":"c1","tags":["control"],"scenario":{"kind":"ChatCompletion","messageCount":1},"expected":{"decision":"Allowed"},"actual":{"decision":"Allowed"},"verdict":{"result":"Pass"},"durationMs":100},
+          {"caseId":"c2","tags":["jailbreak"],"scenario":{"kind":"ChatCompletion","messageCount":1},"expected":{"decision":"Blocked"},"actual":{"decision":"Allowed"},"verdict":{"result":"Fail","reason":"DecisionMismatch","expected":"Blocked","actual":"Allowed"},"durationMs":100},
+          {"caseId":"c3","tags":["jailbreak"],"scenario":{"kind":"ChatCompletion","messageCount":1},"expected":{"decision":"Blocked"},"actual":{"decision":"Errored"},"verdict":{"result":"Errored","reason":"transport error: timed out"},"durationMs":5000}
+        ]}
+        "#;
+        let parsed = parse_report_from_log(log).expect("parses");
+        assert_eq!(parsed.errored, 1);
+        // c3 is the errored case.
+        let c3 = &parsed.results[2];
+        assert_eq!(c3.case_id, "c3");
+        assert_eq!(c3.verdict_pass, None);
+        assert!(c3.verdict_errored);
+        // c2 is a real failure — still Some(false), NOT errored.
+        let c2 = &parsed.results[1];
+        assert_eq!(c2.verdict_pass, Some(false));
+        assert!(!c2.verdict_errored);
     }
 
     #[test]

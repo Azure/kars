@@ -113,6 +113,7 @@ async fn run(cli: Cli) -> Result<bool> {
     let mut results: Vec<CaseReport> = Vec::with_capacity(corpus.cases.len());
     let mut passed: usize = 0;
     let mut failed: usize = 0;
+    let mut errored: usize = 0;
 
     for case in &corpus.cases {
         if let Some(only) = &cli.only_case
@@ -147,17 +148,18 @@ async fn run(cli: Cli) -> Result<bool> {
                 match report.verdict {
                     VerdictWire::Pass => passed += 1,
                     VerdictWire::Fail { .. } => failed += 1,
+                    VerdictWire::Errored { .. } => errored += 1,
                 }
                 report
             }
             Err(e) => {
-                failed += 1;
+                errored += 1;
                 tracing::warn!(
                     case_id = %case.id,
                     error = %e,
-                    "case replay failed at transport layer; recording as DecisionMismatch (Blocked)",
+                    "case replay failed at transport layer; recording as Errored (target unreachable — inconclusive)",
                 );
-                synthetic_transport_failure_report(
+                report::build_errored_case_report(
                     case,
                     &format!("transport error: {e:#}"),
                     case_started.elapsed().as_millis() as u64,
@@ -169,6 +171,9 @@ async fn run(cli: Cli) -> Result<bool> {
             VerdictWire::Pass => tracing::info!(case_id = %case.id, "PASS"),
             VerdictWire::Fail { failure } => {
                 tracing::warn!(case_id = %case.id, ?failure, "FAIL");
+            }
+            VerdictWire::Errored { reason } => {
+                tracing::warn!(case_id = %case.id, %reason, "ERRORED");
             }
         }
 
@@ -190,6 +195,7 @@ async fn run(cli: Cli) -> Result<bool> {
         total,
         passed,
         failed,
+        errored,
         results,
     };
 
@@ -204,6 +210,7 @@ async fn run(cli: Cli) -> Result<bool> {
         total,
         passed,
         failed,
+        errored,
         duration_ms,
         "conformance run complete"
     );
@@ -250,31 +257,6 @@ fn write_report(path: &PathBuf, json: &str) -> Result<()> {
     }
     std::fs::write(path, json).context("write report file")?;
     Ok(())
-}
-
-/// Build a [`CaseReport`] that records a transport-level failure as a
-/// `DecisionMismatch` (actual `Blocked` vs. whatever was expected). The
-/// reason carries the transport error string so the 6.3 reconciler can
-/// surface it; the corpus's `judge` function only sees actual decisions,
-/// so we bypass it here and stamp the failure directly.
-fn synthetic_transport_failure_report(
-    case: &kars_eval_corpus::Case,
-    reason: &str,
-    duration_ms: u64,
-) -> CaseReport {
-    use kars_eval_corpus::{ActualDecision, Decision, Verdict, VerdictFailure};
-
-    let actual = ActualDecision {
-        decision: Decision::Blocked,
-        by_policy_kind: None,
-        reason: Some(reason.to_string()),
-        observations: Vec::new(),
-    };
-    let verdict = Verdict::Fail(VerdictFailure::DecisionMismatch {
-        expected: case.expect.decision,
-        actual: Decision::Blocked,
-    });
-    build_case_report(case, &actual, &verdict, duration_ms)
 }
 
 /// Derive a sensible default forward-proxy address from `router_base`
