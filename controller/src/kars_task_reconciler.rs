@@ -43,6 +43,11 @@ const REQUEUE_OK: Duration = Duration::from_secs(300);
 /// promptly once the parent reconciles, rather than waiting a full cycle.
 const REQUEUE_PENDING: Duration = Duration::from_secs(10);
 
+/// A launched, executing task polls its sandbox router on a tight loop so
+/// in-flight capability requests surface in the inbox within seconds and
+/// approved grants take effect promptly.
+const REQUEUE_RUNNING: Duration = Duration::from_secs(20);
+
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
     #[error("Kubernetes API error: {0}")]
@@ -273,9 +278,22 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // Widening is controller-only; a mission cannot self-escalate.
     process_task_promotion(&ctx.client, &ns, &task).await;
 
+    // In-flight capability gaps (§14): always apply any grants a human has
+    // already approved (cheap + idempotent), and — while the agent is live —
+    // poll the sandbox router for new blocked hosts / capability requests and
+    // surface each as a Pending `KarsApproval`. A request never grants anything
+    // by itself; only a human decision creates the EgressApproval grant.
+    let executing = new_status.execution_phase.as_deref() == Some(crate::status::phase::PHASE_SANDBOX_RUNNING);
+    process_access_requests(&ctx.client, &ns, &task, executing).await;
+
     // A child still waiting on its parent requeues quickly to converge.
     let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING) {
         REQUEUE_PENDING
+    } else if executing {
+        // A live agent may raise a gap at any moment; poll on a tight loop so
+        // requests surface in the inbox within seconds, and grants take effect
+        // promptly once approved.
+        REQUEUE_RUNNING
     } else {
         REQUEUE_OK
     };
@@ -945,6 +963,414 @@ async fn process_task_promotion(client: &Client, ns: &str, task: &KarsTask) {
             &Patch::Apply(appr),
         )
         .await;
+}
+
+/// In-flight capability requests (§14): poll the task's sandbox router for
+/// (a) hosts the forward-proxy blocked and (b) capabilities the agent explicitly
+/// requested via `POST /v1/access-request`; surface each novel one as a Pending
+/// `KarsApproval` owned by this task; and — only once a human approves an
+/// egress request — create the `EgressApproval` grant that actually widens the
+/// allowlist. Nothing here grants without a human decision.
+async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, executing: bool) {
+    let Some(sandbox) = task
+        .status
+        .as_ref()
+        .and_then(|s| s.sandbox_ref.as_ref())
+        .map(|r| r.name.clone())
+    else {
+        return; // not launched yet — no router to poll
+    };
+
+    // Consume side always runs: apply any egress requests a human has approved,
+    // even after the agent has gone Idle, so a grant still lands.
+    consume_approved_egress(client, ns, task, &sandbox).await;
+
+    // Request side only while the agent is live — a finished run raises nothing.
+    if !executing {
+        return;
+    }
+
+    // Poll the router admin surfaces (best-effort; the router may not be ready
+    // or reachable, which is a transient no-op).
+    let token = match crate::status::router_confirmation_io::read_admin_token(client, &sandbox).await
+    {
+        Ok(Some(t)) => t,
+        _ => return,
+    };
+    let base = crate::status::router_confirmation::router_admin_url(&sandbox);
+    let Ok(http) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return;
+    };
+
+    // Push any human decisions back to the router so the agent's
+    // `GET /v1/access-requests` poll reflects them and it can continue.
+    push_decisions_to_router(client, ns, task, &http, &base, &token).await;
+
+    // (a) Blocked egress attempts → egress-kind approvals.
+    if let Some(entries) = fetch_json_entries(&http, &base, "/internal/egress/blocked", &token).await
+    {
+        for e in entries {
+            let host = e.get("host").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let port = e.get("port").and_then(|v| v.as_u64()).unwrap_or(443) as u16;
+            if host.is_empty() {
+                continue;
+            }
+            ensure_egress_approval(
+                client,
+                ns,
+                task,
+                &sandbox,
+                host,
+                port,
+                "The agent was blocked from reaching this host while working on the mission.",
+            )
+            .await;
+        }
+    }
+
+    // (b) Explicit capability requests → mapped approvals.
+    if let Some(entries) = fetch_json_entries(&http, &base, "/internal/access-requests", &token).await
+    {
+        for r in entries {
+            let kind = r.get("kind").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let target = r.get("target").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let reason = r
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if kind.is_empty() {
+                continue;
+            }
+            if kind == "egress" {
+                let port = r.get("port").and_then(|v| v.as_u64()).unwrap_or(443) as u16;
+                if !target.is_empty() {
+                    let why = if reason.is_empty() {
+                        "The agent requested egress to this host to complete the mission."
+                    } else {
+                        reason
+                    };
+                    ensure_egress_approval(client, ns, task, &sandbox, target, port, why).await;
+                }
+            } else {
+                let tier = r.get("tier").and_then(|v| v.as_i64()).map(|t| t as i32);
+                ensure_capability_approval(client, ns, task, kind, target, reason, tier).await;
+            }
+        }
+    }
+}
+
+/// GET a `/internal/*` router surface and return its `entries` array, if any.
+async fn fetch_json_entries(
+    http: &reqwest::Client,
+    base: &str,
+    path: &str,
+    token: &str,
+) -> Option<Vec<serde_json::Value>> {
+    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let resp = http.get(&url).bearer_auth(token).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body.get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+}
+
+/// A short, stable, RFC1123-safe suffix for deterministic (deduplicated) object
+/// names. djb2 over the input, hex-encoded.
+fn stable_suffix(input: &str) -> String {
+    let mut h: u64 = 5381;
+    for b in input.as_bytes() {
+        h = h.wrapping_mul(33) ^ u64::from(*b);
+    }
+    format!("{h:x}")
+}
+
+const REQ_KIND_ANN: &str = "kars.azure.com/req-kind";
+const REQ_TARGET_ANN: &str = "kars.azure.com/req-target";
+const REQ_PORT_ANN: &str = "kars.azure.com/req-port";
+/// Marks an egress approval whose grant has already been materialised, so the
+/// consumer is idempotent and never re-creates the EgressApproval.
+const REQ_GRANTED_ANN: &str = "kars.azure.com/req-granted";
+/// Marks an approval whose decision has already been mirrored to the router, so
+/// the agent-facing poll reflects it exactly once.
+const REQ_PUSHED_ANN: &str = "kars.azure.com/req-pushed";
+
+fn task_owner_ref(task: &KarsTask) -> serde_json::Value {
+    json!([{
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsTask",
+        "name": task.name_any(),
+        "uid": task.uid().unwrap_or_default(),
+        "controller": true,
+        "blockOwnerDeletion": true,
+    }])
+}
+
+/// Idempotently open a Pending `KarsApproval` (kind `egress`) for a host the
+/// agent needs. Machine-readable host/port live in annotations so the consumer
+/// can materialise the grant without parsing prose.
+async fn ensure_egress_approval(
+    client: &Client,
+    ns: &str,
+    task: &KarsTask,
+    _sandbox: &str,
+    host: &str,
+    port: u16,
+    reason: &str,
+) {
+    use crate::kars_approval::{ApprovalAction, KarsApproval};
+    let task_name = task.name_any();
+    let name = format!("{task_name}-eg-{}", stable_suffix(&format!("{host}:{port}")));
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    // Don't reopen an already-decided (or existing) request.
+    if let Ok(Some(_)) = approvals.get_opt(&name).await {
+        return;
+    }
+    let appr = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsApproval",
+        "metadata": {
+            "name": name,
+            "ownerReferences": task_owner_ref(task),
+            "labels": { "kars.azure.com/req-task": task_name, "kars.azure.com/req-kind": "egress" },
+            "annotations": {
+                REQ_KIND_ANN: "egress",
+                REQ_TARGET_ANN: host,
+                REQ_PORT_ANN: port.to_string(),
+            },
+        },
+        "spec": {
+            "taskRef": { "name": task_name },
+            "action": ApprovalAction {
+                kind: "egress".into(),
+                summary: format!("Allow the mission to reach {host}:{port}"),
+                detail: Some(format!(
+                    "{reason} Approving adds {host}:{port} to this sandbox's egress \
+                     allowlist for a limited window so the agent can proceed."
+                )),
+                requested_tier: None,
+            },
+        },
+    });
+    let _ = approvals
+        .patch(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(appr))
+        .await;
+}
+
+/// Idempotently open a Pending `KarsApproval` for a non-egress capability
+/// (tool/skill/mcp/command/permission/tier). The controller cannot itself grant
+/// these mid-run, but surfacing them lets a human decide + the agent retry, and
+/// makes the missing capability visible instead of a silent failure.
+async fn ensure_capability_approval(
+    client: &Client,
+    ns: &str,
+    task: &KarsTask,
+    kind: &str,
+    target: &str,
+    reason: &str,
+    tier: Option<i32>,
+) {
+    use crate::kars_approval::{ApprovalAction, KarsApproval};
+    let task_name = task.name_any();
+    let key = format!("{kind}:{target}");
+    let name = format!("{task_name}-cap-{}", stable_suffix(&key));
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    if let Ok(Some(_)) = approvals.get_opt(&name).await {
+        return;
+    }
+    let (approval_kind, summary) = match kind {
+        "tier" => (
+            "tierRaise".to_string(),
+            match tier {
+                Some(t) => format!("Raise the mission's autonomy to Tier {t}"),
+                None => "Raise the mission's autonomy tier".to_string(),
+            },
+        ),
+        "tool" => ("toolCall".to_string(), format!("Grant the tool '{target}'")),
+        other => (
+            "custom".to_string(),
+            format!("Grant {other} access: '{target}'"),
+        ),
+    };
+    let detail = if reason.is_empty() {
+        format!("The agent requested {kind} '{target}' to complete the mission.")
+    } else {
+        format!("{reason} (requested {kind}: '{target}')")
+    };
+    let appr = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsApproval",
+        "metadata": {
+            "name": name,
+            "ownerReferences": task_owner_ref(task),
+            "labels": { "kars.azure.com/req-task": task_name, "kars.azure.com/req-kind": kind },
+            "annotations": {
+                REQ_KIND_ANN: kind,
+                REQ_TARGET_ANN: target,
+            },
+        },
+        "spec": {
+            "taskRef": { "name": task_name },
+            "action": ApprovalAction {
+                kind: approval_kind,
+                summary,
+                detail: Some(detail),
+                requested_tier: tier,
+            },
+        },
+    });
+    let _ = approvals
+        .patch(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(appr))
+        .await;
+}
+
+/// For every `Approved` egress `KarsApproval` owned by this task that hasn't yet
+/// been materialised, create the `EgressApproval` grant that widens the sandbox
+/// allowlist, then annotate the approval so we never re-create the grant.
+async fn consume_approved_egress(client: &Client, ns: &str, task: &KarsTask, sandbox: &str) {
+    use crate::egress_approval::EgressApproval;
+    use crate::kars_approval::{KarsApproval, PHASE_APPROVED};
+    let task_name = task.name_any();
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default().labels(&format!("kars.azure.com/req-task={task_name}"));
+    let Ok(list) = approvals.list(&lp).await else {
+        return;
+    };
+    for appr in list.items {
+        // Only egress requests that a human has approved.
+        let is_egress = appr
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(REQ_KIND_ANN))
+            .map(|k| k == "egress")
+            .unwrap_or(false);
+        if !is_egress {
+            continue;
+        }
+        let approved = appr
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .map(|p| p == PHASE_APPROVED)
+            .unwrap_or(false);
+        if !approved {
+            continue;
+        }
+        // Forgery guard: only honor an approval this task actually owns.
+        let owned = appr.metadata.owner_references.as_ref().is_some_and(|refs| {
+            refs.iter()
+                .any(|r| r.kind == "KarsTask" && r.name == task_name && r.controller == Some(true))
+        });
+        if !owned {
+            continue;
+        }
+        // Already materialised?
+        let anns = appr.metadata.annotations.clone().unwrap_or_default();
+        if anns.get(REQ_GRANTED_ANN).is_some() {
+            continue;
+        }
+        let host = match anns.get(REQ_TARGET_ANN) {
+            Some(h) if !h.is_empty() => h.clone(),
+            _ => continue,
+        };
+        let port: u16 = anns
+            .get(REQ_PORT_ANN)
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(443);
+        let appr_name = appr.name_any();
+        let grant_name = format!("{task_name}-egg-{}", stable_suffix(&format!("{host}:{port}")));
+        let egress: Api<EgressApproval> = Api::namespaced(client.clone(), ns);
+        let grant = json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "EgressApproval",
+            "metadata": {
+                "name": grant_name,
+                "ownerReferences": task_owner_ref(task),
+                "labels": { "kars.azure.com/req-task": task_name },
+            },
+            "spec": {
+                "sandbox": sandbox,
+                "hosts": [ { "host": host, "port": port } ],
+                "reason": format!("Approved via Bridge inbox for mission '{task_name}'"),
+                "ttl": "PT8H",
+            },
+        });
+        if egress
+            .patch(&grant_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(grant))
+            .await
+            .is_ok()
+        {
+            // Stamp the approval so we don't re-create the grant every requeue.
+            let stamp = json!({ "metadata": { "annotations": { REQ_GRANTED_ANN: grant_name } } });
+            let _ = approvals
+                .patch(&appr_name, &PatchParams::default(), &Patch::Merge(stamp))
+                .await;
+            tracing::info!(
+                karstask = %task_name, host = %host, port = port, grant = %grant_name,
+                "egress request approved — allowlist grant created"
+            );
+        }
+    }
+}
+
+/// Mirror decided (`Approved`/`Denied`) `KarsApproval`s owned by this task back
+/// to the sandbox router, so the agent's `GET /v1/access-requests` poll shows
+/// the outcome and it can proceed (or stop) instead of blindly retrying. Each
+/// decision is pushed exactly once (stamped with `REQ_PUSHED_ANN`).
+async fn push_decisions_to_router(
+    client: &Client,
+    ns: &str,
+    task: &KarsTask,
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+) {
+    use crate::kars_approval::{KarsApproval, PHASE_APPROVED, PHASE_DENIED};
+    let task_name = task.name_any();
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default().labels(&format!("kars.azure.com/req-task={task_name}"));
+    let Ok(list) = approvals.list(&lp).await else {
+        return;
+    };
+    for appr in list.items {
+        let anns = appr.metadata.annotations.clone().unwrap_or_default();
+        if anns.get(REQ_PUSHED_ANN).is_some() {
+            continue; // already mirrored
+        }
+        let Some(kind) = anns.get(REQ_KIND_ANN) else {
+            continue;
+        };
+        let phase = appr.status.as_ref().and_then(|s| s.phase.as_deref());
+        let verdict = match phase {
+            Some(PHASE_APPROVED) => "approved",
+            Some(PHASE_DENIED) => "denied",
+            _ => continue, // still pending
+        };
+        let target = anns.get(REQ_TARGET_ANN).cloned().unwrap_or_default();
+        let url = format!("{}/internal/access-requests/decision", base.trim_end_matches('/'));
+        let ok = http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&json!({ "kind": kind, "target": target, "verdict": verdict }))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if ok {
+            let appr_name = appr.name_any();
+            let stamp = json!({ "metadata": { "annotations": { REQ_PUSHED_ANN: verdict } } });
+            let _ = approvals
+                .patch(&appr_name, &PatchParams::default(), &Patch::Merge(stamp))
+                .await;
+        }
+    }
 }
 
 pub async fn run(client: Client) -> Result<()> {

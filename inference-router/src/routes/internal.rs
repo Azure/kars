@@ -36,6 +36,99 @@ pub fn internal_routes() -> Router<AppState> {
         .route("/internal/policy-status", get(policy_status))
         .route("/internal/egress/blocked", get(egress_blocked))
         .route("/internal/egress/blocked/top", get(egress_blocked_top))
+        .route("/internal/access-requests", get(access_requests))
+        .route(
+            "/internal/access-requests/decision",
+            axum::routing::post(access_request_decision),
+        )
+}
+
+/// Body for `POST /internal/access-requests/decision` — the controller pushes a
+/// human decision back so the agent's `GET /v1/access-requests` poll reflects it.
+#[derive(Debug, serde::Deserialize)]
+struct AccessRequestDecisionBody {
+    kind: String,
+    #[serde(default)]
+    target: String,
+    /// `approved` | `denied`.
+    verdict: String,
+}
+
+/// `POST /internal/access-requests/decision` — admin-gated. Records a human's
+/// decision on a prior capability request so the agent can observe it and
+/// continue. Never grants access itself (egress widening is done by the
+/// controller creating an EgressApproval); this only mirrors the outcome.
+async fn access_request_decision(
+    State(state): State<AppState>,
+    Json(body): Json<AccessRequestDecisionBody>,
+) -> impl IntoResponse {
+    let updated = state
+        .access_requests
+        .set_decision(&body.kind, &body.target, &body.verdict);
+    Json(serde_json::json!({ "updated": updated }))
+}
+
+/// Wire DTO for a single capability access request raised by the agent via
+/// `POST /v1/access-request`. Mirrors [`crate::access_request::AccessRequestEntry`]
+/// with an added RFC 3339 string alongside the raw Unix seconds.
+#[derive(Debug, Serialize)]
+struct AccessRequestDto {
+    kind: String,
+    target: String,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    count: u32,
+    first_seen_unix: u64,
+    last_seen_unix: u64,
+    first_seen: String,
+    last_seen: String,
+}
+
+impl From<crate::access_request::AccessRequestEntry> for AccessRequestDto {
+    fn from(e: crate::access_request::AccessRequestEntry) -> Self {
+        let first_seen = format_rfc3339_unix(e.first_seen_unix);
+        let last_seen = format_rfc3339_unix(e.last_seen_unix);
+        Self {
+            kind: e.kind,
+            target: e.target,
+            reason: e.reason,
+            tier: e.tier,
+            port: e.port,
+            count: e.count,
+            first_seen_unix: e.first_seen_unix,
+            last_seen_unix: e.last_seen_unix,
+            first_seen,
+            last_seen,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AccessRequestsResponse {
+    schema_version: u32,
+    sandbox: String,
+    count: usize,
+    entries: Vec<AccessRequestDto>,
+}
+
+/// `GET /internal/access-requests` — the controller polls this to mint a
+/// Pending KarsApproval per novel agent capability request. Admin-gated.
+async fn access_requests(State(state): State<AppState>) -> impl IntoResponse {
+    let entries: Vec<AccessRequestDto> = state
+        .access_requests
+        .snapshot(0)
+        .into_iter()
+        .map(AccessRequestDto::from)
+        .collect();
+    Json(AccessRequestsResponse {
+        schema_version: 1,
+        sandbox: state.sandbox_name.as_str().to_string(),
+        count: entries.len(),
+        entries,
+    })
 }
 
 /// JSON envelope returned by `GET /internal/policy-status`. Each

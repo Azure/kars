@@ -49,6 +49,9 @@ pub use mesh_token::mesh_token_routes;
 mod github_token;
 pub use github_token::routes as github_token_routes;
 
+mod access_request;
+pub use access_request::routes as access_request_routes;
+
 mod egress;
 pub use egress::egress_routes;
 
@@ -102,6 +105,11 @@ pub struct AppState {
     /// `GET /egress/learned/blocked`. Hostname-only, deduped, rate-limited
     /// per source. Populated by the forward proxy's deny branches.
     pub blocked_egress: Arc<BlockedBuffer>,
+    /// In-flight capability access requests raised by the agent via
+    /// `POST /v1/access-request` (tool/skill/mcp/command/egress/tier). Polled by
+    /// the controller (`GET /internal/access-requests`) which mints a Pending
+    /// KarsApproval per novel request. A request, never a grant.
+    pub access_requests: Arc<crate::access_request::AccessRequestBuffer>,
     pub sandbox_name: Arc<String>,
     /// Per-task execution telemetry derived from proxied model traffic
     /// (`task_telemetry`). The honest, router-sourced trace that replaces the
@@ -336,6 +344,7 @@ impl AppState {
             governance,
             blocklist,
             blocked_egress: Arc::new(BlockedBuffer::with_defaults()),
+            access_requests: Arc::new(crate::access_request::AccessRequestBuffer::default()),
             sandbox_name: Arc::new(sandbox_name),
             task_telemetry: Arc::new(crate::task_telemetry::TaskTelemetry::new()),
             inbox: Arc::new(MeshInbox::new()),

@@ -152,10 +152,21 @@ async fn egress_fetch(
     // Check egress access: blocklist → allowlist (Strict denies the rest).
     if let Err(reason) = state.blocklist.check_egress(url, sandbox).await {
         tracing::warn!(url = %url, reason = %reason, "Egress fetch denied");
+        // Surface the denied host so the controller mints a Pending KarsApproval
+        // and the human can grant it from the Bridge inbox (in-flight gap flow).
+        // Hostname + port only — no path/query is ever recorded.
+        if let Ok(parsed) = reqwest::Url::parse(url) {
+            if let Some(host) = parsed.host_str() {
+                let port = parsed
+                    .port_or_known_default()
+                    .unwrap_or(443);
+                state.blocked_egress.record(sandbox, host, port);
+            }
+        }
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": reason,
             "url": url,
-            "action": "If legitimate, an operator can add the host to the baseline allowlist ('kars egress <name> --approve <host>', which re-signs) or grant it temporarily ('kars egress allow-extra <name> --host <host> --ttl <dur> --reason <why>').",
+            "action": "This host isn't in your egress allowlist. It has been surfaced to the Bridge inbox for approval — a user or operator can grant it there. You may also POST /v1/access-request {\"kind\":\"egress\",\"target\":\"<host>\",\"reason\":\"<why>\"} to raise it explicitly.",
         }))).into_response();
     }
 
