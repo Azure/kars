@@ -2740,6 +2740,38 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             let skill_cm = format!("karsskill-{skill}");
             let volume_name = format!("skill-{skill}");
             let mount_path = format!("/opt/clawhub-skills/{skill}");
+            // Trust gate (enforced at the control plane, not just the UI): only an
+            // operator-APPROVED skill may be installed. Read the KarsSkill CR and
+            // require `kars.azure.com/skill-review: approved`; anything else
+            // (pending / rejected / missing) is skipped so an unvetted capability
+            // can never reach a running agent.
+            let skill_api: Api<kube::api::DynamicObject> = Api::namespaced_with(
+                client.clone(),
+                &sandbox_self_ns,
+                &kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(
+                    "kars.azure.com",
+                    "v1alpha1",
+                    "KarsSkill",
+                )),
+            );
+            let approved = match skill_api.get_opt(skill).await {
+                Ok(Some(sk)) => sk
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("kars.azure.com/skill-review"))
+                    .map(|v| v == "approved")
+                    .unwrap_or(false),
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::error!(error = %e, sandbox = %name, skill = %skill, "failed to read KarsSkill for approval check");
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
+            };
+            if !approved {
+                tracing::warn!(sandbox = %name, skill = %skill, "skill is not operator-approved — refusing to install (trust gate)");
+                continue;
+            }
             match governance_mounts::mirror_configmap(
                 client,
                 &skill_cm,
