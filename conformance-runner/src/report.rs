@@ -49,6 +49,13 @@ pub struct RunReport {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
+    /// Cases the runner could not evaluate at all (e.g. the target router was
+    /// unreachable — a transport error). These are inconclusive, NOT policy
+    /// failures: an unreachable target tells us nothing about whether the
+    /// sandbox is safe, so they are tracked separately and never counted as
+    /// drift.
+    #[serde(default)]
+    pub errored: usize,
     pub results: Vec<CaseReport>,
 }
 
@@ -129,6 +136,13 @@ pub enum VerdictWire {
     Fail {
         #[serde(flatten)]
         failure: FailureWire,
+    },
+    /// The case could not be evaluated — the target was unreachable or the
+    /// replay failed at the transport layer. This is inconclusive, distinct
+    /// from a policy `Fail`: we never observed a real decision, so we must not
+    /// claim the sandbox is unsafe (nor safe).
+    Errored {
+        reason: String,
     },
 }
 
@@ -254,6 +268,30 @@ pub fn build_case_report(
         expected: expect_to_wire(&case.expect),
         actual: actual_to_wire(actual),
         verdict: verdict_to_wire(verdict),
+        duration_ms,
+    }
+}
+
+/// Build a [`CaseReport`] for a case that could not be evaluated because the
+/// replay failed at the transport layer (e.g. the target router was
+/// unreachable). The actual decision is recorded as `"Errored"` — NOT
+/// `"Blocked"` — so the report never conflates "the sandbox refused this" with
+/// "we could not reach the sandbox". The verdict is [`VerdictWire::Errored`].
+pub fn build_errored_case_report(case: &Case, reason: &str, duration_ms: u64) -> CaseReport {
+    CaseReport {
+        case_id: case.id.clone(),
+        tags: case.tags.clone(),
+        scenario: scenario_to_wire(&case.scenario),
+        expected: expect_to_wire(&case.expect),
+        actual: ActualWire {
+            decision: "Errored",
+            by_policy_kind: None,
+            reason: Some(reason.to_string()),
+            observations: Vec::new(),
+        },
+        verdict: VerdictWire::Errored {
+            reason: reason.to_string(),
+        },
         duration_ms,
     }
 }
@@ -409,6 +447,36 @@ mod tests {
         let j = serde_json::to_value(verdict_to_wire(&v)).unwrap();
         assert_eq!(j["needle"], "expected substring");
         assert_eq!(j["actual"], "something else");
+    }
+
+    #[test]
+    fn errored_case_report_is_inconclusive_not_a_blocked_fail() {
+        let case = Case {
+            id: "jb-001".into(),
+            tags: vec!["jailbreak".into()],
+            scenario: Scenario::ChatCompletion {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "ignore prior".into(),
+                }],
+                model: None,
+            },
+            expect: Expect {
+                decision: Decision::Blocked,
+                decision_at_least_some: None,
+                by_policy_kind: None,
+                reason_contains: None,
+            },
+        };
+        let r = build_errored_case_report(&case, "transport error: connection refused", 12);
+        let j = serde_json::to_value(&r).unwrap();
+        // The verdict is a distinct Errored — NOT a Blocked Fail. This is the
+        // whole point: an unreachable target must never read as a policy verdict.
+        assert_eq!(j["verdict"]["result"], "Errored");
+        assert_eq!(j["verdict"]["reason"], "transport error: connection refused");
+        assert_eq!(j["actual"]["decision"], "Errored");
+        assert_ne!(j["actual"]["decision"], "Blocked");
+        assert_eq!(j["expected"]["decision"], "Blocked");
     }
 
     #[test]
