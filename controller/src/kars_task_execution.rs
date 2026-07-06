@@ -247,6 +247,21 @@ pub async fn materialize(
         ("kars.azure.com/task-id".to_string(), task_name.clone()),
         ("kars.azure.com/task-root".to_string(), task_root),
     ]);
+    let mut attribution = attribution;
+    // Granted skill PACKAGES → sandbox annotation the reconciler reads to mount
+    // each `karsskill-<name>` ConfigMap into the agent's skills dir.
+    if !blueprint.skills.is_empty() {
+        let list = blueprint
+            .skills
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        if !list.is_empty() {
+            attribution.insert("kars.azure.com/skills".to_string(), list);
+        }
+    }
     apply_dynamic(
         client,
         namespace,

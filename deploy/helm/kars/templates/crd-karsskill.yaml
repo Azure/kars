@@ -64,6 +64,14 @@ spec:
                 description: Human-readable display name (e.g. "Repo triage", "Hotel itemization").
                 nullable: true
                 type: string
+              files:
+                description: |-
+                  The flat filenames the package bundle contains (e.g. `SKILL.md`,
+                  `greet.sh`). The file CONTENT lives in the `karsskill-<name>` ConfigMap;
+                  this is the manifest surfaced to reviewers. Empty for a recipe-only skill.
+                items:
+                  type: string
+                type: array
               knowledgePack:
                 description: |-
                   Optional knowledge-pack reference (the name of a team knowledge commons
@@ -75,6 +83,13 @@ spec:
                 items:
                   type: string
                 type: array
+              package:
+                description: |-
+                  Whether this skill ships an executable **package** — a bundle of files
+                  (a `SKILL.md` the agent auto-discovers, plus any scripts) stored in the
+                  `karsskill-<name>` ConfigMap. When true, a granting OpenClaw sandbox
+                  mounts the bundle into its skills dir so the agent can run it.
+                type: boolean
               recipe:
                 description: |-
                   The **recipe** — standing instructions for using the capability well,
@@ -198,3 +213,4 @@ spec:
     storage: true
     subresources:
       status: {}
+

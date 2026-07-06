@@ -69,6 +69,19 @@ pub struct KarsSkillSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
 
+    /// Whether this skill ships an executable **package** — a bundle of files
+    /// (a `SKILL.md` the agent auto-discovers, plus any scripts) stored in the
+    /// `karsskill-<name>` ConfigMap. When true, a granting OpenClaw sandbox
+    /// mounts the bundle into its skills dir so the agent can run it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub package: bool,
+
+    /// The flat filenames the package bundle contains (e.g. `SKILL.md`,
+    /// `greet.sh`). The file CONTENT lives in the `karsskill-<name>` ConfigMap;
+    /// this is the manifest surfaced to reviewers. Empty for a recipe-only skill.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+
     /// Optional knowledge-pack reference (the name of a team knowledge commons
     /// or a packaged knowledge set the skill ships with).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +239,8 @@ mod tests {
                 bounding_policy: "kars-default".into(),
                 mcp_servers: vec!["github".into()],
                 recipe: Some("Label by area; close duplicates.".into()),
+                package: false,
+                files: vec![],
                 knowledge_pack: None,
                 attestation_ref: None,
                 attestation_digest: None,
