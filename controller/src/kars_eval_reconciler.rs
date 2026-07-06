@@ -518,7 +518,7 @@ fn karseval_owner_refs(eval_name: &str, uid: &str) -> serde_json::Value {
 }
 
 fn cron_job_name(eval_name: &str) -> String {
-    format!("karseval-{eval_name}")
+    cap_k8s_name(&format!("karseval-{eval_name}"))
 }
 
 /// Build a deterministic Job name for a run-now spawn. The CR's
@@ -530,7 +530,24 @@ fn run_now_job_name(eval_name: &str, resource_version: Option<&str>) -> String {
     let suffix = resource_version
         .map(short_hash)
         .unwrap_or_else(|| "now".into());
-    format!("karseval-{eval_name}-runnow-{suffix}")
+    cap_k8s_name(&format!("karseval-{eval_name}-runnow-{suffix}"))
+}
+
+/// K8s object names — and the `job-name` label the Job controller auto-injects
+/// into the pod template — must be <= 63 bytes. A long eval/sandbox name blows
+/// that and the runner Job is rejected (FieldValueInvalid). Truncate
+/// deterministically, appending a short hash of the FULL name so two distinct
+/// long names don't collide after truncation. Names are ASCII (K8s DNS-1123), so
+/// byte slicing is safe.
+fn cap_k8s_name(name: &str) -> String {
+    const MAX: usize = 63;
+    if name.len() <= MAX {
+        return name.to_string();
+    }
+    let h = short_hash(name);
+    let keep = MAX - 1 - h.len();
+    let head = name[..keep].trim_end_matches('-');
+    format!("{head}-{h}")
 }
 
 fn short_hash(s: &str) -> String {
