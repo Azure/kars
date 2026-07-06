@@ -251,6 +251,7 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let (history, last_result, last_run_at) = observe_completed_jobs(
         &jobs,
         &pods,
+        &configmaps,
         &name,
         &resolved.digest,
         &resolved.label,
@@ -763,6 +764,7 @@ where
 async fn observe_completed_jobs(
     jobs: &Api<Job>,
     pods: &Api<Pod>,
+    configmaps: &Api<ConfigMap>,
     eval_name: &str,
     corpus_digest: &str,
     corpus_label: &str,
@@ -841,6 +843,51 @@ async fn observe_completed_jobs(
             .take(5)
             .map(|c| c.case_id.clone())
             .collect();
+
+        // Persist the PER-CASE report durably so the Bridge can render a detailed
+        // report (which specific cases passed/failed, expected vs actual). The
+        // runner pod log is TTL'd away, so counts alone would lose the detail.
+        let per_case: Vec<serde_json::Value> = report
+            .results
+            .iter()
+            .map(|c| {
+                json!({
+                    "caseId": c.case_id,
+                    "tags": c.tags,
+                    "pass": c.verdict_pass,
+                    "expected": c.expected,
+                    "actual": c.actual,
+                    "durationMs": c.duration_ms,
+                })
+            })
+            .collect();
+        let report_doc = json!({
+            "corpusName": report.corpus_name,
+            "corpusDigest": corpus_digest,
+            "total": report.total,
+            "passed": report.passed,
+            "failed": report.failed,
+            "completedAt": completion_time,
+            "results": per_case,
+        });
+        if let Ok(json_str) = serde_json::to_string(&report_doc) {
+            let cm_name = format!("karseval-{eval_name}-report");
+            let cm_body = json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": cm_name,
+                    "labels": { "app.kubernetes.io/managed-by": "kars-controller", LABEL_KEY_CLAW_EVAL: eval_name },
+                },
+                "data": { "report.json": json_str },
+            });
+            if let Err(e) = configmaps
+                .patch(&cm_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(cm_body))
+                .await
+            {
+                tracing::warn!(karseval = %eval_name, "failed to persist per-case eval report CM: {e}");
+            }
+        }
         let failed_u32 = u32::try_from(report.failed).unwrap_or(u32::MAX);
         let passed_u32 = u32::try_from(report.passed).unwrap_or(u32::MAX);
         let total_u32 = u32::try_from(report.total).unwrap_or(u32::MAX);
@@ -901,6 +948,8 @@ async fn observe_completed_jobs(
 struct ParsedReport {
     #[serde(rename = "schemaVersion")]
     schema_version: String,
+    #[serde(rename = "corpusName", default)]
+    corpus_name: String,
     total: usize,
     passed: usize,
     failed: usize,
@@ -919,6 +968,17 @@ struct ParsedCase {
     /// Raw verdict object — used to populate `verdict_pass`.
     #[serde(default)]
     verdict: serde_json::Value,
+    /// Case tags (e.g. jailbreak, prompt-injection) — surfaced in the detail.
+    #[serde(default)]
+    tags: Vec<String>,
+    /// The expected decision for this case (what SHOULD happen).
+    #[serde(default)]
+    expected: serde_json::Value,
+    /// What the router ACTUALLY decided — the evidence of drift.
+    #[serde(default)]
+    actual: serde_json::Value,
+    #[serde(rename = "durationMs", default)]
+    duration_ms: u64,
 }
 
 async fn read_job_report(
