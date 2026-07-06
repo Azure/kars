@@ -23,6 +23,61 @@ use crate::errors;
 use crate::proxy;
 use crate::safety;
 
+/// Provider-agnostic detection of a "model / deployment not available" upstream
+/// error. Different providers word this differently — Azure OpenAI returns 404
+/// `DeploymentNotFound`, OpenAI 404 "The model `X` does not exist", GitHub
+/// Models / Copilot 400/404 with an "unknown model" / "invalid model" message —
+/// so we match on the status class plus a small set of message/code signatures.
+/// Deliberately narrow: it must NOT fire on auth, rate-limit, or content-safety
+/// errors (those are handled elsewhere and must not silently swap the model).
+fn is_model_unavailable_error(status: axum::http::StatusCode, body: &[u8]) -> bool {
+    if status != axum::http::StatusCode::NOT_FOUND
+        && status != axum::http::StatusCode::BAD_REQUEST
+    {
+        return false;
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let err = v.get("error").unwrap_or(&v);
+    let code = err
+        .get("code")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let msg = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if code.contains("deploymentnotfound") || code == "model_not_found" {
+        return true;
+    }
+    let mentions_model = msg.contains("deployment") || msg.contains("model");
+    let mentions_absence = msg.contains("does not exist")
+        || msg.contains("not found")
+        || msg.contains("unknown model")
+        || msg.contains("invalid model")
+        || msg.contains("no deployment");
+    mentions_model && mentions_absence
+}
+
+/// Return `body` with its top-level `"model"` field replaced by `model`
+/// (best-effort — an unparseable body is returned unchanged). Used to retry a
+/// request against the default model after the requested one was reported
+/// unavailable.
+fn override_model_in_body(body: &[u8], model: &str) -> bytes::Bytes {
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(mut v) if v.is_object() => {
+            v["model"] = serde_json::Value::String(model.to_string());
+            serde_json::to_vec(&v)
+                .map(bytes::Bytes::from)
+                .unwrap_or_else(|_| bytes::Bytes::copy_from_slice(body))
+        }
+        _ => bytes::Bytes::copy_from_slice(body),
+    }
+}
+
 /// Inject the canonical `x-kars-decision*` triplet onto a response
 /// so downstream tooling (conformance-runner, observability pipelines,
 /// HTTP clients) can read the policy decision without parsing the
@@ -220,10 +275,37 @@ pub(super) async fn chat_completions(
     }
 
     // Check if this model is known to require Responses API (cached from prior 400s)
-    let model_name = serde_json::from_slice::<serde_json::Value>(&body)
+    let mut model_name = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("model")?.as_str().map(String::from))
         .unwrap_or_else(|| upstream.deployment.clone());
+
+    // Foolproof model selection (Option A — provider-agnostic): if this model was
+    // previously reported unavailable by the upstream, don't waste a round-trip —
+    // transparently use the configured default model instead. The default is
+    // always a served model (it's what the cluster was configured with). This is
+    // what makes a sub-agent's model choice safe regardless of provider: an
+    // unserved pick self-heals to the default rather than dead-ending.
+    {
+        let previously_unavailable = state
+            .unavailable_models
+            .read()
+            .ok()
+            .map(|s| s.contains(&model_name))
+            .unwrap_or(false);
+        let default_model = state.config.default_model.clone();
+        if previously_unavailable && !default_model.is_empty() && default_model != model_name {
+            tracing::warn!(
+                sandbox = %sandbox_name,
+                requested = %model_name,
+                fallback = %default_model,
+                "requested model was previously unavailable on this provider — using the default model"
+            );
+            body = override_model_in_body(&body, &default_model);
+            upstream.deployment = default_model.clone();
+            model_name = default_model;
+        }
+    }
 
     // Telemetry: correlate any tool results this request carries back to the
     // tool calls recorded on the prior round (OpenAI shape), so the router-
@@ -417,7 +499,7 @@ pub(super) async fn chat_completions(
         )
         .await
         {
-            Ok((status, _resp_headers, stream)) if status == StatusCode::BAD_REQUEST => {
+            Ok((status, _resp_headers, stream)) if status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND => {
                 // Might be a Responses-only model — buffer the error and check
                 use futures::TryStreamExt;
                 let err_bytes: Vec<u8> = stream
@@ -497,8 +579,28 @@ pub(super) async fn chat_completions(
                         }
                     }
                 } else {
-                    // Genuine 400 error — return as-is
-                    (StatusCode::BAD_REQUEST, Body::from(err_bytes)).into_response()
+                    // Foolproof (Option A): the upstream reported the model as
+                    // unavailable → cache it so the very next call (the agent
+                    // loop always retries a failed turn) transparently uses the
+                    // default model via the pre-flight override above. We don't
+                    // re-stream here (that would duplicate the guardrail wrapping);
+                    // the cache makes the retry self-heal in one round-trip.
+                    if is_model_unavailable_error(status, &err_bytes) {
+                        let default_model = state.config.default_model.clone();
+                        if !default_model.is_empty() && default_model != model_name {
+                            if let Ok(mut set) = state.unavailable_models.write() {
+                                set.insert(model_name.clone());
+                            }
+                            tracing::warn!(
+                                sandbox = %sandbox_name,
+                                requested = %model_name,
+                                fallback = %default_model,
+                                "streaming model unavailable on this provider — cached; the retry will use the default model"
+                            );
+                        }
+                    }
+                    // Return the genuine error with its real status.
+                    (status, Body::from(err_bytes)).into_response()
                 }
             }
             Ok((status, resp_headers, stream)) => {
@@ -631,7 +733,7 @@ pub(super) async fn chat_completions(
         // retries against `fallback[N].deployment`. The 400-→-
         // Responses-API recovery further down still runs against the
         // *successful* upstream's deployment.
-        let result = crate::failover::forward_with_failover(
+        let mut result = crate::failover::forward_with_failover(
             &state.auth,
             Some(&state.copilot),
             &state.client,
@@ -644,6 +746,44 @@ pub(super) async fn chat_completions(
             body.clone(),
         )
         .await;
+
+        // Foolproof (Option A): the upstream reported the requested model as
+        // unavailable → cache it and retry ONCE against the configured default
+        // model so the sub-agent still delivers. Provider-agnostic: it reacts to
+        // the real upstream response, so it can never wrongly reject a served
+        // model, and works for Foundry / Copilot / GitHub Models alike.
+        let model_unavailable = matches!(&result, Ok((s, _, rb)) if is_model_unavailable_error(*s, rb.as_ref()));
+        if model_unavailable {
+            let default_model = state.config.default_model.clone();
+            if !default_model.is_empty() && default_model != model_name {
+                if let Ok(mut set) = state.unavailable_models.write() {
+                    set.insert(model_name.clone());
+                }
+                tracing::warn!(
+                    sandbox = %sandbox_name,
+                    requested = %model_name,
+                    fallback = %default_model,
+                    "model unavailable on this provider — retrying against the default model"
+                );
+                let mut fallback_upstream = upstream.clone();
+                fallback_upstream.deployment = default_model.clone();
+                let fallback_body = override_model_in_body(&body, &default_model);
+                result = crate::failover::forward_with_failover(
+                    &state.auth,
+                    Some(&state.copilot),
+                    &state.client,
+                    &state.deployment_health,
+                    &fallback_upstream,
+                    &policy,
+                    axum::http::Method::POST,
+                    "chat/completions",
+                    &headers,
+                    fallback_body,
+                )
+                .await;
+                model_name = default_model;
+            }
+        }
 
         match result {
             Ok((status, _resp_headers, resp_body))
@@ -1142,6 +1282,50 @@ async fn filter_disallowed_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_unavailable_detects_provider_variants() {
+        use axum::http::StatusCode;
+        // Azure OpenAI 404 DeploymentNotFound.
+        assert!(is_model_unavailable_error(
+            StatusCode::NOT_FOUND,
+            br#"{"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist."}}"#
+        ));
+        // OpenAI 404 model does not exist.
+        assert!(is_model_unavailable_error(
+            StatusCode::NOT_FOUND,
+            br#"{"error":{"message":"The model `gpt-99` does not exist","type":"invalid_request_error"}}"#
+        ));
+        // GitHub Models / Copilot 400 unknown model.
+        assert!(is_model_unavailable_error(
+            StatusCode::BAD_REQUEST,
+            br#"{"error":{"message":"Unknown model: bogus-model"}}"#
+        ));
+        // Must NOT fire on unrelated errors.
+        assert!(!is_model_unavailable_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"message":"rate limit exceeded"}}"#
+        ));
+        assert!(!is_model_unavailable_error(
+            StatusCode::BAD_REQUEST,
+            br#"{"error":{"message":"content filtered"}}"#
+        ));
+        assert!(!is_model_unavailable_error(StatusCode::OK, br#"{}"#));
+    }
+
+    #[test]
+    fn override_model_rewrites_only_model_field() {
+        let out = override_model_in_body(
+            br#"{"model":"bad","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+            "gpt-default",
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["model"], "gpt-default");
+        assert_eq!(v["stream"], true);
+        assert_eq!(v["messages"][0]["content"], "hi");
+        // Unparseable body is returned unchanged.
+        assert_eq!(override_model_in_body(b"not json", "x").as_ref(), b"not json");
+    }
 
     #[test]
     fn gate_allow_when_no_policy_cap() {

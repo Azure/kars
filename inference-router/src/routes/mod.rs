@@ -117,6 +117,13 @@ pub struct AppState {
     /// Models that don't support chat/completions (need Responses API).
     /// Populated on first 400 "unsupported" — avoids redundant round-trips.
     pub responses_only_models: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    /// Models the upstream provider reported as NOT AVAILABLE (deployment/model
+    /// not found or invalid). Provider-agnostic foolproofing for sub-agent (or
+    /// any) model selection: on the first such error the router transparently
+    /// falls back to the configured default model and caches the bad model here
+    /// so later requests skip straight to the default. See kars-bridge issue for
+    /// the complementary pre-flight catalog (Option B).
+    pub unavailable_models: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     /// Handoff token store (in-memory, TTL-based, one-at-a-time).
     pub handoff_tokens: HandoffTokenStore,
     /// Handoff session tracker (phase, direction, progress).
@@ -335,6 +342,9 @@ impl AppState {
             mesh_metrics: Arc::new(MeshMetrics::new()),
             model_override: Arc::new(std::sync::RwLock::new(None)),
             responses_only_models: Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
+            unavailable_models: Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
             )),
             admin_token: std::fs::read_to_string("/etc/kars/secrets/admin-token")
