@@ -72,6 +72,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
         model_override: Arc::new(std::sync::RwLock::new(None)),
         admin_token: admin_token.map(|t| Arc::new(t.to_string())),
         responses_only_models: Arc::new(std::sync::RwLock::new(Default::default())),
+        unavailable_models: Arc::new(std::sync::RwLock::new(Default::default())),
         handoff_tokens: HandoffTokenStore::new(),
         handoff_session: HandoffSession::new(),
         drain_state: DrainState::new(),
