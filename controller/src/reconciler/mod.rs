@@ -1153,36 +1153,60 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
-    // ── Step 2b': Propagate a standing team's channel credentials ─────────
-    // Team runs are ephemeral sandboxes (`<team>-run-<epoch>`) in their own
-    // namespaces, so an operator can't `kars credentials update` each one. If
-    // the team has a channel secret (`kars-team-channel-<team>` in kars-system,
-    // holding TELEGRAM_BOT_TOKEN etc.), copy it into this run's
-    // `<sandbox>-credentials` secret BEFORE the pod is created — the deployment
-    // already mounts that secret via `envFrom optional`, so the entrypoint sees
-    // the token and wires up the Telegram (or other) channel. This is what lets
-    // a standing "finance"/"marketing" team DM the operator its deliverables.
-    if let Some(team) = name.rsplit_once("-run-").map(|(t, _)| t.to_string()) {
+    // ── Step 2b': Propagate communication-channel credentials ─────────────
+    // Channels (Telegram / Slack / Discord / WhatsApp) are configured
+    // AGENT-AGNOSTICALLY at the workspace level (secret `kars-workspace-channels`
+    // in kars-system, written by the Bridge Connections tab) and propagated into
+    // EVERY run sandbox — mission or team — so any agent can report over them. A
+    // standing team may ALSO carry a team-specific channel secret
+    // (`kars-team-channel-<team>`) that layers on top (team keys win). Both are
+    // copied into this run's `<sandbox>-credentials` secret (mounted via
+    // `envFrom optional`) BEFORE the pod is created, so the entrypoint sees the
+    // token and wires up the channel.
+    {
         let system_secrets: Api<Secret> = Api::namespaced(client.clone(), "kars-system");
-        if let Ok(Some(src)) = system_secrets
-            .get_opt(&format!("kars-team-channel-{team}"))
-            .await
+        let mut channel_data: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        // Workspace-level channels apply to all sandboxes (agent-agnostic).
+        if let Ok(Some(src)) = system_secrets.get_opt("kars-workspace-channels").await
             && let Some(data) = src.data.clone()
         {
-            let string_data: std::collections::BTreeMap<String, String> = data
-                .into_iter()
-                .filter_map(|(k, v)| String::from_utf8(v.0).ok().map(|s| (k, s)))
-                .collect();
+            for (k, v) in data {
+                if let Ok(s) = String::from_utf8(v.0) {
+                    channel_data.insert(k, s);
+                }
+            }
+        }
+        // A standing team's own channel secret layers on top (team keys win).
+        let team_of_run = name.rsplit_once("-run-").map(|(t, _)| t.to_string());
+        if let Some(team) = team_of_run.as_deref()
+            && let Ok(Some(src)) = system_secrets
+                .get_opt(&format!("kars-team-channel-{team}"))
+                .await
+            && let Some(data) = src.data.clone()
+        {
+            for (k, v) in data {
+                if let Ok(s) = String::from_utf8(v.0) {
+                    channel_data.insert(k, s);
+                }
+            }
+        }
+        if !channel_data.is_empty() {
             let cred_name = format!("{name}-credentials");
+            let mut labels = serde_json::Map::new();
+            labels.insert("kars.azure.com/sandbox".into(), json!(name));
+            if let Some(team) = team_of_run.as_deref() {
+                labels.insert("kars.azure.com/team".into(), json!(team));
+            }
             let cred_secret: Secret = serde_json::from_value(json!({
                 "apiVersion": "v1",
                 "kind": "Secret",
                 "metadata": {
                     "name": cred_name,
                     "namespace": sandbox_ns,
-                    "labels": { "kars.azure.com/sandbox": name, "kars.azure.com/team": team },
+                    "labels": labels,
                 },
-                "stringData": string_data,
+                "stringData": channel_data,
             }))?;
             secret_api
                 .patch(
@@ -1191,7 +1215,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     &Patch::Apply(cred_secret),
                 )
                 .await?;
-            tracing::info!(sandbox = %name, team = %team, "propagated team channel credentials to run sandbox");
+            tracing::info!(sandbox = %name, "propagated channel credentials (workspace + team) to run sandbox");
         }
     }
 
