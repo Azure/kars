@@ -1,0 +1,284 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Keyless git write (§14) — the router's **loopback GitHub reverse-proxy**.
+//!
+//! The agent talks plain HTTP on loopback and the router injects a short-lived,
+//! repo-scoped credential and forwards to GitHub over TLS. The agent NEVER holds
+//! a token (defeating prompt-injection exfil), and every request's `owner/repo`
+//! is checked against a fail-closed allowlist, so a broad underlying credential
+//! can still only ever reach the declared repositories.
+//!
+//!  - `ANY /git/{owner}/{repo}/…`  → `https://github.com/{owner}/{repo}/…`
+//!    (git smart-HTTP: clone/fetch/push). Injects HTTP Basic
+//!    `x-access-token:<token>`. `git config insteadOf` makes normal
+//!    `https://github.com/…` URLs route here transparently.
+//!  - `ANY /gh-api/repos/{owner}/{repo}/…` → `https://api.github.com/…`
+//!    (REST: open a PR, comment). Injects `Authorization: Bearer <token>`.
+//!
+//! Both are mounted on the same-pod loopback (the agent's trust boundary) and
+//! are inert unless git write is configured (`state.git_write` is `Some`).
+
+use axum::{
+    Router,
+    body::Body,
+    extract::{ConnectInfo, Request, State},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    response::{IntoResponse, Response},
+    routing::any,
+};
+use base64::Engine;
+use std::net::SocketAddr;
+
+use super::AppState;
+
+const GITHUB_GIT: &str = "https://github.com";
+const GITHUB_API: &str = "https://api.github.com";
+
+/// Hop-by-hop headers that must not be forwarded (RFC 7230 §6.1) plus the ones
+/// we set ourselves.
+fn is_stripped_request_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "host"
+            | "authorization"
+            | "content-length"
+            | "connection"
+            | "proxy-connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "te"
+            | "trailer"
+            | "upgrade"
+    )
+}
+
+fn is_stripped_response_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            | "content-length"
+    )
+}
+
+/// Split a proxied path into `(owner/repo, rest)`. For `/git` the captured path
+/// is `owner/repo/rest…`; for `/gh-api` it is the full API path and we only
+/// accept `repos/{owner}/{repo}/…`.
+fn owner_repo_from_git(path: &str) -> Option<(String, String)> {
+    let mut it = path.trim_start_matches('/').splitn(3, '/');
+    let owner = it.next()?;
+    let repo = it.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    let rest = it.next().unwrap_or("");
+    Some((format!("{owner}/{repo}"), rest.to_string()))
+}
+
+fn owner_repo_from_api(path: &str) -> Option<String> {
+    // Only `repos/{owner}/{repo}/…` (and the bare repo) are in scope.
+    let mut it = path.trim_start_matches('/').splitn(4, '/');
+    if it.next()? != "repos" {
+        return None;
+    }
+    let owner = it.next()?;
+    let repo = it.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn deny(status: StatusCode, msg: &str) -> Response {
+    (status, msg.to_string()).into_response()
+}
+
+/// Core proxy: rebuild the upstream URL, inject the credential, stream the body
+/// through, and stream the response back.
+async fn proxy(
+    state: &AppState,
+    upstream_url: String,
+    auth: HeaderValue,
+    method: Method,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let client = &state.client;
+    // Stream the request body straight through (packfiles can be large).
+    let stream = body.into_data_stream();
+    let reqwest_body = reqwest::Body::wrap_stream(stream);
+
+    let mut builder = client
+        .request(method, &upstream_url)
+        .header(axum::http::header::AUTHORIZATION, auth)
+        .header(axum::http::header::USER_AGENT, HeaderValue::from_static("kars-inference-router"));
+    for (name, value) in headers.iter() {
+        if !is_stripped_request_header(name) && name.as_str() != "user-agent" {
+            builder = builder.header(name, value);
+        }
+    }
+
+    let upstream = match builder.body(reqwest_body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(url = %upstream_url, error = %e, "git proxy upstream error");
+            return deny(StatusCode::BAD_GATEWAY, "upstream request to GitHub failed");
+        }
+    };
+
+    let status = upstream.status();
+    let mut resp_headers = HeaderMap::new();
+    for (name, value) in upstream.headers().iter() {
+        if !is_stripped_response_header(name) {
+            resp_headers.insert(name.clone(), value.clone());
+        }
+    }
+    let out_stream = upstream.bytes_stream();
+    let mut response = Response::builder()
+        .status(status)
+        .body(Body::from_stream(out_stream))
+        .unwrap_or_else(|_| deny(StatusCode::BAD_GATEWAY, "failed to build response"));
+    *response.headers_mut() = resp_headers;
+    response
+}
+
+/// `ANY /git/{owner}/{repo}/…` — git smart-HTTP, Basic `x-access-token:<token>`.
+async fn git_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        // Same-pod agent only. The router service is cluster-reachable on 8443,
+        // so refuse the git proxy to anything but pod-local loopback — a sibling
+        // sandbox must never mint through this sandbox's credential.
+        return deny(StatusCode::NOT_FOUND, "not found");
+    }
+    let Some(gw) = state.git_write.clone() else {
+        return deny(StatusCode::NOT_FOUND, "git write is not enabled for this sandbox");
+    };
+    let (parts, body) = req.into_parts();
+    let full_path = parts.uri.path().strip_prefix("/git/").unwrap_or("");
+    let Some((owner_repo, rest)) = owner_repo_from_git(full_path) else {
+        return deny(StatusCode::BAD_REQUEST, "expected /git/{owner}/{repo}/…");
+    };
+    if !gw.repo_allowed(&owner_repo) {
+        tracing::warn!(repo = %owner_repo, "git proxy denied: repo not in the operator allowlist");
+        return deny(
+            StatusCode::FORBIDDEN,
+            "this repository is outside the operator-granted scope for this mission",
+        );
+    }
+    let token = match gw.token().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "git proxy: failed to mint token");
+            return deny(StatusCode::BAD_GATEWAY, "could not obtain a GitHub token");
+        }
+    };
+    // git over HTTPS authenticates with Basic x-access-token:<token>.
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+    let Ok(auth) = HeaderValue::from_str(&format!("Basic {basic}")) else {
+        return deny(StatusCode::INTERNAL_SERVER_ERROR, "bad token");
+    };
+    let url = build_upstream(GITHUB_GIT, &format!("{owner_repo}/{rest}"), parts.uri.query());
+    tracing::info!(repo = %owner_repo, "git proxy → github.com (token injected)");
+    proxy(&state, url, auth, parts.method, parts.headers, body).await
+}
+
+/// `ANY /gh-api/repos/{owner}/{repo}/…` — REST, `Authorization: Bearer <token>`.
+async fn api_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return deny(StatusCode::NOT_FOUND, "not found");
+    }
+    let Some(gw) = state.git_write.clone() else {
+        return deny(StatusCode::NOT_FOUND, "git write is not enabled for this sandbox");
+    };
+    let (parts, body) = req.into_parts();
+    let api_path = parts.uri.path().strip_prefix("/gh-api/").unwrap_or("");
+    let Some(owner_repo) = owner_repo_from_api(api_path) else {
+        return deny(
+            StatusCode::FORBIDDEN,
+            "only /gh-api/repos/{owner}/{repo}/… is proxied (repo-scoped)",
+        );
+    };
+    if !gw.repo_allowed(&owner_repo) {
+        tracing::warn!(repo = %owner_repo, "gh-api proxy denied: repo not in the operator allowlist");
+        return deny(
+            StatusCode::FORBIDDEN,
+            "this repository is outside the operator-granted scope for this mission",
+        );
+    }
+    let token = match gw.token().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "gh-api proxy: failed to mint token");
+            return deny(StatusCode::BAD_GATEWAY, "could not obtain a GitHub token");
+        }
+    };
+    let Ok(auth) = HeaderValue::from_str(&format!("Bearer {token}")) else {
+        return deny(StatusCode::INTERNAL_SERVER_ERROR, "bad token");
+    };
+    let url = build_upstream(GITHUB_API, api_path, parts.uri.query());
+    tracing::info!(repo = %owner_repo, "gh-api proxy → api.github.com (token injected)");
+    proxy(&state, url, auth, parts.method, parts.headers, body).await
+}
+
+fn build_upstream(base: &str, path: &str, query: Option<&str>) -> String {
+    let path = path.trim_start_matches('/');
+    match query {
+        Some(q) if !q.is_empty() => format!("{base}/{path}?{q}"),
+        _ => format!("{base}/{path}"),
+    }
+}
+
+/// Loopback routes for keyless git write. Inert (404) unless `state.git_write`
+/// is configured — the handlers check it per request.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/git/{*path}", any(git_handler))
+        .route("/gh-api/{*path}", any(api_handler))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_path_split() {
+        assert_eq!(
+            owner_repo_from_git("o/r/info/refs"),
+            Some(("o/r".into(), "info/refs".into()))
+        );
+        assert_eq!(owner_repo_from_git("o/r"), Some(("o/r".into(), "".into())));
+        assert_eq!(owner_repo_from_git("o"), None);
+    }
+
+    #[test]
+    fn api_path_scope() {
+        assert_eq!(owner_repo_from_api("repos/o/r/pulls"), Some("o/r".into()));
+        assert_eq!(owner_repo_from_api("user/repos"), None);
+        assert_eq!(owner_repo_from_api("orgs/x/repos"), None);
+    }
+
+    #[test]
+    fn upstream_url_with_query() {
+        assert_eq!(
+            build_upstream(GITHUB_GIT, "o/r/info/refs", Some("service=git-upload-pack")),
+            "https://github.com/o/r/info/refs?service=git-upload-pack"
+        );
+        assert_eq!(
+            build_upstream(GITHUB_API, "repos/o/r/pulls", None),
+            "https://api.github.com/repos/o/r/pulls"
+        );
+    }
+}

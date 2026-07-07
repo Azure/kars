@@ -1254,28 +1254,30 @@ TOOLSEOF
 ## Opening a pull request (keyless git write)
 
 Git write is enabled for this sandbox. You can clone a repo, make changes, and
-open a pull request — **without handling any credentials**. A router-managed,
-short-lived, repo-scoped token is injected automatically for github.com.
+open a pull request — **without ever handling a credential**. The router injects
+a short-lived, repo-scoped token on your behalf; you just use normal github.com
+URLs and a loopback API endpoint.
 
-Ensure the repo host is reachable (it must be on your egress allowlist — if a
-`git clone`/`git push` is denied, request it with the access-request flow above,
-then retry). Then:
+Only the repositories the operator granted are reachable. If a repo is out of
+scope you'll get a 403 — report it (or raise an access-request); don't retry.
 
 ```bash
+# Clone + branch + edit + commit + push — auth is injected by the router.
 git clone https://github.com/<owner>/<repo>.git && cd <repo>
 git checkout -b kars/<short-change-name>
 # ... make your edits ...
 git add -A && git commit -m "Describe the change"
-git push -u origin HEAD                 # auth is injected by the router; no token needed
+git push -u origin HEAD
 
-# Open the PR (gh authenticates via the same router-managed token):
-GH_TOKEN="$(/usr/local/bin/git-credential-kars token)" \
-  gh pr create --title "Your title" --body "What changed and why"
+# Open the PR via the router's loopback GitHub API proxy (no token needed):
+curl -s -X POST \
+  http://127.0.0.1:8443/gh-api/repos/<owner>/<repo>/pulls \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Your title","head":"kars/<short-change-name>","base":"main","body":"What changed and why"}'
 ```
 
-The token is scoped to the repositories the operator configured — you cannot push
-to arbitrary repos. If a push or PR fails with an auth error, the repo may be
-outside the configured scope; report that rather than retrying blindly.
+The PR URL is in the response (`html_url`). Never write a token into a file, env
+var, or commit — you don't have one and don't need one.
 GITEOF
   fi
 
@@ -1407,20 +1409,22 @@ if [ -d /opt/kars-plugin ]; then
 
   # ── Keyless git write (§14) ───────────────────────────────────────────────
   # When the operator enables git write (controller sets KARS_GIT_WRITE=1 and
-  # gives the router a GitHub App or a scoped PAT), wire git + gh to fetch a
-  # short-lived, repo-scoped token from the router via the credential helper.
-  # The agent never holds a credential; the token expires within the hour and is
-  # scoped to the operator-configured repos. Inert (git stays anonymous /
-  # read-only) when KARS_GIT_WRITE is unset — fail-closed.
+  # gives the router a GitHub App / scoped PAT + the repo allowlist), route the
+  # agent's GitHub traffic through the router's loopback reverse-proxy. The
+  # router injects a short-lived, repo-scoped token and forwards to GitHub — the
+  # agent NEVER holds a credential. `insteadOf` rewrites make normal github.com
+  # URLs transparent, so the agent just runs `git clone https://github.com/…`.
+  # Inert (git stays anonymous / read-only) when KARS_GIT_WRITE is unset.
   if [ "${KARS_GIT_WRITE:-}" = "1" ]; then
     _git_name="${GIT_AUTHOR_NAME:-kars-agent}"
     _git_email="${GIT_AUTHOR_EMAIL:-kars-agent@users.noreply.github.com}"
     $AS_SANDBOX git config --global user.name "$_git_name" 2>/dev/null || true
     $AS_SANDBOX git config --global user.email "$_git_email" 2>/dev/null || true
-    # Route github.com HTTPS auth through the kars credential helper (git push
-    # authenticates without the agent ever storing a token).
-    $AS_SANDBOX git config --global credential.https://github.com.helper "/usr/local/bin/git-credential-kars" 2>/dev/null || true
-    echo "[kars] Keyless git write enabled — github.com auth via router credential helper"
+    # Transparent rewrite: https://github.com/… and git@github.com:… → the
+    # router's loopback git proxy. The router injects auth; git sends none.
+    $AS_SANDBOX git config --global url."http://127.0.0.1:8443/git/".insteadOf "https://github.com/" 2>/dev/null || true
+    $AS_SANDBOX git config --global url."http://127.0.0.1:8443/git/".insteadOf "git@github.com:" 2>/dev/null || true
+    echo "[kars] Keyless git write enabled — github.com routed through the router proxy (agent holds no token)"
   fi
   # Copy node_modules so the plugin can resolve runtime deps (ws, etc).
   # `-L` dereferences symlinks: the @kars/mesh entry is a `file:` dep

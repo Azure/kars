@@ -177,12 +177,6 @@ RUN mkdir -p /etc/kars/policies /etc/kars/blocklist && \
 COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Keyless git-write credential helper (§14): fetches a short-lived, repo-scoped
-# token from the router so `git`/`gh` push without the agent ever holding a
-# credential. Inert unless the operator enables git write.
-COPY sandbox-images/openclaw/git-credential-kars.sh /usr/local/bin/git-credential-kars
-RUN chmod +x /usr/local/bin/git-credential-kars
-
 # Labels
 LABEL org.opencontainers.image.title="kars OpenClaw Sandbox" \
       org.opencontainers.image.description="Hardened OpenClaw sandbox on Azure Linux 3" \
