@@ -1926,6 +1926,16 @@ async fn apply_task(
     {
         annotations.insert("kars.azure.com/git-write-repos".into(), json!(repos));
     }
+    // Propagate the team's creator onto each run so per-user inference budgets
+    // attribute a team's token spend to the human who owns the team.
+    if let Some(creator) = team
+        .annotations()
+        .get("kars.azure.com/created-by")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        annotations.insert("kars.azure.com/created-by".into(), json!(creator));
+    }
     if role == "taskforce" {
         // Stable nonce = run name, so the run is dispatched once and not
         // re-triggered on subsequent reconciles.
