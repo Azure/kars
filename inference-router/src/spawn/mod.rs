@@ -302,6 +302,29 @@ pub async fn create_sandbox(
     // `Degraded: ToolPolicy ... not found`.
     apply_parent_refs(&mut crd, parent_tool_policy.as_deref(), parent_inference.as_deref());
 
+    // Keyless git write (§14): a sub-agent inherits its principal's repo scope so
+    // it can push branches + open PRs on the same repos. This is ATTENUATED — the
+    // controller clamps the child to the workspace connection, so child repos are
+    // always ⊆ parent repos, and the child is marked a sub-agent (by its parent
+    // label) so it can never MERGE (only the principal/human can). Absent parent
+    // git write ⇒ no annotation ⇒ child stays read-only (fail-closed).
+    if let Ok(parent_repos) = std::env::var("GIT_WRITE_REPOS") {
+        let parent_repos = parent_repos.trim().to_string();
+        if !parent_repos.is_empty()
+            && let Some(meta) = crd.get_mut("metadata").and_then(|m| m.as_object_mut())
+        {
+            let anns = meta
+                .entry("annotations")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(o) = anns.as_object_mut() {
+                o.insert(
+                    "kars.azure.com/git-write-repos".to_string(),
+                    serde_json::Value::String(parent_repos),
+                );
+            }
+        }
+    }
+
     // kars-bridge: own the child by its parent sandbox so K8s garbage-collects
     // it when the parent goes away (run completes / task deleted / team
     // deleted). Without this, agent-spawned sub-agents outlive their parent run

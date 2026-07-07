@@ -38,6 +38,19 @@ pub struct GitWriteConfig {
     /// Lowercased `owner/repo` entries the agent may reach. EMPTY ⇒ deny all
     /// (fail-closed): the operator must explicitly declare the repositories.
     allowed_repos: Vec<String>,
+    /// Whether this sandbox is a principal (top-level mission) or a spawned
+    /// sub-agent. Sub-agents may push branches + open PRs, but never merge — a
+    /// principal (or a human via the inbox) is the merge gate.
+    role: GitRole,
+}
+
+/// The role of the sandbox this router serves, for git-write authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitRole {
+    /// Top-level mission agent — may merge (if the workspace/envelope allows).
+    Principal,
+    /// Spawned sub-agent — push branches + open PRs only; never merge.
+    SubAgent,
 }
 
 impl GitWriteConfig {
@@ -60,7 +73,24 @@ impl GitWriteConfig {
             .or_else(|| std::env::var("GITHUB_APP_REPOS").ok())
             .map(|s| parse_repos(&s))
             .unwrap_or_default();
-        Some(Self { credential, allowed_repos })
+        let role = match std::env::var("KARS_GIT_ROLE").ok().as_deref() {
+            Some(r) if r.trim().eq_ignore_ascii_case("subagent") => GitRole::SubAgent,
+            _ => GitRole::Principal,
+        };
+        Some(Self { credential, allowed_repos, role })
+    }
+
+    /// The sandbox's git-write role.
+    #[must_use]
+    pub fn role(&self) -> GitRole {
+        self.role
+    }
+
+    /// Whether this sandbox may merge a pull request. Only a principal may — a
+    /// sub-agent pushes + opens PRs and asks the principal (or a human) to merge.
+    #[must_use]
+    pub fn can_merge(&self) -> bool {
+        self.role == GitRole::Principal
     }
 
     /// Whether the agent may reach `owner/repo` (case-insensitive; a trailing
@@ -115,7 +145,24 @@ mod tests {
         GitWriteConfig {
             credential: GitCredential::Pat("t".into()),
             allowed_repos: repos.iter().map(|r| normalize_repo(r)).collect(),
+            role: GitRole::Principal,
         }
+    }
+
+    #[test]
+    fn subagent_cannot_merge_principal_can() {
+        let principal = GitWriteConfig {
+            credential: GitCredential::Pat("t".into()),
+            allowed_repos: vec!["a/b".into()],
+            role: GitRole::Principal,
+        };
+        let sub = GitWriteConfig {
+            credential: GitCredential::Pat("t".into()),
+            allowed_repos: vec!["a/b".into()],
+            role: GitRole::SubAgent,
+        };
+        assert!(principal.can_merge());
+        assert!(!sub.can_merge());
     }
 
     #[test]

@@ -3347,6 +3347,19 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     );
                 } else {
                     let gw_scope = allowed.join(",");
+                    // A spawned sub-agent (has a parent label) may push branches +
+                    // open PRs but never merge; a principal may merge.
+                    let git_role = if sandbox
+                        .metadata
+                        .labels
+                        .as_ref()
+                        .and_then(|l| l.get("kars.azure.com/parent"))
+                        .is_some()
+                    {
+                        "subagent"
+                    } else {
+                        "principal"
+                    };
                     // GITHUB_APP_REPOS wants bare repo names (installation-token
                     // scope); GIT_WRITE_REPOS wants owner/repo (proxy allowlist).
                     let repo_names: Vec<String> = allowed
@@ -3367,6 +3380,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         },
                         "stringData": {
                             "KARS_GIT_WRITE": "1",
+                            "KARS_GIT_ROLE": git_role,
                             "GITHUB_APP_INSTALLATION_ID": installation_id,
                             "GITHUB_APP_REPOS": repo_names.join(","),
                             "GIT_WRITE_REPOS": gw_scope.clone(),
