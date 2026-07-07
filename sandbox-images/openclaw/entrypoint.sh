@@ -1278,6 +1278,28 @@ curl -s -X POST \
 
 The PR URL is in the response (`html_url`). Never write a token into a file, env
 var, or commit — you don't have one and don't need one.
+
+## Sub-agents, review, and merging
+
+Merging is governed — **you cannot merge unless you are the principal**. If a
+merge call returns 403, you are a sub-agent: that's expected.
+
+- **If you are a sub-agent:** do your work on a branch, push it, and open the PR
+  (above). Then **ask your principal to review** — send a mesh message to
+  `parent` naming the PR (e.g. "PR #12 ready on owner/repo for review"). Do not
+  attempt to merge.
+- **If you are the principal:** review your sub-agents' PRs — read the diff via
+  the API proxy (`GET http://127.0.0.1:8443/gh-api/repos/<owner>/<repo>/pulls/<n>/files`).
+  To merge, either merge directly if you're authorized:
+  ```bash
+  curl -s -X PUT http://127.0.0.1:8443/gh-api/repos/<owner>/<repo>/pulls/<n>/merge \
+    -H "Content-Type: application/json" -d '{"merge_method":"squash"}'
+  ```
+  or, when a human should sign off, raise a request and wait:
+  ```bash
+  bash request-access.sh permission "merge PR #<n> on <owner>/<repo>" "reviewed by principal; requesting human approval to merge"
+  ```
+  Only merge once it's approved. Never merge your own unreviewed work.
 GITEOF
   fi
 
