@@ -3291,55 +3291,101 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         {
             use k8s_openapi::api::core::v1::Secret;
             let conn_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_self_ns);
-            let installation_id = conn_api
+            let conn = conn_api
                 .get_opt("kars-github-connection")
                 .await
                 .ok()
                 .flatten()
-                .and_then(|s| s.data)
-                .and_then(|d| d.get("installation_id").cloned())
-                .and_then(|v| String::from_utf8(v.0).ok())
+                .and_then(|s| s.data);
+            let read_conn = |key: &str| -> Option<String> {
+                conn.as_ref()
+                    .and_then(|d| d.get(key))
+                    .and_then(|v| String::from_utf8(v.0.clone()).ok())
+            };
+            let installation_id = read_conn("installation_id")
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
+            // The repos the workspace's GitHub connection actually grants — the
+            // authorized ceiling for THIS workspace.
+            let granted: std::collections::HashSet<String> = read_conn("repos")
+                .and_then(|r| serde_json::from_str::<Vec<String>>(&r).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.trim().to_ascii_lowercase())
+                .collect();
             if let Some(installation_id) = installation_id {
-                // GITHUB_APP_REPOS wants bare repo names (installation-token
-                // scope); GIT_WRITE_REPOS wants owner/repo (proxy allowlist).
-                let repo_names: Vec<String> = gw_repos
+                // ISOLATION: a mission only ever gets repos its workspace
+                // connection actually grants — declared ∩ granted. A mission
+                // cannot over-scope to a repo it wasn't authorized for (nor, since
+                // the connection is read from the mission's OWN namespace, reach
+                // another workspace's repos). Empty intersection → git write stays
+                // OFF (fail-closed).
+                let declared: Vec<String> = gw_repos
                     .split(',')
-                    .filter_map(|r| r.trim().rsplit('/').next())
+                    .map(|r| r.trim().to_string())
                     .filter(|r| !r.is_empty())
-                    .map(|r| r.to_string())
                     .collect();
-                let gw_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_ns);
-                let secret_name = format!("{name}-git-write");
-                let secret: Secret = serde_json::from_value(json!({
-                    "apiVersion": "v1",
-                    "kind": "Secret",
-                    "metadata": {
-                        "name": secret_name,
-                        "namespace": sandbox_ns,
-                        "labels": { "kars.azure.com/sandbox": name },
-                    },
-                    "stringData": {
-                        "KARS_GIT_WRITE": "1",
-                        "GITHUB_APP_INSTALLATION_ID": installation_id,
-                        "GITHUB_APP_REPOS": repo_names.join(","),
-                        "GIT_WRITE_REPOS": gw_repos,
-                        "GIT_AUTHOR_NAME": "kars-agent",
-                        "GIT_AUTHOR_EMAIL": "kars-agent@users.noreply.github.com",
-                    },
-                }))?;
-                if let Err(e) = gw_api
-                    .patch(
-                        &secret_name,
-                        &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
-                        &Patch::Apply(secret),
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %e, sandbox = %name, "failed to materialize git-write secret");
+                let allowed: Vec<String> = declared
+                    .iter()
+                    .filter(|r| granted.contains(&r.to_ascii_lowercase()))
+                    .cloned()
+                    .collect();
+                let dropped: Vec<&String> = declared
+                    .iter()
+                    .filter(|r| !granted.contains(&r.to_ascii_lowercase()))
+                    .collect();
+                if !dropped.is_empty() {
+                    tracing::warn!(
+                        sandbox = %name, dropped = ?dropped,
+                        "git-write: dropping repos not granted by the workspace connection (isolation)"
+                    );
+                }
+                if allowed.is_empty() {
+                    tracing::warn!(
+                        sandbox = %name, declared = %gw_repos,
+                        "git-write: no declared repo is in the workspace connection — git write stays OFF (fail-closed)"
+                    );
                 } else {
-                    tracing::info!(sandbox = %name, repos = %gw_repos, "git-write secret materialized from workspace connection");
+                    let gw_scope = allowed.join(",");
+                    // GITHUB_APP_REPOS wants bare repo names (installation-token
+                    // scope); GIT_WRITE_REPOS wants owner/repo (proxy allowlist).
+                    let repo_names: Vec<String> = allowed
+                        .iter()
+                        .filter_map(|r| r.rsplit('/').next())
+                        .filter(|r| !r.is_empty())
+                        .map(|r| r.to_string())
+                        .collect();
+                    let gw_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_ns);
+                    let secret_name = format!("{name}-git-write");
+                    let secret: Secret = serde_json::from_value(json!({
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": {
+                            "name": secret_name,
+                            "namespace": sandbox_ns,
+                            "labels": { "kars.azure.com/sandbox": name },
+                        },
+                        "stringData": {
+                            "KARS_GIT_WRITE": "1",
+                            "GITHUB_APP_INSTALLATION_ID": installation_id,
+                            "GITHUB_APP_REPOS": repo_names.join(","),
+                            "GIT_WRITE_REPOS": gw_scope.clone(),
+                            "GIT_AUTHOR_NAME": "kars-agent",
+                            "GIT_AUTHOR_EMAIL": "kars-agent@users.noreply.github.com",
+                        },
+                    }))?;
+                    if let Err(e) = gw_api
+                        .patch(
+                            &secret_name,
+                            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                            &Patch::Apply(secret),
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, sandbox = %name, "failed to materialize git-write secret");
+                    } else {
+                        tracing::info!(sandbox = %name, repos = %gw_scope, "git-write secret materialized (clamped to workspace connection)");
+                    }
                 }
             } else {
                 tracing::warn!(sandbox = %name, "git-write-repos set but no workspace GitHub connection found");
