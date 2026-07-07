@@ -1290,16 +1290,24 @@ merge call returns 403, you are a sub-agent: that's expected.
   attempt to merge.
 - **If you are the principal:** review your sub-agents' PRs — read the diff via
   the API proxy (`GET http://127.0.0.1:8443/gh-api/repos/<owner>/<repo>/pulls/<n>/files`).
-  To merge, either merge directly if you're authorized:
+  **A merge is blocked until the PR has been reviewed** (the router enforces
+  this). So to merge, FIRST submit a review, THEN merge:
   ```bash
+  # 1. Submit a review (required before merge). Use event=COMMENT — a shared App
+  #    identity cannot APPROVE its own PR, but a COMMENT review records the review:
+  curl -s -X POST http://127.0.0.1:8443/gh-api/repos/<owner>/<repo>/pulls/<n>/reviews \
+    -H "Content-Type: application/json" -d '{"event":"COMMENT","body":"Reviewed: <your assessment>."}'
+  # 2. Merge:
   curl -s -X PUT http://127.0.0.1:8443/gh-api/repos/<owner>/<repo>/pulls/<n>/merge \
     -H "Content-Type: application/json" -d '{"merge_method":"squash"}'
   ```
-  or, when a human should sign off, raise a request and wait:
+  If your review finds problems, submit event=REQUEST_CHANGES instead — that
+  BLOCKS the merge until resolved. When a human should sign off, raise a request:
   ```bash
   bash request-access.sh permission "merge PR #<n> on <owner>/<repo>" "reviewed by principal; requesting human approval to merge"
   ```
-  Only merge once it's approved. Never merge your own unreviewed work.
+  Only merge once it's approved. You cannot merge unreviewed work — the gateway
+  rejects it.
 GITEOF
   fi
 
@@ -1434,19 +1442,30 @@ if [ -d /opt/kars-plugin ]; then
   # gives the router a GitHub App / scoped PAT + the repo allowlist), route the
   # agent's GitHub traffic through the router's loopback reverse-proxy. The
   # router injects a short-lived, repo-scoped token and forwards to GitHub — the
-  # agent NEVER holds a credential. `insteadOf` rewrites make normal github.com
-  # URLs transparent, so the agent just runs `git clone https://github.com/…`.
-  # Inert (git stays anonymous / read-only) when KARS_GIT_WRITE is unset.
+  # agent NEVER holds a credential. `insteadOf`/`pushInsteadOf` rewrites make
+  # normal github.com URLs transparent, so the agent just runs
+  # `git clone https://github.com/…` and `git push`. Inert (git stays anonymous /
+  # read-only) when KARS_GIT_WRITE is unset.
   if [ "${KARS_GIT_WRITE:-}" = "1" ]; then
     _git_name="${GIT_AUTHOR_NAME:-kars-agent}"
     _git_email="${GIT_AUTHOR_EMAIL:-kars-agent@users.noreply.github.com}"
-    $AS_SANDBOX git config --global user.name "$_git_name" 2>/dev/null || true
-    $AS_SANDBOX git config --global user.email "$_git_email" 2>/dev/null || true
-    # Transparent rewrite: https://github.com/… and git@github.com:… → the
-    # router's loopback git proxy. The router injects auth; git sends none.
-    $AS_SANDBOX git config --global url."http://127.0.0.1:8443/git/".insteadOf "https://github.com/" 2>/dev/null || true
-    $AS_SANDBOX git config --global url."http://127.0.0.1:8443/git/".insteadOf "git@github.com:" 2>/dev/null || true
-    echo "[kars] Keyless git write enabled — github.com routed through the router proxy (agent holds no token)"
+    # CRITICAL: write to a FIXED path exported as GIT_CONFIG_GLOBAL, not
+    # `git config --global`. The agent runs its tools with HOME=/tmp/node-host-home
+    # (see the node-host launch below), which differs from the HOME the entrypoint
+    # has here — so a plain `--global` write lands in a .gitconfig the agent's git
+    # never reads, and `git push` falls through to raw github.com (no credential).
+    # GIT_CONFIG_GLOBAL is HOME-independent and inherited by every child git.
+    export GIT_CONFIG_GLOBAL=/tmp/.kars-gitconfig
+    : > "$GIT_CONFIG_GLOBAL" 2>/dev/null || true
+    git config --file "$GIT_CONFIG_GLOBAL" user.name "$_git_name" 2>/dev/null || true
+    git config --file "$GIT_CONFIG_GLOBAL" user.email "$_git_email" 2>/dev/null || true
+    # Transparent rewrite (both fetch AND push) → the router's loopback git proxy.
+    git config --file "$GIT_CONFIG_GLOBAL" url."http://127.0.0.1:8443/git/".insteadOf "https://github.com/" 2>/dev/null || true
+    git config --file "$GIT_CONFIG_GLOBAL" url."http://127.0.0.1:8443/git/".pushInsteadOf "https://github.com/" 2>/dev/null || true
+    git config --file "$GIT_CONFIG_GLOBAL" url."http://127.0.0.1:8443/git/".insteadOf "git@github.com:" 2>/dev/null || true
+    git config --file "$GIT_CONFIG_GLOBAL" url."http://127.0.0.1:8443/git/".pushInsteadOf "git@github.com:" 2>/dev/null || true
+    chmod 0644 "$GIT_CONFIG_GLOBAL" 2>/dev/null || true
+    echo "[kars] Keyless git write enabled — github.com routed through the router proxy (GIT_CONFIG_GLOBAL=$GIT_CONFIG_GLOBAL, agent holds no token)"
   fi
   # Copy node_modules so the plugin can resolve runtime deps (ws, etc).
   # `-L` dereferences symlinks: the @kars/mesh entry is a `file:` dep
