@@ -1914,6 +1914,18 @@ async fn apply_task(
     let mut annotations = serde_json::Map::new();
     annotations.insert(ANNOT_TEAM.into(), json!(team.name_any()));
     annotations.insert(ANNOT_TEAM_ROLE.into(), json!(role));
+    // Propagate the team's git-write grant (declared repos, set by the Bridge from
+    // the workspace GitHub connection) onto the run so the run sandbox reconciler
+    // materializes the keyless git-write secret scoped to those repos — otherwise a
+    // team run (principal or its sub-agents) can never open a PR.
+    if let Some(repos) = team
+        .annotations()
+        .get("kars.azure.com/git-write-repos")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        annotations.insert("kars.azure.com/git-write-repos".into(), json!(repos));
+    }
     if role == "taskforce" {
         // Stable nonce = run name, so the run is dispatched once and not
         // re-triggered on subsequent reconciles.
