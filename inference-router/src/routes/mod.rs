@@ -52,6 +52,9 @@ pub use github_token::routes as github_token_routes;
 mod access_request;
 pub use access_request::routes as access_request_routes;
 
+mod github_proxy;
+pub use github_proxy::routes as github_proxy_routes;
+
 mod egress;
 pub use egress::egress_routes;
 
@@ -110,6 +113,11 @@ pub struct AppState {
     /// the controller (`GET /internal/access-requests`) which mints a Pending
     /// KarsApproval per novel request. A request, never a grant.
     pub access_requests: Arc<crate::access_request::AccessRequestBuffer>,
+    /// Keyless git write (§14): the router-held credential + fail-closed repo
+    /// allowlist backing the loopback git/API reverse-proxy. `None` ⇒ git write
+    /// is off (the agent stays read-only/anonymous). The token is minted +
+    /// injected here; the agent never receives it.
+    pub git_write: Option<Arc<crate::git_write::GitWriteConfig>>,
     pub sandbox_name: Arc<String>,
     /// Per-task execution telemetry derived from proxied model traffic
     /// (`task_telemetry`). The honest, router-sourced trace that replaces the
@@ -345,6 +353,7 @@ impl AppState {
             blocklist,
             blocked_egress: Arc::new(BlockedBuffer::with_defaults()),
             access_requests: Arc::new(crate::access_request::AccessRequestBuffer::default()),
+            git_write: crate::git_write::GitWriteConfig::from_env().map(Arc::new),
             sandbox_name: Arc::new(sandbox_name),
             task_telemetry: Arc::new(crate::task_telemetry::TaskTelemetry::new()),
             inbox: Arc::new(MeshInbox::new()),
