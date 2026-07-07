@@ -3275,6 +3275,77 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
+        // Keyless git write (§14): when the mission declared repos (the Bridge
+        // set `kars.azure.com/git-write-repos` from the workspace's GitHub
+        // connection), materialize the per-mission <name>-git-write secret here
+        // from the workspace connection — the installation id + repo scope only,
+        // never a key/token (the key is the mirrored kars-github-app). This is
+        // what ties a Bridge-created mission to its workspace's GitHub App.
+        if let Some(gw_repos) = sandbox
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("kars.azure.com/git-write-repos"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            use k8s_openapi::api::core::v1::Secret;
+            let conn_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_self_ns);
+            let installation_id = conn_api
+                .get_opt("kars-github-connection")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.data)
+                .and_then(|d| d.get("installation_id").cloned())
+                .and_then(|v| String::from_utf8(v.0).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(installation_id) = installation_id {
+                // GITHUB_APP_REPOS wants bare repo names (installation-token
+                // scope); GIT_WRITE_REPOS wants owner/repo (proxy allowlist).
+                let repo_names: Vec<String> = gw_repos
+                    .split(',')
+                    .filter_map(|r| r.trim().rsplit('/').next())
+                    .filter(|r| !r.is_empty())
+                    .map(|r| r.to_string())
+                    .collect();
+                let gw_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_ns);
+                let secret_name = format!("{name}-git-write");
+                let secret: Secret = serde_json::from_value(json!({
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {
+                        "name": secret_name,
+                        "namespace": sandbox_ns,
+                        "labels": { "kars.azure.com/sandbox": name },
+                    },
+                    "stringData": {
+                        "KARS_GIT_WRITE": "1",
+                        "GITHUB_APP_INSTALLATION_ID": installation_id,
+                        "GITHUB_APP_REPOS": repo_names.join(","),
+                        "GIT_WRITE_REPOS": gw_repos,
+                        "GIT_AUTHOR_NAME": "kars-agent",
+                        "GIT_AUTHOR_EMAIL": "kars-agent@users.noreply.github.com",
+                    },
+                }))?;
+                if let Err(e) = gw_api
+                    .patch(
+                        &secret_name,
+                        &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                        &Patch::Apply(secret),
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, sandbox = %name, "failed to materialize git-write secret");
+                } else {
+                    tracing::info!(sandbox = %name, repos = %gw_repos, "git-write secret materialized from workspace connection");
+                }
+            } else {
+                tracing::warn!(sandbox = %name, "git-write-repos set but no workspace GitHub connection found");
+            }
+        }
+
         // Keyless git write (§14): mirror the cluster-shared kars GitHub App
         // secret (App id + private key — the platform identity, held in ONE
         // place, kars-system) into this sandbox's namespace so the router's

@@ -262,6 +262,20 @@ pub async fn materialize(
             attribution.insert("kars.azure.com/skills".to_string(), list);
         }
     }
+    // Git write: propagate the mission's declared repos (Bridge sets the
+    // annotation from the workspace's GitHub connection) so the KarsSandbox
+    // reconciler materializes the per-mission <name>-git-write secret + enables
+    // the router's keyless git proxy scoped to exactly these repos.
+    if let Some(repos) = task
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("kars.azure.com/git-write-repos"))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        attribution.insert("kars.azure.com/git-write-repos".to_string(), repos.to_string());
+    }
     apply_dynamic(
         client,
         namespace,
