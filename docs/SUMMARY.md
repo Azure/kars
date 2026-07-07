@@ -24,6 +24,7 @@
   - [Mesh trust design](architecture/entra-agent-id/06-mesh-trust-design.md)
 - [Multi-tenant model](multi-tenant.md)
 - [Egress proxy](egress-proxy.md)
+- [Keyless git write (agent git gateway)](git-write.md)
 
 # Security
 
