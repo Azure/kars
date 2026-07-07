@@ -192,6 +192,20 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let mut member_refs: Vec<LocalObjectRef> = Vec::new();
     for role in &team.spec.roster {
         let member_name = format!("{name}-{}", sanitize(&role.name));
+        // Reserved-name guard: a roster role whose sanitized name collides with
+        // the auto-created principal task (e.g. a role literally named
+        // "principal") would otherwise re-materialize `<team>-principal` as a
+        // member — parented to itself — which deadlocks the principal (waits for
+        // itself to become Ready) and starves every run. Skip it; the principal
+        // already exists as the authority root.
+        if member_name == principal_name {
+            tracing::warn!(
+                team = %name,
+                role = %role.name,
+                "roster role name is reserved (collides with the team principal) — skipping; rename the role"
+            );
+            continue;
+        }
         materialize_member(&tasks, &team, &principal_name, role, &member_name).await?;
         member_refs.push(LocalObjectRef { name: member_name });
     }
