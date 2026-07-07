@@ -2511,12 +2511,17 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                                     {"containerPort": 9090, "name": "metrics"}
                                 ],
                                 "env": router_env,
-                                // Keyless git write (§14): the operator-managed
-                                // `<name>-git-write` secret carries the GitHub App
-                                // creds or a scoped PAT (GITHUB_APP_* / GIT_WRITE_TOKEN)
-                                // ONLY to the router — the agent never receives the
-                                // token. Optional → absent = feature off (fail-closed).
+                                // Keyless git write (§14). Two secrets, ROUTER-only
+                                // (the agent never receives the token):
+                                //  - `kars-github-app` (cluster-shared, mirrored in):
+                                //    the GitHub App id + private key — the platform
+                                //    identity, in ONE place.
+                                //  - `<name>-git-write` (per-mission): the workspace
+                                //    installation id + repo scope + KARS_GIT_WRITE +
+                                //    author (or, for the no-App path, a scoped PAT).
+                                // Both optional → absent = feature off (fail-closed).
                                 "envFrom": [
+                                    {"secretRef": {"name": "kars-github-app", "optional": true}},
                                     {"secretRef": {"name": format!("{}-git-write", name), "optional": true}}
                                 ],
                                 "securityContext": {
@@ -3267,6 +3272,32 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         }));
                     }
                 }
+            }
+        }
+
+        // Keyless git write (§14): mirror the cluster-shared kars GitHub App
+        // secret (App id + private key — the platform identity, held in ONE
+        // place, kars-system) into this sandbox's namespace so the router's
+        // `envFrom kars-github-app` resolves. Best-effort + fail-closed: when the
+        // operator hasn't configured the App, mirror_secret returns Skipped and
+        // git write simply stays off. The private key reaches only the router
+        // container (UID 1001), never the agent.
+        match governance_mounts::mirror_secret(
+            client,
+            "kars-github-app",
+            &sandbox_self_ns,
+            &sandbox_ns,
+            &name,
+            "GitHubApp",
+        )
+        .await
+        {
+            Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                tracing::info!(sandbox = %name, "kars-github-app secret mirrored (keyless git write)");
+            }
+            Ok(governance_mounts::MirrorOutcome::Skipped(_)) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, sandbox = %name, "kars-github-app mirror failed; git write may be off");
             }
         }
 
