@@ -1808,6 +1808,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             ("KARS_GIT_WRITE", "KARS_GIT_WRITE"),
             ("GIT_AUTHOR_NAME", "GIT_AUTHOR_NAME"),
             ("GIT_AUTHOR_EMAIL", "GIT_AUTHOR_EMAIL"),
+            // HOME-independent git config path (the agent runs with a different
+            // HOME than the entrypoint, so a plain `git config --global` is not
+            // seen). Guarantees `insteadOf`/`pushInsteadOf` apply to git push.
+            ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_GLOBAL"),
         ] {
             openclaw_env.push(json!({
                 "name": var,
@@ -2366,6 +2370,27 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "readOnly": true,
             }));
         }
+        // Keyless git write (§14): when the mission declared git-write repos,
+        // mount a system-level /etc/gitconfig that routes github.com through the
+        // router's loopback git proxy (insteadOf/pushInsteadOf). /etc/gitconfig is
+        // read by EVERY git invocation regardless of user/HOME/env — the reliable
+        // delivery (a per-HOME `git config --global` is not seen by the agent's
+        // sanitized tool shell). Optional CM → absent = no mount = read-only.
+        let git_write_requested = sandbox
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("kars.azure.com/git-write-repos"))
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if git_write_requested {
+            agent_volume_mounts.push(json!({
+                "name": "kars-gitconfig",
+                "mountPath": "/etc/gitconfig",
+                "subPath": "gitconfig",
+                "readOnly": true,
+            }));
+        }
         let mut agent_container = json!({
             "name": agent_container_name,
             "image": image,
@@ -2552,7 +2577,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         "volumes": [
                             {"name": "sandbox-data", "emptyDir": {}},
                             {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "4Gi"}},
-                            {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}}
+                            {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}},
+                            // Keyless git write (§14): system /etc/gitconfig routing
+                            // github.com through the router git proxy. Optional →
+                            // absent = no git write.
+                            {"name": "kars-gitconfig", "configMap": {"name": format!("{}-gitconfig", name), "optional": true, "items": [{"key": "gitconfig", "path": "gitconfig"}]}}
                         ],
                         "tolerations": [{
                             "key": "kars.azure.com/sandbox",
@@ -3347,6 +3376,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     );
                 } else {
                     let gw_scope = allowed.join(",");
+                    // System /etc/gitconfig content: route github.com through the
+                    // router's loopback git proxy for BOTH fetch and push. Read by
+                    // every git invocation regardless of user/HOME/env.
+                    let gitconfig = "[user]\n\tname = kars-agent\n\temail = kars-agent@users.noreply.github.com\n[url \"http://127.0.0.1:8443/git/\"]\n\tinsteadOf = https://github.com/\n\tpushInsteadOf = https://github.com/\n\tinsteadOf = git@github.com:\n\tpushInsteadOf = git@github.com:\n";
+                    let gc_api: Api<k8s_openapi::api::core::v1::ConfigMap> =
+                        Api::namespaced(client.clone(), &sandbox_ns);
+                    let gc_name = format!("{name}-gitconfig");
+                    let gc: k8s_openapi::api::core::v1::ConfigMap = serde_json::from_value(json!({
+                        "apiVersion": "v1",
+                        "kind": "ConfigMap",
+                        "metadata": { "name": gc_name, "namespace": sandbox_ns, "labels": {"kars.azure.com/sandbox": name} },
+                        "data": { "gitconfig": gitconfig },
+                    }))?;
+                    let _ = gc_api
+                        .patch(&gc_name, &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(), &Patch::Apply(gc))
+                        .await;
                     // A spawned sub-agent (has a parent label) may push branches +
                     // open PRs but never merge; a principal may merge.
                     let git_role = if sandbox
@@ -3381,6 +3426,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         "stringData": {
                             "KARS_GIT_WRITE": "1",
                             "KARS_GIT_ROLE": git_role,
+                            "GIT_CONFIG_GLOBAL": "/tmp/.kars-gitconfig",
                             "GITHUB_APP_INSTALLATION_ID": installation_id,
                             "GITHUB_APP_REPOS": repo_names.join(","),
                             "GIT_WRITE_REPOS": gw_scope.clone(),

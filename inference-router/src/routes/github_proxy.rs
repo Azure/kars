@@ -218,6 +218,16 @@ async fn api_handler(
             "this repository is outside the operator-granted scope for this mission",
         );
     }
+    // Review is a governed action too: a sub-agent must NOT approve a PR (no
+    // self-approval of its own delegated work). Sub-agents open + comment; only a
+    // principal reviews. Deny `POST /repos/{o}/{r}/pulls/{n}/reviews` for sub-agents.
+    if !gw.can_merge() && is_pr_review_submit(&parts.method, api_path) {
+        tracing::warn!(repo = %owner_repo, "gh-api proxy denied: sub-agents cannot submit PR reviews (no self-approval)");
+        return deny(
+            StatusCode::FORBIDDEN,
+            "sub-agents cannot approve pull requests — a principal reviews your PR",
+        );
+    }
     // Merge is a governed action: a sub-agent may open PRs but must NOT merge —
     // it asks the principal (or a human via the inbox) to merge. Deny
     // `PUT/POST /repos/{owner}/{repo}/pulls/{n}/merge` for sub-agents.
@@ -235,6 +245,27 @@ async fn api_handler(
             return deny(StatusCode::BAD_GATEWAY, "could not obtain a GitHub token");
         }
     };
+    // Mandatory review before merge (§14): a PR may only be merged once it carries
+    // an APPROVED review. kars enforces this at the gateway because every action
+    // uses the same App identity on GitHub, so GitHub-native "review required"
+    // can't tell author from reviewer — the router can. No approval → 403.
+    if is_pr_merge(&parts.method, api_path) {
+        if let Some(pr) = pr_number_from_api_path(api_path) {
+            match pr_has_approved_review(&state, &owner_repo, pr, &token).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(repo = %owner_repo, pr, "gh-api proxy denied merge: no approving review on the PR");
+                    return deny(
+                        StatusCode::FORBIDDEN,
+                        "a review is required before merge — a principal must submit an approving review on this PR first",
+                    );
+                }
+                Err(_) => {
+                    return deny(StatusCode::BAD_GATEWAY, "could not verify the PR review state before merge");
+                }
+            }
+        }
+    }
     let Ok(auth) = HeaderValue::from_str(&format!("Bearer {token}")) else {
         return deny(StatusCode::INTERNAL_SERVER_ERROR, "bad token");
     };
@@ -249,6 +280,92 @@ fn build_upstream(base: &str, path: &str, query: Option<&str>) -> String {
         Some(q) if !q.is_empty() => format!("{base}/{path}?{q}"),
         _ => format!("{base}/{path}"),
     }
+}
+
+/// True for the "submit a PR review" API call —
+/// `POST /repos/{owner}/{repo}/pulls/{number}/reviews`.
+fn is_pr_review_submit(method: &Method, api_path: &str) -> bool {
+    if *method != Method::POST {
+        return false;
+    }
+    let p = api_path.trim_end_matches('/');
+    p.ends_with("/reviews") && p.contains("/pulls/")
+}
+
+/// Extract the PR number from `repos/{owner}/{repo}/pulls/{number}/…`.
+fn pr_number_from_api_path(api_path: &str) -> Option<u64> {
+    let mut it = api_path.trim_start_matches('/').split('/');
+    // repos / owner / repo / pulls / NUMBER
+    if it.next()? != "repos" {
+        return None;
+    }
+    let _owner = it.next()?;
+    let _repo = it.next()?;
+    if it.next()? != "pulls" {
+        return None;
+    }
+    it.next()?.parse::<u64>().ok()
+}
+
+/// Whether the PR is mergeable per the review policy: at least one review has
+/// been submitted, and the most recent review is not `CHANGES_REQUESTED`.
+///
+/// NB: we deliberately do NOT require `APPROVED`. Every kars agent acts under the
+/// same GitHub App identity, and GitHub forbids approving your *own* PR — so an
+/// `APPROVED` state is unreachable for App-authored PRs and would deadlock the
+/// merge. Instead the gate enforces that a review STEP happened (sub-agents are
+/// blocked from submitting reviews, so a sub-agent's PR can only be reviewed by a
+/// principal), and that changes weren't requested.
+async fn pr_has_approved_review(
+    state: &AppState,
+    owner_repo: &str,
+    pr: u64,
+    token: &str,
+) -> Result<bool, ()> {
+    let url = format!("{GITHUB_API}/repos/{owner_repo}/pulls/{pr}/reviews?per_page=100");
+    let resp = state
+        .client
+        .get(&url)
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(axum::http::header::USER_AGENT, "kars-inference-router")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|_| ())?;
+    if !resp.status().is_success() {
+        return Err(());
+    }
+    let reviews: serde_json::Value = resp.json().await.map_err(|_| ())?;
+    let Some(arr) = reviews.as_array() else {
+        return Ok(false);
+    };
+    let states: Vec<String> = arr
+        .iter()
+        .filter_map(|r| r.get("state").and_then(|s| s.as_str()).map(|s| s.to_ascii_uppercase()))
+        .collect();
+    Ok(review_states_permit_merge(&states))
+}
+
+/// Pure review-policy decision (extracted for unit testing): a review STEP must
+/// have happened, and the most recent decisive review must not request changes.
+/// COMMENTED counts as a review (an App cannot APPROVE its own PR), but a trailing
+/// CHANGES_REQUESTED blocks the merge until resolved.
+fn review_states_permit_merge(states: &[String]) -> bool {
+    let decisive: Vec<&String> = states
+        .iter()
+        .filter(|s| *s == "APPROVED" || *s == "CHANGES_REQUESTED" || *s == "COMMENTED")
+        .collect();
+    if decisive.is_empty() {
+        return false; // no review at all → block
+    }
+    // Block if the most recent decisive review (APPROVED/CHANGES_REQUESTED)
+    // requested changes. (GitHub returns reviews in chronological order.)
+    let last_decisive = decisive
+        .iter()
+        .rev()
+        .find(|s| ***s == "APPROVED" || ***s == "CHANGES_REQUESTED");
+    !last_decisive.map(|s| **s == "CHANGES_REQUESTED").unwrap_or(false)
 }
 
 /// True for the "merge a pull request" API call —
@@ -311,5 +428,56 @@ mod tests {
         assert!(!is_pr_merge(&Method::POST, "repos/o/r/pulls"));
         assert!(!is_pr_merge(&Method::GET, "repos/o/r/pulls/3/merge"));
         assert!(!is_pr_merge(&Method::PATCH, "repos/o/r/pulls/3"));
+    }
+
+    #[test]
+    fn review_submit_detection() {
+        assert!(is_pr_review_submit(&Method::POST, "repos/o/r/pulls/3/reviews"));
+        assert!(!is_pr_review_submit(&Method::GET, "repos/o/r/pulls/3/reviews"));
+        assert!(!is_pr_review_submit(&Method::POST, "repos/o/r/pulls/3/comments"));
+    }
+
+    #[test]
+    fn pr_number_parse() {
+        assert_eq!(pr_number_from_api_path("repos/o/r/pulls/42/merge"), Some(42));
+        assert_eq!(pr_number_from_api_path("repos/o/r/pulls/7/reviews"), Some(7));
+        assert_eq!(pr_number_from_api_path("repos/o/r/pulls"), None);
+        assert_eq!(pr_number_from_api_path("repos/o/r/issues/3"), None);
+    }
+
+    fn states(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn review_gate_blocks_when_no_review() {
+        assert!(!review_states_permit_merge(&[]));
+        // Non-review states (e.g. DISMISSED/PENDING) do not count as a review.
+        assert!(!review_states_permit_merge(&states(&["PENDING", "DISMISSED"])));
+    }
+
+    #[test]
+    fn review_gate_allows_commented() {
+        // An App can't APPROVE its own PR; a COMMENTED review satisfies the gate.
+        assert!(review_states_permit_merge(&states(&["COMMENTED"])));
+        assert!(review_states_permit_merge(&states(&["APPROVED"])));
+    }
+
+    #[test]
+    fn review_gate_blocks_trailing_changes_requested() {
+        assert!(!review_states_permit_merge(&states(&["CHANGES_REQUESTED"])));
+        // A trailing CHANGES_REQUESTED blocks even after an earlier approval.
+        assert!(!review_states_permit_merge(&states(&["APPROVED", "CHANGES_REQUESTED"])));
+        // ...but a later APPROVED/COMMENTED clears an earlier CHANGES_REQUESTED
+        // (last decisive review wins; COMMENTED is not decisive so APPROVED does it).
+        assert!(review_states_permit_merge(&states(&[
+            "CHANGES_REQUESTED",
+            "APPROVED"
+        ])));
+        // A COMMENTED after CHANGES_REQUESTED does NOT clear it (not decisive).
+        assert!(!review_states_permit_merge(&states(&[
+            "CHANGES_REQUESTED",
+            "COMMENTED"
+        ])));
     }
 }
