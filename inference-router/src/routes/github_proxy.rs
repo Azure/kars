@@ -218,6 +218,16 @@ async fn api_handler(
             "this repository is outside the operator-granted scope for this mission",
         );
     }
+    // Merge is a governed action: a sub-agent may open PRs but must NOT merge —
+    // it asks the principal (or a human via the inbox) to merge. Deny
+    // `PUT/POST /repos/{owner}/{repo}/pulls/{n}/merge` for sub-agents.
+    if !gw.can_merge() && is_pr_merge(&parts.method, api_path) {
+        tracing::warn!(repo = %owner_repo, "gh-api proxy denied: sub-agents cannot merge (ask the principal to review + merge)");
+        return deny(
+            StatusCode::FORBIDDEN,
+            "sub-agents cannot merge a pull request — push your branch, open the PR, and ask your principal to review and merge",
+        );
+    }
     let token = match gw.token().await {
         Ok(t) => t,
         Err(e) => {
@@ -239,6 +249,17 @@ fn build_upstream(base: &str, path: &str, query: Option<&str>) -> String {
         Some(q) if !q.is_empty() => format!("{base}/{path}?{q}"),
         _ => format!("{base}/{path}"),
     }
+}
+
+/// True for the "merge a pull request" API call —
+/// `PUT /repos/{owner}/{repo}/pulls/{number}/merge`. GitHub uses PUT; we also
+/// treat POST defensively. The path is the `/gh-api/`-stripped API path.
+fn is_pr_merge(method: &Method, api_path: &str) -> bool {
+    if *method != Method::PUT && *method != Method::POST {
+        return false;
+    }
+    let p = api_path.trim_end_matches('/');
+    p.ends_with("/merge") && p.contains("/pulls/")
 }
 
 /// Loopback routes for keyless git write. Inert (404) unless `state.git_write`
@@ -280,5 +301,15 @@ mod tests {
             build_upstream(GITHUB_API, "repos/o/r/pulls", None),
             "https://api.github.com/repos/o/r/pulls"
         );
+    }
+
+    #[test]
+    fn merge_detection() {
+        assert!(is_pr_merge(&Method::PUT, "repos/o/r/pulls/3/merge"));
+        assert!(is_pr_merge(&Method::PUT, "repos/o/r/pulls/3/merge/"));
+        // Opening / listing / commenting PRs is not a merge.
+        assert!(!is_pr_merge(&Method::POST, "repos/o/r/pulls"));
+        assert!(!is_pr_merge(&Method::GET, "repos/o/r/pulls/3/merge"));
+        assert!(!is_pr_merge(&Method::PATCH, "repos/o/r/pulls/3"));
     }
 }
