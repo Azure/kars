@@ -10,18 +10,18 @@
 //! Bridge UI — what authority a task ran under and that the governance
 //! invariants held.
 //!
-//! ## What V0 proves (and what it honestly does not)
+//! ## What V0/V1 proves (and what it honestly does not)
 //!
 //! The receipt is an [in-toto Statement] wrapped in a [DSSE] envelope and
 //! signed by the controller (see [`crate::providers::signing`]). Its claim
 //! matrix is deliberately explicit so the receipt never overstates assurance:
 //!
-//! | class        | V0 status | meaning |
+//! | class        | status | meaning |
 //! |--------------|-----------|---------|
 //! | `integrity`  | `PASS`    | DSSE/Ed25519 signature binds the payload to the envelope digest. |
 //! | `conformance`| `PASS`    | Envelope validated; any delegation strictly attenuated its parent. |
-//! | `completeness`| `PARTIAL`| Covers *governance* facts (envelope, lineage, launch decision). The runtime token/cost audit chain is emitted by the inference router and is **not yet** bound in — that is the V1 upgrade. |
-//! | `regulatory` | `OMITTED` | No external transparency-log / KMS anchor in V0 local signing. |
+//! | `completeness`| `PASS`/`PARTIAL` | Dynamic, per-run: `PASS` once every bindable axis is bound for THIS task (floor controls + the router token/cost audit chain + the egress-guard ruleset + an independent transparency witness + the eBPF kernel-datapath witness); `PARTIAL` while any axis remains unbound (see [`PredicateCompleteness`] for exactly which). Never upgraded past what was actually observed. |
+//! | `regulatory` | `PARTIAL`/`OMITTED` | `PARTIAL` once an independent transparency witness co-signs the receipt log checkpoint; `OMITTED` otherwise. No external KMS anchor yet (that remains a future upgrade). |
 //!
 //! These statuses are written verbatim into the receipt predicate *and*
 //! surfaced at `spec.claims` for `kubectl`/Bridge, so the honesty travels

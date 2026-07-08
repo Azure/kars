@@ -935,17 +935,34 @@ async fn gather_completeness(
         .filter(|s| !s.is_empty());
     let transparency_witnessed = witness_key_id.is_some();
 
-    // V2 kernel-datapath witness: the eBPF/datapath witness DaemonSet writes the
-    // live kernel egress ruleset hash per node into kars-datapath-witness. The
-    // datapath is witnessed when a node's observed hash matches the authored one.
-    let authored = crate::reconciler::egress_guard_ruleset_hash(false);
+    // V2 kernel-datapath witness: the eBPF/datapath witness aggregator
+    // (deploy/ebpf-witness) cross-checks kernel-observed egress (Inspektor
+    // Gadget DNS/TCP traces) against each sandbox's declared allowlist and
+    // publishes one JSON document (`witness.json`) with a per-sandbox verdict
+    // in `kars-datapath-witness`: COMPLIANT (Strict mode, every observed host
+    // was declared — the kernel actually enforced the authored posture),
+    // BEYOND-DECLARED (Strict mode, but the kernel observed an undeclared
+    // host — a genuine completeness gap), or LEARN (the sandbox isn't in
+    // Strict egress mode yet, so enforcement isn't active — not proof of
+    // anything). Only COMPLIANT binds this axis; the sandbox being absent
+    // from the witness (not yet observed) or any other verdict leaves it
+    // honestly unset, never faked.
     let kernel_datapath_witnessed = cms_system(client)
         .get_opt("kars-datapath-witness")
         .await
         .ok()
         .flatten()
         .and_then(|cm| cm.data)
-        .map(|d| d.values().any(|v| v == &authored))
+        .and_then(|d| d.get("witness.json").cloned())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|doc| doc.get("sandboxes").cloned())
+        .and_then(|sbs| sbs.as_array().cloned())
+        .map(|sbs| {
+            sbs.iter().any(|s| {
+                s.get("sandbox").and_then(|v| v.as_str()) == Some(task_name)
+                    && s.get("verdict").and_then(|v| v.as_str()) == Some("COMPLIANT")
+            })
+        })
         .unwrap_or(false);
 
     crate::kars_receipt::PredicateCompleteness {
