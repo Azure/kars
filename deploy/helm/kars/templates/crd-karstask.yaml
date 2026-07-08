@@ -285,6 +285,20 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
+              retentionTtlSeconds:
+                description: |-
+                  Per-task retention override, in seconds, counted from the moment this
+                  task's deliverable landed (`status.deliveredAt`). When the effective TTL
+                  (this override, else the cluster-wide default read from the
+                  `kars-retention-policy` ConfigMap) elapses, the controller deletes this
+                  KarsTask — mirroring Kubernetes' `Job.spec.ttlSecondsAfterFinished`. Only
+                  a DELIVERED (terminal) task is ever auto-deleted; a task still running
+                  is never touched regardless of TTL. `0` disables retention for this
+                  task specifically (keep forever) even if a cluster default is set.
+                  Unset inherits the cluster default (which itself defaults to "never").
+                format: int64
+                nullable: true
+                type: integer
             required:
             - envelope
             - objective
@@ -372,6 +386,15 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              deliveredAt:
+                description: |-
+                  RFC3339 timestamp of the moment this task's deliverable first landed
+                  (the `kars-mission-output-<name>` ConfigMap was observed) — stamped
+                  ONCE, write-once like `envelope_digest`, and never touched again. This
+                  is the anchor the retention-TTL reconciler counts from; a task with no
+                  `deliveredAt` is still in flight and is never auto-deleted.
+                nullable: true
+                type: string
               envelopeDigest:
                 description: |-
                   `sha256:` digest of the validated trust envelope. Stable for a given

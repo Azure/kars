@@ -37,6 +37,13 @@ const FINALIZER: &str = "kars.azure.com/karstask-cleanup";
 /// Server-Side Apply field manager for Governance Receipt writes.
 const RECEIPT_FIELD_MANAGER: &str = "kars-controller/receipt";
 
+/// Cluster-wide retention default ConfigMap (namespace = KARS_NAMESPACE /
+/// kars-system) and the key on it holding the default TTL in seconds. Read via
+/// the Bridge's GET/PUT /api/operator/retention-policy. Absent or `0` means
+/// "never auto-delete" — the safe, backward-compatible default.
+const RETENTION_POLICY_CM: &str = "kars-retention-policy";
+const RETENTION_POLICY_KEY: &str = "defaultTtlSeconds";
+
 const REQUEUE_OK: Duration = Duration::from_secs(300);
 
 /// A child waiting on its parent requeues quickly so it converges to `Ready`
@@ -170,6 +177,23 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
+    // Retention TTL (mirrors Kubernetes Job.spec.ttlSecondsAfterFinished): once
+    // a task's deliverable has landed, an operator may want it auto-cleaned
+    // after a window instead of accumulating forever. Two steps, each cheap and
+    // idempotent:
+    //   1. Stamp status.deliveredAt ONCE, the first reconcile that observes the
+    //      mission-output ConfigMap (the harness-neutral "this task produced a
+    //      terminal result" signal) — never touched again.
+    //   2. Once stamped, if the effective TTL (this task's own override, else
+    //      the cluster-wide default) has elapsed, delete the task. Deletion
+    //      re-enters this same function's deletion-timestamp branch above,
+    //      which already sweeps the mission-output/artifacts/trace/review
+    //      ConfigMaps — so retention reuses the exact same cleanup path a
+    //      human "Delete mission" click takes.
+    if let Some(action) = reconcile_retention(&task, &tasks, &ctx, &name, &ns).await? {
+        return Ok(action);
+    }
+
     let generation = task.metadata.generation;
     let prior_conditions = task
         .status
@@ -298,6 +322,105 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         REQUEUE_OK
     };
     Ok(Action::requeue(requeue))
+}
+
+/// Retention TTL check/enforcement, run at the top of every reconcile (after
+/// the finalizer is ensured). Returns `Some(action)` when the retention path
+/// handled this reconcile (either just stamped `deliveredAt` or deleted the
+/// task) — the caller should return early in that case. Returns `None` to let
+/// the normal envelope/execution reconcile proceed unmodified.
+async fn reconcile_retention(
+    task: &KarsTask,
+    tasks: &Api<KarsTask>,
+    ctx: &Ctx,
+    name: &str,
+    ns: &str,
+) -> Result<Option<Action>, ReconcileError> {
+    use k8s_openapi::api::core::v1::ConfigMap;
+
+    let already_delivered_at = task.status.as_ref().and_then(|s| s.delivered_at.clone());
+
+    if already_delivered_at.is_none() {
+        // Not yet stamped — check whether a deliverable has landed. The
+        // mission-output ConfigMap is the harness-neutral "this task produced a
+        // terminal result" signal (written on success AND on a genuine
+        // terminal error/timeout alike — either way the task is done running).
+        let cms: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), ns);
+        let output = cms
+            .get_opt(&format!("kars-mission-output-{name}"))
+            .await?
+            .and_then(|cm| cm.data);
+        let Some(data) = output else {
+            // Still running (or never launched) — nothing to do.
+            return Ok(None);
+        };
+        let delivered_at = data
+            .get("finishedAt")
+            .cloned()
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        let status_patch = json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsTask",
+            "status": { "deliveredAt": delivered_at },
+        });
+        tasks
+            .patch_status(
+                name,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(status_patch),
+            )
+            .await?;
+        tracing::debug!(karstask = %name, ns = %ns, "retention: stamped deliveredAt");
+        // Requeue promptly so the TTL check (below, on the NEXT reconcile) can
+        // run against the now-stamped timestamp without waiting a full cycle.
+        return Ok(Some(Action::requeue(Duration::from_secs(5))));
+    }
+
+    // Already delivered — check the effective TTL.
+    let delivered_at = already_delivered_at.expect("checked above");
+    let Ok(delivered_ts) = chrono::DateTime::parse_from_rfc3339(&delivered_at) else {
+        return Ok(None);
+    };
+    let effective_ttl = effective_retention_ttl_seconds(ctx, task).await;
+    if effective_ttl <= 0 {
+        return Ok(None); // retention disabled for this task
+    }
+    let age = chrono::Utc::now().signed_duration_since(delivered_ts.with_timezone(&chrono::Utc));
+    if age.num_seconds() < effective_ttl {
+        // Not yet due — requeue for exactly when it WILL be due, so a task
+        // near its TTL boundary doesn't linger an extra REQUEUE_OK cycle.
+        let remaining = (effective_ttl - age.num_seconds()).max(1) as u64;
+        return Ok(Some(Action::requeue(Duration::from_secs(remaining.min(3600)))));
+    }
+    tracing::info!(
+        karstask = %name,
+        ns = %ns,
+        delivered_at = %delivered_at,
+        ttl_seconds = effective_ttl,
+        "retention: TTL elapsed — deleting delivered task"
+    );
+    tasks.delete(name, &kube::api::DeleteParams::default()).await?;
+    Ok(Some(Action::await_change()))
+}
+
+/// This task's own retention override, else the cluster-wide default read
+/// from the `kars-retention-policy` ConfigMap (key `defaultTtlSeconds`).
+/// Absent/unparseable/`<= 0` on both means retention is disabled (never
+/// auto-delete) — the safe default that preserves pre-retention behavior.
+async fn effective_retention_ttl_seconds(ctx: &Ctx, task: &KarsTask) -> i64 {
+    if let Some(ttl) = task.spec.retention_ttl_seconds {
+        return ttl;
+    }
+    use k8s_openapi::api::core::v1::ConfigMap;
+    let sys = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+    let cms: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &sys);
+    cms.get_opt(RETENTION_POLICY_CM)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|cm| cm.data)
+        .and_then(|d| d.get(RETENTION_POLICY_KEY).and_then(|v| v.parse::<i64>().ok()))
+        .unwrap_or(0)
 }
 
 /// Outcome of resolving a task's `parentRef`.
@@ -1464,6 +1587,7 @@ mod tests {
                 execution: None,
                 blueprint: None,
                 display_name: None,
+                retention_ttl_seconds: None,
             },
         );
         t.metadata.namespace = Some("default".into());

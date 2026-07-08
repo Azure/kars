@@ -131,6 +131,15 @@ pub struct KarsTeamSpec {
     /// budget). This is the headline "budget-capped standing team" control.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_token_budget: Option<i64>,
+
+    /// Retention override, in seconds, for every task-force RUN this team
+    /// mints (its cadence/on-demand `<team>-run-<epoch>` tasks) — NOT for the
+    /// standing principal/roster, which are never auto-deleted. Threaded onto
+    /// each run's `KarsTaskSpec.retentionTtlSeconds`. Unset inherits the
+    /// cluster-wide default (`kars-retention-policy` ConfigMap); `0` disables
+    /// retention for this team's runs even if a cluster default is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_retention_ttl_seconds: Option<i64>,
 }
 
 /// A member role in the team roster — a named seat in the org chart holding an
@@ -372,6 +381,7 @@ mod tests {
                 profile_ref: None,
                 requested_tier: None,
                 total_token_budget: None,
+                run_retention_ttl_seconds: None,
             },
         );
         t.metadata.namespace = Some("kars-system".into());

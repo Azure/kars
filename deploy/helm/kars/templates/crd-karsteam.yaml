@@ -513,6 +513,17 @@ spec:
                   - name
                   type: object
                 type: array
+              runRetentionTtlSeconds:
+                description: |-
+                  Retention override, in seconds, for every task-force RUN this team
+                  mints (its cadence/on-demand `<team>-run-<epoch>` tasks) — NOT for the
+                  standing principal/roster, which are never auto-deleted. Threaded onto
+                  each run's `KarsTaskSpec.retentionTtlSeconds`. Unset inherits the
+                  cluster-wide default (`kars-retention-policy` ConfigMap); `0` disables
+                  retention for this team's runs even if a cluster default is set.
+                format: int64
+                nullable: true
+                type: integer
               totalTokenBudget:
                 description: |-
                   Optional **cumulative lifetime token budget** for the whole standing
@@ -689,3 +700,4 @@ spec:
     storage: true
     subresources:
       status: {}
+
