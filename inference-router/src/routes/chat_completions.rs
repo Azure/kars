@@ -691,6 +691,15 @@ pub(super) async fn chat_completions(
                 let stream_blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let floor_for_stream = stream_floor.clone();
                 let digest_for_stream = stream_policy_digest.clone();
+                // Task-telemetry: record ONE round from the final usage chunk so
+                // the streaming chat/completions path is observable (rounds +
+                // tokens + Activity trace), not just budget. Hermes streams here
+                // for non-reasoning models, so without this its runs report
+                // rounds=0 / no trace / no tokens. Guarded so a stream that
+                // repeats usage can't double-count.
+                let telem_stream = state.task_telemetry.clone();
+                let round_recorded =
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let wrapped = stream.map(move |chunk| {
                     use std::sync::atomic::Ordering;
                     if stream_blocked.load(Ordering::Relaxed) {
@@ -772,6 +781,15 @@ pub(super) async fn chat_completions(
                                         tokio::spawn(async move {
                                             b.record_usage(&s, total).await;
                                         });
+                                        // Record the round for task telemetry (rounds +
+                                        // trace) exactly once — the usage chunk is terminal.
+                                        if !round_recorded.swap(true, Ordering::Relaxed) {
+                                            telem_stream.record_response(
+                                                &v,
+                                                crate::task_telemetry::Shape::OpenAi,
+                                                0,
+                                            );
+                                        }
                                     }
                                 }
                             }
