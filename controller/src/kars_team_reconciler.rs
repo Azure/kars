@@ -1688,12 +1688,16 @@ async fn harvest_and_retire_runs(
             .and_then(|c| c.parse::<i64>().ok())
             .unwrap_or(0);
         stats.tokens_total += tokens.max(0);
-        // A *substantive* deliverable did real inference work — harness-neutral
-        // signal: tokens were spent or artifacts were produced. This keeps the
-        // commons free of empty/error runs (e.g. a model that rejected the
-        // request) that would otherwise pollute the team's prior knowledge.
-        let did_work = tokens > 0 || artifacts > 0;
         let output = data.get("output").map(String::as_str).unwrap_or_default();
+        // A *substantive* deliverable did real work. Prefer the harness-reported
+        // signal (tokens spent or artifacts produced), but some harnesses (e.g.
+        // Hermes) don't populate token/artifact counts — so also accept a
+        // non-trivial `ok` deliverable. This keeps the commons free of empty or
+        // terse error/refusal runs (a model that rejected the request) while not
+        // penalising a productive run just because its harness is quiet about
+        // usage. `ok`, non-empty and non-"no change" are still required below.
+        let substantive_output = output.trim().chars().count() >= 40;
+        let did_work = tokens > 0 || artifacts > 0 || substantive_output;
         // Clarification: a run asked the human (via the principal) for a decision
         // or information it cannot obtain itself. Raise a principal-owned
         // `clarification` KarsApproval (idempotent per question) so it surfaces on
