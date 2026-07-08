@@ -396,7 +396,7 @@ async fn responses(
     // ~15s. Failover / digest gating still happens above — we just need
     // the byte stream to flow through unchanged.
     use axum::body::Body;
-    use futures::TryStreamExt;
+    use futures::StreamExt;
     match proxy::forward_stream(
         state.auth.clone(),
         Some(state.copilot.clone()),
@@ -409,14 +409,64 @@ async fn responses(
     .await
     {
         Ok((status, resp_headers, stream)) => {
-            // Surface usage tokens by buffering only the very last chunk
-            // is impossible without breaking streaming. We accept that
-            // the budget tracker won't see /v1/responses usage in
-            // streaming mode (it already misses /v1/chat/completions
-            // streamed usage too — same trade-off).
+            // Tap the SSE stream so the Responses API path is observable like
+            // /v1/chat/completions: each chunk is forwarded to the client
+            // UNCHANGED, and a bounded tail is accumulated so the terminal
+            // `response.completed` event's `usage` can be recorded once the
+            // stream ends. This gives streaming /v1/responses consumers
+            // (Hermes always streams here) real token counts + a round in the
+            // task telemetry — which powers the Bridge Activity tab and the
+            // team `did_work` signal — without buffering the whole response.
+            let (tx, rx) =
+                tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+            let telem = state.task_telemetry.clone();
+            let budget = state.budget.clone();
+            let sandbox_owned = sandbox_name.to_string();
+            let started = std::time::Instant::now();
+            tokio::spawn(async move {
+                // Keep a bounded tail of the SSE so a large output can't blow up
+                // memory; the terminal usage event is at the very end.
+                const TAIL_CAP: usize = 256 * 1024;
+                let mut tail: Vec<u8> = Vec::new();
+                let mut stream = stream;
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(chunk) => {
+                            tail.extend_from_slice(&chunk);
+                            if tail.len() > TAIL_CAP {
+                                let drop = tail.len() - TAIL_CAP;
+                                tail.drain(0..drop);
+                            }
+                            if tx.send(Ok(chunk)).await.is_err() {
+                                return; // client hung up
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(std::io::Error::other(e))).await;
+                            return;
+                        }
+                    }
+                }
+                // Stream ended cleanly — record the usage as one round.
+                if let Some(usage) = parse_responses_stream_usage(&tail) {
+                    let latency = started.elapsed().as_millis() as u64;
+                    telem.record_response(
+                        &usage,
+                        crate::task_telemetry::Shape::OpenAi,
+                        latency,
+                    );
+                    if let Some(total) = usage
+                        .get("usage")
+                        .and_then(|u| u.get("total_tokens"))
+                        .and_then(|v| v.as_u64())
+                    {
+                        budget.record_usage(&sandbox_owned, total).await;
+                    }
+                }
+            });
             let mut response = (
                 status,
-                Body::from_stream(stream.map_err(std::io::Error::other)),
+                Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
             )
                 .into_response();
             if let Some(ct) = resp_headers.get("content-type") {
@@ -434,6 +484,50 @@ async fn responses(
             .into_response()
         }
     }
+}
+
+/// Extract usage from the tail of a Responses API SSE stream and return it in
+/// OpenAI chat shape (`{"usage":{"prompt_tokens","completion_tokens",
+/// "total_tokens"}}`) so `TaskTelemetry::record_response(_, Shape::OpenAi, _)`
+/// records one round. The Responses API reports `input_tokens`/`output_tokens`
+/// on a terminal `response.completed` (or `response.incomplete`) event; we scan
+/// the accumulated tail for the last usage object with `input_tokens`.
+fn parse_responses_stream_usage(tail: &[u8]) -> Option<serde_json::Value> {
+    let text = String::from_utf8_lossy(tail);
+    // Walk each SSE `data:` payload; keep the last one that carries a usage with
+    // input_tokens (the terminal completed event).
+    let mut found: Option<(u64, u64, u64)> = None;
+    for line in text.lines() {
+        let payload = line.strip_prefix("data:").map(str::trim).unwrap_or("");
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        // usage may be at v.usage or v.response.usage depending on event.
+        let usage = v
+            .get("usage")
+            .or_else(|| v.get("response").and_then(|r| r.get("usage")));
+        if let Some(u) = usage {
+            if let Some(input) = u.get("input_tokens").and_then(|x| x.as_u64()) {
+                let output = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                let total = u
+                    .get("total_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(input + output);
+                found = Some((input, output, total));
+            }
+        }
+    }
+    let (prompt, completion, total) = found?;
+    Some(serde_json::json!({
+        "usage": {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": total,
+        }
+    }))
 }
 
 async fn embeddings(
@@ -942,6 +1036,37 @@ async fn foundry_proxy(
 #[cfg(test)]
 mod tests {
     use super::strip_project_prefix;
+
+    #[test]
+    fn responses_stream_usage_parsed_from_terminal_event() {
+        // Azure Responses API streaming: usage rides the terminal
+        // `response.completed` event under `response.usage`.
+        let sse = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":",
+            "{\"input_tokens\":120,\"output_tokens\":45,\"total_tokens\":165}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let v = super::parse_responses_stream_usage(sse.as_bytes()).expect("usage");
+        assert_eq!(v["usage"]["prompt_tokens"], 120);
+        assert_eq!(v["usage"]["completion_tokens"], 45);
+        assert_eq!(v["usage"]["total_tokens"], 165);
+    }
+
+    #[test]
+    fn responses_stream_usage_top_level_and_total_fallback() {
+        // Some events carry usage at the top level and omit total_tokens.
+        let sse = "data: {\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\n\n";
+        let v = super::parse_responses_stream_usage(sse.as_bytes()).expect("usage");
+        assert_eq!(v["usage"]["prompt_tokens"], 10);
+        assert_eq!(v["usage"]["total_tokens"], 15);
+    }
+
+    #[test]
+    fn responses_stream_usage_absent_is_none() {
+        let sse = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n";
+        assert!(super::parse_responses_stream_usage(sse.as_bytes()).is_none());
+    }
 
     #[test]
     fn strips_foundry_project_prefix() {
