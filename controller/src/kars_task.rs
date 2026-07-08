@@ -118,6 +118,18 @@ pub struct KarsTaskSpec {
     /// Optional short label surfaced in CLI / UI listings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+
+    /// Per-task retention override, in seconds, counted from the moment this
+    /// task's deliverable landed (`status.deliveredAt`). When the effective TTL
+    /// (this override, else the cluster-wide default read from the
+    /// `kars-retention-policy` ConfigMap) elapses, the controller deletes this
+    /// KarsTask — mirroring Kubernetes' `Job.spec.ttlSecondsAfterFinished`. Only
+    /// a DELIVERED (terminal) task is ever auto-deleted; a task still running
+    /// is never touched regardless of TTL. `0` disables retention for this
+    /// task specifically (keep forever) even if a cluster default is set.
+    /// Unset inherits the cluster default (which itself defaults to "never").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_ttl_seconds: Option<i64>,
 }
 
 /// The concrete, editable run blueprint reviewed on the launch package.
@@ -669,6 +681,14 @@ pub struct KarsTaskStatus {
     /// the product so a user understands *why* (e.g. the kind/Foundry caveat).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_detail: Option<String>,
+
+    /// RFC3339 timestamp of the moment this task's deliverable first landed
+    /// (the `kars-mission-output-<name>` ConfigMap was observed) — stamped
+    /// ONCE, write-once like `envelope_digest`, and never touched again. This
+    /// is the anchor the retention-TTL reconciler counts from; a task with no
+    /// `deliveredAt` is still in flight and is never auto-deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<String>,
 }
 
 #[cfg(test)]
@@ -731,6 +751,7 @@ mod tests {
             execution: None,
             blueprint: None,
             display_name: Some("payments-bugfix".into()),
+            retention_ttl_seconds: None,
         };
         let yaml = serde_yaml::to_string(&spec).expect("serializes");
         // Envelope fields must be camelCase on the wire.
@@ -947,6 +968,7 @@ mod tests {
                 ..Default::default()
             }),
             display_name: None,
+            retention_ttl_seconds: None,
         }
     }
 

@@ -1250,6 +1250,10 @@ async fn materialize_principal(
             "{} — principal",
             team.spec.display_name.clone().unwrap_or_else(|| team.name_any())
         )),
+        // The principal is the team's stable authority root, not a disposable
+        // run — explicitly disable retention (0) so it's never auto-deleted
+        // even if a cluster-wide default TTL is set.
+        retention_ttl_seconds: Some(0),
     };
     apply_task(tasks, team, principal_name, spec, "principal").await
 }
@@ -1284,6 +1288,9 @@ async fn materialize_member(
             team.spec.display_name.clone().unwrap_or_else(|| team.name_any()),
             role.name
         )),
+        // A roster seat is a standing member, not a disposable run — never
+        // auto-delete via retention TTL.
+        retention_ttl_seconds: Some(0),
     };
     apply_task(tasks, team, member_name, spec, "member").await
 }
@@ -1501,6 +1508,7 @@ async fn mint_taskforce(
         execution: Some(TaskExecution { launch: true, runtime: None }),
         blueprint: launched_run_blueprint(team),
         display_name: Some(display),
+        retention_ttl_seconds: team.spec.run_retention_ttl_seconds,
     };
     apply_task(tasks, team, tf_name, spec, "taskforce").await
 }
