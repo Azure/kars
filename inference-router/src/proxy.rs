@@ -26,6 +26,14 @@ pub struct UpstreamConfig {
     pub endpoint: String,
     pub deployment: String,
     pub sandbox_name: String,
+    /// Direct bearer/API key for THIS specific upstream, set when
+    /// `InferencePolicy.modelPreference` routed the request to a
+    /// non-default provider that carries its own dev-mode key (e.g. a
+    /// GitHub Models PAT). `None` ⇒ use the router's normal auth
+    /// resolution (Workload Identity / IMDS / sidecar / the single global
+    /// dev key) — the pre-existing behavior, unchanged for the default
+    /// provider. Never logged. See `Config::resolve_provider`.
+    pub provider_api_key: Option<String>,
 }
 
 /// Determine the correct token audience for the upstream endpoint.
@@ -106,9 +114,11 @@ pub fn is_copilot_endpoint(endpoint: &str) -> bool {
     endpoint.contains("api.githubcopilot.com")
 }
 
-/// Acquire the right auth token for a given upstream endpoint.
+/// Acquire the right auth token for a given upstream request.
 ///
 /// - GitHub Copilot endpoints → exchanged Copilot JWT (cached, refreshed proactively).
+/// - `upstream.provider_api_key` set (a non-default provider with its own
+///   dev-mode key, e.g. a GitHub Models PAT) → used directly.
 /// - Everything else → Azure auth (API key in dev mode, WI/IMDS in AKS mode).
 ///
 /// Returning `Result<String>` lets the caller surface a clean 502 if the
@@ -117,8 +127,9 @@ pub fn is_copilot_endpoint(endpoint: &str) -> bool {
 pub async fn token_for_endpoint(
     auth: &WorkloadIdentityAuth,
     copilot: Option<&CopilotTokenCache>,
-    endpoint: &str,
+    upstream: &UpstreamConfig,
 ) -> Result<String> {
+    let endpoint = upstream.endpoint.as_str();
     if is_copilot_endpoint(endpoint) {
         match copilot {
             Some(cache) => cache.get_jwt().await,
@@ -127,6 +138,8 @@ pub async fn token_for_endpoint(
                  set COPILOT_GITHUB_TOKEN or mount /run/secrets/copilot-github-token"
             ),
         }
+    } else if let Some(key) = upstream.provider_api_key.as_deref() {
+        Ok(key.to_string())
     } else {
         auth.get_token(token_audience(endpoint)).await
     }
@@ -201,7 +214,7 @@ pub async fn forward(
     };
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = %mode, "Forwarding inference");
 
-    let token = token_for_endpoint(auth, copilot, &upstream.endpoint)
+    let token = token_for_endpoint(auth, copilot, upstream)
         .await
         .context("Failed to acquire auth token")?;
 
@@ -428,7 +441,7 @@ pub async fn forward_stream(
 
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
 
-    let token = token_for_endpoint(&auth, copilot.as_deref(), &upstream.endpoint)
+    let token = token_for_endpoint(&auth, copilot.as_deref(), &upstream)
         .await
         .context("Failed to acquire auth token")?;
     let headers = build_upstream_headers(&request_headers, &auth, &token, &upstream.endpoint)?;

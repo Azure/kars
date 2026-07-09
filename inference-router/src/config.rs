@@ -4,6 +4,31 @@
 //! Configuration loaded from environment variables.
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
+
+/// A named upstream provider the router can route inference calls to,
+/// distinct from the single "default" endpoint fields below. Populated from
+/// `KARS_PROVIDER_<TAG>_ENDPOINT` (+ optional `_API_KEY`/`_TOKEN`) env vars
+/// that the controller injects — one pair per provider configured on the
+/// cluster's `kars-inference-providers` Secret (see
+/// `docs/adr/0002-inference-endpoint-sourcing.md`). A sandbox may have
+/// several of these simultaneously (e.g. Foundry AND GitHub Copilot both
+/// configured); `InferencePolicy.modelPreference.primary.provider` selects
+/// which one a given request actually uses — see
+/// `routes::apply_model_preference_override`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderEndpoint {
+    pub tag: String,
+    pub endpoint: String,
+    /// Direct bearer/API key for this specific provider, when dev-mode auth
+    /// is used (e.g. a GitHub Models PAT, or a second Azure OpenAI resource's
+    /// key). `None` means "use the router's normal auth resolution for this
+    /// endpoint" (Workload Identity / IMDS / sidecar / the single global dev
+    /// key) — i.e. this provider rides on the SAME auth path the default
+    /// provider already uses. Never logged; only ever read once at request
+    /// time by `proxy::token_for_endpoint`.
+    pub api_key: Option<String>,
+}
 
 /// Registry topology mode.
 ///
@@ -81,6 +106,13 @@ pub struct Config {
     /// Captured at config-load time so provider detection is a pure
     /// function on the `Config` struct (testable without env hacks).
     pub provider_override: Option<String>,
+
+    /// Additional named providers this sandbox's router can route to,
+    /// beyond the single "default" endpoint above — parsed from
+    /// `KARS_PROVIDER_<TAG>_ENDPOINT` (+ optional `_API_KEY`/`_TOKEN`) env
+    /// vars. Keyed by tag (lowercase, hyphenated — e.g. "github-models",
+    /// "foundry"). See `resolve_provider`.
+    pub providers: HashMap<String, ProviderEndpoint>,
 }
 
 impl Config {
@@ -145,6 +177,8 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_ascii_lowercase()),
+
+            providers: parse_providers_from_env(std::env::vars()),
         })
     }
 
@@ -191,7 +225,86 @@ impl Config {
             .flatten()
             .any(|e| e.contains("api.githubcopilot.com"))
     }
+
+    /// Resolve a named provider for cross-provider routing — the mechanism
+    /// `InferencePolicy.modelPreference.primary.provider` (and `fallback[]`)
+    /// uses to send THIS sandbox's inference calls to a provider other than
+    /// its default. Returns `None` when the tag isn't configured on this
+    /// sandbox (fail-open to the caller's existing default, never a 500).
+    ///
+    /// `"github-copilot"` is synthesized from the presence of
+    /// `COPILOT_GITHUB_TOKEN` alone (the well-known Copilot endpoint needs no
+    /// separate `KARS_PROVIDER_GITHUB_COPILOT_ENDPOINT` env var, and its auth
+    /// is always the JWT-exchange path in `AppState.copilot`, never a raw
+    /// key) — this keeps the existing single env var as the one source of
+    /// truth for "is Copilot available here", instead of requiring both a
+    /// legacy and a new env var to agree.
+    pub fn resolve_provider(&self, tag: &str) -> Option<ProviderEndpoint> {
+        if tag.eq_ignore_ascii_case("github-copilot")
+            && std::env::var("COPILOT_GITHUB_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .is_some()
+        {
+            return Some(ProviderEndpoint {
+                tag: "github-copilot".to_string(),
+                endpoint: "https://api.githubcopilot.com".to_string(),
+                api_key: None,
+            });
+        }
+        self.providers.get(&tag.to_ascii_lowercase()).cloned()
+    }
 }
+
+/// Parse `KARS_PROVIDER_<TAG>_ENDPOINT` (+ optional sibling `_API_KEY` /
+/// `_TOKEN`) env var pairs into a tag → `ProviderEndpoint` map.
+///
+/// Tag extraction: `KARS_PROVIDER_GITHUB_MODELS_ENDPOINT` → tag
+/// `"github-models"` (middle segment lowercased, underscores → hyphens).
+/// Generic by design — adding a new provider kind needs a controller-side
+/// secret entry, never a router code change.
+fn parse_providers_from_env(
+    vars: impl Iterator<Item = (String, String)>,
+) -> HashMap<String, ProviderEndpoint> {
+    let mut endpoints: HashMap<String, String> = HashMap::new();
+    let mut keys: HashMap<String, String> = HashMap::new();
+    for (name, value) in vars {
+        if value.trim().is_empty() {
+            continue;
+        }
+        let Some(rest) = name.strip_prefix("KARS_PROVIDER_") else {
+            continue;
+        };
+        if let Some(tag_part) = rest.strip_suffix("_ENDPOINT") {
+            endpoints.insert(tag_to_key(tag_part), value);
+        } else if let Some(tag_part) = rest
+            .strip_suffix("_API_KEY")
+            .or_else(|| rest.strip_suffix("_TOKEN"))
+        {
+            keys.insert(tag_to_key(tag_part), value);
+        }
+    }
+    endpoints
+        .into_iter()
+        .map(|(tag, endpoint)| {
+            let api_key = keys.remove(&tag);
+            (
+                tag.clone(),
+                ProviderEndpoint {
+                    tag,
+                    endpoint,
+                    api_key,
+                },
+            )
+        })
+        .collect()
+}
+
+/// `GITHUB_MODELS` → `github-models`.
+fn tag_to_key(tag_part: &str) -> String {
+    tag_part.to_ascii_lowercase().replace('_', "-")
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -212,6 +325,7 @@ mod tests {
             registry_mode: RegistryMode::Local,
             registry_url: None,
             provider_override: None,
+            providers: HashMap::new(),
         }
     }
 
@@ -274,4 +388,88 @@ mod tests {
         );
         assert!(!c.is_github_models());
     }
+
+    // ── Multi-provider resolution (KARS_PROVIDER_<TAG>_*) ───────────────────
+
+    #[test]
+    fn parses_provider_endpoint_and_matching_key() {
+        let vars = vec![
+            (
+                "KARS_PROVIDER_GITHUB_MODELS_ENDPOINT".to_string(),
+                "https://models.github.ai/inference".to_string(),
+            ),
+            (
+                "KARS_PROVIDER_GITHUB_MODELS_TOKEN".to_string(),
+                "ghp_test".to_string(),
+            ),
+            ("UNRELATED_VAR".to_string(), "ignored".to_string()),
+        ];
+        let providers = parse_providers_from_env(vars.into_iter());
+        let p = providers.get("github-models").expect("parsed");
+        assert_eq!(p.tag, "github-models");
+        assert_eq!(p.endpoint, "https://models.github.ai/inference");
+        assert_eq!(p.api_key.as_deref(), Some("ghp_test"));
+    }
+
+    #[test]
+    fn parses_provider_endpoint_without_key() {
+        let vars = vec![(
+            "KARS_PROVIDER_FOUNDRY_ENDPOINT".to_string(),
+            "https://contoso.services.ai.azure.com/api/projects/x".to_string(),
+        )];
+        let providers = parse_providers_from_env(vars.into_iter());
+        let p = providers.get("foundry").expect("parsed");
+        assert_eq!(p.api_key, None);
+    }
+
+    #[test]
+    fn ignores_empty_provider_env_values() {
+        let vars = vec![(
+            "KARS_PROVIDER_FOUNDRY_ENDPOINT".to_string(),
+            "".to_string(),
+        )];
+        let providers = parse_providers_from_env(vars.into_iter());
+        assert!(providers.is_empty());
+    }
+
+    #[test]
+    fn resolve_provider_finds_configured_tag() {
+        let mut c = cfg(None);
+        c.providers.insert(
+            "github-models".to_string(),
+            ProviderEndpoint {
+                tag: "github-models".to_string(),
+                endpoint: "https://models.github.ai/inference".to_string(),
+                api_key: Some("ghp_test".to_string()),
+            },
+        );
+        let resolved = c.resolve_provider("github-models").expect("resolved");
+        assert_eq!(resolved.endpoint, "https://models.github.ai/inference");
+    }
+
+    #[test]
+    fn resolve_provider_returns_none_when_not_configured() {
+        let c = cfg(None);
+        assert!(c.resolve_provider("azure-openai").is_none());
+    }
+
+    #[test]
+    fn resolve_provider_is_case_insensitive() {
+        let mut c = cfg(None);
+        c.providers.insert(
+            "foundry".to_string(),
+            ProviderEndpoint {
+                tag: "foundry".to_string(),
+                endpoint: "https://contoso.services.ai.azure.com".to_string(),
+                api_key: None,
+            },
+        );
+        assert!(c.resolve_provider("Foundry").is_some());
+    }
+
+    // Note: resolve_provider("github-copilot") depends on the
+    // COPILOT_GITHUB_TOKEN process-wide env var. Mutating process env from
+    // parallel unit tests races with other tests reading it (e.g.
+    // copilot_auth's own tests), so that branch is verified via the E2E
+    // deployment check instead of a unit test here.
 }

@@ -255,8 +255,8 @@ pub(super) async fn chat_completions(
 
     // Forward to Foundry
     let mut upstream = state.upstream_config(sandbox_name);
-    // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
-    crate::routes::apply_model_preference_override(&mut upstream, &policy);
+    // Slice 2d.2: honour `InferencePolicy.modelPreference.primary.{provider,deployment}`.
+    crate::routes::apply_model_preference_override(&mut upstream, &policy, &state.config);
 
     // Defence-in-depth tool-schema filter: even when the upstream
     // runtime (e.g. a raw OpenAI SDK client outside OpenClaw) sends
@@ -827,6 +827,7 @@ pub(super) async fn chat_completions(
             &state.client,
             &state.deployment_health,
             &upstream,
+            &state.config,
             &policy,
             axum::http::Method::POST,
             "chat/completions",
@@ -862,6 +863,7 @@ pub(super) async fn chat_completions(
                     &state.client,
                     &state.deployment_health,
                     &fallback_upstream,
+                    &state.config,
                     &policy,
                     axum::http::Method::POST,
                     "chat/completions",
