@@ -444,10 +444,14 @@ pub(crate) fn apply_model_preference_override(
     } else {
         config.resolve_provider(provider_tag)
     };
-    let endpoint_changes = resolved_provider
-        .as_ref()
-        .is_some_and(|p| p.endpoint != upstream.endpoint);
-    if (target.is_empty() || target == upstream.deployment) && !endpoint_changes {
+    let deployment_changes = !target.is_empty() && target != upstream.deployment;
+    // Gate on whether a provider TAG resolved at all, not on whether its
+    // endpoint string differs from the current one. Two logical providers
+    // can share a base URL but use different credentials — bailing out
+    // early (or skipping credential assignment) just because the endpoint
+    // string happens to match would silently keep the wrong credentials.
+    // See failover::resolve_candidate's identical fix.
+    if !deployment_changes && resolved_provider.is_none() {
         return;
     }
     tracing::info!(
@@ -455,16 +459,14 @@ pub(crate) fn apply_model_preference_override(
         from = %upstream.deployment,
         to = %target,
         provider = %provider_tag,
-        provider_resolved = %endpoint_changes,
+        provider_resolved = %resolved_provider.is_some(),
         digest = %policy.digest,
         "InferencePolicy modelPreference: overriding deployment"
     );
     if !target.is_empty() {
         upstream.deployment = target.to_string();
     }
-    if let Some(p) = resolved_provider
-        && endpoint_changes
-    {
+    if let Some(p) = resolved_provider {
         upstream.endpoint = p.endpoint;
         upstream.provider_api_key = p.api_key;
     }

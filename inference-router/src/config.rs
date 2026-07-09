@@ -187,16 +187,22 @@ impl Config {
     /// GitHub PAT). When this is true, the router skips Azure-specific
     /// URL rewriting (`/openai/v1/`) and Foundry-only routes return 501
     /// instead of failing with a confusing upstream error.
+    ///
+    /// Compares the parsed HOST exactly, not a substring of the raw URL —
+    /// see `proxy::is_copilot_endpoint`'s doc comment for why `.contains()`
+    /// on a URL string is unsafe.
     pub fn is_github_models(&self) -> bool {
         let candidates = [
             self.azure_openai_endpoint.as_deref(),
             self.foundry_endpoint.as_deref(),
             self.foundry_project_endpoint.as_deref(),
         ];
-        candidates
-            .iter()
-            .flatten()
-            .any(|e| e.contains("models.github.ai") || e.contains("models.inference.ai.azure.com"))
+        candidates.iter().flatten().any(|e| {
+            matches!(
+                crate::proxy::endpoint_host(e).as_deref(),
+                Some("models.github.ai") | Some("models.inference.ai.azure.com")
+            )
+        })
     }
 
     /// Returns true when the configured endpoint points at the GitHub
@@ -223,7 +229,7 @@ impl Config {
         candidates
             .iter()
             .flatten()
-            .any(|e| e.contains("api.githubcopilot.com"))
+            .any(|e| crate::proxy::endpoint_host(e).as_deref() == Some("api.githubcopilot.com"))
     }
 
     /// Resolve a named provider for cross-provider routing — the mechanism

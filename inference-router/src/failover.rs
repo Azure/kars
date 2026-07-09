@@ -102,7 +102,16 @@ pub fn build_candidates(
         if dep.is_empty() {
             return;
         }
-        if !out.iter().any(|c| c.deployment == dep) {
+        // Dedup by (provider, deployment), not deployment alone — two
+        // providers can legitimately serve a model under the same
+        // deployment name (e.g. both call it "gpt-4o"), and treating that
+        // as one candidate would silently DROP a genuinely different
+        // fallback provider. A provider-less candidate (the safety-net
+        // default) is its own distinct key from any explicitly-tagged one,
+        // even if the deployment string happens to match — worst case it's
+        // a harmless redundant retry against the same effective
+        // destination, never a lost fallback.
+        if !out.iter().any(|c| c.deployment == dep && c.provider == provider) {
             out.push(Candidate {
                 provider,
                 deployment: dep.to_string(),
@@ -152,14 +161,22 @@ fn resolve_candidate(base: &UpstreamConfig, config: &Config, c: &Candidate) -> U
     upstream.deployment = c.deployment.clone();
     if let Some(tag) = c.provider.as_deref()
         && let Some(target) = config.resolve_provider(tag)
-        && target.endpoint != base.endpoint
     {
-        tracing::info!(
-            sandbox = %base.sandbox_name,
-            provider = %tag,
-            endpoint = %target.endpoint,
-            "InferencePolicy failover: routing candidate to a different provider"
-        );
+        // Always apply the resolved provider's endpoint + key when a tag
+        // names a configured provider — even if its endpoint string happens
+        // to equal `base.endpoint`. Two logical providers can share a base
+        // URL but use different credentials (e.g. per-tenant keys behind
+        // the same host); gating credential assignment on endpoint
+        // inequality would silently keep the base's (wrong) credentials in
+        // that case.
+        if target.endpoint != base.endpoint {
+            tracing::info!(
+                sandbox = %base.sandbox_name,
+                provider = %tag,
+                endpoint = %target.endpoint,
+                "InferencePolicy failover: routing candidate to a different provider"
+            );
+        }
         upstream.endpoint = target.endpoint;
         upstream.provider_api_key = target.api_key;
     }
@@ -392,9 +409,37 @@ mod tests {
 
     #[test]
     fn build_candidates_dedups_overlap() {
+        // Same provider + deployment repeated (primary appears again as its
+        // own first fallback) dedups to one entry; the provider-less
+        // safety-net default is a DISTINCT key even with the same
+        // deployment string, since it may resolve against a different
+        // (the sandbox's true default) endpoint than the tagged "primary".
         let snap = snapshot_with("primary", &["primary", "fb-a"]);
         let c = build_candidates(&upstream("primary"), &snap);
-        assert_eq!(deployments(&c), vec!["primary", "fb-a"]);
+        assert_eq!(deployments(&c), vec!["primary", "fb-a", "primary"]);
+        assert_eq!(c[0].provider.as_deref(), Some("Foundry"));
+        assert_eq!(c[2].provider, None, "the safety-net entry carries no provider tag");
+    }
+
+    #[test]
+    fn build_candidates_preserves_cross_provider_same_deployment_name() {
+        // Two DIFFERENT providers legitimately serving a model under the
+        // SAME deployment name must both survive as distinct candidates —
+        // deduping by deployment name alone would silently drop the
+        // fallback provider entirely.
+        let snap = InferencePolicySnapshot {
+            digest: "sha256:test".into(),
+            model_preference: Some(ModelPreference {
+                primary: ModelRef { provider: "copilot".into(), deployment: "gpt-4.1".into() },
+                fallback: vec![ModelRef { provider: "foundry".into(), deployment: "gpt-4.1".into() }],
+            }),
+            ..InferencePolicySnapshot::default()
+        };
+        let c = build_candidates(&upstream("default"), &snap);
+        assert_eq!(c.len(), 3, "primary + distinct-provider fallback + safety net, none deduped away");
+        assert_eq!(c[0].provider.as_deref(), Some("copilot"));
+        assert_eq!(c[1].provider.as_deref(), Some("foundry"));
+        assert_eq!(c[1].deployment, "gpt-4.1");
     }
 
     #[test]
