@@ -1355,6 +1355,29 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             }}}],
             "ports": [{"protocol": "TCP", "port": 5000}]
         }),
+        // Allow the inference-router to reach an in-cluster local inference
+        // model (see docs/local-inference.md) deployed by kars-bridge's
+        // "Local model" provider wizard. The blanket :443 rule above
+        // deliberately EXCLUDES RFC1918 ranges to prevent lateral movement
+        // between sandboxes/services — a local model's Service ClusterIP
+        // always falls in one of those ranges, same reasoning as the
+        // SRE-mode apiserver carve-out below. Unconditional + namespace-
+        // scoped (not IP-scoped): a compromised router can reach every
+        // Service in this ONE namespace on port 80, not the whole cluster —
+        // and the namespace not existing (no operator has set up local
+        // inference) makes this a harmless no-op, same as the auth-sidecar
+        // rule above.
+        json!({
+            "to": [{"namespaceSelector": {"matchLabels": {
+                // Literal namespace name matching kars-bridge's
+                // LOCAL_INFERENCE_NAMESPACE constant (bff/src/kars/cluster.rs
+                // in the separate kars-bridge repo — no shared crate exists
+                // between the two, so this is intentionally a plain literal,
+                // same as "kube-system"/"agentmesh" above).
+                "kubernetes.io/metadata.name": "kars-local-inference"
+            }}}],
+            "ports": [{"protocol": "TCP", "port": 80}]
+        }),
     ];
 
     // SRE-mode-only egress allow: apiserver Service ClusterIP.
