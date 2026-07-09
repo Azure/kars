@@ -255,6 +255,15 @@ pub(super) async fn chat_completions(
 
     // Forward to Foundry
     let mut upstream = state.upstream_config(sandbox_name);
+    // The sandbox's TRUE, unmutated default — kept separately so the
+    // failover walker can correctly resolve fallback/safety-net candidates
+    // against the real default provider, not whatever `upstream` gets
+    // overridden to below. Without this, a fallback entry with no explicit
+    // provider tag (or the walker's own env-driven safety net) would
+    // silently inherit the PRIMARY's provider/endpoint instead of ever
+    // being able to fall back to the sandbox's actual default — see
+    // `failover::forward_with_failover` callers.
+    let true_default_upstream = upstream.clone();
     // Slice 2d.2: honour `InferencePolicy.modelPreference.primary.{provider,deployment}`.
     crate::routes::apply_model_preference_override(&mut upstream, &policy, &state.config);
 
@@ -821,12 +830,20 @@ pub(super) async fn chat_completions(
         // retries against `fallback[N].deployment`. The 400-→-
         // Responses-API recovery further down still runs against the
         // *successful* upstream's deployment.
+        //
+        // Pass `true_default_upstream` (NOT the primary-overridden
+        // `upstream`) as the base — `build_candidates` already resolves
+        // primary/fallback straight from the policy snapshot regardless of
+        // what's passed here; this argument only backs the safety-net
+        // default candidate and any fallback entry with no explicit
+        // provider tag, both of which must mean the sandbox's REAL default,
+        // not whatever primary happened to route to.
         let mut result = crate::failover::forward_with_failover(
             &state.auth,
             Some(&state.copilot),
             &state.client,
             &state.deployment_health,
-            &upstream,
+            &true_default_upstream,
             &state.config,
             &policy,
             axum::http::Method::POST,
@@ -854,7 +871,12 @@ pub(super) async fn chat_completions(
                     fallback = %default_model,
                     "model unavailable on this provider — retrying against the default model"
                 );
-                let mut fallback_upstream = upstream.clone();
+                // The cluster's env-driven default model belongs to the TRUE
+                // default provider, not whatever primary/additional provider
+                // this request was routed to — use true_default_upstream so
+                // we don't send a deployment name that may not even exist on
+                // the (possibly different) provider `upstream` points at.
+                let mut fallback_upstream = true_default_upstream.clone();
                 fallback_upstream.deployment = default_model.clone();
                 let fallback_body = override_model_in_body(&body, &default_model);
                 result = crate::failover::forward_with_failover(

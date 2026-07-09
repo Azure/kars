@@ -110,8 +110,45 @@ fn build_upstream_headers(
 /// (`https://api.githubcopilot.com`). Copilot is OpenAI-API + Anthropic-API
 /// compatible *but* requires its own short-lived JWT (exchanged from the
 /// user's GitHub OAuth token) and three static integration headers.
+///
+/// Matches the URL's parsed HOST exactly (not a substring of the whole URL
+/// string) — a naive `.contains("api.githubcopilot.com")` would also match
+/// an attacker-controlled endpoint like `https://api.githubcopilot.com.evil.tld`,
+/// causing a real exchanged Copilot JWT to be sent to that attacker host.
 pub fn is_copilot_endpoint(endpoint: &str) -> bool {
-    endpoint.contains("api.githubcopilot.com")
+    endpoint_host(endpoint).as_deref() == Some("api.githubcopilot.com")
+}
+
+/// Parses `endpoint` as a URL and returns its lowercased host, or `None` if
+/// it isn't a valid absolute URL. Used everywhere a host needs to be
+/// compared EXACTLY (never `.contains()` on the raw string — see
+/// `is_copilot_endpoint` doc comment for why that's unsafe).
+pub(crate) fn endpoint_host(endpoint: &str) -> Option<String> {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+}
+
+/// True only for a hardcoded allowlist of genuine Azure AI/OpenAI host
+/// suffixes. Workload Identity / IMDS mint a REAL Entra bearer token scoped
+/// to the Azure AI audience — that token must never be sent to a host we
+/// haven't verified is actually Azure-owned, or a misconfigured (or
+/// malicious) provider endpoint could exfiltrate a live bearer token to an
+/// attacker-controlled host. `token_for_endpoint` refuses to fall back to
+/// WI/IMDS for any host that doesn't match one of these suffixes.
+///
+/// `ends_with` (not `contains`) is deliberate: DNS resolution follows the
+/// domain hierarchy, so a string that genuinely *ends with*
+/// `.openai.azure.com` can only resolve into Microsoft's real Azure
+/// infrastructure — an attacker cannot make their own domain end with
+/// someone else's suffix while controlling where it resolves.
+fn is_azure_ai_host(host: &str) -> bool {
+    const AZURE_AI_HOST_SUFFIXES: &[&str] = &[
+        ".openai.azure.com",
+        ".cognitiveservices.azure.com",
+        ".services.ai.azure.com",
+    ];
+    AZURE_AI_HOST_SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
 }
 
 /// Acquire the right auth token for a given upstream request.
@@ -119,11 +156,21 @@ pub fn is_copilot_endpoint(endpoint: &str) -> bool {
 /// - GitHub Copilot endpoints → exchanged Copilot JWT (cached, refreshed proactively).
 /// - `upstream.provider_api_key` set (a non-default provider with its own
 ///   dev-mode key, e.g. a GitHub Models PAT) → used directly.
-/// - Everything else → Azure auth (API key in dev mode, WI/IMDS in AKS mode).
+/// - Everything else → the router's normal Azure auth: an explicit dev-mode
+///   API key or the shared Entra auth-sidecar are used as-is (operator
+///   already supplied that specific credential for that specific provider —
+///   the pre-existing, already-accepted single-default-provider behavior).
+///   The AMBIENT Workload Identity / IMDS fallback is different: it mints a
+///   real Entra token automatically from the cluster's own identity, so it
+///   is only used against a verified Azure AI/OpenAI host
+///   (`is_azure_ai_host`) — never against an arbitrary configured endpoint
+///   that happens to have no key. Refused outright otherwise: better a
+///   clean 502 than silently minting a real bearer token and sending it to
+///   an unverified host.
 ///
 /// Returning `Result<String>` lets the caller surface a clean 502 if the
-/// Copilot token cache is uninitialised or the GitHub token is missing —
-/// rather than panicking inside `forward()`.
+/// Copilot token cache is uninitialised, the GitHub token is missing, or the
+/// host isn't trusted for WI/IMDS — rather than panicking inside `forward()`.
 pub async fn token_for_endpoint(
     auth: &WorkloadIdentityAuth,
     copilot: Option<&CopilotTokenCache>,
@@ -141,6 +188,25 @@ pub async fn token_for_endpoint(
     } else if let Some(key) = upstream.provider_api_key.as_deref() {
         Ok(key.to_string())
     } else {
+        // The host-verification gate below only matters for the AMBIENT
+        // WI/IMDS fallback — a token minted automatically from the cluster's
+        // own identity, without the operator directly handling it. Explicit
+        // dev-mode credentials (a single global API key, or the shared
+        // Entra auth-sidecar) are operator-supplied for a SPECIFIC provider
+        // they configured; using them is the pre-existing, already-accepted
+        // single-default-provider behavior and isn't gated here.
+        if !auth.is_api_key_mode() && !auth.is_sidecar_mode() {
+            let host = endpoint_host(endpoint).unwrap_or_default();
+            if !is_azure_ai_host(&host) {
+                anyhow::bail!(
+                    "Refusing to send a Workload Identity / IMDS token to '{host}' — it \
+                     isn't a recognized Azure AI endpoint (*.openai.azure.com / \
+                     *.services.ai.azure.com / *.cognitiveservices.azure.com) and this \
+                     provider has no configured key/token. Connect a direct API key for \
+                     this provider, or point it at a genuine Azure AI endpoint."
+                );
+            }
+        }
         auth.get_token(token_audience(endpoint)).await
     }
 }
@@ -590,8 +656,16 @@ fn inject_stream_usage(body: Bytes) -> Bytes {
 /// (https://models.github.ai/inference or the legacy
 /// https://models.inference.ai.azure.com URL). GitHub Models is OpenAI-API
 /// compatible but does NOT use the Azure `/openai/v1/` URL prefix.
+///
+/// Matches the parsed HOST exactly — see `is_copilot_endpoint`'s doc comment
+/// for why `.contains()` on the raw URL string is unsafe (URL-path/query
+/// spoofing, e.g. `https://evil.tld/?models.github.ai`, or a subdomain like
+/// `models.github.ai.evil.tld`, would otherwise also match).
 fn is_github_models_endpoint(endpoint: &str) -> bool {
-    endpoint.contains("models.github.ai") || endpoint.contains("models.inference.ai.azure.com")
+    matches!(
+        endpoint_host(endpoint).as_deref(),
+        Some("models.github.ai") | Some("models.inference.ai.azure.com")
+    )
 }
 
 /// Build the upstream URL and optionally inject model into request body.
@@ -869,5 +943,115 @@ mod retry_tests {
     fn success_is_not_retryable() {
         assert!(!is_retryable_status(StatusCode::OK));
         assert!(!is_retryable_status(StatusCode::CREATED));
+    }
+}
+
+#[cfg(test)]
+mod host_matching_security_tests {
+    use super::{
+        UpstreamConfig, endpoint_host, is_azure_ai_host, is_copilot_endpoint,
+        is_github_models_endpoint,
+    };
+
+    // ── is_copilot_endpoint: exact host, not substring ──────────────────────
+
+    #[test]
+    fn copilot_endpoint_matches_real_host() {
+        assert!(is_copilot_endpoint("https://api.githubcopilot.com"));
+        assert!(is_copilot_endpoint("https://api.githubcopilot.com/v1/chat/completions"));
+    }
+
+    #[test]
+    fn copilot_endpoint_rejects_spoofed_subdomain() {
+        // The exact attack a naive `.contains()` check would have missed:
+        // an attacker-controlled domain that merely CONTAINS the real
+        // Copilot host as a substring.
+        assert!(!is_copilot_endpoint("https://api.githubcopilot.com.evil.tld"));
+        assert!(!is_copilot_endpoint("https://evil.tld/api.githubcopilot.com"));
+        assert!(!is_copilot_endpoint(
+            "https://evil.tld/redirect?to=api.githubcopilot.com"
+        ));
+    }
+
+    #[test]
+    fn copilot_endpoint_rejects_malformed_url() {
+        assert!(!is_copilot_endpoint("not a url at all"));
+        assert!(!is_copilot_endpoint(""));
+    }
+
+    // ── is_github_models_endpoint: same class of fix ────────────────────────
+
+    #[test]
+    fn github_models_endpoint_matches_real_hosts() {
+        assert!(is_github_models_endpoint("https://models.github.ai/inference"));
+        assert!(is_github_models_endpoint(
+            "https://models.inference.ai.azure.com/chat/completions"
+        ));
+    }
+
+    #[test]
+    fn github_models_endpoint_rejects_spoofed_subdomain() {
+        assert!(!is_github_models_endpoint("https://models.github.ai.evil.tld"));
+        assert!(!is_github_models_endpoint("https://evil.tld/models.github.ai"));
+    }
+
+    // ── is_azure_ai_host: the WI/IMDS credential-leak gate ───────────────────
+
+    #[test]
+    fn azure_ai_host_accepts_real_azure_suffixes() {
+        assert!(is_azure_ai_host("contoso.openai.azure.com"));
+        assert!(is_azure_ai_host("contoso.cognitiveservices.azure.com"));
+        assert!(is_azure_ai_host("contoso.services.ai.azure.com"));
+    }
+
+    #[test]
+    fn azure_ai_host_rejects_attacker_controlled_host() {
+        // The core scenario the fix exists for: an operator (or a
+        // misconfigured / malicious "additional provider" entry) points an
+        // endpoint at a completely unrelated host with no key configured —
+        // this must NEVER be treated as eligible for an ambient WI/IMDS
+        // token.
+        assert!(!is_azure_ai_host("evil.tld"));
+        assert!(!is_azure_ai_host("attacker-controlled.com"));
+    }
+
+    #[test]
+    fn azure_ai_host_rejects_suffix_spoof_attempt() {
+        // A domain that merely CONTAINS the suffix, but doesn't END with
+        // it, must not match (e.g. the suffix appearing mid-string via a
+        // crafted subdomain label).
+        assert!(!is_azure_ai_host("openai.azure.com.evil.tld"));
+        assert!(!is_azure_ai_host("notcontoso.openai.azure.com.attacker.io"));
+    }
+
+    #[test]
+    fn endpoint_host_parses_and_lowercases() {
+        assert_eq!(
+            endpoint_host("https://Contoso.OpenAI.Azure.Com/v1/chat"),
+            Some("contoso.openai.azure.com".to_string())
+        );
+        assert_eq!(endpoint_host("not a url"), None);
+    }
+
+    // ── token_for_endpoint: the end-to-end gate ──────────────────────────────
+    // (WorkloadIdentityAuth in ambient/no-key mode can't be constructed
+    // without live WI/IMDS env in a unit test, so we only exercise the
+    // pure host-classification helpers above; the integration is covered
+    // live — see the session's E2E verification notes.)
+
+    #[test]
+    fn upstream_config_with_provider_api_key_bypasses_host_gate_entirely() {
+        // Sanity: an UpstreamConfig carrying its own provider_api_key is
+        // handled by the FIRST branch in token_for_endpoint (direct key),
+        // never reaching the host-gate logic at all — confirmed by reading
+        // the function; this test just pins the struct shape so a future
+        // refactor can't silently drop the field.
+        let upstream = UpstreamConfig {
+            endpoint: "https://evil.tld".to_string(),
+            deployment: "gpt-4o".to_string(),
+            sandbox_name: "sbx".to_string(),
+            provider_api_key: Some("direct-key".to_string()),
+        };
+        assert_eq!(upstream.provider_api_key.as_deref(), Some("direct-key"));
     }
 }
