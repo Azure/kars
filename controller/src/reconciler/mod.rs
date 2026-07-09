@@ -2568,10 +2568,25 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                                 //  - `<name>-git-write` (per-mission): the workspace
                                 //    installation id + repo scope + KARS_GIT_WRITE +
                                 //    author (or, for the no-App path, a scoped PAT).
-                                // Both optional → absent = feature off (fail-closed).
+                                //
+                                // Multi-provider inference (§ inference-provider-wizard):
+                                //  - `kars-inference-providers` (cluster-shared, mirrored
+                                //    in): every provider the operator configured beyond
+                                //    the single default (Foundry endpoint/key, GitHub
+                                //    Copilot token, GitHub Models endpoint+token, ...).
+                                //    Keys are literal env var names the router already
+                                //    understands (`COPILOT_GITHUB_TOKEN`,
+                                //    `KARS_PROVIDER_<TAG>_ENDPOINT`/`_API_KEY`/`_TOKEN`)
+                                //    — envFrom needs no controller-side parsing. Every
+                                //    sandbox gets ALL configured providers; which one a
+                                //    given request actually uses is decided per-request
+                                //    by that sandbox's InferencePolicy.modelPreference,
+                                //    never by what's merely present in the env.
+                                // All optional → absent = feature off (fail-closed).
                                 "envFrom": [
                                     {"secretRef": {"name": "kars-github-app", "optional": true}},
-                                    {"secretRef": {"name": format!("{}-git-write", name), "optional": true}}
+                                    {"secretRef": {"name": format!("{}-git-write", name), "optional": true}},
+                                    {"secretRef": {"name": "kars-inference-providers", "optional": true}}
                                 ],
                                 "securityContext": {
                                     "runAsUser": 1001,
@@ -3499,6 +3514,39 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             Ok(governance_mounts::MirrorOutcome::Skipped(_)) => {}
             Err(e) => {
                 tracing::warn!(error = %e, sandbox = %name, "kars-github-app mirror failed; git write may be off");
+            }
+        }
+
+        // Multi-provider inference: mirror the cluster-shared
+        // `kars-inference-providers` secret (kars-system) into this
+        // sandbox's namespace so the router's `envFrom
+        // kars-inference-providers` resolves. Every configured provider
+        // (Foundry, GitHub Copilot, GitHub Models, ...) reaches every
+        // sandbox's router this way — which one a given request actually
+        // uses is decided per-request by that sandbox's InferencePolicy
+        // (see inference-router::routes::apply_model_preference_override),
+        // never by what's merely present in the env. Best-effort +
+        // fail-closed: no secret configured ⇒ Skipped ⇒ the sandbox behaves
+        // exactly as it did before this feature (single default provider
+        // from the existing FOUNDRY_ENDPOINT/AZURE_OPENAI_ENDPOINT/
+        // COPILOT_GITHUB_TOKEN env vars). Reaches only the router
+        // container (UID 1001), never the agent.
+        match governance_mounts::mirror_secret(
+            client,
+            "kars-inference-providers",
+            &sandbox_self_ns,
+            &sandbox_ns,
+            &name,
+            "InferenceProviders",
+        )
+        .await
+        {
+            Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                tracing::info!(sandbox = %name, "kars-inference-providers secret mirrored (multi-provider inference)");
+            }
+            Ok(governance_mounts::MirrorOutcome::Skipped(_)) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, sandbox = %name, "kars-inference-providers mirror failed; only the single default provider will be available");
             }
         }
 

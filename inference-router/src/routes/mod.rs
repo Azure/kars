@@ -406,50 +406,68 @@ impl AppState {
             endpoint,
             deployment,
             sandbox_name: sandbox_name.to_string(),
+            provider_api_key: None,
         }
     }
 }
 
-/// Slice 2d.1 — apply `modelPreference.primary.deployment` from a
-/// loaded `InferencePolicy` snapshot as a deployment override.
-///
-/// Mutates `upstream.deployment` in place when the policy carries a
-/// non-empty `primary.deployment` that differs from the current
-/// deployment. Logs an `info!` event on every effective override so
-/// operators can correlate router-level traffic shaping against the
-/// policy bytes (digest is included).
+/// Slice 2d.2 — apply `modelPreference.primary.{provider,deployment}` from
+/// a loaded `InferencePolicy` snapshot: switches the deployment name, and —
+/// when `primary.provider` names a provider configured on this sandbox
+/// (`Config::resolve_provider`) that differs from the sandbox's default
+/// endpoint — ALSO switches the upstream endpoint and auth key. This is
+/// what makes "this sandbox's model preference points at GitHub Copilot
+/// while its default provider is Foundry" an actual routing change, not
+/// just a deployment-name swap against the wrong provider.
 ///
 /// Fail-open by design:
 /// * `None` snapshot ⇒ no-op (back-compat for sandboxes without an
 ///   `InferencePolicy`).
 /// * Empty-string `primary.deployment` ⇒ no-op (defence-in-depth even
 ///   though the controller schema rejects empty strings).
-/// * Same-deployment override ⇒ no-op + no log spam.
-///
-/// **Slice 2d.1 deliberately ignores `primary.provider`** — provider-
-/// tagged routing requires a per-provider client registry the router
-/// doesn't carry today; Slice 2d.2 will pick that up. Until then the
-/// provider tag is informational-only.
+/// * `primary.provider` unset, empty, or not configured on this sandbox ⇒
+///   the endpoint/key are left as the sandbox's own default — only the
+///   deployment name changes (the pre-2d.2 behavior, preserved exactly).
+/// * Same-deployment-and-endpoint override ⇒ no-op + no log spam.
 pub(crate) fn apply_model_preference_override(
     upstream: &mut UpstreamConfig,
     policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+    config: &crate::config::Config,
 ) {
     let Some(ref pref) = policy.model_preference else {
         return;
     };
     let target = pref.primary.deployment.as_str();
-    if target.is_empty() || target == upstream.deployment {
+    let provider_tag = pref.primary.provider.as_str();
+    let resolved_provider = if provider_tag.is_empty() {
+        None
+    } else {
+        config.resolve_provider(provider_tag)
+    };
+    let endpoint_changes = resolved_provider
+        .as_ref()
+        .is_some_and(|p| p.endpoint != upstream.endpoint);
+    if (target.is_empty() || target == upstream.deployment) && !endpoint_changes {
         return;
     }
     tracing::info!(
         sandbox = %upstream.sandbox_name,
         from = %upstream.deployment,
         to = %target,
-        provider = %pref.primary.provider,
+        provider = %provider_tag,
+        provider_resolved = %endpoint_changes,
         digest = %policy.digest,
         "InferencePolicy modelPreference: overriding deployment"
     );
-    upstream.deployment = target.to_string();
+    if !target.is_empty() {
+        upstream.deployment = target.to_string();
+    }
+    if let Some(p) = resolved_provider
+        && endpoint_changes
+    {
+        upstream.endpoint = p.endpoint;
+        upstream.provider_api_key = p.api_key;
+    }
 }
 
 /// Extract the admin bearer token from either `Authorization: Bearer <token>`
