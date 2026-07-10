@@ -16,8 +16,7 @@
 //! a pure forward-rollout; nothing breaks when it's absent.
 
 use axum::{
-    Router, extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse,
-    routing::get,
+    Router, extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, routing::get,
 };
 
 use super::AppState;

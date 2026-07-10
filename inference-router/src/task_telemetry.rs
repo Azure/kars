@@ -94,7 +94,11 @@ impl TaskTelemetry {
         let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.events
             .iter()
-            .filter(|e| e.get("seq").and_then(|s| s.as_u64()).is_some_and(|s| s > since))
+            .filter(|e| {
+                e.get("seq")
+                    .and_then(|s| s.as_u64())
+                    .is_some_and(|s| s > since)
+            })
             .cloned()
             .collect()
     }
@@ -220,12 +224,21 @@ fn preview(value: &Value, max: usize) -> String {
 /// `usage.cache_read_input_tokens`) — cache reads are billed at a fraction of
 /// fresh input, so surfacing them lets the efficiency engine reflect the real
 /// economics instead of treating every input token as full price.
-fn parse_response(resp: &Value, shape: Shape) -> (u64, u64, u64, u64, String, Vec<(String, String, String)>) {
+fn parse_response(
+    resp: &Value,
+    shape: Shape,
+) -> (u64, u64, u64, u64, String, Vec<(String, String, String)>) {
     match shape {
         Shape::OpenAi => {
             let usage = resp.get("usage");
-            let prompt = usage.and_then(|u| u.get("prompt_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-            let completion = usage.and_then(|u| u.get("completion_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let prompt = usage
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let completion = usage
+                .and_then(|u| u.get("completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let total = usage
                 .and_then(|u| u.get("total_tokens"))
                 .and_then(|v| v.as_u64())
@@ -235,7 +248,10 @@ fn parse_response(resp: &Value, shape: Shape) -> (u64, u64, u64, u64, String, Ve
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let choice = resp.get("choices").and_then(|c| c.as_array()).and_then(|c| c.first());
+            let choice = resp
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .and_then(|c| c.first());
             let finish = choice
                 .and_then(|c| c.get("finish_reason"))
                 .and_then(|f| f.as_str())
@@ -248,7 +264,11 @@ fn parse_response(resp: &Value, shape: Shape) -> (u64, u64, u64, u64, String, Ve
                 .and_then(|t| t.as_array())
             {
                 for tc in tcs {
-                    let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                    let id = tc
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let name = tc
                         .get("function")
                         .and_then(|f| f.get("name"))
@@ -267,25 +287,50 @@ fn parse_response(resp: &Value, shape: Shape) -> (u64, u64, u64, u64, String, Ve
         }
         Shape::Anthropic => {
             let usage = resp.get("usage");
-            let prompt = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-            let completion = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let prompt = usage
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let completion = usage
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let cached = usage
                 .and_then(|u| u.get("cache_read_input_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let finish = resp.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let finish = resp
+                .get("stop_reason")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
             let mut tools = Vec::new();
             if let Some(content) = resp.get("content").and_then(|c| c.as_array()) {
                 for block in content {
                     if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                        let id = block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let args = block.get("input").cloned().unwrap_or(Value::Null);
                         tools.push((id, name, preview(&args, 180)));
                     }
                 }
             }
-            (prompt, completion, prompt + completion, cached, finish, tools)
+            (
+                prompt,
+                completion,
+                prompt + completion,
+                cached,
+                finish,
+                tools,
+            )
         }
     }
 }
@@ -301,7 +346,11 @@ fn parse_request_results(req: &Value, shape: Shape) -> Vec<(String, String, bool
         Shape::OpenAi => {
             for m in messages {
                 if m.get("role").and_then(|r| r.as_str()) == Some("tool") {
-                    let id = m.get("tool_call_id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                    let id = m
+                        .get("tool_call_id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let content = m.get("content").cloned().unwrap_or(Value::Null);
                     if !id.is_empty() {
                         out.push((id, preview(&content, 180), !is_error_text(&content)));
@@ -316,7 +365,11 @@ fn parse_request_results(req: &Value, shape: Shape) -> Vec<(String, String, bool
                 };
                 for p in parts {
                     if p.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                        let id = p.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                        let id = p
+                            .get("tool_use_id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let content = p.get("content").cloned().unwrap_or(Value::Null);
                         let ok = !p.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false)
                             && !is_error_text(&content);
@@ -394,8 +447,16 @@ impl AnthropicStreamAcc {
                     self.tools.insert(
                         idx,
                         ToolAcc {
-                            id: cb.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
-                            name: cb.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                            id: cb
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            name: cb
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string(),
                             args: String::new(),
                         },
                     );
@@ -414,10 +475,18 @@ impl AnthropicStreamAcc {
                 false
             }
             Some("message_delta") => {
-                if let Some(sr) = v.get("delta").and_then(|d| d.get("stop_reason")).and_then(|s| s.as_str()) {
+                if let Some(sr) = v
+                    .get("delta")
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(|s| s.as_str())
+                {
                     self.stop_reason = sr.to_string();
                 }
-                if let Some(ot) = v.get("usage").and_then(|u| u.get("output_tokens")).and_then(|t| t.as_u64()) {
+                if let Some(ot) = v
+                    .get("usage")
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|t| t.as_u64())
+                {
                     self.output_tokens = ot;
                 }
                 false
@@ -510,11 +579,23 @@ mod tests {
     #[test]
     fn cursor_isolates_a_tasks_events() {
         let t = TaskTelemetry::new();
-        t.record_response(&json!({"usage": {"prompt_tokens": 1, "completion_tokens": 1}}), Shape::OpenAi, 1);
+        t.record_response(
+            &json!({"usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+            Shape::OpenAi,
+            1,
+        );
         let cursor = t.cursor();
-        t.record_response(&json!({"usage": {"prompt_tokens": 2, "completion_tokens": 2}}), Shape::OpenAi, 1);
+        t.record_response(
+            &json!({"usage": {"prompt_tokens": 2, "completion_tokens": 2}}),
+            Shape::OpenAi,
+            1,
+        );
         let evs = t.snapshot(cursor);
-        assert_eq!(evs.len(), 1, "only events after the cursor belong to this task");
+        assert_eq!(
+            evs.len(),
+            1,
+            "only events after the cursor belong to this task"
+        );
         assert_eq!(evs[0]["total_tokens"], 4);
     }
 
@@ -530,7 +611,10 @@ mod tests {
         });
         t.record_response(&resp, Shape::OpenAi, 100);
         let evs = t.snapshot(0);
-        assert_eq!(evs[0]["cached_tokens"], 768, "OpenAI cached prompt tokens are surfaced");
+        assert_eq!(
+            evs[0]["cached_tokens"], 768,
+            "OpenAI cached prompt tokens are surfaced"
+        );
     }
 
     #[test]
@@ -543,15 +627,25 @@ mod tests {
         });
         t.record_response(&resp, Shape::Anthropic, 100);
         let evs = t.snapshot(0);
-        assert_eq!(evs[0]["cached_tokens"], 32, "Anthropic cache-read tokens are surfaced");
+        assert_eq!(
+            evs[0]["cached_tokens"], 32,
+            "Anthropic cache-read tokens are surfaced"
+        );
     }
 
     #[test]
     fn cached_tokens_default_zero_when_absent() {
         let t = TaskTelemetry::new();
-        t.record_response(&json!({"usage": {"prompt_tokens": 5, "completion_tokens": 5}}), Shape::OpenAi, 1);
+        t.record_response(
+            &json!({"usage": {"prompt_tokens": 5, "completion_tokens": 5}}),
+            Shape::OpenAi,
+            1,
+        );
         let evs = t.snapshot(0);
-        assert_eq!(evs[0]["cached_tokens"], 0, "no cache info → 0, never fabricated");
+        assert_eq!(
+            evs[0]["cached_tokens"], 0,
+            "no cache info → 0, never fabricated"
+        );
     }
 
     #[test]
@@ -566,7 +660,11 @@ mod tests {
         t.record_response(&resp, Shape::OpenAi, 1);
         let req = json!({"messages": [{"role": "tool", "tool_call_id": "c1", "content": "error: command failed"}]});
         t.record_request_results(&req, Shape::OpenAi);
-        let tool = t.snapshot(0).into_iter().find(|e| e["kind"] == "tool").unwrap();
+        let tool = t
+            .snapshot(0)
+            .into_iter()
+            .find(|e| e["kind"] == "tool")
+            .unwrap();
         assert_eq!(tool["ok"], false);
     }
 }

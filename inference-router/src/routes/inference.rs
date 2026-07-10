@@ -417,8 +417,7 @@ async fn responses(
             // (Hermes always streams here) real token counts + a round in the
             // task telemetry — which powers the Bridge Activity tab and the
             // team `did_work` signal — without buffering the whole response.
-            let (tx, rx) =
-                tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
             let telem = state.task_telemetry.clone();
             let budget = state.budget.clone();
             let sandbox_owned = sandbox_name.to_string();
@@ -450,11 +449,7 @@ async fn responses(
                 // Stream ended cleanly — record the usage as one round.
                 if let Some(usage) = parse_responses_stream_usage(&tail) {
                     let latency = started.elapsed().as_millis() as u64;
-                    telem.record_response(
-                        &usage,
-                        crate::task_telemetry::Shape::OpenAi,
-                        latency,
-                    );
+                    telem.record_response(&usage, crate::task_telemetry::Shape::OpenAi, latency);
                     if let Some(total) = usage
                         .get("usage")
                         .and_then(|u| u.get("total_tokens"))

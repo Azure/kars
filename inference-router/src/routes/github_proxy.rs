@@ -116,7 +116,10 @@ async fn proxy(
     let mut builder = client
         .request(method, &upstream_url)
         .header(axum::http::header::AUTHORIZATION, auth)
-        .header(axum::http::header::USER_AGENT, HeaderValue::from_static("kars-inference-router"));
+        .header(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("kars-inference-router"),
+        );
     for (name, value) in headers.iter() {
         if !is_stripped_request_header(name) && name.as_str() != "user-agent" {
             builder = builder.header(name, value);
@@ -160,7 +163,10 @@ async fn git_handler(
         return deny(StatusCode::NOT_FOUND, "not found");
     }
     let Some(gw) = state.git_write.clone() else {
-        return deny(StatusCode::NOT_FOUND, "git write is not enabled for this sandbox");
+        return deny(
+            StatusCode::NOT_FOUND,
+            "git write is not enabled for this sandbox",
+        );
     };
     let (parts, body) = req.into_parts();
     let full_path = parts.uri.path().strip_prefix("/git/").unwrap_or("");
@@ -186,7 +192,11 @@ async fn git_handler(
     let Ok(auth) = HeaderValue::from_str(&format!("Basic {basic}")) else {
         return deny(StatusCode::INTERNAL_SERVER_ERROR, "bad token");
     };
-    let url = build_upstream(GITHUB_GIT, &format!("{owner_repo}/{rest}"), parts.uri.query());
+    let url = build_upstream(
+        GITHUB_GIT,
+        &format!("{owner_repo}/{rest}"),
+        parts.uri.query(),
+    );
     tracing::info!(repo = %owner_repo, "git proxy → github.com (token injected)");
     proxy(&state, url, auth, parts.method, parts.headers, body).await
 }
@@ -201,7 +211,10 @@ async fn api_handler(
         return deny(StatusCode::NOT_FOUND, "not found");
     }
     let Some(gw) = state.git_write.clone() else {
-        return deny(StatusCode::NOT_FOUND, "git write is not enabled for this sandbox");
+        return deny(
+            StatusCode::NOT_FOUND,
+            "git write is not enabled for this sandbox",
+        );
     };
     let (parts, body) = req.into_parts();
     let api_path = parts.uri.path().strip_prefix("/gh-api/").unwrap_or("");
@@ -261,7 +274,10 @@ async fn api_handler(
                     );
                 }
                 Err(_) => {
-                    return deny(StatusCode::BAD_GATEWAY, "could not verify the PR review state before merge");
+                    return deny(
+                        StatusCode::BAD_GATEWAY,
+                        "could not verify the PR review state before merge",
+                    );
                 }
             }
         }
@@ -342,7 +358,11 @@ async fn pr_has_approved_review(
     };
     let states: Vec<String> = arr
         .iter()
-        .filter_map(|r| r.get("state").and_then(|s| s.as_str()).map(|s| s.to_ascii_uppercase()))
+        .filter_map(|r| {
+            r.get("state")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_ascii_uppercase())
+        })
         .collect();
     Ok(review_states_permit_merge(&states))
 }
@@ -365,7 +385,9 @@ fn review_states_permit_merge(states: &[String]) -> bool {
         .iter()
         .rev()
         .find(|s| ***s == "APPROVED" || ***s == "CHANGES_REQUESTED");
-    !last_decisive.map(|s| **s == "CHANGES_REQUESTED").unwrap_or(false)
+    !last_decisive
+        .map(|s| **s == "CHANGES_REQUESTED")
+        .unwrap_or(false)
 }
 
 /// True for the "merge a pull request" API call —
@@ -432,15 +454,30 @@ mod tests {
 
     #[test]
     fn review_submit_detection() {
-        assert!(is_pr_review_submit(&Method::POST, "repos/o/r/pulls/3/reviews"));
-        assert!(!is_pr_review_submit(&Method::GET, "repos/o/r/pulls/3/reviews"));
-        assert!(!is_pr_review_submit(&Method::POST, "repos/o/r/pulls/3/comments"));
+        assert!(is_pr_review_submit(
+            &Method::POST,
+            "repos/o/r/pulls/3/reviews"
+        ));
+        assert!(!is_pr_review_submit(
+            &Method::GET,
+            "repos/o/r/pulls/3/reviews"
+        ));
+        assert!(!is_pr_review_submit(
+            &Method::POST,
+            "repos/o/r/pulls/3/comments"
+        ));
     }
 
     #[test]
     fn pr_number_parse() {
-        assert_eq!(pr_number_from_api_path("repos/o/r/pulls/42/merge"), Some(42));
-        assert_eq!(pr_number_from_api_path("repos/o/r/pulls/7/reviews"), Some(7));
+        assert_eq!(
+            pr_number_from_api_path("repos/o/r/pulls/42/merge"),
+            Some(42)
+        );
+        assert_eq!(
+            pr_number_from_api_path("repos/o/r/pulls/7/reviews"),
+            Some(7)
+        );
         assert_eq!(pr_number_from_api_path("repos/o/r/pulls"), None);
         assert_eq!(pr_number_from_api_path("repos/o/r/issues/3"), None);
     }
@@ -453,7 +490,10 @@ mod tests {
     fn review_gate_blocks_when_no_review() {
         assert!(!review_states_permit_merge(&[]));
         // Non-review states (e.g. DISMISSED/PENDING) do not count as a review.
-        assert!(!review_states_permit_merge(&states(&["PENDING", "DISMISSED"])));
+        assert!(!review_states_permit_merge(&states(&[
+            "PENDING",
+            "DISMISSED"
+        ])));
     }
 
     #[test]
@@ -467,7 +507,10 @@ mod tests {
     fn review_gate_blocks_trailing_changes_requested() {
         assert!(!review_states_permit_merge(&states(&["CHANGES_REQUESTED"])));
         // A trailing CHANGES_REQUESTED blocks even after an earlier approval.
-        assert!(!review_states_permit_merge(&states(&["APPROVED", "CHANGES_REQUESTED"])));
+        assert!(!review_states_permit_merge(&states(&[
+            "APPROVED",
+            "CHANGES_REQUESTED"
+        ])));
         // ...but a later APPROVED/COMMENTED clears an earlier CHANGES_REQUESTED
         // (last decisive review wins; COMMENTED is not decisive so APPROVED does it).
         assert!(review_states_permit_merge(&states(&[

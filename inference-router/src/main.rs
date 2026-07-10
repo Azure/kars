@@ -932,7 +932,9 @@ async fn admin_auth_middleware(
         });
 
     match provided_token {
-        Some(provided) if handoff::constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) => {
+        Some(provided)
+            if handoff::constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) =>
+        {
             next.run(req).await.into_response()
         }
         Some(_) => {

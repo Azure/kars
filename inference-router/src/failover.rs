@@ -111,7 +111,10 @@ pub fn build_candidates(
         // even if the deployment string happens to match — worst case it's
         // a harmless redundant retry against the same effective
         // destination, never a lost fallback.
-        if !out.iter().any(|c| c.deployment == dep && c.provider == provider) {
+        if !out
+            .iter()
+            .any(|c| c.deployment == dep && c.provider == provider)
+        {
             out.push(Candidate {
                 provider,
                 deployment: dep.to_string(),
@@ -124,11 +127,12 @@ pub fn build_candidates(
             &pref.primary.deployment,
             Some(pref.primary.provider.clone()).filter(|p| !p.is_empty()),
         );
-        for ModelRef { deployment, provider } in &pref.fallback {
-            push(
-                deployment,
-                Some(provider.clone()).filter(|p| !p.is_empty()),
-            );
+        for ModelRef {
+            deployment,
+            provider,
+        } in &pref.fallback
+        {
+            push(deployment, Some(provider.clone()).filter(|p| !p.is_empty()));
         }
     }
 
@@ -418,7 +422,10 @@ mod tests {
         let c = build_candidates(&upstream("primary"), &snap);
         assert_eq!(deployments(&c), vec!["primary", "fb-a", "primary"]);
         assert_eq!(c[0].provider.as_deref(), Some("Foundry"));
-        assert_eq!(c[2].provider, None, "the safety-net entry carries no provider tag");
+        assert_eq!(
+            c[2].provider, None,
+            "the safety-net entry carries no provider tag"
+        );
     }
 
     #[test]
@@ -430,13 +437,23 @@ mod tests {
         let snap = InferencePolicySnapshot {
             digest: "sha256:test".into(),
             model_preference: Some(ModelPreference {
-                primary: ModelRef { provider: "copilot".into(), deployment: "gpt-4.1".into() },
-                fallback: vec![ModelRef { provider: "foundry".into(), deployment: "gpt-4.1".into() }],
+                primary: ModelRef {
+                    provider: "copilot".into(),
+                    deployment: "gpt-4.1".into(),
+                },
+                fallback: vec![ModelRef {
+                    provider: "foundry".into(),
+                    deployment: "gpt-4.1".into(),
+                }],
             }),
             ..InferencePolicySnapshot::default()
         };
         let c = build_candidates(&upstream("default"), &snap);
-        assert_eq!(c.len(), 3, "primary + distinct-provider fallback + safety net, none deduped away");
+        assert_eq!(
+            c.len(),
+            3,
+            "primary + distinct-provider fallback + safety net, none deduped away"
+        );
         assert_eq!(c[0].provider.as_deref(), Some("copilot"));
         assert_eq!(c[1].provider.as_deref(), Some("foundry"));
         assert_eq!(c[1].deployment, "gpt-4.1");
@@ -555,4 +572,3 @@ mod tests {
         assert_eq!(health_key(&c), "gpt-4.1");
     }
 }
-

@@ -77,7 +77,11 @@ impl GitWriteConfig {
             Some(r) if r.trim().eq_ignore_ascii_case("subagent") => GitRole::SubAgent,
             _ => GitRole::Principal,
         };
-        Some(Self { credential, allowed_repos, role })
+        Some(Self {
+            credential,
+            allowed_repos,
+            role,
+        })
     }
 
     /// The sandbox's git-write role.

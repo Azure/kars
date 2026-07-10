@@ -59,8 +59,12 @@ pub static TASK_TOKENS_USED: LazyLock<IntCounterVec> = LazyLock::new(|| {
 
 /// Task attribution read once from the environment: `(task_id, root_task)`.
 /// `None` when this router is not inside a task-materialized sandbox.
-pub static TASK_ATTRIBUTION: LazyLock<Option<(String, String)>> =
-    LazyLock::new(|| parse_task_attribution(std::env::var("KARS_TASK_ID").ok(), std::env::var("KARS_TASK_ROOT").ok()));
+pub static TASK_ATTRIBUTION: LazyLock<Option<(String, String)>> = LazyLock::new(|| {
+    parse_task_attribution(
+        std::env::var("KARS_TASK_ID").ok(),
+        std::env::var("KARS_TASK_ROOT").ok(),
+    )
+});
 
 /// Pure attribution resolver (testable): a task id is required; the root
 /// defaults to the task itself when unset (a root task is its own branch).
@@ -69,7 +73,9 @@ pub fn parse_task_attribution(
     root: Option<String>,
 ) -> Option<(String, String)> {
     let task = task_id.filter(|s| !s.is_empty())?;
-    let root = root.filter(|s| !s.is_empty()).unwrap_or_else(|| task.clone());
+    let root = root
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| task.clone());
     Some((task, root))
 }
 

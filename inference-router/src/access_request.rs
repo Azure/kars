@@ -106,10 +106,7 @@ impl AccessRequestBuffer {
         let Ok(mut q) = self.inner.lock() else {
             return false;
         };
-        if let Some(e) = q
-            .iter_mut()
-            .find(|e| e.kind == kind && e.target == target)
-        {
+        if let Some(e) = q.iter_mut().find(|e| e.kind == kind && e.target == target) {
             e.count = e.count.saturating_add(1);
             e.last_seen_unix = now;
             // Keep the freshest reason/tier/port — the agent may refine them.
@@ -213,7 +210,13 @@ mod tests {
         let b = AccessRequestBuffer::new(8);
         assert!(b.record("egress", "api.example.com", "fetch docs", None, Some(443)));
         // Duplicate coalesces — not a new entry.
-        assert!(!b.record("egress", "api.example.com", "still need it", None, Some(443)));
+        assert!(!b.record(
+            "egress",
+            "api.example.com",
+            "still need it",
+            None,
+            Some(443)
+        ));
         assert_eq!(b.len(), 1);
         let snap = b.snapshot(0);
         assert_eq!(snap[0].count, 2);

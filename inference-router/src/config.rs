@@ -311,7 +311,6 @@ fn tag_to_key(tag_part: &str) -> String {
     tag_part.to_ascii_lowercase().replace('_', "-")
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,10 +429,7 @@ mod tests {
 
     #[test]
     fn ignores_empty_provider_env_values() {
-        let vars = vec![(
-            "KARS_PROVIDER_FOUNDRY_ENDPOINT".to_string(),
-            "".to_string(),
-        )];
+        let vars = vec![("KARS_PROVIDER_FOUNDRY_ENDPOINT".to_string(), "".to_string())];
         let providers = parse_providers_from_env(vars.into_iter());
         assert!(providers.is_empty());
     }

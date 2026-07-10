@@ -16,7 +16,10 @@
 //! already uses for inference. It cannot itself widen access.
 
 use axum::{
-    Json, Router, extract::State, http::StatusCode, response::IntoResponse,
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -164,7 +167,15 @@ mod tests {
 
     #[test]
     fn allowed_kinds_cover_the_taxonomy() {
-        for k in ["egress", "tool", "skill", "mcp", "command", "permission", "tier"] {
+        for k in [
+            "egress",
+            "tool",
+            "skill",
+            "mcp",
+            "command",
+            "permission",
+            "tier",
+        ] {
             assert!(ALLOWED_KINDS.contains(&k));
         }
     }

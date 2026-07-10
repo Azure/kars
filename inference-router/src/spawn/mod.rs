@@ -225,13 +225,7 @@ pub async fn create_sandbox(
     //   - the parent's REAL `governance.toolPolicyRef`/`inferenceRef` names +
     //     uid (kars-bridge: so team-run sub-agents point at policies that
     //     actually exist and are garbage-collected when the parent goes away).
-    let (
-        parent_labels,
-        parent_mcp_refs,
-        parent_tool_policy,
-        parent_inference,
-        parent_uid,
-    ): (
+    let (parent_labels, parent_mcp_refs, parent_tool_policy, parent_inference, parent_uid): (
         BTreeMap<String, String>,
         Vec<serde_json::Value>,
         Option<String>,
@@ -300,7 +294,11 @@ pub async fn create_sandbox(
     // threshold), the child must not point at a convention-derived
     // `{parent}-toolpolicy` that does not exist, or it hangs
     // `Degraded: ToolPolicy ... not found`.
-    apply_parent_refs(&mut crd, parent_tool_policy.as_deref(), parent_inference.as_deref());
+    apply_parent_refs(
+        &mut crd,
+        parent_tool_policy.as_deref(),
+        parent_inference.as_deref(),
+    );
 
     // Keyless git write (§14): a sub-agent inherits its principal's repo scope so
     // it can push branches + open PRs on the same repos. This is ATTENUATED — the
@@ -855,7 +853,11 @@ fn parent_mcp_server_refs(parent_data: &serde_json::Value) -> Vec<serde_json::Va
 /// owner-based GC. `controller:false` + `blockOwnerDeletion:false` — the parent
 /// doesn't reconcile the child, it only anchors its lifetime, and deleting the
 /// parent must never be blocked waiting on the child.
-pub(crate) fn apply_owner_reference(crd: &mut serde_json::Value, parent_name: &str, parent_uid: &str) {
+pub(crate) fn apply_owner_reference(
+    crd: &mut serde_json::Value,
+    parent_name: &str,
+    parent_uid: &str,
+) {
     if let Some(meta) = crd
         .pointer_mut("/metadata")
         .and_then(serde_json::Value::as_object_mut)
@@ -1203,8 +1205,7 @@ mod tests {
         });
         apply_parent_refs(&mut crd, None, None);
         assert_eq!(
-            crd["spec"]["governance"]["toolPolicyRef"]["name"],
-            "kars-default",
+            crd["spec"]["governance"]["toolPolicyRef"]["name"], "kars-default",
             "must fall back to kars-default, satisfying the enabled⇒policy CEL rule"
         );
         assert_eq!(crd["spec"]["governance"]["enabled"], true);
