@@ -15,9 +15,9 @@
 
 pub mod a2a;
 pub mod a2a_mtls;
+pub mod access_request;
 pub mod audit;
 pub mod audit_jsonl;
-pub mod access_request;
 pub mod audit_sink;
 pub mod auth;
 pub mod behavior_monitor;

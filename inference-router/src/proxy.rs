@@ -79,10 +79,16 @@ fn build_upstream_headers(
     // Both API-key and Entra modes use Authorization: Bearer for the unified
     // /openai/v1/ endpoint format. Azure OpenAI accepts API keys as Bearer tokens.
     // Copilot also uses Bearer (with the exchanged Copilot JWT).
-    headers.insert(
-        "authorization",
-        HeaderValue::from_str(&format!("Bearer {token}")).context("Invalid token")?,
-    );
+    // A genuinely unauthenticated destination (a local in-cluster model
+    // -- see token_for_endpoint's is_local_inference_host case, which
+    // returns an empty token specifically for this) gets no Authorization
+    // header at all, rather than sending one with nothing after "Bearer ".
+    if !token.is_empty() {
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).context("Invalid token")?,
+        );
+    }
     headers
         .entry("content-type")
         .or_insert(HeaderValue::from_static("application/json"));
@@ -148,7 +154,33 @@ pub(crate) fn is_azure_ai_host(host: &str) -> bool {
         ".cognitiveservices.azure.com",
         ".services.ai.azure.com",
     ];
-    AZURE_AI_HOST_SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
+    AZURE_AI_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host.ends_with(suffix))
+}
+
+/// True for a Service in the Bridge's own dedicated `kars-local-inference`
+/// namespace (see docs/local-inference.md) — an in-cluster model deployed
+/// via the "Local model" wizard. Same `ends_with`-on-a-cluster-DNS-suffix
+/// reasoning as `is_azure_ai_host`: the in-cluster DNS zone
+/// `.svc.cluster.local` only resolves within this cluster, so nothing
+/// external can spoof it.
+///
+/// Used to recognize a case `is_azure_ai_host` correctly does NOT cover:
+/// a local model has no key of its own (`upstream.provider_api_key` is
+/// always `None` for it — it's genuinely unauthenticated) and, on a
+/// Workload-Identity/IMDS production cluster, neither
+/// `auth.is_api_key_mode()` nor `auth.is_sidecar_mode()` holds. Without this
+/// check, `token_for_endpoint` would refuse to send anything to a local
+/// model at all — the WI/IMDS-host gate below was written to protect a REAL
+/// Entra bearer token from leaking to an untrusted destination, but a local
+/// model never gets a token in the first place, so there's nothing to
+/// protect here. Confirmed live: this was masked entirely in dev/kind
+/// testing because the dev router runs in API-key mode, where the gate
+/// below doesn't even apply — it would have hard-failed every request on a
+/// real AKS cluster running Workload Identity.
+pub(crate) fn is_local_inference_host(host: &str) -> bool {
+    host.ends_with(".kars-local-inference.svc.cluster.local")
 }
 
 /// Acquire the right auth token for a given upstream request.
@@ -187,6 +219,15 @@ pub async fn token_for_endpoint(
         }
     } else if let Some(key) = upstream.provider_api_key.as_deref() {
         Ok(key.to_string())
+    } else if is_local_inference_host(&endpoint_host(endpoint).unwrap_or_default()) {
+        // A local in-cluster model (see docs/local-inference.md) is
+        // genuinely unauthenticated — it never has a `provider_api_key`,
+        // and unlike the ambient WI/IMDS case below, there is no real
+        // credential to protect here, so this must be checked BEFORE the
+        // dev-mode/WI branching, not folded into the host-verification gate
+        // (which only ever decides whether to send an EXISTING token, not
+        // whether one is needed at all).
+        Ok(String::new())
     } else {
         // The host-verification gate below only matters for the AMBIENT
         // WI/IMDS fallback — a token minted automatically from the cluster's
@@ -839,7 +880,10 @@ mod thinking_migration_tests {
             "claude-mythos-5",
             "claude-mythos-preview",
         ] {
-            assert!(model_requires_adaptive_thinking(m), "{m} should be adaptive-only");
+            assert!(
+                model_requires_adaptive_thinking(m),
+                "{m} should be adaptive-only"
+            );
         }
     }
 
@@ -856,7 +900,10 @@ mod thinking_migration_tests {
             "gpt-5.4",
             "",
         ] {
-            assert!(!model_requires_adaptive_thinking(m), "{m:?} must not be flagged");
+            assert!(
+                !model_requires_adaptive_thinking(m),
+                "{m:?} must not be flagged"
+            );
         }
     }
 
@@ -966,8 +1013,9 @@ mod retry_tests {
 #[cfg(test)]
 mod host_matching_security_tests {
     use super::{
-        UpstreamConfig, endpoint_host, is_azure_ai_host, is_copilot_endpoint,
-        is_github_models_endpoint,
+        UpstreamConfig, WorkloadIdentityAuth, endpoint_host, is_azure_ai_host,
+        is_copilot_endpoint, is_github_models_endpoint, is_local_inference_host,
+        token_for_endpoint,
     };
 
     // ── is_copilot_endpoint: exact host, not substring ──────────────────────
@@ -975,7 +1023,9 @@ mod host_matching_security_tests {
     #[test]
     fn copilot_endpoint_matches_real_host() {
         assert!(is_copilot_endpoint("https://api.githubcopilot.com"));
-        assert!(is_copilot_endpoint("https://api.githubcopilot.com/v1/chat/completions"));
+        assert!(is_copilot_endpoint(
+            "https://api.githubcopilot.com/v1/chat/completions"
+        ));
     }
 
     #[test]
@@ -983,8 +1033,12 @@ mod host_matching_security_tests {
         // The exact attack a naive `.contains()` check would have missed:
         // an attacker-controlled domain that merely CONTAINS the real
         // Copilot host as a substring.
-        assert!(!is_copilot_endpoint("https://api.githubcopilot.com.evil.tld"));
-        assert!(!is_copilot_endpoint("https://evil.tld/api.githubcopilot.com"));
+        assert!(!is_copilot_endpoint(
+            "https://api.githubcopilot.com.evil.tld"
+        ));
+        assert!(!is_copilot_endpoint(
+            "https://evil.tld/api.githubcopilot.com"
+        ));
         assert!(!is_copilot_endpoint(
             "https://evil.tld/redirect?to=api.githubcopilot.com"
         ));
@@ -1000,7 +1054,9 @@ mod host_matching_security_tests {
 
     #[test]
     fn github_models_endpoint_matches_real_hosts() {
-        assert!(is_github_models_endpoint("https://models.github.ai/inference"));
+        assert!(is_github_models_endpoint(
+            "https://models.github.ai/inference"
+        ));
         assert!(is_github_models_endpoint(
             "https://models.inference.ai.azure.com/chat/completions"
         ));
@@ -1008,8 +1064,12 @@ mod host_matching_security_tests {
 
     #[test]
     fn github_models_endpoint_rejects_spoofed_subdomain() {
-        assert!(!is_github_models_endpoint("https://models.github.ai.evil.tld"));
-        assert!(!is_github_models_endpoint("https://evil.tld/models.github.ai"));
+        assert!(!is_github_models_endpoint(
+            "https://models.github.ai.evil.tld"
+        ));
+        assert!(!is_github_models_endpoint(
+            "https://evil.tld/models.github.ai"
+        ));
     }
 
     // ── is_azure_ai_host: the WI/IMDS credential-leak gate ───────────────────
@@ -1056,6 +1116,53 @@ mod host_matching_security_tests {
     // pure host-classification helpers above; the integration is covered
     // live — see the session's E2E verification notes.)
 
+    // ── is_local_inference_host: local-model no-credential recognition ──────
+
+    #[test]
+    fn local_inference_host_accepts_real_cluster_suffix() {
+        assert!(is_local_inference_host(
+            "llama-3-2-1b.kars-local-inference.svc.cluster.local"
+        ));
+    }
+
+    #[test]
+    fn local_inference_host_rejects_unrelated_host() {
+        assert!(!is_local_inference_host("evil.tld"));
+        assert!(!is_local_inference_host("contoso.openai.azure.com"));
+    }
+
+    #[test]
+    fn local_inference_host_rejects_suffix_spoof_attempt() {
+        // A domain that merely CONTAINS the suffix, but doesn't END with
+        // it, must not match — same reasoning as the Azure host check.
+        assert!(!is_local_inference_host(
+            "kars-local-inference.svc.cluster.local.evil.tld"
+        ));
+    }
+
+    #[tokio::test]
+    async fn token_for_endpoint_returns_empty_for_local_inference_host_regardless_of_auth_mode() {
+        // The Critical fix: a local in-cluster model is genuinely
+        // unauthenticated. This must return an empty token (never bail)
+        // even though the router's own ambient auth is WI/IMDS mode (no
+        // dev API key, no sidecar) — the exact production configuration
+        // where the pre-fix code would have hard-failed every request to
+        // a local model with "Refusing to send a Workload Identity /
+        // IMDS token ... isn't a recognized Azure AI endpoint".
+        let auth = WorkloadIdentityAuth::new();
+        let upstream = UpstreamConfig {
+            endpoint: "http://llama-3-2-1b.kars-local-inference.svc.cluster.local"
+                .to_string(),
+            deployment: "llama-3.2-1b-instruct".to_string(),
+            sandbox_name: "sbx".to_string(),
+            provider_api_key: None,
+        };
+        let token = token_for_endpoint(&auth, None, &upstream)
+            .await
+            .expect("local inference host must never bail");
+        assert_eq!(token, "");
+    }
+
     #[test]
     fn upstream_config_with_provider_api_key_bypasses_host_gate_entirely() {
         // Sanity: an UpstreamConfig carrying its own provider_api_key is
@@ -1091,7 +1198,10 @@ mod build_upstream_url_tests {
         let auth = WorkloadIdentityAuth::new();
         let up = upstream("https://contoso.openai.azure.com");
         let (url, _) = build_upstream_url(&auth, &up, "/chat/completions", Bytes::new()).unwrap();
-        assert_eq!(url, "https://contoso.openai.azure.com/openai/v1/chat/completions");
+        assert_eq!(
+            url,
+            "https://contoso.openai.azure.com/openai/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -1123,7 +1233,8 @@ mod build_upstream_url_tests {
         // until this fix.
         let auth = WorkloadIdentityAuth::new();
         let up = upstream("http://verify-e2e.kars-local-inference.svc.cluster.local");
-        let (url, _) = build_upstream_url(&auth, &up, "/v1/chat/completions", Bytes::new()).unwrap();
+        let (url, _) =
+            build_upstream_url(&auth, &up, "/v1/chat/completions", Bytes::new()).unwrap();
         assert_eq!(
             url,
             "http://verify-e2e.kars-local-inference.svc.cluster.local/v1/chat/completions"
@@ -1135,6 +1246,9 @@ mod build_upstream_url_tests {
         let auth = WorkloadIdentityAuth::new();
         let up = upstream("https://my-proj.services.ai.azure.com");
         let (url, _) = build_upstream_url(&auth, &up, "/chat/completions", Bytes::new()).unwrap();
-        assert_eq!(url, "https://my-proj.services.ai.azure.com/openai/v1/chat/completions");
+        assert_eq!(
+            url,
+            "https://my-proj.services.ai.azure.com/openai/v1/chat/completions"
+        );
     }
 }

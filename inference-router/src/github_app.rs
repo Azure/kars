@@ -77,7 +77,9 @@ impl GitHubApp {
     /// privilege; absent ⇒ installation default.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        let app_id = std::env::var("GITHUB_APP_ID").ok().filter(|s| !s.is_empty())?;
+        let app_id = std::env::var("GITHUB_APP_ID")
+            .ok()
+            .filter(|s| !s.is_empty())?;
         let installation_id = std::env::var("GITHUB_APP_INSTALLATION_ID")
             .ok()
             .filter(|s| !s.is_empty())?;
@@ -86,9 +88,19 @@ impl GitHubApp {
             .filter(|s| !s.is_empty())?;
         let repositories = std::env::var("GITHUB_APP_REPOS")
             .ok()
-            .map(|s| s.split(',').map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|r| r.trim().to_string())
+                    .filter(|r| !r.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
-        Some(Self::new(app_id, installation_id, private_key_pem.into_bytes(), repositories))
+        Some(Self::new(
+            app_id,
+            installation_id,
+            private_key_pem.into_bytes(),
+            repositories,
+        ))
     }
 
     /// Construct explicitly (used by `from_env` and tests).
@@ -187,13 +199,19 @@ impl GitHubApp {
             token: String,
             expires_at: String,
         }
-        let tr: TokenResp = resp.json().await.context("parse installation token response")?;
+        let tr: TokenResp = resp
+            .json()
+            .await
+            .context("parse installation token response")?;
         let expires_at = chrono::DateTime::parse_from_rfc3339(&tr.expires_at)
             .map(|d| d.timestamp())
             .unwrap_or(now + 3600);
 
         let mut guard = self.inner.cached.lock().await;
-        *guard = Some(CachedToken { token: tr.token.clone(), expires_at });
+        *guard = Some(CachedToken {
+            token: tr.token.clone(),
+            expires_at,
+        });
         Ok(tr.token)
     }
 }
@@ -245,7 +263,11 @@ mod tests {
         // We can't sign with the truncated test key, but we can assert the claim
         // window logic: iat in the past, exp <= 10 minutes out.
         let now = 1_700_000_000i64;
-        let claims = AppClaims { iat: now - 60, exp: now + 540, iss: "1".into() };
+        let claims = AppClaims {
+            iat: now - 60,
+            exp: now + 540,
+            iss: "1".into(),
+        };
         assert!(claims.iat < now);
         assert!(claims.exp - claims.iat <= 600);
         let _ = TEST_KEY; // referenced so the const isn't dead

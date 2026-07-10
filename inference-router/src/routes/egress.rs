@@ -157,9 +157,7 @@ async fn egress_fetch(
         // Hostname + port only — no path/query is ever recorded.
         if let Ok(parsed) = reqwest::Url::parse(url) {
             if let Some(host) = parsed.host_str() {
-                let port = parsed
-                    .port_or_known_default()
-                    .unwrap_or(443);
+                let port = parsed.port_or_known_default().unwrap_or(443);
                 state.blocked_egress.record(sandbox, host, port);
             }
         }

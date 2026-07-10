@@ -31,8 +31,7 @@ use crate::safety;
 /// Deliberately narrow: it must NOT fire on auth, rate-limit, or content-safety
 /// errors (those are handled elsewhere and must not silently swap the model).
 fn is_model_unavailable_error(status: axum::http::StatusCode, body: &[u8]) -> bool {
-    if status != axum::http::StatusCode::NOT_FOUND
-        && status != axum::http::StatusCode::BAD_REQUEST
+    if status != axum::http::StatusCode::NOT_FOUND && status != axum::http::StatusCode::BAD_REQUEST
     {
         return false;
     }
@@ -514,7 +513,9 @@ pub(super) async fn chat_completions(
         )
         .await
         {
-            Ok((status, _resp_headers, stream)) if status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND => {
+            Ok((status, _resp_headers, stream))
+                if status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND =>
+            {
                 // Might be a Responses-only model — buffer the error and check
                 use futures::TryStreamExt;
                 let err_bytes: Vec<u8> = stream
@@ -557,7 +558,8 @@ pub(super) async fn chat_completions(
                     {
                         Ok((resp_status, _, resp_body)) => {
                             let chat_body = responses_to_chat_body(&resp_body);
-                            if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body) {
+                            if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
+                            {
                                 state.task_telemetry.record_response(
                                     &bj,
                                     crate::task_telemetry::Shape::OpenAi,
@@ -615,8 +617,8 @@ pub(super) async fn chat_completions(
                         fb_upstream.deployment = default_model.clone();
                         // Buffered (stream:false) fallback against the default model.
                         let fb_body = {
-                            let mut v: serde_json::Value =
-                                serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
+                            let mut v: serde_json::Value = serde_json::from_slice(&body)
+                                .unwrap_or_else(|_| serde_json::json!({}));
                             if v.is_object() {
                                 v["model"] = serde_json::Value::String(default_model.clone());
                                 v["stream"] = serde_json::Value::Bool(false);
@@ -707,8 +709,7 @@ pub(super) async fn chat_completions(
                 // rounds=0 / no trace / no tokens. Guarded so a stream that
                 // repeats usage can't double-count.
                 let telem_stream = state.task_telemetry.clone();
-                let round_recorded =
-                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let round_recorded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let wrapped = stream.map(move |chunk| {
                     use std::sync::atomic::Ordering;
                     if stream_blocked.load(Ordering::Relaxed) {
@@ -858,7 +859,8 @@ pub(super) async fn chat_completions(
         // model so the sub-agent still delivers. Provider-agnostic: it reacts to
         // the real upstream response, so it can never wrongly reject a served
         // model, and works for Foundry / Copilot / GitHub Models alike.
-        let model_unavailable = matches!(&result, Ok((s, _, rb)) if is_model_unavailable_error(*s, rb.as_ref()));
+        let model_unavailable =
+            matches!(&result, Ok((s, _, rb)) if is_model_unavailable_error(*s, rb.as_ref()));
         if model_unavailable {
             let default_model = state.config.default_model.clone();
             if !default_model.is_empty() && default_model != model_name {
@@ -1441,7 +1443,10 @@ mod tests {
         assert_eq!(v["stream"], true);
         assert_eq!(v["messages"][0]["content"], "hi");
         // Unparseable body is returned unchanged.
-        assert_eq!(override_model_in_body(b"not json", "x").as_ref(), b"not json");
+        assert_eq!(
+            override_model_in_body(b"not json", "x").as_ref(),
+            b"not json"
+        );
     }
 
     #[test]
