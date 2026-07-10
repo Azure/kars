@@ -142,7 +142,7 @@ pub(crate) fn endpoint_host(endpoint: &str) -> Option<String> {
 /// `.openai.azure.com` can only resolve into Microsoft's real Azure
 /// infrastructure — an attacker cannot make their own domain end with
 /// someone else's suffix while controlling where it resolves.
-fn is_azure_ai_host(host: &str) -> bool {
+pub(crate) fn is_azure_ai_host(host: &str) -> bool {
     const AZURE_AI_HOST_SUFFIXES: &[&str] = &[
         ".openai.azure.com",
         ".cognitiveservices.azure.com",
@@ -669,21 +669,38 @@ fn is_github_models_endpoint(endpoint: &str) -> bool {
 }
 
 /// Build the upstream URL and optionally inject model into request body.
-/// Uses the unified /openai/v1/ format — works with both API-key and Entra auth.
 ///
 /// Routing rules:
 ///  - GitHub Copilot (`api.githubcopilot.com`): no path rewrite; OpenClaw
 ///    sends OpenAI-shape to `/chat/completions` and Anthropic-shape to
 ///    `/v1/messages`. We forward those paths unchanged.
 ///  - GitHub Models: no path rewrite either — OpenAI-compat under root.
-///  - Foundry / Azure OpenAI: prepend `/openai/v1/` (unified endpoint).
+///  - Foundry / Azure OpenAI (`is_azure_ai_host`): prepend `/openai/v1/`
+///    (the unified endpoint format that works with both API-key and Entra
+///    auth).
+///  - Everything else (any other host — a "Custom" wizard endpoint, a
+///    local in-cluster model deployed via the local-inference wizard,
+///    Ollama, a standalone vLLM/llama.cpp server, ...): no path rewrite.
+///    This used to be the Azure branch's default too (the `else` here was
+///    unconditional), which silently broke any genuinely custom
+///    OpenAI-compatible endpoint — confirmed live: a local AIKit/llama.cpp
+///    deployment got `/openai/v1/chat/completions` prepended and 404'd,
+///    since it only serves the plain `/v1/chat/completions` path. Only
+///    hosts we've actually verified need the Azure-specific prefix get it;
+///    every other custom endpoint is assumed to be plain OpenAI-compatible,
+///    which is the more common and more conservative default for an
+///    endpoint we don't recognize.
 fn build_upstream_url(
     _auth: &WorkloadIdentityAuth,
     upstream: &UpstreamConfig,
     path: &str,
     request_body: Bytes,
 ) -> Result<(String, Bytes)> {
-    let url = if is_github_models_endpoint(&upstream.endpoint)
+    let needs_azure_prefix = endpoint_host(&upstream.endpoint)
+        .map(|host| is_azure_ai_host(&host))
+        .unwrap_or(false);
+    let url = if !needs_azure_prefix
+        || is_github_models_endpoint(&upstream.endpoint)
         || is_copilot_endpoint(&upstream.endpoint)
     {
         format!(
@@ -1053,5 +1070,71 @@ mod host_matching_security_tests {
             provider_api_key: Some("direct-key".to_string()),
         };
         assert_eq!(upstream.provider_api_key.as_deref(), Some("direct-key"));
+    }
+}
+
+#[cfg(test)]
+mod build_upstream_url_tests {
+    use super::{Bytes, UpstreamConfig, WorkloadIdentityAuth, build_upstream_url};
+
+    fn upstream(endpoint: &str) -> UpstreamConfig {
+        UpstreamConfig {
+            endpoint: endpoint.to_string(),
+            deployment: "test-model".to_string(),
+            sandbox_name: "sbx".to_string(),
+            provider_api_key: None,
+        }
+    }
+
+    #[test]
+    fn azure_ai_host_gets_openai_v1_prefix() {
+        let auth = WorkloadIdentityAuth::new();
+        let up = upstream("https://contoso.openai.azure.com");
+        let (url, _) = build_upstream_url(&auth, &up, "/chat/completions", Bytes::new()).unwrap();
+        assert_eq!(url, "https://contoso.openai.azure.com/openai/v1/chat/completions");
+    }
+
+    #[test]
+    fn copilot_host_is_not_rewritten() {
+        let auth = WorkloadIdentityAuth::new();
+        let up = upstream("https://api.githubcopilot.com");
+        let (url, _) = build_upstream_url(&auth, &up, "/chat/completions", Bytes::new()).unwrap();
+        assert_eq!(url, "https://api.githubcopilot.com/chat/completions");
+    }
+
+    #[test]
+    fn github_models_host_is_not_rewritten() {
+        let auth = WorkloadIdentityAuth::new();
+        let up = upstream("https://models.github.ai/inference");
+        let (url, _) = build_upstream_url(&auth, &up, "/chat/completions", Bytes::new()).unwrap();
+        assert_eq!(url, "https://models.github.ai/inference/chat/completions");
+    }
+
+    #[test]
+    fn generic_custom_endpoint_is_not_rewritten() {
+        // The exact regression this test guards against: a genuinely custom
+        // OpenAI-compatible endpoint (a "Custom" wizard provider, a local
+        // in-cluster model, Ollama, a standalone vLLM/llama.cpp server, ...)
+        // previously fell into the `else` branch and got an incorrect
+        // `/openai/v1/` prefix prepended, 404ing against servers that only
+        // serve the plain `/v1/...` path. Confirmed live: a local AIKit/
+        // llama.cpp deployment reached via
+        // http://verify-e2e.kars-local-inference.svc.cluster.local 404'd
+        // until this fix.
+        let auth = WorkloadIdentityAuth::new();
+        let up = upstream("http://verify-e2e.kars-local-inference.svc.cluster.local");
+        let (url, _) = build_upstream_url(&auth, &up, "/v1/chat/completions", Bytes::new()).unwrap();
+        assert_eq!(
+            url,
+            "http://verify-e2e.kars-local-inference.svc.cluster.local/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn foundry_style_host_still_gets_prefix() {
+        let auth = WorkloadIdentityAuth::new();
+        let up = upstream("https://my-proj.services.ai.azure.com");
+        let (url, _) = build_upstream_url(&auth, &up, "/chat/completions", Bytes::new()).unwrap();
+        assert_eq!(url, "https://my-proj.services.ai.azure.com/openai/v1/chat/completions");
     }
 }

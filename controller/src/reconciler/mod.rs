@@ -1361,12 +1361,25 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // deliberately EXCLUDES RFC1918 ranges to prevent lateral movement
         // between sandboxes/services — a local model's Service ClusterIP
         // always falls in one of those ranges, same reasoning as the
-        // SRE-mode apiserver carve-out below. Unconditional + namespace-
-        // scoped (not IP-scoped): a compromised router can reach every
-        // Service in this ONE namespace on port 80, not the whole cluster —
-        // and the namespace not existing (no operator has set up local
-        // inference) makes this a harmless no-op, same as the auth-sidecar
-        // rule above.
+        // SRE-mode apiserver carve-out below. Namespace-scoped (not
+        // IP-scoped): a compromised router can reach every Service in this
+        // ONE namespace, not the whole cluster — and the namespace not
+        // existing (no operator has set up local inference) makes this a
+        // harmless no-op, same as the auth-sidecar rule above.
+        //
+        // NO port restriction (unlike the other rules in this list) —
+        // confirmed live on kind: a port-scoped rule here (e.g. TCP 80,
+        // the ModelDeployment Service's port) intermittently failed to
+        // admit traffic that a portless rule for the identical namespace
+        // consistently allowed, even after confirming DNAT correctness and
+        // waiting well past kindnet's policy-sync interval — most likely
+        // kindnet's NFQUEUE-based policy engine misresolving the
+        // post-DNAT container port (Services here DNAT to the engine's
+        // real listen port — 5000 for llama.cpp/AIKit, potentially
+        // different for vLLM/other presets — not the Service's port 80).
+        // A portless rule sidesteps that entirely and is also more robust
+        // against different inference engines using different container
+        // ports.
         json!({
             "to": [{"namespaceSelector": {"matchLabels": {
                 // Literal namespace name matching kars-bridge's
@@ -1375,8 +1388,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 // between the two, so this is intentionally a plain literal,
                 // same as "kube-system"/"agentmesh" above).
                 "kubernetes.io/metadata.name": "kars-local-inference"
-            }}}],
-            "ports": [{"protocol": "TCP", "port": 80}]
+            }}}]
         }),
     ];
 
