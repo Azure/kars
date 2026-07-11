@@ -21,6 +21,10 @@ spec:
     spec:
       serviceAccountName: kars-controller
       automountServiceAccountToken: true
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -70,6 +74,22 @@ spec:
               value: "{{ .Values.inferenceRouter.image.repository }}:{{ .Values.inferenceRouter.image.tag }}"
             - name: SANDBOX_IMAGE
               value: "{{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}"
+            - name: MCP_MANAGED_NAMESPACE
+              value: {{ .Values.managedMcp.namespace | default "kars-mcp" | quote }}
+            - name: MCP_PLAYWRIGHT_IMAGE
+              value: {{ .Values.managedMcp.playwrightImage | quote }}
+            - name: MCP_EVERYTHING_IMAGE
+              value: {{ .Values.managedMcp.everythingImage | quote }}
+            {{- with (first .Values.global.imagePullSecrets) }}
+            - name: IMAGE_PULL_SECRET_NAME
+              value: {{ .name | quote }}
+            {{- end }}
+            - name: LOCAL_INFERENCE_NAMESPACES
+              value: {{ join "," .Values.localInference.namespaces | quote }}
+            - name: LOCAL_INFERENCE_TARGETS_JSON
+              value: {{ .Values.localInference.targets | toJson | quote }}
+            - name: KARS_SANDBOX_EXTRA_TOLERATIONS
+              value: {{ .Values.sandbox.extraTolerations | toJson | quote }}
             # Multi-runtime adapter image overrides (consumed by
             # controller/src/reconciler/runtime.rs::*_default_image()).
             # Empty string keeps the controller's compiled-in default.

@@ -96,7 +96,7 @@ The controller (AKS/local-k8s) or `inference-router/src/spawn/docker.rs` (dev) i
 | `BRAVE_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY`, `PERPLEXITY_API_KEY`, `OPENAI_API_KEY` | same Secret | Third-party plugin keys; runtime entrypoint maps to the matching plugin config if supported |
 | `KARS_SUPPRESS_EXFIL_URL=1`, `KARS_SUPPRESS_CONTENT_FLAGS=violence`, `KARS_CONTENT_FLAG_MIN_SEVERITY=medium` | `KARS_DEV_PROFILE=true` | Governance noise suppressors for dev sessions |
 | `KARS_STRICT_TOOLS=1` | helm `controller.strictTools` | OpenAI strict-mode tool schemas where supported. **Currently OpenClaw-only; A1.2 makes generic.** |
-| `KARS_AGT_EVALUATE_FAIL_OPEN_GRACE` | runtime opt-in | Number of consecutive `/agt/evaluate` failures the runtime tolerates before failing closed. Default 3 (OpenClaw compat). Max 10. Set to 0 to fail closed immediately. |
+| `KARS_AGT_EVALUATE_FAIL_OPEN_GRACE` | runtime opt-in | Number of consecutive `/agt/evaluate` failures the runtime tolerates before failing closed. Default 0. Clamped to 0–10. `N=2` allows the first two consecutive failures and blocks the third. |
 
 ### Runtime-specific (per-platform)
 
@@ -254,7 +254,7 @@ Response shape:
 }
 ```
 
-**Fail-closed grace period**: if `/agt/evaluate` is unreachable, the runtime SHOULD allow the first N consecutive failures then fail-closed. Default N=3 (OpenClaw compat); configurable via env `KARS_AGT_EVALUATE_FAIL_OPEN_GRACE` (max 10). Set to 0 to fail closed immediately. After router readiness has been confirmed once (any successful response), subsequent failures may fail-closed immediately at the runtime's discretion.
+**Fail-closed grace period**: transport errors, timeouts, non-2xx responses, malformed JSON, and invalid decision payloads from `/agt/evaluate` are governance failures. The runtime MUST fail closed on the first failure by default. Operators may explicitly set `KARS_AGT_EVALUATE_FAIL_OPEN_GRACE=N` (clamped to 0–10) to tolerate exactly the first N consecutive failures; `N=2` allows failures one and two and blocks failure three. Only a valid parsed 2xx router decision resets the consecutive-failure counter.
 
 ---
 

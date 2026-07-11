@@ -11,6 +11,17 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createServer } from "node:http";
+
+beforeEach(() => {
+  // Existing unit tests intentionally exercise tool bodies without a router.
+  // Opt them into grace; fail-closed default behavior has dedicated tests below.
+  process.env.KARS_AGT_EVALUATE_FAIL_OPEN_GRACE = "10";
+});
+
+afterEach(() => {
+  delete process.env.KARS_AGT_EVALUATE_FAIL_OPEN_GRACE;
+});
 
 // ---------------------------------------------------------------------------
 // Test helpers — mock OpenClaw plugin API and HTTP
@@ -49,6 +60,52 @@ function createMockApi(pluginConfig: Record<string, unknown> = {}) {
 
   return { api, tools, commands, providers, logMessages };
 }
+
+describe("AGT governance outage", () => {
+  it("blocks the first failure by default without invoking the original tool", async () => {
+    delete process.env.KARS_AGT_EVALUATE_FAIL_OPEN_GRACE;
+    process.env.AGT_SKIP_INIT = "1";
+    process.env.KARS_PROVIDER = "github-models";
+    let evaluateCalls = 0;
+    let egressCalls = 0;
+    const server = createServer((req, res) => {
+      if (req.url === "/agt/evaluate") {
+        evaluateCalls += 1;
+        res.writeHead(503, { "content-type": "text/plain" });
+        res.end("unavailable");
+        return;
+      }
+      if (req.url === "/egress/fetch") {
+        egressCalls += 1;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      process.env.KARS_ROUTER_URL = `http://127.0.0.1:${port}`;
+      const mod = await import("./index.js");
+      const mock = createMockApi();
+      (mock.api as any).registrationMode = "setup-only";
+      mod.default.register(mock.api);
+
+      const result = await mock.tools.get("http_fetch")!.execute("id", {
+        url: "https://example.com",
+      });
+
+      expect(result.content[0].text).toContain("Blocked by AGT policy");
+      expect(evaluateCalls).toBe(1);
+      expect(egressCalls).toBe(0);
+    } finally {
+      await new Promise<void>((done) => server.close(() => done()));
+      delete process.env.AGT_SKIP_INIT;
+      delete process.env.KARS_PROVIDER;
+      delete process.env.KARS_ROUTER_URL;
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // 1. Plugin object structure

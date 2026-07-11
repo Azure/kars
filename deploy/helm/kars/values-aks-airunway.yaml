@@ -1,0 +1,85 @@
+# Private-alpha override for the real airunway AKS H100 cluster.
+# All images remain in the private karsur6qnm ACR; Bridge access is ClusterIP +
+# kubectl port-forward only.
+
+global:
+  imagePullSecrets:
+    - name: karsur6qnm-pull
+
+controller:
+  replicas: 1
+  image:
+    repository: karsur6qnm.azurecr.io/kars-controller
+    tag: "latest"
+    pullPolicy: Always
+  extraEnv:
+    - name: KARS_TASK_DEFAULT_MODEL
+      value: gpt-oss-120b
+    - name: AZURE_OPENAI_DEPLOYMENT
+      value: gpt-oss-120b
+
+inferenceRouter:
+  image:
+    repository: karsur6qnm.azurecr.io/kars-inference-router
+    tag: "latest"
+    pullPolicy: Always
+  azure:
+    openai:
+      endpoint: http://kars-inference-sentinel.local
+    contentSafety:
+      enabled: false
+    promptShields:
+      enabled: false
+
+sandbox:
+  image:
+    repository: karsur6qnm.azurecr.io/openclaw-sandbox
+    tag: "latest"
+    pullPolicy: Always
+  isolation: enhanced
+  extraTolerations:
+    - key: sku
+      operator: Equal
+      value: gpu
+      effect: NoSchedule
+
+managedMcp:
+  namespace: kars-mcp
+  playwrightImage: karsur6qnm.azurecr.io/playwright-mcp:latest
+  everythingImage: karsur6qnm.azurecr.io/kars-mcp-everything:latest
+
+localInference:
+  namespaces: []
+  targets:
+    - namespace: default
+      matchLabels:
+        kaito.sh/workspace: gpt-oss-120b
+      # AKS NetworkPolicy evaluates the Service after DNAT, so use the
+      # model pod targetPort rather than the Service port 80.
+      ports: [5000]
+
+foundry:
+  endpoint: http://gpt-oss-120b.kars-local-inference.svc.cluster.local:80/v1
+  deployments: gpt-oss-120b
+
+models:
+  catalog: gpt-oss-120b
+
+runtimes:
+  hermes:
+    image: karsur6qnm.azurecr.io/kars-runtime-hermes:latest
+
+mesh:
+  provider: agt
+
+meshPeer:
+  enabled: true
+
+monitoring:
+  enabled: false
+  containerInsights: false
+  prometheus:
+    enabled: false
+
+datapathWitness:
+  enabled: false

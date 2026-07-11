@@ -26,6 +26,38 @@ Two pieces, both declarative:
 2. A sandbox **opts in** by naming that CR in
    `spec.governance.mcpServerRefs`.
 
+### Managed presets vs external endpoints
+
+`McpServer` has two operational modes:
+
+- **Managed preset** — `spec.managed.preset` selects a reviewed workload recipe
+  (`playwright` or `everything`). The controller creates a rootless Deployment,
+  Service, ingress NetworkPolicy, and private-registry pull wiring in the
+  managed-MCP namespace. It performs a real MCP
+  `initialize → notifications/initialized → tools/list` probe and records the
+  discovered tools + schema digest before `Ready=True`.
+- **External endpoint** — `spec.url` registers an MCP server that already
+  exists. Kars does not deploy it or pretend a placeholder URL is reachable.
+  Hosted authentication remains router-owned (`oauth` or `bearerFromEnv`).
+
+The source modes are mutually exclusive. Operators cannot provide an arbitrary
+container image through `McpServer`; managed images are controller/chart
+configuration, preventing the CR from becoming a general-purpose workload
+launcher.
+
+```yaml
+apiVersion: kars.azure.com/v1alpha1
+kind: McpServer
+metadata:
+  name: playwright
+  namespace: kars-system
+spec:
+  managed:
+    preset: playwright
+  allowedTools: ["browser_navigate", "browser_click", "browser_snapshot"]
+  displayName: "Playwright (managed headless Chromium)"
+```
+
 ```yaml
 apiVersion: kars.azure.com/v1alpha1
 kind: McpServer

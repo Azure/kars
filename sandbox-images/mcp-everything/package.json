@@ -1,0 +1,9 @@
+{
+  "name": "@kars-runtime/mcp-everything-image",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hermetic image wrapper for the MCP reference everything server",
+  "dependencies": {
+    "@modelcontextprotocol/server-everything": "2026.7.4"
+  }
+}

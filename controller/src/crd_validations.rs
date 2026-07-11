@@ -51,8 +51,8 @@ use kube::CustomResourceExt;
 use crate::a2a_agent::A2AAgent;
 use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
-use crate::kars_eval::KarsEval;
 use crate::kars_approval::KarsApproval;
+use crate::kars_eval::KarsEval;
 use crate::kars_memory::KarsMemory;
 use crate::kars_receipt::KarsReceipt;
 use crate::kars_sre_action::KarsSREAction;
@@ -70,18 +70,21 @@ use crate::tool_policy::ToolPolicy;
 ///    `https://`.
 /// 3. `oauth.pkce`, when present, must be `S256` (RFC 7636 §4.2 — the
 ///    one PKCE method this CRD supports).
-/// 4. `bundleRef` is mutually exclusive with the inline content
+/// 4. `bundleRef` is mutually exclusive with the inline/managed content
 ///    fields (`url`, `oauth`, `productionMode`, `scopes`,
-///    `allowedTools`, `displayName`). The CR may either inline the
+///    `allowedTools`, `displayName`, `managed`). The CR may either inline the
 ///    server identity + tool surface or reference a signed OCI
 ///    bundle, never both. (Selector field `allowedSandboxes` stays
 ///    on the CR in both modes — it's authoring metadata, not
 ///    bundle content.)
+/// 5. `managed` is mutually exclusive with endpoint/auth source fields. The
+///    controller derives the endpoint and owns the workload; callers may still
+///    set `allowedTools`, `allowedSandboxes`, and `displayName`.
 #[must_use]
 pub fn mcp_server_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule: "has(self.bundleRef) || !has(self.productionMode) || \
+            rule: "has(self.bundleRef) || has(self.managed) || !has(self.productionMode) || \
                    self.productionMode == false || \
                    (has(self.oauth) && size(self.oauth.issuer) > 0)"
                 .into(),
@@ -90,7 +93,7 @@ pub fn mcp_server_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "has(self.bundleRef) || !has(self.productionMode) || \
+            rule: "has(self.bundleRef) || has(self.managed) || !has(self.productionMode) || \
                    self.productionMode == false || \
                    (has(self.url) && self.url.startsWith('https://'))"
                 .into(),
@@ -107,12 +110,25 @@ pub fn mcp_server_validations() -> Vec<ValidationRule> {
         ValidationRule {
             rule: "!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && \
                    !has(self.productionMode) && !has(self.scopes) && \
-                   !has(self.allowedTools) && !has(self.displayName))"
+                   !has(self.allowedTools) && !has(self.displayName) && !has(self.managed))"
                 .into(),
             message: Some(
                 "spec.bundleRef is mutually exclusive with spec.url, spec.oauth, \
                  spec.productionMode, spec.scopes, spec.allowedTools, and \
-                 spec.displayName"
+                 spec.displayName, and spec.managed"
+                    .into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.managed) || (!has(self.url) && !has(self.oauth) && \
+                   !has(self.productionMode) && !has(self.scopes) && \
+                   !has(self.bearerFromEnv) && !has(self.bundleRef))"
+                .into(),
+            message: Some(
+                "spec.managed is mutually exclusive with spec.url, spec.oauth, \
+                 spec.productionMode, spec.scopes, spec.bearerFromEnv, and spec.bundleRef"
                     .into(),
             ),
             reason: Some("FieldValueInvalid".into()),
@@ -671,7 +687,9 @@ pub fn kars_skill_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
             rule: "size(self.version) > 0".into(),
-            message: Some("spec.version must be non-empty (the author-declared semantic version)".into()),
+            message: Some(
+                "spec.version must be non-empty (the author-declared semantic version)".into(),
+            ),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
@@ -687,8 +705,11 @@ pub fn kars_skill_validations() -> Vec<ValidationRule> {
 /// `KarsSkill` CRD (§13) with [`kars_skill_validations`] injected.
 #[must_use]
 pub fn kars_skill_crd() -> CustomResourceDefinition {
-    inject_spec_validations(crate::kars_skill::KarsSkill::crd(), kars_skill_validations())
-        .expect("kube-rs derive must produce a spec property on KarsSkill")
+    inject_spec_validations(
+        crate::kars_skill::KarsSkill::crd(),
+        kars_skill_validations(),
+    )
+    .expect("kube-rs derive must produce a spec property on KarsSkill")
 }
 
 /// `KarsProfile.spec` CEL rules.
@@ -713,8 +734,11 @@ pub fn kars_profile_validations() -> Vec<ValidationRule> {
 /// `KarsProfile` CRD (§17) with [`kars_profile_validations`] injected.
 #[must_use]
 pub fn kars_profile_crd() -> CustomResourceDefinition {
-    inject_spec_validations(crate::kars_profile::KarsProfile::crd(), kars_profile_validations())
-        .expect("kube-rs derive must produce a spec property on KarsProfile")
+    inject_spec_validations(
+        crate::kars_profile::KarsProfile::crd(),
+        kars_profile_validations(),
+    )
+    .expect("kube-rs derive must produce a spec property on KarsProfile")
 }
 
 /// `KarsReceipt.spec` CEL rules. The receipt is controller-written and its
@@ -745,14 +769,13 @@ pub fn kars_receipt_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on KarsReceipt")
 }
 
-/// `KarsApproval.spec` CEL rules. `spec.decision` is a human steer written
-/// post-creation, so the admission guards only assert the immutable request
-/// shape (`action`, `taskRef`) is present.
+/// `KarsApproval.spec` CEL rules. The request is immutable after creation and a
+/// decision may transition only once from absent to a fixed value.
 #[must_use]
 pub fn kars_approval_validations() -> Vec<ValidationRule> {
     vec![
         ValidationRule {
-            rule: "size(self.action) > 0".into(),
+            rule: "size(self.action.kind) > 0".into(),
             message: Some("spec.action must be non-empty".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
@@ -761,6 +784,29 @@ pub fn kars_approval_validations() -> Vec<ValidationRule> {
             rule: "size(self.taskRef.name) > 0".into(),
             message: Some("spec.taskRef.name must be non-empty".into()),
             reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.taskRef == oldSelf.taskRef && self.action == oldSelf.action".into(),
+            message: Some("spec.taskRef and spec.action are immutable".into()),
+            reason: Some("FieldValueForbidden".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "((!has(self.ttl) && !has(oldSelf.ttl)) || \
+                   (has(self.ttl) && has(oldSelf.ttl) && self.ttl == oldSelf.ttl)) && \
+                   ((!has(self.requestedBy) && !has(oldSelf.requestedBy)) || \
+                   (has(self.requestedBy) && has(oldSelf.requestedBy) && self.requestedBy == oldSelf.requestedBy))"
+                .into(),
+            message: Some("spec.ttl and spec.requestedBy are immutable".into()),
+            reason: Some("FieldValueForbidden".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(oldSelf.decision) || (has(self.decision) && self.decision == oldSelf.decision)"
+                .into(),
+            message: Some("spec.decision is immutable once recorded".into()),
+            reason: Some("FieldValueForbidden".into()),
             ..ValidationRule::default()
         },
     ]

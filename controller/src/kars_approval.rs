@@ -93,6 +93,12 @@ pub struct KarsApprovalSpec {
     /// What needs a human decision.
     pub action: ApprovalAction,
 
+    /// Authenticated principal that originated the request. Bridge-authored
+    /// approvals populate both stable subject and display name; controller-
+    /// authored agent requests may leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<ApprovalActor>,
+
     /// Time-to-live as an ISO-8601 duration (`PT15M`, `PT4H`, `P1D`). An
     /// undecided approval past `requestedAt + ttl` becomes `Expired`. Defaults
     /// to `PT1H` when omitted.
@@ -149,9 +155,24 @@ pub struct ApprovalDecision {
     /// verbatim into status and, for granted approvals, into the receipt.
     pub decider: String,
 
+    /// Stable OIDC subject of the authenticated decider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decider_subject: Option<String>,
+
+    /// Signed Bridge roles held at decision time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decider_roles: Vec<String>,
+
     /// Optional justification, surfaced to auditors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalActor {
+    pub subject: String,
+    pub name: String,
 }
 
 /// Verdict values.
@@ -238,12 +259,12 @@ impl ApprovalOutcome {
 /// them here, so all decision logic is testable without a cluster.
 ///
 /// Precedence:
-/// 1. A recorded human decision wins over everything (it is the governance
-///    truth, even if the request later expired or went stale).
-/// 2. Otherwise, an unbound approval is `Pending` (awaiting the task envelope).
-/// 3. A bound approval whose task digest drifted (or whose task vanished) is
+/// 1. An unbound approval is `Pending` (awaiting the task envelope).
+/// 2. A bound approval whose task digest drifted (or whose task vanished) is
 ///    `Stale`.
-/// 4. A bound, current approval past its TTL is `Expired`.
+/// 3. A bound, current approval past its TTL is `Expired`.
+/// 4. Only a still-current request may consume a human decision. A late
+///    approval can never resurrect stale or expired authority.
 /// 5. Otherwise `Pending` (awaiting a decision).
 pub fn evaluate(
     decision: Option<&ApprovalDecision>,
@@ -251,6 +272,10 @@ pub fn evaluate(
     live_task_digest: Option<&str>,
     expired: bool,
 ) -> ApprovalOutcome {
+    let current = undecided_outcome(bound_digest, live_task_digest, expired);
+    if !matches!(current, ApprovalOutcome::Pending("awaiting a human decision")) {
+        return current;
+    }
     if let Some(d) = decision {
         return match d.verdict.as_str() {
             VERDICT_APPROVE => ApprovalOutcome::Approved {
@@ -261,10 +286,10 @@ pub fn evaluate(
             },
             // An unknown verdict is treated as no decision rather than a
             // silent approval — fail closed.
-            _ => undecided_outcome(bound_digest, live_task_digest, expired),
+            _ => current,
         };
     }
-    undecided_outcome(bound_digest, live_task_digest, expired)
+    current
 }
 
 fn undecided_outcome(
@@ -295,6 +320,8 @@ mod tests {
         ApprovalDecision {
             verdict: verdict.to_string(),
             decider: "alice@example.com".to_string(),
+            decider_subject: Some("oidc-subject-alice".into()),
+            decider_roles: vec!["operator".into()],
             reason: None,
         }
     }
@@ -315,10 +342,9 @@ mod tests {
     }
 
     #[test]
-    fn decision_wins_over_expiry_and_staleness() {
-        // Expired + drifted, but a human decided → the decision stands.
+    fn stale_or_expired_authority_beats_late_decision() {
         let out = evaluate(Some(&decision("approve")), Some("sha256:aa"), Some("sha256:bb"), true);
-        assert_eq!(out.phase(), PHASE_APPROVED);
+        assert_eq!(out.phase(), PHASE_STALE);
     }
 
     #[test]

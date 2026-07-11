@@ -2,6 +2,11 @@
 # NOTE: For production, replace "latest" tags with specific image digests
 #       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
 
+global:
+  # Registry credentials used by Kars control-plane images and mirrored by the
+  # controller into managed sandbox/MCP namespaces.
+  imagePullSecrets: []
+
 # Controller configuration
 controller:
   image:
@@ -27,6 +32,21 @@ controller:
     limits:
       cpu: "500m"
       memory: "512Mi"
+
+# Controller-managed MCP workload presets. McpServer.spec.managed selects a
+# reviewed preset; operators cannot supply arbitrary images through the CR.
+managedMcp:
+  namespace: kars-mcp
+  playwrightImage: "mcr.microsoft.com/playwright/mcp@sha256:3d871c22ea2d4cca0966e2cfb1860e1cb03eb7353725a3d6cffd133296fb04eb"
+  everythingImage: "ghcr.io/azure/kars/mcp-everything:latest"
+
+localInference:
+  # Namespaces containing trusted in-cluster model services.
+  namespaces:
+    - kars-local-inference
+  # Prefer precise targets in production. Each target requires namespace,
+  # matchLabels, and destination pod ports.
+  targets: []
 
 # Model catalog offered in the launch-package picker (comma-separated
 # vendor/deployment ids). Operator-curated; the controller default still applies
@@ -73,6 +93,9 @@ sandbox:
   runAsNonRoot: true
   runAsUser: 1000
   runAsGroup: 1000
+  # Additional Kubernetes tolerations merged with the mandatory Kars sandbox
+  # toleration (for example an AKS GPU node-pool taint).
+  extraTolerations: []
   writablePaths:
     - /sandbox
     - /tmp

@@ -61,9 +61,10 @@ RUN TOPMOD="/usr/local/lib/node_modules/openclaw/node_modules" && \
     link_pkg feishu @larksuiteoapi/node-sdk && \
     echo "OpenClaw extension dep symlinks applied"
 
-# Patch vulnerable transitive npm deps (tar, minimatch, glob, brace-expansion)
-# without waiting for upstream OpenClaw to update them.
-RUN cd /usr/local/lib/node_modules && npm audit fix --force 2>/dev/null || true
+# Keep the Node-distribution-bundled npm intact. `npm audit fix --force` upgrades
+# npm's own transitive sigstore tree in-place and has produced a broken install
+# missing `@sigstore/protobuf-specs/rekor/v2`; every later `npm ci` then fails.
+RUN npm --version
 
 # Pre-install popular ClawHub skills at build time (VirusTotal-scanned).
 # kars's runtime security (egress guard, Content Safety, read-only rootfs)
@@ -188,12 +189,14 @@ RUN pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
       ftfy unidecode qrcode fpdf2 nano-pdf && \
     rm -rf /tmp/sandbox-wheels
 
-# Node.js (vendored binary) + update npm to fix tar/minimatch/glob CVEs
+# Node.js vendored binary. Keep its bundled npm 10.9.8; npm 12's current
+# sigstore dependency set is incomplete in this image and breaks every
+# downstream npm install.
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
     curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz && \
-    npm install -g npm@latest
+    test "$(npm --version)" = "10.9.8"
 
 # Install npm CLIs that unlock built-in OpenClaw skills. MUST come AFTER
 # the Node.js tarball extraction above — the tarball overwrites

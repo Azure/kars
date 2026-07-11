@@ -82,6 +82,13 @@ pub struct KarsSkillSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
 
+    /// SHA-256 of the canonical package file map (`BTreeMap<path, content>`
+    /// serialized as JSON). Required when `package=true`; binds operator
+    /// approval and the skill version digest to the executable bytes stored in
+    /// `karsskill-<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_digest: Option<String>,
+
     /// Optional knowledge-pack reference (the name of a team knowledge commons
     /// or a packaged knowledge set the skill ships with).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +148,18 @@ impl KarsSkill {
                 "spec.boundingPolicy is required — a skill that calls tools must name a ToolPolicy that bounds them".into(),
             );
         }
+        if self.spec.package
+            && self
+                .spec
+                .package_digest
+                .as_deref()
+                .is_none_or(|d| !d.starts_with("sha256:") || d.len() != 71)
+        {
+            errs.push(
+                "spec.packageDigest must be a full sha256:<64 hex> digest when package=true"
+                    .into(),
+            );
+        }
         errs
     }
 
@@ -164,6 +183,9 @@ impl KarsSkill {
         // never had them is byte-for-byte unchanged.
         if !self.spec.scripts.is_empty() {
             canonical["scripts"] = serde_json::json!(self.spec.scripts);
+        }
+        if let Some(package_digest) = self.spec.package_digest.as_ref() {
+            canonical["packageDigest"] = serde_json::json!(package_digest);
         }
         let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
         let full = Sha256::digest(&bytes);
@@ -241,6 +263,7 @@ mod tests {
                 recipe: Some("Label by area; close duplicates.".into()),
                 package: false,
                 files: vec![],
+                package_digest: None,
                 knowledge_pack: None,
                 attestation_ref: None,
                 attestation_digest: None,
@@ -252,6 +275,17 @@ mod tests {
     #[test]
     fn valid_skill_has_no_errors() {
         assert!(skill().validation_errors().is_empty());
+    }
+
+    #[test]
+    fn packaged_skill_requires_full_package_digest() {
+        let mut s = skill();
+        s.spec.package = true;
+        s.spec.files = vec!["SKILL.md".into()];
+        assert!(!s.validation_errors().is_empty());
+        s.spec.package_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        assert!(s.validation_errors().is_empty());
+        assert!(s.version_digest().contains("sha256:"));
     }
 
     #[test]

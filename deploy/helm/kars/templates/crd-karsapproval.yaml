@@ -3,9 +3,6 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: karsapprovals.kars.azure.com
-  labels:
-    app.kubernetes.io/name: kars
-    app.kubernetes.io/component: crd
 spec:
   group: kars.azure.com
   names:
@@ -82,6 +79,15 @@ spec:
                       Identity of the human (or delegated principal) who decided. Recorded
                       verbatim into status and, for granted approvals, into the receipt.
                     type: string
+                  deciderRoles:
+                    description: Signed Bridge roles held at decision time.
+                    items:
+                      type: string
+                    type: array
+                  deciderSubject:
+                    description: Stable OIDC subject of the authenticated decider.
+                    nullable: true
+                    type: string
                   reason:
                     description: Optional justification, surfaced to auditors.
                     nullable: true
@@ -92,6 +98,21 @@ spec:
                 required:
                 - decider
                 - verdict
+                type: object
+              requestedBy:
+                description: |-
+                  Authenticated principal that originated the request. Bridge-authored
+                  approvals populate both stable subject and display name; controller-
+                  authored agent requests may leave this absent.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                  subject:
+                    type: string
+                required:
+                - name
+                - subject
                 type: object
               taskRef:
                 description: |-
@@ -117,10 +138,19 @@ spec:
             x-kubernetes-validations:
             - message: spec.action must be non-empty
               reason: FieldValueInvalid
-              rule: size(self.action) > 0
+              rule: size(self.action.kind) > 0
             - message: spec.taskRef.name must be non-empty
               reason: FieldValueInvalid
               rule: size(self.taskRef.name) > 0
+            - message: spec.taskRef and spec.action are immutable
+              reason: FieldValueForbidden
+              rule: self.taskRef == oldSelf.taskRef && self.action == oldSelf.action
+            - message: spec.ttl and spec.requestedBy are immutable
+              reason: FieldValueForbidden
+              rule: ((!has(self.ttl) && !has(oldSelf.ttl)) || (has(self.ttl) && has(oldSelf.ttl) && self.ttl == oldSelf.ttl)) && ((!has(self.requestedBy) && !has(oldSelf.requestedBy)) || (has(self.requestedBy) && has(oldSelf.requestedBy) && self.requestedBy == oldSelf.requestedBy))
+            - message: spec.decision is immutable once recorded
+              reason: FieldValueForbidden
+              rule: '!has(oldSelf.decision) || (has(self.decision) && self.decision == oldSelf.decision)'
           status:
             description: '`KarsApproval.status` — the controller is the sole writer.'
             nullable: true

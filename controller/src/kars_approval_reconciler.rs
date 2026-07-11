@@ -436,6 +436,8 @@ mod tests {
         let d = ApprovalDecision {
             verdict: "approve".to_string(),
             decider: "bob".to_string(),
+            decider_subject: Some("subject-bob".into()),
+            decider_roles: vec!["operator".into()],
             reason: Some("looks good".to_string()),
         };
         let out = evaluate(Some(&d), Some("sha256:aa"), Some("sha256:aa"), false);

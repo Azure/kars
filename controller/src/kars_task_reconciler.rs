@@ -1234,6 +1234,7 @@ fn stable_suffix(input: &str) -> String {
 const REQ_KIND_ANN: &str = "kars.azure.com/req-kind";
 const REQ_TARGET_ANN: &str = "kars.azure.com/req-target";
 const REQ_PORT_ANN: &str = "kars.azure.com/req-port";
+const REQ_TTL_ANN: &str = "kars.azure.com/req-ttl";
 /// Marks an egress approval whose grant has already been materialised, so the
 /// consumer is idempotent and never re-creates the EgressApproval.
 const REQ_GRANTED_ANN: &str = "kars.azure.com/req-granted";
@@ -1424,6 +1425,11 @@ async fn consume_approved_egress(client: &Client, ns: &str, task: &KarsTask, san
             .get(REQ_PORT_ANN)
             .and_then(|p| p.parse().ok())
             .unwrap_or(443);
+        let ttl = anns
+            .get(REQ_TTL_ANN)
+            .filter(|v| !v.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "PT8H".into());
         let appr_name = appr.name_any();
         let grant_name = format!("{task_name}-egg-{}", stable_suffix(&format!("{host}:{port}")));
         let egress: Api<EgressApproval> = Api::namespaced(client.clone(), ns);
@@ -1439,7 +1445,7 @@ async fn consume_approved_egress(client: &Client, ns: &str, task: &KarsTask, san
                 "sandbox": sandbox,
                 "hosts": [ { "host": host, "port": port } ],
                 "reason": format!("Approved via Bridge inbox for mission '{task_name}'"),
-                "ttl": "PT8H",
+                "ttl": ttl,
             },
         });
         if egress

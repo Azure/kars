@@ -7,14 +7,16 @@
 //! inference router is the only network path to an MCP server, so the sandbox's
 //! default-deny `NetworkPolicy` must admit the router→server hop without the
 //! operator also hand-writing a `networkPolicy.allowedEndpoints` entry. These
-//! helpers turn an `McpServer.spec.url` into the matching egress rule; the
+//! helpers turn an `McpServer.spec.url` (or controller-derived
+//! `status.endpoint` for managed presets) into the matching egress rule; the
 //! reconciler walks every referenced server and adds the derived rules.
 
 use serde_json::json;
 
 /// Auto-derive the NetworkPolicy egress rules that admit the sandbox router to
 /// every `McpServer` the sandbox references. For each referent we fetch its
-/// `spec.url`, parse it, and build the matching rule (see [`mcp_egress_rule`]),
+/// effective endpoint, parse it, and build the matching rule (see
+/// [`mcp_egress_rule`]),
 /// skipping any that duplicate `existing` rules or each other.
 ///
 /// A missing (`404`) referent is logged and skipped — the JWKS-mirror path
@@ -38,7 +40,11 @@ pub(crate) async fn derive_mcp_egress_rules(
             continue;
         }
         let url = match mcp_api.get(ref_name).await {
-            Ok(mcp) => mcp.spec.url.unwrap_or_default(),
+            Ok(mcp) => mcp
+                .spec
+                .url
+                .or_else(|| mcp.status.and_then(|s| s.endpoint))
+                .unwrap_or_default(),
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
                 tracing::warn!(
                     sandbox = %sandbox_name,

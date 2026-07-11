@@ -33,13 +33,17 @@ use serde::{Deserialize, Serialize};
 /// in the same namespace (or, if `crossNamespaceAllowed: true` on the
 /// server side, cluster-wide).
 ///
-/// ## Two authoring paths
+/// ## Three authoring paths
 ///
-/// The content fields (`url`, `oauth`, `productionMode`, `scopes`,
-/// `allowedTools`, `displayName`) are mutually exclusive with
-/// [`bundle_ref`](McpServerSpec::bundle_ref): either inline the values
-/// (no supply-chain attestation) or reference a signed OCI artifact
-/// (cosign-verified against the cluster `SignerPolicy`). The
+/// - `managed`: select a reviewed controller-owned in-cluster workload preset.
+/// - Inline `url`/auth fields: register an already-running external or private
+///   endpoint (no supply-chain attestation of the server workload).
+/// - [`bundle_ref`](McpServerSpec::bundle_ref): reference a signed OCI policy
+///   artifact (cosign-verified against the cluster `SignerPolicy`).
+///
+/// These source paths are mutually exclusive. `allowedTools`, `displayName`,
+/// and the `allowedSandboxes` selector remain deployment-time controls for the
+/// managed path. The
 /// `allowedSandboxes` selector is owned exclusively by the CR — one
 /// signed server bundle can be referenced by multiple `McpServer` CRs
 /// with different sandbox selectors.
@@ -67,6 +71,19 @@ pub struct McpServerSpec {
     /// `Degraded=True/SpecInvalid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+
+    /// Optional controller-managed in-cluster MCP workload.
+    ///
+    /// This is deliberately a closed preset enum rather than an arbitrary image
+    /// field. An operator who can author an `McpServer` must not be able to turn
+    /// the controller into a general-purpose privileged workload launcher.
+    /// Presets are reviewed, versioned with Kars, and materialized into the
+    /// dedicated managed-MCP namespace with a rootless security context.
+    ///
+    /// Mutually exclusive with `url` and `bundleRef`. The reconciler derives the
+    /// effective in-cluster Streamable-HTTP URL from the managed Service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<ManagedMcpConfig>,
 
     /// OAuth 2.1 configuration. Required when `productionMode: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +159,24 @@ pub struct McpServerSpec {
     /// CR field there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_from_env: Option<String>,
+}
+
+/// Controller-owned managed MCP workload selection.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedMcpConfig {
+    pub preset: ManagedMcpPreset,
+}
+
+/// Reviewed workload recipes the controller knows how to deploy safely.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManagedMcpPreset {
+    /// Microsoft's official Playwright MCP server (headless Chromium).
+    Playwright,
+    /// The MCP reference "everything" server used for deterministic protocol
+    /// and utility-tool verification.
+    Everything,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -223,6 +258,29 @@ pub struct McpServerStatus {
     /// Slice 1c.5 of `crd-well-oiled-machine`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_ref_digest: Option<String>,
+
+    /// `Managed` when `spec.managed` materializes an in-cluster workload;
+    /// otherwise `External`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+
+    /// Effective upstream Streamable-HTTP endpoint consumed by sandbox routers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+
+    /// Managed Deployment name (`namespace/name`) when mode is `Managed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_ref: Option<String>,
+
+    /// Tool names returned by the last successful upstream `tools/list` probe,
+    /// after applying `allowedTools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovered_tools: Option<Vec<String>>,
+
+    /// SHA-256 of the canonical discovered tool definitions. Lets operators and
+    /// admission/preflight detect catalog drift without exposing credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_schema_digest: Option<String>,
 }
 
 /// Minimal `LocalObjectReference`-shaped struct with `name` only — the
