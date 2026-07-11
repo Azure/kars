@@ -132,8 +132,26 @@ def test_evaluate_returns_deny_with_reason_on_allowed_false() -> None:
     assert d.matched_rule == "block-public-internet"
 
 
-def test_evaluate_grace_period_allows_first_n_failures(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Default grace = 3. First two failures pass; third fails closed.
+def test_evaluate_absent_env_blocks_first_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(governance, "FAIL_OPEN_GRACE", governance._parse_fail_open_grace(None))
+
+    def raise_(*_args: Any, **_kwargs: Any) -> None:
+        raise httpx.ConnectError("router down")
+
+    with mock.patch.object(governance.router_client, "call", side_effect=raise_):
+        decision = governance.evaluate("http_fetch", {"url": "x"})
+
+    assert not decision.allowed
+    assert "fail-closed" in (decision.reason or "").lower()
+
+
+def test_evaluate_grace_two_allows_exactly_two_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(governance, "FAIL_OPEN_GRACE", 2)
+
     def raise_(*_args: Any, **_kwargs: Any) -> None:
         raise httpx.ConnectError("router down")
 
@@ -142,13 +160,15 @@ def test_evaluate_grace_period_allows_first_n_failures(monkeypatch: pytest.Monke
         d2 = governance.evaluate("http_fetch", {"url": "x"})
         d3 = governance.evaluate("http_fetch", {"url": "x"})
 
-    assert d1.allowed and d2.allowed  # under grace
-    assert not d3.allowed  # grace exhausted → fail-closed
-    assert "fail-closed" in (d3.reason or "").lower()
+    assert d1.allowed and d2.allowed
+    assert not d3.allowed
 
 
-def test_evaluate_success_resets_failure_counter() -> None:
+def test_evaluate_success_resets_failure_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One successful call resets the failure counter to zero."""
+    monkeypatch.setattr(governance, "FAIL_OPEN_GRACE", 2)
 
     def raise_(*_args: Any, **_kwargs: Any) -> None:
         raise httpx.ConnectError("router down")
@@ -160,15 +180,17 @@ def test_evaluate_success_resets_failure_counter() -> None:
     with mock.patch.object(
         governance.router_client,
         "call",
-        return_value=_mock_response(200, {"allowed": True}),
+        return_value=_mock_response(200, {"allowed": True, "decision": "allow"}),
     ):
         governance.evaluate("x", {})  # success — resets
 
-    # Now we should get 2 more grace failures (counter reset)
+    # Now we should get exactly two more grace failures before blocking.
     with mock.patch.object(governance.router_client, "call", side_effect=raise_):
         d1 = governance.evaluate("x", {})
         d2 = governance.evaluate("x", {})
-        assert d1.allowed and d2.allowed  # counter was reset
+        d3 = governance.evaluate("x", {})
+        assert d1.allowed and d2.allowed
+        assert not d3.allowed
 
 
 def test_evaluate_non_2xx_treated_as_failure() -> None:
@@ -181,12 +203,44 @@ def test_evaluate_non_2xx_treated_as_failure() -> None:
             request=httpx.Request("POST", "http://127.0.0.1:8443/agt/evaluate"),
         ),
     ):
-        d1 = governance.evaluate("x", {})
-        governance.evaluate("x", {})  # consumes one grace slot; result not asserted
-        d3 = governance.evaluate("x", {})
+        decision = governance.evaluate("x", {})
 
-    assert d1.allowed  # under grace
-    assert not d3.allowed  # grace exhausted
+    assert not decision.allowed
+
+
+def test_evaluate_malformed_json_treated_as_failure() -> None:
+    response = httpx.Response(
+        status_code=200,
+        content=b"{not-json",
+        request=httpx.Request("POST", "http://127.0.0.1:8443/agt/evaluate"),
+    )
+    with mock.patch.object(governance.router_client, "call", return_value=response):
+        decision = governance.evaluate("x", {})
+
+    assert not decision.allowed
+    assert "fail-closed" in (decision.reason or "").lower()
+
+
+def test_repeated_connection_failures_do_not_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(governance, "FAIL_OPEN_GRACE", 2)
+
+    def raise_(*_args: Any, **_kwargs: Any) -> None:
+        raise httpx.ConnectError("router down")
+
+    with mock.patch.object(governance.router_client, "call", side_effect=raise_):
+        decisions = [governance.evaluate("x", {}) for _ in range(4)]
+
+    assert [d.allowed for d in decisions] == [True, True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, 0), ("-1", 0), ("2", 2), ("99", 10), ("invalid", 0)],
+)
+def test_parse_fail_open_grace_is_clamped(raw: str | None, expected: int) -> None:
+    assert governance._parse_fail_open_grace(raw) == expected
 
 
 # ── pre_tool_call hook integration ───────────────────────────────────

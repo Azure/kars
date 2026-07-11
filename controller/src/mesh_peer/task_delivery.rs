@@ -51,10 +51,22 @@ const RUN_ACK_ANNOTATION: &str = "kars.azure.com/run-ack";
 /// a run whose agent wasn't ready yet is retried a bounded number of times
 /// rather than recorded as a permanent timeout on the first miss.
 const RUN_ATTEMPTS_ANNOTATION: &str = "kars.azure.com/run-attempts";
-/// Max transient delivery attempts before a timeout is recorded as terminal.
-/// A freshly-launched sandbox can take ~30-90s to bring its agent onto the mesh;
-/// retrying every poll interval covers that warm-up window before giving up.
-const MAX_DELIVERY_ATTEMPTS: u32 = 6;
+/// Post-dispatch idle timeout retries are tracked independently from agent
+/// warm-up. Reusing the warm-up budget here made a 6-minute startup allowance
+/// turn into hours of repeated 180-second idle waits.
+const RUN_TIMEOUT_ATTEMPTS_ANNOTATION: &str = "kars.azure.com/run-timeout-attempts";
+const MAX_TIMEOUT_RETRIES: u32 = 3;
+
+/// A fresh AKS sandbox can take several minutes to pull images and join the mesh.
+/// Keep the local/kind default robust while allowing operators to tune the
+/// bounded warm-up budget.
+fn max_delivery_attempts() -> u32 {
+    std::env::var("KARS_MESH_DELIVERY_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.clamp(1, 360))
+        .unwrap_or(72)
+}
 /// Idle timeout: how long the controller waits with NO signal from the agent
 /// (neither a `task_progress` heartbeat nor the terminal `task_response`)
 /// before recording a delivery as dead. The native agent loop emits a
@@ -277,6 +289,13 @@ async fn deliver_for_task(
         .and_then(|a| a.get(RUN_ATTEMPTS_ANNOTATION))
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
+    let timeout_attempts = task
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(RUN_TIMEOUT_ATTEMPTS_ANNOTATION))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
 
     // Discover the running agent's mesh DID from the registry. The runtime
     // adapter registers under the sandbox name as a capability — harness
@@ -408,7 +427,7 @@ async fn deliver_for_task(
                 Vec::new(),
                 None,
                 false,
-                true,
+                false,
             )
         }
     };
@@ -418,11 +437,20 @@ async fn deliver_for_task(
     // terminal timeout. This is what makes an auto-launched standing-operation
     // run reliable: the run-request can be stamped at launch without racing the
     // sandbox's mesh warm-up.
-    if transient && attempts + 1 < MAX_DELIVERY_ATTEMPTS {
-        bump_attempts(state, &namespace, &name, attempts + 1).await?;
+    if transient && timeout_attempts < MAX_TIMEOUT_RETRIES {
+        bump_attempt_annotation(
+            state,
+            &namespace,
+            &name,
+            RUN_TIMEOUT_ATTEMPTS_ANNOTATION,
+            timeout_attempts + 1,
+        )
+        .await?;
         tracing::info!(
-            task = %name, attempt = attempts + 1, max = MAX_DELIVERY_ATTEMPTS,
-            "task-delivery: agent not ready — will retry on next poll"
+            task = %name,
+            attempt = timeout_attempts + 1,
+            max = MAX_TIMEOUT_RETRIES,
+            "task-delivery: agent went idle — retrying within timeout budget"
         );
         return Ok(());
     }
@@ -908,6 +936,16 @@ async fn bump_attempts(
     task: &str,
     attempts: u32,
 ) -> Result<()> {
+    bump_attempt_annotation(state, namespace, task, RUN_ATTEMPTS_ANNOTATION, attempts).await
+}
+
+async fn bump_attempt_annotation(
+    state: &Arc<MeshPeerState>,
+    namespace: &str,
+    task: &str,
+    annotation: &str,
+    attempts: u32,
+) -> Result<()> {
     let api_resource = kube::api::ApiResource {
         group: "kars.azure.com".into(),
         version: "v1alpha1".into(),
@@ -919,7 +957,7 @@ async fn bump_attempts(
         Api::namespaced_with(state.client.clone(), namespace, &api_resource);
     let patch = json!({
         "metadata": {
-            "annotations": { RUN_ATTEMPTS_ANNOTATION: attempts.to_string() }
+            "annotations": { annotation: attempts.to_string() }
         }
     });
     api.patch(
@@ -947,10 +985,11 @@ async fn handle_transient_miss(
     harness: &str,
     reason: &str,
 ) -> Result<()> {
-    if attempts + 1 < MAX_DELIVERY_ATTEMPTS {
+    let max_attempts = max_delivery_attempts();
+    if attempts + 1 < max_attempts {
         bump_attempts(state, namespace, task, attempts + 1).await?;
         tracing::info!(
-            task = %task, attempt = attempts + 1, max = MAX_DELIVERY_ATTEMPTS, reason,
+            task = %task, attempt = attempts + 1, max = max_attempts, reason,
             "task-delivery: agent not ready — will retry on next poll"
         );
         return Ok(());
@@ -963,7 +1002,7 @@ async fn handle_transient_miss(
         state,
         task,
         objective,
-        &format!("agent did not come online after {MAX_DELIVERY_ATTEMPTS} attempts: {reason}"),
+        &format!("agent did not come online after {max_attempts} attempts: {reason}"),
         false,
         &[],
         None,

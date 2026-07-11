@@ -16,9 +16,6 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: mcpservers.kars.azure.com
-  labels:
-    app.kubernetes.io/name: kars
-    app.kubernetes.io/component: crd
 spec:
   group: kars.azure.com
   names:
@@ -54,13 +51,17 @@ spec:
               in the same namespace (or, if `crossNamespaceAllowed: true` on the
               server side, cluster-wide).
 
-              ## Two authoring paths
+              ## Three authoring paths
 
-              The content fields (`url`, `oauth`, `productionMode`, `scopes`,
-              `allowedTools`, `displayName`) are mutually exclusive with
-              [`bundle_ref`](McpServerSpec::bundle_ref): either inline the values
-              (no supply-chain attestation) or reference a signed OCI artifact
-              (cosign-verified against the cluster `SignerPolicy`). The
+              - `managed`: select a reviewed controller-owned in-cluster workload preset.
+              - Inline `url`/auth fields: register an already-running external or private
+                endpoint (no supply-chain attestation of the server workload).
+              - [`bundle_ref`](McpServerSpec::bundle_ref): reference a signed OCI policy
+                artifact (cosign-verified against the cluster `SignerPolicy`).
+
+              These source paths are mutually exclusive. `allowedTools`, `displayName`,
+              and the `allowedSandboxes` selector remain deployment-time controls for the
+              managed path. The
               `allowedSandboxes` selector is owned exclusively by the CR — one
               signed server bundle can be referenced by multiple `McpServer` CRs
               with different sandbox selectors.
@@ -159,6 +160,29 @@ spec:
                 description: Optional human-readable label for operator-TUI display.
                 nullable: true
                 type: string
+              managed:
+                description: |-
+                  Optional controller-managed in-cluster MCP workload.
+
+                  This is deliberately a closed preset enum rather than an arbitrary image
+                  field. An operator who can author an `McpServer` must not be able to turn
+                  the controller into a general-purpose privileged workload launcher.
+                  Presets are reviewed, versioned with Kars, and materialized into the
+                  dedicated managed-MCP namespace with a rootless security context.
+
+                  Mutually exclusive with `url` and `bundleRef`. The reconciler derives the
+                  effective in-cluster Streamable-HTTP URL from the managed Service.
+                nullable: true
+                properties:
+                  preset:
+                    description: Reviewed workload recipes the controller knows how to deploy safely.
+                    enum:
+                    - playwright
+                    - everything
+                    type: string
+                required:
+                - preset
+                type: object
               oauth:
                 description: 'OAuth 2.1 configuration. Required when `productionMode: true`.'
                 nullable: true
@@ -223,16 +247,19 @@ spec:
             x-kubernetes-validations:
             - message: productionMode requires spec.oauth.issuer to be set
               reason: FieldValueInvalid
-              rule: has(self.bundleRef) || !has(self.productionMode) || self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)
+              rule: has(self.bundleRef) || has(self.managed) || !has(self.productionMode) || self.productionMode == false || (has(self.oauth) && size(self.oauth.issuer) > 0)
             - message: productionMode requires spec.url to begin with https://
               reason: FieldValueInvalid
-              rule: has(self.bundleRef) || !has(self.productionMode) || self.productionMode == false || (has(self.url) && self.url.startsWith('https://'))
+              rule: has(self.bundleRef) || has(self.managed) || !has(self.productionMode) || self.productionMode == false || (has(self.url) && self.url.startsWith('https://'))
             - message: spec.oauth.pkce, when set, must be 'S256' (RFC 7636 §4.2)
               reason: FieldValueInvalid
               rule: '!has(self.oauth) || !has(self.oauth.pkce) || self.oauth.pkce == ''S256'''
-            - message: spec.bundleRef is mutually exclusive with spec.url, spec.oauth, spec.productionMode, spec.scopes, spec.allowedTools, and spec.displayName
+            - message: spec.bundleRef is mutually exclusive with spec.url, spec.oauth, spec.productionMode, spec.scopes, spec.allowedTools, and spec.displayName, and spec.managed
               reason: FieldValueInvalid
-              rule: '!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.allowedTools) && !has(self.displayName))'
+              rule: '!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.allowedTools) && !has(self.displayName) && !has(self.managed))'
+            - message: spec.managed is mutually exclusive with spec.url, spec.oauth, spec.productionMode, spec.scopes, spec.bearerFromEnv, and spec.bundleRef
+              reason: FieldValueInvalid
+              rule: '!has(self.managed) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.bearerFromEnv) && !has(self.bundleRef))'
           status:
             nullable: true
             properties:
@@ -282,6 +309,18 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              discoveredTools:
+                description: |-
+                  Tool names returned by the last successful upstream `tools/list` probe,
+                  after applying `allowedTools`.
+                items:
+                  type: string
+                nullable: true
+                type: array
+              endpoint:
+                description: Effective upstream Streamable-HTTP endpoint consumed by sandbox routers.
+                nullable: true
+                type: string
               jwksConfigMapRef:
                 description: |-
                   Reference to the ConfigMap caching the issuer's JWKS. Present
@@ -297,6 +336,12 @@ spec:
                 type: object
               lastProbedAt:
                 description: Last health-check timestamp (RFC 3339).
+                nullable: true
+                type: string
+              mode:
+                description: |-
+                  `Managed` when `spec.managed` materializes an in-cluster workload;
+                  otherwise `External`.
                 nullable: true
                 type: string
               observedGeneration:
@@ -323,6 +368,16 @@ spec:
                 required:
                 - name
                 type: object
+              toolSchemaDigest:
+                description: |-
+                  SHA-256 of the canonical discovered tool definitions. Lets operators and
+                  admission/preflight detect catalog drift without exposing credentials.
+                nullable: true
+                type: string
+              workloadRef:
+                description: Managed Deployment name (`namespace/name`) when mode is `Managed`.
+                nullable: true
+                type: string
             type: object
         required:
         - spec

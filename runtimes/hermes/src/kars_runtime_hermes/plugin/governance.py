@@ -30,14 +30,19 @@ from . import router_client
 
 logger = logging.getLogger("kars.hermes.governance")
 
-# Fail-closed counter — at FAIL_CLOSED_THRESHOLD consecutive failures
-# to reach /agt/evaluate, we block. Below the threshold we allow with a
-# warning so the agent doesn't wedge during a transient router restart.
-#
-# Configurable via env per the runtime contract; capped at 10.
-FAIL_CLOSED_THRESHOLD: int = max(
-    0,
-    min(10, int(os.environ.get("KARS_AGT_EVALUATE_FAIL_OPEN_GRACE", "3"))),
+def _parse_fail_open_grace(raw: str | None) -> int:
+    """Parse the explicit fail-open allowance, clamped to the contract range."""
+    try:
+        value = int(raw or "0")
+    except ValueError:
+        return 0
+    return max(0, min(10, value))
+
+
+# Number of consecutive /agt/evaluate failures tolerated before blocking.
+# The secure default is zero: the first failure fails closed.
+FAIL_OPEN_GRACE = _parse_fail_open_grace(
+    os.environ.get("KARS_AGT_EVALUATE_FAIL_OPEN_GRACE")
 )
 
 # Process-wide counter (Hermes is single-process per pod, so a module
@@ -173,11 +178,10 @@ def _grace_or_block(failure_reason: str) -> GovernanceDecision:
     """Apply fail-closed grace period semantics."""
     global _consecutive_failures
     _consecutive_failures += 1
-    if FAIL_CLOSED_THRESHOLD == 0 or _consecutive_failures >= FAIL_CLOSED_THRESHOLD:
+    if _consecutive_failures > FAIL_OPEN_GRACE:
         logger.warning(
-            "AGT governance unreachable (%d/%d failures) — failing closed: %s",
+            "AGT governance unreachable (%d consecutive failures) — failing closed: %s",
             _consecutive_failures,
-            FAIL_CLOSED_THRESHOLD,
             failure_reason,
         )
         return GovernanceDecision(
@@ -186,9 +190,9 @@ def _grace_or_block(failure_reason: str) -> GovernanceDecision:
             reason=f"AGT governance unreachable (fail-closed): {failure_reason}",
         )
     logger.warning(
-        "AGT governance unreachable (%d/%d failures) — allowing under grace: %s",
+        "AGT governance unreachable (%d/%d grace failures) — allowing under explicit grace: %s",
         _consecutive_failures,
-        FAIL_CLOSED_THRESHOLD,
+        FAIL_OPEN_GRACE,
         failure_reason,
     )
     return GovernanceDecision(allowed=True, decision="allow")
@@ -208,21 +212,23 @@ def evaluate(tool_name: str, params: dict[str, Any]) -> GovernanceDecision:
     except Exception as exc:  # noqa: BLE001 — fail-closed contract
         return _grace_or_block(repr(exc))
 
-    if resp.status_code >= 400:
+    if resp.status_code < 200 or resp.status_code >= 300:
         return _grace_or_block(f"HTTP {resp.status_code}")
 
     try:
-        data: dict[str, Any] = resp.json()
+        data: Any = resp.json()
     except Exception as exc:  # noqa: BLE001
         return _grace_or_block(f"non-JSON response: {exc}")
+    if not isinstance(data, dict) or not isinstance(data.get("allowed"), bool):
+        return _grace_or_block("invalid governance decision")
 
-    # Success path resets the consecutive-failure counter.
+    # Only a valid parsed router decision resets the consecutive-failure counter.
     _consecutive_failures = 0
 
-    allowed = bool(data.get("allowed", True))
+    allowed = data["allowed"]
     return GovernanceDecision(
         allowed=allowed,
-        decision=str(data.get("decision", "allow")),
+        decision=str(data.get("decision", "allow" if allowed else "deny")),
         reason=data.get("reason"),
         matched_rule=data.get("matched_rule"),
         rate_limited=bool(data.get("rate_limited", False)),
@@ -277,7 +283,7 @@ def register(ctx: Any) -> None:  # noqa: ANN401
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     logger.info(
         "AGT governance pre_tool_call hook registered (fail-closed grace: %d)",
-        FAIL_CLOSED_THRESHOLD,
+        FAIL_OPEN_GRACE,
     )
 
 
@@ -285,4 +291,3 @@ def _reset_for_testing() -> None:
     """Test helper — reset module state for unit tests."""
     global _consecutive_failures
     _consecutive_failures = 0
-

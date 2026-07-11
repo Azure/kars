@@ -291,7 +291,13 @@ pub struct PredicateApproval {
     /// `approve` or `deny`.
     pub verdict: String,
     pub decider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decider_subject: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub decider_roles: Vec<String>,
     pub decided_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_envelope_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_tier: Option<i32>,
 }
@@ -652,7 +658,19 @@ pub fn approval_facts(approvals: &[crate::kars_approval::KarsApproval]) -> Vec<P
                 summary: a.spec.action.summary.clone(),
                 verdict: verdict.to_string(),
                 decider: status.decider.clone().unwrap_or_default(),
+                decider_subject: a
+                    .spec
+                    .decision
+                    .as_ref()
+                    .and_then(|d| d.decider_subject.clone()),
+                decider_roles: a
+                    .spec
+                    .decision
+                    .as_ref()
+                    .map(|d| d.decider_roles.clone())
+                    .unwrap_or_default(),
                 decided_at: status.decided_at.clone().unwrap_or_default(),
+                bound_envelope_digest: status.bound_envelope_digest.clone(),
                 requested_tier: a.spec.action.requested_tier,
             })
         })
@@ -843,7 +861,10 @@ mod tests {
             summary: "raise to tier 4 for the migration".to_string(),
             verdict: "approve".to_string(),
             decider: "alice@example.com".to_string(),
+            decider_subject: Some("oidc-subject-alice".to_string()),
+            decider_roles: vec!["operator".to_string()],
             decided_at: "2026-06-26T10:00:00+00:00".to_string(),
+            bound_envelope_digest: Some("sha256:abc".to_string()),
             requested_tier: Some(4),
         }];
         let st = build_statement(
@@ -880,6 +901,7 @@ mod tests {
                         summary: "ok?".to_string(),
                         ..Default::default()
                     },
+                    requested_by: None,
                     ttl: None,
                     decision: None,
                 },

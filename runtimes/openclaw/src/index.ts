@@ -394,7 +394,7 @@ import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MES
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
-import { processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
+import { createAGTPolicyEvaluator, processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
 import { createHarvestMarker, collectAndShipArtifacts, latin1Safe } from "./core/artifact-collect.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
@@ -489,6 +489,7 @@ async function startProactiveOffloadIfNeeded(
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
   // Node hosts don't participate in the mesh — skip entirely.
   if (process.env.AGT_SKIP_INIT === "1") return;
+  const evaluateAGTPolicy = createAGTPolicyEvaluator(log);
 
   // Process-level singleton — the gateway loads this plugin in 5 parallel contexts.
   // Use a synchronous lock (set BEFORE any async work) to prevent race conditions.
@@ -953,11 +954,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
       // AGT policy gate — validate incoming mesh message via router PolicyEngine.
       // Checks trust score of sender against mesh-receive-untrusted rule.
-      // Non-blocking: on error or timeout, fail-open (log and continue).
+      // Governance failures use the configured grace, then fail closed.
       // This runs AFTER E2E decryption (handled by SDK) — encryption is not affected.
       if (message?.type === "task_request") {
         try {
-          const http = await import("node:http");
           // Look up sender's trust score via router (which forwards with admin token)
           let senderTrustScore = 0;
           try {
@@ -991,25 +991,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           }
 
           // Evaluate mesh:receive action with sender trust context
-          const evalPayload = JSON.stringify({
-            action: "mesh:receive",
+          const evalData = await evaluateAGTPolicy("mesh:receive", {
+            trust_score: senderTrustScore,
+            from_agent: fromName,
             agent_id: fromAmid,
-            context: { trust_score: senderTrustScore, from_agent: fromName },
           });
-          const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request(routerUrl("/agt/evaluate"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
-            }, (res) => {
-              let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
-            });
-            req.on("error", reject);
-            req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
-            req.write(evalPayload);
-            req.end();
-          });
-          const evalData = JSON.parse(evalResult);
-          if (evalData.decision === "deny") {
+          if (!evalData.allowed) {
             log.warn(`AGT policy DENIED mesh:receive from ${fromName} (trust=${senderTrustScore}): ${evalData.reason}`);
             // Send rejection back via E2E encrypted relay
             if (agtMeshClient) {
@@ -1027,8 +1014,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           }
           log.info(`AGT policy allowed mesh:receive from ${fromName} (trust=${senderTrustScore})`);
         } catch (policyErr: any) {
-          // Fail-open: router unreachable or error — log and continue processing
-          log.warn(`AGT mesh policy check failed (proceeding): ${policyErr.message}`);
+          log.warn(`AGT mesh policy check failed closed: ${policyErr.message}`);
+          return;
         }
       }
 
@@ -1044,42 +1031,23 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         const taskContent = message?.content || content;
 
         // AGT policy: evaluate task:execute before dispatching to native agent
-        let taskAllowed = true;
-        try {
-          const http = await import("node:http");
-          const evalPayload = JSON.stringify({
-            action: "task:execute",
-            context: { from_agent: fromName, task_preview: String(taskContent).slice(0, 500) },
-          });
-          const evalResult = await new Promise<string>((resolve, reject) => {
-            const req = http.request(routerUrl("/agt/evaluate"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(evalPayload) },
-            }, (res) => {
-              let d = ""; res.on("data", (c: Buffer) => { d += c.toString(); }); res.on("end", () => resolve(d));
+        const evalData = await evaluateAGTPolicy("task:execute", {
+          from_agent: fromName,
+          task_preview: String(taskContent).slice(0, 500),
+        });
+        if (!evalData.allowed) {
+          log.warn(`AGT policy DENIED task:execute from ${fromName}: ${evalData.reason}`);
+          try {
+            await agtMeshClient.send(fromAmid, {
+              type: "task_response",
+              content: `Task denied by AGT governance: ${evalData.reason}`,
+              ok: false,
+              from_agent: agtSandboxName,
+              timestamp: new Date().toISOString(),
             });
-            req.on("error", reject);
-            req.setTimeout(2000, () => { req.destroy(); reject(new Error("timeout")); });
-            req.write(evalPayload);
-            req.end();
-          });
-          const evalData = JSON.parse(evalResult);
-          if (evalData.decision === "deny") {
-            log.warn(`AGT policy DENIED task:execute from ${fromName}: ${evalData.reason}`);
-            taskAllowed = false;
-            try {
-              await agtMeshClient.send(fromAmid, {
-                type: "task_response",
-                content: `Task denied by AGT governance: ${evalData.reason}`,
-                ok: false,
-                from_agent: agtSandboxName,
-                timestamp: new Date().toISOString(),
-              });
-            } catch { /* best effort */ }
-          }
-        } catch { /* router unavailable — allow (fail-open) */ }
-
-        if (!taskAllowed) return;
+          } catch { /* best effort */ }
+          return;
+        }
 
         try {
           // Execute the mission through the REAL OpenClaw agent harness — the
@@ -2901,68 +2869,19 @@ const azureClawPlugin = definePluginEntry({
     memorySyncToolCount = 0;
     memorySyncBuffer = [];
 
-    // Consecutive governance failure counter for fail-closed behavior
-    let govFailCount = { value: 0 };
-    const FAIL_CLOSED_THRESHOLD = 3;
+    const evaluateAGTPolicy = createAGTPolicyEvaluator(log);
 
-    async function evaluateAGTPolicy(toolName: string, params: Record<string, unknown>): Promise<{ allowed: boolean; rule?: string; reason?: string }> {
+    function agtAction(toolName: string, params: Record<string, unknown>): string {
       // Build action string in AGT format: "category:detail"
       // Map tool names to AGT action categories for policy matching
       const paramStr = Object.values(params).map(v => typeof v === "string" ? v : "").join(" ").trim();
-      let action: string;
       if (toolName === "exec_command" || toolName === "foundry_code_execute") {
-        action = `shell:${paramStr}`;
-      } else if (toolName === "http_fetch") {
-        action = `egress:${paramStr}`;
-      } else {
-        action = `tool:${toolName}:${paramStr}`;
+        return `shell:${paramStr}`;
       }
-
-      try {
-        const http = await import("node:http");
-        const postData = JSON.stringify({ action, context: { tool: toolName } });
-        const result = await new Promise<{ allowed: boolean; matched_rule?: string; reason?: string }>((resolve, _reject) => {
-          const req = http.request(routerUrl("/agt/evaluate"), {
-            method: "POST", timeout: 2000,
-            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
-          }, (res) => {
-            let data = "";
-            res.on("data", (c: Buffer) => { data += c.toString(); });
-            res.on("end", () => {
-              try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); }
-            });
-          });
-          req.on("error", () => {
-            govFailCount.value++;
-            if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-              resolve({ allowed: false, reason: "AGT governance unreachable (fail-closed)" });
-            } else {
-              log.warn(`AGT governance unreachable (${govFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
-              resolve({ allowed: true });
-            }
-          });
-          req.on("timeout", () => {
-            req.destroy();
-            govFailCount.value++;
-            if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-              resolve({ allowed: false, reason: "AGT governance timeout (fail-closed)" });
-            } else {
-              log.warn(`AGT governance timeout (${govFailCount.value}/${FAIL_CLOSED_THRESHOLD}), allowing (grace)`);
-              resolve({ allowed: true });
-            }
-          });
-          req.write(postData);
-          req.end();
-        });
-        if (result.allowed !== false) govFailCount.value = 0; // reset on success
-        return { allowed: result.allowed, rule: result.matched_rule, reason: result.reason };
-      } catch {
-        govFailCount.value++;
-        if (govFailCount.value >= FAIL_CLOSED_THRESHOLD) {
-          return { allowed: false, reason: "AGT governance error (fail-closed)" };
-        }
-        return { allowed: true };
+      if (toolName === "http_fetch") {
+        return `egress:${paramStr}`;
       }
+      return `tool:${toolName}:${paramStr}`;
     }
 
     const _origRegisterTool = api.registerTool.bind(api);
@@ -2972,10 +2891,10 @@ const azureClawPlugin = definePluginEntry({
         ...tool,
         execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => {
           // AGT policy gate — forward to router for evaluation
-          const decision = await evaluateAGTPolicy(tool.name, params);
+          const decision = await evaluateAGTPolicy(agtAction(tool.name, params), { tool: tool.name });
           if (!decision.allowed) {
-            const msg = `⛔ Blocked by AGT policy: rule "${decision.rule}" — ${decision.reason || "action denied"}`;
-            log.warn(`AGT policy DENIED ${tool.name}: rule=${decision.rule}`);
+            const msg = `⛔ Blocked by AGT policy: rule "${decision.matched_rule}" — ${decision.reason || "action denied"}`;
+            log.warn(`AGT policy DENIED ${tool.name}: rule=${decision.matched_rule}`);
             return { content: [{ type: "text", text: msg }] };
           }
 

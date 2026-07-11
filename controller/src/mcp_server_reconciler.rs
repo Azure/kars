@@ -37,22 +37,25 @@ use base64::Engine;
 use ed25519_dalek::SigningKey;
 use futures::StreamExt;
 use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, Service};
+use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{
     Client, ResourceExt,
-    api::{Api, ListParams, ObjectMeta, Patch, PatchParams},
+    api::{Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams},
     runtime::controller::{Action, Controller},
 };
 use rand::RngCore;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::mcp_server::{LocalObjectRef, McpServer, McpServerStatus};
+use crate::mcp_server::{LocalObjectRef, ManagedMcpPreset, McpServer, McpServerStatus};
 use crate::status::conditions::{self, reason, status as cond_status};
-use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
 
 /// Field manager for SSA patches emitted by this reconciler. A unique
 /// suffix per reconciler is the §10.4 #1 craftsmanship requirement —
@@ -83,6 +86,22 @@ const MAX_JWKS_BYTES: usize = 256 * 1024;
 /// reconciler should never hang on a slow issuer.
 const HTTP_TIMEOUT_SECS: u64 = 10;
 
+/// Namespace holding controller-managed MCP workloads. Keeping third-party
+/// servers out of `kars-system` makes their trust boundary and resource use
+/// visible, while sandbox NetworkPolicies can admit only this namespace/port.
+const MANAGED_MCP_NAMESPACE_DEFAULT: &str = "kars-mcp";
+
+/// Immutable official Playwright MCP multi-arch image index resolved on
+/// 2026-07-11. Operators may override it cluster-wide for private-registry
+/// mirroring via `MCP_PLAYWRIGHT_IMAGE`; the CR cannot choose arbitrary images.
+const PLAYWRIGHT_IMAGE_DEFAULT: &str = "mcr.microsoft.com/playwright/mcp@sha256:3d871c22ea2d4cca0966e2cfb1860e1cb03eb7353725a3d6cffd133296fb04eb";
+
+/// Kars-built image containing
+/// `@modelcontextprotocol/server-everything@2026.7.4`. The release pipeline
+/// publishes it alongside the other Kars images; private clusters override via
+/// `MCP_EVERYTHING_IMAGE`.
+const EVERYTHING_IMAGE_DEFAULT: &str = "ghcr.io/azure/kars/mcp-everything:latest";
+
 /// Requeue cadence on success.
 const REQUEUE_OK: Duration = Duration::from_secs(300);
 
@@ -95,12 +114,125 @@ enum ReconcileError {
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("MCP configuration error: {0}")]
+    Configuration(String),
 }
 
 struct Ctx {
     client: Client,
     /// Override hook for tests — swap the JWKS fetcher with a mock.
     jwks_fetcher: Arc<dyn JwksFetcher>,
+    probe_client: reqwest::Client,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedWorkloadPlan {
+    namespace: String,
+    workload_name: String,
+    image: String,
+    port: u16,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    cpu_request: &'static str,
+    memory_request: &'static str,
+    cpu_limit: &'static str,
+    memory_limit: &'static str,
+}
+
+impl ManagedWorkloadPlan {
+    fn endpoint(&self) -> String {
+        format!(
+            "http://{}.{}.svc.cluster.local:{}/mcp",
+            self.workload_name, self.namespace, self.port
+        )
+    }
+
+    fn workload_ref(&self) -> String {
+        format!("{}/{}", self.namespace, self.workload_name)
+    }
+}
+
+fn managed_namespace() -> String {
+    std::env::var("MCP_MANAGED_NAMESPACE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| MANAGED_MCP_NAMESPACE_DEFAULT.to_string())
+}
+
+fn managed_workload_plan(
+    source_namespace: &str,
+    name: &str,
+    uid: Option<&str>,
+    preset: &ManagedMcpPreset,
+) -> ManagedWorkloadPlan {
+    let namespace = managed_namespace();
+    let identity = format!("{source_namespace}/{}", uid.unwrap_or(name));
+    let suffix = &hex::encode(Sha256::digest(identity.as_bytes()))[..10];
+    let max_name_len = 63usize.saturating_sub("mcp--".len() + suffix.len());
+    let trimmed_name = name.trim_matches('-');
+    let safe_name = if trimmed_name.len() > max_name_len {
+        trimmed_name[..max_name_len].trim_end_matches('-')
+    } else {
+        trimmed_name
+    };
+    let workload_name = format!("mcp-{safe_name}-{suffix}");
+    match preset {
+        ManagedMcpPreset::Playwright => {
+            let image = std::env::var("MCP_PLAYWRIGHT_IMAGE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| PLAYWRIGHT_IMAGE_DEFAULT.to_string());
+            let allowed_hosts = format!(
+                "{workload_name}.{namespace}.svc.cluster.local:8931,\
+                 {workload_name}.{namespace}:8931,{workload_name}:8931,\
+                 localhost:8931,localhost"
+            )
+            .replace(' ', "");
+            ManagedWorkloadPlan {
+                namespace,
+                workload_name,
+                image,
+                port: 8931,
+                args: vec![
+                    "--port=8931".into(),
+                    "--host=0.0.0.0".into(),
+                    "--headless".into(),
+                    "--browser=chromium".into(),
+                    "--no-sandbox".into(),
+                    format!("--allowed-hosts={allowed_hosts}"),
+                ],
+                env: Vec::new(),
+                cpu_request: "250m",
+                memory_request: "512Mi",
+                cpu_limit: "2",
+                memory_limit: "2Gi",
+            }
+        }
+        ManagedMcpPreset::Everything => {
+            let image = std::env::var("MCP_EVERYTHING_IMAGE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| EVERYTHING_IMAGE_DEFAULT.to_string());
+            ManagedWorkloadPlan {
+                namespace,
+                workload_name,
+                image,
+                port: 3001,
+                args: Vec::new(),
+                env: vec![("PORT".into(), "3001".into())],
+                cpu_request: "50m",
+                memory_request: "128Mi",
+                cpu_limit: "500m",
+                memory_limit: "512Mi",
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UpstreamProbe {
+    tool_names: Vec<String>,
+    schema_digest: String,
 }
 
 /// Pluggable JWKS fetcher — production uses [`HttpJwksFetcher`], tests
@@ -244,6 +376,433 @@ fn parse_jwks_key_count(raw: &[u8]) -> Result<usize, FetchError> {
     Ok(keys.len())
 }
 
+async fn ensure_managed_namespace(client: &Client, namespace: &str) -> Result<(), ReconcileError> {
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let body = json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": namespace,
+            "labels": {
+                "app.kubernetes.io/name": "kars-managed-mcp",
+                "app.kubernetes.io/managed-by": "kars-controller",
+                "kubernetes.io/metadata.name": namespace,
+                "pod-security.kubernetes.io/enforce": "restricted",
+                "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/warn": "restricted"
+            }
+        }
+    });
+    namespaces
+        .patch(
+            namespace,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(body),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn mirror_managed_pull_secret(
+    client: &Client,
+    namespace: &str,
+) -> Result<Option<String>, ReconcileError> {
+    let Some(secret_name) = std::env::var("IMAGE_PULL_SECRET_NAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let source_namespace = std::env::var("POD_NAMESPACE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "kars-system".to_string());
+    let source: Api<Secret> = Api::namespaced(client.clone(), &source_namespace);
+    let target: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let secret = source.get(&secret_name).await?;
+    let body = Secret {
+        metadata: ObjectMeta {
+            name: Some(secret_name.clone()),
+            labels: Some(BTreeMap::from([
+                (
+                    "app.kubernetes.io/managed-by".into(),
+                    "kars-controller".into(),
+                ),
+                (
+                    "app.kubernetes.io/part-of".into(),
+                    "kars-managed-mcp".into(),
+                ),
+            ])),
+            ..Default::default()
+        },
+        type_: secret.type_,
+        data: secret.data,
+        string_data: secret.string_data,
+        ..Default::default()
+    };
+    target
+        .patch(
+            &secret_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(body),
+        )
+        .await?;
+    Ok(Some(secret_name))
+}
+
+async fn ensure_managed_workload(
+    client: &Client,
+    owner: &str,
+    plan: &ManagedWorkloadPlan,
+) -> Result<bool, ReconcileError> {
+    ensure_managed_namespace(client, &plan.namespace).await?;
+    let pull_secret = mirror_managed_pull_secret(client, &plan.namespace).await?;
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), &plan.namespace);
+    let services: Api<Service> = Api::namespaced(client.clone(), &plan.namespace);
+    let policies: Api<NetworkPolicy> = Api::namespaced(client.clone(), &plan.namespace);
+
+    let labels = json!({
+        "app.kubernetes.io/name": plan.workload_name,
+        "app.kubernetes.io/component": "mcp-server",
+        "app.kubernetes.io/managed-by": "kars-controller",
+        "kars.azure.com/mcp-server": owner
+    });
+    let env: Vec<serde_json::Value> = plan
+        .env
+        .iter()
+        .map(|(name, value)| json!({"name": name, "value": value}))
+        .collect();
+    let image_pull_secrets: Vec<serde_json::Value> = pull_secret
+        .iter()
+        .map(|name| json!({"name": name}))
+        .collect();
+    let deployment = json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": plan.workload_name,
+            "namespace": plan.namespace,
+            "labels": labels
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {"matchLabels": {"kars.azure.com/mcp-server": owner}},
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {
+                    "securityContext": {
+                        "runAsNonRoot": true,
+                        "runAsUser": 1000,
+                        "seccompProfile": {"type": "RuntimeDefault"}
+                    },
+                    "imagePullSecrets": image_pull_secrets,
+                    "containers": [{
+                        "name": "mcp",
+                        "image": plan.image,
+                        "imagePullPolicy": "IfNotPresent",
+                        "args": plan.args,
+                        "env": env,
+                        "ports": [{"name": "mcp", "containerPort": plan.port}],
+                        "readinessProbe": {
+                            "tcpSocket": {"port": "mcp"},
+                            "initialDelaySeconds": 3,
+                            "periodSeconds": 5
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {"drop": ["ALL"]}
+                        },
+                        "resources": {
+                            "requests": {
+                                "cpu": plan.cpu_request,
+                                "memory": plan.memory_request
+                            },
+                            "limits": {
+                                "cpu": plan.cpu_limit,
+                                "memory": plan.memory_limit
+                            }
+                        }
+                    }]
+                }
+            }
+        }
+    });
+    deployments
+        .patch(
+            &plan.workload_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(deployment),
+        )
+        .await?;
+
+    let service = json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": plan.workload_name,
+            "namespace": plan.namespace,
+            "labels": labels
+        },
+        "spec": {
+            "selector": {"kars.azure.com/mcp-server": owner},
+            "ports": [{"name": "mcp", "port": plan.port, "targetPort": "mcp"}]
+        }
+    });
+    services
+        .patch(
+            &plan.workload_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(service),
+        )
+        .await?;
+
+    // Only sandbox routers and the controller namespace may initiate MCP
+    // sessions. This is ingress isolation; preset-specific browser egress is
+    // governed separately by tool policy and remains visible in the witness.
+    let policy = json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": plan.workload_name,
+            "namespace": plan.namespace,
+            "labels": labels
+        },
+        "spec": {
+            "podSelector": {"matchLabels": {"kars.azure.com/mcp-server": owner}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [
+                    {"namespaceSelector": {"matchLabels": {"kars.azure.com/role": "sandbox"}}},
+                    {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kars-system"}}}
+                ],
+                "ports": [{"protocol": "TCP", "port": plan.port}]
+            }]
+        }
+    });
+    policies
+        .patch(
+            &plan.workload_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(policy),
+        )
+        .await?;
+
+    let current = deployments.get(&plan.workload_name).await?;
+    let ready = current
+        .status
+        .as_ref()
+        .and_then(|s| s.ready_replicas)
+        .unwrap_or(0)
+        >= 1;
+    Ok(ready)
+}
+
+async fn cleanup_managed_workload(
+    client: &Client,
+    workload_ref: &str,
+) -> Result<(), ReconcileError> {
+    let (namespace, name) = workload_ref.split_once('/').ok_or_else(|| {
+        ReconcileError::Configuration(format!(
+            "invalid managed MCP workloadRef '{workload_ref}'"
+        ))
+    })?;
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    let services: Api<Service> = Api::namespaced(client.clone(), namespace);
+    let policies: Api<NetworkPolicy> = Api::namespaced(client.clone(), namespace);
+    for result in [
+        deployments
+            .delete(name, &DeleteParams::default())
+            .await
+            .map(|_| ()),
+        services
+            .delete(name, &DeleteParams::default())
+            .await
+            .map(|_| ()),
+        policies
+            .delete(name, &DeleteParams::default())
+            .await
+            .map(|_| ()),
+    ] {
+        if let Err(e) = result
+            && !matches!(e, kube::Error::Api(ref ae) if ae.code == 404)
+        {
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
+fn extract_jsonrpc_payload(content_type: &str, body: &str) -> Result<serde_json::Value, String> {
+    if content_type.contains("text/event-stream") {
+        for line in body.lines() {
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.trim();
+                if !data.is_empty() {
+                    return serde_json::from_str(data)
+                        .map_err(|e| format!("invalid SSE JSON-RPC payload: {e}"));
+                }
+            }
+        }
+        return Err("SSE response carried no data event".into());
+    }
+    serde_json::from_str(body).map_err(|e| format!("invalid JSON-RPC payload: {e}"))
+}
+
+async fn probe_upstream_tools(
+    client: &reqwest::Client,
+    endpoint: &str,
+    allowed_tools: &[String],
+) -> Result<UpstreamProbe, String> {
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": "kars-controller-initialize",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "kars-controller", "version": env!("CARGO_PKG_VERSION")}
+        }
+    });
+    let init = client
+        .post(endpoint)
+        .header("accept", "application/json, text/event-stream")
+        .json(&initialize)
+        .send()
+        .await
+        .map_err(|e| format!("initialize request failed: {e}"))?;
+    if !init.status().is_success() {
+        return Err(format!("initialize returned HTTP {}", init.status()));
+    }
+    let session = init
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let init_content_type = init
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let init_body = init
+        .text()
+        .await
+        .map_err(|e| format!("initialize body read failed: {e}"))?;
+    let init_value = extract_jsonrpc_payload(&init_content_type, &init_body)?;
+    if let Some(error) = init_value.get("error") {
+        return Err(format!("initialize JSON-RPC error: {error}"));
+    }
+    let protocol = init_value
+        .pointer("/result/protocolVersion")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "initialize result missing protocolVersion".to_string())?
+        .to_string();
+
+    let result = async {
+        let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+        let mut initialized_request = client
+            .post(endpoint)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", &protocol)
+            .json(&initialized);
+        if let Some(session_id) = session.as_deref() {
+            initialized_request = initialized_request.header("mcp-session-id", session_id);
+        }
+        let response = initialized_request
+            .send()
+            .await
+            .map_err(|e| format!("notifications/initialized failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "notifications/initialized returned HTTP {}",
+                response.status()
+            ));
+        }
+
+        let list = json!({
+            "jsonrpc": "2.0",
+            "id": "kars-controller-tools-list",
+            "method": "tools/list",
+            "params": {}
+        });
+        let mut request = client
+            .post(endpoint)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", &protocol)
+            .json(&list);
+        if let Some(session_id) = session.as_deref() {
+            request = request.header("mcp-session-id", session_id);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("tools/list request failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("tools/list returned HTTP {}", response.status()));
+        }
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("tools/list body read failed: {e}"))?;
+        let value = extract_jsonrpc_payload(&content_type, &body)?;
+        if let Some(error) = value.get("error") {
+            return Err(format!("tools/list JSON-RPC error: {error}"));
+        }
+        let tools = value
+            .pointer("/result/tools")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "tools/list response missing result.tools".to_string())?;
+        let allow_all = allowed_tools.iter().any(|t| t == "*");
+        let mut definitions: Vec<serde_json::Value> = tools
+            .iter()
+            .filter(|tool| {
+                let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                allow_all || allowed_tools.iter().any(|allowed| allowed == name)
+            })
+            .cloned()
+            .collect();
+        definitions.sort_by(|a, b| {
+            a.get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or(""))
+        });
+        if definitions.is_empty() {
+            return Err(format!(
+                "upstream exposed no tools matching allowedTools={allowed_tools:?}"
+            ));
+        }
+        let tool_names = definitions
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        let canonical =
+            serde_json::to_vec(&definitions).map_err(|e| format!("tool catalog serialize: {e}"))?;
+        let schema_digest = format!("sha256:{}", hex::encode(Sha256::digest(&canonical)));
+        Ok(UpstreamProbe {
+            tool_names,
+            schema_digest,
+        })
+    }
+    .await;
+
+    if let Some(session_id) = session.as_deref() {
+        let _ = client
+            .delete(endpoint)
+            .header("mcp-session-id", session_id)
+            .header("mcp-protocol-version", &protocol)
+            .send()
+            .await;
+    }
+    result
+}
+
 async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
     let name = mcp.name_any();
     let ns = mcp.namespace().unwrap_or_else(|| "kars-system".into());
@@ -255,7 +814,7 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     // Deletion path — finalizer-cascading cleanup.
     if mcp.metadata.deletion_timestamp.is_some() {
-        return finalize(&api, &secrets, &configmaps, &mcp, &name).await;
+        return finalize(&ctx.client, &api, &secrets, &configmaps, &mcp, &name).await;
     }
 
     // Add finalizer if missing.
@@ -287,7 +846,69 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // path) or fetch + cosign-verify the referenced OCI bundle and
     // merge its content onto the CR's `allowedSandboxes` selector
     // (signed path). See [`resolve_mcp_source`] doc-comment.
-    let (effective_spec, bundle_ref_digest, source_degraded) = resolve_mcp_source(&mcp).await;
+    let (mut effective_spec, bundle_ref_digest, source_degraded) = resolve_mcp_source(&mcp).await;
+    let mut managed_plan: Option<ManagedWorkloadPlan> = None;
+    let mut pending: Option<String> = None;
+    let mut discovered_tools: Option<Vec<String>> = None;
+    let mut tool_schema_digest: Option<String> = None;
+    let mut degraded: Option<(&'static str, String)> = source_degraded;
+
+    // Mode transition Managed → External: remove the workload recorded by the
+    // previous status before publishing external metadata. Cleanup identity is
+    // persisted in status, so it remains stable even if the current spec/env
+    // changed.
+    if effective_spec.managed.is_none()
+        && mcp
+            .status
+            .as_ref()
+            .and_then(|s| s.mode.as_deref())
+            == Some("Managed")
+        && let Some(workload_ref) = mcp
+            .status
+            .as_ref()
+            .and_then(|s| s.workload_ref.as_deref())
+        && let Err(e) = cleanup_managed_workload(&ctx.client, workload_ref).await
+    {
+        degraded = Some(("ManagedCleanupFailed", e.to_string()));
+    }
+
+    // A managed preset owns a real Deployment + Service. Derive the endpoint
+    // before writing router metadata so sandboxes consume the Service DNS name,
+    // never a fake placeholder URL from the Bridge catalog.
+    if degraded.is_none()
+        && let Some(managed) = effective_spec.managed.as_ref()
+    {
+        let plan = managed_workload_plan(
+            &ns,
+            &name,
+            mcp.metadata.uid.as_deref(),
+            &managed.preset,
+        );
+        effective_spec.url = Some(plan.endpoint());
+        effective_spec.production_mode = Some(false);
+        match ensure_managed_workload(&ctx.client, &name, &plan).await {
+            Ok(true) => {
+                let allowed = effective_spec.allowed_tools.clone().unwrap_or_default();
+                match probe_upstream_tools(&ctx.probe_client, &plan.endpoint(), &allowed).await {
+                    Ok(probe) => {
+                        discovered_tools = Some(probe.tool_names);
+                        tool_schema_digest = Some(probe.schema_digest);
+                    }
+                    Err(e) => degraded = Some(("McpProbeFailed", e)),
+                }
+            }
+            Ok(false) => {
+                pending = Some(format!(
+                    "managed MCP workload {} is not Ready yet",
+                    plan.workload_ref()
+                ));
+            }
+            Err(e) => {
+                degraded = Some(("ManagedWorkloadFailed", e.to_string()));
+            }
+        }
+        managed_plan = Some(plan);
+    }
 
     // 1. Ensure signing keypair Secret.
     let secret_name = format!("mcp-{name}-signing");
@@ -307,7 +928,6 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let cm_name = format!("mcp-{name}-jwks");
     let meta = McpServerMeta::from_spec(&effective_spec);
     let mut jwks_ref: Option<LocalObjectRef> = None;
-    let mut degraded: Option<(&'static str, String)> = source_degraded;
     let production = effective_spec.production_mode.unwrap_or(false);
 
     if degraded.is_none() && !production {
@@ -371,12 +991,15 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let new_conditions = build_conditions(
         &prior_conditions,
         observed_generation,
+        pending.as_deref(),
         degraded
             .as_ref()
             .map(|(reason, msg)| (*reason, msg.as_str())),
     );
     let phase = if degraded.is_some() {
         PHASE_DEGRADED
+    } else if pending.is_some() {
+        PHASE_PENDING
     } else {
         // Slice 0 honesty: McpServer reconciler today binds exactly
         // one server per KarsSandbox via `spec.mcp:` (singular).
@@ -399,10 +1022,22 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             phase: Some(phase.into()),
             observed_generation,
             conditions: Some(new_conditions),
-            last_probed_at: Some(rfc3339_now()),
+            last_probed_at: discovered_tools.as_ref().map(|_| rfc3339_now()),
             signing_key_ref: Some(signing_ref),
             jwks_config_map_ref: jwks_ref,
             bundle_ref_digest: bundle_ref_digest.clone(),
+            mode: Some(
+                if managed_plan.is_some() {
+                    "Managed"
+                } else {
+                    "External"
+                }
+                .into(),
+            ),
+            endpoint: effective_spec.url.clone(),
+            workload_ref: managed_plan.as_ref().map(ManagedWorkloadPlan::workload_ref),
+            discovered_tools,
+            tool_schema_digest,
         }
     });
     api.patch_status(
@@ -416,6 +1051,8 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
+    } else if pending.is_some() {
+        Ok(Action::requeue(Duration::from_secs(5)))
     } else {
         // (Removed) Per-reconcile `LimitedSupport` event explaining
         // the singular-vs-plural `spec.mcp` migration roadmap was
@@ -441,6 +1078,7 @@ fn rfc3339_now() -> String {
 fn build_conditions(
     prior: &[Condition],
     observed_generation: Option<i64>,
+    pending: Option<&str>,
     degraded: Option<(&str, &str)>,
 ) -> Vec<Condition> {
     let mut out: Vec<Condition> = Vec::with_capacity(3);
@@ -472,6 +1110,33 @@ fn build_conditions(
                 cond_status::TRUE,
                 reason_value,
                 message,
+                observed_generation,
+            ));
+        }
+        None if pending.is_some() => {
+            let message = pending.unwrap_or("managed MCP workload is progressing");
+            out.push(conditions::preserve_transition_time(
+                prior_ready,
+                conditions::TYPE_READY,
+                cond_status::FALSE,
+                reason::RECONCILING,
+                message,
+                observed_generation,
+            ));
+            out.push(conditions::preserve_transition_time(
+                prior_progressing,
+                conditions::TYPE_PROGRESSING,
+                cond_status::TRUE,
+                reason::RECONCILING,
+                message,
+                observed_generation,
+            ));
+            out.push(conditions::preserve_transition_time(
+                prior_degraded,
+                conditions::TYPE_DEGRADED,
+                cond_status::FALSE,
+                reason::RECONCILING,
+                "no error; waiting for managed MCP readiness",
                 observed_generation,
             ));
         }
@@ -707,6 +1372,7 @@ async fn ensure_jwks_configmap(
 }
 
 async fn finalize(
+    client: &Client,
     api: &Api<McpServer>,
     secrets: &Api<Secret>,
     configmaps: &Api<ConfigMap>,
@@ -715,7 +1381,7 @@ async fn finalize(
 ) -> Result<Action, ReconcileError> {
     let secret_name = format!("mcp-{name}-signing");
     let cm_name = format!("mcp-{name}-jwks");
-    let _ = secrets
+    secrets
         .delete(&secret_name, &Default::default())
         .await
         .map(|_| ())
@@ -725,8 +1391,8 @@ async fn finalize(
             } else {
                 Err(e)
             }
-        });
-    let _ = configmaps
+        })?;
+    configmaps
         .delete(&cm_name, &Default::default())
         .await
         .map(|_| ())
@@ -736,7 +1402,15 @@ async fn finalize(
             } else {
                 Err(e)
             }
-        });
+        })?;
+
+    if let Some(workload_ref) = mcp
+        .status
+        .as_ref()
+        .and_then(|s| s.workload_ref.as_deref())
+    {
+        cleanup_managed_workload(client, workload_ref).await?;
+    }
 
     let finalizers: Vec<String> = mcp
         .metadata
@@ -758,6 +1432,7 @@ fn error_policy(mcp: Arc<McpServer>, error: &ReconcileError, _ctx: Arc<Ctx>) -> 
     let class = match error {
         ReconcileError::Kube(_) => "kube_api",
         ReconcileError::SerdeJson(_) => "serde",
+        ReconcileError::Configuration(_) => "configuration",
     };
     crate::metrics::record_reconcile_error("McpServer", class);
     tracing::warn!(
@@ -789,6 +1464,10 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         jwks_fetcher: Arc::new(HttpJwksFetcher::new()),
+        probe_client: reqwest::Client::builder()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build()
+            .expect("MCP probe reqwest client"),
     });
     Controller::new(mcps, crate::watch_config::bounded())
         .run(
@@ -843,6 +1522,7 @@ async fn resolve_mcp_source(
 ) {
     let spec = &mcp.spec;
     let inline_any = spec.url.is_some()
+        || spec.managed.is_some()
         || spec.oauth.is_some()
         || spec.production_mode.is_some()
         || spec.scopes.is_some()
@@ -860,7 +1540,7 @@ async fn resolve_mcp_source(
             None,
             Some((
                 "InvalidSpec",
-                "spec.bundleRef is mutually exclusive with spec.url, spec.oauth, \
+                "spec.bundleRef is mutually exclusive with spec.url, spec.managed, spec.oauth, \
                  spec.productionMode, spec.scopes, spec.allowedTools, and \
                  spec.displayName"
                     .into(),
@@ -944,6 +1624,7 @@ fn merge_bundle_with_selector(
 
     McpServerSpec {
         url: verified.url.clone(),
+        managed: None,
         oauth,
         production_mode: verified.production_mode,
         scopes: verified.scopes.clone(),
@@ -1019,7 +1700,7 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_three_types_on_success() {
-        let conds = build_conditions(&[], Some(7), None);
+        let conds = build_conditions(&[], Some(7), None, None);
         assert_eq!(conds.len(), 3);
         let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
         assert_eq!(ready.status, "True");
@@ -1034,7 +1715,7 @@ mod tests {
 
     #[test]
     fn build_conditions_emits_degraded_true_on_failure() {
-        let conds = build_conditions(&[], Some(2), Some(("JwksFetchFailed", "boom")));
+        let conds = build_conditions(&[], Some(2), None, Some(("JwksFetchFailed", "boom")));
         let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
         assert_eq!(ready.status, "False");
         assert_eq!(ready.reason, "JwksFetchFailed");
@@ -1045,9 +1726,9 @@ mod tests {
 
     #[test]
     fn build_conditions_preserves_transition_time_on_repeat_success() {
-        let prior = build_conditions(&[], Some(1), None);
+        let prior = build_conditions(&[], Some(1), None, None);
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let next = build_conditions(&prior, Some(1), None);
+        let next = build_conditions(&prior, Some(1), None, None);
         let p_ready = prior.iter().find(|c| c.type_ == "Ready").unwrap();
         let n_ready = next.iter().find(|c| c.type_ == "Ready").unwrap();
         assert_eq!(p_ready.last_transition_time, n_ready.last_transition_time);
@@ -1055,12 +1736,87 @@ mod tests {
 
     #[test]
     fn build_conditions_stamps_new_time_on_status_flip() {
-        let prior = build_conditions(&[], Some(1), None);
+        let prior = build_conditions(&[], Some(1), None, None);
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let next = build_conditions(&prior, Some(1), Some(("JwksFetchFailed", "x")));
+        let next = build_conditions(&prior, Some(1), None, Some(("JwksFetchFailed", "x")));
         let p_ready = prior.iter().find(|c| c.type_ == "Ready").unwrap();
         let n_ready = next.iter().find(|c| c.type_ == "Ready").unwrap();
         assert_ne!(p_ready.last_transition_time, n_ready.last_transition_time);
+    }
+
+    #[test]
+    fn build_conditions_pending_is_not_ready_or_degraded() {
+        let conds = build_conditions(
+            &[],
+            Some(4),
+            Some("managed workload is starting"),
+            None,
+        );
+        let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
+        let progressing = conds.iter().find(|c| c.type_ == "Progressing").unwrap();
+        let degraded = conds.iter().find(|c| c.type_ == "Degraded").unwrap();
+        assert_eq!(ready.status, "False");
+        assert_eq!(progressing.status, "True");
+        assert_eq!(degraded.status, "False");
+    }
+
+    #[test]
+    fn managed_playwright_plan_derives_internal_endpoint_and_pinned_image() {
+        let plan = managed_workload_plan(
+            "kars-system",
+            "browser",
+            Some("uid-browser"),
+            &ManagedMcpPreset::Playwright,
+        );
+        assert_eq!(plan.namespace, "kars-mcp");
+        assert_eq!(
+            plan.endpoint(),
+            format!(
+                "http://{}.kars-mcp.svc.cluster.local:8931/mcp",
+                plan.workload_name
+            )
+        );
+        assert!(plan.image.contains("@sha256:"));
+        assert!(
+            plan.args
+                .iter()
+                .any(|a| a.contains(&format!(
+                    "{}.kars-mcp.svc.cluster.local:8931",
+                    plan.workload_name
+                )))
+        );
+    }
+
+    #[test]
+    fn managed_everything_plan_uses_hermetic_kars_image() {
+        let plan = managed_workload_plan(
+            "kars-system",
+            "utility",
+            Some("uid-utility"),
+            &ManagedMcpPreset::Everything,
+        );
+        assert_eq!(plan.port, 3001);
+        assert_eq!(plan.image, EVERYTHING_IMAGE_DEFAULT);
+        assert_eq!(plan.env, vec![("PORT".into(), "3001".into())]);
+    }
+
+    #[test]
+    fn managed_workload_identity_is_unique_per_source_object() {
+        let a = managed_workload_plan(
+            "tenant-a",
+            "browser",
+            Some("uid-a"),
+            &ManagedMcpPreset::Playwright,
+        );
+        let b = managed_workload_plan(
+            "tenant-b",
+            "browser",
+            Some("uid-b"),
+            &ManagedMcpPreset::Playwright,
+        );
+        assert_ne!(a.workload_name, b.workload_name);
+        assert!(a.workload_name.len() <= 63);
+        assert!(b.workload_name.len() <= 63);
     }
 
     #[test]

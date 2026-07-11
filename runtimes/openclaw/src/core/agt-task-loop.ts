@@ -26,6 +26,113 @@ import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js"
 type AnyMeshClient = any;
 type Logger = { info: (m: string) => void; warn: (m: string) => void };
 
+export interface AGTPolicyDecision {
+  allowed: boolean;
+  matched_rule?: string;
+  reason?: string;
+}
+
+export interface AGTEvaluateResponse {
+  statusCode: number;
+  body: string;
+}
+
+export type AGTEvaluateTransport = (
+  action: string,
+  context: Record<string, unknown>,
+) => Promise<AGTEvaluateResponse>;
+
+export function agtEvaluateFailOpenGrace(raw = process.env.KARS_AGT_EVALUATE_FAIL_OPEN_GRACE): number {
+  const normalized = raw?.trim();
+  if (!normalized || !/^[+-]?\d+$/.test(normalized)) return 0;
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed)) return 0;
+  return Math.max(0, Math.min(10, parsed));
+}
+
+async function requestAGTEvaluation(
+  action: string,
+  context: Record<string, unknown>,
+): Promise<AGTEvaluateResponse> {
+  const http = await import("node:http");
+  const body = JSON.stringify({ action, context });
+  return new Promise((resolve, reject) => {
+    const req = http.request(routerUrl("/agt/evaluate"), {
+      method: "POST",
+      timeout: 2000,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+      res.on("end", () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("timeout"));
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+export function createAGTPolicyEvaluator(
+  log: Logger,
+  transport: AGTEvaluateTransport = requestAGTEvaluation,
+): (action: string, context?: Record<string, unknown>) => Promise<AGTPolicyDecision> {
+  const grace = agtEvaluateFailOpenGrace();
+  let consecutiveFailures = 0;
+
+  const failureDecision = (reason: string): AGTPolicyDecision => {
+    consecutiveFailures += 1;
+    if (consecutiveFailures <= grace) {
+      log.warn(`AGT governance unavailable (${consecutiveFailures}/${grace} grace failures), allowing under explicit grace: ${reason}`);
+      return { allowed: true, reason };
+    }
+    log.warn(`AGT governance unavailable (${consecutiveFailures} consecutive failures), failing closed: ${reason}`);
+    return { allowed: false, reason: `AGT governance unavailable (fail-closed): ${reason}` };
+  };
+
+  return async (action, context = {}) => {
+    let response: AGTEvaluateResponse;
+    try {
+      response = await transport(action, context);
+    } catch (error) {
+      return failureDecision(error instanceof Error ? error.message : String(error));
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return failureDecision(`HTTP ${response.statusCode}`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response.body);
+    } catch {
+      return failureDecision("invalid JSON response");
+    }
+    if (
+      typeof parsed !== "object"
+      || parsed === null
+      || typeof (parsed as { allowed?: unknown }).allowed !== "boolean"
+    ) {
+      return failureDecision("invalid governance decision");
+    }
+
+    consecutiveFailures = 0;
+    const decision = parsed as { allowed: boolean; matched_rule?: string; reason?: string };
+    return {
+      allowed: decision.allowed,
+      matched_rule: decision.matched_rule,
+      reason: decision.reason,
+    };
+  };
+}
+
 /// A single event in the agent's execution trace — the honest, real record of
 /// what the agent loop did. Emitted live as the loop runs (not reconstructed),
 /// so it can be surfaced as live Activity and persisted as a clean audit path.
@@ -159,6 +266,7 @@ export async function processTaskWithTools(
 ): Promise<string> {
   const http = await import("node:http");
   const { execSync } = await import("node:child_process");
+  const evaluateAGTPolicy = createAGTPolicyEvaluator(log);
   const model = process.env.OPENCLAW_MODEL || process.env.MODEL || "gpt-4.1";
 
   const tools = getTaskTools();
@@ -1547,30 +1655,9 @@ export async function processTaskWithTools(
           } else {
             const cmd = String(args.command || args.cmd || "echo 'no command'");
             log.info(`AGT sub-agent exec: ${sanitizeLog(cmd, 200)}`);
-            let policyAllowed = true;
-            let policyReason = "";
-            try {
-              const policyHttp = await import("node:http");
-              const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
-              const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
-                const req = policyHttp.request(routerUrl("/agt/evaluate"), {
-                  method: "POST", timeout: 2000,
-                  headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
-                }, (res) => {
-                  let data = "";
-                  res.on("data", (c: Buffer) => { data += c.toString(); });
-                  res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); } });
-                });
-                req.on("error", () => resolve({ allowed: true }));
-                req.on("timeout", () => { req.destroy(); resolve({ allowed: true }); });
-                req.write(policyBody);
-                req.end();
-              });
-              policyAllowed = policyResult.allowed !== false;
-              policyReason = policyResult.reason || "";
-            } catch { /* router unavailable — allow */ }
-            if (!policyAllowed) {
-              result = `Blocked by policy: ${policyReason || "denied"}`;
+            const policy = await evaluateAGTPolicy(`shell:${cmd}`, { tool: "exec_command" });
+            if (!policy.allowed) {
+              result = `Blocked by policy: ${policy.reason || "denied"}`;
             } else {
               result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
             }

@@ -18,6 +18,7 @@ use k8s_openapi::api::{
     networking::v1::NetworkPolicy,
     rbac::v1::ClusterRoleBinding,
 };
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{
     Client, ResourceExt,
     api::{Api, DeleteParams, ListParams, Patch, PatchParams},
@@ -32,7 +33,6 @@ use tokio::time::Duration;
 
 use crate::crd::{KarsSandbox, SandboxConfig};
 use crate::fedcred::{FedCredConfig, FedCredManager};
-use crate::mcp_server::McpServer;
 
 pub(crate) mod byo_contract;
 mod dev_env;
@@ -91,45 +91,6 @@ pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'
         "confidential" => (Some("kata-vm-isolation"), "sandbox-kata"),
         _ => (None, "sandbox"), // standard + enhanced both on clawpool
     }
-}
-
-/// Parse an in-cluster MCP server URL into `(namespace, port)` for a
-/// NetworkPolicy egress rule. Returns `None` for external URLs (already covered
-/// by the blanket `:443` egress rule) or unparseable input. Recognizes
-/// Kubernetes service DNS of the form `<svc>.<namespace>.svc[.cluster.local][:port]`.
-fn parse_in_cluster_mcp_endpoint(url: &str) -> Option<(String, u16)> {
-    let scheme_end = url.find("://")?;
-    let scheme = &url[..scheme_end];
-    let rest = &url[scheme_end + 3..];
-    let authority = rest.split('/').next().unwrap_or(rest);
-    // Strip any userinfo (user@host) — MCP service URLs don't use it, but be safe.
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let (host, port_str) = match authority.rsplit_once(':') {
-        Some((h, p)) => (h, Some(p)),
-        None => (authority, None),
-    };
-    let host = host.strip_suffix('.').unwrap_or(host);
-    // Only in-cluster service DNS names get an explicit rule; everything else
-    // (public hostnames, bare IPs) is out of scope for a namespace-scoped rule.
-    if !host.ends_with(".svc.cluster.local") && !host.ends_with(".svc") {
-        return None;
-    }
-    // `<svc>.<namespace>.svc(.cluster.local)` → namespace is the 2nd label.
-    let namespace = host.split('.').nth(1)?.to_string();
-    if namespace.is_empty() {
-        return None;
-    }
-    let port: u16 = match port_str {
-        Some(p) => p.parse().ok()?,
-        None => {
-            if scheme.eq_ignore_ascii_case("https") {
-                443
-            } else {
-                80
-            }
-        }
-    };
-    Some((namespace, port))
 }
 
 /// Build the egress-guard init-container command.
@@ -266,41 +227,6 @@ pub(crate) fn egress_guard_ruleset_hash(is_sre_sandbox: bool) -> String {
 #[allow(clippy::module_inception)]
 mod egress_guard_tests {
     use super::build_egress_guard_command;
-    use super::parse_in_cluster_mcp_endpoint;
-
-    #[test]
-    fn mcp_endpoint_in_cluster_svc_dns_resolves_ns_and_port() {
-        assert_eq!(
-            parse_in_cluster_mcp_endpoint("http://playwright-mcp.default.svc.cluster.local:8931/mcp"),
-            Some(("default".to_string(), 8931))
-        );
-        // Short `.svc` form.
-        assert_eq!(
-            parse_in_cluster_mcp_endpoint("http://my-mcp.tools.svc:9000"),
-            Some(("tools".to_string(), 9000))
-        );
-        // Default ports by scheme when omitted.
-        assert_eq!(
-            parse_in_cluster_mcp_endpoint("https://sec.default.svc.cluster.local/mcp"),
-            Some(("default".to_string(), 443))
-        );
-        assert_eq!(
-            parse_in_cluster_mcp_endpoint("http://sec.default.svc.cluster.local/mcp"),
-            Some(("default".to_string(), 80))
-        );
-    }
-
-    #[test]
-    fn mcp_endpoint_external_urls_are_none() {
-        // External https MCP → covered by the blanket :443 rule, no NP rule.
-        assert_eq!(parse_in_cluster_mcp_endpoint("https://api.githubcopilot.com/mcp"), None);
-        assert_eq!(parse_in_cluster_mcp_endpoint("http://example.com:8080/mcp"), None);
-        // Garbage / empty.
-        assert_eq!(parse_in_cluster_mcp_endpoint(""), None);
-        assert_eq!(parse_in_cluster_mcp_endpoint("not-a-url"), None);
-        // Non-numeric port is rejected.
-        assert_eq!(parse_in_cluster_mcp_endpoint("http://a.b.svc.cluster.local:zzz/mcp"), None);
-    }
 
     #[test]
     fn standard_sandbox_has_no_apiserver_bypass() {
@@ -392,6 +318,8 @@ enum ReconcileError {
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("Controller configuration error: {0}")]
+    Configuration(String),
 }
 
 /// Shared controller context.
@@ -1030,6 +958,43 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await?;
 
+    // Private-registry support: mirror the controller's configured pull secret
+    // into every isolated sandbox namespace. Secrets are namespace-scoped, so
+    // merely adding imagePullSecrets to the controller/chart is insufficient.
+    let image_pull_secret_name = std::env::var("IMAGE_PULL_SECRET_NAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if let Some(secret_name) = image_pull_secret_name.as_deref() {
+        let source_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_self_ns);
+        let target_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_ns);
+        let source = source_api.get(secret_name).await?;
+        let mirrored = Secret {
+            metadata: ObjectMeta {
+                name: Some(secret_name.to_string()),
+                namespace: Some(sandbox_ns.clone()),
+                labels: Some(std::collections::BTreeMap::from([
+                    (
+                        "app.kubernetes.io/managed-by".to_string(),
+                        "kars-controller".to_string(),
+                    ),
+                    ("kars.azure.com/sandbox".to_string(), name.clone()),
+                ])),
+                ..Default::default()
+            },
+            type_: source.type_,
+            data: source.data,
+            string_data: source.string_data,
+            ..Default::default()
+        };
+        target_api
+            .patch(
+                secret_name,
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                &Patch::Apply(mirrored),
+            )
+            .await?;
+    }
+
     // ── Step 2: Create ServiceAccount with Workload Identity ─────────────
     let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), &sandbox_ns);
     let sa: ServiceAccount = serde_json::from_value(json!({
@@ -1044,7 +1009,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             "annotations": {
                 "azure.workload.identity/client-id": ctx.wi_client_id
             }
-        }
+        },
+        "imagePullSecrets": image_pull_secret_name
+            .as_ref()
+            .map(|name| vec![json!({"name": name})])
+            .unwrap_or_default()
     }))?;
     sa_api
         .patch(
@@ -1392,6 +1361,71 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }),
     ];
 
+    // Local inference is an operator-declared in-cluster trust boundary. Service
+    // traffic is evaluated post-DNAT by AKS/Cilium, so the blanket external
+    // HTTPS ipBlock does not admit model pods. Allow TCP egress to only the
+    // configured namespaces (default: the standard Kars local-inference ns).
+    let local_targets = std::env::var("LOCAL_INFERENCE_TARGETS_JSON").unwrap_or_default();
+    if !local_targets.trim().is_empty() && local_targets.trim() != "[]" {
+        let targets: Vec<serde_json::Value> = serde_json::from_str(&local_targets).map_err(|e| {
+            ReconcileError::Configuration(format!(
+                "LOCAL_INFERENCE_TARGETS_JSON is invalid: {e}"
+            ))
+        })?;
+        for target in targets {
+            let namespace = target
+                .get("namespace")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    ReconcileError::Configuration(
+                        "local inference target requires namespace".into(),
+                    )
+                })?;
+            let mut destination = json!({
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": namespace}
+                }
+            });
+            if let Some(labels) = target.get("matchLabels").and_then(|v| v.as_object())
+                && !labels.is_empty()
+            {
+                destination["podSelector"] = json!({"matchLabels": labels});
+            }
+            let ports: Vec<serde_json::Value> = target
+                .get("ports")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_u64())
+                .map(|port| json!({"protocol": "TCP", "port": port}))
+                .collect();
+            if ports.is_empty() {
+                return Err(ReconcileError::Configuration(format!(
+                    "local inference target '{namespace}' requires at least one TCP port"
+                )));
+            }
+            egress_rules.push(json!({"to": [destination], "ports": ports}));
+        }
+    } else {
+        let local_inference_namespaces = std::env::var("LOCAL_INFERENCE_NAMESPACES")
+            .unwrap_or_else(|_| "kars-local-inference".into());
+        for namespace in local_inference_namespaces
+            .split(',')
+            .map(str::trim)
+            .filter(|ns| !ns.is_empty())
+        {
+            egress_rules.push(json!({
+                "to": [{
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": namespace}
+                    }
+                }],
+                "ports": [{"protocol": "TCP"}]
+            }));
+        }
+    }
+
     // SRE-mode-only egress allow: apiserver Service ClusterIP.
     // Same gate as the egress-guard apiserver bypass — only sandboxes
     // labeled `kars.azure.com/role=sre` get a NetworkPolicy egress rule
@@ -1454,37 +1488,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     }
 
-    // Allow the inference-router to reach IN-CLUSTER MCP servers this sandbox
-    // uses. The blanket :443 egress rule above deliberately EXCLUDES the RFC1918
-    // ranges (anti-lateral-movement), so an in-cluster MCP endpoint such as
-    // `playwright-mcp.default.svc.cluster.local:8931` is otherwise unreachable
-    // and forwarder discovery silently fails ("tools/list POST failed"). We
-    // resolve each referenced McpServer's URL and, for in-cluster service DNS,
-    // add a scoped egress rule to that namespace + port. External https MCP
-    // servers (e.g. api.githubcopilot.com) are already covered by the :443 rule,
-    // so they add nothing here.
-    for mcp_ref in governance_config.effective_mcp_server_refs() {
-        let mcp_name = mcp_ref.name.trim();
-        if mcp_name.is_empty() {
-            continue;
-        }
-        let mcp_api: Api<McpServer> = Api::namespaced(client.clone(), &sandbox_self_ns);
-        let url = match mcp_api.get_opt(mcp_name).await {
-            Ok(Some(m)) => m.spec.url.clone().unwrap_or_default(),
-            _ => String::new(),
-        };
-        if let Some((ns_label, port)) = parse_in_cluster_mcp_endpoint(&url) {
-            egress_rules.push(json!({
-                "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ns_label}}}],
-                "ports": [{"protocol": "TCP", "port": port}]
-            }));
-            tracing::info!(
-                sandbox = %name, mcp = %mcp_name, namespace = %ns_label, port = port,
-                "NetworkPolicy: allowing egress to in-cluster MCP server"
-            );
-        }
-    }
-
     // Compute ingress rules up front. When governance is enabled the sandbox
     // exposes :8443 (mesh inference) and :18789/:18791 (gateway WebUX/WebSocket)
     // to peer sandbox namespaces, plus :8443 to the operator namespace for
@@ -1516,6 +1519,18 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }],
         "ports": [{"port": 8443, "protocol": "TCP"}]
     });
+    // The Bridge reaches router admin/compose endpoints through the Kubernetes
+    // apiserver pod-proxy. On AKS the actual source is the kube-system
+    // konnectivity-agent pod, not the Bridge pod and not an RFC1918 "external"
+    // address. Admit only kube-system on the router port; auth still applies.
+    let apiserver_pod_proxy_ingress = json!({
+        "from": [{
+            "namespaceSelector": {
+                "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+            }
+        }],
+        "ports": [{"port": 8443, "protocol": "TCP"}]
+    });
     // Mesh + gateway peer-sandbox ingress is only meaningful when
     // governance is on. Gateway ports 18789/18791 stay closed to the
     // operator namespace either way.
@@ -1534,9 +1549,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 ]
             }),
             operator_policy_echo_ingress,
+            apiserver_pod_proxy_ingress,
         ]
     } else {
-        vec![operator_policy_echo_ingress]
+        vec![operator_policy_echo_ingress, apiserver_pod_proxy_ingress]
     };
 
     let netpol: NetworkPolicy = serde_json::from_value(json!({
@@ -2668,6 +2684,39 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         }
         });
 
+        // Cluster-specific scheduling constraints (for example an AKS GPU
+        // node-pool taint) are merged with the mandatory Kars sandbox
+        // toleration. The value is a JSON array of standard Kubernetes
+        // Toleration objects; malformed configuration fails reconciliation
+        // loudly rather than silently leaving every sandbox Pending.
+        if let Ok(raw) = std::env::var("KARS_SANDBOX_EXTRA_TOLERATIONS")
+            && !raw.trim().is_empty()
+        {
+            let extras: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(|e| {
+                ReconcileError::Configuration(format!(
+                    "KARS_SANDBOX_EXTRA_TOLERATIONS is invalid JSON: {e}"
+                ))
+            })?;
+            let tolerations = pod_spec
+                .get_mut("tolerations")
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| {
+                    ReconcileError::Configuration(
+                        "sandbox pod tolerations must be an array".into(),
+                    )
+                })?;
+            for extra in extras {
+                if !extra.is_object() {
+                    return Err(ReconcileError::Configuration(
+                        "KARS_SANDBOX_EXTRA_TOLERATIONS entries must be objects".into(),
+                    ));
+                }
+                if !tolerations.contains(&extra) {
+                    tolerations.push(extra);
+                }
+            }
+        }
+
         // Set runtimeClassName for Kata (confidential) isolation
         if let Some(rc) = runtime_class {
             pod_spec
@@ -2897,11 +2946,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             let skill_cm = format!("karsskill-{skill}");
             let volume_name = format!("skill-{skill}");
             let mount_path = format!("/opt/clawhub-skills/{skill}");
-            // Trust gate (enforced at the control plane, not just the UI): only an
-            // operator-APPROVED skill may be installed. Read the KarsSkill CR and
-            // require `kars.azure.com/skill-review: approved`; anything else
-            // (pending / rejected / missing) is skipped so an unvetted capability
-            // can never reach a running agent.
+            // Trust gate (enforced at the control plane, not just the UI): the
+            // approval must cover the CURRENT reconciled skill generation and
+            // the exact executable ConfigMap bytes.
             let skill_api: Api<kube::api::DynamicObject> = Api::namespaced_with(
                 client.clone(),
                 &sandbox_self_ns,
@@ -2912,13 +2959,63 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 )),
             );
             let approved = match skill_api.get_opt(skill).await {
-                Ok(Some(sk)) => sk
-                    .metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|a| a.get("kars.azure.com/skill-review"))
-                    .map(|v| v == "approved")
-                    .unwrap_or(false),
+                Ok(Some(sk)) => {
+                    let annotations = sk.metadata.annotations.clone().unwrap_or_default();
+                    let review_approved = annotations
+                        .get("kars.azure.com/skill-review")
+                        .is_some_and(|v| v == "approved");
+                    let locked_digest = annotations
+                        .get("kars.azure.com/skill-locked-digest")
+                        .cloned();
+                    let live_digest = sk
+                        .data
+                        .get("status")
+                        .and_then(|s| s.get("versionDigest"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let package_digest = sk
+                        .data
+                        .get("spec")
+                        .and_then(|s| s.get("packageDigest"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let generation_current = sk
+                        .data
+                        .get("status")
+                        .and_then(|s| s.get("observedGeneration"))
+                        .and_then(|v| v.as_i64())
+                        == sk.metadata.generation;
+                    let digest_locked =
+                        locked_digest.is_some() && locked_digest == live_digest;
+
+                    let package_valid = if let Some(expected) = package_digest {
+                        let source_cm_api: Api<ConfigMap> =
+                            Api::namespaced(client.clone(), &sandbox_self_ns);
+                        match source_cm_api.get_opt(&skill_cm).await {
+                            Ok(Some(cm)) => {
+                                use sha2::{Digest, Sha256};
+                                let data = cm.data.unwrap_or_default();
+                                let canonical = serde_json::to_vec(&data).unwrap_or_default();
+                                let actual =
+                                    format!("sha256:{}", hex::encode(Sha256::digest(&canonical)));
+                                let labelled = cm
+                                    .metadata
+                                    .annotations
+                                    .as_ref()
+                                    .and_then(|a| a.get("kars.azure.com/package-digest"));
+                                actual == expected && labelled == Some(&expected)
+                            }
+                            Ok(None) => false,
+                            Err(e) => {
+                                tracing::error!(error = %e, sandbox = %name, skill = %skill, "failed to read skill package for digest verification");
+                                return Ok(Action::requeue(Duration::from_secs(15)));
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    review_approved && generation_current && digest_locked && package_valid
+                }
                 Ok(None) => false,
                 Err(e) => {
                     tracing::error!(error = %e, sandbox = %name, skill = %skill, "failed to read KarsSkill for approval check");
@@ -2926,7 +3023,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             };
             if !approved {
-                tracing::warn!(sandbox = %name, skill = %skill, "skill is not operator-approved — refusing to install (trust gate)");
+                tracing::warn!(sandbox = %name, skill = %skill, "skill approval/package digest is stale or invalid — refusing to install");
                 continue;
             }
             match governance_mounts::mirror_configmap(
@@ -4065,7 +4162,7 @@ fn error_requeue_duration(error: &ReconcileError) -> Duration {
         // Serde errors are deterministic — the same body will fail again.
         // Back off longer so we don't spam logs while a human fixes the
         // bad CR.
-        ReconcileError::SerdeJson(_) => 300,
+        ReconcileError::SerdeJson(_) | ReconcileError::Configuration(_) => 300,
     };
     crate::backoff::requeue_secs_with_jitter(base)
 }
@@ -4075,6 +4172,7 @@ fn error_policy(sandbox: Arc<KarsSandbox>, error: &ReconcileError, _ctx: Arc<Con
     let class = match error {
         ReconcileError::Kube(_) => "kube_api",
         ReconcileError::SerdeJson(_) => "serde",
+        ReconcileError::Configuration(_) => "configuration",
     };
     crate::metrics::record_reconcile_error("KarsSandbox", class);
     tracing::error!(
