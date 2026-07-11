@@ -105,6 +105,19 @@ spec:
       ports:
         - protocol: TCP
           port: 8443
+    # Controller-managed MCP readiness probes. McpServer reconciliation performs
+    # a real initialize/tools-list handshake before Ready=True, so the operator
+    # namespace must reach only the dedicated managed-MCP namespace and reviewed
+    # preset ports.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.managedMcp.namespace | default "kars-mcp" }}
+      ports:
+        - protocol: TCP
+          port: 8931
+        - protocol: TCP
+          port: 3001
     # Azure IMDS (Instance Metadata Service) for managed-identity tokens.
     #
     # The controller's `agent_identity` module exchanges an IMDS-acquired
