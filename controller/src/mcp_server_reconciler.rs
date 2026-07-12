@@ -199,6 +199,10 @@ fn managed_workload_plan(
                     "--headless".into(),
                     "--browser=chromium".into(),
                     "--no-sandbox".into(),
+                    // A managed server is shared by many sandbox routers. Each
+                    // MCP session needs its own browser profile; otherwise the
+                    // second mission fails with "Browser is already in use".
+                    "--isolated".into(),
                     format!("--allowed-hosts={allowed_hosts}"),
                 ],
                 env: Vec::new(),
@@ -1785,6 +1789,7 @@ mod tests {
                     plan.workload_name
                 )))
         );
+        assert!(plan.args.iter().any(|a| a == "--isolated"));
     }
 
     #[test]
