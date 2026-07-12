@@ -25,7 +25,11 @@ inferenceRouter:
     pullPolicy: Always
   azure:
     openai:
-      endpoint: http://kars-inference-sentinel.local
+      # The router intentionally prefers AZURE_OPENAI_ENDPOINT for inference.
+      # Point the legacy-compatible field at the same real in-cluster OpenAI
+      # endpoint; a fake sentinel shadows FOUNDRY_ENDPOINT and makes every model
+      # call fail before tools can run.
+      endpoint: http://gpt-oss-120b.kars-local-inference.svc.cluster.local:80/v1
     contentSafety:
       enabled: false
     promptShields:
