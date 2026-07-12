@@ -1823,6 +1823,12 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         } else {
             "Always"
         };
+        let router_pull_policy =
+            if ctx.dev_profile || !ctx.inference_router_image.ends_with(":latest") {
+                "IfNotPresent"
+            } else {
+                "Always"
+            };
 
         let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
 
@@ -2606,6 +2612,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                             {
                                 "name": "inference-router",
                                 "image": &ctx.inference_router_image,
+                                "imagePullPolicy": router_pull_policy,
                                 "ports": [
                                     {"containerPort": 8443, "name": "inference"},
                                     {"containerPort": 9090, "name": "metrics"}
