@@ -194,22 +194,39 @@ pub async fn materialize(
         "networkPolicy": { "defaultDeny": true },
     });
 
-    // Egress: when the blueprint names destinations, bound the sandbox to
-    // exactly those hosts in strict mode (the substance of "what it can reach").
-    if !blueprint.egress.is_empty() {
-        let endpoints: Vec<serde_json::Value> = blueprint
-            .egress
-            .iter()
-            .map(|e| match e.port {
-                Some(p) => json!({ "host": e.host, "port": p }),
-                None => json!({ "host": e.host }),
-            })
-            .collect();
-        sandbox_spec["networkPolicy"] = json!({
-            "defaultDeny": true,
-            "egressMode": "Strict",
-            "allowedEndpoints": endpoints,
-        });
+    let endpoints: Vec<serde_json::Value> = blueprint
+        .egress
+        .iter()
+        .map(|e| match e.port {
+            Some(p) => json!({ "host": e.host, "port": p }),
+            None => json!({ "host": e.host }),
+        })
+        .collect();
+    match blueprint.egress_mode.as_deref() {
+        Some("strict" | "Strict") => {
+            sandbox_spec["networkPolicy"] = json!({
+                "defaultDeny": true,
+                "egressMode": "Strict",
+                "allowedEndpoints": endpoints,
+            });
+        }
+        Some("learning" | "learn" | "Learning" | "Learn") => {
+            sandbox_spec["networkPolicy"] = json!({
+                "defaultDeny": true,
+                "egressMode": "Learn",
+                "allowedEndpoints": [],
+            });
+        }
+        _ if !endpoints.is_empty() => {
+            // Backwards compatibility: an older blueprint with endpoints but no
+            // explicit mode was always intended as strict.
+            sandbox_spec["networkPolicy"] = json!({
+                "defaultDeny": true,
+                "egressMode": "Strict",
+                "allowedEndpoints": endpoints,
+            });
+        }
+        _ => {}
     }
 
     // Agent instructions (the system prompt) — combine the objective with any
