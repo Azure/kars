@@ -176,6 +176,12 @@ pub struct TaskBlueprint {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub egress: Vec<TaskEgress>,
 
+    /// Explicit egress posture: `strict` or `learning`. This is separate from
+    /// the endpoint list so `strict` with an empty list means deny all external
+    /// hosts rather than being indistinguishable from Learn mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_mode: Option<String>,
+
     /// Sandbox isolation level (`standard`, `enhanced`, `confidential`). Drives
     /// `KarsSandbox.spec.sandbox.isolation`. Defaults to `standard`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

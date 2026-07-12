@@ -3,9 +3,6 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: karstasks.kars.azure.com
-  labels:
-    app.kubernetes.io/name: kars
-    app.kubernetes.io/component: crd
 spec:
   group: kars.azure.com
   names:
@@ -77,6 +74,13 @@ spec:
                       - host
                       type: object
                     type: array
+                  egressMode:
+                    description: |-
+                      Explicit egress posture: `strict` or `learning`. This is separate from
+                      the endpoint list so `strict` with an empty list means deny all external
+                      hosts rather than being indistinguishable from Learn mode.
+                    nullable: true
+                    type: string
                   instructions:
                     description: |-
                       System prompt / standing instructions for the agent, in addition to the

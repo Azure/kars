@@ -2037,6 +2037,7 @@ fn merge_blueprint(
                 rb.mcp_servers.clone()
             },
             egress: if rb.egress.is_empty() { tb.egress.clone() } else { rb.egress.clone() },
+            egress_mode: rb.egress_mode.clone().or_else(|| tb.egress_mode.clone()),
             isolation: rb.isolation.clone().or_else(|| tb.isolation.clone()),
             memory: rb.memory.clone().or_else(|| tb.memory.clone()),
             skills: if rb.skills.is_empty() { tb.skills.clone() } else { rb.skills.clone() },
@@ -2293,6 +2294,7 @@ mod tests {
             tool_policy: Some("kars-default".into()),
             mcp_servers: vec!["github".into()],
             egress: vec![],
+            egress_mode: None,
             isolation: None,
             memory: None,
             skills: vec![],
@@ -2308,6 +2310,7 @@ mod tests {
             tool_policy: None,
             mcp_servers: vec![],
             egress: vec![],
+            egress_mode: None,
             isolation: None,
             memory: None,
             skills: vec![],
