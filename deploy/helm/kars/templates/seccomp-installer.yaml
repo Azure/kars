@@ -28,6 +28,9 @@ spec:
           effect: "NoSchedule"
         - key: "CriticalAddonsOnly"
           operator: "Exists"
+        {{- with .Values.sandbox.extraTolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       # Needs host access to write seccomp profile to kubelet directory
       hostPID: false
       hostNetwork: false
