@@ -14,6 +14,15 @@ interface TaskLogger {
   warn(m: string): void;
 }
 
+export function taskSessionId(fromAgent: string): string {
+  const safe = fromAgent
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 52);
+  return `agt-task-${safe || "unknown"}`;
+}
+
 /**
  * Delegate a task to the native OpenClaw agent loop running in the Gateway.
  * This gives the sub-agent access to ALL OpenClaw tools (exec, process, web_search,
@@ -31,7 +40,7 @@ export async function delegateToNativeAgent(
   const { spawn } = await import("node:child_process");
 
   // Stable session ID per sender → maintains conversation context across tasks
-  const sessionId = `agt-task-${fromAgent}`;
+  const sessionId = taskSessionId(fromAgent);
   const taskText = typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent);
 
   log.info(`Delegating task to native OpenClaw agent (session: ${sessionId})`);
@@ -83,6 +92,7 @@ export async function delegateToNativeAgent(
             log.info(`Native agent responded (${text.length} chars, session: ${sessionId})`);
             return resolve(text);
           }
+
         } catch { /* fall through */ }
       }
 
