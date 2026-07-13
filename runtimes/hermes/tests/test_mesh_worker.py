@@ -249,6 +249,73 @@ async def test_collect_and_ship_artifacts_creates_text_fallback(
 
 
 @pytest.mark.asyncio
+async def test_structured_json_reply_creates_json_fallback_but_terse_text_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.setenv("KARS_HERMES_WORKSPACE_DIR", str(tmp_path))
+    peer_did = "did:controller:kars"
+    msg = _FakeMsg(from_did=peer_did, payload=b"task")
+
+    json_client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    structured = '{"marker":"PASS","sum":42}'
+    manifest = await mesh_worker._collect_and_ship_artifacts(
+        json_client,
+        msg,
+        None,
+        {},
+        structured,
+        True,
+        "json-request",
+        "hermes-agent",
+    )
+    assert manifest[0]["path"].endswith(".json")
+
+    before = mesh_worker._snapshot_workspace()
+    terse_client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    terse = await mesh_worker._collect_and_ship_artifacts(
+        terse_client,
+        msg,
+        None,
+        before,
+        "ok",
+        True,
+        "terse-request",
+        "hermes-agent",
+    )
+    assert terse == []
+    assert terse_client.sent == []
+
+    ack_client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    ack = await mesh_worker._collect_and_ship_artifacts(
+        ack_client,
+        msg,
+        None,
+        before,
+        '{"ok":true}',
+        True,
+        "ack-request",
+        "hermes-agent",
+    )
+    assert ack == []
+    assert ack_client.sent == []
+
+    long_ack_client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    long_ack = await mesh_worker._collect_and_ship_artifacts(
+        long_ack_client,
+        msg,
+        None,
+        before,
+        json.dumps({"message": "x" * 500}),
+        True,
+        "long-ack-request",
+        "hermes-agent",
+    )
+    assert long_ack == []
+    assert long_ack_client.sent == []
+
+
+@pytest.mark.asyncio
 async def test_artifact_paths_are_unique_and_symlinks_are_not_followed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,

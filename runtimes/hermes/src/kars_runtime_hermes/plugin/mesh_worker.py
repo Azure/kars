@@ -322,9 +322,27 @@ def _read_changed_artifacts(
             if before.get(rel) != (mtime, size)
         ]
 
-        if not candidates and reply_ok and len(reply) > 400:
+        structured_json = False
+        json_payload = False
+        if reply.strip():
+            try:
+                parsed_reply = json.loads(reply)
+                json_payload = True
+                if isinstance(parsed_reply, dict):
+                    acknowledgement_keys = {"ok", "status", "success", "message"}
+                    structured_json = bool(parsed_reply) and not (
+                        set(parsed_reply).issubset(acknowledgement_keys)
+                    )
+                elif isinstance(parsed_reply, list):
+                    structured_json = bool(parsed_reply)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if not candidates and reply_ok and (
+            structured_json or (not json_payload and len(reply) > 400)
+        ):
             safe_id = "".join(c for c in request_id if c.isascii() and c.isalnum())[:8] or "task"
-            rel = f"task-{safe_id}-report.md"
+            suffix = "json" if structured_json else "md"
+            rel = f"task-{safe_id}-report.{suffix}"
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW

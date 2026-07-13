@@ -39,6 +39,21 @@ def test_egress_action_verb_for_http_fetch() -> None:
     assert v == "egress:https://example.com/x"
 
 
+def test_mcp_bridge_action_uses_canonical_mcp_verb() -> None:
+    v = governance._action_verb(
+        "kars_mcp_call",
+        {"name": "everything.get-sum", "arguments": {"a": 1, "b": 2}},
+    )
+    assert v == "mcp:everything:get-sum"
+    assert (
+        governance._action_verb(
+            "kars_mcp_call",
+            {"name": "github_mcp.search_code", "arguments": {}},
+        )
+        == "mcp:github-mcp:search_code"
+    )
+
+
 def test_memory_action_verb_uses_operation() -> None:
     v = governance._action_verb("foundry_memory", {"operation": "UPDATE", "text": "hi"})
     assert v == "memory:update"

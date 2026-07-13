@@ -92,6 +92,13 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
 
     http_fetch.register(ctx)
 
+    # Stable MCP fallback for models/providers that do not expose Hermes'
+    # deferred native MCP catalog. Calls still flow through the router's /mcp
+    # governance, session recovery, telemetry, and namespaced tool registry.
+    from . import mcp_bridge  # noqa: PLC0415
+
+    mcp_bridge.register(ctx)
+
     # Phase A2.1 — real AGT MeshClient (replaces mesh_stubs).
     # SKIPPED in SRE mode per §7.8.6 — the SRE agent is not on the mesh
     # at all (no DID, no relay socket, not in the registry). The
