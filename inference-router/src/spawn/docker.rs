@@ -343,6 +343,7 @@ pub(super) async fn create_sandbox_docker(
                 return Ok(SpawnResponse {
                     status: "created".into(),
                     agent_id: req.agent_id.clone(),
+                    mesh_name: Some(req.agent_id.clone()),
                     namespace: Some(container_name),
                     phase: Some("Running".into()),
                     message: Some(format!(
@@ -408,6 +409,7 @@ pub(super) async fn create_sandbox_docker(
     Ok(SpawnResponse {
         status: "created".into(),
         agent_id: req.agent_id.clone(),
+        mesh_name: Some(req.agent_id.clone()),
         namespace: Some(container_name),
         phase: Some("Running".into()),
         message: Some(format!(
@@ -448,6 +450,7 @@ pub(super) async fn get_sandbox_status_docker(name: &str) -> Result<SpawnRespons
     Ok(SpawnResponse {
         status: "ok".into(),
         agent_id: name.to_string(),
+        mesh_name: Some(name.to_string()),
         namespace: Some(container_name),
         phase: Some(phase.to_string()),
         message: None,
@@ -492,6 +495,7 @@ pub async fn list_sandboxes_docker(parent_name: &str) -> Result<Vec<SubAgentEntr
             };
 
             Some(SubAgentEntry {
+                mesh_name: name.clone(),
                 agent_id: name,
                 namespace: Some(raw_name.to_string()),
                 phase: Some(phase.to_string()),
@@ -540,6 +544,7 @@ pub async fn delete_sandbox_docker(parent_name: &str, name: &str) -> Result<Spaw
     Ok(SpawnResponse {
         status: "deleted".into(),
         agent_id: name.to_string(),
+        mesh_name: Some(name.to_string()),
         namespace: None,
         phase: Some("Terminated".into()),
         message: Some(format!("Sub-agent '{}' container removed", name)),

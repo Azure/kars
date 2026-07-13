@@ -270,6 +270,10 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             }
         },
     };
+    // `deliveredAt` is write-once retention state owned by this reconciler.
+    // Carry it across normal status refreshes so SSA does not erase it and make
+    // the retention path stamp it again on every reconcile.
+    preserve_delivered_at(&task, &mut new_status);
 
     // Execution bridge (§20 launch gate). Only a governance-Ready task may
     // execute. Launch materializes a governed sandbox; un-launch tears it down.
@@ -538,6 +542,10 @@ fn ready_status(
         lineage,
         ..Default::default()
     }
+}
+
+fn preserve_delivered_at(task: &KarsTask, status: &mut KarsTaskStatus) {
+    status.delivered_at = task.status.as_ref().and_then(|s| s.delivered_at.clone());
 }
 
 /// Build a `Degraded` status with no digest — the receipt must never bind to
@@ -1621,6 +1629,20 @@ mod tests {
     fn valid_envelope_passes() {
         let t = task_with(3, 3, 2);
         assert!(matches!(check_envelope(&t), EnvelopeCheck::Valid));
+    }
+
+    #[test]
+    fn normal_status_refresh_preserves_delivered_at() {
+        let mut task = task_with(3, 3, 2);
+        task.status = Some(KarsTaskStatus {
+            delivered_at: Some("2026-07-12T19:13:57Z".into()),
+            ..Default::default()
+        });
+        let mut refreshed = ready_status(None, Some(1), "sha256:test".into(), Vec::new());
+
+        preserve_delivered_at(&task, &mut refreshed);
+
+        assert_eq!(refreshed.delivered_at.as_deref(), Some("2026-07-12T19:13:57Z"));
     }
 
     #[test]

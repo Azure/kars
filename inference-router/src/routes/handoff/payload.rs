@@ -517,7 +517,9 @@ pub(super) async fn handoff_restore(
                     )
                     .await;
                     sub_agent_results.push(serde_json::json!({
+                        "name": sub_snap.agent_id,
                         "agent_id": sub_snap.agent_id,
+                        "mesh_name": resp.mesh_name,
                         "original_amid": sub_snap.original_amid,
                         "status": "spawned",
                         "namespace": resp.namespace,

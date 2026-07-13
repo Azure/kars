@@ -306,6 +306,7 @@ export async function runHandoffOrchestration(
   const myName = process.env.SANDBOX_NAME || "unknown";
   const myAmid = deps.meshClient()?.getAmid?.() || deps.identity()?.amid;
   let targetName = myName;
+  let targetMeshName = targetName;
   let targetAmid: string | undefined;
 
   if (direction === "local_to_aks") {
@@ -328,7 +329,10 @@ export async function runHandoffOrchestration(
       };
       const handoffModel = process.env.OPENCLAW_MODEL || process.env.DEFAULT_MODEL;
       if (handoffModel) spawnPayload.model = handoffModel;
-      await _routerCall("POST", "/sandbox/spawn", spawnPayload);
+      const spawnResult = await _routerCall("POST", "/sandbox/spawn", spawnPayload);
+      if (typeof spawnResult?.mesh_name === "string" && spawnResult.mesh_name) {
+        targetMeshName = spawnResult.mesh_name;
+      }
       _hp("spawn", "🚀 CRD created — waiting for pod to start...");
     } catch (spawnErr: any) {
       if (!spawnErr.message?.includes("already exists")) throw spawnErr;
@@ -341,9 +345,9 @@ export async function runHandoffOrchestration(
     while (Date.now() - spawnStart < 90_000) {
       await new Promise(r => setTimeout(r, 2000));
       try {
-        const agents = await getMeshRegistry(routerUrl).search(targetName, { timeoutMs: 5000 });
+        const agents = await getMeshRegistry(routerUrl).search(targetMeshName, { timeoutMs: 5000 });
         const match = agents.find((a) =>
-          a.amid !== myAmid && (a.display_name === targetName || a.capabilities?.includes(targetName))
+          a.amid !== myAmid && (a.display_name === targetMeshName || a.capabilities?.includes(targetMeshName))
         );
         if (match?.amid) {
           targetAmid = match.amid;
