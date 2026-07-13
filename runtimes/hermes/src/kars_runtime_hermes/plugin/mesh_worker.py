@@ -221,7 +221,15 @@ def _summarize_telemetry(
 
 
 def _artifact_root() -> Path:
-    return Path(os.environ.get("KARS_HERMES_WORKSPACE_DIR", "/sandbox/agent"))
+    # /sandbox/agent may be an operator-mounted, read-only agent-code tree.
+    # Hermes owns /sandbox/.hermes, so keep task outputs in a dedicated writable
+    # runtime directory and ship them over mesh before the task response.
+    return Path(
+        os.environ.get(
+            "KARS_HERMES_ARTIFACT_DIR",
+            "/sandbox/.hermes/artifacts",
+        )
+    )
 
 
 def _open_workspace_root() -> int:
