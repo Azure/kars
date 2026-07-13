@@ -369,14 +369,9 @@ async fn responses(
         .into_response();
     }
 
-    let upstream = state.upstream_config(sandbox_name);
-    // Slice 2d.2: walk `modelPreference.primary → fallback[]` with
-    // per-deployment health awareness. The override that 2d.1 did via
-    // `apply_model_preference_override` is now part of
-    // `forward_with_failover`'s candidate construction
-    // (`build_candidates` starts with `primary.deployment` and walks
-    // outward), so this single call subsumes the override + the
-    // retry loop in one place.
+    let mut upstream = state.upstream_config(sandbox_name);
+    crate::routes::apply_model_preference_override(&mut upstream, &policy, &state.config);
+    let body = super::chat_completions::override_model_in_body(&body, &upstream.deployment);
     tracing::info!(
         target: "inference.audit",
         sandbox = %sandbox_name,
