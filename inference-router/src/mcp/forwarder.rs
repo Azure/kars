@@ -785,6 +785,18 @@ enum CallAttempt {
     /// turning any future false-positive into a one-line diagnosis instead of
     /// a guessing game.
     SessionLost { reason: String },
+    /// The request failed in a way that could mean either a stale pooled
+    /// connection/session or a genuine tool failure. The caller probes the
+    /// existing session with `tools/list`; only a failed probe permits re-init
+    /// and retry, preventing duplicate side effects when the tool actually ran.
+    AmbiguousFatal {
+        error: DispatchError,
+        reason: String,
+    },
+    AmbiguousResult {
+        output: ToolCallOutput,
+        reason: String,
+    },
     /// Terminal failure — surface to the agent as-is.
     Fatal(DispatchError),
 }
@@ -872,10 +884,21 @@ async fn post_tools_call(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            return CallAttempt::Fatal(DispatchError::ExecutionFailed {
-                tool: tool_label,
-                reason: format!("upstream POST failed: {e}"),
-            });
+            let reason = format!("upstream POST failed: {e}");
+            return if session.id.is_some() {
+                CallAttempt::AmbiguousFatal {
+                    error: DispatchError::ExecutionFailed {
+                        tool: tool_label,
+                        reason: reason.clone(),
+                    },
+                    reason,
+                }
+            } else {
+                CallAttempt::Fatal(DispatchError::ExecutionFailed {
+                    tool: tool_label,
+                    reason,
+                })
+            };
         }
     };
 
@@ -889,10 +912,21 @@ async fn post_tools_call(
     let body_text = match resp.text().await {
         Ok(t) => t,
         Err(e) => {
-            return CallAttempt::Fatal(DispatchError::ExecutionFailed {
-                tool: tool_label,
-                reason: format!("upstream body read failed: {e}"),
-            });
+            let reason = format!("upstream body read failed: {e}");
+            return if session.id.is_some() {
+                CallAttempt::AmbiguousFatal {
+                    error: DispatchError::ExecutionFailed {
+                        tool: tool_label,
+                        reason: reason.clone(),
+                    },
+                    reason,
+                }
+            } else {
+                CallAttempt::Fatal(DispatchError::ExecutionFailed {
+                    tool: tool_label,
+                    reason,
+                })
+            };
         }
     };
 
@@ -946,6 +980,27 @@ async fn post_tools_call(
                 reason: format!("jsonrpc error code={} message={}", err.code, err.message),
             };
         }
+        if err.code == -32603
+            && err
+                .message
+                .to_ascii_lowercase()
+                .contains("tool execution failed")
+            && session.id.is_some()
+        {
+            let reason = format!("ambiguous jsonrpc error code={} message={}", err.code, err.message);
+            return CallAttempt::AmbiguousResult {
+                output: ToolCallOutput {
+                    content: vec![ToolContent::Text {
+                        text: format!(
+                            "upstream JSON-RPC error code={} message={}",
+                            err.code, err.message
+                        ),
+                    }],
+                    is_error: true,
+                },
+                reason,
+            };
+        }
         // Other upstream protocol error → surface as an isError content
         // entry, not a DispatchError. Per MCP spec, JSON-RPC errors from
         // `tools/call` indicate the *protocol* failed; the semantic "tool
@@ -973,10 +1028,24 @@ async fn post_tools_call(
         }
     };
 
-    CallAttempt::Done(ToolCallOutput {
+    let output = ToolCallOutput {
         content: result.content,
         is_error: result.is_error.unwrap_or(false),
-    })
+    };
+    let ambiguous_execution_failure = output.is_error
+        && output.content.iter().any(|content| {
+            let ToolContent::Text { text } = content;
+            let lower = text.to_ascii_lowercase();
+            lower.contains("tool execution failed") || lower.contains("mcp error -32603")
+        });
+    if ambiguous_execution_failure && session.id.is_some() {
+        return CallAttempt::AmbiguousResult {
+            output,
+            reason: "upstream returned isError tool execution failure on a stateful session"
+                .to_string(),
+        };
+    }
+    CallAttempt::Done(output)
 }
 
 async fn forward_tools_call(
@@ -989,10 +1058,57 @@ async fn forward_tools_call(
     // their per-session state (e.g. the open browser page) across calls.
     let session = entry.session.lock().await.clone();
 
-    match post_tools_call(http, entry, upstream_name, arguments, &session).await {
-        CallAttempt::Done(out) => Ok(out),
-        CallAttempt::Fatal(e) => Err(e),
-        CallAttempt::SessionLost { reason } => {
+    let attempt = post_tools_call(http, entry, upstream_name, arguments, &session).await;
+    let reason = match attempt {
+        CallAttempt::Done(out) => return Ok(out),
+        CallAttempt::Fatal(error) => {
+            if session.id.is_none()
+                || fetch_upstream_tools(
+                    http,
+                    &entry.upstream_url,
+                    entry.bearer_token.as_deref(),
+                    &session,
+                )
+                .await
+                .is_ok()
+            {
+                return Err(error);
+            }
+            format!(
+                "fatal tools/call failure followed by failed existing-session tools/list probe: {error}"
+            )
+        }
+        CallAttempt::SessionLost { reason } => reason,
+        CallAttempt::AmbiguousFatal { error, reason } => {
+            if fetch_upstream_tools(
+                http,
+                &entry.upstream_url,
+                entry.bearer_token.as_deref(),
+                &session,
+            )
+            .await
+            .is_ok()
+            {
+                return Err(error);
+            }
+            format!("{reason}; existing-session tools/list probe failed")
+        }
+        CallAttempt::AmbiguousResult { output, reason } => {
+            if fetch_upstream_tools(
+                http,
+                &entry.upstream_url,
+                entry.bearer_token.as_deref(),
+                &session,
+            )
+            .await
+            .is_ok()
+            {
+                return Ok(output);
+            }
+            format!("{reason}; existing-session tools/list probe failed")
+        }
+    };
+    {
             // Re-establish the session once and retry. Covers upstream pod
             // restarts and session TTL expiry without failing the agent's call.
             tracing::info!(
@@ -1026,12 +1142,13 @@ async fn forward_tools_call(
             match post_tools_call(http, entry, upstream_name, arguments, &new_session).await {
                 CallAttempt::Done(out) => Ok(out),
                 CallAttempt::Fatal(e) => Err(e),
+                CallAttempt::AmbiguousFatal { error, .. } => Err(error),
+                CallAttempt::AmbiguousResult { output, .. } => Ok(output),
                 CallAttempt::SessionLost { .. } => Err(DispatchError::ExecutionFailed {
                     tool: format!("{}.{}", entry.prefix, upstream_name),
                     reason: "upstream session could not be re-established after retry".to_string(),
                 }),
             }
-        }
     }
 }
 
@@ -1690,6 +1807,11 @@ mod tests {
         /// When set, the next `tools/call` returns a `400` session error once
         /// (then clears the flag), simulating session expiry / pod restart.
         fail_next_with_session_lost: StdArc<std::sync::atomic::AtomicBool>,
+        /// Return a 200 `isError:true` generic execution failure once and mark
+        /// the session invalid, matching the official Everything server after
+        /// its pod restarts behind an existing router.
+        fail_next_with_ambiguous_execution: StdArc<std::sync::atomic::AtomicBool>,
+        session_invalidated: StdArc<std::sync::atomic::AtomicBool>,
         /// When set, every successful `tools/call` result embeds the word
         /// "session" in its text (mimics Playwright `browser_evaluate` output
         /// that references `sessionStorage`). A healthy 200 like this must
@@ -1708,6 +1830,10 @@ mod tests {
                 init_count: StdArc::new(AtomicUsize::new(0)),
                 call_count: StdArc::new(AtomicUsize::new(0)),
                 fail_next_with_session_lost: StdArc::new(std::sync::atomic::AtomicBool::new(false)),
+                fail_next_with_ambiguous_execution: StdArc::new(
+                    std::sync::atomic::AtomicBool::new(false),
+                ),
+                session_invalidated: StdArc::new(std::sync::atomic::AtomicBool::new(false)),
                 result_mentions_session: false,
             }
         }
@@ -1741,6 +1867,7 @@ mod tests {
         match method {
             "initialize" => {
                 state.init_count.fetch_add(1, Ordering::SeqCst);
+                state.session_invalidated.store(false, Ordering::SeqCst);
                 let result = serde_json::json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": {"protocolVersion": state.negotiated_version, "capabilities": {}}
@@ -1766,6 +1893,11 @@ mod tests {
                 }
             }
             "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
+            "tools/list" | "tools/call"
+                if state.session_invalidated.load(Ordering::SeqCst) =>
+            {
+                session_lost()
+            }
             "tools/list" | "tools/call" if sid != state.session_id => session_lost(),
             "tools/list" | "tools/call" if state.require_protocol_header && !has_proto => (
                 StatusCode::BAD_REQUEST,
@@ -1789,6 +1921,24 @@ mod tests {
                     .swap(false, Ordering::SeqCst)
                 {
                     return session_lost();
+                }
+                if state
+                    .fail_next_with_ambiguous_execution
+                    .swap(false, Ordering::SeqCst)
+                {
+                    state.session_invalidated.store(true, Ordering::SeqCst);
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{"type": "text", "text": "MCP error -32603: tool execution failed: do_thing"}],
+                                "isError": true
+                            }
+                        })),
+                    )
+                        .into_response();
                 }
                 let tool = body
                     .pointer("/params/name")
@@ -1941,6 +2091,31 @@ mod tests {
             2,
             "session must be re-initialized once on expiry"
         );
+    }
+
+    #[tokio::test]
+    async fn generic_execution_failure_probes_then_recovers_dead_session() {
+        let state = StatefulState::new("sess-generic", vec![tool_def("do_thing", "")]);
+        let init_count = state.init_count.clone();
+        let call_count = state.call_count.clone();
+        let fail_flag = state.fail_next_with_ambiguous_execution.clone();
+        let url = stateful_mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("svc", &url, vec!["*"])]);
+
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .expect("discover");
+        fail_flag.store(true, Ordering::SeqCst);
+
+        let out = dispatcher
+            .invoke("svc.do_thing", &serde_json::json!({}))
+            .await
+            .expect("dead session should be probed, reinitialized, and retried");
+        let ToolContent::Text { text } = &out.content[0];
+        assert!(text.contains("called do_thing"));
+        assert!(!out.is_error);
+        assert_eq!(init_count.load(Ordering::SeqCst), 2);
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
     }
 
     /// Regression: a HEALTHY `tools/call` whose 200 result merely mentions the
