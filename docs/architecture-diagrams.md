@@ -225,7 +225,7 @@ The A2A gateway is the only inbound public surface. Every request gets the same 
 ```mermaid
 flowchart LR
   User["operator / CLI / GitOps"]
-  CRD[("10 CRDs<br/>KarsSandbox · A2AAgent · McpServer<br/>ToolPolicy · InferencePolicy<br/>KarsMemory · KarsEval · TrustGraph<br/>EgressApproval · KarsSREAction")]
+  CRD[("18 CRDs<br/>sandboxes · tasks · teams · profiles · skills<br/>approvals · receipts · policies · MCP · memory<br/>evaluation · trust · identity · A2A · egress · SRE")]
   Ctrl["kars-controller<br/>(kube-rs)"]
 
   User -->|kubectl apply / kars cli| CRD
@@ -241,7 +241,12 @@ flowchart LR
   Status --> User
 ```
 
-The controller is a vanilla kube-rs reconciler. It owns the ten user-facing CRDs (plus the infrastructure CRDs `KarsAuthConfig` and the controller-internal `KarsPairing`), watches them, and produces the boring Kubernetes objects that make a sandbox real. The CRD `status.conditions` chain is the operator-facing source of truth; every condition is documented in **[`docs/api/conditions.md`](api/conditions.md)**.
+The controller is a vanilla kube-rs reconciler. It owns the 16 user-facing
+CRDs plus the infrastructure CRDs `KarsAuthConfig` and `KarsPairing`, watches
+them, and produces the Kubernetes objects, policy artifacts, task outputs, and
+evidence that make an agent workload real. The CRD `status.conditions` chain is
+the operator-facing source of truth; every condition is documented in
+**[`docs/api/conditions.md`](api/conditions.md)**.
 
 ---
 

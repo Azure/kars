@@ -278,7 +278,8 @@ for the architecture.
 What this does, in order:
 
 1. Runs preflight: subscription RBAC, resource providers, **Entra Agent ID directory role** (skipped when `--mesh-trust=anonymous`), preview features.
-2. Creates a resource group `kars-<name>-rg`.
+2. Creates or reuses the selected resource group. Without
+   `--resource-group`, the default is `kars-<region>`.
 3. Creates an ACR (your private registry) and an AKS cluster with Workload Identity and OIDC issuer enabled.
 4. Creates an Azure AI Foundry project, Content Safety binding, and a model deployment.
 5. **Gets the images into your ACR** — with `--release`, imports the public, cosign-signed `ghcr.io/azure/*` images (no build); with `--build`, compiles the controller, inference-router, A2A gateway, and sandbox images from source and pushes them; otherwise imports from `--source-acr`.
@@ -346,7 +347,7 @@ kars upgrade --rollback  # revert to the previous Helm revision if needed
 
 ```bash
 kars destroy prod-agent           # one sandbox
-kars destroy --all                # everything, including the resource group
+kars destroy --all --yes --resource-group <resource-group>
 ```
 
 ---
@@ -358,13 +359,25 @@ If you already have an AKS cluster and a Foundry project, you can install kars i
 ```bash
 helm install kars deploy/helm/kars \
   --namespace kars-system --create-namespace \
-  --set acr.loginServer=<youracr>.azurecr.io \
-  --set foundry.endpoint=https://<your>.openai.azure.com \
-  --set foundry.deploymentName=gpt-4.1 \
-  --set workloadIdentity.clientId=<federated-mi-client-id>
+  --set controller.image.repository=<your-registry>/kars-controller \
+  --set inferenceRouter.image.repository=<your-registry>/kars-inference-router \
+  --set sandbox.image.repository=<your-registry>/openclaw-sandbox \
+  --set foundry.endpoint=https://<ai-services-resource>.services.ai.azure.com \
+  --set foundry.projectEndpoint=https://<ai-services-resource>.services.ai.azure.com/api/projects/<project> \
+  --set-string foundry.deployments='[\"gpt-4.1\"]' \
+  --set azure.workloadIdentity.clientId=<federated-mi-client-id>
 ```
 
-Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [minimal example](api/crd-reference.md#minimal-example) for the smallest valid sandbox + `InferencePolicy` pair. The CLI is convenient but optional — every action it takes is a Helm value, a Kubernetes resource, or an `az` call you can perform yourself. See **[Operations / GitOps](operations/gitops.md)**.
+This installs the Kars control plane only. A complete deployment also requires
+an inference endpoint, registry access, the AGT relay/registry, and the identity
+configuration appropriate to the cluster. Review the
+[Helm installation guide](how-to/helm-installation.md) and
+[compatibility matrix](reference/compatibility.md) before installation.
+
+Then submit `KarsSandbox` resources directly with `kubectl apply` — see the
+[minimal example](api/crd-reference.md#minimal-example) for the smallest valid
+sandbox + `InferencePolicy` pair. The CLI is convenient but optional. See
+**[Operations / GitOps](operations/gitops.md)**.
 
 ---
 

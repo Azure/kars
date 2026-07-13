@@ -14,13 +14,11 @@ open-source projects:
   is requested (CPU inference via [AIKit](https://github.com/kaito-project/aikit)/llama.cpp),
   or when you're on a GPU node pool.
 
-kars does **not** install or manage either project. You install them once,
-the same way you'd install any other cluster addon — using their own real
-`helm`/`kubectl` commands, with your own cluster-admin kubeconfig. kars-bridge
-only detects that they're present and builds a normal, narrowly-scoped
-`ModelDeployment` CRUD flow on top — exactly like it detects an
-already-configured GitHub App or Azure AI Foundry connection, rather than
-configuring those itself.
+Kars does **not** install or manage either project. You install them once,
+the same way you'd install any other cluster addon. Core Kars can route to the
+resulting Service by configuring a router provider Secret and an
+`InferencePolicy`. Kars Bridge is an optional private UI for discovery and
+`ModelDeployment` CRUD; it is not required.
 
 ## Tier 0 — CPU-only, works everywhere (recommended default)
 
@@ -71,6 +69,7 @@ optimization the CPU/small-model path doesn't need. The
 ### 3. Deploy a tiny model
 
 ```bash
+kubectl create namespace kars-local-inference
 kubectl label node <your-node-name> apps=llm-inference
 
 cat <<'EOF' | kubectl apply -f -
@@ -78,7 +77,7 @@ apiVersion: airunway.ai/v1alpha1
 kind: ModelDeployment
 metadata:
   name: local-llama-1b
-  namespace: default
+  namespace: kars-local-inference
 spec:
   model:
     id: "llama-3.2-1b-instruct"
@@ -93,19 +92,63 @@ EOF
 Watch it come up:
 
 ```bash
-kubectl get modeldeployment local-llama-1b -w
+kubectl -n kars-local-inference get modeldeployment local-llama-1b -w
 # PHASE goes Deploying -> Running (first run pulls the ~860MB image)
 ```
 
 ### 4. Verify
 
 ```bash
-CLUSTERIP=$(kubectl get svc local-llama-1b -o jsonpath='{.spec.clusterIP}')
+CLUSTERIP=$(kubectl -n kars-local-inference get svc local-llama-1b -o jsonpath='{.spec.clusterIP}')
 kubectl run curl-test --rm -i --restart=Never --image=curlimages/curl -- \
   curl -s -X POST http://$CLUSTERIP:80/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"llama-3.2-1b-instruct","messages":[{"role":"user","content":"say hi"}],"max_tokens":20}'
 ```
+
+### 5. Register the endpoint with core Kars
+
+The router discovers additional providers from the canonical
+`kars-inference-providers` Secret. The controller mirrors it into sandbox
+namespaces for the router only.
+
+```bash
+kubectl -n kars-system create secret generic kars-inference-providers \
+  --from-literal=KARS_PROVIDER_AIRUNWAY_ENDPOINT=http://local-llama-1b.kars-local-inference.svc.cluster.local
+```
+
+Create an inference policy and sandbox:
+
+```yaml
+apiVersion: kars.azure.com/v1alpha1
+kind: InferencePolicy
+metadata:
+  name: local-llama
+  namespace: kars-system
+spec:
+  appliesTo:
+    sandboxName: local-agent
+  modelPreference:
+    primary:
+      provider: airunway
+      deployment: llama-3.2-1b-instruct
+---
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: local-agent
+  namespace: kars-system
+spec:
+  sandbox: {}
+  runtime:
+    kind: OpenClaw
+    openclaw: {}
+  inferenceRef:
+    name: local-llama
+```
+
+Ensure the Kars Helm values include `kars-local-inference` in
+`localInference.namespaces` or a precise `localInference.targets` entry.
 
 Other small CPU-tier models from AIKit's
 [pre-made image list](https://kaito-project.github.io/aikit/docs/premade-models/):

@@ -1,6 +1,7 @@
 # kars Helm Chart Values
-# NOTE: For production, replace "latest" tags with specific image digests
-#       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
+# Kars currently standardizes its component defaults on `:latest` with
+# pullPolicy Always. Do not introduce per-component version tags; tag drift has
+# caused mismatched controller/router/runtime deployments in the past.
 
 global:
   # Registry credentials used by Kars control-plane images and mirrored by the
@@ -11,7 +12,7 @@ global:
 controller:
   image:
     repository: karsacr.azurecr.io/kars-controller
-    tag: "latest"  # Pin to digest in production
+    tag: "latest"
     pullPolicy: Always
   replicas: 2
   # When true, BYO sandboxes whose

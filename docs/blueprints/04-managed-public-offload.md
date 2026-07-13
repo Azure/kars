@@ -365,7 +365,7 @@ None of these change the trust model. They change the customer-facing UX around 
 - `docs/security-validation.md` (live-AKS validation of all 9 defence-in-depth layers, including Kata VM)
 - `docs/multi-tenant.md` (per-namespace tenant isolation patterns)
 - `docs/security.md` § Layer 2 (Kata VM Isolation)
-- `docs/api/crd-reference.md` (all twelve CRDs, especially `InferencePolicy`, `ToolPolicy`, `KarsMemory`, `A2AAgent`)
+- `docs/api/crd-reference.md` (the complete CRD inventory, especially `InferencePolicy`, `ToolPolicy`, `KarsMemory`, `A2AAgent`)
 - `docs/use-cases.md` Scenario 2 (the customer-side experience)
 - ADR-0001 (A2A ingress front-edge, identical pattern for A2A 1.0.0 inbound)
 

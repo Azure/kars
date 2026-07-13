@@ -5,12 +5,13 @@ inference router, the sandbox base + slim overlay, the AgentMesh relay
 + registry, and the five runtime adapter images
 (`kars-runtime-{anthropic,langgraph,langgraph-ts,maf-python,openai-agents,pydantic-ai}`).
 
-The build system supports two parallel tag channels for every image:
+The build system can produce multiple tags, but the Kars deployment convention
+uses one coherent floating channel:
 
 | Channel | Tag form | Purpose |
 |---|---|---|
 | **Floating** | `:latest` | Track-the-tip channel for development clusters and CI; the controller's image-default constants point here so a `helm upgrade` always picks up the newest sandbox/runtime build. |
-| **Pinned** | `:$(VERSION)-$(GIT_SHA)` | Immutable per-build tag for production rollouts, audit trails, and Cosign signature provenance. `VERSION` is read from `cli/package.json`; `GIT_SHA` is the abbreviated commit hash. |
+| **Build tag** | `:$(VERSION)-$(GIT_SHA)` | Build/release artifact and provenance lookup; not the default controller/runtime override strategy. |
 
 Both tags are produced by every `make image-*` target. Operators choose
 which channel to follow per environment by setting the corresponding
@@ -20,13 +21,13 @@ override env var on the controller (e.g. `OPENAI_AGENTS_RUNTIME_IMAGE`,
 `PYDANTIC_AI_RUNTIME_IMAGE`, `INFERENCE_ROUTER_IMAGE`,
 `SANDBOX_IMAGE`).
 
-## Recommended channels per environment
+## Deployment convention
 
 | Environment | Controller / router | Sandbox / runtimes | Why |
 |---|---|---|---|
-| Local dev / Kind | `:latest` | `:latest` | Fastest iteration. |
-| Shared dev / staging | `:$(VERSION)-$(GIT_SHA)` | `:latest` | Pin the control plane (rare changes); float the data plane (frequent rebuilds). |
-| Production | `:$(VERSION)-$(GIT_SHA)` for everything | same | Immutable rollouts, signature-pinnable, easy rollback. |
+| Local dev / Kind | `:latest` | `:latest` | Loaded or pulled as one coherent build set. |
+| Shared clusters | `:latest` | `:latest` | Avoid controller/router/runtime tag drift; use `imagePullPolicy: Always`. |
+| Evidence and rollback | Resolve deployed tags to digests | Resolve deployed tags to digests | Record the actual image IDs in receipts, evidence, and release metadata. |
 
 ## Tagging a release
 
@@ -43,9 +44,8 @@ git push origin v0.1.18
 make images push push-runtimes  # uses VERSION from package.json + GIT_SHA
 ```
 
-> **Repo policy:** images are pushed to a **private** ACR. The
-> upstream OSS repo is and stays private. Public mirroring is done via
-> a separate (non-default) workflow that the maintainers run manually.
+The source repository is public. Development and private-preview deployments
+may use private registries; public release workflows may mirror signed images.
 
 ## Why `:latest` is also kept
 
@@ -53,9 +53,8 @@ make images push push-runtimes  # uses VERSION from package.json + GIT_SHA
   fall back to `:latest` when no override env var is set. This is the
   zero-config developer-experience path — `kars up` against a
   freshly-built ACR Just Works without the operator computing a SHA.
-- Every Helm chart override (`controller.image.tag` etc.) silently
-  defaults to the chart's own version when omitted; explicit `:latest`
-  via env override is the documented escape hatch.
+- The Helm values explicitly default controller, router, and sandbox tags to
+  `latest`; operators can supply another coherent tag set through values.
 - Removing `:latest` would force operators to thread `IMAGE_TAG`
   through every dev workflow. Not worth it.
 

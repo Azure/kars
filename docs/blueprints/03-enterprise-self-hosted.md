@@ -312,7 +312,7 @@ The controller ships production-grade operator hygiene relevant to enterprise de
 - `controller/src/policy_fetcher.rs` (signed OCI allowlist fetch + verify)
 - `inference-router/src/auth.rs` (Workload Identity OIDC exchange)
 - `deploy/helm/kars/values.yaml` (Helm contract)
-- `docs/api/crd-reference.md` (all twelve CRDs)
+- `docs/api/crd-reference.md` (the complete CRD inventory)
 - ADR-0001 — A2A ingress front-edge (`docs/adr/0001-a2a-ingress-front-edge.md`)
 
 ---

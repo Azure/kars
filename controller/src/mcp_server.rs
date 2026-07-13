@@ -29,9 +29,8 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// `McpServer.spec` — declares an MCP 2026 server reachable from sandboxes
-/// in the same namespace (or, if `crossNamespaceAllowed: true` on the
-/// server side, cluster-wide).
+/// `McpServer.spec` — declares an MCP 2026 server reachable from allowed
+/// sandboxes in the same namespace.
 ///
 /// ## Three authoring paths
 ///
@@ -100,9 +99,9 @@ pub struct McpServerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_mode: Option<bool>,
 
-    /// OAuth 2.1 scopes that the router will request when fronting calls
-    /// from sandboxes to this server. The actual per-tool gating is
-    /// expressed in `ToolPolicy` resources, not here.
+    /// OAuth 2.1 scopes accepted by the sandbox-facing router MCP endpoint.
+    /// Outbound OAuth acquisition for an external upstream is not implemented.
+    /// The actual per-tool gating is expressed in `ToolPolicy` resources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
 
@@ -142,8 +141,8 @@ pub struct McpServerSpec {
     /// `Authorization: Bearer <value>` on every outbound `tools/list`
     /// and `tools/call` request to this server.
     ///
-    /// Designed to reuse pre-existing sandbox env vars without
-    /// introducing new mounts. The primary intended consumer is the
+    /// Reads a pre-existing inference-router environment variable. The primary
+    /// intended consumer is the
     /// GitHub Copilot dev-credential path (`COPILOT_GITHUB_TOKEN`),
     /// which already contains a GitHub OAuth token that authenticates
     /// against `https://api.githubcopilot.com/mcp`.

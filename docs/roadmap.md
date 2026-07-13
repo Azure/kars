@@ -6,7 +6,11 @@
 
 The current public surface — exercised by CI (Kind E2E + manual matrix) on every push to `main`:
 
-- **`KarsSandbox` CRD** (`kars.azure.com/v1alpha1`) plus nine sibling workload CRDs covering inference policy, tool policy, A2A agents, MCP servers, memory, evaluation, egress approval, trust topology, and approval-gated SRE remediation actions (`KarsSREAction`). Two infrastructure CRDs (`KarsAuthConfig`, `KarsPairing`) bring the registered total to twelve. Full schema in [`api/crd-reference.md`](api/crd-reference.md).
+- **Kubernetes-native API surface** (`kars.azure.com/v1alpha1`) covering
+  sandboxes, missions, teams, profiles, skills, approvals, receipts, inference,
+  tools, MCP, memory, evaluation, egress, trust, identity, A2A, and SRE actions.
+  The Helm chart currently installs 18 CRDs. Full schema in
+  [`api/crd-reference.md`](api/crd-reference.md).
 - **Eight first-class agent runtime adapters:** OpenClaw, Hermes (Nous Research), OpenAI Agents (Python), Microsoft Agent Framework (Python), Anthropic Claude Agent SDK, LangGraph (Python **and** TypeScript — two adapters), Pydantic-AI. Plus a documented **BYO runtime** path with strict-mode admission gating ([`operations/byo-strict.md`](operations/byo-strict.md)). See [`runtimes.md`](runtimes.md) for the authoritative table.
 - **Inference router** with IMDS / Workload-Identity broker, content-safety floor, per-sandbox token budgets, the full Foundry data-plane API surface, MCP Streamable-HTTP + SSE compat, A2A transport.
 - **E2E-encrypted inter-agent messaging** via AgentMesh (Signal Protocol — X3DH + Double Ratchet). The Signal session is owned end-to-end by the agent processes; the inference router only WebSocket-bridges opaque ciphertext.
