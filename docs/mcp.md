@@ -45,6 +45,33 @@ container image through `McpServer`; managed images are controller/chart
 configuration, preventing the CR from becoming a general-purpose workload
 launcher.
 
+#### What is the Everything MCP?
+
+The managed `everything` preset deploys the Model Context Protocol project's
+reference **Everything server**. It intentionally exposes a broad set of small,
+deterministic protocol features:
+
+- `echo` and `get-sum`;
+- structured content and annotations;
+- resources and resource links;
+- logging and subscriber updates;
+- long-running operations and research-task simulation.
+
+It is a **conformance and diagnostics fixture**. Use it to answer questions such
+as:
+
+- Did Kars deploy the managed MCP workload?
+- Did `initialize`, `notifications/initialized`, and `tools/list` succeed?
+- Were tool schemas namespaced and filtered correctly?
+- Can a sandbox router forward `tools/call`?
+- Does session recovery work after the MCP pod restarts?
+
+Do not present Everything as a production integration or business tool. For a
+real user-facing capability, use the managed Playwright preset or register an
+external MCP that provides the service you need.
+
+See [Managed MCP: Playwright and Everything](tutorials/managed-mcp.md).
+
 ```yaml
 apiVersion: kars.azure.com/v1alpha1
 kind: McpServer
@@ -112,9 +139,8 @@ kars mcp delete playwright -n kars-system
 | `allowedTools` | Allow-list of tool names. Empty = none; `["*"]` = all (then gate with `ToolPolicy`). Pin explicitly so an upstream change can't widen the surface. |
 | `allowedSandboxes.matchLabels` | Which sandboxes may use this MCP. Empty = same-namespace only. |
 | `productionMode` | `true` requires HTTPS + OAuth 2.1. |
-| `oauth` | OAuth issuer/audience/resource for `productionMode`. The router mints tokens; the agent never sees them. |
-| `bearerFromEnv` | Static outbound bearer from a named env var, for MCPs that use a long-lived API token. |
-| `crossNamespaceAllowed` | Allow sandboxes in other namespaces to reference this CR. |
+| `oauth` | OAuth verifier configuration for the sandbox-facing router `/mcp` endpoint. It does not acquire an outbound token for an external upstream. |
+| `bearerFromEnv` | Static outbound bearer read from a named **router** environment variable. |
 
 The full schema is in the [CRD reference](api/crd-reference.md).
 
@@ -176,11 +202,13 @@ This is automatic for any heartbeating MCP; there's nothing to configure.
 
 ## Authentication
 
-The agent never holds MCP credentials. Two outbound modes, both handled by the
-router:
+The router supports static outbound bearer authentication. Outbound OAuth token
+acquisition for an external MCP upstream is not implemented in the current
+forwarder.
 
-- **OAuth 2.1** (`productionMode: true` + `oauth:`): the controller wires JWKS
-  rotation and the router presents a signed bearer token to the MCP.
+- **OAuth verifier** (`productionMode: true` + `oauth:`): protects the
+  sandbox-facing router MCP endpoint. External upstreams that declare outbound
+  OAuth are skipped with `outbound_oauth_unsupported`.
 
   ```yaml
   spec:
@@ -191,9 +219,16 @@ router:
       audience: "api://your-mcp"
   ```
 
-- **Static bearer** (`bearerFromEnv`): for MCPs that authenticate with a
-  long-lived API token, stored in the sandbox's `<name>-credentials` secret and
-  injected by name. The token stays in the router; the agent only sees tools.
+- **Static outbound bearer** (`bearerFromEnv`): the named variable must be
+  present in the inference-router environment. The shared
+  `kars-inference-providers` Secret is the existing router-only configuration
+  path used by integrated provider/MCP flows. Do not place an MCP bearer only in
+  `<sandbox>-credentials`: that Secret is mounted into the agent container and
+  does not configure the router.
+
+There is not yet a generic CRD-driven router-only Secret reference for arbitrary
+external MCP bearers. Treat that as an operator integration gap rather than
+claiming the CR alone is sufficient.
 
 ## Tool governance
 

@@ -20,7 +20,7 @@ kars has four code components, two languages, and one rule that ties them togeth
 
 | Component | Language | Crate / package | Responsibility |
 |---|---|---|---|
-| **Controller** | Rust (kube-rs) | `kars-controller` | Watches `KarsSandbox` and its nine peer workload CRDs, plus the infrastructure CRDs `KarsAuthConfig` and (controller-internal) `KarsPairing`; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, federated identities. |
+| **Controller** | Rust (kube-rs) | `kars-controller` | Watches the 16 user-facing APIs plus the infrastructure CRDs `KarsAuthConfig` and `KarsPairing`; reconciles them into namespaces, pods, services, NetworkPolicies, ConfigMaps, evidence, and federated identities. |
 | **Inference router** | Rust (axum) | `kars-inference-router` | Sits in the data path of every external call — identity, content safety, governance, audit, A2A. **Mesh**: WebSocket-bridges opaque Signal-Protocol ciphertext for the agent (the Signal session is plugin-owned; see [The mesh](#the-mesh)). |
 | **A2A gateway** | Rust (axum) | `kars-a2a-gateway` + `kars-a2a-core` | Public-ingress entry point for A2A 1.0.0 peer traffic. Verifies signed `AgentCard`s, routes to the correct sandbox, emits audit. |
 | **kars OpenClaw plugin** | TypeScript | `runtimes/openclaw/` (id `kars`) | The agent-side surface for OpenClaw-runtime sandboxes: registers 24 governance-aware tools with OpenClaw (`kars_spawn`, `kars_mesh_send`, `kars_mesh_transfer_file`, `foundry_web_search`, `foundry_code_execute`, `foundry_image_generation`, …) and owns the Signal Protocol session via `@microsoft/agent-governance-sdk`. Catalogued in [OpenClaw plugin](openclaw-plugin.md). |
@@ -202,7 +202,7 @@ A CRD makes sense when it represents a thing that
 
 Anything that fails all three tests is a `KarsSandbox` field, not its own CRD.
 
-### The ten CRDs and what each one buys you
+### The API resources and what each one buys you
 
 | CRD | Owner / changes-with | What you'd give up if it were a `KarsSandbox` field |
 |---|---|---|
@@ -216,16 +216,23 @@ Anything that fails all three tests is a `KarsSandbox` field, not its own CRD.
 | **`TrustGraph`** | Cluster admin. Cross-namespace, cross-cluster. | Sibling-trust at scale collapses: every sandbox would need a list of every peer's AMID. `TrustGraph` is the *only* cluster-scoped CRD precisely because trust topology is a cluster concern. <br><br> **Status — reconciler-only.** The graph is projected to `/etc/kars/trustgraph/graph.json` in each sandbox; the router does not yet consume it for mesh-admission gating. KNOCK accept/deny is — and stays — agent-side (the router cannot decrypt the Signal session). The router-side post-decision trust-score map exists for audit/governance only. **Tracked in the [roadmap](roadmap.md):** router-side **mesh-admission gating** against the projected graph (pre-handshake, refuse to bridge a WS for an edge not in the graph) — a separate, coarser layer that complements agent-side KNOCK rather than replacing it. See [`api/crd-reference.md` §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology). |
 | **`EgressApproval`** | On-call / SRE. Ephemeral, TTL-bounded. | A single inline overlay would mix permanent allowlist drift with short-lived break-glass grants. As a separate CRD, the grant carries its own audit record, TTL, and revocation path. |
 | **`KarsSREAction`** | The [autonomous SRE operator](runbooks/sre.md) proposes; a human (or policy) approves. Ephemeral, TTL-bounded. | A remediation an agent wants to perform — scale a Deployment, restart a rollout, patch an image, delete a stuck pod — would be an un-audited, un-gated `kubectl` call from inside an agent process. As a CRD, every proposed action carries a `diagnosis`, a `rationale`, an explicit `approval.state`, and a TTL; the controller executes it **only** when approved, via a short-lived `TokenRequest` + scoped `ClusterRoleBinding` that is revoked immediately after. |
+| **`KarsTask`** | Mission author. One governed unit of work. | Mission envelopes, outputs, retention, and execution state would be hidden in UI or controller-private storage. |
+| **`KarsTeam`** | Team owner. Standing charter and run lifecycle. | Teams could not be managed declaratively or run independently of Bridge. |
+| **`KarsProfile`** | Platform/team owner. Reusable blueprint. | Runtime, policy, and role configuration would be duplicated across teams and missions. |
+| **`KarsSkill`** | Skill author and approver. Versioned package. | Skill bytes, attestations, approvals, and revocation would not have an immutable resource identity. |
+| **`KarsApproval`** | Requester and human decision-maker. | Human-in-the-loop decisions would be transient UI state without CAS, actor, or digest binding. |
+| **`KarsReceipt`** | Controller/platform. One delivery proof. | Deliverables would lack a durable, independently verifiable governance record. |
 
 Two further resources are **infrastructure CRDs** you don't author per
 agent. `KarsAuthConfig` is a cluster-scoped singleton, written by
 `kars mesh setup-trust`, that anchors tenant-wide Entra Agent ID trust
 (see [Agent identity](agent-identity.md)); when it's absent, sandboxes run
-in the AGT anonymous tier. `KarsPairing` is **controller-internal** — it
-records the binding between a `KarsSandbox` and its AgentMesh registry
-identity. Both are exposed as CRDs so the controller can use the same
-reconciliation machinery as everything else, but you never write either by
-hand. That brings the registered total to **twelve** CRDs.
+in the AGT anonymous tier. `KarsPairing` is a controller-managed binding record
+for peer pairing and trust state.
+
+The Helm chart currently installs **18 CRDs**. The rendered CRDs are the
+authoritative inventory; avoid duplicating a hand-maintained count in product
+logic or release automation.
 
 ### What you actually get from this design
 

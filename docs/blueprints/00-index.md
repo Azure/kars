@@ -36,9 +36,13 @@ These properties are not blueprint-specific; they come from running kars at all.
 - **Egress isolation.** Agent runs as UID 1000 with no path to the network. The router (UID 1001) is the only egress. Enforced by the `egress-guard` initContainer (iptables) and a Kubernetes NetworkPolicy.
 - **Foundry-side Content Safety.** `Microsoft.DefaultV2` Prompt Shields on every inference, both directions.
 - **AGT governance.** `PolicyEngine`, `TrustManager`, `AuditLogger`, `RateLimiter`, `BehaviorMonitor` evaluated in-process on every tool call, every inference, every mesh message.
-- **Tamper-evident audit.** Hash-chained log via `AuditSink`. Each record is signed.
+- **Tamper-evident audit.** Hash-chained log via `AuditSink`. The current chain
+  detects modification or deletion; the chain head is not independently signed.
 - **Signal-Protocol mesh.** X3DH + Double Ratchet. Relay sees only ciphertext. Failed decrypt is a `security_event`; there is no plaintext fallback.
-- **CRD-driven control plane.** Ten workload CRDs in `kars.azure.com/v1alpha1`: `KarsSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval`, `KarsSREAction` — plus the infrastructure CRDs `KarsAuthConfig` and `KarsPairing` (twelve in total). Full schema in [`docs/api/crd-reference.md`](../api/crd-reference.md).
+- **CRD-driven control plane.** The Helm chart installs 18 APIs covering
+  sandboxes, missions, teams, policies, MCP, skills, approvals, receipts,
+  memory, evaluation, trust, identity, A2A, egress, and SRE actions. Full
+  schema in [`docs/api/crd-reference.md`](../api/crd-reference.md).
 - **Multi-runtime hosting.** `KarsSandbox.spec.runtime.kind` selects the runtime: `OpenClaw` (default), `OpenAIAgents`, `MicrosoftAgentFramework` (Python — .NET deferred), `LangGraph` (Python or TypeScript), `Anthropic`, `PydanticAi`, or `BYO`. `SemanticKernel` is reserved but not yet wired. See [Runtime catalog](../runtimes.md).
 - **InferencePolicy reference.** Sandboxes bind to an `InferencePolicy` by name; model and budget configuration is no longer inline.
 

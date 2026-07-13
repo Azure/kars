@@ -84,13 +84,10 @@ caused hard-to-debug incidents, and `:latest` plus
 `imagePullPolicy: Always` keeps the cluster on the most recently
 published digest.
 
-In production, operators are expected to override the tag at install
-time with a digest pin:
-
-```bash
-helm install kars deploy/helm/kars \
-  --set controller.image.tag="@sha256:<digest>"
-```
+Kars deploys the coherent `:latest` component set with
+`imagePullPolicy: Always` to avoid independent controller/router/runtime tag
+drift. For audit and rollback, resolve the deployed image IDs to immutable
+digests and record them in release evidence.
 
 The CNCF AI Conformance suite under `tests/cncf-conformance/` enforces
 the minimum bar: every `image:` reference must declare an explicit

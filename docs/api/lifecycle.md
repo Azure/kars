@@ -9,7 +9,7 @@ If you only read one document about how kars fits together, read this one.
 ## Table of contents
 
 - [The big picture](#the-big-picture)
-- [Two reconcile patterns](#two-reconcile-patterns)
+- [Reconcile patterns](#reconcile-patterns)
 - [CLI ↔ CRD ↔ artifact map](#cli--crd--artifact-map)
 - [`KarsSandbox` — the heavyweight reconcile](#karssandbox--the-heavyweight-reconcile)
 - [`InferencePolicy` — the policy compile pattern](#inferencepolicy--the-policy-compile-pattern)
@@ -26,7 +26,7 @@ If you only read one document about how kars fits together, read this one.
 ```mermaid
 flowchart LR
   CLI["kars CLI<br/>or GitOps / kubectl"]
-  CRD[("CRD<br/>(12 kinds)")]
+  CRD[("CRD<br/>(18 kinds)")]
   Ctrl["kars-controller<br/>(kube-rs)"]
   Art[("Cluster artifacts<br/>Namespace · ServiceAccount · NetworkPolicy<br/>Deployment · Service · ConfigMap · Secret<br/>FederatedIdentityCredential")]
   Runtime["Runtime data plane<br/>inference-router · A2A gateway · sandbox pod"]
@@ -48,15 +48,19 @@ This is the whole loop. Everything else on this page is detail.
 
 ---
 
-## Two reconcile patterns
+## Reconcile patterns
 
-kars's ten user-facing CRDs split into two operational shapes:
+Kars's user-facing APIs use several operational shapes:
 
 | Pattern | CRDs | What gets produced |
 |---|---|---|
 | **Compile-to-artifact** | `InferencePolicy`, `ToolPolicy`, `A2AAgent`, `McpServer`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval` | A deterministic `ConfigMap` (and sometimes a `Secret`) that the router or gateway mounts. The CRD spec is hashed; the hash is stored in `status.versionHash` or equivalent. |
 | **Heavyweight namespace** | `KarsSandbox` | A whole tenant namespace: `Namespace` + `ServiceAccount` + Workload-Identity federated credential + `NetworkPolicy` + governance `ConfigMap` + `Deployment` + `Service`. |
 | **Propose-approve-execute** | `KarsSREAction` | No mounted artifact. The reconciler gates on `spec.approval.state`, and on `Approved` mints a one-shot writer token (`TokenRequest` + scoped `ClusterRoleBinding`) to execute a single typed cluster action, then revokes it. Phase advances `Proposed → Approved → Applied → Recovered`. |
+| **Mission delivery** | `KarsTask` | Trust-envelope validation, sandbox materialization, mesh delivery, output/artifact persistence, receipt linkage, and retention. |
+| **Standing organization** | `KarsTeam`, `KarsProfile` | Principal/member materialization, scheduled or on-demand task runs, backlog, health, and team commons. |
+| **Supply-chain approval** | `KarsSkill`, `KarsApproval` | Package/generation digest binding, immutable human decision, and verified sandbox mount. |
+| **Evidence** | `KarsReceipt` | Durable signed delivery and governance evidence plus inclusion-log metadata. |
 
 ### The reconciler map
 
@@ -79,6 +83,12 @@ graph TD
       R8["TrustGraph<br/>fm: trustgraph"]
       R9["EgressApproval<br/>fm: egressapproval"]
       R11["KarsSREAction<br/>fm: karssreaction"]
+      R12["KarsTask<br/>fm: karstask"]
+      R13["KarsTeam<br/>fm: karsteam"]
+      R14["KarsProfile<br/>fm: karsprofile"]
+      R15["KarsSkill<br/>fm: karsskill"]
+      R16["KarsApproval<br/>fm: karsapproval"]
+      R17["KarsReceipt<br/>fm: karsreceipt"]
     end
     R10["KarsPairing reconciler<br/>(internal — bound by KarsSandbox)"]
     MESH["mesh-peer reconciler<br/>(own lease — agentmesh-mesh-peer-leader)"]
@@ -128,7 +138,7 @@ Every CLI command is a thin wrapper around `kubectl apply`. The CLI does no orch
 | `kars destroy <name>` | Deletes `KarsSandbox` | Cascades via finalizer to delete the namespace + federated credential | — |
 | `kars inferencepolicy apply` | `InferencePolicy` | `ConfigMap` `inferencepolicy-<name>-profile` | Inference router (`/v1/chat`, `/v1/responses`) |
 | `kars toolpolicy apply` | `ToolPolicy` | `ConfigMap` `toolpolicy-<name>-profile` | Inference router (every tool dispatch) |
-| `kars mcp add` | `McpServer` | `Secret` `mcp-<name>-signing` (Ed25519 keypair) <br/> `ConfigMap` `mcp-<name>-jwks` (when `productionMode=true`) | Inference router (`/mcp` proxy — multi-issuer OAuth verifier + namespaced `{server}.{tool}` dispatch) |
+| `kars mcp apply` | `McpServer` | `Secret` `mcp-<name>-signing` (Ed25519 keypair) <br/> `ConfigMap` `mcp-<name>-jwks` (when `productionMode=true`) | Inference router (`/mcp` proxy — multi-issuer OAuth verifier + namespaced `{server}.{tool}` dispatch) |
 | `kars a2a-agent apply` | `A2AAgent` | `ConfigMap` `a2aagent-<name>-card` (signed AgentCard) | A2A gateway (inbound JWS verification) |
 | `kars eval` | `KarsEval` | `ConfigMap` `karseval-<name>-spec` <br/> `Job` (when run-now) | Eval harness |
 | `kars mesh ...` | `TrustGraph` | `ConfigMap` `trustgraph-<name>-graph` | Sandbox agent SDK (KNOCK accept/deny via `@microsoft/agent-governance-sdk`); inference router tracks the post-decision trust-score map for audit/governance |
@@ -242,15 +252,19 @@ sequenceDiagram
     Note over C: skip JWKS — dev / local servers
   end
   C->>K: patch_status:<br/>phase, signingKeyRef, jwksConfigMapRef, lastProbedAt
-  Note over R: At inference time the router resolves<br/>spec.endpoint, signs requests with the<br/>Secret keypair, verifies inbound JWTs<br/>against the JWKS ConfigMap.
+  Note over R: The router verifies bearer tokens calling<br/>its sandbox-facing /mcp endpoint against<br/>the JWKS ConfigMap. External upstream<br/>OAuth acquisition is unsupported.
 ```
 
 **Verified against**: `controller/src/mcp_server_reconciler.rs:246-377`.
 
 Two artifacts, two purposes:
 
-- **The `Secret`** (`mcp-<name>-signing`) is the local Ed25519 keypair used by the router to sign outbound MCP requests. The `kid` is stable across reconciles; the keypair is created once and persists.
-- **The `ConfigMap`** (`mcp-<name>-jwks`) contains the remote OAuth issuer's JWKS, fetched by the controller and refreshed on each reconcile. Only present when `productionMode=true` and `spec.oauth.issuer` is set. Used by the router to verify JWTs the MCP server returns.
+- **The `Secret`** (`mcp-<name>-signing`) is the stable local Ed25519 keypair
+  associated with the router MCP surface.
+- **The `ConfigMap`** (`mcp-<name>-jwks`) contains the configured issuer's JWKS,
+  fetched by the controller and refreshed on reconcile. It is present when
+  `productionMode=true` and verifies callers of the router's `/mcp` endpoint;
+  it is not an outbound OAuth token source.
 
 If JWKS fetch fails the CR is stamped `Degraded / JwksFetchFailed` and the controller requeues with backoff. The router's tool dispatch path treats this as fail-closed for that MCP server.
 
@@ -270,8 +284,12 @@ A `KarsSandbox` may bind up to **8** `McpServer`s via `spec.mcpServerRefs: []Loc
 
 The inference router walks `MCP_JWKS_DIR` at startup, builds an `McpServerRegistry` keyed by name, and:
 
-1. **OAuth:** registers each `meta.issuer` as a trusted issuer in the multi-issuer `OAuthVerifier`. Inbound MCP-host requests are routed to the matching JWKS by `iss` claim.
-2. **Tool dispatch:** for each unauthenticated server (servers requiring outbound OAuth-on-behalf-of are skipped — that path is still being wired), the router calls `tools/list` upstream and registers each tool under the namespaced name `{server_snake_case}.{tool}`. `allowed_tools` filters the catalog (`["*"]` = full passthrough; explicit list = subset; empty = fail-closed with reason recorded).
+1. **Caller verification:** registers each `meta.issuer` in the multi-issuer
+   verifier for bearer tokens presented to the router's `/mcp` endpoint.
+2. **Tool dispatch:** calls `tools/list` on upstreams that need no outbound OAuth
+   or have `bearerFromEnv`. Upstreams requiring outbound OAuth are skipped. Tools
+   are registered as `{server_snake_case}.{tool}` and filtered by
+   `allowed_tools`.
 
 Stale-file sweep (DoD #6) is producer-side: each reconcile rewrites the full current ref set, so removed servers' volumes disappear naturally on the next kubelet pod sync.
 

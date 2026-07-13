@@ -6,14 +6,21 @@
 
 - [Quickstart](quickstart.md)
 - [Getting started](getting-started.md)
+- [Install with Helm](how-to/helm-installation.md)
+- [Compatibility & support](reference/compatibility.md)
 - [CLI reference](cli-reference.md)
 - [Use cases](use-cases.md)
   - [Exec-brief walkthrough](use-cases/exec-brief-walkthrough.md)
+
+# Tutorials
+
+- [Managed MCP: Playwright and Everything](tutorials/managed-mcp.md)
 
 # Architecture
 
 - [Architecture overview](architecture.md)
 - [Architecture diagrams](architecture-diagrams.md)
+- [Kars and Kars Bridge](concepts/kars-and-bridge.md)
 - [Runtimes](runtimes.md)
   - [Runtime contract (BYO)](runtimes/CONTRACT.md)
 - [A2A gateway (architecture)](architecture/a2a-gateway.md)
@@ -60,6 +67,7 @@
 # Operations
 
 - [Operations overview](operations/README.md)
+- [Troubleshooting](operations/troubleshooting.md)
 - [A2A gateway (operations)](operations/a2a-gateway.md)
 - [BYO strict mode](operations/byo-strict.md)
 - [Branch protection](operations/branch-protection.md)
@@ -95,3 +103,7 @@
 - [ADR index](adr/README.md)
   - [ADR-0001: A2A ingress front edge](adr/0001-a2a-ingress-front-edge.md)
   - [ADR-0002: Inference endpoint sourcing](adr/0002-inference-endpoint-sourcing.md)
+
+# Contributing
+
+- [Documentation guide](contributing/documentation.md)

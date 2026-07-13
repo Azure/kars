@@ -19,7 +19,11 @@ All use cases share the same trust boundary:
 - All external traffic flows through the per-sandbox **inference router** (UID 1001).
 - All inter-agent traffic flows through the **AgentMesh relay** (Signal Protocol — X3DH + Double Ratchet); the relay sees only ciphertext.
 - Every tool call, inference, mesh message, and handoff is policy-evaluated by **AGT** (`PolicyDecisionProvider`) and persisted to the **audit chain** (`AuditSink`). See [§Provider seams](architecture/agt-boundary.md#2-provider-contracts).
-- The ten workload CRDs (`KarsSandbox`, `A2AAgent`, `McpServer`, `ToolPolicy`, `InferencePolicy`, `KarsMemory`, `KarsEval`, `TrustGraph`, `EgressApproval`, `KarsSREAction`) are first-class and reconciled. The operator TUI (`kars operator`) renders live panels for the sandbox, its policy / peer / memory / eval CRDs, and `KarsPairing`; `TrustGraph` and `EgressApproval` are inspected via `kubectl` and `kars egress`, and `KarsSREAction` proposals via `kars sre actions` / `kars sre show`, rather than a dedicated panel. `TrustGraph` is v1alpha1 reconciler-only today — see the [API reference §TrustGraph](api/crd-reference.md#trustgraph--mesh-trust-topology) for what is and isn't yet enforced at the router.
+- The 16 user-facing CRDs are first-class and reconciled, covering sandboxes,
+  missions, teams, profiles, skills, approvals, receipts, policies, MCP,
+  memory, evaluation, trust, egress, A2A, and SRE actions. `KarsPairing` and
+  `KarsAuthConfig` are infrastructure APIs. The operator TUI and CLI expose
+  different subsets; the CRD reference is the complete inventory.
 
 ---
 

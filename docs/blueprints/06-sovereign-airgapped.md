@@ -278,7 +278,7 @@ bundle.tar.gz
 - `cli/profiles/` (offline-portable policy bundle)
 - `controller/src/policy_fetcher.rs` (allowlist fetch + offline KMS verify)
 - `Makefile` `bundle` target (🚧 to be added)
-- `docs/api/crd-reference.md` (all twelve CRDs; `spec.runtime.kind` enum; `spec.networkPolicy.allowlistRef.*`)
+- `docs/api/crd-reference.md` (the complete CRD inventory; `spec.runtime.kind` enum; `spec.networkPolicy.allowlistRef.*`)
 - `docs/security.md` § "Air-gapped operating mode"
 
 ---

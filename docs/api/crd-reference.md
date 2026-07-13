@@ -1,8 +1,15 @@
 # CRD reference
 
-kars exposes its API through **twelve** CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. **Ten are workload CRDs** you author per agent or per policy (or, for `KarsSREAction`, that the SRE operator proposes on your behalf) — catalogued in [At a glance](#at-a-glance) below. **Two are infrastructure CRDs** you do not hand-write: [`KarsAuthConfig`](#karsauthconfig--cluster-trust-anchor) (a cluster-scoped singleton created by `kars mesh setup-trust`) and [`KarsPairing`](#infrastructure-crds) (a controller-internal binding record). This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
+kars exposes its API through **18 CustomResourceDefinitions** in the
+`kars.azure.com` group, all at version `v1alpha1`. Sixteen are user-facing
+workload, policy, evidence, or operations APIs. Two are infrastructure CRDs you
+do not normally hand-write: [`KarsAuthConfig`](#karsauthconfig--cluster-trust-anchor)
+and [`KarsPairing`](#infrastructure-crds). This page is the canonical prose
+reference; the rendered CRDs remain the schema authority.
 
-> **Version.** All CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.18`; see [`CHANGELOG.md`](../../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](../roadmap.md) for what's next.
+> **Version.** All CRDs are served at `kars.azure.com/v1alpha1`. Package, chart,
+> and image versions are not yet one unified compatibility signal. Use the
+> release notes, Git commit, and image digests together.
 
 ## At a glance
 
@@ -18,6 +25,12 @@ kars exposes its API through **twelve** CustomResourceDefinitions in the `kars.a
 | `trustgraphs.kars.azure.com` | `TrustGraph` | `tg` | Cluster | Inline `spec.edges[].signature` (Ed25519 per edge, domain-separated payload) | Cross-namespace / cross-cluster mesh trust topology. |
 | `egressapprovals.kars.azure.com` | `EgressApproval` | `eappr` | Namespaced | None on the CR itself (it's a sibling overlay); the sandbox's signed `allowlistRef` is the cryptographic baseline | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
 | `karssreactions.kars.azure.com` | `KarsSREAction` | `sreaction` | Namespaced | None on the CR; execution is gated by `spec.approval.state` + a one-shot minted writer token | An approval-gated, TTL-bounded cluster remediation the SRE operator proposes. |
+| `karstasks.kars.azure.com` | `KarsTask` | `ctask` | Namespaced | Trust-envelope digest and delivery receipt | One governed mission, including launch, retention, output, artifacts, and lineage. |
+| `karsteams.kars.azure.com` | `KarsTeam` | `cteam` | Namespaced | Run envelope and team commons lineage | Standing team charter, roster, cadence, backlog, and run lifecycle. |
+| `karsprofiles.kars.azure.com` | `KarsProfile` | `cprofile` | Namespaced | Profile generation/version | Reusable runtime, policy, and team blueprint. |
+| `karsskills.kars.azure.com` | `KarsSkill` | `cskill` | Namespaced | Package/version digest and approval binding | Versioned skill package with scripts, references, attestation, and approval state. |
+| `karsapprovals.kars.azure.com` | `KarsApproval` | `cappr` | Namespaced | Actor, resource generation, and request/envelope digest | Human decision for a governed request such as egress, skill, tier, or steering. |
+| `karsreceipts.kars.azure.com` | `KarsReceipt` | `crcpt` | Namespaced | Signed receipt and inclusion-log fields | Durable governance and delivery evidence for a task. |
 
 ### Infrastructure CRDs
 
@@ -28,7 +41,10 @@ Two more CRDs round out the API. You don't author these per agent, but the same 
 | `karsauthconfigs.kars.azure.com` | `KarsAuthConfig` | `kac` | Cluster | `kars mesh setup-trust` (singleton, `metadata.name: default`) | Tenant-wide Entra Agent ID trust anchor. When absent, sandboxes run in the AGT anonymous tier. Fully documented in [KarsAuthConfig](#karsauthconfig--cluster-trust-anchor) below. |
 | `karspairings.kars.azure.com` | `KarsPairing` | `cp` | Namespaced | Controller | Binds two agents to their AgentMesh registry IDs and tracks handshake/trust state. Created from a one-time pairing token; read-only from your side. |
 
-The full Kubernetes schema for all twelve lives in `deploy/helm/kars/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
+The full Kubernetes schema lives in `deploy/helm/kars/templates/crd*.yaml`.
+The chart currently installs 18 CRDs. The rendered CRDs are authoritative;
+below we summarize what each resource does, the spec fields you write, and the
+status fields the controller reports back.
 
 > **A note on short names.** The `c`-prefixed aliases (`cs`, `cmem`, `ceval`, `cp`) are retained from the project's earlier name and kept stable for API compatibility. One caveat: `cs` overlaps with kubectl's deprecated built-in `componentstatuses` alias, so in scripts prefer the unambiguous full plural (`karssandboxes`) or the kind (`KarsSandbox`).
 
@@ -58,6 +74,7 @@ metadata:
   name: hello
   namespace: kars-system          # the InferencePolicy must share this namespace
 spec:
+  sandbox: {}
   runtime:
     kind: OpenClaw
     openclaw:
@@ -73,7 +90,9 @@ kubectl apply -f hello.yaml
 kubectl get karssandbox hello -n kars-system -w   # wait for phase: Running
 ```
 
-That's the whole contract: pick a runtime, point at an `InferencePolicy`, apply. The runnable version of this pair (with comments) is [`examples/basic-agent/`](https://github.com/Azure/kars/tree/main/examples/basic-agent). To add governance, memory, MCP servers, or a tighter egress allowlist, layer the optional blocks documented per-CRD below — starting with the full [`KarsSandbox`](#karssandbox--the-agent) schema.
+That's the whole contract: declare the required sandbox posture, pick a runtime,
+point at an `InferencePolicy`, and apply. The runnable version of this pair
+(with comments) is [`examples/basic-agent/`](https://github.com/Azure/kars/tree/main/examples/basic-agent).
 
 ---
 
@@ -350,13 +369,8 @@ metadata:
   namespace: kars-my-agent
 spec:
   url: https://api.githubcopilot.com/mcp                  # required (or supplied by bundleRef)
-  productionMode: true
-  oauth:
-    issuer: https://github.com/login/oauth                # required when productionMode
-    audience: kars-mcp                               # optional
-    resource: https://api.githubcopilot.com/mcp           # optional resource indicator
-    pkce: S256                                            # only S256 today
-  scopes: ["read:repo"]
+  productionMode: false                                   # private loopback router path
+  bearerFromEnv: COPILOT_GITHUB_TOKEN                     # router environment variable
   allowedTools: ["*"]                                     # or explicit list; empty fails closed
   allowedSandboxes:
     matchLabels:
@@ -366,16 +380,19 @@ spec:
 | Field | Purpose |
 |---|---|
 | `spec.url` | Upstream MCP endpoint. Required when `bundleRef` is absent. `https://` is enforced by admission CEL when `productionMode: true`. |
-| `spec.productionMode` | When `true`, the router rejects calls that are not bearer-authenticated against `oauth.issuer` with a verified PKCE flow. Default `false` (dev-only). |
-| `spec.oauth.issuer` | OAuth 2.1 issuer URL. Required when `productionMode: true`. The controller fetches the JWKS via discovery and mirrors it to the sandbox. |
+| `spec.productionMode` | When `true`, protects the sandbox-facing router `/mcp` endpoint with bearer verification. It does not acquire an outbound token for the upstream. |
+| `spec.oauth.issuer` | OAuth issuer used to verify callers of the sandbox-facing router endpoint. External upstream OAuth acquisition is unsupported. |
 | `spec.oauth.audience` | Optional `aud` claim enforcement. |
 | `spec.oauth.resource` | Optional RFC 8707 resource indicator. |
-| `spec.scopes[]` | OAuth scopes the router will request when fronting calls. |
+| `spec.scopes[]` | Scopes accepted by the sandbox-facing router verifier. |
 | `spec.allowedTools[]` | Allow-list of tool names. `["*"]` exposes everything; an explicit list selects a subset; an **empty** list fails closed and the server is skipped on the registry. |
 | `spec.allowedSandboxes.matchLabels` | Selector restricting which sandboxes can reach this server. Empty = same-namespace only. |
 | `spec.bundleRef` | Signed OCI artifact alternative to inline content fields (see [Policy canonical format](policy-canonical-format.md)). |
+| `spec.bearerFromEnv` | Name of an inference-router environment variable attached as the outbound bearer on `tools/list` / `tools/call`. For GitHub MCP use `COPILOT_GITHUB_TOKEN`. |
+<!-- Legacy generated wording below is hidden because it described the wrong environment injection path.
 | `spec.bearerFromEnv` | Name of an environment variable on the inference-router container whose value is attached as `Authorization: Bearer <value>` on every outbound `tools/list` / `tools/call` request to this server. The primary intended consumer is the GitHub Copilot dev-credential path (`COPILOT_GITHUB_TOKEN`). Non-fatal when the named variable is unset or empty — the router records a `skipped` entry and other servers stay advertised. |
 
+-->
 > Content-safety floors are not configured on `McpServer` — they live on [`InferencePolicy.spec.contentSafety`](#inferencepolicy--model-routing-and-budgets).
 
 ---
@@ -817,6 +834,66 @@ status:
 A `phase: NotDefault` (with a matching condition) is how the reconciler tells you a `KarsAuthConfig` was created under the wrong name — rename it to `default`.
 
 CLI: created and updated by `kars mesh setup-trust`. Inspect with `kubectl get kac default` or `kubectl describe karsauthconfig default`. See **[Agent identity](../agent-identity.md)** for the end-to-end trust-setup walkthrough and the anonymous-vs-Entra decision.
+
+---
+
+## `KarsTask` — governed mission
+
+Required fields: `spec.objective` and `spec.envelope`.
+
+| Field | Purpose |
+|---|---|
+| `blueprint` | Runtime, model, policy, MCP, skill, egress, and memory selection |
+| `execution.launch` | Materialize and run the task |
+| `parentRef` | Delegation lineage |
+| `retentionTtlSeconds` | Task/output cleanup policy |
+
+Status records envelope validation, sandbox reference, execution phase,
+delivery timestamp, and conditions. Mission output, trace, and artifacts are
+persisted in task-labelled ConfigMaps.
+
+## `KarsTeam` — standing team
+
+Required fields: `spec.charter` and `spec.envelope`.
+
+| Field | Purpose |
+|---|---|
+| `roster` | Logical roles and role configuration |
+| `blueprint` | Principal/runtime/model/policy defaults |
+| `cadence` | Scheduled execution |
+| `knowledgeCommons` | Run-to-run retained reference data |
+| `paused` | Hibernates the team |
+| `runRetentionTtlSeconds` | Retention for minted runs |
+
+The controller creates a principal, materializes members, mints `KarsTask`
+runs, and harvests substantive results into the team commons.
+
+## `KarsProfile` — reusable blueprint
+
+Required fields: `domain`, `charterTemplate`, and `defaultEnvelope`. Profiles
+define reusable roles, tool policy, and knowledge-commons settings for teams.
+
+## `KarsSkill` — versioned skill package
+
+Required fields: `version`, `summary`, and `boundingPolicy`. Package files,
+scripts, knowledge, MCP dependencies, and attestation data are digest-bound.
+Approval applies to the exact package generation rather than only the resource
+name.
+
+## `KarsApproval` — human decision
+
+Required fields: `taskRef` and `action`. Optional decision and TTL fields
+record an immutable, actor-attributed transition for a governed request.
+Clients must use resource-version compare-and-swap; terminal decisions are not
+editable.
+
+## `KarsReceipt` — delivery evidence
+
+Required fields include `taskRef`, `envelopeDigest`, `scheme`, `keyId`,
+`predicateType`, `claims`, and `dsse`. Receipts bind a delivered task to its
+validated envelope and evidence. Verification provides tamper detection and
+signature evidence supported by the configured scheme; it is not a regulatory
+certification.
 
 ---
 
