@@ -37,10 +37,14 @@ in the inbox, it has already cleared both layers.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
+import stat
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("kars.hermes.mesh_worker")
@@ -56,6 +60,13 @@ def _utc_now_iso() -> str:
 # (180s, controller/src/mesh_peer/task_delivery.rs) or a long-running run is
 # killed as "no progress heartbeat" — the original Hermes-mission failure mode.
 _HEARTBEAT_INTERVAL_S = 20.0
+_MAX_ARTIFACTS = 12
+_MAX_ARTIFACT_SET_BYTES = 900 * 1024
+_MAX_WORKSPACE_FILES = 1000
+_MAX_WORKSPACE_DEPTH = 6
+_ARTIFACT_SEND_TIMEOUT_S = 15.0
+_ARTIFACT_TOTAL_TIMEOUT_S = 60.0
+_TASK_EXECUTION_LOCK = asyncio.Lock()
 
 
 async def _route_send(
@@ -209,6 +220,210 @@ def _summarize_telemetry(
     return telemetry, events[-400:]
 
 
+def _artifact_root() -> Path:
+    return Path(os.environ.get("KARS_HERMES_WORKSPACE_DIR", "/sandbox/agent"))
+
+
+def _open_workspace_root() -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(_artifact_root(), flags)
+
+
+def _walk_workspace(root_fd: int) -> list[tuple[str, int, int]]:
+    """Return bounded regular-file metadata without following symlinks."""
+    files: list[tuple[str, int, int]] = []
+    for dirpath, dirnames, filenames, dir_fd in os.fwalk(
+        ".",
+        topdown=True,
+        follow_symlinks=False,
+        dir_fd=root_fd,
+    ):
+        depth = 0 if dirpath == "." else len(Path(dirpath).parts)
+        if depth >= _MAX_WORKSPACE_DEPTH:
+            dirnames[:] = []
+        for name in filenames:
+            try:
+                info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            rel = name if dirpath == "." else f"{dirpath.removeprefix('./')}/{name}"
+            files.append((rel, info.st_mtime_ns, info.st_size))
+            if len(files) >= _MAX_WORKSPACE_FILES:
+                return files
+    return files
+
+
+def _open_workspace_file(root_fd: int, rel: str) -> int:
+    """Open a relative regular file while rejecting symlinks in every component."""
+    parts = Path(rel).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise OSError("unsafe artifact path")
+    current_fd = os.dup(root_fd)
+    try:
+        for component in parts[:-1]:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        return os.open(parts[-1], flags, dir_fd=current_fd)
+    finally:
+        os.close(current_fd)
+
+
+def _artifact_wire_name(rel: str) -> str:
+    digest = hashlib.sha256(rel.encode("utf-8")).hexdigest()[:10]
+    safe = "".join(c if (c.isascii() and c.isalnum()) or c in "._-" else "_" for c in rel)
+    stem, dot, suffix = safe.rpartition(".")
+    if dot and stem:
+        return f"{stem[:150]}-{digest}.{suffix[:20]}"
+    return f"{safe[:160]}-{digest}"
+
+
+def _snapshot_workspace() -> dict[str, tuple[int, int]]:
+    """Record regular workspace files before a task so only its changes ship."""
+    try:
+        root_fd = _open_workspace_root()
+    except OSError:
+        return {}
+    try:
+        return {rel: (mtime, size) for rel, mtime, size in _walk_workspace(root_fd)}
+    finally:
+        os.close(root_fd)
+
+
+def _read_changed_artifacts(
+    before: dict[str, tuple[int, int]],
+    reply: str,
+    reply_ok: bool,
+    request_id: str,
+) -> list[tuple[str, str, bytes]]:
+    """Read bounded new/modified workspace files after a task completes."""
+    root = _artifact_root()
+    changed: list[tuple[str, str, bytes]] = []
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        root_fd = _open_workspace_root()
+    except OSError:
+        return changed
+
+    try:
+        candidates = [
+            (mtime, rel, size)
+            for rel, mtime, size in _walk_workspace(root_fd)
+            if before.get(rel) != (mtime, size)
+        ]
+
+        if not candidates and reply_ok and len(reply) > 400:
+            safe_id = "".join(c for c in request_id if c.isascii() and c.isalnum())[:8] or "task"
+            rel = f"task-{safe_id}-report.md"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(rel, flags, 0o600, dir_fd=root_fd)
+            try:
+                data = reply.encode("utf-8")
+                remaining = memoryview(data)
+                while remaining:
+                    written = os.write(fd, remaining)
+                    remaining = remaining[written:]
+                info = os.fstat(fd)
+            finally:
+                os.close(fd)
+            candidates.append((info.st_mtime_ns, rel, info.st_size))
+
+        total = 0
+        for _, rel, size in sorted(candidates, reverse=True):
+            if len(changed) >= _MAX_ARTIFACTS:
+                break
+            if size > _MAX_ARTIFACT_SET_BYTES or total + size > _MAX_ARTIFACT_SET_BYTES:
+                continue
+            try:
+                fd = _open_workspace_file(root_fd, rel)
+                try:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                        continue
+                    with os.fdopen(fd, "rb", closefd=False) as file:
+                        data = file.read(size + 1)
+                finally:
+                    os.close(fd)
+            except OSError as exc:
+                logger.warning("mesh_worker: failed to read artifact %s: %s", rel, exc)
+                continue
+            if len(data) != size:
+                continue
+            changed.append((_artifact_wire_name(rel), rel, data))
+            total += size
+        return changed
+    except OSError as exc:
+        logger.warning("mesh_worker: artifact collection failed: %s", exc)
+        return []
+    finally:
+        os.close(root_fd)
+
+
+async def _collect_and_ship_artifacts(
+    client: Any,
+    msg: Any,
+    sender_name: str | None,
+    before: dict[str, tuple[int, int]],
+    reply: str,
+    reply_ok: bool,
+    request_id: str,
+    from_agent: str,
+) -> list[dict[str, Any]]:
+    """Ship task-created files before the matching task_response."""
+    loop = asyncio.get_running_loop()
+    artifacts = await loop.run_in_executor(
+        None,
+        _read_changed_artifacts,
+        before,
+        reply,
+        reply_ok,
+        request_id,
+    )
+    manifest: list[dict[str, Any]] = []
+    try:
+        async with asyncio.timeout(_ARTIFACT_TOTAL_TIMEOUT_S):
+            for name, rel, data in artifacts:
+                frame = json.dumps(
+                    {
+                        "type": "file_transfer",
+                        "file_name": name,
+                        "file_path": rel,
+                        "file_data": base64.b64encode(data).decode("ascii"),
+                        "size_bytes": len(data),
+                        "from_agent": from_agent,
+                        "timestamp": _utc_now_iso(),
+                    }
+                ).encode("utf-8")
+                try:
+                    await asyncio.wait_for(
+                        _route_send(client, msg, sender_name, frame),
+                        timeout=_ARTIFACT_SEND_TIMEOUT_S,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("mesh_worker: failed to ship artifact %s: %s", rel, exc)
+                    continue
+                manifest.append({"name": name, "path": rel, "size_bytes": len(data)})
+                logger.info("mesh_worker: shipped artifact %s (%d bytes)", rel, len(data))
+    except TimeoutError:
+        logger.warning(
+            "mesh_worker: artifact delivery exceeded %.0fs; sending partial manifest",
+            _ARTIFACT_TOTAL_TIMEOUT_S,
+        )
+    return manifest
+
+
 async def _resolve_sender_name(client: Any, did: str) -> str | None:
     """Reverse-lookup a peer DID → display name via the registry.
 
@@ -351,6 +566,98 @@ def _maybe_save_file_transfer(
     return summary
 
 
+async def _execute_task_request(
+    client: Any,
+    msg: Any,
+    prompt_text: str,
+    task_request_id: str | None,
+) -> None:
+    """Run one task and keep artifact harvesting ordered with its response."""
+    timeout_seconds = float(os.environ.get("KARS_MESH_WORKER_TIMEOUT_S", "1500"))
+    sender_name = await _resolve_sender_name(client, msg.from_did)
+    from_agent = os.environ.get("SANDBOX_NAME") or os.environ.get("HERMES_PROFILE") or ""
+    hb_task = asyncio.create_task(_heartbeat_loop(client, msg, sender_name, from_agent))
+    loop = asyncio.get_running_loop()
+    tel_cursor = await loop.run_in_executor(None, _telemetry_cursor)
+    artifact_snapshot = await loop.run_in_executor(None, _snapshot_workspace)
+    agent_future = loop.run_in_executor(None, _run_hermes_agent_inprocess, prompt_text)
+    timed_out = False
+
+    try:
+        try:
+            reply, reply_ok = await asyncio.wait_for(
+                asyncio.shield(agent_future),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            reply = f"WORKER_TIMEOUT after {timeout_seconds:.0f}s"
+            reply_ok = False
+            timed_out = True
+            logger.warning("mesh_worker: %s for inbound from %s", reply, msg.from_did)
+
+        telemetry, trace = _summarize_telemetry(
+            await loop.run_in_executor(None, _telemetry_since, tel_cursor)
+        )
+        if timed_out:
+            artifacts = []
+        else:
+            try:
+                artifacts = await _collect_and_ship_artifacts(
+                    client,
+                    msg,
+                    sender_name,
+                    artifact_snapshot,
+                    reply,
+                    reply_ok,
+                    task_request_id or "task",
+                    from_agent,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("mesh_worker: artifact delivery failed (continuing): %s", exc)
+                artifacts = []
+
+        reply_payload = json.dumps(
+            {
+                "type": "task_response",
+                "content": reply,
+                "ok": reply_ok,
+                "in_reply_to": task_request_id or prompt_text[:256],
+                "from_agent": from_agent,
+                "artifacts": artifacts,
+                "telemetry": telemetry,
+                "trace": trace,
+                "timestamp": _utc_now_iso(),
+            }
+        ).encode("utf-8")
+        try:
+            await _route_send(client, msg, sender_name, reply_payload)
+            logger.info(
+                "mesh_worker: replied %d bytes to %s (task_response=true)",
+                len(reply_payload),
+                sender_name or msg.from_did,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "mesh_worker: failed to send reply to %s: %s",
+                sender_name or msg.from_did,
+                exc,
+            )
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+        if not agent_future.done():
+            # wait_for cannot terminate a running executor thread. Keep the
+            # workspace transaction locked until Hermes actually returns so its
+            # late file writes and telemetry cannot contaminate a later task.
+            try:
+                await asyncio.shield(agent_future)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("mesh_worker: timed-out agent exited with error: %s", exc)
+
+
 async def _handle_message(client: Any, msg: Any) -> None:
     payload_text = msg.payload.decode("utf-8", errors="replace")
     logger.info(
@@ -445,94 +752,33 @@ async def _handle_message(client: Any, msg: Any) -> None:
         )
         return
 
-    # Cap the per-prompt timeout so a misbehaving inbound can't pin a
-    # worker forever. 25 min matches the parent's typical patience for
-    # a sub-agent doing real Foundry work (research + code + image).
-    timeout_seconds = float(os.environ.get("KARS_MESH_WORKER_TIMEOUT_S", "1500"))
-    # Resolve the friendly name once, up front, so both the heartbeat and the
-    # terminal reply route to the originator identically.
-    sender_name = await _resolve_sender_name(client, msg.from_did)
-    from_agent = (
-        os.environ.get("SANDBOX_NAME") or os.environ.get("HERMES_PROFILE") or ""
-    )
-    # Keep the originator's delivery alive while the agent runs. Heartbeat for
-    # ANY delivered task (controller mission OR a team principal's sub-agent
-    # task) so a long run isn't killed as "no progress heartbeat". Mirrors
-    # OpenClaw.
-    hb_task: asyncio.Task[None] | None = None
-    if _envelope_is_task:
-        hb_task = asyncio.create_task(
-            _heartbeat_loop(client, msg, sender_name, from_agent)
-        )
-    # Snapshot the router telemetry cursor so we can attribute exactly this
-    # run's rounds/tools/tokens to the reply (the router is the honest source).
-    loop = asyncio.get_running_loop()
-    tel_cursor = 0
-    if _envelope_is_task:
-        tel_cursor = await loop.run_in_executor(None, _telemetry_cursor)
-    # Run the agent IN-PROCESS (in an executor thread so the mesh loop keeps
-    # servicing heartbeats + the agent's own kars_mesh_* tool calls, which
-    # schedule onto this same loop). This is the crux of the single-process
-    # model: the agent's kars_mesh_send reuses the worker's MeshClient.
-    try:
-        reply, reply_ok = await asyncio.wait_for(
-            loop.run_in_executor(None, _run_hermes_agent_inprocess, prompt_text),
-            timeout=timeout_seconds,
-        )
-    except asyncio.TimeoutError:
-        reply = f"WORKER_TIMEOUT after {timeout_seconds:.0f}s"
-        reply_ok = False
-        logger.warning("mesh_worker: %s for inbound from %s", reply, msg.from_did)
-
-    # Stop heartbeats now that the run has produced its terminal result.
-    if hb_task is not None:
-        hb_task.cancel()
-        try:
-            await hb_task
-        except asyncio.CancelledError:
-            pass
-
-    # Wrap the reply for the delivery waiter (controller or team principal): it
-    # parses base64(json(FederationMessage)) — a TaskResponse matched by the
-    # sender DID — and reads content/ok/telemetry/trace. A raw text reply is
-    # dropped. When the inbound was a task_request, reply with a task_response
-    # envelope mirroring OpenClaw's shape — INCLUDING the real telemetry (token
-    # counts) + trace, so the controller scores the run as substantive work
-    # (did_work → Healthy, not 'low yield') and the Bridge Activity tab renders
-    # the run's rounds/tools. Otherwise (peer chat) send the raw text.
-    if _envelope_is_task:
-        telemetry, trace = _summarize_telemetry(
-            await loop.run_in_executor(None, _telemetry_since, tel_cursor)
-        )
-        reply_payload = json.dumps(
+    # Hermes' in-process agent and workspace are process-global. Never queue a
+    # second task behind a long run: the sender's idle timer could expire and
+    # retry it, producing duplicate execution. Return an honest terminal busy
+    # response instead; the caller can explicitly redrive later.
+    if _TASK_EXECUTION_LOCK.locked():
+        sender_name = await _resolve_sender_name(client, msg.from_did)
+        from_agent = os.environ.get("SANDBOX_NAME") or os.environ.get("HERMES_PROFILE") or ""
+        busy_payload = json.dumps(
             {
                 "type": "task_response",
-                "content": reply,
-                "ok": reply_ok,
+                "content": "WORKER_BUSY: Hermes is already executing another task",
+                "ok": False,
                 "in_reply_to": task_request_id or prompt_text[:256],
                 "from_agent": from_agent,
-                "telemetry": telemetry,
-                "trace": trace,
+                "artifacts": [],
+                "telemetry": None,
+                "trace": [],
                 "timestamp": _utc_now_iso(),
             }
         ).encode("utf-8")
-    else:
-        reply_payload = reply.encode("utf-8")
+        await _route_send(client, msg, sender_name, busy_payload)
+        return
 
-    try:
-        await _route_send(client, msg, sender_name, reply_payload)
-        logger.info(
-            "mesh_worker: replied %d bytes to %s (task_response=%s)",
-            len(reply_payload),
-            sender_name or msg.from_did,
-            _envelope_is_task,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "mesh_worker: failed to send reply to %s: %s",
-            sender_name or msg.from_did,
-            exc,
-        )
+    # Serialize the run, harvest, file transfers, and task_response as one
+    # ordered transaction so files and telemetry cannot cross task boundaries.
+    async with _TASK_EXECUTION_LOCK:
+        await _execute_task_request(client, msg, prompt_text, task_request_id)
 
 
 async def _worker_loop(get_client: Any) -> None:

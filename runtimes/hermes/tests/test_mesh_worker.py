@@ -14,6 +14,10 @@ so the two runtimes' operator views agree.
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
+import time
 from typing import Any
 from unittest import mock
 
@@ -64,6 +68,9 @@ class _FakeClient:
 
     async def send_by_did(self, *, to: str, payload: bytes) -> None:
         self.sent.append(("by_did:" + to, payload))
+
+    def is_plaintext_peer(self, did: str) -> bool:
+        return did.startswith("did:controller:")
 
 
 @pytest.mark.asyncio
@@ -162,3 +169,221 @@ async def test_handle_message_falls_back_to_did_when_name_unresolvable(
     assert captured == [{"agent_id": peer_did}], (
         f"expected fallback to raw DID, got {captured!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_collect_and_ship_artifacts_sends_only_task_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.setenv("KARS_HERMES_WORKSPACE_DIR", str(tmp_path))
+    existing = tmp_path / "existing.txt"
+    existing.write_text("before", encoding="utf-8")
+    before = mesh_worker._snapshot_workspace()
+
+    existing.write_text("after", encoding="utf-8")
+    proof = tmp_path / "proof.json"
+    proof.write_text('{"marker":"PASS"}', encoding="utf-8")
+
+    peer_did = "did:controller:kars"
+    client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    msg = _FakeMsg(from_did=peer_did, payload=b"task")
+    manifest = await mesh_worker._collect_and_ship_artifacts(
+        client,
+        msg,
+        None,
+        before,
+        "done",
+        True,
+        "request-123",
+        "hermes-agent",
+    )
+
+    assert {item["path"] for item in manifest} == {"existing.txt", "proof.json"}
+    assert len({item["name"] for item in manifest}) == 2
+    assert len(client.sent) == 2
+    frames = [json.loads(payload) for _, payload in client.sent]
+    assert all(route == "by_did:" + peer_did for route, _ in client.sent)
+    assert all(frame["type"] == "file_transfer" for frame in frames)
+    decoded = {
+        frame["file_path"]: base64.b64decode(frame["file_data"]).decode("utf-8")
+        for frame in frames
+    }
+    assert decoded == {
+        "existing.txt": "after",
+        "proof.json": '{"marker":"PASS"}',
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_and_ship_artifacts_creates_text_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.setenv("KARS_HERMES_WORKSPACE_DIR", str(tmp_path))
+    peer_did = "did:controller:kars"
+    client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    msg = _FakeMsg(from_did=peer_did, payload=b"task")
+    reply = "substantive report\n" + ("x" * 500)
+
+    manifest = await mesh_worker._collect_and_ship_artifacts(
+        client,
+        msg,
+        None,
+        {},
+        reply,
+        True,
+        "abcdef123456",
+        "hermes-agent",
+    )
+
+    assert manifest == [
+        {
+            "name": mesh_worker._artifact_wire_name("task-abcdef12-report.md"),
+            "path": "task-abcdef12-report.md",
+            "size_bytes": len(reply.encode("utf-8")),
+        }
+    ]
+    frame = json.loads(client.sent[0][1])
+    assert base64.b64decode(frame["file_data"]).decode("utf-8") == reply
+
+
+@pytest.mark.asyncio
+async def test_artifact_paths_are_unique_and_symlinks_are_not_followed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("must-not-ship", encoding="utf-8")
+    (workspace / "escape").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("KARS_HERMES_WORKSPACE_DIR", str(workspace))
+    before = mesh_worker._snapshot_workspace()
+
+    for subdir, content in (("a", "first"), ("b", "second")):
+        directory = workspace / subdir
+        directory.mkdir()
+        (directory / "report.md").write_text(content, encoding="utf-8")
+
+    peer_did = "did:controller:kars"
+    client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    manifest = await mesh_worker._collect_and_ship_artifacts(
+        client,
+        _FakeMsg(from_did=peer_did, payload=b"task"),
+        None,
+        before,
+        "done",
+        True,
+        "request-123",
+        "hermes-agent",
+    )
+
+    names = [item["name"] for item in manifest]
+    assert len(names) == 2
+    assert len(set(names)) == 2
+    frames = [json.loads(payload) for _, payload in client.sent]
+    assert all("must-not-ship" not in base64.b64decode(frame["file_data"]).decode("utf-8") for frame in frames)
+
+
+@pytest.mark.asyncio
+async def test_artifact_failure_does_not_suppress_task_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def idle_heartbeat(*_args: Any, **_kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    async def fail_artifacts(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise OSError("read-only workspace")
+
+    monkeypatch.setattr(mesh_worker, "_heartbeat_loop", idle_heartbeat)
+    monkeypatch.setattr(mesh_worker, "_resolve_sender_name", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(mesh_worker, "_telemetry_cursor", lambda: 0)
+    monkeypatch.setattr(mesh_worker, "_snapshot_workspace", lambda: {})
+    monkeypatch.setattr(mesh_worker, "_run_hermes_agent_inprocess", lambda _prompt: ("deliverable", True))
+    monkeypatch.setattr(mesh_worker, "_telemetry_since", lambda _cursor: [])
+    monkeypatch.setattr(mesh_worker, "_collect_and_ship_artifacts", fail_artifacts)
+
+    peer_did = "did:controller:kars"
+    client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    await mesh_worker._execute_task_request(
+        client,
+        _FakeMsg(from_did=peer_did, payload=b"task"),
+        "objective",
+        "request-123",
+    )
+
+    assert len(client.sent) == 1
+    response = json.loads(client.sent[0][1])
+    assert response["type"] == "task_response"
+    assert response["content"] == "deliverable"
+    assert response["artifacts"] == []
+
+
+@pytest.mark.asyncio
+async def test_timed_out_executor_is_contained_before_task_unlocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def idle_heartbeat(*_args: Any, **_kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    def slow_agent(_prompt: str) -> tuple[str, bool]:
+        time.sleep(0.05)
+        return "late reply", True
+
+    monkeypatch.setenv("KARS_MESH_WORKER_TIMEOUT_S", "0.01")
+    monkeypatch.setattr(mesh_worker, "_heartbeat_loop", idle_heartbeat)
+    monkeypatch.setattr(mesh_worker, "_resolve_sender_name", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(mesh_worker, "_telemetry_cursor", lambda: 0)
+    monkeypatch.setattr(mesh_worker, "_snapshot_workspace", lambda: {})
+    monkeypatch.setattr(mesh_worker, "_run_hermes_agent_inprocess", slow_agent)
+    monkeypatch.setattr(mesh_worker, "_telemetry_since", lambda _cursor: [])
+
+    peer_did = "did:controller:kars"
+    client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    started = time.monotonic()
+    await mesh_worker._execute_task_request(
+        client,
+        _FakeMsg(from_did=peer_did, payload=b"task"),
+        "objective",
+        "request-123",
+    )
+
+    assert time.monotonic() - started >= 0.04
+    response = json.loads(client.sent[0][1])
+    assert response["ok"] is False
+    assert response["content"].startswith("WORKER_TIMEOUT")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_task_is_rejected_without_queueing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mesh_worker, "_resolve_sender_name", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "kars_runtime_hermes.plugin.telemetry.submit_trust",
+        lambda **_kwargs: True,
+    )
+    peer_did = "did:controller:kars"
+    client = _FakeClient(peer_did=peer_did, peer_name="controller")
+    payload = json.dumps(
+        {
+            "type": "task_request",
+            "content": "objective",
+            "request_id": "request-456",
+        }
+    ).encode("utf-8")
+
+    await mesh_worker._TASK_EXECUTION_LOCK.acquire()
+    try:
+        await mesh_worker._handle_message(
+            client,
+            _FakeMsg(from_did=peer_did, payload=payload),
+        )
+    finally:
+        mesh_worker._TASK_EXECUTION_LOCK.release()
+
+    response = json.loads(client.sent[0][1])
+    assert response["ok"] is False
+    assert response["content"].startswith("WORKER_BUSY")
