@@ -176,7 +176,7 @@ async def test_collect_and_ship_artifacts_sends_only_task_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    monkeypatch.setenv("KARS_HERMES_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("KARS_HERMES_ARTIFACT_DIR", str(tmp_path))
     existing = tmp_path / "existing.txt"
     existing.write_text("before", encoding="utf-8")
     before = mesh_worker._snapshot_workspace()
@@ -220,7 +220,7 @@ async def test_collect_and_ship_artifacts_creates_text_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    monkeypatch.setenv("KARS_HERMES_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("KARS_HERMES_ARTIFACT_DIR", str(tmp_path))
     peer_did = "did:controller:kars"
     client = _FakeClient(peer_did=peer_did, peer_name="controller")
     msg = _FakeMsg(from_did=peer_did, payload=b"task")
@@ -253,7 +253,7 @@ async def test_structured_json_reply_creates_json_fallback_but_terse_text_does_n
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    monkeypatch.setenv("KARS_HERMES_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("KARS_HERMES_ARTIFACT_DIR", str(tmp_path))
     peer_did = "did:controller:kars"
     msg = _FakeMsg(from_did=peer_did, payload=b"task")
 
@@ -326,7 +326,7 @@ async def test_artifact_paths_are_unique_and_symlinks_are_not_followed(
     outside.mkdir()
     (outside / "secret.txt").write_text("must-not-ship", encoding="utf-8")
     (workspace / "escape").symlink_to(outside, target_is_directory=True)
-    monkeypatch.setenv("KARS_HERMES_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("KARS_HERMES_ARTIFACT_DIR", str(workspace))
     before = mesh_worker._snapshot_workspace()
 
     for subdir, content in (("a", "first"), ("b", "second")):
