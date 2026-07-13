@@ -458,6 +458,31 @@ spec:
                   x-kubernetes-validations:
                     - rule: "self.name.size() > 0"
                       message: "spec.memoryRef.name must not be empty"
+                gitWrite:
+                  type: object
+                  nullable: true
+                  description: |
+                    Keyless Git write grant compiled from a task blueprint. The
+                    referenced same-namespace ConfigMap is read by the controller
+                    only and is never mounted into the agent.
+                  required: ["connectionConfigMapRef"]
+                  properties:
+                    connectionConfigMapRef:
+                      type: object
+                      description: |
+                        Same-namespace ConfigMap containing the principal's GitHub
+                        installation metadata (`installation_id`, `account`, and
+                        JSON `repos`).
+                      required: ["name"]
+                      properties:
+                        name:
+                          type: string
+                    repos:
+                      type: array
+                      default: []
+                      description: "`owner/repo` names requested for this run."
+                      items:
+                        type: string
                 agent:
                   type: object
                   description: "Foundry Agent Service configuration — controller creates a prompt agent on reconcile"

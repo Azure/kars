@@ -13,6 +13,8 @@
 
 use super::*;
 use crate::crd::SandboxConfig;
+use crate::kars_task::GitWriteConfig;
+use crate::mcp_server::LocalObjectRef;
 
 #[test]
 fn standard_isolation_uses_runtime_default_seccomp() {
@@ -80,6 +82,65 @@ fn isolation_scheduling_standard() {
     let (runtime, pool) = isolation_scheduling("standard");
     assert!(runtime.is_none());
     assert_eq!(pool, "sandbox");
+}
+
+#[test]
+fn typed_git_write_request_wins_over_legacy_annotation() {
+    let mut sandbox = KarsSandbox::new("mission", Default::default());
+    sandbox.spec.git_write = Some(GitWriteConfig {
+        connection_config_map_ref: LocalObjectRef {
+            name: "kars-github-connection-0123456789abcdef".into(),
+        },
+        repos: vec!["owner/typed".into()],
+    });
+    sandbox
+        .metadata
+        .annotations
+        .get_or_insert_with(Default::default)
+        .insert(
+            "kars.azure.com/git-write-repos".into(),
+            "owner/legacy".into(),
+        );
+
+    assert_eq!(
+        git_write_request(&sandbox),
+        Some(GitWriteRequest {
+            connection_name: "kars-github-connection-0123456789abcdef".into(),
+            repos: vec!["owner/typed".into()],
+            legacy: false,
+        })
+    );
+}
+
+#[test]
+fn legacy_git_write_annotation_uses_fixed_secret_fallback() {
+    let mut sandbox = KarsSandbox::new("mission", Default::default());
+    sandbox
+        .metadata
+        .annotations
+        .get_or_insert_with(Default::default)
+        .insert(
+            "kars.azure.com/git-write-repos".into(),
+            "owner/a, owner/b".into(),
+        );
+
+    assert_eq!(
+        git_write_request(&sandbox),
+        Some(GitWriteRequest {
+            connection_name: "kars-github-connection".into(),
+            repos: vec!["owner/a".into(), "owner/b".into()],
+            legacy: true,
+        })
+    );
+}
+
+#[test]
+fn git_write_repo_clamp_is_case_insensitive_and_reports_dropped() {
+    let declared = vec!["Owner/Allowed".into(), "owner/denied".into()];
+    let granted = vec!["owner/allowed".into()];
+    let (allowed, dropped) = clamp_git_write_repos(&declared, &granted);
+    assert_eq!(allowed, vec!["Owner/Allowed".to_string()]);
+    assert_eq!(dropped, vec!["owner/denied".to_string()]);
 }
 
 #[test]

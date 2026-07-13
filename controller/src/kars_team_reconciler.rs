@@ -1991,11 +1991,9 @@ async fn apply_task(
     let mut annotations = serde_json::Map::new();
     annotations.insert(ANNOT_TEAM.into(), json!(team.name_any()));
     annotations.insert(ANNOT_TEAM_ROLE.into(), json!(role));
-    // Propagate the team's git-write grant (declared repos, set by the Bridge from
-    // the workspace GitHub connection) onto the run so the run sandbox reconciler
-    // materializes the keyless git-write secret scoped to those repos — otherwise a
-    // team run (principal or its sub-agents) can never open a PR.
-    if let Some(repos) = team
+    // Backward compatibility for teams authored before blueprint.gitWrite.
+    if spec.blueprint.as_ref().and_then(|bp| bp.git_write.as_ref()).is_none()
+        && let Some(repos) = team
         .annotations()
         .get("kars.azure.com/git-write-repos")
         .map(|s| s.trim())
@@ -2092,11 +2090,33 @@ fn merge_blueprint(
             isolation: rb.isolation.clone().or_else(|| tb.isolation.clone()),
             memory: rb.memory.clone().or_else(|| tb.memory.clone()),
             skills: if rb.skills.is_empty() { tb.skills.clone() } else { rb.skills.clone() },
+            git_write: attenuate_git_write(tb.git_write.as_ref(), rb.git_write.as_ref()),
         }),
-        (None, Some(rb)) => Some(rb.clone()),
+        (None, Some(rb)) => {
+            let mut bp = rb.clone();
+            bp.git_write = None;
+            Some(bp)
+        }
         (Some(tb), None) => Some(tb.clone()),
         (None, None) => None,
     }
+}
+
+fn attenuate_git_write(
+    team: Option<&crate::kars_task::GitWriteConfig>,
+    role: Option<&crate::kars_task::GitWriteConfig>,
+) -> Option<crate::kars_task::GitWriteConfig> {
+    let team = team?;
+    let mut grant = team.clone();
+    if let Some(role) = role {
+        let requested: std::collections::HashSet<String> = role
+            .repos
+            .iter()
+            .map(|repo| repo.trim().to_ascii_lowercase())
+            .collect();
+        grant.repos.retain(|repo| requested.contains(&repo.trim().to_ascii_lowercase()));
+    }
+    Some(grant)
 }
 
 async fn write_status(
@@ -2326,6 +2346,32 @@ mod tests {
     }
 
     #[test]
+    fn launched_run_preserves_team_git_write() {
+        let git_write = crate::kars_task::GitWriteConfig {
+            connection_config_map_ref: LocalObjectRef {
+                name: "kars-github-connection-0123456789abcdef".into(),
+            },
+            repos: vec!["owner/repo".into()],
+        };
+        let team = KarsTeam::new(
+            "git-team",
+            crate::kars_team::KarsTeamSpec {
+                charter: "Maintain the repository".into(),
+                envelope: team_env(),
+                blueprint: Some(TaskBlueprint {
+                    git_write: Some(git_write.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            launched_run_blueprint(&team).and_then(|bp| bp.git_write),
+            Some(git_write)
+        );
+    }
+
+    #[test]
     fn long_team_objective_preserves_orchestration_and_memory_contracts() {
         use crate::kars_team::KarsTeamSpec;
         use crate::team_tasks::TeamTask;
@@ -2430,6 +2476,12 @@ mod tests {
             isolation: None,
             memory: None,
             skills: vec![],
+            git_write: Some(crate::kars_task::GitWriteConfig {
+                connection_config_map_ref: LocalObjectRef {
+                    name: "kars-github-connection-team".into(),
+                },
+                repos: vec!["owner/a".into(), "owner/b".into()],
+            }),
         };
         // Role specialises the model but omits tool_policy and mcp.
         let role_bp = TaskBlueprint {
@@ -2446,6 +2498,12 @@ mod tests {
             isolation: None,
             memory: None,
             skills: vec![],
+            git_write: Some(crate::kars_task::GitWriteConfig {
+                connection_config_map_ref: LocalObjectRef {
+                    name: "attempted-other-connection".into(),
+                },
+                repos: vec!["owner/b".into(), "owner/c".into()],
+            }),
         };
         let merged = merge_blueprint(Some(&team_bp), Some(&role_bp)).unwrap();
         // tool_policy inherited from the team so the member stays attenuated.
@@ -2455,5 +2513,11 @@ mod tests {
         assert_eq!(merged.instructions.as_deref(), Some("role prompt"));
         // mcp inherited from team since role left it empty.
         assert_eq!(merged.mcp_servers, vec!["github".to_string()]);
+        let git_write = merged.git_write.expect("inherits attenuated git write");
+        assert_eq!(
+            git_write.connection_config_map_ref.name,
+            "kars-github-connection-team"
+        );
+        assert_eq!(git_write.repos, vec!["owner/b".to_string()]);
     }
 }

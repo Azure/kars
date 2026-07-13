@@ -14,13 +14,16 @@ Bridge (or an operator) declares which repos a mission/team may write, via an
 annotation on the `KarsTask` / `KarsTeam`:
 
 ```yaml
-metadata:
-  annotations:
-    kars.azure.com/git-write-repos: "owner/repo-a,owner/repo-b"
+spec:
+  blueprint:
+    gitWrite:
+      connectionConfigMapRef:
+        name: kars-github-connection-0123456789abcdef
+      repos: ["owner/repo-a", "owner/repo-b"]
 ```
 
-The controller clamps the declared set to the repos the **workspace's GitHub
-connection** actually granted (`declared ∩ connection`) and materializes a
+The controller clamps the declared set to the repos the authenticated
+principal's GitHub connection actually granted (`declared ∩ connection`) and materializes a
 per-sandbox `<name>-git-write` secret carrying the installation id, the clamped
 repo scope, the git role, and the author identity — **never** the App private key.
 
@@ -52,9 +55,10 @@ agent  ──git push / curl github.com──▶  loopback reverse-proxy (router
 - The GitHub App **private key** lives in exactly one secret (`kars-github-app`,
   `kars-system`), mirrored only into each git-write sandbox namespace and mounted
   **only to the router container** — never the agent.
-- Each workspace connects its **own** repos: `kars-github-connection` in the
-  workspace namespace carries the installation id + reachable repos (no key). A
-  mission's write scope can never exceed its workspace connection.
+- Each principal connects their **own** installation/repo set. Bridge stores it
+  in a ConfigMap named `kars-github-connection-<subject-hash>` containing the
+  installation id, account, and reachable repos (no key). A mission's write
+  scope can never exceed its creator's connection.
 
 ## Sub-agent attenuation & mandatory review
 
@@ -70,8 +74,8 @@ agent  ──git push / curl github.com──▶  loopback reverse-proxy (router
 
 ## Team runs
 
-A `KarsTeam` annotated with `git-write-repos` propagates the grant onto **every**
-run it mints (principal, merger, task-force), so a standing team — and the
+A `KarsTeam` with `spec.blueprint.gitWrite` preserves the grant on **every** run
+it mints (principal, merger, task-force), so a standing team — and the
 sub-agents its principal spawns — can open PRs. See
 `controller/src/kars_team_reconciler.rs::apply_task`.
 
@@ -82,7 +86,7 @@ sub-agents its principal spawns — can open PRs. See
 | `inference-router/src/git_write.rs` | `GitWriteConfig` (App/PAT + fail-closed repo allowlist + `GitRole`); `repo_allowed`, `token`, `can_merge`. |
 | `inference-router/src/routes/github_proxy.rs` | Loopback `/git/*` + `/gh-api/*` proxy; token injection; repo-scope 403; merge + mandatory-review gate (`review_states_permit_merge`). |
 | `inference-router/src/routes/github_token.rs` | `/v1/github-token` → `410 Gone` (agent can't self-mint). |
-| `controller/src/reconciler/mod.rs` | Materialize `<name>-git-write` (clamped to `declared ∩ connection`); mount `/etc/gitconfig`; mirror the App secret to the router only. |
+| `controller/src/reconciler/mod.rs` | Read the typed principal ConfigMap reference, materialize `<name>-git-write` (clamped to `declared ∩ connection`), mount `/etc/gitconfig`, and mirror the App secret to the router only. Legacy annotation + fixed Secret remains read-only fallback. |
 | `controller/src/kars_team_reconciler.rs` | Propagate the team's git-write grant onto every run. |
 
 ## Deliverable

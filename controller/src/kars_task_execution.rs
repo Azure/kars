@@ -251,6 +251,7 @@ pub async fn materialize(
     {
         sandbox_spec["memoryRef"] = json!({ "name": mem });
     }
+    propagate_git_write(&mut sandbox_spec, &blueprint);
     // Task attribution for router metering: the task id and its lineage *root*
     // (the oldest ancestor, or the task itself when it is a root). The main
     // reconciler forwards these to the router as KARS_TASK_ID / KARS_TASK_ROOT
@@ -279,11 +280,9 @@ pub async fn materialize(
             attribution.insert("kars.azure.com/skills".to_string(), list);
         }
     }
-    // Git write: propagate the mission's declared repos (Bridge sets the
-    // annotation from the workspace's GitHub connection) so the KarsSandbox
-    // reconciler materializes the per-mission <name>-git-write secret + enables
-    // the router's keyless git proxy scoped to exactly these repos.
-    if let Some(repos) = task
+    // Backward compatibility for tasks authored before spec.blueprint.gitWrite.
+    if blueprint.git_write.is_none()
+        && let Some(repos) = task
         .metadata
         .annotations
         .as_ref()
@@ -390,9 +389,16 @@ fn governance_spec(blueprint: &TaskBlueprint, envelope: &TaskEnvelope) -> serde_
                     .collect();
                 g["mcpServerRefs"] = json!(refs);
             }
+
             g
         }
         None => json!({ "enabled": false }),
+    }
+}
+
+fn propagate_git_write(sandbox_spec: &mut serde_json::Value, blueprint: &TaskBlueprint) {
+    if let Some(git_write) = blueprint.git_write.as_ref() {
+        sandbox_spec["gitWrite"] = json!(git_write);
     }
 }
 
@@ -562,6 +568,26 @@ mod tests {
         assert_eq!(g["toolPolicyRef"]["name"], "eng-tools");
         assert_eq!(g["mcpServerRefs"][0]["name"], "docs-index");
         assert_eq!(g["mcpServerRefs"][1]["name"], "jira");
+    }
+
+    #[test]
+    fn typed_git_write_propagates_to_sandbox_spec() {
+        let bp = TaskBlueprint {
+            git_write: Some(crate::kars_task::GitWriteConfig {
+                connection_config_map_ref: crate::mcp_server::LocalObjectRef {
+                    name: "kars-github-connection-0123456789abcdef".into(),
+                },
+                repos: vec!["owner/repo".into()],
+            }),
+            ..Default::default()
+        };
+        let mut sandbox_spec = json!({});
+        propagate_git_write(&mut sandbox_spec, &bp);
+        assert_eq!(
+            sandbox_spec["gitWrite"]["connectionConfigMapRef"]["name"],
+            "kars-github-connection-0123456789abcdef"
+        );
+        assert_eq!(sandbox_spec["gitWrite"]["repos"][0], "owner/repo");
     }
 
     #[test]

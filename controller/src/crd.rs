@@ -6,6 +6,7 @@
 //! This is the Rust representation of the KarsSandbox CRD.
 //! kube-rs derives the CRD schema, API bindings, and JSON schema automatically.
 
+use crate::kars_task::GitWriteConfig;
 use crate::mcp_server::LocalObjectRef;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
@@ -71,6 +72,12 @@ pub struct KarsSandboxSpec {
     /// (Slice 3a). Cross-namespace refs are deliberately not supported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_ref: Option<LocalObjectRef>,
+
+    /// Keyless Git write grant compiled from a task blueprint. The referenced
+    /// same-namespace ConfigMap is read by the controller only and is never
+    /// mounted into the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_write: Option<GitWriteConfig>,
 
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
@@ -1462,6 +1469,25 @@ mod tests {
             ir.get("name").and_then(|n| n.as_str()),
             Some("my-sandbox-inference")
         );
+    }
+
+    #[test]
+    fn git_write_serializes_as_typed_sandbox_field() {
+        let spec = KarsSandboxSpec {
+            git_write: Some(GitWriteConfig {
+                connection_config_map_ref: LocalObjectRef {
+                    name: "kars-github-connection-0123456789abcdef".into(),
+                },
+                repos: vec!["owner/repo".into()],
+            }),
+            ..KarsSandboxSpec::default()
+        };
+        let value = serde_json::to_value(spec).expect("serializes");
+        assert_eq!(
+            value["gitWrite"]["connectionConfigMapRef"]["name"],
+            "kars-github-connection-0123456789abcdef"
+        );
+        assert_eq!(value["gitWrite"]["repos"][0], "owner/repo");
     }
 
     #[test]
