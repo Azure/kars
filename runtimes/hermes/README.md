@@ -41,7 +41,7 @@ The plugin is installed two ways:
 | **Memory binding** | `foundry_memory` uses store name `memory-${SANDBOX_NAME}` per the KarsMemory convention |
 | **HTTP fetch** | `http_fetch` — routes through `/egress/fetch` for egress allowlist enforcement |
 | **Trust / signing telemetry** | After successful peer interactions: POST `/agt/trust` + `/agt/signing-counter` |
-| **MCP** | Hermes' native MCP client consumes the `mcp_servers.*` block the entrypoint translates from `/etc/kars/mcp/<server>/meta.json` — no plugin code needed |
+| **MCP** | Hermes' native MCP client consumes the translated `mcp_servers.*` block. `kars_mcp_list` / `kars_mcp_call` provide a governed router-backed fallback for models that do not expose deferred native MCP tools. |
 
 ## Contract
 

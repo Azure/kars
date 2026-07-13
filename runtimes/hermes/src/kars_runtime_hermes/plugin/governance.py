@@ -107,6 +107,16 @@ def _action_verb(tool_name: str, params: dict[str, Any]) -> str:
         op = str(params.get("operation", "")).lower()
         return _canonicalize(f"memory:{op}")
 
+    if tool_name == "kars_mcp_call":
+        namespaced = str(params.get("name", "")).strip()
+        server, separator, tool = namespaced.partition(".")
+        if separator and server and tool:
+            # Router tool prefixes replace DNS-1123 server-name hyphens with
+            # underscores. DNS-1123 excludes underscores, so this inversion is
+            # unambiguous and restores the McpServer name policy rules target.
+            return _canonicalize(f"mcp:{server.replace('_', '-')}:{tool}")
+        return _canonicalize(f"mcp:unknown:{namespaced}")
+
     if tool_name == "kars_mesh_send":
         # Accept all three conventional arg names — the OpenClaw
         # canonical (`to_agent`), the Hermes short form (`to`), and

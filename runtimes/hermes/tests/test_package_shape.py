@@ -65,6 +65,8 @@ def test_plugin_manifest_lists_required_tools() -> None:
         "kars_mesh_inbox",
         "kars_mesh_await",
         "kars_mesh_transfer_file",
+        "kars_mcp_list",
+        "kars_mcp_call",
         "http_fetch",
         "foundry_memory",
         "foundry_agents",
