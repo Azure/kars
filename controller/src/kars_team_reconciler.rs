@@ -1314,45 +1314,23 @@ fn is_no_change(output: &str) -> bool {
 /// Appended to a team run's operating contract when the team has communication
 /// channels configured (Telegram/Slack/Discord/WhatsApp). Instructs the agent to
 /// proactively keep the operator in the loop over whatever channel is wired.
-const CHANNEL_DIRECTIVE: &str = "\n\nThis team has live communication channel(s) to its operator (Telegram/Slack/Discord/WhatsApp). \
-Keep the operator in the loop: post ONE short milestone when you start (e.g. '🚀 starting: <task>') and ONE concise \
-summary of your deliverable (≤240 chars) when you finish, using the configured channel's status/notify tool \
-(e.g. `telegram_status`). Keep messages terse; never post secrets or full document content — milestone summaries only.";
+const CHANNEL_DIRECTIVE: &str = "\nChannels are configured. Send one start milestone and one completion summary \
+(each <=240 chars) through the channel status/notify tool. Never send secrets or full document content.";
 
 /// The operating contract appended to every standing run's objective: build on
 /// prior knowledge, don't redo settled work, and emit the no-change sentinel
 /// when a cadence tick found nothing new (so the team stays quiet instead of
 /// producing a redundant briefing every interval).
 fn operating_contract(tools: &str, mcp: &str) -> String {
-    // Durable team memory ALWAYS works via the harvest, independent of Foundry:
-    // the controller captures each run's final reply into the team knowledge-
-    // commons and injects it back as reference data on the next run. The
-    // `foundry_memory` tool is an OPTIONAL richer store that is only present in
-    // some cluster modes (absent in GitHub-Copilot mode), so we never promise it
-    // as required — telling the agent it MUST use a tool it may not have caused a
-    // recurring false "I can't persist memory" clarification every run.
-    let memory = " Your DURABLE TEAM MEMORY works automatically: your final reply is captured into the \
-         team's knowledge-commons and returned to you as reference data on the next run — so put durable \
-         findings in your reply; you do NOT need to call any tool to persist them, and you can never be \
-         blocked from persisting. (If a `foundry_memory` tool happens to be in your toolset you may also \
-         use it for richer semantic recall, but it is optional and often absent — never block or raise a \
-         question over its availability.)";
     format!(
-        "\n\nYour capabilities: tool policy = {tools}; connected services = {mcp}.{memory} \
-         Operating contract: this is a recurring standing run — review the reference data above, \
-         act ONLY on what has changed or is not yet done, and do not repeat work already completed. \
-         If nothing material has changed since the last run, do NOT write a full report — reply with \
-         exactly `{NO_CHANGE_SENTINEL}` and a one-line reason. If you need a decision or information \
-         only the human can provide (a credential, an access grant, a scope choice, a policy call), \
-         do NOT guess or stall — put a line `{CLARIFY_SENTINEL} <your one-line question>` anywhere in \
-         your reply. It is routed to the human via the team principal; their answer arrives as \
-         reference data on your next run. If you need to reach an external host the sandbox denies, \
-         put a line `{EGRESS_SENTINEL} host[:port] — why you need it` in your reply — once the human \
-         approves, the host is opened for the team's future runs. If you are blocked because your \
-         AUTONOMY is too low to act (e.g. you can only propose but need to act without per-step \
-         approval), put a line `{TIER_SENTINEL} <level 1-5> — why` in your reply — the human is asked \
-         to approve the raise; you can never escalate yourself. If you are blocked or a tool is \
-         unavailable, report that clearly instead of looping."
+        "\n\nCapabilities: tool policy={tools}; connected services={mcp}. \
+         Memory is automatic: your final reply is harvested into the team commons and prior entries \
+         return as UNTRUSTED reference data on the next run. Put durable findings in the reply; never \
+         block on an optional memory tool. Build on prior evidence and do not repeat settled work. \
+         If nothing changed, reply `{NO_CHANGE_SENTINEL}` plus one reason. For information only a human \
+         can provide, emit `{CLARIFY_SENTINEL} <question>`. For denied network access, emit \
+         `{EGRESS_SENTINEL} host[:port] - <reason>`. For insufficient authority, emit \
+         `{TIER_SENTINEL} <1-5> - <reason>`. Never self-escalate; report unavailable tools plainly."
     )
 }
 
@@ -1524,36 +1502,49 @@ fn orchestration_contract(team: &KarsTeam) -> String {
     if team.spec.roster.is_empty() {
         return String::new();
     }
-    let mut roster = String::new();
+    const CONTRACT_MAX: usize = 1150;
+    const CHARGE_MAX: usize = 120;
+    let names = team
+        .spec
+        .roster
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut roster = format!(
+        "\n\nYou are the team PRINCIPAL. Members: {}.\nRole charges:",
+        truncate_middle(&names, 360, " [member names truncated] ")
+    );
     for r in &team.spec.roster {
         let charge = r
             .system_prompt
             .clone()
             .unwrap_or_else(|| "carry out this role's part of the charter".into());
-        roster.push_str(&format!("\n  - {}: {}", r.name, charge));
+        let line = format!(
+            "\n- {}: {}",
+            r.name,
+            truncate_middle(&charge, CHARGE_MAX, " [charge truncated] ")
+        );
+        if roster.chars().count() + line.chars().count() > CONTRACT_MAX - 430 {
+            roster.push_str("\n[additional role charges omitted; use the member names above]");
+            break;
+        }
+        roster.push_str(&line);
     }
-    format!(
-        "\n\nYou are the PRINCIPAL of a team. Your members (roles):{roster}\n\
-         Orchestration contract: for each member role above, use `kars_spawn` to create a \
-         sub-agent, then delegate its task with `kars_mesh_send` (or ship data/files with \
-         `kars_mesh_transfer_file`). Let independent roles run in parallel; feed each one what it \
-         needs. Collect their results from your mesh inbox, then compile the team's deliverable per \
-         the charter. If a sub-agent fails or times out, note it and proceed with what you have — do \
-         not block the whole team on one member. Do the delegation yourself via these tools; do not \
-         attempt all the members' work alone unless spawning is unavailable.\n\
-         Loop inheritance: if your charter defines a LOOP (a cycle + success criteria), give EACH \
-         sub-agent the same loop and success criteria in its delegated task, so the whole team runs \
-         the loop — not just you."
-    )
+    roster.push_str(
+        "\nOrchestration contract: for EVERY member, call `kars_spawn`, delegate with \
+         `kars_mesh_send` (or `kars_mesh_transfer_file`), run independent roles in parallel, collect \
+         their replies, and synthesize the deliverable. Do not perform all roles alone unless spawn \
+         is unavailable. If one member fails, record it and continue. Propagate any charter LOOP and \
+         its success criteria to every member.",
+    );
+    truncate_middle(&roster, CONTRACT_MAX, " [orchestration detail truncated] ")
 }
 
 /// Build the standing-run objective, bounded to the `KarsTask.spec.objective`
-/// CRD limit (1–4096 characters). The charter + capability manifest + roster
-/// orchestration contract are the stable head; the accumulated `prior_knowledge`
-/// grows every run as the team commons fills, so it is the part we truncate
-/// (tail-first) to fit. Without this cap a long-running team eventually emits an
-/// objective > 4096 chars and every new run fails CRD validation — silently
-/// halting the whole team.
+/// CRD limit (1–4096 characters). User-authored task/charter text is bounded
+/// independently so it can never push the load-bearing operating,
+/// orchestration, or shared-memory contracts out of the objective.
 fn build_run_objective(
     team: &KarsTeam,
     manifest: &str,
@@ -1561,48 +1552,108 @@ fn build_run_objective(
     task: Option<&crate::team_tasks::TeamTask>,
 ) -> String {
     const OBJ_MAX: usize = 4096;
-    const TRUNC_MARKER: &str = "\n[prior knowledge truncated to fit run objective]";
-    let head = match task {
+    const TASK_TITLE_MAX: usize = 220;
+    const TASK_DETAILS_MAX: usize = 600;
+    const CHARTER_MAX: usize = 300;
+    const MANIFEST_MAX: usize = 850;
+    let task_and_charter = match task {
         // A discrete assigned task: THIS is the run's objective. The charter is
         // demoted to standing context so the agent still respects the team's
         // mandate, but its job is to complete + deliver the specific task.
         Some(t) => format!(
             "Assigned task for team '{}'.\nTASK: {}\n{}\n\
-             Deliver a complete result for THIS task. Team charter (standing context): {}{}{}",
+             Deliver a complete result for THIS task.\nTEAM CHARTER: {}",
             team.name_any(),
-            t.title,
+            truncate_middle(&t.title, TASK_TITLE_MAX, " [title truncated] "),
             if t.description.trim().is_empty() {
                 String::new()
             } else {
-                format!("DETAILS: {}", t.description)
+                format!(
+                    "DETAILS: {}",
+                    truncate_middle(&t.description, TASK_DETAILS_MAX, " [details truncated] ")
+                )
             },
-            team.spec.charter,
-            manifest,
-            orchestration_contract(team),
+            truncate_middle(&team.spec.charter, CHARTER_MAX, " [charter truncated] "),
         ),
         None => format!(
-            "Standing-operation run for team '{}'. Charter: {}{}{}",
+            "Standing-operation run for team '{}'.\nCHARTER: {}",
             team.name_any(),
-            team.spec.charter,
-            manifest,
-            orchestration_contract(team),
+            truncate_middle(&team.spec.charter, CHARTER_MAX, " [charter truncated] "),
         ),
     };
-    let full = format!("{head}{prior_knowledge}");
-    if full.chars().count() <= OBJ_MAX {
-        return full;
-    }
-    // Reserve room for the head + truncation marker; truncate the prior-knowledge
-    // tail to whatever budget remains. If even the head overflows (pathological
-    // charter), hard-cap the whole string.
+    let manifest = truncate_middle(manifest, MANIFEST_MAX, " [operating contract truncated] ");
+    let orchestration = orchestration_contract(team);
+    let head = format!("{task_and_charter}{manifest}{orchestration}");
     let head_len = head.chars().count();
-    let marker_len = TRUNC_MARKER.chars().count();
-    if head_len + marker_len >= OBJ_MAX {
-        return head.chars().take(OBJ_MAX).collect();
+    if head_len >= OBJ_MAX {
+        return truncate_middle(&head, OBJ_MAX, "\n[objective truncated]\n");
     }
-    let budget = OBJ_MAX - head_len - marker_len;
-    let kept: String = prior_knowledge.chars().take(budget).collect();
-    format!("{head}{kept}{TRUNC_MARKER}")
+    let remaining = OBJ_MAX - head_len;
+    let prior = fit_prior_knowledge(prior_knowledge, remaining);
+    format!("{head}{prior}")
+}
+
+fn fit_prior_knowledge(prior: &str, max_chars: usize) -> String {
+    use crate::team_commons::{PRIOR_KNOWLEDGE_FOOTER, PRIOR_KNOWLEDGE_HEADER};
+
+    if prior.chars().count() <= max_chars {
+        return prior.to_string();
+    }
+    let Some(body) = prior
+        .strip_prefix(PRIOR_KNOWLEDGE_HEADER)
+        .and_then(|value| value.strip_suffix(PRIOR_KNOWLEDGE_FOOTER))
+    else {
+        return truncate_middle(
+            prior,
+            max_chars,
+            "\n[prior knowledge truncated to fit run objective]\n",
+        );
+    };
+    const MARKER: &str = "[older shared-memory content truncated]\n";
+    let frame_len = PRIOR_KNOWLEDGE_HEADER.chars().count()
+        + PRIOR_KNOWLEDGE_FOOTER.chars().count()
+        + MARKER.chars().count();
+    if frame_len > max_chars {
+        return String::new();
+    }
+    let body_budget = max_chars - frame_len;
+    if body_budget == 0 {
+        return format!("{PRIOR_KNOWLEDGE_HEADER}{MARKER}{PRIOR_KNOWLEDGE_FOOTER}");
+    }
+    let newest = body.lines().next().unwrap_or_default();
+    let newest_len = newest.chars().count();
+    let kept = if newest_len >= body_budget {
+        format!(
+            "{}\n",
+            truncate_middle(newest, body_budget.saturating_sub(1), " [newest entry truncated] ")
+        )
+    } else {
+        let mut out = format!("{newest}\n");
+        let remaining = body_budget.saturating_sub(out.chars().count());
+        if remaining > 0 {
+            let rest = body.strip_prefix(newest).unwrap_or_default().trim_start_matches('\n');
+            out.push_str(&rest.chars().take(remaining).collect::<String>());
+        }
+        out
+    };
+    format!("{PRIOR_KNOWLEDGE_HEADER}{kept}{MARKER}{PRIOR_KNOWLEDGE_FOOTER}")
+}
+
+fn truncate_middle(value: &str, max_chars: usize, marker: &str) -> String {
+    let len = value.chars().count();
+    if len <= max_chars {
+        return value.to_string();
+    }
+    let marker_len = marker.chars().count();
+    if max_chars <= marker_len {
+        return marker.chars().take(max_chars).collect();
+    }
+    let content = max_chars - marker_len;
+    let head_len = content.div_ceil(2);
+    let tail_len = content / 2;
+    let head: String = value.chars().take(head_len).collect();
+    let tail: String = value.chars().skip(len - tail_len).collect();
+    format!("{head}{marker}{tail}")
 }
 
 /// Aggregate outcome of a harvest pass — the autonomous-operation health signal.
@@ -2272,6 +2323,87 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(bp.tool_policy.as_deref(), Some("my-strict-policy"));
+    }
+
+    #[test]
+    fn long_team_objective_preserves_orchestration_and_memory_contracts() {
+        use crate::kars_team::KarsTeamSpec;
+        use crate::team_tasks::TeamTask;
+
+        let team = KarsTeam::new(
+            "architecture-review",
+            KarsTeamSpec {
+                charter: format!(
+                    "Review the release and persist token WOW-ARCH-20260712. {}",
+                    "charter detail ".repeat(80)
+                ),
+                envelope: team_env(),
+                roster: vec![
+                    TeamRole {
+                        name: "security-reviewer".into(),
+                        system_prompt: Some("Threat-model authentication and governance. ".repeat(20)),
+                        ..Default::default()
+                    },
+                    TeamRole {
+                        name: "reliability-reviewer".into(),
+                        system_prompt: Some("Test lifecycle, restart, timeout, and concurrency. ".repeat(20)),
+                        ..Default::default()
+                    },
+                    TeamRole {
+                        name: "browser-investigator".into(),
+                        system_prompt: Some("Use Playwright and report deterministic evidence. ".repeat(20)),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let task = TeamTask {
+            id: "task-1".into(),
+            title: "Complete the architecture release review".into(),
+            description: format!(
+                "Use the in-cluster Bridge and do not ask for credentials. {} \
+                 Extend the prior decision with WOW-ARCH-20260712-EXTENDED.",
+                "detailed acceptance criterion ".repeat(80)
+            ),
+            status: "pending".into(),
+            run: None,
+            created_at: None,
+            done_at: None,
+            stuck_since: None,
+        };
+        let prior = format!(
+            "{}- [newest-run] {} PRIOR TOKEN WOW-ARCH-20260712\n{}",
+            crate::team_commons::PRIOR_KNOWLEDGE_HEADER,
+            "prior evidence ".repeat(80),
+            crate::team_commons::PRIOR_KNOWLEDGE_FOOTER,
+        );
+        let objective = build_run_objective(
+            &team,
+            &operating_contract("kars-default", "playwright"),
+            &prior,
+            Some(&task),
+        );
+
+        assert!(objective.chars().count() <= 4096);
+        assert!(objective.contains("security-reviewer"));
+        assert!(objective.contains("reliability-reviewer"));
+        assert!(objective.contains("browser-investigator"));
+        assert!(objective.contains("kars_spawn"));
+        assert!(objective.contains("kars_mesh_send"));
+        assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_HEADER));
+        assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_FOOTER));
+        assert!(objective.contains("PRIOR TOKEN WOW-ARCH-20260712"));
+        assert!(objective.contains("WOW-ARCH-20260712-EXTENDED"));
+    }
+
+    #[test]
+    fn truncate_middle_keeps_both_ends() {
+        let value = format!("START-{}-END", "x".repeat(100));
+        let truncated = truncate_middle(&value, 30, "[cut]");
+        assert_eq!(truncated.chars().count(), 30);
+        assert!(truncated.starts_with("START-"));
+        assert!(truncated.ends_with("-END"));
     }
 
     #[test]

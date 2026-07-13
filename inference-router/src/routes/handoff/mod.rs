@@ -82,7 +82,8 @@ async fn sandbox_list(State(_state): State<AppState>) -> impl IntoResponse {
 
 /// GET /sandbox/{name}/status — get status of a specific sub-agent.
 async fn sandbox_status(Path(name): Path<String>) -> impl IntoResponse {
-    match spawn::get_sandbox_status(&name).await {
+    let parent_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
+    match spawn::get_sandbox_status(&parent_name, &name).await {
         Ok(resp) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
         Err(msg) => errors::flat(StatusCode::NOT_FOUND, msg).into_response(),
     }

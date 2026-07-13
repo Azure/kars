@@ -231,7 +231,12 @@ def _maybe_prepend_peer_roster(content: str, recipient: str) -> str:
     for name, role in roster.items():
         if name == parent_sandbox or name == recipient:
             continue
-        rows.append(f"  - {name} — {role}" if role else f"  - {name}")
+        mesh_name = _spawn.get_mesh_name(name)
+        rows.append(
+            f"  - {mesh_name} — {role} (logical role: {name})"
+            if role
+            else f"  - {mesh_name} (logical role: {name})"
+        )
     if len(rows) < 1:
         return content
 
@@ -275,6 +280,12 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
         return json.dumps(
             {"error": "missing required arg: to_agent=<display_name>"}
         )
+    try:
+        from . import spawn as _spawn  # noqa: PLC0415
+
+        registry_peer = _spawn.get_mesh_name(peer)
+    except Exception:  # noqa: BLE001
+        registry_peer = peer
 
     payload_raw = args.get("content")
     if payload_raw is None:
@@ -288,7 +299,7 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
         payload = bytes(payload_raw)
         try:
             future = asyncio.run_coroutine_threadsafe(
-                client.send_by_name(to=peer, payload=payload), loop
+                client.send_by_name(to=registry_peer, payload=payload), loop
             )
             future.result(timeout=30.0)
             return json.dumps({"ok": True, "to_agent": peer, "bytes": len(payload)})
@@ -343,7 +354,7 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
             attempt += 1
             try:
                 if peer_did is None:
-                    peer_rec = await client._registry.find_by_display_name(peer)  # noqa: SLF001
+                    peer_rec = await client._registry.find_by_display_name(registry_peer)  # noqa: SLF001
                     if peer_rec is None:
                         raise MeshPeerNotFoundError(
                             f"{peer!r} not yet in registry"

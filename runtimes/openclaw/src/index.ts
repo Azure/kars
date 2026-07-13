@@ -1920,7 +1920,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               // IMPORTANT: Use sub_agent_results (always populated for spawned agents)
               // as the primary loop driver — NOT sub_agent_workspaces (which may be
               // empty if workspace data was lost in the snapshot round-trip).
-              const spawnedSubs: Array<{ name: string; original_amid?: string; status?: string }> =
+              const spawnedSubs: Array<{ name: string; mesh_name?: string; original_amid?: string; status?: string }> =
                 (restoreResp.sub_agent_results || []).filter((r: any) => r.status === "spawned");
               const subWorkspaceMap = new Map<string, any>();
               for (const ws of (restoreResp.sub_agent_workspaces || [])) {
@@ -1960,9 +1960,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     const subStart = Date.now();
                     while (Date.now() - subStart < 90_000) {
                       try {
-                        const results = await getMeshRegistry(routerUrl).search(spawned.name, { timeoutMs: 5000 });
+                        const meshName = spawned.mesh_name || spawned.name;
+                        const results = await getMeshRegistry(routerUrl).search(meshName, { timeoutMs: 5000 });
                         const candidates = results.filter((a) =>
-                          a.display_name === spawned.name && a.status === "online"
+                          a.display_name === meshName && a.status === "online"
                         );
                         const match = candidates.find((a) => !staleAmids.has(a.amid));
                         if (match?.amid) {

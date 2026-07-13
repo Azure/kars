@@ -459,13 +459,14 @@ async fn deliver_for_task(
     // may still be in flight when the task_response lands. Wait briefly for the
     // buffered set to reach the manifest count before flushing.
     let artifacts = drain_artifacts(state, &agent_did, artifact_count).await;
+    let deliverable_ok = ok && is_substantive_deliverable(&content);
 
     write_mission_output(
         state,
         &name,
         &objective,
         &content,
-        ok,
+        deliverable_ok,
         &artifacts,
         telemetry.as_ref(),
         model.as_deref(),
@@ -500,6 +501,31 @@ async fn deliver_for_task(
         "task-delivery: persisted mesh run result"
     );
     Ok(())
+}
+
+fn is_substantive_deliverable(output: &str) -> bool {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if ["aborted", "cancelled", "canceled", "stopped", "terminated"]
+        .iter()
+        .any(|status| {
+            lower == *status
+                || lower
+                    .strip_prefix(status)
+                    .is_some_and(|rest| {
+                        rest.starts_with([':', '-', '—'])
+                            || rest.chars().next().is_some_and(char::is_whitespace)
+                    })
+        })
+    {
+        return false;
+    }
+    !trimmed.contains("[[NEEDS_CLARIFICATION]]")
+        && !trimmed.contains("[[NEEDS_EGRESS]]")
+        && !trimmed.contains("[[NEEDS_TIER]]")
 }
 
 /// Wait up to a short window for the agent's `file_transfer` frames to land,
@@ -1012,4 +1038,25 @@ async fn handle_transient_miss(
     .await?;
     mark_completed(state, namespace, task, nonce).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_substantive_deliverable;
+
+    #[test]
+    fn aborted_and_human_blocked_outputs_are_not_successes() {
+        assert!(!is_substantive_deliverable("aborted"));
+        assert!(!is_substantive_deliverable("Aborted: operator cancelled"));
+        assert!(!is_substantive_deliverable("Stopped before completing the task"));
+        assert!(!is_substantive_deliverable(
+            "[[NEEDS_CLARIFICATION]] Which environment?"
+        ));
+        assert!(!is_substantive_deliverable(
+            "Partial work\n[[NEEDS_EGRESS]] example.com:443 - fetch evidence"
+        ));
+        assert!(is_substantive_deliverable(
+            "Completed the review with evidence and a ship recommendation."
+        ));
+    }
 }

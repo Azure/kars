@@ -14,6 +14,7 @@ use kube::{
     discovery::ApiResource,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 mod docker;
@@ -36,6 +37,115 @@ fn kars_sandbox_api_resource() -> ApiResource {
         kind: "KarsSandbox".into(),
         plural: "karssandboxes".into(),
     }
+}
+
+const LOGICAL_AGENT_ID_ANNOTATION: &str = "kars.azure.com/logical-agent-id";
+
+fn scoped_child_name(parent_name: &str, logical_agent_id: &str) -> String {
+    let candidate = format!("{parent_name}-{logical_agent_id}");
+    // The controller creates namespace `kars-<sandbox>`; keep the sandbox name
+    // at <=58 so the prefixed namespace also satisfies the 63-byte DNS limit.
+    const MAX_NAME: usize = 58;
+    if candidate.len() <= MAX_NAME {
+        return candidate;
+    }
+    let digest = Sha256::digest(candidate.as_bytes());
+    let suffix = format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    );
+    let prefix_len = MAX_NAME - suffix.len() - 1;
+    let prefix = candidate[..prefix_len].trim_end_matches('-');
+    format!("{prefix}-{suffix}")
+}
+
+fn logical_agent_id(obj: &DynamicObject) -> String {
+    obj.metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(LOGICAL_AGENT_ID_ANNOTATION))
+        .cloned()
+        .unwrap_or_else(|| obj.name_any())
+}
+
+fn spawn_parent(obj: &DynamicObject) -> Option<&str> {
+    obj.metadata.labels.as_ref().and_then(|labels| {
+        labels
+            .get("kars.azure.com/parent")
+            .or_else(|| labels.get("kars.azure.com/predecessor"))
+            .map(String::as_str)
+    })
+}
+
+fn apply_spawn_identity(
+    crd: &mut serde_json::Value,
+    resource_name: &str,
+    logical_agent_id: &str,
+) {
+    crd["metadata"]["name"] = serde_json::Value::String(resource_name.to_string());
+    if !crd["metadata"]["annotations"].is_object() {
+        crd["metadata"]["annotations"] = serde_json::json!({});
+    }
+    crd["metadata"]["annotations"][LOGICAL_AGENT_ID_ANNOTATION] =
+        serde_json::Value::String(logical_agent_id.to_string());
+}
+
+fn child_matches_parent(
+    obj: &DynamicObject,
+    parent_name: &str,
+    parent_uid: &str,
+    logical_name: &str,
+) -> bool {
+    if obj.metadata.deletion_timestamp.is_some()
+        || spawn_parent(obj) != Some(parent_name)
+        || logical_agent_id(obj) != logical_name
+    {
+        return false;
+    }
+    let bound_uid = obj
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get("kars.azure.com/spawn-parent-uid"))
+        .map(String::as_str)
+        .or_else(|| {
+            obj.metadata
+                .owner_references
+                .as_ref()
+                .and_then(|owners| owners.iter().find(|owner| owner.name == parent_name))
+                .map(|owner| owner.uid.as_str())
+        });
+    bound_uid == Some(parent_uid)
+}
+
+async fn find_existing_child(
+    api: &Api<DynamicObject>,
+    parent_name: &str,
+    parent_uid: &str,
+    logical_agent_id: &str,
+) -> Result<Option<(String, DynamicObject)>, String> {
+    let scoped = scoped_child_name(parent_name, logical_agent_id);
+    for (index, resource_name) in [scoped.as_str(), logical_agent_id].into_iter().enumerate() {
+        let Some(obj) = api
+            .get_opt(resource_name)
+            .await
+            .map_err(|e| format!("Failed to inspect child sandbox: {e}"))?
+        else {
+            continue;
+        };
+        if !child_matches_parent(&obj, parent_name, parent_uid, logical_agent_id) {
+            if index == 1 {
+                // Legacy global-name child owned by another parent. Ignore it;
+                // the scoped name is independent and safe to create.
+                continue;
+            }
+            return Err(format!(
+                "Sandbox resource collision for '{logical_agent_id}' — existing object is not this parent incarnation's child"
+            ));
+        }
+        return Ok(Some((resource_name.to_string(), obj)));
+    }
+    Ok(None)
 }
 
 /// Request body for `POST /sandbox/spawn`.
@@ -107,6 +217,8 @@ pub struct SpawnResponse {
     pub status: String,
     pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mesh_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
@@ -118,6 +230,7 @@ pub struct SpawnResponse {
 #[derive(Debug, Serialize)]
 pub struct SubAgentEntry {
     pub agent_id: String,
+    pub mesh_name: String,
     pub namespace: Option<String>,
     pub phase: Option<String>,
     pub model: Option<String>,
@@ -230,11 +343,15 @@ pub async fn create_sandbox(
         Vec<serde_json::Value>,
         Option<String>,
         Option<String>,
-        Option<String>,
+        String,
     ) = match api.get(parent_name).await {
         Ok(parent_obj) => {
             let labels = parent_obj.metadata.labels.clone().unwrap_or_default();
-            let uid = parent_obj.metadata.uid.clone();
+            let uid = parent_obj
+                .metadata
+                .uid
+                .clone()
+                .ok_or_else(|| "Parent KarsSandbox has no metadata.uid".to_string())?;
             let mcp_refs = parent_mcp_server_refs(&parent_obj.data);
             let spec = parent_obj.data.get("spec");
             let tool_policy = spec
@@ -250,12 +367,9 @@ pub async fn create_sandbox(
             (labels, mcp_refs, tool_policy, inference, uid)
         }
         Err(e) => {
-            tracing::warn!(
-                parent = %parent_name,
-                child = %req.agent_id,
-                "Could not fetch parent CRD for inheritance (non-fatal): {e}"
-            );
-            (BTreeMap::new(), Vec::new(), None, None, None)
+            return Err(format!(
+                "Could not fetch parent KarsSandbox '{parent_name}' for secure spawn: {e}"
+            ));
         }
     };
 
@@ -267,6 +381,10 @@ pub async fn create_sandbox(
         req,
         &parent_labels,
     );
+    let child_resource_name = scoped_child_name(parent_name, &req.agent_id);
+    apply_spawn_identity(&mut crd, &child_resource_name, &req.agent_id);
+    crd["metadata"]["annotations"]["kars.azure.com/spawn-parent-uid"] =
+        serde_json::Value::String(parent_uid.clone());
 
     // main: additive overlay — copy inherited MCP refs onto the child's
     // governance (the builder always emits `spec.governance`).
@@ -328,10 +446,37 @@ pub async fn create_sandbox(
     // deleted). Without this, agent-spawned sub-agents outlive their parent run
     // as *orphans*. Skipped for handoff successors, which must OUTLIVE the
     // predecessor by design.
-    if req.handoff.is_none()
-        && let Some(uid) = parent_uid
+    if req.handoff.is_none() {
+        apply_owner_reference(&mut crd, parent_name, &parent_uid);
+    }
+
+    if let Some((resource_name, existing)) =
+        find_existing_child(&api, parent_name, &parent_uid, &req.agent_id).await?
     {
-        apply_owner_reference(&mut crd, parent_name, &uid);
+        let phase = existing
+            .data
+            .get("status")
+            .and_then(|status| status.get("phase"))
+            .and_then(|phase| phase.as_str())
+            .unwrap_or("Pending")
+            .to_string();
+        tracing::info!(
+            parent = %parent_name,
+            child = %req.agent_id,
+            resource = %resource_name,
+            "Sub-agent sandbox already exists — reusing"
+        );
+        return Ok(SpawnResponse {
+            status: "created".into(),
+            agent_id: req.agent_id.clone(),
+            mesh_name: Some(resource_name.clone()),
+            namespace: Some(format!("kars-{resource_name}")),
+            phase: Some(phase),
+            message: Some(format!(
+                "Sub-agent '{}' already exists (model: {}, governance: {}). Use AGT mesh to communicate.",
+                req.agent_id, model, req.governance
+            )),
+        });
     }
 
     let obj: kube::api::DynamicObject =
@@ -339,12 +484,17 @@ pub async fn create_sandbox(
 
     match api.create(&PostParams::default(), &obj).await {
         Ok(_created) => {
-            tracing::info!(parent = %parent_name, child = %req.agent_id, "Sub-agent sandbox created");
+            tracing::info!(
+                parent = %parent_name,
+                child = %req.agent_id,
+                resource = %child_resource_name,
+                "Sub-agent sandbox created"
+            );
 
             // For handoff targets, propagate channel/plugin credentials to the
             // target namespace so the cloud agent gets Telegram, Slack, etc.
             if req.handoff.is_some() {
-                let child_name = req.agent_id.clone();
+                let child_name = child_resource_name.clone();
                 let client_clone = Client::try_default().await.ok();
                 if let Some(kc) = client_clone {
                     tokio::spawn(async move {
@@ -361,7 +511,8 @@ pub async fn create_sandbox(
             Ok(SpawnResponse {
                 status: "created".into(),
                 agent_id: req.agent_id.clone(),
-                namespace: Some(format!("kars-{}", req.agent_id)),
+                mesh_name: Some(child_resource_name.clone()),
+                namespace: Some(format!("kars-{child_resource_name}")),
                 phase: Some("Pending".into()),
                 message: Some(format!(
                     "Sub-agent '{}' spawned (model: {}, governance: {}). Use AGT mesh to communicate.",
@@ -370,12 +521,27 @@ pub async fn create_sandbox(
             })
         }
         Err(kube::Error::Api(resp)) if resp.code == 409 => {
-            // Already exists — reuse rather than error
-            tracing::info!(parent = %parent_name, child = %req.agent_id, "Sub-agent sandbox already exists — reusing");
+            let existing = api
+                .get(&child_resource_name)
+                .await
+                .map_err(|e| format!("Failed to inspect existing sandbox: {e}"))?;
+            if !child_matches_parent(&existing, parent_name, &parent_uid, &req.agent_id) {
+                return Err(format!(
+                    "Sandbox resource collision for '{}' — existing object is not this parent's logical child",
+                    req.agent_id
+                ));
+            }
+            tracing::info!(
+                parent = %parent_name,
+                child = %req.agent_id,
+                resource = %child_resource_name,
+                "Sub-agent sandbox already exists — reusing"
+            );
             Ok(SpawnResponse {
                 status: "created".into(),
                 agent_id: req.agent_id.clone(),
-                namespace: Some(format!("kars-{}", req.agent_id)),
+                mesh_name: Some(child_resource_name.clone()),
+                namespace: Some(format!("kars-{child_resource_name}")),
                 phase: Some("Running".into()),
                 message: Some(format!(
                     "Sub-agent '{}' already running (model: {}, governance: {}). Use AGT mesh to communicate.",
@@ -502,7 +668,8 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
         .items
         .iter()
         .map(|obj| {
-            let name = obj.name_any();
+            let name = logical_agent_id(obj);
+            let mesh_name = obj.name_any();
             let data = &obj.data;
 
             let phase = data
@@ -533,6 +700,7 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
 
             SubAgentEntry {
                 agent_id: name,
+                mesh_name,
                 namespace: ns,
                 phase,
                 model,
@@ -545,7 +713,7 @@ pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, Str
 }
 
 /// Get status of a specific sub-agent sandbox.
-pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
+pub async fn get_sandbox_status(parent_name: &str, name: &str) -> Result<SpawnResponse, String> {
     // Dev mode: query Docker Engine API instead of K8s
     if std::env::var("KARS_DEV_MODE").unwrap_or_default() == "true" {
         return docker::get_sandbox_status_docker(name).await;
@@ -559,10 +727,18 @@ pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
     let api: Api<DynamicObject> =
         Api::namespaced_with(client, &namespace, &kars_sandbox_api_resource());
 
-    let obj = api
-        .get(name)
+    let parent_uid = api
+        .get(parent_name)
         .await
-        .map_err(|e| format!("Sandbox '{}' not found: {e}", name))?;
+        .map_err(|e| format!("Parent sandbox '{parent_name}' not found: {e}"))?
+        .metadata
+        .uid
+        .ok_or_else(|| format!("Parent sandbox '{parent_name}' has no metadata.uid"))?;
+    let Some((resource_name, obj)) =
+        find_existing_child(&api, parent_name, &parent_uid, name).await?
+    else {
+        return Err(format!("Sandbox '{name}' not found"));
+    };
     let data = &obj.data;
 
     let phase = data
@@ -580,6 +756,7 @@ pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
     Ok(SpawnResponse {
         status: "ok".into(),
         agent_id: name.to_string(),
+        mesh_name: Some(resource_name),
         namespace: ns,
         phase,
         message: None,
@@ -596,24 +773,20 @@ pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnRespon
     let api: Api<DynamicObject> =
         Api::namespaced_with(client, &namespace, &kars_sandbox_api_resource());
 
-    // Verify the sandbox was spawned by this parent (prevent deleting others' sandboxes)
-    let obj = api
-        .get(name)
+    let parent_uid = api
+        .get(parent_name)
         .await
-        .map_err(|e| format!("Sandbox '{}' not found: {e}", name))?;
-    let labels = obj.metadata.labels.as_ref();
-    let actual_parent = labels
-        .and_then(|l| l.get("kars.azure.com/parent"))
-        .map(String::as_str);
+        .map_err(|e| format!("Parent sandbox '{parent_name}' not found: {e}"))?
+        .metadata
+        .uid
+        .ok_or_else(|| format!("Parent sandbox '{parent_name}' has no metadata.uid"))?;
+    let Some((resource_name, _obj)) =
+        find_existing_child(&api, parent_name, &parent_uid, name).await?
+    else {
+        return Err(format!("Sandbox '{name}' not found"));
+    };
 
-    if actual_parent != Some(parent_name) {
-        return Err(format!(
-            "Sandbox '{}' was not spawned by '{}' — cannot delete",
-            name, parent_name
-        ));
-    }
-
-    api.delete(name, &Default::default())
+    api.delete(&resource_name, &Default::default())
         .await
         .map_err(|e| format!("Failed to delete: {e}"))?;
 
@@ -621,6 +794,7 @@ pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnRespon
     Ok(SpawnResponse {
         status: "deleted".into(),
         agent_id: name.to_string(),
+        mesh_name: Some(resource_name),
         namespace: None,
         phase: Some("Terminating".into()),
         message: Some(format!("Sub-agent '{}' is being torn down", name)),
@@ -656,7 +830,7 @@ pub async fn collect_sub_agent_snapshots(
     let mut snapshots = Vec::new();
 
     for obj in &list.items {
-        let name = obj.name_any();
+        let name = logical_agent_id(obj);
         let spec = match obj.data.get("spec") {
             Some(s) => s,
             None => continue,
@@ -1091,6 +1265,44 @@ pub(crate) fn build_sub_agent_crd_with_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_resource_names_are_parent_scoped_and_bounded() {
+        let first = scoped_child_name("team-a-run-123", "security-reviewer");
+        let second = scoped_child_name("team-b-run-456", "security-reviewer");
+        assert_ne!(first, second);
+        assert_eq!(first, "team-a-run-123-security-reviewer");
+
+        let long_parent = "p".repeat(63);
+        let long = scoped_child_name(&long_parent, "browser-evidence-reviewer");
+        assert!(long.len() <= 58);
+        assert!(format!("kars-{long}").len() <= 63);
+        assert_eq!(long, scoped_child_name(&long_parent, "browser-evidence-reviewer"));
+    }
+
+    #[test]
+    fn spawn_identity_separates_resource_name_from_logical_agent_id() {
+        let mut crd = serde_json::json!({
+            "metadata": {
+                "name": "security-reviewer",
+                "annotations": {"kars.azure.com/model": "gpt-oss-120b"}
+            }
+        });
+        apply_spawn_identity(
+            &mut crd,
+            "team-a-run-123-security-reviewer",
+            "security-reviewer",
+        );
+        assert_eq!(crd["metadata"]["name"], "team-a-run-123-security-reviewer");
+        assert_eq!(
+            crd["metadata"]["annotations"][LOGICAL_AGENT_ID_ANNOTATION],
+            "security-reviewer"
+        );
+        assert_eq!(
+            crd["metadata"]["annotations"]["kars.azure.com/model"],
+            "gpt-oss-120b"
+        );
+    }
 
     #[test]
     fn spawn_request_rejects_unknown_fields() {

@@ -46,6 +46,9 @@ import type { HandoffProgress, AgtInboxEntry } from "../agt-handoff.js";
 // Re-suppress unused warnings for imports retained for symmetry with plugin.ts.
 void routerCallStrict; void parentTrustedAmids; void getCachedAmid;
 
+// Agent-facing logical child name → parent-scoped mesh/registry name.
+const spawnedMeshNames = new Map<string, string>();
+
 // 2-arg wrapper around the canonical resolveAmidByName(name, routerUrl, opts?).
 // Kept local so existing tool bodies don't have to thread routerUrl.
 async function resolveAmidByName(
@@ -53,7 +56,13 @@ async function resolveAmidByName(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   opts: { timeoutMs?: number; registryBase?: string; scopeFilter?: (a: any) => boolean; bypassCache?: boolean } = {},
 ): Promise<string | undefined> {
-  return _resolveAmidByName(agentName, routerUrl, opts);
+  const meshName = spawnedMeshNames.get(agentName) || agentName;
+  const amid = await _resolveAmidByName(meshName, routerUrl, opts);
+  if (amid && meshName !== agentName) {
+    nameToAmid.set(agentName, amid);
+    amidToName.set(amid, agentName);
+  }
+  return amid;
 }
 
 // Pod phases that mean the sub-agent is permanently gone.
@@ -227,7 +236,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         const myName = process.env.SANDBOX_NAME || process.env.HOSTNAME || "parent";
         if (myAmid) trustedPeers.push(`${myName}:${myAmid}`);
         for (const [amid, name] of amidToName.entries()) {
-          if (amid !== myAmid) trustedPeers.push(`${name}:${amid}`);
+          if (amid !== myAmid) {
+            trustedPeers.push(`${spawnedMeshNames.get(name) || name}:${amid}`);
+          }
         }
 
         const result = await routerCall("POST", "/sandbox/spawn", {
@@ -262,6 +273,10 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
 
         // Poll until sub-agent is Running AND registered on mesh (in parallel)
         const agentName = params.name as string;
+        const meshName = typeof result?.mesh_name === "string" && result.mesh_name
+          ? result.mesh_name
+          : agentName;
+        spawnedMeshNames.set(agentName, meshName);
         log.info(`Waiting for sub-agent '${agentName}' to be Running + registered...`);
 
         let phase = "Pending";
@@ -288,9 +303,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // actual send path resolves through resolveAmidByName which will hit the
           // registry once status flips Running, picking the freshest live entry.
           if (!amid && deps.meshClient()) {
-            const resolved = await resolveAmidByName(agentName, { bypassCache: true });
+            const resolved = await resolveAmidByName(meshName, { bypassCache: true });
             if (resolved) {
               amid = resolved;
+              nameToAmid.set(agentName, resolved);
+              amidToName.set(resolved, agentName);
               log.info(`AGT pre-discovery: '${agentName}' registered (${resolved.slice(0, 12)}..., not cached — send will re-resolve)`);
             }
           }
@@ -325,7 +342,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         // pairs in multi-agent fan-out workloads. Best-effort: any send
         // failure is logged but doesn't fail the spawn.
         if (amid && deps.meshClient() && amidToName.size > 1) {
-          const peerEntry = { name: agentName, amid };
+          const peerEntry = { name: meshName, logical_name: agentName, amid };
           const myAmidLocal = deps.meshClient()?.getAmid?.() || deps.identity()?.amid;
           const broadcastTargets: Array<{ name: string; amid: string }> = [];
           for (const [siblingAmid, siblingName] of amidToName.entries()) {
@@ -365,7 +382,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             try {
               await deps.meshClient()!.send(amid, {
                 type: "peers_update",
-                peers: broadcastTargets.map(t => ({ name: t.name, amid: t.amid })),
+                peers: broadcastTargets.map(t => ({
+                  name: spawnedMeshNames.get(t.name) || t.name,
+                  logical_name: t.name,
+                  amid: t.amid,
+                })),
                 from_agent: process.env.SANDBOX_NAME || "parent",
                 timestamp: new Date().toISOString(),
               });
@@ -418,7 +439,12 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                   for (const [name, role] of spawnedRoster.entries()) {
                     if (name === parentSandboxName) continue;
                     if (name === t.name) continue; // exclude recipient
-                    rosterLines.push(role ? `  - ${name} — ${role}` : `  - ${name}`);
+                    const peerName = spawnedMeshNames.get(name) || name;
+                    rosterLines.push(
+                      role
+                        ? `  - ${peerName} — ${role} (logical role: ${name})`
+                        : `  - ${peerName} (logical role: ${name})`,
+                    );
                   }
                   if (rosterLines.length === 0) return;
                   const rosterText =
@@ -462,13 +488,24 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       const name = params.name as string;
       try {
         const result: any = await routerCall("GET", `/sandbox/${encodeURIComponent(name)}/status`);
+        const meshName = typeof result?.mesh_name === "string" && result.mesh_name
+          ? result.mesh_name
+          : name;
+        spawnedMeshNames.set(name, meshName);
         // Best-effort registry probe — don't fail status on registry hiccups.
         let mesh_registered = false;
         try {
-          const agents = await getMeshRegistry(routerUrl).search(name, { timeoutMs: 5000 });
+          const agents = await getMeshRegistry(routerUrl).search(meshName, { timeoutMs: 5000 });
           mesh_registered = agents.some(
-            (a) => a.display_name === name || (a.capabilities || []).includes(name),
+            (a) => a.display_name === meshName || (a.capabilities || []).includes(meshName),
           );
+          const agent = agents.find(
+            (a) => a.display_name === meshName || (a.capabilities || []).includes(meshName),
+          );
+          if (agent?.amid) {
+            nameToAmid.set(name, agent.amid);
+            amidToName.set(agent.amid, name);
+          }
         } catch { /* registry unavailable — report as not-registered */ }
         const enriched = {
           ...result,
@@ -559,7 +596,12 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // confuses the LLM and triggers self-targeted mesh_send attempts.
           if (name === parentSandboxName) continue;
           if (name === agentName) continue;
-          rosterLines.push(role ? `  - ${name} — ${role}` : `  - ${name}`);
+          const peerName = spawnedMeshNames.get(name) || name;
+          rosterLines.push(
+            role
+              ? `  - ${peerName} — ${role} (logical role: ${name})`
+              : `  - ${peerName} (logical role: ${name})`,
+          );
         }
         if (rosterLines.length >= 1) {
           const rosterBlock =
@@ -1610,6 +1652,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         // Drop the destroyed sibling from the roster so future mesh_send
         // calls don't advertise a peer that no longer exists.
         spawnedRoster.delete(params.name as string);
+        spawnedMeshNames.delete(params.name as string);
 
         return { content: [{ type: "text", text: safeJson(result) }] };
       } catch (e: any) {
@@ -1626,6 +1669,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     async execute(_id: string, _params: Record<string, unknown>) {
       try {
         const result = await routerCall("GET", "/sandbox/list");
+        for (const sandbox of result?.sandboxes || []) {
+          if (sandbox?.agent_id && sandbox?.mesh_name) {
+            spawnedMeshNames.set(String(sandbox.agent_id), String(sandbox.mesh_name));
+          }
+        }
         return { content: [{ type: "text", text: safeJson(result) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `List failed: ${e.message}` }] };

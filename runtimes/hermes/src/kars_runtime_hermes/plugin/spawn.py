@@ -33,6 +33,7 @@ logger = logging.getLogger("kars.hermes.spawn")
 # Module-level so a single Hermes daemon process sees the same roster
 # across every plugin context that imports this module.
 _SPAWNED_ROSTER: dict[str, str] = {}
+_MESH_NAMES: dict[str, str] = {}
 
 
 def get_roster() -> dict[str, str]:
@@ -41,6 +42,10 @@ def get_roster() -> dict[str, str]:
     `Peer roster:` prefix without sharing mutable state across
     plugin modules."""
     return dict(_SPAWNED_ROSTER)
+
+def get_mesh_name(name: str) -> str:
+    """Return the parent-scoped registry name for a logical child name."""
+    return _MESH_NAMES.get(name, name)
 
 
 def _record_in_roster(name: str, role: str | None) -> None:
@@ -53,6 +58,7 @@ def _remove_from_roster(name: str) -> None:
     a sibling that was torn down doesn't leak into future roster
     headers."""
     _SPAWNED_ROSTER.pop(name, None)
+    _MESH_NAMES.pop(name, None)
 
 # DNS-label rules — same as K8s metadata.name constraint
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$")
@@ -101,6 +107,8 @@ def _kars_spawn(args: dict[str, Any], **_kwargs: Any) -> str:
         result = router_client.call_json("POST", "/sandbox/spawn", json=body)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"spawn failed: {exc}"})
+    mesh_name = str(result.get("mesh_name") or name)
+    _MESH_NAMES[name] = mesh_name
 
     # Track the freshly spawned sibling in the process-local roster
     # so kars_mesh_send can prepend a `Peer roster:` block to subsequent
@@ -121,6 +129,7 @@ def _kars_spawn(args: dict[str, Any], **_kwargs: Any) -> str:
                 continue
             status_resp.raise_for_status()
             status = status_resp.json()
+            _MESH_NAMES[name] = str(status.get("mesh_name") or mesh_name)
             phase = status.get("phase", "Pending")
             if phase == "Running":
                 break
@@ -161,6 +170,7 @@ def _kars_spawn_status(args: dict[str, Any], **_kwargs: Any) -> str:
     except Exception:  # noqa: BLE001
         return json.dumps({"error": "non-JSON status response"})
 
+    _MESH_NAMES[name] = str(result.get("mesh_name") or name)
     return json.dumps(result)
 
 
@@ -196,6 +206,11 @@ def _kars_spawn_list(_args: dict[str, Any], **_kwargs: Any) -> str:
         result = router_client.call_json("GET", "/sandbox/list")
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"list failed: {exc}"})
+    for sandbox in result.get("sandboxes", []):
+        logical = str(sandbox.get("agent_id") or "")
+        mesh_name = str(sandbox.get("mesh_name") or logical)
+        if logical:
+            _MESH_NAMES[logical] = mesh_name
     return json.dumps(result)
 
 
@@ -306,4 +321,3 @@ def register(ctx: Any) -> None:  # noqa: ANN401
         description=_LIST_SCHEMA["description"],
     )
     logger.info("kars_spawn family registered (4 tools)")
-
