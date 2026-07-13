@@ -39,6 +39,9 @@ fn is_model_unavailable_error(status: axum::http::StatusCode, body: &[u8]) -> bo
         return false;
     };
     let err = v.get("error").unwrap_or(&v);
+    if is_responses_only_error(body) {
+        return false;
+    }
     let code = err
         .get("code")
         .and_then(|c| c.as_str())
@@ -67,11 +70,31 @@ fn is_model_unavailable_error(status: axum::http::StatusCode, body: &[u8]) -> bo
     mentions_model && mentions_absence
 }
 
+fn is_responses_only_error(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let err = v.get("error").unwrap_or(&v);
+    let code = err
+        .get("code")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let message = err
+        .get("message")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    code == "unsupported_api_for_model"
+        || message.contains("unsupported")
+        || message.contains("not accessible via the /chat/completions endpoint")
+}
+
 /// Return `body` with its top-level `"model"` field replaced by `model`
 /// (best-effort — an unparseable body is returned unchanged). Used to retry a
 /// request against the default model after the requested one was reported
 /// unavailable.
-fn override_model_in_body(body: &[u8], model: &str) -> bytes::Bytes {
+pub(super) fn override_model_in_body(body: &[u8], model: &str) -> bytes::Bytes {
     match serde_json::from_slice::<serde_json::Value>(body) {
         Ok(mut v) if v.is_object() => {
             v["model"] = serde_json::Value::String(model.to_string());
@@ -525,15 +548,7 @@ pub(super) async fn chat_completions(
                     })
                     .await
                     .unwrap_or_default();
-                let is_unsupported = serde_json::from_slice::<serde_json::Value>(&err_bytes)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("error")?
-                            .get("message")?
-                            .as_str()
-                            .map(|s| s.contains("unsupported"))
-                    })
-                    .unwrap_or(false);
+                let is_unsupported = is_responses_only_error(&err_bytes);
 
                 if is_unsupported {
                     // Cache this model as Responses-only to skip future chat/completions attempts
@@ -902,15 +917,7 @@ pub(super) async fn chat_completions(
         match result {
             Ok((status, _resp_headers, resp_body))
                 if status == StatusCode::BAD_REQUEST
-                    && serde_json::from_slice::<serde_json::Value>(&resp_body)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("error")?
-                                .get("message")?
-                                .as_str()
-                                .map(|s| s.contains("unsupported"))
-                        })
-                        .unwrap_or(false) =>
+                    && is_responses_only_error(&resp_body) =>
             {
                 // Model doesn't support chat/completions — auto-fallback to Responses API.
                 // Cache this model to skip future chat/completions attempts.
@@ -1430,6 +1437,12 @@ mod tests {
             br#"{"error":{"message":"content filtered"}}"#
         ));
         assert!(!is_model_unavailable_error(StatusCode::OK, br#"{}"#));
+        let responses_only = br#"{"error":{"message":"model \"gpt-5.6-sol\" is not accessible via the /chat/completions endpoint","code":"unsupported_api_for_model"}}"#;
+        assert!(is_responses_only_error(responses_only));
+        assert!(!is_model_unavailable_error(
+            StatusCode::BAD_REQUEST,
+            responses_only
+        ));
     }
 
     #[test]
