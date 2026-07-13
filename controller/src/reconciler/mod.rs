@@ -93,6 +93,57 @@ pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitWriteRequest {
+    connection_name: String,
+    repos: Vec<String>,
+    legacy: bool,
+}
+
+fn git_write_request(sandbox: &KarsSandbox) -> Option<GitWriteRequest> {
+    if let Some(git_write) = sandbox.spec.git_write.as_ref() {
+        let repos = git_write
+            .repos
+            .iter()
+            .map(|repo| repo.trim().to_string())
+            .filter(|repo| !repo.is_empty())
+            .collect::<Vec<_>>();
+        return (!repos.is_empty()).then(|| GitWriteRequest {
+            connection_name: git_write.connection_config_map_ref.name.clone(),
+            repos,
+            legacy: false,
+        });
+    }
+
+    sandbox
+        .annotations()
+        .get("kars.azure.com/git-write-repos")
+        .map(|repos| {
+            repos
+                .split(',')
+                .map(|repo| repo.trim().to_string())
+                .filter(|repo| !repo.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|repos| !repos.is_empty())
+        .map(|repos| GitWriteRequest {
+            connection_name: "kars-github-connection".to_string(),
+            repos,
+            legacy: true,
+        })
+}
+
+fn clamp_git_write_repos(declared: &[String], granted: &[String]) -> (Vec<String>, Vec<String>) {
+    let granted = granted
+        .iter()
+        .map(|repo| repo.trim().to_ascii_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    declared
+        .iter()
+        .cloned()
+        .partition(|repo| granted.contains(&repo.trim().to_ascii_lowercase()))
+}
+
 /// Build the egress-guard init-container command.
 ///
 /// Standard sandboxes (every kind except SRE) get the full lockdown:
@@ -2457,13 +2508,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // read by EVERY git invocation regardless of user/HOME/env — the reliable
         // delivery (a per-HOME `git config --global` is not seen by the agent's
         // sanitized tool shell). Optional CM → absent = no mount = read-only.
-        let git_write_requested = sandbox
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get("kars.azure.com/git-write-repos"))
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
+        let git_write_requested = git_write_request(&sandbox).is_some();
         if git_write_requested {
             agent_volume_mounts.push(json!({
                 "name": "kars-gitconfig",
@@ -2623,7 +2668,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                                 //  - `kars-github-app` (cluster-shared, mirrored in):
                                 //    the GitHub App id + private key — the platform
                                 //    identity, in ONE place.
-                                //  - `<name>-git-write` (per-mission): the workspace
+                                //  - `<name>-git-write` (per-mission): the principal
                                 //    installation id + repo scope + KARS_GIT_WRITE +
                                 //    author (or, for the no-App path, a scoped PAT).
                                 //
@@ -3482,75 +3527,56 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
-        // Keyless git write (§14): when the mission declared repos (the Bridge
-        // set `kars.azure.com/git-write-repos` from the workspace's GitHub
-        // connection), materialize the per-mission <name>-git-write secret here
-        // from the workspace connection — the installation id + repo scope only,
-        // never a key/token (the key is the mirrored kars-github-app). This is
-        // what ties a Bridge-created mission to its workspace's GitHub App.
-        if let Some(gw_repos) = sandbox
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get("kars.azure.com/git-write-repos"))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        {
-            use k8s_openapi::api::core::v1::Secret;
-            let conn_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_self_ns);
-            let conn = conn_api
-                .get_opt("kars-github-connection")
-                .await
-                .ok()
-                .flatten()
-                .and_then(|s| s.data);
+        // Typed path: read the principal-specific same-namespace connection
+        // ConfigMap. Legacy annotation + fixed Secret remains read-only fallback
+        // for already-created objects.
+        let mut git_write_materialized = false;
+        if let Some(request) = git_write_request(&sandbox) {
+            let conn = if request.legacy {
+                let conn_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_self_ns);
+                conn_api
+                    .get_opt(&request.connection_name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|secret| secret.data)
+                    .map(|data| {
+                        data.into_iter()
+                            .filter_map(|(key, value)| {
+                                String::from_utf8(value.0).ok().map(|value| (key, value))
+                            })
+                            .collect::<std::collections::BTreeMap<_, _>>()
+                    })
+            } else {
+                let conn_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_self_ns);
+                conn_api
+                    .get_opt(&request.connection_name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|config_map| config_map.data)
+            };
             let read_conn = |key: &str| -> Option<String> {
-                conn.as_ref()
-                    .and_then(|d| d.get(key))
-                    .and_then(|v| String::from_utf8(v.0.clone()).ok())
+                conn.as_ref().and_then(|data| data.get(key)).cloned()
             };
             let installation_id = read_conn("installation_id")
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            // The repos the workspace's GitHub connection actually grants — the
-            // authorized ceiling for THIS workspace.
-            let granted: std::collections::HashSet<String> = read_conn("repos")
+            let granted = read_conn("repos")
                 .and_then(|r| serde_json::from_str::<Vec<String>>(&r).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| r.trim().to_ascii_lowercase())
-                .collect();
+                .unwrap_or_default();
             if let Some(installation_id) = installation_id {
-                // ISOLATION: a mission only ever gets repos its workspace
-                // connection actually grants — declared ∩ granted. A mission
-                // cannot over-scope to a repo it wasn't authorized for (nor, since
-                // the connection is read from the mission's OWN namespace, reach
-                // another workspace's repos). Empty intersection → git write stays
-                // OFF (fail-closed).
-                let declared: Vec<String> = gw_repos
-                    .split(',')
-                    .map(|r| r.trim().to_string())
-                    .filter(|r| !r.is_empty())
-                    .collect();
-                let allowed: Vec<String> = declared
-                    .iter()
-                    .filter(|r| granted.contains(&r.to_ascii_lowercase()))
-                    .cloned()
-                    .collect();
-                let dropped: Vec<&String> = declared
-                    .iter()
-                    .filter(|r| !granted.contains(&r.to_ascii_lowercase()))
-                    .collect();
+                let (allowed, dropped) = clamp_git_write_repos(&request.repos, &granted);
                 if !dropped.is_empty() {
                     tracing::warn!(
                         sandbox = %name, dropped = ?dropped,
-                        "git-write: dropping repos not granted by the workspace connection (isolation)"
+                        "git-write: dropping repos not granted by the principal connection (isolation)"
                     );
                 }
                 if allowed.is_empty() {
                     tracing::warn!(
-                        sandbox = %name, declared = %gw_repos,
-                        "git-write: no declared repo is in the workspace connection — git write stays OFF (fail-closed)"
+                        sandbox = %name, declared = ?request.repos,
+                        "git-write: no declared repo is in the principal connection — git write stays OFF (fail-closed)"
                     );
                 } else {
                     let gw_scope = allowed.join(",");
@@ -3622,12 +3648,27 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     {
                         tracing::warn!(error = %e, sandbox = %name, "failed to materialize git-write secret");
                     } else {
-                        tracing::info!(sandbox = %name, repos = %gw_scope, "git-write secret materialized (clamped to workspace connection)");
+                        git_write_materialized = true;
+                        tracing::info!(sandbox = %name, repos = %gw_scope, "git-write secret materialized (clamped to principal connection)");
                     }
                 }
             } else {
-                tracing::warn!(sandbox = %name, "git-write-repos set but no workspace GitHub connection found");
+                tracing::warn!(
+                    sandbox = %name,
+                    connection = %request.connection_name,
+                    "git-write requested but no usable principal GitHub connection found"
+                );
             }
+        }
+        if !git_write_materialized {
+            let secret_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_ns);
+            let config_map_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
+            let _ = secret_api
+                .delete(&format!("{name}-git-write"), &DeleteParams::default())
+                .await;
+            let _ = config_map_api
+                .delete(&format!("{name}-gitconfig"), &DeleteParams::default())
+                .await;
         }
 
         // Keyless git write (§14): mirror the cluster-shared kars GitHub App

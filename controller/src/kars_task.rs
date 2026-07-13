@@ -200,6 +200,23 @@ pub struct TaskBlueprint {
     /// sandbox annotation `kars.azure.com/skills`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
+
+    /// GitHub repositories this run may write through the router's keyless Git
+    /// proxy. The referenced ConfigMap is resolved in the KarsSandbox object's
+    /// namespace and is never mounted into the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_write: Option<GitWriteConfig>,
+}
+
+/// Typed keyless Git write grant shared by task blueprints and sandboxes.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWriteConfig {
+    /// Same-namespace principal connection ConfigMap.
+    pub connection_config_map_ref: LocalObjectRef,
+    /// `owner/repo` names requested for this run.
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 /// A model route: provider tag + deployment name.
@@ -766,6 +783,27 @@ mod tests {
         let back: KarsTaskSpec = serde_yaml::from_str(&yaml).expect("roundtrips");
         assert_eq!(back.envelope.tier, 3);
         assert_eq!(back.envelope.authority_ceiling, 3);
+    }
+
+    #[test]
+    fn git_write_roundtrips_as_typed_camelcase_blueprint_field() {
+        let blueprint = TaskBlueprint {
+            git_write: Some(GitWriteConfig {
+                connection_config_map_ref: LocalObjectRef {
+                    name: "kars-github-connection-0123456789abcdef".into(),
+                },
+                repos: vec!["owner/repo".into()],
+            }),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&blueprint).expect("serializes");
+        assert_eq!(
+            value["gitWrite"]["connectionConfigMapRef"]["name"],
+            "kars-github-connection-0123456789abcdef"
+        );
+        assert_eq!(value["gitWrite"]["repos"][0], "owner/repo");
+        let back: TaskBlueprint = serde_json::from_value(value).expect("roundtrips");
+        assert_eq!(back.git_write, blueprint.git_write);
     }
 
     // ── Capability-attenuating delegation lattice (Pillar A) ──────────────
