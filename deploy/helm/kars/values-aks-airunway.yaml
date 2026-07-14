@@ -47,6 +47,12 @@ sandbox:
       value: gpu
       effect: NoSchedule
 
+# Constrain GPT-family tool-call arguments at decode time. This prevents local
+# gpt-oss runs from emitting malformed multi-KB mesh/spawn JSON during complex
+# team orchestration.
+strictTools:
+  enabled: true
+
 managedMcp:
   namespace: kars-mcp
   playwrightImage: karsur6qnm.azurecr.io/playwright-mcp:latest
