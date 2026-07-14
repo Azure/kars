@@ -77,11 +77,7 @@ fn spawn_parent(obj: &DynamicObject) -> Option<&str> {
     })
 }
 
-fn apply_spawn_identity(
-    crd: &mut serde_json::Value,
-    resource_name: &str,
-    logical_agent_id: &str,
-) {
+fn apply_spawn_identity(crd: &mut serde_json::Value, resource_name: &str, logical_agent_id: &str) {
     crd["metadata"]["name"] = serde_json::Value::String(resource_name.to_string());
     if !crd["metadata"]["annotations"].is_object() {
         crd["metadata"]["annotations"] = serde_json::json!({});
@@ -235,6 +231,43 @@ pub struct SubAgentEntry {
     pub phase: Option<String>,
     pub model: Option<String>,
     pub governance: bool,
+}
+
+fn apply_parent_git_write(
+    crd: &mut serde_json::Value,
+    parent_repos: &str,
+    connection_name: Option<&str>,
+) {
+    let parent_repos = parent_repos.trim();
+    if parent_repos.is_empty() {
+        return;
+    }
+    if let Some(connection_name) = connection_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let repos = parent_repos
+            .split(',')
+            .map(str::trim)
+            .filter(|repo| !repo.is_empty())
+            .collect::<Vec<_>>();
+        crd["spec"]["gitWrite"] = serde_json::json!({
+            "connectionConfigMapRef": {"name": connection_name},
+            "repos": repos,
+        });
+        return;
+    }
+    if let Some(meta) = crd.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+        let anns = meta
+            .entry("annotations")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(o) = anns.as_object_mut() {
+            o.insert(
+                "kars.azure.com/git-write-repos".to_string(),
+                serde_json::Value::String(parent_repos.to_string()),
+            );
+        }
+    }
 }
 
 /// Create a KarsSandbox CRD for a sub-agent, or a Docker container in dev mode.
@@ -418,27 +451,13 @@ pub async fn create_sandbox(
         parent_inference.as_deref(),
     );
 
-    // Keyless git write (§14): a sub-agent inherits its principal's repo scope so
-    // it can push branches + open PRs on the same repos. This is ATTENUATED — the
-    // controller clamps the child to the workspace connection, so child repos are
-    // always ⊆ parent repos, and the child is marked a sub-agent (by its parent
-    // label) so it can never MERGE (only the principal/human can). Absent parent
-    // git write ⇒ no annotation ⇒ child stays read-only (fail-closed).
+    // Keyless git write (§14): a sub-agent inherits the principal's typed
+    // connection reference and repo scope. The controller re-clamps the child
+    // against that principal-specific ConfigMap. Legacy parents that do not
+    // carry GIT_CONNECTION_CONFIG_MAP retain the annotation fallback.
     if let Ok(parent_repos) = std::env::var("GIT_WRITE_REPOS") {
-        let parent_repos = parent_repos.trim().to_string();
-        if !parent_repos.is_empty()
-            && let Some(meta) = crd.get_mut("metadata").and_then(|m| m.as_object_mut())
-        {
-            let anns = meta
-                .entry("annotations")
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(o) = anns.as_object_mut() {
-                o.insert(
-                    "kars.azure.com/git-write-repos".to_string(),
-                    serde_json::Value::String(parent_repos),
-                );
-            }
-        }
+        let connection_name = std::env::var("GIT_CONNECTION_CONFIG_MAP").ok();
+        apply_parent_git_write(&mut crd, &parent_repos, connection_name.as_deref());
     }
 
     // kars-bridge: own the child by its parent sandbox so K8s garbage-collects
@@ -1277,7 +1296,10 @@ mod tests {
         let long = scoped_child_name(&long_parent, "browser-evidence-reviewer");
         assert!(long.len() <= 58);
         assert!(format!("kars-{long}").len() <= 63);
-        assert_eq!(long, scoped_child_name(&long_parent, "browser-evidence-reviewer"));
+        assert_eq!(
+            long,
+            scoped_child_name(&long_parent, "browser-evidence-reviewer")
+        );
     }
 
     #[test]
@@ -1302,6 +1324,33 @@ mod tests {
             crd["metadata"]["annotations"]["kars.azure.com/model"],
             "gpt-oss-120b"
         );
+    }
+
+    #[test]
+    fn spawned_child_inherits_typed_principal_git_connection() {
+        let mut crd = serde_json::json!({"metadata": {}, "spec": {}});
+        apply_parent_git_write(
+            &mut crd,
+            "owner/repo,owner/second",
+            Some("kars-github-connection-0123456789abcdef"),
+        );
+        assert_eq!(
+            crd["spec"]["gitWrite"]["connectionConfigMapRef"]["name"],
+            "kars-github-connection-0123456789abcdef"
+        );
+        assert_eq!(crd["spec"]["gitWrite"]["repos"][0], "owner/repo");
+        assert!(crd["metadata"]["annotations"].is_null());
+    }
+
+    #[test]
+    fn spawned_child_keeps_legacy_annotation_without_typed_connection() {
+        let mut crd = serde_json::json!({"metadata": {}, "spec": {}});
+        apply_parent_git_write(&mut crd, "owner/repo", None);
+        assert_eq!(
+            crd["metadata"]["annotations"]["kars.azure.com/git-write-repos"],
+            "owner/repo"
+        );
+        assert!(crd["spec"]["gitWrite"].is_null());
     }
 
     #[test]
