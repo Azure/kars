@@ -1418,11 +1418,12 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // configured namespaces (default: the standard Kars local-inference ns).
     let local_targets = std::env::var("LOCAL_INFERENCE_TARGETS_JSON").unwrap_or_default();
     if !local_targets.trim().is_empty() && local_targets.trim() != "[]" {
-        let targets: Vec<serde_json::Value> = serde_json::from_str(&local_targets).map_err(|e| {
-            ReconcileError::Configuration(format!(
-                "LOCAL_INFERENCE_TARGETS_JSON is invalid: {e}"
-            ))
-        })?;
+        let targets: Vec<serde_json::Value> =
+            serde_json::from_str(&local_targets).map_err(|e| {
+                ReconcileError::Configuration(format!(
+                    "LOCAL_INFERENCE_TARGETS_JSON is invalid: {e}"
+                ))
+            })?;
         for target in targets {
             let namespace = target
                 .get("namespace")
@@ -2753,9 +2754,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .get_mut("tolerations")
                 .and_then(serde_json::Value::as_array_mut)
                 .ok_or_else(|| {
-                    ReconcileError::Configuration(
-                        "sandbox pod tolerations must be an array".into(),
-                    )
+                    ReconcileError::Configuration("sandbox pod tolerations must be an array".into())
                 })?;
             for extra in extras {
                 if !extra.is_object() {
@@ -3037,8 +3036,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         .and_then(|s| s.get("observedGeneration"))
                         .and_then(|v| v.as_i64())
                         == sk.metadata.generation;
-                    let digest_locked =
-                        locked_digest.is_some() && locked_digest == live_digest;
+                    let digest_locked = locked_digest.is_some() && locked_digest == live_digest;
 
                     let package_valid = if let Some(expected) = package_digest {
                         let source_cm_api: Api<ConfigMap> =
@@ -3587,14 +3585,20 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     let gc_api: Api<k8s_openapi::api::core::v1::ConfigMap> =
                         Api::namespaced(client.clone(), &sandbox_ns);
                     let gc_name = format!("{name}-gitconfig");
-                    let gc: k8s_openapi::api::core::v1::ConfigMap = serde_json::from_value(json!({
-                        "apiVersion": "v1",
-                        "kind": "ConfigMap",
-                        "metadata": { "name": gc_name, "namespace": sandbox_ns, "labels": {"kars.azure.com/sandbox": name} },
-                        "data": { "gitconfig": gitconfig },
-                    }))?;
+                    let gc: k8s_openapi::api::core::v1::ConfigMap = serde_json::from_value(
+                        json!({
+                            "apiVersion": "v1",
+                            "kind": "ConfigMap",
+                            "metadata": { "name": gc_name, "namespace": sandbox_ns, "labels": {"kars.azure.com/sandbox": name} },
+                            "data": { "gitconfig": gitconfig },
+                        }),
+                    )?;
                     let _ = gc_api
-                        .patch(&gc_name, &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(), &Patch::Apply(gc))
+                        .patch(
+                            &gc_name,
+                            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                            &Patch::Apply(gc),
+                        )
                         .await;
                     // A spawned sub-agent (has a parent label) may push branches +
                     // open PRs but never merge; a principal may merge.
@@ -3631,6 +3635,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "KARS_GIT_WRITE": "1",
                             "KARS_GIT_ROLE": git_role,
                             "GIT_CONFIG_GLOBAL": "/tmp/.kars-gitconfig",
+                            "GIT_CONNECTION_CONFIG_MAP": request.connection_name,
                             "GITHUB_APP_INSTALLATION_ID": installation_id,
                             "GITHUB_APP_REPOS": repo_names.join(","),
                             "GIT_WRITE_REPOS": gw_scope.clone(),
