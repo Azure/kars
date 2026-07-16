@@ -240,7 +240,12 @@ async function harvestArtifactPaths(harvestMarker: string, log: Logger): Promise
 function selectArtifactPaths(paths: string[]): string[] {
   const selected: string[] = [];
   const roots = new Set(paths.filter((p) => !p.includes("/")));
-  for (const rel of paths) {
+  const ordered = paths.slice().sort((a, b) => {
+    const priority = (path: string) =>
+      path.startsWith("artifacts/.run-") ? 0 : path.startsWith("incoming/") ? 2 : 1;
+    return priority(a) - priority(b);
+  });
+  for (const rel of ordered) {
     const base = rel.split("/").pop() || rel;
     if (rel === `incoming/${base}` && roots.has(base)) continue;
     if (!selected.includes(rel)) selected.push(rel);
