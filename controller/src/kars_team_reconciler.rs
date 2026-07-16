@@ -1636,7 +1636,7 @@ fn orchestration_contract(team: &KarsTeam) -> String {
     if team.spec.roster.is_empty() {
         return String::new();
     }
-    const CONTRACT_MAX: usize = 1150;
+    const CONTRACT_MAX: usize = 1450;
     const CHARGE_MAX: usize = 120;
     let names = team
         .spec
@@ -1659,18 +1659,21 @@ fn orchestration_contract(team: &KarsTeam) -> String {
             r.name,
             truncate_middle(&charge, CHARGE_MAX, " [charge truncated] ")
         );
-        if roster.chars().count() + line.chars().count() > CONTRACT_MAX - 430 {
+        if roster.chars().count() + line.chars().count() > CONTRACT_MAX - 720 {
             roster.push_str("\n[additional role charges omitted; use the member names above]");
             break;
         }
         roster.push_str(&line);
     }
     roster.push_str(
-        "\nOrchestration contract: for EVERY member, call `kars_spawn`, delegate with \
-         `kars_mesh_send` (or `kars_mesh_transfer_file`), run independent roles in parallel, collect \
-         their replies, and synthesize the deliverable. Do not perform all roles alone unless spawn \
-         is unavailable. If one member fails, record it and continue. Propagate any charter LOOP and \
-         its success criteria to every member.",
+        "\nOrchestration contract: plan the task against the roster and select the roles that add real \
+         value; do not wake every member mechanically. Record selected and skipped roles with reasons. \
+         For each selected member, call `kars_spawn`, assign a stable work-packet ID with dependencies \
+         through `kars_mesh_send` (or `kars_mesh_transfer_file`), require acknowledgement, run independent \
+         work in parallel, collect the handbacks, and synthesize the deliverable. Use the full roster only \
+         when the task genuinely spans every role. Do not silently perform a selected specialist's work \
+         yourself unless spawn is unavailable; record failures and continue honestly. Propagate any charter \
+         LOOP and its success criteria to every selected member.",
     );
     truncate_middle(&roster, CONTRACT_MAX, " [orchestration detail truncated] ")
 }
@@ -2679,6 +2682,9 @@ mod tests {
         assert!(objective.contains("browser-investigator"));
         assert!(objective.contains("kars_spawn"));
         assert!(objective.contains("kars_mesh_send"));
+        assert!(objective.contains("select the roles that add real value"));
+        assert!(objective.contains("selected and skipped roles"));
+        assert!(!objective.contains("for EVERY member"));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_HEADER));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_FOOTER));
         assert!(objective.contains("PRIOR TOKEN WOW-ARCH-20260712"));
