@@ -51,38 +51,6 @@ function appendEvidence(file: string, event: EvidenceEvent): void {
   }
 }
 
-export function redactEvidenceUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    url.username = "";
-    url.password = "";
-    url.hash = "";
-    const secretKey = /(token|key|secret|signature|sig|password|code|credential|auth)/i;
-    for (const [key, current] of [...url.searchParams.entries()]) {
-      if (secretKey.test(key) || current.length > 32) {
-        url.searchParams.set(key, "[redacted]");
-      }
-    }
-    url.pathname = url.pathname
-      .split("/")
-      .map((segment) => {
-        if (!segment) return segment;
-        if (segment.length > 32 || /^bot[^/]{16,}$/i.test(segment) || secretKey.test(segment)) {
-          return "[redacted]";
-        }
-        return segment;
-      })
-      .join("/");
-    return url.toString();
-  } catch {
-    return "[invalid-url]";
-  }
-}
-
 export function appendCollaborationEvent(event: EvidenceEvent): void {
   appendEvidence("collaboration.jsonl", event);
-}
-
-export function appendResearchEvent(event: EvidenceEvent): void {
-  appendEvidence("research-evidence.jsonl", event);
 }

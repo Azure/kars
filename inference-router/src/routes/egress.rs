@@ -117,10 +117,19 @@ async fn egress_fetch(
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
     let req_body = req.get("body").and_then(|v| v.as_str()).unwrap_or("");
     let req_headers = req.get("headers").and_then(|v| v.as_object());
+    let started = std::time::Instant::now();
 
     if url.is_empty() {
+        state.task_telemetry.record_router_tool(
+            "http_fetch",
+            "<missing-url>",
+            "rejected: missing url",
+            false,
+            started.elapsed().as_millis() as u64,
+        );
         return errors::flat(StatusCode::BAD_REQUEST, "Missing 'url' field").into_response();
     }
+    let safe_url = safe_evidence_url(url);
 
     // SSRF protection: reject requests to localhost/private IPs
     if let Ok(parsed) = reqwest::Url::parse(url) {
@@ -135,6 +144,13 @@ async fn egress_fetch(
             };
             if is_private {
                 tracing::warn!(url = %url, "Egress fetch blocked: private/internal target");
+                state.task_telemetry.record_router_tool(
+                    "http_fetch",
+                    &safe_url,
+                    "denied: private/internal target",
+                    false,
+                    started.elapsed().as_millis() as u64,
+                );
                 return (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({
@@ -161,6 +177,13 @@ async fn egress_fetch(
                 state.blocked_egress.record(sandbox, host, port);
             }
         }
+        state.task_telemetry.record_router_tool(
+            "http_fetch",
+            &safe_url,
+            &format!("denied: {reason}"),
+            false,
+            started.elapsed().as_millis() as u64,
+        );
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": reason,
             "url": url,
@@ -220,6 +243,13 @@ async fn egress_fetch(
     {
         Ok(resp) => {
             let status = resp.status().as_u16();
+            state.task_telemetry.record_router_tool(
+                "http_fetch",
+                &safe_url,
+                &format!("HTTP {status}"),
+                status < 400,
+                started.elapsed().as_millis() as u64,
+            );
             // Strip sensitive response headers
             const STRIPPED_RESP_HEADERS: &[&str] = &[
                 "set-cookie",
@@ -267,6 +297,13 @@ async fn egress_fetch(
         }
         Err(e) => {
             tracing::warn!(url = %url, error = %e, "Egress fetch failed");
+            state.task_telemetry.record_router_tool(
+                "http_fetch",
+                &safe_url,
+                "request failed",
+                false,
+                started.elapsed().as_millis() as u64,
+            );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -276,6 +313,88 @@ async fn egress_fetch(
             )
                 .into_response()
         }
+    }
+}
+
+/// URL projection safe for durable activity evidence: preserve the exact
+/// scheme/host/port/path needed to identify a source, but never userinfo,
+/// query parameters, fragments, or request headers where credentials live.
+fn safe_evidence_url(raw: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(raw) else {
+        return "<invalid-url>".into();
+    };
+    let Some(host) = parsed.host_str() else {
+        return "<invalid-url>".into();
+    };
+    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let path = parsed
+        .path_segments()
+        .map(|segments| {
+            segments
+                .map(|segment| {
+                    let lower = segment.to_ascii_lowercase();
+                    let secret_word = [
+                        "token",
+                        "secret",
+                        "signature",
+                        "password",
+                        "credential",
+                        "authorization",
+                        "apikey",
+                        "api-key",
+                    ]
+                    .iter()
+                    .any(|word| lower.contains(word));
+                    if segment.len() > 32
+                        || (lower.starts_with("bot") && segment.len() > 16)
+                        || secret_word
+                    {
+                        "[redacted]"
+                    } else {
+                        segment
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_default();
+    let value = format!(
+        "{}://{}{}{path_prefix}{path}",
+        parsed.scheme(),
+        host,
+        port,
+        path_prefix = if path.is_empty() { "" } else { "/" }
+    );
+    value.chars().take(512).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_evidence_url;
+
+    #[test]
+    fn evidence_url_strips_credentials_query_and_fragment() {
+        assert_eq!(
+            safe_evidence_url("https://user:secret@example.com:8443/docs/page?token=abc#private"),
+            "https://example.com:8443/docs/page"
+        );
+    }
+
+    #[test]
+    fn evidence_url_redacts_secret_path_segments() {
+        assert_eq!(
+            safe_evidence_url("https://api.telegram.org/bot12345678901234567890/getUpdates"),
+            "https://api.telegram.org/[redacted]/getUpdates"
+        );
+        assert_eq!(
+            safe_evidence_url("https://example.com/api-token/download"),
+            "https://example.com/[redacted]/download"
+        );
+    }
+
+    #[test]
+    fn evidence_url_rejects_invalid_input() {
+        assert_eq!(safe_evidence_url("not a url"), "<invalid-url>");
     }
 }
 

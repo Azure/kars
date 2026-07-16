@@ -28,8 +28,8 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use futures::StreamExt;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{
     Api, Client, ResourceExt,
     api::{ListParams, Patch, PatchParams},
@@ -40,12 +40,10 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::kars_task::{
-    KarsTask, KarsTaskSpec, TaskBlueprint, TaskEnvelope, TaskExecution,
-};
-use crate::kars_team::{KarsTeam, KarsTeamStatus, TeamRole};
 use crate::kars_profile::KarsProfile;
 use crate::kars_skill::KarsSkill;
+use crate::kars_task::{KarsTask, KarsTaskSpec, TaskBlueprint, TaskEnvelope, TaskExecution};
+use crate::kars_team::{KarsTeam, KarsTeamStatus, TeamRole};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::phase::{PHASE_ACTIVE, PHASE_DEGRADED, PHASE_HIBERNATING, PHASE_READY};
 
@@ -117,7 +115,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             "metadata": { "name": name, "finalizers": finalizers },
         });
         teams
-            .patch(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(patch))
+            .patch(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(patch),
+            )
             .await?;
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
@@ -260,11 +262,12 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         tracing::warn!(team = %name, err = %format!("{e:#}"), "failed to reset stale active tasks");
     }
     let team_task_list = crate::team_tasks::read_tasks(&ctx.client, &name).await;
-    let mut assigned_task: Option<crate::team_tasks::TeamTask> = if crate::team_tasks::has_active(&team_task_list) {
-        None
-    } else {
-        crate::team_tasks::next_pending(&team_task_list).cloned()
-    };
+    let mut assigned_task: Option<crate::team_tasks::TeamTask> =
+        if crate::team_tasks::has_active(&team_task_list) {
+            None
+        } else {
+            crate::team_tasks::next_pending(&team_task_list).cloned()
+        };
     if let Some(every_min) = every {
         // The cadence WINDOW (epoch floored to the interval) names the run. A new
         // window opens each interval; the run is minted once per window
@@ -290,7 +293,16 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             // builds on prior ticks instead of starting cold.
             let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
             let assigned = assigned_task.take();
-            mint_taskforce(&tasks, &team, &principal_name, &canonical, &prior, assigned.as_ref(), channel_enabled).await?;
+            mint_taskforce(
+                &tasks,
+                &team,
+                &principal_name,
+                &canonical,
+                &prior,
+                assigned.as_ref(),
+                channel_enabled,
+            )
+            .await?;
             if let Some(t) = &assigned {
                 let _ = crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
             }
@@ -319,18 +331,24 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
     if run_now {
-        if !paused
-            && active_runs < MAX_CONCURRENT_RUNS
-            && cap_gate.is_none()
-            && !budget_exhausted
-        {
+        if !paused && active_runs < MAX_CONCURRENT_RUNS && cap_gate.is_none() && !budget_exhausted {
             let canonical = format!("{name}-run-{}", now.timestamp());
             if tasks.get_opt(&canonical).await.ok().flatten().is_none() {
                 let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
                 let assigned = assigned_task.take();
-                mint_taskforce(&tasks, &team, &principal_name, &canonical, &prior, assigned.as_ref(), channel_enabled).await?;
+                mint_taskforce(
+                    &tasks,
+                    &team,
+                    &principal_name,
+                    &canonical,
+                    &prior,
+                    assigned.as_ref(),
+                    channel_enabled,
+                )
+                .await?;
                 if let Some(t) = &assigned {
-                    let _ = crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
+                    let _ =
+                        crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
                 }
                 generated += 1;
                 last_generated = Some(canonical.clone());
@@ -364,7 +382,16 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         if tasks.get_opt(&canonical).await.ok().flatten().is_none() {
             let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
             let assigned = assigned_task.take();
-            mint_taskforce(&tasks, &team, &principal_name, &canonical, &prior, assigned.as_ref(), channel_enabled).await?;
+            mint_taskforce(
+                &tasks,
+                &team,
+                &principal_name,
+                &canonical,
+                &prior,
+                assigned.as_ref(),
+                channel_enabled,
+            )
+            .await?;
             if let Some(t) = &assigned {
                 let _ = crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
             }
@@ -374,7 +401,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         }
     }
 
-    let phase = if paused { PHASE_HIBERNATING } else { PHASE_ACTIVE };
+    let phase = if paused {
+        PHASE_HIBERNATING
+    } else {
+        PHASE_ACTIVE
+    };
     let member_count = member_refs.len() as i64;
 
     // Health — the autonomous-monitoring signal. Computed from run outcomes +
@@ -449,7 +480,9 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             stats.tokens_total
         )
     } else if let Some(reason) = &cap_gate {
-        format!("Standing operation paused — capability not ready: {reason}. Will resume automatically once it is.")
+        format!(
+            "Standing operation paused — capability not ready: {reason}. Will resume automatically once it is."
+        )
     } else if every.is_some() {
         let quiet_note = if stats.quiet > 0 {
             format!(", {} quiet tick(s) (no change)", stats.quiet)
@@ -498,7 +531,9 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             phase: Some(phase.into()),
             observed_generation: team.metadata.generation,
             envelope_digest: Some(team.spec.envelope.digest()),
-            principal_ref: Some(LocalObjectRef { name: principal_name }),
+            principal_ref: Some(LocalObjectRef {
+                name: principal_name,
+            }),
             member_refs,
             member_count: Some(member_count),
             generated_task_count: generated,
@@ -521,7 +556,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // poll interval. Add ±20% jitter so N teams created together don't reconcile
     // in lockstep (synchronized API-call spikes). We always requeue so the
     // charter loop keeps ticking.
-    let base = if every.is_some() && !paused { 30 } else { REQUEUE_OK.as_secs() };
+    let base = if every.is_some() && !paused {
+        30
+    } else {
+        REQUEUE_OK.as_secs()
+    };
     let requeue = crate::backoff::requeue_secs_with_jitter(base);
     Ok(Action::requeue(requeue))
 }
@@ -625,16 +664,12 @@ async fn effective_team(client: &Client, ns: &str, team: Arc<KarsTeam>) -> Arc<K
                 .annotations()
                 .get("kars.azure.com/skill-review")
                 .is_some_and(|v| v == "approved");
-            let live_digest = skill
-                .status
-                .as_ref()
-                .and_then(|s| s.version_digest.clone());
+            let live_digest = skill.status.as_ref().and_then(|s| s.version_digest.clone());
             let locked_digest = skill
                 .annotations()
                 .get("kars.azure.com/skill-locked-digest")
                 .cloned();
-            let lock_matches =
-                locked_digest.is_some() && locked_digest == live_digest;
+            let lock_matches = locked_digest.is_some() && locked_digest == live_digest;
             if !review_approved || !lock_matches {
                 tracing::warn!(
                     team = %eff_name, role = %role.name, skill = %skill_name,
@@ -725,24 +760,21 @@ async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal
 
     // If the approval exists and is Approved, widen the envelope.
     if let Ok(Some(appr)) = approvals.get_opt(&approval_name).await {
+        ensure_team_approval_owner(&approvals, &approval_name, team).await;
         // SECURITY: only honor an approval the CONTROLLER created (owner-referenced
         // to this team). A name-matched approval planted by some other principal
         // must NOT be able to drive an envelope widen — this closes the
         // "request + self-approve via the unauthenticated BFF" escalation.
-        let controller_owned = appr
-            .metadata
-            .owner_references
-            .as_ref()
-            .is_some_and(|refs| {
-                refs.iter().any(|r| {
-                    r.kind == "KarsTeam"
+        let controller_owned = appr.metadata.owner_references.as_ref().is_some_and(|refs| {
+            refs.iter().any(|r| {
+                r.kind == "KarsTeam"
                         && r.name == team_name
                         && r.controller == Some(true)
                         // Bind to the team's UID too, so a same-named team
                         // recreated after deletion can't inherit an old approval.
                         && team.metadata.uid.as_ref().is_none_or(|u| &r.uid == u)
-                })
-            });
+            })
+        });
         let approved = controller_owned
             && appr
                 .status
@@ -784,6 +816,7 @@ async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal
             "name": approval_name,
             "ownerReferences": [owner_ref(team)],
             "labels": { "kars.azure.com/team": team_name },
+            "annotations": team_owner_annotations(team),
         },
         "spec": {
             "taskRef": { "name": principal_name },
@@ -836,6 +869,7 @@ async fn ensure_clarification_approval(
     let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
     // Idempotent: if it already exists (answered or pending), don't recreate it.
     if let Ok(Some(_)) = approvals.get_opt(&approval_name).await {
+        ensure_team_approval_owner(&approvals, &approval_name, team).await;
         return;
     }
     let appr = json!({
@@ -848,6 +882,7 @@ async fn ensure_clarification_approval(
                 "kars.azure.com/team": team_name,
                 "kars.azure.com/clarification": "true",
             },
+            "annotations": team_owner_annotations(team),
         },
         "spec": {
             "taskRef": { "name": run },
@@ -880,8 +915,9 @@ async fn process_clarifications(client: &Client, ns: &str, team: &KarsTeam, comm
     use crate::kars_approval::KarsApproval;
     let team_name = team.name_any();
     let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
-    let lp = ListParams::default()
-        .labels(&format!("kars.azure.com/clarification=true,kars.azure.com/team={team_name}"));
+    let lp = ListParams::default().labels(&format!(
+        "kars.azure.com/clarification=true,kars.azure.com/team={team_name}"
+    ));
     let Ok(list) = approvals.list(&lp).await else {
         return;
     };
@@ -928,7 +964,10 @@ async fn process_clarifications(client: &Client, ns: &str, team: &KarsTeam, comm
             client,
             commons,
             &id,
-            &format!("Answered: {}", crate::team_commons::derive_title(&question, &question)),
+            &format!(
+                "Answered: {}",
+                crate::team_commons::derive_title(&question, &question)
+            ),
             "human",
             &name,
             &content,
@@ -965,6 +1004,7 @@ async fn ensure_egress_request_approval(
     let approval_name = format!("{team_name}-egress-{}", clarification_id(&hostport));
     let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
     if let Ok(Some(_)) = approvals.get_opt(&approval_name).await {
+        ensure_team_approval_owner(&approvals, &approval_name, team).await;
         return;
     }
     let summary = if reason.is_empty() {
@@ -972,6 +1012,12 @@ async fn ensure_egress_request_approval(
     } else {
         format!("Open egress to {hostport} for team '{team_name}' — {reason}")
     };
+    let mut approval_annotations = team_owner_annotations(team);
+    approval_annotations.insert("kars.azure.com/egress-host".into(), json!(host));
+    approval_annotations.insert(
+        "kars.azure.com/egress-port".into(),
+        json!(port.map(|p| p.to_string()).unwrap_or_default()),
+    );
     let appr = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsApproval",
@@ -982,10 +1028,7 @@ async fn ensure_egress_request_approval(
                 "kars.azure.com/team": team_name,
                 "kars.azure.com/egress-request": "true",
             },
-            "annotations": {
-                "kars.azure.com/egress-host": host,
-                "kars.azure.com/egress-port": port.map(|p| p.to_string()).unwrap_or_default(),
-            },
+            "annotations": approval_annotations,
         },
         "spec": {
             "taskRef": { "name": run },
@@ -1001,7 +1044,11 @@ async fn ensure_egress_request_approval(
         },
     });
     let _ = approvals
-        .patch(&approval_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(appr))
+        .patch(
+            &approval_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(appr),
+        )
         .await;
     tracing::info!(team = %team_name, %hostport, "agent-originated egress request raised for the human");
 }
@@ -1013,8 +1060,9 @@ async fn process_egress_grants(client: &Client, ns: &str, team: &KarsTeam) {
     use crate::kars_approval::KarsApproval;
     let team_name = team.name_any();
     let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
-    let lp = ListParams::default()
-        .labels(&format!("kars.azure.com/egress-request=true,kars.azure.com/team={team_name}"));
+    let lp = ListParams::default().labels(&format!(
+        "kars.azure.com/egress-request=true,kars.azure.com/team={team_name}"
+    ));
     let Ok(list) = approvals.list(&lp).await else {
         return;
     };
@@ -1036,7 +1084,11 @@ async fn process_egress_grants(client: &Client, ns: &str, team: &KarsTeam) {
         if !approved || appr.annotations().get(APPLIED).is_some_and(|v| v == "true") {
             continue;
         }
-        let host = appr.annotations().get("kars.azure.com/egress-host").cloned().unwrap_or_default();
+        let host = appr
+            .annotations()
+            .get("kars.azure.com/egress-host")
+            .cloned()
+            .unwrap_or_default();
         if host.is_empty() {
             continue;
         }
@@ -1061,7 +1113,9 @@ async fn process_egress_grants(client: &Client, ns: &str, team: &KarsTeam) {
                     .collect()
             })
             .unwrap_or_default();
-        let already = egress.iter().any(|e| e.get("host").and_then(|h| h.as_str()) == Some(host.as_str()));
+        let already = egress
+            .iter()
+            .any(|e| e.get("host").and_then(|h| h.as_str()) == Some(host.as_str()));
         if !already {
             egress.push(match port {
                 Some(p) => json!({ "host": host, "port": p }),
@@ -1075,10 +1129,11 @@ async fn process_egress_grants(client: &Client, ns: &str, team: &KarsTeam) {
         }
         let name = appr.name_any();
         let patch = json!({ "metadata": { "annotations": { APPLIED: "true" } } });
-        let _ = approvals.patch(&name, &PatchParams::default(), &Patch::Merge(patch)).await;
+        let _ = approvals
+            .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
+            .await;
     }
 }
-
 
 /// and is `Ready`. Returns `Some(reason)` when a capability is missing/not
 /// ready (the charter loop pauses-with-reason), or `None` when all clear.
@@ -1208,7 +1263,11 @@ async fn ensure_team_memory(client: &Client, ns: &str, team: &KarsTeam) {
         }
     };
     if let Err(e) = api
-        .patch(&mem_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(&obj))
+        .patch(
+            &mem_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(&obj),
+        )
         .await
     {
         tracing::warn!(team = %team_name, error = %e, "failed to ensure team KarsMemory");
@@ -1217,14 +1276,19 @@ async fn ensure_team_memory(client: &Client, ns: &str, team: &KarsTeam) {
     }
 }
 
-
 /// Ensure a run blueprint carries a governing `tool_policy`, defaulting to the
 /// cluster-wide `kars-default` when absent/blank. Extracted from
 /// `launched_run_blueprint` so the fail-closed fallback is unit-testable without
 /// constructing a full `KarsTeam`.
 fn ensure_governing_tool_policy(blueprint: Option<TaskBlueprint>) -> TaskBlueprint {
     let mut bp = blueprint.unwrap_or_default();
-    if bp.tool_policy.as_deref().map(str::trim).unwrap_or("").is_empty() {
+    if bp
+        .tool_policy
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
         bp.tool_policy = Some(DEFAULT_TEAM_TOOL_POLICY.to_string());
     }
     bp
@@ -1248,7 +1312,10 @@ async fn materialize_principal(
         blueprint: team.spec.blueprint.clone(),
         display_name: Some(format!(
             "{} — principal",
-            team.spec.display_name.clone().unwrap_or_else(|| team.name_any())
+            team.spec
+                .display_name
+                .clone()
+                .unwrap_or_else(|| team.name_any())
         )),
         // The principal is the team's stable authority root, not a disposable
         // run — explicitly disable retention (0) so it's never auto-deleted
@@ -1279,13 +1346,18 @@ async fn materialize_member(
             .clone()
             .unwrap_or_else(|| format!("[{}] {}", role.name, team.spec.charter)),
         envelope,
-        parent_ref: Some(LocalObjectRef { name: principal_name.to_string() }),
+        parent_ref: Some(LocalObjectRef {
+            name: principal_name.to_string(),
+        }),
         requested_tier: None,
         execution: None,
         blueprint,
         display_name: Some(format!(
             "{} — {}",
-            team.spec.display_name.clone().unwrap_or_else(|| team.name_any()),
+            team.spec
+                .display_name
+                .clone()
+                .unwrap_or_else(|| team.name_any()),
             role.name
         )),
         // A roster seat is a standing member, not a disposable run — never
@@ -1339,17 +1411,57 @@ fn operating_contract(tools: &str, mcp: &str) -> String {
 /// a `clarification` `KarsApproval` owned by the team (the principal), so the
 /// question surfaces on the human's inbox and the answer feeds the next run.
 pub const CLARIFY_SENTINEL: &str = "[[NEEDS_CLARIFICATION]]";
+const OWNER_SUB_ANNOTATION: &str = "kars.azure.com/owner-sub";
+const OWNER_NAME_ANNOTATION: &str = "kars.azure.com/owner-name";
 
-/// Extract the one-line question following a `[[NEEDS_CLARIFICATION]]` marker in
-/// a run's reply, if present. Returns the trimmed, length-bounded question.
-pub fn extract_clarification(output: &str) -> Option<String> {
-    let idx = output.find(CLARIFY_SENTINEL)?;
-    let after = &output[idx + CLARIFY_SENTINEL.len()..];
-    // The question is the rest of that line.
-    let line = after.lines().next().unwrap_or("").trim();
-    if line.is_empty() {
-        return None;
+fn team_owner_annotations(team: &KarsTeam) -> serde_json::Map<String, serde_json::Value> {
+    let mut annotations = serde_json::Map::new();
+    for key in [OWNER_SUB_ANNOTATION, OWNER_NAME_ANNOTATION] {
+        if let Some(value) = team
+            .annotations()
+            .get(key)
+            .filter(|value| !value.trim().is_empty())
+        {
+            annotations.insert(key.into(), json!(value));
+        }
     }
+    annotations
+}
+
+async fn ensure_team_approval_owner(
+    approvals: &Api<crate::kars_approval::KarsApproval>,
+    name: &str,
+    team: &KarsTeam,
+) {
+    let annotations = team_owner_annotations(team);
+    if annotations.is_empty() {
+        return;
+    }
+    let patch = json!({"metadata": {"annotations": annotations}});
+    let _ = approvals
+        .patch(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await;
+}
+
+/// Return the payload of a principal control signal only when that signal leads
+/// the first meaningful line. This prevents a final report that quotes a child
+/// agent's sentinel from opening a false human approval.
+fn leading_control_payload<'a>(output: &'a str, sentinel: &str) -> Option<&'a str> {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let line =
+        line.trim_start_matches(|c: char| matches!(c, '#' | '*' | '_' | '`' | '-' | ' ' | '\t'));
+    line.strip_prefix(sentinel)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Extract the one-line question following a leading
+/// `[[NEEDS_CLARIFICATION]]` marker in a run's reply.
+pub fn extract_clarification(output: &str) -> Option<String> {
+    let line = leading_control_payload(output, CLARIFY_SENTINEL)?;
     Some(line.chars().take(280).collect())
 }
 
@@ -1363,13 +1475,12 @@ pub const EGRESS_SENTINEL: &str = "[[NEEDS_EGRESS]]";
 /// Extract `(host, port, reason)` from a `[[NEEDS_EGRESS]] host[:port] — reason`
 /// marker. Host is validated to look like a domain; `None` otherwise.
 pub fn extract_egress_request(output: &str) -> Option<(String, Option<u16>, String)> {
-    let idx = output.find(EGRESS_SENTINEL)?;
-    let line = output[idx + EGRESS_SENTINEL.len()..].lines().next().unwrap_or("").trim();
-    if line.is_empty() {
-        return None;
-    }
+    let line = leading_control_payload(output, EGRESS_SENTINEL)?;
     // Split off the reason after an em-dash / hyphen / colon separator.
-    let (target, reason) = match line.split_once(['—', '-']).or_else(|| line.split_once(':').filter(|_| line.matches(':').count() > 1)) {
+    let (target, reason) = match line.split_once(['—', '-']).or_else(|| {
+        line.split_once(':')
+            .filter(|_| line.matches(':').count() > 1)
+    }) {
         Some((t, r)) => (t.trim(), r.trim().to_string()),
         None => (line, String::new()),
     };
@@ -1383,12 +1494,21 @@ pub fn extract_egress_request(output: &str) -> Option<(String, Option<u16>, Stri
     let host = host.trim().trim_matches('`').trim();
     // Must look like a hostname: a dot-separated name with a TLD-ish tail.
     let looks_like_host = host.contains('.')
-        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-        && host.split('.').last().is_some_and(|t| t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphabetic()));
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && host
+            .split('.')
+            .last()
+            .is_some_and(|t| t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphabetic()));
     if !looks_like_host {
         return None;
     }
-    Some((host.to_lowercase(), port, reason.chars().take(200).collect()))
+    Some((
+        host.to_lowercase(),
+        port,
+        reason.chars().take(200).collect(),
+    ))
 }
 
 /// Sentinel a run uses to ask (via the principal) for a HIGHER autonomy tier it
@@ -1401,11 +1521,7 @@ pub const TIER_SENTINEL: &str = "[[NEEDS_TIER]]";
 /// Extract `(tier, reason)` from a `[[NEEDS_TIER]] <1-5> — reason` marker in a
 /// run's reply. The tier must parse to 1..=5; `None` otherwise.
 pub fn extract_tier_request(output: &str) -> Option<(i32, String)> {
-    let idx = output.find(TIER_SENTINEL)?;
-    let line = output[idx + TIER_SENTINEL.len()..].lines().next().unwrap_or("").trim();
-    if line.is_empty() {
-        return None;
-    }
+    let line = leading_control_payload(output, TIER_SENTINEL)?;
     let (target, reason) = match line.split_once(['—', '-', ':']) {
         Some((t, r)) => (t.trim(), r.trim().to_string()),
         None => (line, String::new()),
@@ -1413,7 +1529,11 @@ pub fn extract_tier_request(output: &str) -> Option<(i32, String)> {
     // Pull the first integer 1..=5 out of the target token (tolerates "Tier 4").
     let tier: i32 = target
         .split_whitespace()
-        .find_map(|tok| tok.trim_matches(|c: char| !c.is_ascii_digit()).parse::<i32>().ok())
+        .find_map(|tok| {
+            tok.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<i32>()
+                .ok()
+        })
         .filter(|t| (1..=5).contains(t))?;
     Some((tier, reason.chars().take(200).collect()))
 }
@@ -1462,7 +1582,10 @@ async fn mint_taskforce(
         .and_then(|b| b.tool_policy.clone())
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_TEAM_TOOL_POLICY.into());
-    let mcp = bp.map(|b| b.mcp_servers.join(", ")).filter(|s| !s.is_empty()).unwrap_or_else(|| "none".into());
+    let mcp = bp
+        .map(|b| b.mcp_servers.join(", "))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "none".into());
     let mut manifest = operating_contract(&tools, &mcp);
     if channel_enabled {
         manifest.push_str(CHANNEL_DIRECTIVE);
@@ -1470,20 +1593,31 @@ async fn mint_taskforce(
     let display = match assigned {
         Some(t) => format!(
             "{} — task: {}",
-            team.spec.display_name.clone().unwrap_or_else(|| team.name_any()),
+            team.spec
+                .display_name
+                .clone()
+                .unwrap_or_else(|| team.name_any()),
             t.title.chars().take(60).collect::<String>()
         ),
         None => format!(
             "{} — standing run",
-            team.spec.display_name.clone().unwrap_or_else(|| team.name_any())
+            team.spec
+                .display_name
+                .clone()
+                .unwrap_or_else(|| team.name_any())
         ),
     };
     let spec = KarsTaskSpec {
         objective: build_run_objective(team, &manifest, prior_knowledge, assigned),
         envelope,
-        parent_ref: Some(LocalObjectRef { name: principal_name.to_string() }),
+        parent_ref: Some(LocalObjectRef {
+            name: principal_name.to_string(),
+        }),
         requested_tier: None,
-        execution: Some(TaskExecution { launch: true, runtime: None }),
+        execution: Some(TaskExecution {
+            launch: true,
+            runtime: None,
+        }),
         blueprint: launched_run_blueprint(team),
         display_name: Some(display),
         retention_ttl_seconds: team.spec.run_retention_ttl_seconds,
@@ -1625,13 +1759,20 @@ fn fit_prior_knowledge(prior: &str, max_chars: usize) -> String {
     let kept = if newest_len >= body_budget {
         format!(
             "{}\n",
-            truncate_middle(newest, body_budget.saturating_sub(1), " [newest entry truncated] ")
+            truncate_middle(
+                newest,
+                body_budget.saturating_sub(1),
+                " [newest entry truncated] "
+            )
         )
     } else {
         let mut out = format!("{newest}\n");
         let remaining = body_budget.saturating_sub(out.chars().count());
         if remaining > 0 {
-            let rest = body.strip_prefix(newest).unwrap_or_default().trim_start_matches('\n');
+            let rest = body
+                .strip_prefix(newest)
+                .unwrap_or_default()
+                .trim_start_matches('\n');
             out.push_str(&rest.chars().take(remaining).collect::<String>());
         }
         out
@@ -1836,14 +1977,20 @@ async fn harvest_and_retire_runs(
             // with SSA-apply elsewhere, but launch is only ever toggled here, so
             // there is no competing writer to conflict with.
             let retire = json!({ "spec": { "execution": { "launch": false } } });
-            let _ = tasks.patch(&run, &PatchParams::default(), &Patch::Merge(retire)).await;
+            let _ = tasks
+                .patch(&run, &PatchParams::default(), &Patch::Merge(retire))
+                .await;
             // A backlog task bound to this run is now complete — advance it to
             // `done` so the team picks up the next pending task (and the queue
             // never deadlocks on a task whose run already finished, even on a
             // failed/timed-out delivery).
-            let _ =
-                crate::team_tasks::mark_done_for_run(client, &team_name, &run, &Utc::now().to_rfc3339())
-                    .await;
+            let _ = crate::team_tasks::mark_done_for_run(
+                client,
+                &team_name,
+                &run,
+                &Utc::now().to_rfc3339(),
+            )
+            .await;
         } else if launched {
             stats.active += 1;
         }
@@ -1900,7 +2047,9 @@ async fn gc_retired_runs(
     let mut retired: Vec<&KarsTask> = items
         .iter()
         .filter(|t| {
-            t.annotations().get(ANNOT_TEAM_ROLE).is_some_and(|r| r == "taskforce")
+            t.annotations()
+                .get(ANNOT_TEAM_ROLE)
+                .is_some_and(|r| r == "taskforce")
                 && !t.spec.execution.as_ref().map(|e| e.launch).unwrap_or(false)
                 && t.metadata.deletion_timestamp.is_none()
         })
@@ -1914,7 +2063,10 @@ async fn gc_retired_runs(
     for task in retired.into_iter().skip(MAX_RETAINED_RUNS) {
         let run = task.name_any();
         delete_mission_cms(cms, &run).await;
-        match tasks.delete(&run, &kube::api::DeleteParams::default()).await {
+        match tasks
+            .delete(&run, &kube::api::DeleteParams::default())
+            .await
+        {
             Ok(_) => {
                 tracing::info!(run = %run, "GC: retired standing run deleted (knowledge preserved in commons)");
             }
@@ -1928,16 +2080,16 @@ async fn gc_retired_runs(
     // Pass 2 — orphan sweep. Live run names for this team (the source of truth
     // for which CMs may remain). Anything else under this team's run prefix is
     // a stranded CM whose KarsTask is gone.
-    let live_runs: std::collections::HashSet<String> =
-        items.iter().map(|t| t.name_any()).collect();
+    let live_runs: std::collections::HashSet<String> = items.iter().map(|t| t.name_any()).collect();
     let run_prefix = format!("{team_name}-run-");
     // One list per kind keeps each response small; output/trace are the bulky
     // ones. The label is set on write to exactly the run/mission id.
     let mut swept = 0usize;
     for kind in MISSION_CM_KINDS {
-        let lp = ListParams::default()
-            .labels(&format!("kars.azure.com/mission-{kind}"));
-        let Ok(list) = cms.list(&lp).await else { continue };
+        let lp = ListParams::default().labels(&format!("kars.azure.com/mission-{kind}"));
+        let Ok(list) = cms.list(&lp).await else {
+            continue;
+        };
         for cm in list.items {
             let name = cm.name_any();
             let Some(run) = name.strip_prefix(&format!("kars-mission-{kind}-")) else {
@@ -1962,13 +2114,13 @@ async fn gc_retired_runs(
 }
 
 /// Delete all four mission ConfigMaps for a run. Best-effort; missing is fine.
-async fn delete_mission_cms(
-    cms: &Api<k8s_openapi::api::core::v1::ConfigMap>,
-    run: &str,
-) {
+async fn delete_mission_cms(cms: &Api<k8s_openapi::api::core::v1::ConfigMap>, run: &str) {
     for kind in MISSION_CM_KINDS {
         let cm_name = format!("kars-mission-{kind}-{run}");
-        match cms.delete(&cm_name, &kube::api::DeleteParams::default()).await {
+        match cms
+            .delete(&cm_name, &kube::api::DeleteParams::default())
+            .await
+        {
             Ok(_) => {}
             Err(kube::Error::Api(ae)) if ae.code == 404 => {}
             Err(e) => {
@@ -1992,12 +2144,16 @@ async fn apply_task(
     annotations.insert(ANNOT_TEAM.into(), json!(team.name_any()));
     annotations.insert(ANNOT_TEAM_ROLE.into(), json!(role));
     // Backward compatibility for teams authored before blueprint.gitWrite.
-    if spec.blueprint.as_ref().and_then(|bp| bp.git_write.as_ref()).is_none()
+    if spec
+        .blueprint
+        .as_ref()
+        .and_then(|bp| bp.git_write.as_ref())
+        .is_none()
         && let Some(repos) = team
-        .annotations()
-        .get("kars.azure.com/git-write-repos")
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
+            .annotations()
+            .get("kars.azure.com/git-write-repos")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
     {
         annotations.insert("kars.azure.com/git-write-repos".into(), json!(repos));
     }
@@ -2010,6 +2166,15 @@ async fn apply_task(
         .filter(|s| !s.is_empty())
     {
         annotations.insert("kars.azure.com/created-by".into(), json!(creator));
+    }
+    for key in [OWNER_SUB_ANNOTATION, OWNER_NAME_ANNOTATION] {
+        if let Some(value) = team
+            .annotations()
+            .get(key)
+            .filter(|value| !value.trim().is_empty())
+        {
+            annotations.insert(key.into(), json!(value));
+        }
     }
     if role == "taskforce" {
         // Stable nonce = run name, so the run is dispatched once and not
@@ -2085,11 +2250,19 @@ fn merge_blueprint(
             } else {
                 rb.mcp_servers.clone()
             },
-            egress: if rb.egress.is_empty() { tb.egress.clone() } else { rb.egress.clone() },
+            egress: if rb.egress.is_empty() {
+                tb.egress.clone()
+            } else {
+                rb.egress.clone()
+            },
             egress_mode: rb.egress_mode.clone().or_else(|| tb.egress_mode.clone()),
             isolation: rb.isolation.clone().or_else(|| tb.isolation.clone()),
             memory: rb.memory.clone().or_else(|| tb.memory.clone()),
-            skills: if rb.skills.is_empty() { tb.skills.clone() } else { rb.skills.clone() },
+            skills: if rb.skills.is_empty() {
+                tb.skills.clone()
+            } else {
+                rb.skills.clone()
+            },
             git_write: attenuate_git_write(tb.git_write.as_ref(), rb.git_write.as_ref()),
         }),
         (None, Some(rb)) => {
@@ -2114,7 +2287,9 @@ fn attenuate_git_write(
             .iter()
             .map(|repo| repo.trim().to_ascii_lowercase())
             .collect();
-        grant.repos.retain(|repo| requested.contains(&repo.trim().to_ascii_lowercase()));
+        grant
+            .repos
+            .retain(|repo| requested.contains(&repo.trim().to_ascii_lowercase()));
     }
     Some(grant)
 }
@@ -2130,23 +2305,39 @@ async fn write_status(
         "status": status,
     });
     teams
-        .patch_status(name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(patch))
+        .patch_status(
+            name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(patch),
+        )
         .await?;
     Ok(())
 }
 
 fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 /// Sanitize a role name into a K8s-safe name suffix.
 fn sanitize(s: &str) -> String {
     let out: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() { "role".to_string() } else { trimmed }
+    if trimmed.is_empty() {
+        "role".to_string()
+    } else {
+        trimmed
+    }
 }
 
 fn has_finalizer(team: &KarsTeam) -> bool {
@@ -2209,8 +2400,13 @@ mod tests {
     fn team_env() -> TaskEnvelope {
         TaskEnvelope {
             tier: 4,
-            budget: Some(TaskBudget { tokens: Some(1_000_000), usd_micros: None }),
-            tool_policy_ref: Some(LocalObjectRef { name: "kars-default".into() }),
+            budget: Some(TaskBudget {
+                tokens: Some(1_000_000),
+                usd_micros: None,
+            }),
+            tool_policy_ref: Some(LocalObjectRef {
+                name: "kars-default".into(),
+            }),
             egress_allowlist_ref: None,
             delegation_depth: 2,
             authority_ceiling: 3,
@@ -2254,8 +2450,12 @@ mod tests {
     #[test]
     fn no_change_sentinel_detected() {
         // A genuine no-change reply LEADS with the sentinel.
-        assert!(is_no_change("[[NO_MATERIAL_CHANGE]] nothing new since 21:00."));
-        assert!(is_no_change("  \n[[NO_MATERIAL_CHANGE]] stars/forks static."));
+        assert!(is_no_change(
+            "[[NO_MATERIAL_CHANGE]] nothing new since 21:00."
+        ));
+        assert!(is_no_change(
+            "  \n[[NO_MATERIAL_CHANGE]] stars/forks static."
+        ));
         assert!(!is_no_change("Here is a full briefing with real findings."));
         // A substantive report that merely MENTIONS the sentinel deep in its
         // body must NOT be misread as a no-op (it would be dropped from memory).
@@ -2267,26 +2467,56 @@ mod tests {
 
     #[test]
     fn clarification_sentinel_extracted() {
-        // The question is the rest of the sentinel's line, wherever it appears.
+        // Only a principal control signal that leads the reply opens the inbox.
         assert_eq!(
-            extract_clarification("Working on it.\n[[NEEDS_CLARIFICATION]] Which AWS account should I use?\nmore text"),
+            extract_clarification(
+                "[[NEEDS_CLARIFICATION]] Which AWS account should I use?\nmore text"
+            ),
             Some("Which AWS account should I use?".to_string())
         );
-        // Inline is fine too.
+        // A quoted child signal in a substantive report is evidence, not a new
+        // human escalation.
+        assert_eq!(
+            extract_clarification(
+                "# Review complete\nBackend reported [[NEEDS_CLARIFICATION]] repo access"
+            ),
+            None
+        );
+        assert_eq!(
+            extract_clarification("> [[NEEDS_CLARIFICATION]] quoted child question"),
+            None
+        );
+        assert_eq!(
+            extract_clarification("- [[NEEDS_CLARIFICATION]] Which environment?"),
+            Some("Which environment?".to_string())
+        );
         assert_eq!(
             extract_clarification("[[NEEDS_CLARIFICATION]] Prod or staging?"),
             Some("Prod or staging?".to_string())
         );
         // No sentinel → None; sentinel with an empty tail → None (nothing to ask).
         assert_eq!(extract_clarification("a normal report with findings"), None);
-        assert_eq!(extract_clarification("[[NEEDS_CLARIFICATION]]   \nnext line"), None);
+        assert_eq!(
+            extract_clarification("[[NEEDS_CLARIFICATION]]   \nnext line"),
+            None
+        );
     }
 
     #[test]
     fn egress_request_sentinel_extracted() {
         assert_eq!(
-            extract_egress_request("Blocked. [[NEEDS_EGRESS]] api.github.com:443 — need to read PRs"),
-            Some(("api.github.com".to_string(), Some(443), "need to read PRs".to_string()))
+            extract_egress_request("[[NEEDS_EGRESS]] api.github.com:443 — need to read PRs"),
+            Some((
+                "api.github.com".to_string(),
+                Some(443),
+                "need to read PRs".to_string()
+            ))
+        );
+        assert_eq!(
+            extract_egress_request(
+                "# Findings\nA child reported [[NEEDS_EGRESS]] api.github.com:443 — need PRs"
+            ),
+            None
         );
         // No port, hyphen reason.
         assert_eq!(
@@ -2302,8 +2532,14 @@ mod tests {
     fn tier_request_sentinel_extracted() {
         // "<n> — reason" form.
         assert_eq!(
-            extract_tier_request("Can only propose. [[NEEDS_TIER]] 4 — need to open PRs directly"),
+            extract_tier_request("[[NEEDS_TIER]] 4 — need to open PRs directly"),
             Some((4, "need to open PRs directly".to_string()))
+        );
+        assert_eq!(
+            extract_tier_request(
+                "# Delivery\nA reviewer quoted [[NEEDS_TIER]] 4 — need write access"
+            ),
+            None
         );
         // Tolerates "Tier N" and a colon separator.
         assert_eq!(
@@ -2387,17 +2623,23 @@ mod tests {
                 roster: vec![
                     TeamRole {
                         name: "security-reviewer".into(),
-                        system_prompt: Some("Threat-model authentication and governance. ".repeat(20)),
+                        system_prompt: Some(
+                            "Threat-model authentication and governance. ".repeat(20),
+                        ),
                         ..Default::default()
                     },
                     TeamRole {
                         name: "reliability-reviewer".into(),
-                        system_prompt: Some("Test lifecycle, restart, timeout, and concurrency. ".repeat(20)),
+                        system_prompt: Some(
+                            "Test lifecycle, restart, timeout, and concurrency. ".repeat(20),
+                        ),
                         ..Default::default()
                     },
                     TeamRole {
                         name: "browser-investigator".into(),
-                        system_prompt: Some("Use Playwright and report deterministic evidence. ".repeat(20)),
+                        system_prompt: Some(
+                            "Use Playwright and report deterministic evidence. ".repeat(20),
+                        ),
                         ..Default::default()
                     },
                 ],
@@ -2509,7 +2751,10 @@ mod tests {
         // tool_policy inherited from the team so the member stays attenuated.
         assert_eq!(merged.tool_policy.as_deref(), Some("kars-default"));
         // role specialisation preserved.
-        assert_eq!(merged.model.as_ref().unwrap().deployment, "claude-sonnet-4.5");
+        assert_eq!(
+            merged.model.as_ref().unwrap().deployment,
+            "claude-sonnet-4.5"
+        );
         assert_eq!(merged.instructions.as_deref(), Some("role prompt"));
         // mcp inherited from team since role left it empty.
         assert_eq!(merged.mcp_servers, vec!["github".to_string()]);
