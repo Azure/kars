@@ -454,13 +454,14 @@ async fn main() -> Result<()> {
 
         let memory_binding_for_platform = state.memory_binding.clone();
         let policy_status_for_platform = state.policy_status.clone();
+        let task_telemetry_for_mcp = state.task_telemetry.clone();
         let merged = public
             .merge(protected)
             .merge(handoff_init)
             .merge(handoff_mutations)
             .merge(handoff_status)
             .with_state(state)
-            .merge(build_mcp_router().await)
+            .merge(build_mcp_router(Some(task_telemetry_for_mcp)).await)
             .merge(build_platform_mcp_router(
                 Some(memory_binding_for_platform),
                 Some(policy_status_for_platform),
@@ -628,7 +629,9 @@ async fn main() -> Result<()> {
 /// falling back to the unauthenticated dev route. Operators see a clear
 /// startup-time error instead of a route that quietly serves
 /// unauthenticated MCP traffic.
-async fn build_mcp_router() -> Router {
+async fn build_mcp_router(
+    task_telemetry: Option<Arc<kars_inference_router::task_telemetry::TaskTelemetry>>,
+) -> Router {
     use kars_inference_router::mcp::forwarder::RouterToolDispatcher;
     use kars_inference_router::mcp::oauth::OAuthVerifierConfig;
     use kars_inference_router::mcp::registry;
@@ -688,6 +691,9 @@ async fn build_mcp_router() -> Router {
     let mut state = routes::McpRouteState::standard();
     if let Some(d) = dispatcher_arc {
         state = state.with_tools(d);
+    }
+    if let Some(task_telemetry) = task_telemetry {
+        state = state.with_task_telemetry(task_telemetry);
     }
 
     // Slice 4d.3 — prefer the multi-issuer path when MCP_JWKS_DIR is

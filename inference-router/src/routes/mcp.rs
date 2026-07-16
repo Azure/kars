@@ -65,6 +65,7 @@ pub struct McpRouteState {
     pub config: Arc<InitializeConfig>,
     pub minter: Arc<dyn SessionMinter + Send + Sync>,
     pub tools: Arc<dyn AsyncToolDispatcher>,
+    pub task_telemetry: Option<Arc<crate::task_telemetry::TaskTelemetry>>,
 }
 
 impl McpRouteState {
@@ -79,6 +80,7 @@ impl McpRouteState {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
             tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
+            task_telemetry: None,
         }
     }
 
@@ -86,6 +88,14 @@ impl McpRouteState {
     /// namespaced upstream forwarder when the registry is non-empty).
     pub fn with_tools(mut self, tools: Arc<dyn AsyncToolDispatcher>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    pub fn with_task_telemetry(
+        mut self,
+        task_telemetry: Arc<crate::task_telemetry::TaskTelemetry>,
+    ) -> Self {
+        self.task_telemetry = Some(task_telemetry);
         self
     }
 
@@ -123,6 +133,7 @@ impl McpRouteState {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
             tools: Arc::new(dispatcher),
+            task_telemetry: None,
         }
     }
 }
@@ -133,6 +144,7 @@ impl std::fmt::Debug for McpRouteState {
             .field("config", &self.config)
             .field("minter", &"<dyn SessionMinter>")
             .field("tools", &"<dyn AsyncToolDispatcher>")
+            .field("task_telemetry", &self.task_telemetry.is_some())
             .finish()
     }
 }
@@ -211,6 +223,18 @@ async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: 
         ProcessOutcome::PayloadTooLarge => "413",
         ProcessOutcome::NotAcceptable(_) => "406",
     };
+    if method.as_deref() == Some("tools/call")
+        && let (Some(tool), Some(telemetry)) = (tool.as_deref(), state.task_telemetry.as_ref())
+    {
+        let (result_preview, ok) = mcp_result_preview(&outcome);
+        telemetry.record_router_tool(
+            tool,
+            &mcp_args_preview(&body),
+            &result_preview,
+            ok,
+            started.elapsed().as_millis() as u64,
+        );
+    }
 
     tracing::info!(
         method = method.as_deref().unwrap_or("(none)"),
@@ -221,6 +245,69 @@ async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: 
     );
 
     outcome_to_response(outcome)
+}
+
+fn mcp_args_preview(body: &[u8]) -> String {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return "arguments unavailable".into();
+    };
+    let request = value
+        .as_array()
+        .and_then(|batch| batch.first())
+        .unwrap_or(&value);
+    let Some(arguments) = request
+        .get("params")
+        .and_then(|params| params.get("arguments"))
+        .and_then(|arguments| arguments.as_object())
+    else {
+        return "no arguments".into();
+    };
+    let mut parts = Vec::new();
+    for (key, value) in arguments {
+        if key == "url"
+            && let Some(raw) = value.as_str()
+            && let Ok(parsed) = reqwest::Url::parse(raw)
+            && let Some(host) = parsed.host_str()
+        {
+            parts.push(format!(
+                "url={}://{}{}",
+                parsed.scheme(),
+                host,
+                parsed.path()
+            ));
+        } else if key == "repoName" {
+            if let Some(repo) = value.as_str() {
+                parts.push(format!(
+                    "repoName={}",
+                    repo.chars().take(120).collect::<String>()
+                ));
+            }
+        } else {
+            parts.push(format!("{key}=<provided>"));
+        }
+    }
+    parts.join(", ")
+}
+
+fn mcp_result_preview(outcome: &ProcessOutcome) -> (String, bool) {
+    let ProcessOutcome::JsonRpcResponse { body, .. } = outcome else {
+        return ("MCP request rejected".into(), false);
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return ("MCP response received".into(), true);
+    };
+    let response = value
+        .as_array()
+        .and_then(|batch| batch.first())
+        .unwrap_or(&value);
+    if let Some(error) = response.get("error") {
+        let message = error
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or("MCP tool error");
+        return (message.chars().take(180).collect(), false);
+    }
+    ("MCP result received".into(), true)
 }
 
 /// Best-effort extraction of `(method, tools/call.name)` from a JSON-RPC
@@ -307,6 +394,7 @@ mod tests {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(FixedMinter("test-session-001")),
             tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
+            task_telemetry: None,
         }
     }
 
@@ -407,6 +495,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tools_call_is_recorded_in_router_task_telemetry() {
+        let telemetry = Arc::new(crate::task_telemetry::TaskTelemetry::new());
+        let state = test_state().with_task_telemetry(telemetry.clone());
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "echo",
+                "arguments": {"text": "hello"}
+            }
+        });
+        let req = post_body(
+            req_body.to_string().as_bytes(),
+            Some("application/json, text/event-stream"),
+        );
+        let (status, _, _) =
+            body_text(mcp_route().with_state(state).oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        let events = telemetry.snapshot(0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "tool");
+        assert_eq!(events[0]["name"], "echo");
+        assert_eq!(events[0]["source"], "router");
+        assert_eq!(events[0]["result_preview"], "MCP result received");
+    }
+
+    #[tokio::test]
     async fn post_mcp_notification_only_returns_202() {
         let req_body = json!({
             "jsonrpc": "2.0",
@@ -496,6 +612,7 @@ mod tests {
             tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
                 "http://127.0.0.1:1",
             )),
+            task_telemetry: None,
         }
     }
 
@@ -684,6 +801,7 @@ mod tests {
             tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
                 upstream.uri(),
             )),
+            task_telemetry: None,
         };
         let app = platform_mcp_route().with_state(state);
 
