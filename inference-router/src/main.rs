@@ -651,10 +651,16 @@ async fn build_mcp_router() -> Router {
     // to mount /mcp.
     let dispatcher_arc: Option<Arc<dyn kars_inference_router::mcp::tools::AsyncToolDispatcher>> =
         if !registry_arc.is_empty() {
-            let timeout = std::env::var("MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS")
+            // The same client executes tools after startup, and AI-backed public
+            // MCPs (for example DeepWiki) legitimately take longer than the old
+            // five-second discovery probe. Keep one bounded timeout, configurable
+            // explicitly for the forwarder; retain the old env as a compatibility
+            // fallback for existing deployments.
+            let timeout = std::env::var("MCP_FORWARDER_TIMEOUT_SECS")
+                .or_else(|_| std::env::var("MCP_FORWARDER_DISCOVERY_TIMEOUT_SECS"))
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(5);
+                .unwrap_or(60);
             match RouterToolDispatcher::discover(registry_arc.clone(), Duration::from_secs(timeout))
                 .await
             {
