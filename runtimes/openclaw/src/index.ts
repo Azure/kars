@@ -396,6 +396,12 @@ import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect,
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 import { createAGTPolicyEvaluator, processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
 import { createHarvestMarker, collectAndShipArtifacts, latin1Safe } from "./core/artifact-collect.js";
+import {
+  appendCollaborationEvent,
+  beginEvidenceScope,
+  endEvidenceScope,
+  evidenceDigest,
+} from "./core/evidence-log.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
 import { registerFoundryTools } from "./core/agt-tools/foundry.js";
@@ -1045,10 +1051,29 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               from_agent: agtSandboxName,
               timestamp: new Date().toISOString(),
             });
+            appendCollaborationEvent({
+              event: "handback_sent",
+              to_agent: fromName,
+              to_amid: fromAmid,
+              outcome: "denied",
+              response_digest: evidenceDigest(evalData.reason),
+              artifacts: [],
+            });
           } catch { /* best effort */ }
           return;
         }
 
+        const reqId = (message?.request_id as string) || crypto.randomUUID();
+        // Mark before the first request-scoped evidence event so the complete
+        // assignment -> handback record is harvested with this task only.
+        const harvestMarker = await createHarvestMarker();
+        beginEvidenceScope(reqId);
+        appendCollaborationEvent({
+          event: "assignment_received",
+          from_agent: fromName,
+          from_amid: fromAmid,
+          content_digest: evidenceDigest(taskContent),
+        });
         try {
           // Execute the mission through the REAL OpenClaw agent harness — the
           // same agent a human talks to via `kars connect` — not a hand-rolled
@@ -1067,9 +1092,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             agtSandboxName,
             log,
           );
-          // Harvest marker BEFORE the run so we only ship artifacts the task
-          // actually produced (not pre-existing workspace scaffold).
-          const harvestMarker = await createHarvestMarker();
           // Snapshot the router telemetry cursor so we can read back exactly the
           // events this task generates (the router observes every model call the
           // native agent makes).
@@ -1131,9 +1153,15 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // — harness-neutral, same wire shape the offload path uses. Falls back
           // to saving the text reply as a markdown artifact so the deliverable
           // set is never empty.
-          const reqId = (message?.request_id as string) || crypto.randomUUID();
           let artifactManifest: Array<{ name: string; path: string; size_bytes: number }> = [];
           try {
+            appendCollaborationEvent({
+              event: "handback_prepared",
+              to_agent: fromName,
+              to_amid: fromAmid,
+              outcome: "success",
+              response_digest: evidenceDigest(llmResponse),
+            });
             artifactManifest = await collectAndShipArtifacts(
               { meshClient: agtMeshClient, toAmid: fromAmid, fromAgent: agtSandboxName },
               harvestMarker,
@@ -1144,6 +1172,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             );
           } catch (artErr: any) {
             log.warn(`Artifact collection failed (continuing): ${artErr.message}`);
+          } finally {
+            endEvidenceScope();
           }
 
           // Send the response back via E2E encrypted relay, including the
@@ -1182,6 +1212,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             log.info(`AGT reputation: submitted +0.8 for ${fromName} (accepted=${ok})`);
           } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
         } catch (replyErr: any) {
+          endEvidenceScope();
           // Fallback: send error message back so parent knows what happened
           try {
             await agtMeshClient.send(fromAmid, {
@@ -1219,6 +1250,14 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           const destPath = path.join(incomingDir, safeName);
           const buf = Buffer.from(message.file_data, "base64");
           fs.writeFileSync(destPath, buf, { mode: 0o600 });
+          appendCollaborationEvent({
+            event: "artifact_received",
+            from_agent: fromName,
+            from_amid: fromAmid,
+            file_name: safeName,
+            size_bytes: buf.length,
+            content_digest: evidenceDigest(buf.toString("base64")),
+          });
 
           // Verify the write
           const stat = fs.statSync(destPath);

@@ -766,8 +766,7 @@ struct MeshPeerState {
     /// task that legitimately runs many minutes) stay alive, while a genuinely
     /// stuck agent that stops ticking still times out. Empty unless a mesh task
     /// is in flight.
-    pending_progress:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicI64>>>>,
+    pending_progress: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicI64>>>>,
 }
 
 /// The payload delivered to a waiting mesh task: the agent's text reply plus
@@ -794,6 +793,8 @@ fn default_true() -> bool {
 #[derive(Debug, Clone)]
 pub(super) struct ReceivedArtifact {
     pub name: String,
+    pub source_agent: Option<String>,
+    pub source_path: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -1633,7 +1634,9 @@ async fn handle_peer_message(
         }
         FederationMessage::FileTransfer {
             file_name,
+            file_path,
             file_data,
+            from_agent,
             ..
         } => {
             // Buffer the artifact under the sender DID; the matching
@@ -1646,7 +1649,10 @@ async fn handle_peer_message(
                         size = bytes.len(),
                         "Received artifact file_transfer — buffering for mission output"
                     );
-                    task_delivery::buffer_artifact(state, from_amid, file_name, bytes).await;
+                    task_delivery::buffer_artifact(
+                        state, from_amid, file_name, from_agent, file_path, bytes,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::warn!(from = %from_amid, file = %file_name, err = %e, "artifact file_data not valid base64 — dropping");

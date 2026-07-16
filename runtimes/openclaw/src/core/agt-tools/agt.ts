@@ -42,6 +42,11 @@ import { safeJson } from "../safe-json.js";
 import { validateMeshPayload } from "../mesh-payload-guard.js";
 import { getMeshRegistry } from "../mesh-registry.js";
 import type { HandoffProgress, AgtInboxEntry } from "../agt-handoff.js";
+import {
+  appendCollaborationEvent,
+  evidenceDigest,
+  evidencePreview,
+} from "../evidence-log.js";
 
 // Re-suppress unused warnings for imports retained for symmetry with plugin.ts.
 void routerCallStrict; void parentTrustedAmids; void getCachedAmid;
@@ -229,6 +234,13 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         };
       }
       try {
+        appendCollaborationEvent({
+          event: "member_spawn_requested",
+          member: String(params.name || ""),
+          role: typeof params.role === "string" ? params.role : null,
+          runtime: typeof params.runtime === "string" ? params.runtime : null,
+          model: typeof params.model === "string" ? params.model : null,
+        });
         // Build trusted peers list: parent's AMID + all existing siblings
         // These are parent-verified (from registry lookups), not self-reported
         const trustedPeers: string[] = [];
@@ -322,11 +334,24 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         }
 
         if (phase !== "Running") {
+          appendCollaborationEvent({
+            event: "member_spawn_incomplete",
+            member: agentName,
+            mesh_name: meshName,
+            phase,
+          });
           return { content: [{ type: "text", text: JSON.stringify({
             ...result,
             warning: `Sub-agent created but not yet Running (phase: ${phase}). It may still be booting. Use kars_spawn_status to check.`,
           }, null, 2) }] };
         }
+        appendCollaborationEvent({
+          event: "member_ready",
+          member: agentName,
+          mesh_name: meshName,
+          phase,
+          mesh_registered: Boolean(amid),
+        });
 
         if (!amid && deps.meshClient()) {
           log.info(`AGT pre-discovery: '${agentName}' not yet registered — mesh_send will retry`);
@@ -468,6 +493,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           ...(siblings.length > 0 ? { mesh_peers: `This agent can communicate directly with other sub-agents: ${siblings.join(", ")}. You can instruct it to forward results to them by name.` } : {}),
         }, null, 2) }] };
       } catch (e: any) {
+        appendCollaborationEvent({
+          event: "member_spawn_failed",
+          member: String(params.name || ""),
+          error: String(e?.message || e),
+        });
         return { content: [{ type: "text", text: `Spawn failed: ${e.message}` }] };
       }
     },
@@ -534,6 +564,8 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     async execute(_id: string, params: Record<string, unknown>) {
       let agentName = params.to_agent as string;
       let msgContent = params.content as string;
+      const originalAgentName = agentName;
+      const assignmentDigest = evidenceDigest(msgContent);
 
       // OFFLOAD HARDENING: native agents in offload sandboxes may call this
       // tool with their own sandbox name or an arbitrary sibling. Force
@@ -757,6 +789,14 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           try { await pushTrustToRouter(agentName, 0.0); } catch { /* best-effort */ }
           const messageId = crypto.randomUUID();
           const sendStart = new Date().toISOString();
+          appendCollaborationEvent({
+            event: "assignment_sent",
+            member: originalAgentName,
+            mesh_name: agentName,
+            message_id: messageId,
+            content_digest: assignmentDigest,
+            content_preview: evidencePreview(msgContent),
+          });
 
           // Auto-wait for reply: poll agtInbox for a response from this agent.
           // The relay layer does NOT surface "agent identity is dead" — it happily
@@ -921,6 +961,16 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           };
           if (replyContent) {
             result.reply = replyContent;
+            appendCollaborationEvent({
+              event: "handback_received",
+              member: originalAgentName,
+              mesh_name: agentName,
+              message_id: messageId,
+              outcome: "success",
+              reply_digest: evidenceDigest(replyContent),
+              reply_preview: evidencePreview(replyContent),
+              elapsed_ms: Date.now() - overallStart,
+            });
             // Parent rates sub-agent — only meaningful for long-lived sub-agents
             // whose reputation will be queried again. Short-lived ones will die
             // and their score is lost, but the audit trail remains.
@@ -932,9 +982,24 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
           } else {
             result.note = "No reply within timeout — use kars_mesh_inbox to check later.";
+            appendCollaborationEvent({
+              event: "handback_missing",
+              member: originalAgentName,
+              mesh_name: agentName,
+              message_id: messageId,
+              outcome: "timeout",
+              elapsed_ms: Date.now() - overallStart,
+            });
           }
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
         } catch (agtErr: any) {
+          appendCollaborationEvent({
+            event: "assignment_failed",
+            member: originalAgentName,
+            mesh_name: agentName,
+            content_digest: assignmentDigest,
+            error: String(agtErr?.message || agtErr),
+          });
           log.warn(`AGT relay send failed: ${agtErr.message}`);
           return { content: [{ type: "text", text: JSON.stringify({
             error: "E2E encrypted send failed — message NOT delivered",

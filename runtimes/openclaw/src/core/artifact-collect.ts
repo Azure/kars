@@ -63,6 +63,7 @@ export interface ArtifactManifestEntry {
   name: string;
   path: string;
   size_bytes: number;
+  source_agent: string;
 }
 
 interface Logger {
@@ -113,7 +114,12 @@ export async function collectAndShipArtifacts(
   if (taskSuccess && relPaths.length === 0 && taskResult && taskResult.length > 400) {
     try {
       const fs = await import("node:fs");
-      const fallbackName = `task-${requestId.slice(0, 8)}-report.md`;
+      const agentSlug = deps.fromAgent
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(-80) || `task-${requestId.slice(0, 8)}`;
+      const fallbackName = `${agentSlug}-report.md`;
       fs.mkdirSync(WORKSPACE_ROOT, { recursive: true });
       fs.writeFileSync(`${WORKSPACE_ROOT}/${fallbackName}`, taskResult, "utf-8");
       relPaths.push(fallbackName);
@@ -140,7 +146,8 @@ export async function collectAndShipArtifacts(
   }
 
   const manifest: ArtifactManifestEntry[] = [];
-  for (const relPath of relPaths.slice(0, 12)) {
+  const usedNames = new Set<string>();
+  for (const relPath of selectArtifactPaths(relPaths).slice(0, 12)) {
     try {
       const fs = await import("node:fs");
       const fPath = `${WORKSPACE_ROOT}/${relPath}`;
@@ -159,7 +166,18 @@ export async function collectAndShipArtifacts(
       } finally {
         fs.closeSync(fd);
       }
-      const name = relPath.split("/").pop() || relPath;
+      const baseName = relPath.split("/").pop() || relPath;
+      let name = baseName;
+      if (usedNames.has(name)) {
+        const parent = relPath
+          .split("/")
+          .slice(0, -1)
+          .join("-")
+          .replace(/[^a-zA-Z0-9._-]/g, "_")
+          .slice(-80) || "artifact";
+        name = `${parent}--${baseName}`;
+      }
+      usedNames.add(name);
       await deps.meshClient.send(deps.toAmid, {
         type: "file_transfer",
         file_name: name,
@@ -170,7 +188,7 @@ export async function collectAndShipArtifacts(
         from_agent: deps.fromAgent,
         timestamp: new Date().toISOString(),
       });
-      manifest.push({ name, path: relPath, size_bytes: stat.size });
+      manifest.push({ name, path: relPath, size_bytes: stat.size, source_agent: deps.fromAgent });
       log.info(`Shipped artifact '${name}' (${(stat.size / 1024).toFixed(1)} KB) to requester`);
     } catch (e) {
       log.warn(`Failed to ship artifact '${relPath}': ${(e as Error).message}`);
@@ -191,6 +209,7 @@ async function harvestArtifactPaths(harvestMarker: string, log: Logger): Promise
     findArgs.push(
       "(",
       "-name", "*.md", "-o", "-name", "*.json", "-o", "-name", "*.csv",
+      "-o", "-name", "*.jsonl",
       "-o", "-name", "*.txt", "-o", "-name", "*.html", "-o", "-name", "*.png",
       "-o", "-name", "*.pdf", "-o", "-name", "*.svg", "-o", "-name", "*.yaml",
       "-o", "-name", "*.yml", "-o", "-name", "*.xml",
@@ -216,4 +235,15 @@ async function harvestArtifactPaths(harvestMarker: string, log: Logger): Promise
     log.warn(`Artifact harvest failed (continuing): ${(e as Error).message}`);
   }
   return out;
+}
+
+function selectArtifactPaths(paths: string[]): string[] {
+  const selected: string[] = [];
+  const roots = new Set(paths.filter((p) => !p.includes("/")));
+  for (const rel of paths) {
+    const base = rel.split("/").pop() || rel;
+    if (rel === `incoming/${base}` && roots.has(base)) continue;
+    if (!selected.includes(rel)) selected.push(rel);
+  }
+  return selected;
 }

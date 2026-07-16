@@ -33,6 +33,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams};
 use serde_json::json;
+use sha2::Digest;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -246,7 +247,11 @@ async fn deliver_for_task(
         })
         // Match the full materialization resolver (kars_task_execution::
         // default_model) so the recorded route is exactly what actually ran.
-        .or_else(|| std::env::var("DEFAULT_MODEL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("DEFAULT_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| Some("gpt-4o-mini".to_string()));
 
     // The harness (agent runtime) the run used — mirror the materialization
@@ -269,6 +274,18 @@ async fn deliver_for_task(
         })
         .unwrap_or("OpenClaw")
         .to_string();
+    let owning_team = task
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("kars.azure.com/team"))
+        .or_else(|| {
+            task.metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("kars.azure.com/team"))
+        })
+        .cloned();
 
     let sandbox = task
         .data
@@ -461,6 +478,18 @@ async fn deliver_for_task(
     let artifacts = drain_artifacts(state, &agent_did, artifact_count).await;
     let deliverable_ok = ok && is_substantive_deliverable(&content);
 
+    let persisted_artifacts = if artifacts.is_empty() {
+        std::collections::BTreeSet::new()
+    } else {
+        match write_mission_artifacts(state, &name, &artifacts).await {
+            Ok(names) => names,
+            Err(e) => {
+                tracing::warn!(task = %name, err = %format!("{e:#}"), "failed to persist mission artifacts");
+                std::collections::BTreeSet::new()
+            }
+        }
+    };
+
     write_mission_output(
         state,
         &name,
@@ -468,20 +497,14 @@ async fn deliver_for_task(
         &content,
         deliverable_ok,
         &artifacts,
+        &persisted_artifacts,
+        artifact_count,
+        owning_team.as_deref(),
         telemetry.as_ref(),
         model.as_deref(),
         &harness,
     )
     .await?;
-    if !artifacts.is_empty() {
-        // Non-fatal: the deliverable (mission-output) already landed above, so a
-        // transient artifact-CM write failure must NOT abort before
-        // `mark_completed` — doing so would re-dispatch and re-run the entire
-        // (expensive) mission on the next reconcile. Log and continue.
-        if let Err(e) = write_mission_artifacts(state, &name, &artifacts).await {
-            tracing::warn!(task = %name, err = %format!("{e:#}"), "failed to persist mission artifacts (continuing)");
-        }
-    }
     if !trace.is_empty() {
         // The execution trace is the clean per-tool audit record. Persist it
         // verbatim so it's independently inspectable (kubectl get configmap).
@@ -513,12 +536,10 @@ fn is_substantive_deliverable(output: &str) -> bool {
         .iter()
         .any(|status| {
             lower == *status
-                || lower
-                    .strip_prefix(status)
-                    .is_some_and(|rest| {
-                        rest.starts_with([':', '-', '—'])
-                            || rest.chars().next().is_some_and(char::is_whitespace)
-                    })
+                || lower.strip_prefix(status).is_some_and(|rest| {
+                    rest.starts_with([':', '-', '—'])
+                        || rest.chars().next().is_some_and(char::is_whitespace)
+                })
         })
     {
         return false;
@@ -565,6 +586,8 @@ pub(super) async fn buffer_artifact(
     state: &Arc<MeshPeerState>,
     from_amid: &str,
     name: String,
+    source_agent: Option<String>,
+    source_path: Option<String>,
     bytes: Vec<u8>,
 ) {
     state
@@ -573,7 +596,12 @@ pub(super) async fn buffer_artifact(
         .await
         .entry(from_amid.to_string())
         .or_default()
-        .push(ReceivedArtifact { name, bytes });
+        .push(ReceivedArtifact {
+            name,
+            source_agent,
+            source_path,
+            bytes,
+        });
 }
 
 /// Resolve an in-flight delivery when the matching `task_response` arrives.
@@ -689,6 +717,9 @@ async fn write_mission_output(
     output: &str,
     ok: bool,
     artifacts: &[ReceivedArtifact],
+    persisted_artifacts: &std::collections::BTreeSet<String>,
+    declared_artifact_count: usize,
+    owning_team: Option<&str>,
     telemetry: Option<&RunTelemetry>,
     model: Option<&str>,
     harness: &str,
@@ -720,16 +751,42 @@ async fn write_mission_output(
         "status".into(),
         if ok { "ok".into() } else { "error".into() },
     );
-    if !artifacts.is_empty() {
+    if let Some(team) = owning_team {
+        data.insert("team".into(), team.to_string());
+    }
+    if declared_artifact_count > 0 || !artifacts.is_empty() {
+        let mut seen = std::collections::BTreeSet::new();
         let manifest: Vec<serde_json::Value> = artifacts
             .iter()
-            .map(|a| json!({ "name": a.name, "size_bytes": a.bytes.len() }))
+            .filter(|a| persisted_artifacts.contains(&a.name) && seen.insert(a.name.clone()))
+            .map(|a| {
+                let digest = format!("sha256:{:x}", sha2::Sha256::digest(&a.bytes));
+                json!({
+                    "name": a.name,
+                    "size_bytes": a.bytes.len(),
+                    "source_agent": a.source_agent,
+                    "source_path": a.source_path,
+                    "digest": digest,
+                })
+            })
             .collect();
         data.insert(
             "artifacts".into(),
             serde_json::to_string(&manifest).unwrap_or_else(|_| "[]".into()),
         );
-        data.insert("artifactCount".into(), artifacts.len().to_string());
+        data.insert("artifactCount".into(), manifest.len().to_string());
+        data.insert(
+            "declaredArtifactCount".into(),
+            declared_artifact_count.to_string(),
+        );
+        data.insert(
+            "artifactPersistence".into(),
+            if manifest.len() == declared_artifact_count {
+                "complete".into()
+            } else {
+                "partial".into()
+            },
+        );
     }
     // Real token telemetry — same key names the single-turn run path uses, so
     // the Bridge scorecard reads them uniformly regardless of run path.
@@ -774,7 +831,7 @@ async fn write_mission_artifacts(
     state: &Arc<MeshPeerState>,
     task: &str,
     artifacts: &[ReceivedArtifact],
-) -> Result<()> {
+) -> Result<std::collections::BTreeSet<String>> {
     use k8s_openapi::ByteString;
     let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let cms: Api<k8s_openapi::api::core::v1::ConfigMap> =
@@ -786,6 +843,7 @@ async fn write_mission_artifacts(
     let mut used = 0usize;
     let mut text: BTreeMap<String, String> = BTreeMap::new();
     let mut binary: BTreeMap<String, ByteString> = BTreeMap::new();
+    let mut persisted = std::collections::BTreeSet::new();
 
     for a in artifacts {
         // Sanitize to a valid ConfigMap key (alnum, '-', '_', '.').
@@ -822,6 +880,7 @@ async fn write_mission_artifacts(
                 binary.insert(key, ByteString(a.bytes.clone()));
             }
         }
+        persisted.insert(a.name.clone());
     }
 
     let patch = json!({
@@ -838,7 +897,7 @@ async fn write_mission_artifacts(
     )
     .await
     .context("write mission-artifacts ConfigMap")?;
-    Ok(())
+    Ok(persisted)
 }
 
 /// Persist the agent's execution trace to `kars-mission-trace-<task>` — the
@@ -1031,6 +1090,9 @@ async fn handle_transient_miss(
         &format!("agent did not come online after {max_attempts} attempts: {reason}"),
         false,
         &[],
+        &std::collections::BTreeSet::new(),
+        0,
+        None,
         None,
         model,
         harness,
@@ -1048,7 +1110,9 @@ mod tests {
     fn aborted_and_human_blocked_outputs_are_not_successes() {
         assert!(!is_substantive_deliverable("aborted"));
         assert!(!is_substantive_deliverable("Aborted: operator cancelled"));
-        assert!(!is_substantive_deliverable("Stopped before completing the task"));
+        assert!(!is_substantive_deliverable(
+            "Stopped before completing the task"
+        ));
         assert!(!is_substantive_deliverable(
             "[[NEEDS_CLARIFICATION]] Which environment?"
         ));

@@ -5,6 +5,11 @@
 
 import { routerCall } from "../router-client.js";
 import { safeJson } from "../safe-json.js";
+import {
+  appendResearchEvent,
+  evidenceDigest,
+  redactEvidenceUrl,
+} from "../evidence-log.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyApi = any;
@@ -26,15 +31,38 @@ export function registerHttpFetchTool(api: AnyApi): void {
       required: ["url"],
     },
     async execute(_id: string, params: Record<string, unknown>) {
+      const url = String(params.url || "");
+      const method = String(params.method || "GET").toUpperCase();
       try {
         const result = await routerCall("POST", "/egress/fetch", {
-          url: params.url,
-          method: (params.method as string) || "GET",
+          url,
+          method,
           headers: params.headers || {},
           body: params.body || undefined,
         });
+        appendResearchEvent({
+          event: "external_source",
+          method,
+          url: redactEvidenceUrl(url),
+          url_digest: evidenceDigest(url),
+          host: new URL(url).host,
+          outcome: "success",
+          status: typeof result?.status === "number" ? result.status : null,
+          result_digest: evidenceDigest(result),
+        });
         return { content: [{ type: "text", text: safeJson(result) }] };
       } catch (e: any) {
+        appendResearchEvent({
+          event: "external_source",
+          method,
+          url: redactEvidenceUrl(url),
+          url_digest: evidenceDigest(url),
+          host: (() => {
+            try { return new URL(url).host; } catch { return null; }
+          })(),
+          outcome: "failed",
+          error: String(e?.message || e),
+        });
         return { content: [{ type: "text", text: `Fetch failed: ${e.message}` }] };
       }
     },
