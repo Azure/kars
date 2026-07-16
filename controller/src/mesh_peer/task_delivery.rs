@@ -544,9 +544,19 @@ fn is_substantive_deliverable(output: &str) -> bool {
     {
         return false;
     }
-    !trimmed.contains("[[NEEDS_CLARIFICATION]]")
-        && !trimmed.contains("[[NEEDS_EGRESS]]")
-        && !trimmed.contains("[[NEEDS_TIER]]")
+    let first_meaningful = trimmed
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .trim_start_matches(|c: char| matches!(c, '#' | '>' | '*' | '_' | '`' | '-' | ' ' | '\t'));
+    ![
+        "[[NEEDS_CLARIFICATION]]",
+        "[[NEEDS_EGRESS]]",
+        "[[NEEDS_TIER]]",
+    ]
+    .iter()
+    .any(|sentinel| first_meaningful.starts_with(sentinel))
 }
 
 /// Wait up to a short window for the agent's `file_transfer` frames to land,
@@ -1116,8 +1126,11 @@ mod tests {
         assert!(!is_substantive_deliverable(
             "[[NEEDS_CLARIFICATION]] Which environment?"
         ));
-        assert!(!is_substantive_deliverable(
+        assert!(is_substantive_deliverable(
             "Partial work\n[[NEEDS_EGRESS]] example.com:443 - fetch evidence"
+        ));
+        assert!(is_substantive_deliverable(
+            "# NORTHSTAR_TEAM_INCOMPLETE\nBackend reported `[[NEEDS_CLARIFICATION]] repo access` as evidence."
         ));
         assert!(is_substantive_deliverable(
             "Completed the review with evidence and a ship recommendation."
