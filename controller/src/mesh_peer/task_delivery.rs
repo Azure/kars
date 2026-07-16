@@ -286,6 +286,18 @@ async fn deliver_for_task(
                 .and_then(|a| a.get("kars.azure.com/team"))
         })
         .cloned();
+    let owner_sub = task
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get("kars.azure.com/owner-sub"))
+        .cloned();
+    let owner_name = task
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get("kars.azure.com/owner-name"))
+        .cloned();
 
     let sandbox = task
         .data
@@ -500,6 +512,8 @@ async fn deliver_for_task(
         &persisted_artifacts,
         artifact_count,
         owning_team.as_deref(),
+        owner_sub.as_deref(),
+        owner_name.as_deref(),
         telemetry.as_ref(),
         model.as_deref(),
         &harness,
@@ -730,6 +744,8 @@ async fn write_mission_output(
     persisted_artifacts: &std::collections::BTreeSet<String>,
     declared_artifact_count: usize,
     owning_team: Option<&str>,
+    owner_sub: Option<&str>,
+    owner_name: Option<&str>,
     telemetry: Option<&RunTelemetry>,
     model: Option<&str>,
     harness: &str,
@@ -763,6 +779,12 @@ async fn write_mission_output(
     );
     if let Some(team) = owning_team {
         data.insert("team".into(), team.to_string());
+    }
+    if let Some(owner_sub) = owner_sub {
+        data.insert("ownerSub".into(), owner_sub.to_string());
+    }
+    if let Some(owner_name) = owner_name {
+        data.insert("ownerName".into(), owner_name.to_string());
     }
     if declared_artifact_count > 0 || !artifacts.is_empty() {
         let mut seen = std::collections::BTreeSet::new();
@@ -1102,6 +1124,8 @@ async fn handle_transient_miss(
         &[],
         &std::collections::BTreeSet::new(),
         0,
+        None,
+        None,
         None,
         None,
         model,
