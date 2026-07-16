@@ -549,7 +549,7 @@ fn is_substantive_deliverable(output: &str) -> bool {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_default()
-        .trim_start_matches(|c: char| matches!(c, '#' | '>' | '*' | '_' | '`' | '-' | ' ' | '\t'));
+        .trim_start_matches(|c: char| matches!(c, '#' | '*' | '_' | '`' | '-' | ' ' | '\t'));
     ![
         "[[NEEDS_CLARIFICATION]]",
         "[[NEEDS_EGRESS]]",
@@ -1131,6 +1131,12 @@ mod tests {
         ));
         assert!(is_substantive_deliverable(
             "# NORTHSTAR_TEAM_INCOMPLETE\nBackend reported `[[NEEDS_CLARIFICATION]] repo access` as evidence."
+        ));
+        assert!(is_substantive_deliverable(
+            "> [[NEEDS_CLARIFICATION]] quoted child question"
+        ));
+        assert!(!is_substantive_deliverable(
+            "- [[NEEDS_CLARIFICATION]] Which environment?"
         ));
         assert!(is_substantive_deliverable(
             "Completed the review with evidence and a ship recommendation."

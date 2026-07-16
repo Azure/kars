@@ -122,6 +122,80 @@ impl TaskTelemetry {
         idx
     }
 
+    /// Record a tool that the router itself authoritatively executed on behalf
+    /// of the sandbox. Unlike model-declared tool calls, these events do not
+    /// depend on the harness reporting a follow-up tool message. Egress proxy
+    /// calls use this path so the router remains the source of truth for the
+    /// URL, enforcement outcome, HTTP status, and latency.
+    pub fn record_router_tool(
+        &self,
+        name: &str,
+        args_preview: &str,
+        result_preview: &str,
+        ok: bool,
+        latency_ms: u64,
+    ) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let round = g.round.saturating_sub(1);
+        let pending = g
+            .pending_tools
+            .iter()
+            .filter_map(|(id, &absolute)| {
+                absolute.checked_sub(g.base).map(|relative| (id, relative))
+            })
+            .find(|(_, idx)| {
+                g.events.get(*idx).is_some_and(|event| {
+                    event.get("name").and_then(Value::as_str) == Some(name)
+                        && event
+                            .get("result_preview")
+                            .and_then(Value::as_str)
+                            .is_none_or(str::is_empty)
+                })
+            });
+        if let Some((id, idx)) = pending.map(|(id, idx)| (id.clone(), idx))
+            && let Some(event) = g.events.get_mut(idx)
+            && let Some(obj) = event.as_object_mut()
+        {
+            obj.insert(
+                "args_preview".into(),
+                json!(Self::preview_text(args_preview, 512)),
+            );
+            obj.insert(
+                "result_preview".into(),
+                json!(Self::preview_text(result_preview, 180)),
+            );
+            obj.insert("ms".into(), json!(latency_ms));
+            obj.insert("ok".into(), json!(ok));
+            obj.insert("source".into(), json!("router"));
+            g.pending_tools.remove(&id);
+            return;
+        }
+        Self::push(
+            &mut g,
+            json!({
+                "kind": "tool",
+                "round": round,
+                "name": name,
+                "args_preview": Self::preview_text(args_preview, 512),
+                "result_preview": Self::preview_text(result_preview, 180),
+                "ms": latency_ms,
+                "ok": ok,
+                "source": "router",
+                "ts": now_rfc3339(),
+            }),
+        );
+    }
+
+    fn preview_text(value: &str, max: usize) -> String {
+        let mut chars = value.chars();
+        let head: String = chars.by_ref().take(max).collect();
+        if chars.next().is_some() {
+            format!("{head}...")
+        } else {
+            head
+        }
+    }
+
     /// Record a completed model response: one `round` event with real token
     /// usage + finish reason + tool-call count, followed by a `tool` event for
     /// each tool the model invoked (name + argument preview). Tool results are
@@ -546,6 +620,67 @@ mod tests {
         assert_eq!(evs[1]["kind"], "tool");
         assert_eq!(evs[1]["name"], "web_search");
         assert_eq!(evs[1]["result_preview"], "");
+    }
+
+    #[test]
+    fn router_tool_is_recorded_without_model_tool_call() {
+        let t = TaskTelemetry::new();
+        let cursor = t.cursor();
+        t.record_router_tool(
+            "http_fetch",
+            "https://example.com/docs",
+            "HTTP 200",
+            true,
+            42,
+        );
+        let events = t.snapshot(cursor);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "tool");
+        assert_eq!(events[0]["name"], "http_fetch");
+        assert_eq!(events[0]["source"], "router");
+        assert_eq!(events[0]["result_preview"], "HTTP 200");
+    }
+
+    #[test]
+    fn router_tool_completes_matching_model_event_without_duplicate() {
+        let t = TaskTelemetry::new();
+        let cursor = t.cursor();
+        t.record_response(
+            &json!({
+                "choices": [{
+                    "finish_reason": "tool_calls",
+                    "message": {"tool_calls": [{
+                        "id": "call-1",
+                        "function": {"name": "http_fetch", "arguments": "{\"url\":\"secret\"}"}
+                    }]}
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }),
+            Shape::OpenAi,
+            1,
+        );
+        t.record_router_tool(
+            "http_fetch",
+            "https://example.com/docs",
+            "HTTP 200",
+            true,
+            42,
+        );
+        let events = t.snapshot(cursor);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["name"], "http_fetch");
+        assert_eq!(events[1]["args_preview"], "https://example.com/docs");
+        assert_eq!(events[1]["source"], "router");
+        t.record_request_results(
+            &json!({"messages": [{
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "{\"url\":\"https://user:secret@example.com/private\"}"
+            }]}),
+            Shape::OpenAi,
+        );
+        let after = t.snapshot(cursor);
+        assert_eq!(after[1]["result_preview"], "HTTP 200");
     }
 
     #[test]

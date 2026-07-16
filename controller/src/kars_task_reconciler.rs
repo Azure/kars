@@ -311,7 +311,8 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // poll the sandbox router for new blocked hosts / capability requests and
     // surface each as a Pending `KarsApproval`. A request never grants anything
     // by itself; only a human decision creates the EgressApproval grant.
-    let executing = new_status.execution_phase.as_deref() == Some(crate::status::phase::PHASE_SANDBOX_RUNNING);
+    let executing =
+        new_status.execution_phase.as_deref() == Some(crate::status::phase::PHASE_SANDBOX_RUNNING);
     process_access_requests(&ctx.client, &ns, &task, executing).await;
 
     // A child still waiting on its parent requeues quickly to converge.
@@ -394,7 +395,9 @@ async fn reconcile_retention(
         // Not yet due — requeue for exactly when it WILL be due, so a task
         // near its TTL boundary doesn't linger an extra REQUEUE_OK cycle.
         let remaining = (effective_ttl - age.num_seconds()).max(1) as u64;
-        return Ok(Some(Action::requeue(Duration::from_secs(remaining.min(3600)))));
+        return Ok(Some(Action::requeue(Duration::from_secs(
+            remaining.min(3600),
+        ))));
     }
     tracing::info!(
         karstask = %name,
@@ -403,7 +406,9 @@ async fn reconcile_retention(
         ttl_seconds = effective_ttl,
         "retention: TTL elapsed — deleting delivered task"
     );
-    tasks.delete(name, &kube::api::DeleteParams::default()).await?;
+    tasks
+        .delete(name, &kube::api::DeleteParams::default())
+        .await?;
     Ok(Some(Action::await_change()))
 }
 
@@ -423,7 +428,10 @@ async fn effective_retention_ttl_seconds(ctx: &Ctx, task: &KarsTask) -> i64 {
         .ok()
         .flatten()
         .and_then(|cm| cm.data)
-        .and_then(|d| d.get(RETENTION_POLICY_KEY).and_then(|v| v.parse::<i64>().ok()))
+        .and_then(|d| {
+            d.get(RETENTION_POLICY_KEY)
+                .and_then(|v| v.parse::<i64>().ok())
+        })
         .unwrap_or(0)
 }
 
@@ -795,7 +803,10 @@ async fn reconcile_receipt(
                                 if let Ok(witness) =
                                     crate::providers::signing::load_or_create_witness(client).await
                                     && let Err(e) = crate::kars_receipt_log::witness_checkpoint(
-                                        client, &witness, &chain, &checkpoint,
+                                        client,
+                                        &witness,
+                                        &chain,
+                                        &checkpoint,
                                     )
                                     .await
                                 {
@@ -935,7 +946,11 @@ async fn gather_completeness(
     // V1 transparency witness: an independent witness co-signs the receipt-log
     // checkpoint (kars-receipt-witness ConfigMap). Presence of a verified witness
     // co-signature binds "the log isn't forked" into the receipt.
-    let witness_cm = cms_system(client).get_opt("kars-receipt-witness").await.ok().flatten();
+    let witness_cm = cms_system(client)
+        .get_opt("kars-receipt-witness")
+        .await
+        .ok()
+        .flatten();
     let witness_key_id = witness_cm
         .as_ref()
         .and_then(|cm| cm.data.as_ref())
@@ -1035,7 +1050,9 @@ async fn process_task_promotion(client: &Client, ns: &str, task: &KarsTask) {
         return;
     };
     let current = task.spec.envelope.tier;
-    if target <= current || !(crate::kars_task::TIER_MIN..=crate::kars_task::TIER_MAX).contains(&target) {
+    if target <= current
+        || !(crate::kars_task::TIER_MIN..=crate::kars_task::TIER_MAX).contains(&target)
+    {
         return; // nothing to promote (or out of range)
     }
 
@@ -1045,6 +1062,7 @@ async fn process_task_promotion(client: &Client, ns: &str, task: &KarsTask) {
 
     // If the approval exists and is Approved (and owned by this task), widen.
     if let Ok(Some(appr)) = approvals.get_opt(&approval_name).await {
+        ensure_task_approval_owner(&approvals, &approval_name, task).await;
         let controller_owned = appr.metadata.owner_references.as_ref().is_some_and(|refs| {
             refs.iter()
                 .any(|r| r.kind == "KarsTask" && r.name == task_name && r.controller == Some(true))
@@ -1090,6 +1108,7 @@ async fn process_task_promotion(client: &Client, ns: &str, task: &KarsTask) {
             "name": approval_name,
             "ownerReferences": owner,
             "labels": { "kars.azure.com/promote-task": task_name },
+            "annotations": task_owner_annotations(task),
         },
         "spec": {
             "taskRef": { "name": task_name },
@@ -1140,11 +1159,11 @@ async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, exe
 
     // Poll the router admin surfaces (best-effort; the router may not be ready
     // or reachable, which is a transient no-op).
-    let token = match crate::status::router_confirmation_io::read_admin_token(client, &sandbox).await
-    {
-        Ok(Some(t)) => t,
-        _ => return,
-    };
+    let token =
+        match crate::status::router_confirmation_io::read_admin_token(client, &sandbox).await {
+            Ok(Some(t)) => t,
+            _ => return,
+        };
     let base = crate::status::router_confirmation::router_admin_url(&sandbox);
     let Ok(http) = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -1158,7 +1177,8 @@ async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, exe
     push_decisions_to_router(client, ns, task, &http, &base, &token).await;
 
     // (a) Blocked egress attempts → egress-kind approvals.
-    if let Some(entries) = fetch_json_entries(&http, &base, "/internal/egress/blocked", &token).await
+    if let Some(entries) =
+        fetch_json_entries(&http, &base, "/internal/egress/blocked", &token).await
     {
         for e in entries {
             let host = e.get("host").and_then(|v| v.as_str()).unwrap_or("").trim();
@@ -1180,11 +1200,16 @@ async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, exe
     }
 
     // (b) Explicit capability requests → mapped approvals.
-    if let Some(entries) = fetch_json_entries(&http, &base, "/internal/access-requests", &token).await
+    if let Some(entries) =
+        fetch_json_entries(&http, &base, "/internal/access-requests", &token).await
     {
         for r in entries {
             let kind = r.get("kind").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let target = r.get("target").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let target = r
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             let reason = r
                 .get("reason")
                 .and_then(|v| v.as_str())
@@ -1224,9 +1249,7 @@ async fn fetch_json_entries(
         return None;
     }
     let body: serde_json::Value = resp.json().await.ok()?;
-    body.get("entries")
-        .and_then(|v| v.as_array())
-        .cloned()
+    body.get("entries").and_then(|v| v.as_array()).cloned()
 }
 
 /// A short, stable, RFC1123-safe suffix for deterministic (deduplicated) object
@@ -1261,6 +1284,35 @@ fn task_owner_ref(task: &KarsTask) -> serde_json::Value {
     }])
 }
 
+fn task_owner_annotations(task: &KarsTask) -> serde_json::Map<String, serde_json::Value> {
+    let mut annotations = serde_json::Map::new();
+    for key in ["kars.azure.com/owner-sub", "kars.azure.com/owner-name"] {
+        if let Some(value) = task
+            .annotations()
+            .get(key)
+            .filter(|value| !value.trim().is_empty())
+        {
+            annotations.insert(key.into(), json!(value));
+        }
+    }
+    annotations
+}
+
+async fn ensure_task_approval_owner(
+    approvals: &Api<crate::kars_approval::KarsApproval>,
+    name: &str,
+    task: &KarsTask,
+) {
+    let annotations = task_owner_annotations(task);
+    if annotations.is_empty() {
+        return;
+    }
+    let patch = json!({"metadata": {"annotations": annotations}});
+    let _ = approvals
+        .patch(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await;
+}
+
 /// Idempotently open a Pending `KarsApproval` (kind `egress`) for a host the
 /// agent needs. Machine-readable host/port live in annotations so the consumer
 /// can materialise the grant without parsing prose.
@@ -1275,12 +1327,20 @@ async fn ensure_egress_approval(
 ) {
     use crate::kars_approval::{ApprovalAction, KarsApproval};
     let task_name = task.name_any();
-    let name = format!("{task_name}-eg-{}", stable_suffix(&format!("{host}:{port}")));
+    let name = format!(
+        "{task_name}-eg-{}",
+        stable_suffix(&format!("{host}:{port}"))
+    );
     let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
     // Don't reopen an already-decided (or existing) request.
     if let Ok(Some(_)) = approvals.get_opt(&name).await {
+        ensure_task_approval_owner(&approvals, &name, task).await;
         return;
     }
+    let mut approval_annotations = task_owner_annotations(task);
+    approval_annotations.insert(REQ_KIND_ANN.into(), json!("egress"));
+    approval_annotations.insert(REQ_TARGET_ANN.into(), json!(host));
+    approval_annotations.insert(REQ_PORT_ANN.into(), json!(port.to_string()));
     let appr = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsApproval",
@@ -1288,11 +1348,7 @@ async fn ensure_egress_approval(
             "name": name,
             "ownerReferences": task_owner_ref(task),
             "labels": { "kars.azure.com/req-task": task_name, "kars.azure.com/req-kind": "egress" },
-            "annotations": {
-                REQ_KIND_ANN: "egress",
-                REQ_TARGET_ANN: host,
-                REQ_PORT_ANN: port.to_string(),
-            },
+            "annotations": approval_annotations,
         },
         "spec": {
             "taskRef": { "name": task_name },
@@ -1308,7 +1364,11 @@ async fn ensure_egress_approval(
         },
     });
     let _ = approvals
-        .patch(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(appr))
+        .patch(
+            &name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(appr),
+        )
         .await;
 }
 
@@ -1331,6 +1391,7 @@ async fn ensure_capability_approval(
     let name = format!("{task_name}-cap-{}", stable_suffix(&key));
     let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
     if let Ok(Some(_)) = approvals.get_opt(&name).await {
+        ensure_task_approval_owner(&approvals, &name, task).await;
         return;
     }
     let (approval_kind, summary) = match kind {
@@ -1352,6 +1413,9 @@ async fn ensure_capability_approval(
     } else {
         format!("{reason} (requested {kind}: '{target}')")
     };
+    let mut approval_annotations = task_owner_annotations(task);
+    approval_annotations.insert(REQ_KIND_ANN.into(), json!(kind));
+    approval_annotations.insert(REQ_TARGET_ANN.into(), json!(target));
     let appr = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsApproval",
@@ -1359,10 +1423,7 @@ async fn ensure_capability_approval(
             "name": name,
             "ownerReferences": task_owner_ref(task),
             "labels": { "kars.azure.com/req-task": task_name, "kars.azure.com/req-kind": kind },
-            "annotations": {
-                REQ_KIND_ANN: kind,
-                REQ_TARGET_ANN: target,
-            },
+            "annotations": approval_annotations,
         },
         "spec": {
             "taskRef": { "name": task_name },
@@ -1375,7 +1436,11 @@ async fn ensure_capability_approval(
         },
     });
     let _ = approvals
-        .patch(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(appr))
+        .patch(
+            &name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(appr),
+        )
         .await;
 }
 
@@ -1439,7 +1504,10 @@ async fn consume_approved_egress(client: &Client, ns: &str, task: &KarsTask, san
             .cloned()
             .unwrap_or_else(|| "PT8H".into());
         let appr_name = appr.name_any();
-        let grant_name = format!("{task_name}-egg-{}", stable_suffix(&format!("{host}:{port}")));
+        let grant_name = format!(
+            "{task_name}-egg-{}",
+            stable_suffix(&format!("{host}:{port}"))
+        );
         let egress: Api<EgressApproval> = Api::namespaced(client.clone(), ns);
         let grant = json!({
             "apiVersion": "kars.azure.com/v1alpha1",
@@ -1457,7 +1525,11 @@ async fn consume_approved_egress(client: &Client, ns: &str, task: &KarsTask, san
             },
         });
         if egress
-            .patch(&grant_name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(grant))
+            .patch(
+                &grant_name,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(grant),
+            )
             .await
             .is_ok()
         {
@@ -1508,7 +1580,10 @@ async fn push_decisions_to_router(
             _ => continue, // still pending
         };
         let target = anns.get(REQ_TARGET_ANN).cloned().unwrap_or_default();
-        let url = format!("{}/internal/access-requests/decision", base.trim_end_matches('/'));
+        let url = format!(
+            "{}/internal/access-requests/decision",
+            base.trim_end_matches('/')
+        );
         let ok = http
             .post(&url)
             .bearer_auth(token)
@@ -1642,7 +1717,10 @@ mod tests {
 
         preserve_delivered_at(&task, &mut refreshed);
 
-        assert_eq!(refreshed.delivered_at.as_deref(), Some("2026-07-12T19:13:57Z"));
+        assert_eq!(
+            refreshed.delivered_at.as_deref(),
+            Some("2026-07-12T19:13:57Z")
+        );
     }
 
     #[test]
