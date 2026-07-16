@@ -221,15 +221,17 @@ def _summarize_telemetry(
 
 
 def _artifact_root() -> Path:
-    # /sandbox/agent may be an operator-mounted, read-only agent-code tree.
-    # Hermes owns /sandbox/.hermes, so keep task outputs in a dedicated writable
-    # runtime directory and ship them over mesh before the task response.
-    return Path(
-        os.environ.get(
-            "KARS_HERMES_ARTIFACT_DIR",
-            "/sandbox/.hermes/artifacts",
-        )
-    )
+    configured = os.environ.get("KARS_HERMES_ARTIFACT_DIR")
+    if configured:
+        return Path(configured)
+    # Use the same durable workspace contract as OpenClaw so task authors and
+    # generated objectives never need harness-specific output paths. The Hermes
+    # image creates this writable directory; retain the historical runtime path
+    # only as a compatibility fallback for older custom images.
+    shared = Path("/sandbox/.openclaw/workspace")
+    if shared.exists():
+        return shared
+    return Path("/sandbox/.hermes/artifacts")
 
 
 def _open_workspace_root() -> int:
