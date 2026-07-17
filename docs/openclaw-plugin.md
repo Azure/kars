@@ -23,7 +23,7 @@ Authoritative source: `runtimes/openclaw/openclaw.plugin.json` → `contracts.to
 | Tool | What it does |
 |---|---|
 | `kars_discover` | Lookup sibling agents on the AgentMesh registry by name or capability. |
-| `kars_spawn` | Create a governed sub-agent — materialises a fresh `KarsSandbox` CR, the controller reconciles it into its own pod with its own policy / network policy / identity. Requires a `role` arg (e.g. `"data analyst"`) when more than one sibling will exist (to enable the peer roster, see [architecture.md → Multi-agent peer roster](architecture.md#the-mesh)). |
+| `kars_spawn` | Create a governed sub-agent — materialises a fresh `KarsSandbox` CR, the controller reconciles it into its own pod with its own policy / network policy / identity. Network delegation is explicit: `egress: "request"` (default) starts with no inherited business endpoints; `egress: "inherit"` delegates only the parent’s already-approved endpoint set. Requires a `role` arg (e.g. `"data analyst"`) when more than one sibling will exist (to enable the peer roster, see [architecture.md → Multi-agent peer roster](architecture.md#the-mesh)). |
 | `kars_spawn_list` | Enumerate currently-running sub-agents. |
 | `kars_spawn_status` | Pod / runtime / mesh status for one sub-agent. |
 | `kars_spawn_destroy` | Graceful tear-down of a sub-agent (deletes the CR; controller reaps the pod + namespace). |
