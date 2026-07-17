@@ -671,7 +671,10 @@ async fn discover_agent_did(sandbox: &str) -> Option<String> {
     let base =
         std::env::var("MESH_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string());
     let base = base.trim_end_matches('/');
-    let url = format!("{base}/v1/discover?capability={sandbox}&limit=10");
+    // A stable mission/team name accumulates historical DIDs as pods are
+    // recycled. The registry returns insertion order, so a small first page can
+    // contain only stale identities and exclude the current pod entirely.
+    let url = format!("{base}/v1/discover?capability={sandbox}&limit=100");
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -683,8 +686,10 @@ async fn discover_agent_did(sandbox: &str) -> Option<String> {
         return None;
     }
     let body: serde_json::Value = resp.json().await.ok()?;
-    let results = body.get("results")?.as_array()?;
+    select_newest_agent_did(body.get("results")?.as_array()?)
+}
 
+fn select_newest_agent_did(results: &[serde_json::Value]) -> Option<String> {
     let mut best: Option<(String, String)> = None; // (did, last_seen)
     for r in results {
         let Some(did) = r.get("did").and_then(|v| v.as_str()) else {
@@ -1138,7 +1143,8 @@ async fn handle_transient_miss(
 
 #[cfg(test)]
 mod tests {
-    use super::is_substantive_deliverable;
+    use super::{is_substantive_deliverable, select_newest_agent_did};
+    use serde_json::json;
 
     #[test]
     fn aborted_and_human_blocked_outputs_are_not_successes() {
@@ -1165,5 +1171,25 @@ mod tests {
         assert!(is_substantive_deliverable(
             "Completed the review with evidence and a ship recommendation."
         ));
+    }
+
+    #[test]
+    fn newest_mesh_identity_is_selected_beyond_the_first_ten() {
+        let mut results = (0..12)
+            .map(|i| {
+                json!({
+                    "did": format!("did:mesh:{i}"),
+                    "last_seen": format!("2026-07-16T10:{i:02}:00Z")
+                })
+            })
+            .collect::<Vec<_>>();
+        results.push(json!({
+            "did": "did:mesh:current",
+            "last_seen": "2026-07-17T08:00:00Z"
+        }));
+        assert_eq!(
+            select_newest_agent_did(&results).as_deref(),
+            Some("did:mesh:current")
+        );
     }
 }
