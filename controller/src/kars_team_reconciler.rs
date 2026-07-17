@@ -1731,8 +1731,9 @@ fn orchestration_contract(team: &KarsTeam) -> String {
     roster.push_str(
         "\nOrchestration contract: plan the task against the roster and select the roles that add real \
          value; do not wake every member mechanically. Record selected and skipped roles with reasons. \
-         For each selected member, call `kars_spawn`; leave egress at `request` for zero-trust isolation, \
-         or set `egress: inherit` only when that role needs the team's already-approved endpoints. Assign \
+         For each selected member, call `kars_spawn`. Use egress `request` by default. If that member's \
+         work packet requires ANY host listed in approved egress, you MUST spawn it with `egress: inherit`; \
+         never tell a request-mode child to use a parent-approved host. Assign \
          the role's listed runtime and model exactly when spawning it. Then assign \
          a stable work-packet ID with dependencies \
          through `kars_mesh_send` (or `kars_mesh_transfer_file`), require acknowledgement, run independent \
@@ -2708,6 +2709,7 @@ mod tests {
         assert!(contract.contains("runtime: Hermes"));
         assert!(contract.contains("model: gpt-oss-120b"));
         assert!(contract.contains("egress: inherit"));
+        assert!(contract.contains("MUST spawn it"));
     }
 
     #[test]
