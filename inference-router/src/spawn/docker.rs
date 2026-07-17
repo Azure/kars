@@ -74,6 +74,7 @@ pub(super) async fn collect_sub_agent_snapshots_docker(
             governance: true,
             trust_threshold: None,
             learn_egress: false,
+            inherit_parent_egress: false,
             isolation: None,
             token_budget_daily: None,
             token_budget_per_request: None,

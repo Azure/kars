@@ -1706,7 +1706,9 @@ fn orchestration_contract(team: &KarsTeam) -> String {
     roster.push_str(
         "\nOrchestration contract: plan the task against the roster and select the roles that add real \
          value; do not wake every member mechanically. Record selected and skipped roles with reasons. \
-         For each selected member, call `kars_spawn`, assign a stable work-packet ID with dependencies \
+         For each selected member, call `kars_spawn`; leave egress at `request` for zero-trust isolation, \
+         or set `egress: inherit` only when that role needs the team's already-approved endpoints. Assign \
+         a stable work-packet ID with dependencies \
          through `kars_mesh_send` (or `kars_mesh_transfer_file`), require acknowledgement, run independent \
          work in parallel, collect the handbacks, and synthesize the deliverable. Use the full roster only \
          when the task genuinely spans every role. Do not silently perform a selected specialist's work \

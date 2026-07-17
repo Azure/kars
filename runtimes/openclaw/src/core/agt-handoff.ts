@@ -324,6 +324,7 @@ export async function runHandoffOrchestration(
         governance: true,
         trust_threshold: 500,
         learn_egress: process.env.EGRESS_LEARN_MODE === "true",
+        inherit_parent_egress: true,
         trusted_peers: trustedPeers.length > 0 ? trustedPeers.join(",") : undefined,
         handoff: { mode: "restore", predecessor: myName },
       };

@@ -435,6 +435,14 @@ describe("tool parameter schemas", () => {
     expect(tool.parameters.required).not.toContain("runtime");
   });
 
+  it("kars_spawn defaults sub-agent egress to request with explicit inheritance opt-in", () => {
+    const tool = tools.get("kars_spawn")!;
+    const egress = tool.parameters.properties.egress;
+    expect(egress.enum).toEqual(["request", "inherit"]);
+    expect(egress.description.toLowerCase()).toContain("default");
+    expect(tool.parameters.required).not.toContain("egress");
+  });
+
   it("kars_mesh_send has to_agent and content properties", () => {
     const tool = tools.get("kars_mesh_send")!;
     const props = tool.parameters.properties;

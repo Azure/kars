@@ -168,6 +168,11 @@ pub struct SpawnRequest {
     /// Enable egress learn mode (default: false).
     #[serde(default)]
     pub learn_egress: bool,
+    /// Deliberately inherit the parent's already-approved endpoint set. Defaults
+    /// to false so spawned agents start zero-trust and must request additional
+    /// access unless the principal explicitly delegates existing network scope.
+    #[serde(default)]
+    pub inherit_parent_egress: bool,
     /// Isolation level: standard | enhanced | confidential.
     pub isolation: Option<String>,
     /// Daily token budget.
@@ -445,6 +450,15 @@ pub async fn create_sandbox(
     apply_spawn_identity(&mut crd, &child_resource_name, &req.agent_id);
     crd["metadata"]["annotations"]["kars.azure.com/spawn-parent-uid"] =
         serde_json::Value::String(parent_uid.clone());
+    crd["metadata"]["annotations"]["kars.azure.com/egress-inheritance"] =
+        serde_json::Value::String(
+            if req.inherit_parent_egress {
+                "inherit"
+            } else {
+                "request"
+            }
+            .into(),
+        );
 
     // main: additive overlay — copy inherited MCP refs onto the child's
     // governance (the builder always emits `spec.governance`).
@@ -481,6 +495,7 @@ pub async fn create_sandbox(
         &mut crd,
         &parent_endpoints,
         parent_egress_mode.as_deref(),
+        req.inherit_parent_egress,
     );
 
     // Keyless git write (§14): a sub-agent inherits the principal's typed
@@ -953,6 +968,13 @@ pub async fn collect_sub_agent_snapshots(
             governance,
             trust_threshold,
             learn_egress,
+            inherit_parent_egress: obj
+                .data
+                .get("metadata")
+                .and_then(|m| m.get("annotations"))
+                .and_then(|a| a.get("kars.azure.com/egress-inheritance"))
+                .and_then(|value| value.as_str())
+                == Some("inherit"),
             isolation,
             token_budget_daily,
             token_budget_per_request,
@@ -1150,11 +1172,12 @@ pub(crate) fn apply_parent_network_policy(
     crd: &mut serde_json::Value,
     parent_endpoints: &[serde_json::Value],
     parent_egress_mode: Option<&str>,
+    inherit_endpoints: bool,
 ) {
     let Some(network) = crd.pointer_mut("/spec/networkPolicy") else {
         return;
     };
-    if !parent_endpoints.is_empty() {
+    if inherit_endpoints && !parent_endpoints.is_empty() {
         network["allowedEndpoints"] = serde_json::Value::Array(parent_endpoints.to_vec());
     }
     if parent_egress_mode.is_some_and(|mode| mode.eq_ignore_ascii_case("Strict")) {
@@ -1540,7 +1563,7 @@ mod tests {
             serde_json::json!({"host": "mcp.deepwiki.com", "port": 443}),
             serde_json::json!({"host": "kubernetes.io"}),
         ];
-        apply_parent_network_policy(&mut crd, &endpoints, Some("Strict"));
+        apply_parent_network_policy(&mut crd, &endpoints, Some("Strict"), true);
         assert_eq!(
             crd["spec"]["networkPolicy"]["allowedEndpoints"],
             serde_json::Value::Array(endpoints)
@@ -1557,8 +1580,15 @@ mod tests {
                 }
             }
         });
-        apply_parent_network_policy(&mut crd, &[], Some("Strict"));
+        let endpoints = vec![serde_json::json!({"host": "kubernetes.io"})];
+        apply_parent_network_policy(&mut crd, &endpoints, Some("Strict"), false);
         assert_eq!(crd["spec"]["networkPolicy"]["egressMode"], "Strict");
+        assert!(
+            crd["spec"]["networkPolicy"]
+                .get("allowedEndpoints")
+                .is_none(),
+            "request mode must not copy parent business egress"
+        );
     }
 
     fn minimal_req(agent_id: &str) -> SpawnRequest {
@@ -1568,6 +1598,7 @@ mod tests {
             governance: true,
             trust_threshold: None,
             learn_egress: false,
+            inherit_parent_egress: false,
             isolation: None,
             token_budget_daily: None,
             token_budget_per_request: None,

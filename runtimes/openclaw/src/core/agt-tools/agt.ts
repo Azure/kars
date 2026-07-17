@@ -209,6 +209,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         name: { type: "string", description: "DNS-safe name for the sub-agent (lowercase alphanumeric + hyphens, e.g. 'auditor', 'analyst')" },
         model: { type: "string", description: "AI model deployment override. Omit to inherit the parent's model (recommended)." },
         governance: { type: "boolean", description: "Enable AGT governance + mesh communication (default: true)" },
+        egress: {
+          type: "string",
+          enum: ["request", "inherit"],
+          description: "Network authority for the child. 'request' (default) starts with no inherited business egress so the child must ask for access. 'inherit' deliberately delegates the parent's already-approved endpoint set; use only when this role needs those same sources.",
+        },
         role: { type: "string", description: "Short persona/role description for this sub-agent (e.g. 'data analyst', 'visualization engineer', 'technical writer'). Used by the platform to build a Peer roster shared with siblings so they can resolve role references to canonical names." },
         runtime: { type: "string", description: "Optional runtime/harness for the sub-agent — 'OpenClaw' (default), 'Hermes', etc. Omit to inherit this agent's own runtime. Use this to delegate a subtask to a different harness (e.g. an OpenClaw principal spawning a Hermes specialist). The sub-agent still communicates over the same E2E mesh regardless of harness." },
       },
@@ -240,6 +245,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           role: typeof params.role === "string" ? params.role : null,
           runtime: typeof params.runtime === "string" ? params.runtime : null,
           model: typeof params.model === "string" ? params.model : null,
+          egress: params.egress === "inherit" ? "inherit" : "request",
         });
         // Build trusted peers list: parent's AMID + all existing siblings
         // These are parent-verified (from registry lookups), not self-reported
@@ -266,6 +272,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           ...(params.model ? { model: params.model } : {}),
           governance: params.governance !== false,
           trust_threshold: 500,
+          inherit_parent_egress: params.egress === "inherit",
           // Cross-harness spawn: forward the optional runtime override as
           // `runtime_kind` (the router's SpawnRequest field — deny_unknown_fields,
           // so the key name must match exactly). When omitted the router falls

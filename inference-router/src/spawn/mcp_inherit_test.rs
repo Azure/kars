@@ -19,6 +19,7 @@ fn req(agent_id: &str) -> SpawnRequest {
         governance: true,
         trust_threshold: None,
         learn_egress: false,
+        inherit_parent_egress: false,
         isolation: None,
         token_budget_daily: None,
         token_budget_per_request: None,
