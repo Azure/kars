@@ -76,6 +76,10 @@ pub const PHASE_COMPILED: &str = "Compiled";
 /// reconcilers stamp `Compiled` until their slice lands.
 pub const PHASE_READY: &str = "Ready";
 
+/// `KarsTask.status.executionPhase = "Launching"` — the task has materialized
+/// its sandbox and is waiting for that sandbox to report Running.
+pub const PHASE_SANDBOX_LAUNCHING: &str = "Launching";
+
 /// `.status.phase = "Running"` — `KarsSandbox`-specific terminal
 /// phase indicating the sandbox Deployment is rolled out and the
 /// pod is serving. Distinct from [`PHASE_READY`] because

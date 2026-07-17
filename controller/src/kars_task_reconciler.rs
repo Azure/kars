@@ -28,6 +28,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::crd::KarsSandbox;
 use crate::kars_task::{KarsTask, KarsTaskStatus, TIER_MAX, TIER_MIN};
 use crate::status::conditions::{self, TYPE_READY, reason as cond_reason, status as cond_status};
 use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
@@ -49,6 +50,8 @@ const REQUEUE_OK: Duration = Duration::from_secs(300);
 /// A child waiting on its parent requeues quickly so it converges to `Ready`
 /// promptly once the parent reconciles, rather than waiting a full cycle.
 const REQUEUE_PENDING: Duration = Duration::from_secs(10);
+/// A launched task must observe the sandbox transition to Running promptly.
+const REQUEUE_LAUNCHING: Duration = Duration::from_secs(2);
 
 /// A launched, executing task polls its sandbox router on a tight loop so
 /// in-flight capability requests surface in the inbox within seconds and
@@ -315,18 +318,18 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         new_status.execution_phase.as_deref() == Some(crate::status::phase::PHASE_SANDBOX_RUNNING);
     process_access_requests(&ctx.client, &ns, &task, executing).await;
 
-    // A child still waiting on its parent requeues quickly to converge.
-    let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING) {
-        REQUEUE_PENDING
-    } else if executing {
-        // A live agent may raise a gap at any moment; poll on a tight loop so
-        // requests surface in the inbox within seconds, and grants take effect
-        // promptly once approved.
-        REQUEUE_RUNNING
-    } else {
-        REQUEUE_OK
-    };
-    Ok(Action::requeue(requeue))
+    Ok(Action::requeue(requeue_for_status(&new_status)))
+}
+
+fn requeue_for_status(status: &KarsTaskStatus) -> Duration {
+    if status.phase.as_deref() == Some(PHASE_PENDING) {
+        return REQUEUE_PENDING;
+    }
+    match status.execution_phase.as_deref() {
+        Some(crate::status::phase::PHASE_SANDBOX_LAUNCHING) => REQUEUE_LAUNCHING,
+        Some(crate::status::phase::PHASE_SANDBOX_RUNNING) => REQUEUE_RUNNING,
+        _ => REQUEUE_OK,
+    }
 }
 
 /// Retention TTL check/enforcement, run at the top of every reconcile (after
@@ -1604,6 +1607,7 @@ async fn push_decisions_to_router(
 
 pub async fn run(client: Client) -> Result<()> {
     let tasks: Api<KarsTask> = Api::all(client.clone());
+    let sandboxes: Api<KarsSandbox> = Api::all(client.clone());
     match tasks.list(&ListParams::default().limit(1)).await {
         Ok(_) => tracing::info!("KarsTask CRD found — starting controller"),
         Err(e) => {
@@ -1627,6 +1631,7 @@ pub async fn run(client: Client) -> Result<()> {
     };
     let ctx = Arc::new(Ctx { client, signer });
     Controller::new(tasks, crate::watch_config::bounded())
+        .owns(sandboxes, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("KarsTask", reconcile(x, ctx)).await
@@ -1698,6 +1703,20 @@ mod tests {
         );
         t.metadata.namespace = Some("default".into());
         t
+    }
+
+    #[test]
+    fn launch_status_requeues_until_sandbox_state_converges() {
+        let mut status = KarsTaskStatus::default();
+        status.execution_phase = Some(crate::status::phase::PHASE_SANDBOX_LAUNCHING.into());
+        assert_eq!(requeue_for_status(&status), REQUEUE_LAUNCHING);
+
+        status.execution_phase = Some(crate::status::phase::PHASE_SANDBOX_RUNNING.into());
+        assert_eq!(requeue_for_status(&status), REQUEUE_RUNNING);
+
+        status.execution_phase = None;
+        status.phase = Some(PHASE_PENDING.into());
+        assert_eq!(requeue_for_status(&status), REQUEUE_PENDING);
     }
 
     #[test]
