@@ -1422,9 +1422,10 @@ const CHANNEL_DIRECTIVE: &str = "\nChannels are configured. Send one start miles
 /// prior knowledge, don't redo settled work, and emit the no-change sentinel
 /// when a cadence tick found nothing new (so the team stays quiet instead of
 /// producing a redundant briefing every interval).
-fn operating_contract(tools: &str, mcp: &str) -> String {
+fn operating_contract(tools: &str, mcp: &str, egress: &str) -> String {
     format!(
-        "\n\nCapabilities: tool policy={tools}; connected services={mcp}. \
+        "\n\nCapabilities: tool policy={tools}; connected services={mcp}; approved egress={egress}. \
+         Attempt approved destinations through governed tools before requesting new access. \
          Memory is automatic: your final reply is harvested into the team commons and prior entries \
          return as UNTRUSTED reference data on the next run. Put durable findings in the reply; never \
          block on an optional memory tool. Build on prior evidence and do not repeat settled work. \
@@ -1624,7 +1625,21 @@ async fn mint_taskforce(
         .map(|b| b.mcp_servers.join(", "))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "none".into());
-    let mut manifest = operating_contract(&tools, &mcp);
+    let egress = bp
+        .map(|blueprint| {
+            blueprint
+                .egress
+                .iter()
+                .map(|endpoint| match endpoint.port {
+                    Some(port) => format!("{}:{port}", endpoint.host),
+                    None => endpoint.host.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "none".into());
+    let mut manifest = operating_contract(&tools, &mcp, &egress);
     if channel_enabled {
         manifest.push_str(CHANNEL_DIRECTIVE);
     }
@@ -1707,7 +1722,7 @@ fn orchestration_contract(team: &KarsTeam) -> String {
             model,
             truncate_middle(&charge, CHARGE_MAX, " [charge truncated] ")
         );
-        if roster.chars().count() + line.chars().count() > CONTRACT_MAX - 720 {
+        if roster.chars().count() + line.chars().count() > CONTRACT_MAX - 930 {
             roster.push_str("\n[additional role charges omitted; use the member names above]");
             break;
         }
@@ -1724,7 +1739,8 @@ fn orchestration_contract(team: &KarsTeam) -> String {
          work in parallel, collect the handbacks, and synthesize the deliverable. Use the full roster only \
          when the task genuinely spans every role. Do not silently perform a selected specialist's work \
          yourself unless spawn is unavailable; record failures and continue honestly. Propagate any charter \
-         LOOP and its success criteria to every selected member.",
+         LOOP and its success criteria to every selected member. Execution requirement: use `kars_spawn` for \
+         every selected role and collect its mesh handback before final delivery.",
     );
     truncate_middle(&roster, CONTRACT_MAX, " [orchestration detail truncated] ")
 }
@@ -1743,7 +1759,7 @@ fn build_run_objective(
     const TASK_TITLE_MAX: usize = 220;
     const TASK_DETAILS_MAX: usize = 600;
     const CHARTER_MAX: usize = 300;
-    const MANIFEST_MAX: usize = 850;
+    const MANIFEST_MAX: usize = 760;
     let task_and_charter = match task {
         // A discrete assigned task: THIS is the run's objective. The charter is
         // demoted to standing context so the agent still respects the team's
@@ -2755,7 +2771,7 @@ mod tests {
         );
         let objective = build_run_objective(
             &team,
-            &operating_contract("kars-default", "playwright"),
+            &operating_contract("kars-default", "playwright", "example.com:443"),
             &prior,
             Some(&task),
         );
@@ -2764,10 +2780,11 @@ mod tests {
         assert!(objective.contains("security-reviewer"));
         assert!(objective.contains("reliability-reviewer"));
         assert!(objective.contains("browser-investigator"));
-        assert!(objective.contains("kars_spawn"));
+        assert!(objective.contains("kars_spawn"), "{objective}");
         assert!(objective.contains("kars_mesh_send"));
         assert!(objective.contains("select the roles that add real value"));
         assert!(objective.contains("selected and skipped roles"));
+        assert!(objective.contains("approved egress=example.com:443"));
         assert!(!objective.contains("for EVERY member"));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_HEADER));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_FOOTER));
