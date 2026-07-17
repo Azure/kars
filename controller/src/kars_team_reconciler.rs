@@ -1037,7 +1037,8 @@ async fn ensure_egress_request_approval(
                 summary,
                 detail: Some(format!(
                     "A run of team '{team_name}' needs to reach {hostport}. Approving adds it to the \
-                     team's egress allowlist for future runs; denying leaves the boundary closed."
+                     team's egress allowlist and immediately retries the standing operation; denying \
+                     leaves the boundary closed."
                 )),
                 requested_tier: None,
             },
@@ -1118,16 +1119,44 @@ async fn process_egress_grants(client: &Client, ns: &str, team: &KarsTeam) {
             .any(|e| e.get("host").and_then(|h| h.as_str()) == Some(host.as_str()));
         if !already {
             egress.push(match port {
-                Some(p) => json!({ "host": host, "port": p }),
-                None => json!({ "host": host }),
+                Some(p) => json!({ "host": host.clone(), "port": p }),
+                None => json!({ "host": host.clone() }),
             });
-            let patch = json!({ "spec": { "blueprint": { "egress": egress } } });
-            let _ = teams
-                .patch(&team_name, &PatchParams::default(), &Patch::Merge(patch))
-                .await;
-            tracing::info!(team = %team_name, %host, "agent-requested egress approved — added to team blueprint");
         }
         let name = appr.name_any();
+        // Applying the grant also re-drives the standing team immediately. The
+        // blocked run is retained as evidence, while the retry inherits the
+        // newly-approved host and can continue without waiting for another
+        // cadence tick or a manual Run now click.
+        let team_patch = json!({
+            "metadata": {
+                "annotations": {
+                    RUN_NOW_ANNOTATION: format!("egress-approved-{name}")
+                }
+            },
+            "spec": { "blueprint": { "egress": egress } }
+        });
+        if let Err(error) = teams
+            .patch(
+                &team_name,
+                &PatchParams::default(),
+                &Patch::Merge(team_patch),
+            )
+            .await
+        {
+            tracing::warn!(
+                team = %team_name,
+                approval = %name,
+                %error,
+                "failed to apply approved team egress and schedule retry"
+            );
+            continue;
+        }
+        tracing::info!(
+            team = %team_name,
+            %host,
+            "agent-requested egress approved — team updated and retry scheduled"
+        );
         let patch = json!({ "metadata": { "annotations": { APPLIED: "true" } } });
         let _ = approvals
             .patch(&name, &PatchParams::default(), &Patch::Merge(patch))

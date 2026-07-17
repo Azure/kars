@@ -130,7 +130,8 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
         .as_ref()
         .and_then(|task| task.status.as_ref())
         .and_then(|status| status.envelope_digest.clone());
-    let task_completed = live_task.as_ref().is_some_and(task_is_completed);
+    let task_completed = live_task.as_ref().is_some_and(task_is_completed)
+        && !survives_task_completion(&approval.metadata);
 
     // Bind on first observation where the task is Ready. The controller owns
     // this; once set it is immutable.
@@ -204,6 +205,7 @@ fn task_is_completed(task: &KarsTask) -> bool {
     {
         return true;
     }
+
     let annotations = task.annotations();
     matches!(
         (
@@ -212,6 +214,14 @@ fn task_is_completed(task: &KarsTask) -> bool {
         ),
         (Some(requested), Some(completed)) if requested == completed
     )
+}
+
+fn survives_task_completion(metadata: &kube::core::ObjectMeta) -> bool {
+    metadata.owner_references.as_ref().is_some_and(|references| {
+        references
+            .iter()
+            .any(|reference| reference.kind == "KarsTeam" && reference.controller == Some(true))
+    })
 }
 
 /// Resolve the effective TTL in seconds, clamped to [`MAX_TTL_SECS`], falling
@@ -413,6 +423,25 @@ mod tests {
 
         let pending = KarsTask::new("pending", Default::default());
         assert!(!task_is_completed(&pending));
+    }
+
+    #[test]
+    fn team_scoped_requests_outlive_the_completed_run() {
+        let metadata = kube::core::ObjectMeta {
+            owner_references: Some(vec![
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                    api_version: "kars.azure.com/v1alpha1".into(),
+                    kind: "KarsTeam".into(),
+                    name: "team-a".into(),
+                    uid: "team-uid".into(),
+                    controller: Some(true),
+                    block_owner_deletion: Some(true),
+                },
+            ]),
+            ..Default::default()
+        };
+        assert!(survives_task_completion(&metadata));
+        assert!(!survives_task_completion(&Default::default()));
     }
 
     #[test]
