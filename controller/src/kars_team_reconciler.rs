@@ -1432,7 +1432,8 @@ fn operating_contract(tools: &str, mcp: &str, egress: &str) -> String {
          If nothing changed, reply `{NO_CHANGE_SENTINEL}` plus one reason. For information only a human \
          can provide, emit `{CLARIFY_SENTINEL} <question>`. For denied network access, emit \
          `{EGRESS_SENTINEL} host[:port] - <reason>`. For insufficient authority, emit \
-         `{TIER_SENTINEL} <1-5> - <reason>`. Never self-escalate; report unavailable tools plainly."
+         `{TIER_SENTINEL} <1-5> - <reason>`. When blocked, that sentinel MUST be the first meaningful \
+         line of the reply; put explanation after it. Never self-escalate; report unavailable tools plainly."
     )
 }
 
@@ -1740,8 +1741,10 @@ fn orchestration_contract(team: &KarsTeam) -> String {
          work in parallel, collect the handbacks, and synthesize the deliverable. Use the full roster only \
          when the task genuinely spans every role. Do not silently perform a selected specialist's work \
          yourself unless spawn is unavailable; record failures and continue honestly. Propagate any charter \
-         LOOP and its success criteria to every selected member. Execution requirement: use `kars_spawn` for \
-         every selected role and collect its mesh handback before final delivery.",
+         LOOP and its success criteria to every selected member. Before spawning, write \
+         `/sandbox/.openclaw/workspace/role-plan.json` with `selected_roles` and `skipped_roles` arrays \
+         containing role + reason; never spawn a skipped role. Use `kars_spawn` for every selected role \
+         and collect its mesh handback before final delivery.",
     );
     truncate_middle(&roster, CONTRACT_MAX, " [orchestration detail truncated] ")
 }
@@ -2710,6 +2713,8 @@ mod tests {
         assert!(contract.contains("model: gpt-oss-120b"));
         assert!(contract.contains("egress: inherit"));
         assert!(contract.contains("MUST spawn it"));
+        assert!(contract.contains("role-plan.json"));
+        assert!(contract.contains("never spawn a skipped role"));
     }
 
     #[test]
@@ -2787,6 +2792,7 @@ mod tests {
         assert!(objective.contains("select the roles that add real value"));
         assert!(objective.contains("selected and skipped roles"));
         assert!(objective.contains("approved egress=example.com:443"));
+        assert!(objective.contains("role-plan.json"));
         assert!(!objective.contains("for EVERY member"));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_HEADER));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_FOOTER));
