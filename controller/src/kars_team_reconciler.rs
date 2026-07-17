@@ -1692,9 +1692,19 @@ fn orchestration_contract(team: &KarsTeam) -> String {
             .system_prompt
             .clone()
             .unwrap_or_else(|| "carry out this role's part of the charter".into());
+        let route = r.blueprint.as_ref().or(team.spec.blueprint.as_ref());
+        let runtime = route
+            .and_then(|blueprint| blueprint.runtime.as_deref())
+            .unwrap_or("OpenClaw");
+        let model = route
+            .and_then(|blueprint| blueprint.model.as_ref())
+            .map(|model| model.deployment.as_str())
+            .unwrap_or("inherit");
         let line = format!(
-            "\n- {}: {}",
+            "\n- {} [runtime: {}; model: {}]: {}",
             r.name,
+            runtime,
+            model,
             truncate_middle(&charge, CHARGE_MAX, " [charge truncated] ")
         );
         if roster.chars().count() + line.chars().count() > CONTRACT_MAX - 720 {
@@ -1708,6 +1718,7 @@ fn orchestration_contract(team: &KarsTeam) -> String {
          value; do not wake every member mechanically. Record selected and skipped roles with reasons. \
          For each selected member, call `kars_spawn`; leave egress at `request` for zero-trust isolation, \
          or set `egress: inherit` only when that role needs the team's already-approved endpoints. Assign \
+         the role's listed runtime and model exactly when spawning it. Then assign \
          a stable work-packet ID with dependencies \
          through `kars_mesh_send` (or `kars_mesh_transfer_file`), require acknowledgement, run independent \
          work in parallel, collect the handbacks, and synthesize the deliverable. Use the full roster only \
@@ -2652,6 +2663,35 @@ mod tests {
             launched_run_blueprint(&team).and_then(|bp| bp.git_write),
             Some(git_write)
         );
+    }
+
+    #[test]
+    fn orchestration_contract_preserves_role_runtime_and_model() {
+        let team = KarsTeam::new(
+            "mixed-runtime-team",
+            crate::kars_team::KarsTeamSpec {
+                charter: "Compare current changes and recommend action".into(),
+                envelope: team_env(),
+                roster: vec![TeamRole {
+                    name: "comparer".into(),
+                    system_prompt: Some("Compare the evidence".into()),
+                    blueprint: Some(TaskBlueprint {
+                        runtime: Some("Hermes".into()),
+                        model: Some(TaskModel {
+                            provider: "local-inference".into(),
+                            deployment: "gpt-oss-120b".into(),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        let contract = orchestration_contract(&team);
+        assert!(contract.contains("runtime: Hermes"));
+        assert!(contract.contains("model: gpt-oss-120b"));
+        assert!(contract.contains("egress: inherit"));
     }
 
     #[test]
