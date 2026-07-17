@@ -1,7 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appendCollaborationEvent,
   beginEvidenceScope,
@@ -12,6 +12,8 @@ import {
 const originalRoot = process.env.KARS_WORKSPACE_ROOT;
 
 afterEach(() => {
+  endEvidenceScope();
+  vi.restoreAllMocks();
   if (originalRoot === undefined) delete process.env.KARS_WORKSPACE_ROOT;
   else process.env.KARS_WORKSPACE_ROOT = originalRoot;
 });
@@ -46,4 +48,25 @@ describe("durable evidence logs", () => {
     expect(evidenceDigest({ a: 1 })).not.toBe(evidenceDigest({ a: 2 }));
   });
 
+  it("reports evidence emitted outside an active run scope", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    appendCollaborationEvent({ event: "assignment_sent", member: "qa" });
+    appendCollaborationEvent({ event: "handback_received", member: "qa" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("assignment_sent");
+  });
+
+  it("reports persistence failures without breaking the task path", () => {
+    const root = mkdtempSync(join(tmpdir(), "kars-evidence-error-"));
+    const notADirectory = join(root, "blocked");
+    writeFileSync(notADirectory, "file");
+    process.env.KARS_WORKSPACE_ROOT = notADirectory;
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    beginEvidenceScope("run-error");
+    expect(() =>
+      appendCollaborationEvent({ event: "assignment_sent", member: "qa" }),
+    ).not.toThrow();
+    expect(error).toHaveBeenCalledOnce();
+    rmSync(root, { recursive: true, force: true });
+  });
 });

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 
 const DEFAULT_WORKSPACE = "/sandbox/.openclaw/workspace";
 let activeScope: string | null = null;
+let warnedMissingScope = false;
 
 export type EvidenceEvent = Record<string, unknown> & {
   event: string;
@@ -18,6 +19,7 @@ function workspaceRoot(): string {
 
 export function beginEvidenceScope(scope: string): void {
   activeScope = scope.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 96) || "run";
+  warnedMissingScope = false;
 }
 
 export function endEvidenceScope(): void {
@@ -37,7 +39,13 @@ export function evidencePreview(value: unknown, max = 240): string {
 }
 
 function appendEvidence(file: string, event: EvidenceEvent): void {
-  if (!activeScope) return;
+  if (!activeScope) {
+    if (!warnedMissingScope) {
+      warnedMissingScope = true;
+      console.warn(`[kars] evidence event dropped before a run scope was active: ${event.event}`);
+    }
+    return;
+  }
   try {
     const path = join(workspaceRoot(), "artifacts", `.run-${activeScope}`, file);
     mkdirSync(dirname(path), { recursive: true });
@@ -46,8 +54,10 @@ function appendEvidence(file: string, event: EvidenceEvent): void {
       agent: process.env.SANDBOX_NAME || process.env.HOSTNAME || "unknown",
       ...event,
     })}\n`, { encoding: "utf8", mode: 0o600 });
-  } catch {
-    // Evidence capture must never break the governed task path.
+  } catch (error) {
+    // Evidence capture must never break the governed task path, but failure must
+    // remain observable because collaboration truth depends on this artifact.
+    console.error(`[kars] failed to persist ${file}:`, error);
   }
 }
 
