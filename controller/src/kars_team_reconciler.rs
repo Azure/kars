@@ -1482,9 +1482,18 @@ fn leading_control_payload<'a>(output: &'a str, sentinel: &str) -> Option<&'a st
         .find(|line| !line.is_empty())?;
     let line =
         line.trim_start_matches(|c: char| matches!(c, '#' | '*' | '_' | '`' | '-' | ' ' | '\t'));
-    line.strip_prefix(sentinel)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    if let Some(payload) = line.strip_prefix(sentinel) {
+        return Some(payload.trim()).filter(|s| !s.is_empty());
+    }
+    // Tolerate the common model-emitted bracket form
+    // `[[NEEDS_EGRESS host — reason]]` while still requiring the sentinel to
+    // lead the principal response.
+    let open = sentinel.strip_suffix("]]")?;
+    let payload = line.strip_prefix(open)?;
+    if !payload.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some(payload.trim().trim_end_matches("]]").trim()).filter(|s| !s.is_empty())
 }
 
 /// Extract the one-line question following a leading
@@ -2553,6 +2562,10 @@ mod tests {
         // No port, hyphen reason.
         assert_eq!(
             extract_egress_request("[[NEEDS_EGRESS]] example.com - fetch docs"),
+            Some(("example.com".to_string(), None, "fetch docs".to_string()))
+        );
+        assert_eq!(
+            extract_egress_request("[[NEEDS_EGRESS example.com - fetch docs]]"),
             Some(("example.com".to_string(), None, "fetch docs".to_string()))
         );
         // Not a hostname → rejected (no silent bad grants).

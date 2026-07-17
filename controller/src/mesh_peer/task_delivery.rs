@@ -570,7 +570,16 @@ fn is_substantive_deliverable(output: &str) -> bool {
         "[[NEEDS_TIER]]",
     ]
     .iter()
-    .any(|sentinel| first_meaningful.starts_with(sentinel))
+    .any(|sentinel| {
+        first_meaningful.starts_with(sentinel)
+            || sentinel
+                .strip_suffix("]]")
+                .is_some_and(|open| {
+                    first_meaningful
+                        .strip_prefix(open)
+                        .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+                })
+    })
 }
 
 /// Wait up to a short window for the agent's `file_transfer` frames to land,
@@ -1155,6 +1164,9 @@ mod tests {
         ));
         assert!(!is_substantive_deliverable(
             "[[NEEDS_CLARIFICATION]] Which environment?"
+        ));
+        assert!(!is_substantive_deliverable(
+            "[[NEEDS_EGRESS example.com:443 - fetch evidence]]"
         ));
         assert!(is_substantive_deliverable(
             "Partial work\n[[NEEDS_EGRESS]] example.com:443 - fetch evidence"

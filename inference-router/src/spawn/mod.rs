@@ -371,10 +371,20 @@ pub async fn create_sandbox(
     //   - the parent's REAL `governance.toolPolicyRef`/`inferenceRef` names +
     //     uid (kars-bridge: so team-run sub-agents point at policies that
     //     actually exist and are garbage-collected when the parent goes away).
-    let (parent_labels, parent_mcp_refs, parent_tool_policy, parent_inference, parent_uid): (
+    let (
+        parent_labels,
+        parent_mcp_refs,
+        parent_tool_policy,
+        parent_inference,
+        parent_endpoints,
+        parent_egress_mode,
+        parent_uid,
+    ): (
         BTreeMap<String, String>,
         Vec<serde_json::Value>,
         Option<String>,
+        Option<String>,
+        Vec<serde_json::Value>,
         Option<String>,
         String,
     ) = match api.get(parent_name).await {
@@ -397,7 +407,24 @@ pub async fn create_sandbox(
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
                 .filter(|s| !s.is_empty());
-            (labels, mcp_refs, tool_policy, inference, uid)
+            let endpoints = spec
+                .and_then(|s| s.pointer("/networkPolicy/allowedEndpoints"))
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let egress_mode = spec
+                .and_then(|s| s.pointer("/networkPolicy/egressMode"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            (
+                labels,
+                mcp_refs,
+                tool_policy,
+                inference,
+                endpoints,
+                egress_mode,
+                uid,
+            )
         }
         Err(e) => {
             return Err(format!(
@@ -449,6 +476,11 @@ pub async fn create_sandbox(
         &mut crd,
         parent_tool_policy.as_deref(),
         parent_inference.as_deref(),
+    );
+    apply_parent_network_policy(
+        &mut crd,
+        &parent_endpoints,
+        parent_egress_mode.as_deref(),
     );
 
     // Keyless git write (§14): a sub-agent inherits the principal's typed
@@ -1102,10 +1134,31 @@ pub(crate) fn apply_parent_refs(
     if let Some(gov) = crd.pointer_mut("/spec/governance/toolPolicyRef/name") {
         *gov = serde_json::Value::String(resolved.to_string());
     }
+
     if let Some(name) = parent_inference.filter(|s| !s.is_empty()) {
         if let Some(inf) = crd.pointer_mut("/spec/inferenceRef/name") {
             *inf = serde_json::Value::String(name.to_string());
         }
+    }
+}
+
+/// A child cannot use a broader network posture than its parent. Copy the
+/// parent's approved endpoint set and preserve Strict mode even when the spawn
+/// request asks for learn mode; a child may narrow authority later, never
+/// silently lose required approved access or relax the parent boundary.
+pub(crate) fn apply_parent_network_policy(
+    crd: &mut serde_json::Value,
+    parent_endpoints: &[serde_json::Value],
+    parent_egress_mode: Option<&str>,
+) {
+    let Some(network) = crd.pointer_mut("/spec/networkPolicy") else {
+        return;
+    };
+    if !parent_endpoints.is_empty() {
+        network["allowedEndpoints"] = serde_json::Value::Array(parent_endpoints.to_vec());
+    }
+    if parent_egress_mode.is_some_and(|mode| mode.eq_ignore_ascii_case("Strict")) {
+        network["egressMode"] = serde_json::Value::String("Strict".into());
     }
 }
 
@@ -1471,6 +1524,41 @@ mod tests {
         );
         assert_eq!(crd["spec"]["governance"]["enabled"], true);
         assert_eq!(crd["spec"]["inferenceRef"]["name"], "child-inference");
+    }
+
+    #[test]
+    fn child_inherits_parent_approved_egress() {
+        let mut crd = serde_json::json!({
+            "spec": {
+                "networkPolicy": {
+                    "defaultDeny": true,
+                    "egressMode": "Strict"
+                }
+            }
+        });
+        let endpoints = vec![
+            serde_json::json!({"host": "mcp.deepwiki.com", "port": 443}),
+            serde_json::json!({"host": "kubernetes.io"}),
+        ];
+        apply_parent_network_policy(&mut crd, &endpoints, Some("Strict"));
+        assert_eq!(
+            crd["spec"]["networkPolicy"]["allowedEndpoints"],
+            serde_json::Value::Array(endpoints)
+        );
+    }
+
+    #[test]
+    fn strict_parent_cannot_be_relaxed_by_child_request() {
+        let mut crd = serde_json::json!({
+            "spec": {
+                "networkPolicy": {
+                    "defaultDeny": true,
+                    "egressMode": "Learn"
+                }
+            }
+        });
+        apply_parent_network_policy(&mut crd, &[], Some("Strict"));
+        assert_eq!(crd["spec"]["networkPolicy"]["egressMode"], "Strict");
     }
 
     fn minimal_req(agent_id: &str) -> SpawnRequest {
