@@ -30,7 +30,7 @@ use chrono::Utc;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{
     Api, Client,
-    api::{Patch, PatchParams},
+    api::{Patch, PatchParams, PostParams},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -354,14 +354,36 @@ pub async fn prior_knowledge(client: &Client, commons: &str) -> String {
     let ns = namespace();
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &ns);
     let name = commons_cm_name(commons);
-    let Ok(Some(cm)) = cms.get_opt(&name).await else {
+    let Ok(Some(mut cm)) = cms.get_opt(&name).await else {
         return String::new();
     };
-    let index = read_index(&cm);
+    let mut index = read_index(&cm);
     if index.is_empty() {
         return String::new();
     }
-    let data = cm.data.unwrap_or_default();
+    let mut data = cm.data.take().unwrap_or_default();
+    let removed = prune_control_entries(&mut index, &mut data);
+    if removed > 0 {
+        data.insert(
+            "index.json".into(),
+            serde_json::to_string(&index).unwrap_or_else(|_| "[]".into()),
+        );
+        cm.data = Some(data.clone());
+        if let Err(error) = cms.replace(&name, &PostParams::default(), &cm).await {
+            tracing::warn!(
+                commons = %commons,
+                removed,
+                %error,
+                "failed to remove stale control requests from team memory"
+            );
+        } else {
+            tracing::info!(
+                commons = %commons,
+                removed,
+                "removed stale control requests from team memory"
+            );
+        }
+    }
     let recent: Vec<&CommonsEntry> = index
         .iter()
         .rev()
@@ -407,6 +429,23 @@ fn is_control_request(value: &str) -> bool {
     ]
     .iter()
     .any(|sentinel| first.starts_with(sentinel))
+}
+
+fn prune_control_entries(
+    index: &mut Vec<CommonsEntry>,
+    data: &mut BTreeMap<String, String>,
+) -> usize {
+    let before = index.len();
+    index.retain(|entry| {
+        let keep = data
+            .get(&content_key(&entry.id))
+            .is_none_or(|content| !is_control_request(content));
+        if !keep {
+            data.remove(&content_key(&entry.id));
+        }
+        keep
+    });
+    before - index.len()
 }
 
 fn bounded_snippet(value: &str, max_chars: usize) -> String {
@@ -530,5 +569,40 @@ mod tests {
         assert!(!is_control_request(
             "# Decision brief\nGateway API migration is recommended."
         ));
+    }
+
+    #[test]
+    fn stale_control_entries_are_pruned() {
+        let mut index = vec![
+            CommonsEntry {
+                id: "blocked".into(),
+                title: "Needs egress".into(),
+                author: "run-a".into(),
+                source_task: "run-a".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                digest: "sha256:blocked".into(),
+                size_bytes: 10,
+            },
+            CommonsEntry {
+                id: "brief".into(),
+                title: "Decision brief".into(),
+                author: "run-b".into(),
+                source_task: "run-b".into(),
+                created_at: "2026-01-02T00:00:00Z".into(),
+                digest: "sha256:brief".into(),
+                size_bytes: 10,
+            },
+        ];
+        let mut data = BTreeMap::from([
+            (
+                content_key("blocked"),
+                "[[NEEDS_EGRESS]] example.com".into(),
+            ),
+            (content_key("brief"), "A real decision brief.".into()),
+        ]);
+        assert_eq!(prune_control_entries(&mut index, &mut data), 1);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].id, "brief");
+        assert!(!data.contains_key(&content_key("blocked")));
     }
 }
