@@ -125,10 +125,12 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
     // Resolve the gated task's live envelope digest (None unless it is
     // governance-Ready and has a digest).
     let tasks: Api<KarsTask> = Api::namespaced(ctx.client.clone(), &ns);
-    let live_task_digest = tasks
-        .get_opt(&approval.spec.task_ref.name)
-        .await?
-        .and_then(|t| t.status.and_then(|s| s.envelope_digest));
+    let live_task = tasks.get_opt(&approval.spec.task_ref.name).await?;
+    let live_task_digest = live_task
+        .as_ref()
+        .and_then(|task| task.status.as_ref())
+        .and_then(|status| status.envelope_digest.clone());
+    let task_completed = live_task.as_ref().is_some_and(task_is_completed);
 
     // Bind on first observation where the task is Ready. The controller owns
     // this; once set it is immutable.
@@ -147,7 +149,10 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
 
     let ttl_secs = resolve_ttl_secs(approval.spec.ttl.as_deref());
     let expires_at = requested_at + ChronoDuration::seconds(ttl_secs as i64);
-    let expired = now >= expires_at;
+    // A pending decision cannot affect a task that has already delivered and
+    // retired. Expire it immediately instead of leaving a success-shaped,
+    // actionable Inbox card whose grant can no longer be consumed.
+    let expired = now >= expires_at || (approval.spec.decision.is_none() && task_completed);
 
     let outcome = evaluate(
         approval.spec.decision.as_ref(),
@@ -190,6 +195,25 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
     }))
 }
 
+fn task_is_completed(task: &KarsTask) -> bool {
+    if task
+        .status
+        .as_ref()
+        .and_then(|status| status.delivered_at.as_ref())
+        .is_some()
+    {
+        return true;
+    }
+    let annotations = task.annotations();
+    matches!(
+        (
+            annotations.get("kars.azure.com/run-requested"),
+            annotations.get("kars.azure.com/run-completed"),
+        ),
+        (Some(requested), Some(completed)) if requested == completed
+    )
+}
+
 /// Resolve the effective TTL in seconds, clamped to [`MAX_TTL_SECS`], falling
 /// back to [`DEFAULT_TTL`] on absence or a parse failure.
 fn resolve_ttl_secs(ttl: Option<&str>) -> u64 {
@@ -221,16 +245,16 @@ fn build_status(
         ApprovalOutcome::Approved { decider } => {
             (cond_status::TRUE, format!("approved by {decider}"))
         }
-        ApprovalOutcome::Denied { decider } => {
-            (cond_status::TRUE, format!("denied by {decider}"))
-        }
+        ApprovalOutcome::Denied { decider } => (cond_status::TRUE, format!("denied by {decider}")),
         ApprovalOutcome::Expired => (cond_status::TRUE, "expired before a decision".to_string()),
         ApprovalOutcome::Stale(why) => (cond_status::TRUE, why.clone()),
     };
 
     let reason_value = match outcome {
         ApprovalOutcome::Pending(_) => cond_reason::RECONCILING,
-        ApprovalOutcome::Approved { .. } | ApprovalOutcome::Denied { .. } => cond_reason::RECONCILED,
+        ApprovalOutcome::Approved { .. } | ApprovalOutcome::Denied { .. } => {
+            cond_reason::RECONCILED
+        }
         ApprovalOutcome::Expired => cond_reason::TIMED_OUT,
         ApprovalOutcome::Stale(_) => cond_reason::DEPENDENCY_MISSING,
     };
@@ -256,10 +280,7 @@ fn build_status(
         _ => prior.decider.clone(),
     };
     let decided_at = if decided {
-        prior
-            .decided_at
-            .clone()
-            .or_else(|| Some(now.to_rfc3339()))
+        prior.decided_at.clone().or_else(|| Some(now.to_rfc3339()))
     } else {
         prior.decided_at.clone()
     };
@@ -368,6 +389,33 @@ mod tests {
     }
 
     #[test]
+    fn completed_tasks_make_pending_approvals_non_actionable() {
+        let mut delivered = KarsTask::new("delivered", Default::default());
+        delivered.status = Some(Default::default());
+        delivered.status.as_mut().unwrap().delivered_at = Some(Utc::now().to_rfc3339());
+        assert!(task_is_completed(&delivered));
+
+        let mut acknowledged = KarsTask::new("acknowledged", Default::default());
+        acknowledged.metadata.annotations = Some(
+            [
+                (
+                    "kars.azure.com/run-requested".to_string(),
+                    "nonce-1".to_string(),
+                ),
+                (
+                    "kars.azure.com/run-completed".to_string(),
+                    "nonce-1".to_string(),
+                ),
+            ]
+            .into(),
+        );
+        assert!(task_is_completed(&acknowledged));
+
+        let pending = KarsTask::new("pending", Default::default());
+        assert!(!task_is_completed(&pending));
+    }
+
+    #[test]
     fn decided_at_is_set_once_and_preserved() {
         let now = Utc::now();
         let req = now - ChronoDuration::minutes(5);
@@ -389,7 +437,15 @@ mod tests {
 
         // A later re-reconcile preserves the original decidedAt.
         let later = now + ChronoDuration::minutes(10);
-        let s2 = build_status(&s1, Some(1), &approved("alice"), req, exp, Some("sha256:aa".to_string()), later);
+        let s2 = build_status(
+            &s1,
+            Some(1),
+            &approved("alice"),
+            req,
+            exp,
+            Some("sha256:aa".to_string()),
+            later,
+        );
         assert_eq!(s2.decided_at, Some(first_decided));
     }
 
