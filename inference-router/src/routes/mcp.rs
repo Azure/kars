@@ -307,6 +307,22 @@ fn mcp_result_preview(outcome: &ProcessOutcome) -> (String, bool) {
             .unwrap_or("MCP tool error");
         return (message.chars().take(180).collect(), false);
     }
+    if response
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(|is_error| is_error.as_bool())
+        == Some(true)
+    {
+        let message = response
+            .get("result")
+            .and_then(|result| result.get("content"))
+            .and_then(|content| content.as_array())
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(|text| text.as_str())
+            .unwrap_or("MCP tool returned an error");
+        return (message.chars().take(180).collect(), false);
+    }
     ("MCP result received".into(), true)
 }
 
@@ -520,6 +536,25 @@ mod tests {
         assert_eq!(events[0]["name"], "echo");
         assert_eq!(events[0]["source"], "router");
         assert_eq!(events[0]["result_preview"], "MCP result received");
+    }
+
+    #[test]
+    fn mcp_semantic_tool_error_is_not_reported_as_success() {
+        let outcome = ProcessOutcome::JsonRpcResponse {
+            body: serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "isError": true,
+                    "content": [{"type": "text", "text": "Invalid arguments: url is required"}]
+                }
+            }))
+            .unwrap(),
+            session_id: None,
+        };
+        let (preview, ok) = super::mcp_result_preview(&outcome);
+        assert!(!ok);
+        assert!(preview.contains("url is required"));
     }
 
     #[tokio::test]
