@@ -73,6 +73,54 @@ async function resolveAmidByName(
 // Pod phases that mean the sub-agent is permanently gone.
 const POD_DEAD_PHASES = new Set(["Failed", "Terminating", "Exited"]);
 
+const AUXILIARY_MESH_TYPES = new Set([
+  "ACCEPT",
+  "KNOCK",
+  "KEY_EXCHANGE",
+  "task_progress",
+  "file_transfer",
+]);
+
+function parsedMessageContent(message: AgtInboxEntry): Record<string, unknown> | null {
+  if (typeof message.content === "object" && message.content !== null) {
+    return message.content as Record<string, unknown>;
+  }
+  if (typeof message.content !== "string") return null;
+  try {
+    const parsed = JSON.parse(message.content);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isReplyForAssignment(
+  message: AgtInboxEntry,
+  targetAmid: string,
+  agentName: string,
+  messageId: string,
+): boolean {
+  if (message.from_amid !== targetAmid && message.from_agent !== agentName) return false;
+  if (AUXILIARY_MESH_TYPES.has(message.message_type || "")) return false;
+  const parsed = parsedMessageContent(message);
+  const type = typeof parsed?.type === "string" ? parsed.type : "";
+  if (AUXILIARY_MESH_TYPES.has(type)) return false;
+  if (
+    type === "task_response" &&
+    typeof parsed?.in_reply_to_id === "string" &&
+    parsed.in_reply_to_id !== messageId
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isAuxiliaryMeshMessage(message: AgtInboxEntry): boolean {
+  if (AUXILIARY_MESH_TYPES.has(message.message_type || "")) return true;
+  const parsed = parsedMessageContent(message);
+  return typeof parsed?.type === "string" && AUXILIARY_MESH_TYPES.has(parsed.type);
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyApi = any;
 
@@ -696,6 +744,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           }
 
           const waitStart = Date.now();
+          const messageId = crypto.randomUUID();
           let nextHeartbeatAt = waitStart + 10_000;
           let sendSucceeded = false;
           let finalSendErr: Error | null = null;
@@ -733,6 +782,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             try {
               await meshSend(deps.meshClient(), targetAmid, {
                 type: "task_request",
+                message_id: messageId,
                 content: msgContent,
                 from_agent: process.env.SANDBOX_NAME || "unknown",
                 timestamp: new Date().toISOString(),
@@ -794,7 +844,6 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // would show "no peer agents yet" until a reply arrives (and never at all
           // for fire-and-forget sends).
           try { await pushTrustToRouter(agentName, 0.0); } catch { /* best-effort */ }
-          const messageId = crypto.randomUUID();
           const sendStart = new Date().toISOString();
           appendCollaborationEvent({
             event: "assignment_sent",
@@ -837,20 +886,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               Date.now() - overallStart < hardCeilingMs
             ) {
               // Check inbox for a reply from this target, skipping protocol messages
-              const replyIdx = agtInbox.findIndex((m) => {
-                if (m.from_amid !== targetAmid && m.from_agent !== agentName) return false;
-                // Skip Signal Protocol handshake + heartbeat messages
-                const mt = m.message_type || "";
-                if (mt === "ACCEPT" || mt === "KNOCK" || mt === "KEY_EXCHANGE" || mt === "task_progress") return false;
-                // Also check content for JSON protocol messages
-                if (typeof m.content === "string") {
-                  try {
-                    const parsed = JSON.parse(m.content);
-                    if (parsed.type === "ACCEPT" || parsed.type === "KNOCK" || parsed.type === "KEY_EXCHANGE" || parsed.type === "task_progress") return false;
-                  } catch { /* not JSON, treat as real content */ }
-                }
-                return true;
-              });
+              const replyIdx = agtInbox.findIndex((message) =>
+                isReplyForAssignment(message, targetAmid!, agentName, messageId)
+              );
               if (replyIdx >= 0) {
                 const reply = agtInbox.splice(replyIdx, 1)[0];
                 deps.notifyConsumed?.("send_wait", 1);
@@ -864,8 +902,10 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               let drained = 0;
               for (let i = agtInbox.length - 1; i >= 0; i--) {
                 const m = agtInbox[i];
-                if ((m.from_amid === targetAmid || m.from_agent === agentName) &&
-                    (m.message_type === "ACCEPT" || m.message_type === "KNOCK" || m.message_type === "KEY_EXCHANGE")) {
+                if (
+                  (m.from_amid === targetAmid || m.from_agent === agentName) &&
+                  isAuxiliaryMeshMessage(m)
+                ) {
                   agtInbox.splice(i, 1);
                   drained++;
                 }
@@ -946,6 +986,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             try {
               await meshSend(deps.meshClient(), targetAmid, {
                 type: "task_request",
+                message_id: messageId,
                 content: msgContent,
                 from_agent: process.env.SANDBOX_NAME || "unknown",
                 timestamp: new Date().toISOString(),

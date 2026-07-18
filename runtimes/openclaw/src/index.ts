@@ -1046,6 +1046,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           try {
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
+              in_reply_to_id: message?.message_id,
               content: `Task denied by AGT governance: ${evalData.reason}`,
               ok: false,
               from_agent: agtSandboxName,
@@ -1182,6 +1183,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // real execution trace + token telemetry for the audit record.
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
+            in_reply_to_id: message?.message_id,
             content: latin1Safe(llmResponse),
             ok: true,
             artifacts: artifactManifest,
@@ -1217,6 +1219,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           try {
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
+              in_reply_to_id: message?.message_id,
               content: latin1Safe(`Error processing task: ${replyErr.message}`),
               ok: false,
               from_agent: agtSandboxName,
