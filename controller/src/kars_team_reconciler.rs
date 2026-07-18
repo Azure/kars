@@ -1732,10 +1732,7 @@ fn orchestration_contract(team: &KarsTeam) -> String {
     roster.push_str(
         "\nOrchestration contract: plan the task against the roster and select the roles that add real \
          value; do not wake every member mechanically. Record selected and skipped roles with reasons. \
-         For each selected member, call `kars_spawn`. Use egress `request` by default. If that member's \
-         work packet requires ANY host listed in approved egress, you MUST spawn it with `egress: inherit`; \
-         never tell a request-mode child to use a parent-approved host. Assign \
-         the role's listed runtime and model exactly when spawning it. Then assign \
+         For each selected member, call `kars_spawn` with the role's listed runtime and model. Then assign \
          a stable work-packet ID with dependencies \
          through `kars_mesh_send` (or `kars_mesh_transfer_file`), require acknowledgement, run independent \
          work in parallel, collect the handbacks, and synthesize the deliverable. Use the full roster only \
@@ -1743,8 +1740,10 @@ fn orchestration_contract(team: &KarsTeam) -> String {
          yourself unless spawn is unavailable; record failures and continue honestly. Propagate any charter \
          LOOP and its success criteria to every selected member. Before spawning, write \
          `/sandbox/.openclaw/workspace/role-plan.json` with `selected_roles` and `skipped_roles` arrays \
-         containing role + reason; never spawn a skipped role. Use `kars_spawn` for every selected role \
-         and collect its mesh handback before final delivery.",
+         containing role + reason; never spawn a skipped role. For each selected role whose work packet uses \
+         ANY host in approved egress, call `kars_spawn` with `egress: inherit`; otherwise use `egress: request`. \
+         Never tell a request-mode child to use a parent-approved host. Assign every selected role through \
+         `kars_mesh_send` and collect its mesh handback before final delivery.",
     );
     truncate_middle(&roster, CONTRACT_MAX, " [orchestration detail truncated] ")
 }
@@ -2712,7 +2711,7 @@ mod tests {
         assert!(contract.contains("runtime: Hermes"));
         assert!(contract.contains("model: gpt-oss-120b"));
         assert!(contract.contains("egress: inherit"));
-        assert!(contract.contains("MUST spawn it"));
+        assert!(contract.contains("ANY host in approved egress"));
         assert!(contract.contains("role-plan.json"));
         assert!(contract.contains("never spawn a skipped role"));
     }
@@ -2793,6 +2792,8 @@ mod tests {
         assert!(objective.contains("selected and skipped roles"));
         assert!(objective.contains("approved egress=example.com:443"));
         assert!(objective.contains("role-plan.json"));
+        assert!(objective.contains("egress: inherit"));
+        assert!(objective.contains("request-mode child"));
         assert!(!objective.contains("for EVERY member"));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_HEADER));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_FOOTER));
