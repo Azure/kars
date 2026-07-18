@@ -869,7 +869,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // sequences no longer time out at a fixed 60s. A hard ceiling
           // bounds the total wait absolutely — even continuous heartbeats
           // cannot keep a stuck tool call running forever.
-          const idleTimeoutMs = 60_000;       // reset on each task_progress
+          const idleTimeoutMs = 180_000;      // reset on each task_progress
           const hardCeilingMs = 600_000;      // absolute upper bound (10 min)
           const pollIntervalMs = 500;
           let replyContent: string | null = null;
