@@ -962,6 +962,18 @@ describe("DEFAULT_CONFIG values", () => {
     expect(spawnTool.parameters.properties.model.description.toLowerCase()).toContain("inherit");
     delete process.env.AGT_SKIP_INIT;
   });
+
+  describe("clarification fallback", () => {
+    it("recognizes a concise final question without misreading a report", async () => {
+      process.env.AGT_SKIP_INIT = "1";
+      const mod = await import("./index.js");
+      expect(mod.clarificationQuestion("Context\nWhich country should this target?"))
+        .toBe("Which country should this target?");
+      expect(mod.clarificationQuestion("# Report\nThe recommendation is complete."))
+        .toBeNull();
+      delete process.env.AGT_SKIP_INIT;
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

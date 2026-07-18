@@ -410,6 +410,65 @@ import { registerOpenClawCommands } from "./core/commands/openclaw.js";
 let foundryProject: FoundryProjectInfo | null = null;
 let foundryInitialized = false;
 
+export function clarificationQuestion(response: string): string | null {
+  const lines = response
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const question = lines.at(-1) ?? "";
+  return question.endsWith("?") && question.length <= 280 ? question : null;
+}
+
+async function waitForHumanClarification(
+  question: string,
+  context: string,
+  log: { info: (message: string) => void; warn: (message: string) => void },
+): Promise<string | null> {
+  await _routerCall("POST", "/v1/access-request", {
+    kind: "clarification",
+    target: question,
+    reason: context.slice(0, 512),
+  });
+  appendCollaborationEvent({
+    event: "clarification_requested",
+    question,
+    context: context.slice(0, 512),
+  });
+  log.info(`Clarification requested from the owning human: ${question}`);
+  const deadline = Date.now() + 20 * 60_000;
+  while (Date.now() < deadline) {
+    const response = await _routerCall("GET", "/v1/access-requests");
+    const requests = Array.isArray(response?.requests) ? response.requests : [];
+    const request = requests.find(
+      (candidate: any) =>
+        candidate?.kind === "clarification" && candidate?.target === question,
+    );
+    if (request?.status === "approved") {
+      const answer = typeof request.decision_reason === "string"
+        ? request.decision_reason.trim()
+        : "";
+      appendCollaborationEvent({
+        event: "clarification_resolved",
+        question,
+        outcome: "approved",
+        answer_digest: evidenceDigest(answer),
+      });
+      return answer || "(approved without a written answer)";
+    }
+    if (request?.status === "denied") {
+      appendCollaborationEvent({
+        event: "clarification_resolved",
+        question,
+        outcome: "denied",
+      });
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  log.warn(`Clarification remained pending for 20 minutes: ${question}`);
+  return null;
+}
+
 // delegateToNativeAgent — extracted to core/agt-task-delegate.ts in S15.f.2.
 
 /**
@@ -1098,12 +1157,33 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // native agent makes).
           const telemetryCursor = await fetchTelemetryCursor(log);
           let llmResponse: string;
+          const taskText =
+            typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent);
           try {
             llmResponse = await delegateToNativeAgent(
-              typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent),
+              taskText,
               fromName,
               log,
             );
+            llmResponse = extractNativeDeliverable(llmResponse);
+            const question = taskText.includes("kars_ask_human")
+              ? clarificationQuestion(llmResponse)
+              : null;
+            if (question) {
+              const answer = await waitForHumanClarification(
+                question,
+                "The mission explicitly required a human answer before completion.",
+                log,
+              );
+              if (answer) {
+                llmResponse = await delegateToNativeAgent(
+                  `${taskText}\n\nHuman clarification received:\nQuestion: ${question}\nAnswer: ${answer}\n\nContinue the original task now. Do not ask the question again.`,
+                  fromName,
+                  log,
+                );
+                llmResponse = extractNativeDeliverable(llmResponse);
+              }
+            }
           } finally {
             cancelHeartbeat();
           }
