@@ -55,6 +55,9 @@ pub struct AccessRequestEntry {
     pub decision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decided_at_unix: Option<u64>,
+    /// Human-supplied answer/justification attached to the decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
 }
 
 /// In-process, thread-safe, bounded, deduplicated request queue.
@@ -135,6 +138,7 @@ impl AccessRequestBuffer {
             last_seen_unix: now,
             decision: None,
             decided_at_unix: None,
+            decision_reason: None,
         });
         true
     }
@@ -144,7 +148,13 @@ impl AccessRequestBuffer {
     /// entry was updated. For an `egress` decision the target may be a host that
     /// was only ever auto-recorded in the blocked buffer (never POSTed here); in
     /// that case we synthesise an entry so the agent's poll still reflects it.
-    pub fn set_decision(&self, kind: &str, target: &str, verdict: &str) -> bool {
+    pub fn set_decision(
+        &self,
+        kind: &str,
+        target: &str,
+        verdict: &str,
+        reason: Option<&str>,
+    ) -> bool {
         let kind = kind.trim();
         let target = target.trim();
         let verdict = verdict.trim();
@@ -158,6 +168,10 @@ impl AccessRequestBuffer {
         if let Some(e) = q.iter_mut().find(|e| e.kind == kind && e.target == target) {
             e.decision = Some(verdict.to_string());
             e.decided_at_unix = Some(now);
+            e.decision_reason = reason
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.chars().take(512).collect());
             return true;
         }
         // No matching request (e.g. an auto-surfaced egress block) — synthesise
@@ -176,6 +190,10 @@ impl AccessRequestBuffer {
             last_seen_unix: now,
             decision: Some(verdict.to_string()),
             decided_at_unix: Some(now),
+            decision_reason: reason
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.chars().take(512).collect()),
         });
         true
     }
@@ -263,7 +281,7 @@ mod tests {
     fn decision_updates_matching_entry() {
         let b = AccessRequestBuffer::new(8);
         b.record("egress", "pypi.org", "install dep", None, Some(443));
-        assert!(b.set_decision("egress", "pypi.org", "approved"));
+        assert!(b.set_decision("egress", "pypi.org", "approved", None));
         let snap = b.snapshot(0);
         assert_eq!(snap[0].decision.as_deref(), Some("approved"));
         assert!(snap[0].decided_at_unix.is_some());
@@ -273,10 +291,33 @@ mod tests {
     fn decision_synthesises_entry_for_unseen_egress() {
         let b = AccessRequestBuffer::new(8);
         // Never POSTed here (auto-surfaced from the blocked buffer instead).
-        assert!(b.set_decision("egress", "npmjs.org", "approved"));
+        assert!(b.set_decision("egress", "npmjs.org", "approved", None));
         let snap = b.snapshot(0);
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].target, "npmjs.org");
         assert_eq!(snap[0].decision.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn clarification_decision_carries_human_answer() {
+        let b = AccessRequestBuffer::new(8);
+        b.record(
+            "clarification",
+            "Which region should the memo cover?",
+            "A region is required",
+            None,
+            None,
+        );
+        assert!(b.set_decision(
+            "clarification",
+            "Which region should the memo cover?",
+            "approved",
+            Some("Cover Germany and Austria."),
+        ));
+        let snap = b.snapshot(0);
+        assert_eq!(
+            snap[0].decision_reason.as_deref(),
+            Some("Cover Germany and Austria.")
+        );
     }
 }

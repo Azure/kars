@@ -30,7 +30,8 @@ use crate::errors;
 /// Request body. `kind` + `target` identify what's needed; `reason` justifies it.
 #[derive(Debug, Deserialize)]
 pub struct AccessRequestBody {
-    /// `egress` | `tool` | `skill` | `mcp` | `command` | `permission` | `tier`.
+    /// `egress` | `tool` | `skill` | `mcp` | `command` | `permission` |
+    /// `clarification` | `tier`.
     pub kind: String,
     /// The host / tool / skill / command / MCP id being requested. For `tier`,
     /// may be empty.
@@ -64,6 +65,7 @@ const ALLOWED_KINDS: &[&str] = &[
     "mcp",
     "command",
     "permission",
+    "clarification",
     "tier",
 ];
 
@@ -78,7 +80,7 @@ async fn access_request_handler(
     if !ALLOWED_KINDS.contains(&kind.as_str()) {
         return errors::flat(
             StatusCode::BAD_REQUEST,
-            "Unknown 'kind' — expected one of: egress, tool, skill, mcp, command, permission, tier",
+            "Unknown 'kind' — expected one of: egress, tool, skill, mcp, command, permission, clarification, tier",
         )
         .into_response();
     }
@@ -139,6 +141,8 @@ struct AgentRequestView {
     reason: String,
     /// `pending` | `approved` | `denied`.
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_reason: Option<String>,
 }
 
 async fn access_request_status(State(state): State<AppState>) -> impl IntoResponse {
@@ -151,6 +155,7 @@ async fn access_request_status(State(state): State<AppState>) -> impl IntoRespon
             kind: e.kind,
             target: e.target,
             reason: e.reason,
+            decision_reason: e.decision_reason,
         })
         .collect();
     Json(serde_json::json!({ "requests": items }))
@@ -174,6 +179,7 @@ mod tests {
             "mcp",
             "command",
             "permission",
+            "clarification",
             "tier",
         ] {
             assert!(ALLOWED_KINDS.contains(&k));

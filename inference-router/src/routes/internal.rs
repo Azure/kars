@@ -52,6 +52,8 @@ struct AccessRequestDecisionBody {
     target: String,
     /// `approved` | `denied`.
     verdict: String,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// `POST /internal/access-requests/decision` — admin-gated. Records a human's
@@ -64,7 +66,12 @@ async fn access_request_decision(
 ) -> impl IntoResponse {
     let updated = state
         .access_requests
-        .set_decision(&body.kind, &body.target, &body.verdict);
+        .set_decision(
+            &body.kind,
+            &body.target,
+            &body.verdict,
+            body.reason.as_deref(),
+        );
     Json(serde_json::json!({ "updated": updated }))
 }
 

@@ -248,6 +248,113 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   // Normal interactive sandboxes use "default" and retain full spawn capability.
 
   api.registerTool({
+    name: "kars_ask_human",
+    label: "Ask Human",
+    description: "Pause the current governed run and ask the owning human one clarification question. The question appears on the mission/team page and in the Bridge inbox. Waits for the approved answer and returns it to this SAME run, so continue the task after it resolves. Use this instead of guessing or ending with a NEEDS_CLARIFICATION sentinel.",
+    parameters: {
+      type: "object",
+      properties: {
+        question: {
+          type: "string",
+          description: "One concise question whose answer is required to continue.",
+        },
+        context: {
+          type: "string",
+          description: "Optional short explanation of why the answer is needed.",
+        },
+      },
+      required: ["question"],
+    },
+    async execute(_id: string, params: Record<string, unknown>) {
+      const question = String(params.question ?? "").trim().slice(0, 280);
+      const context = String(params.context ?? "").trim().slice(0, 512);
+      if (!question) {
+        return { content: [{ type: "text", text: safeJson({ error: "question is required" }) }] };
+      }
+      try {
+        await routerCall("POST", "/v1/access-request", {
+          kind: "clarification",
+          target: question,
+          reason: context,
+        });
+        appendCollaborationEvent({
+          event: "clarification_requested",
+          question,
+          context: context || null,
+        });
+        const deadline = Date.now() + 20 * 60_000;
+        while (Date.now() < deadline) {
+          const response = await routerCall("GET", "/v1/access-requests");
+          const requests = Array.isArray(response?.requests) ? response.requests : [];
+          const request = requests.find(
+            (candidate: any) =>
+              candidate?.kind === "clarification" && candidate?.target === question,
+          );
+          if (request?.status === "approved") {
+            const answer = typeof request.decision_reason === "string"
+              ? request.decision_reason.trim()
+              : "";
+            appendCollaborationEvent({
+              event: "clarification_resolved",
+              question,
+              outcome: "approved",
+              answer_digest: evidenceDigest(answer),
+            });
+            return {
+              content: [{
+                type: "text",
+                text: safeJson({
+                  status: "answered",
+                  question,
+                  answer: answer || "(approved without a written answer)",
+                }),
+              }],
+            };
+          }
+          if (request?.status === "denied") {
+            appendCollaborationEvent({
+              event: "clarification_resolved",
+              question,
+              outcome: "denied",
+            });
+            return {
+              content: [{
+                type: "text",
+                text: safeJson({
+                  status: "denied",
+                  question,
+                  reason: request.decision_reason || null,
+                }),
+              }],
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+        }
+        return {
+          content: [{
+            type: "text",
+            text: safeJson({
+              status: "pending",
+              question,
+              note: "No decision arrived within 20 minutes. The request remains in Bridge.",
+            }),
+          }],
+        };
+      } catch (error: any) {
+        return {
+          content: [{
+            type: "text",
+            text: safeJson({
+              error: "clarification request failed",
+              detail: error?.message || String(error),
+            }),
+          }],
+        };
+      }
+    },
+  });
+
+  api.registerTool({
     name: "kars_spawn",
     label: "Spawn Sub-Agent",
     description: "Spawn a secure isolated sub-agent on AKS with E2E encrypted mesh communication (Signal Protocol). The sub-agent runs in its own container with a SEPARATE filesystem — it CANNOT see your files. Exchange data via kars_mesh_send (include content in the message body). Sub-agents can also message EACH OTHER directly via mesh — you can instruct one sub-agent to forward its results to another sub-agent by name (e.g. 'send your analysis to the writer agent'). You don't need to relay everything yourself. ALWAYS pass a `role` describing the sub-agent's persona (e.g. 'data analyst', 'graphic designer', 'technical writer') — the platform builds a Peer roster from this and prepends it to every mesh task so siblings can resolve role references to canonical names without guessing.",

@@ -186,6 +186,13 @@ describe("plugin.register() — tool definitions", () => {
     expect(tool.parameters.required).toContain("name");
   });
 
+  it("registers kars_ask_human as a single-question pause/resume tool", () => {
+    const tool = tools.get("kars_ask_human")!;
+    expect(tool).toBeDefined();
+    expect(tool.parameters.required).toContain("question");
+    expect(tool.description).toContain("SAME run");
+  });
+
   it("registers kars_spawn_status tool", () => {
     expect(tools.has("kars_spawn_status")).toBe(true);
     const tool = tools.get("kars_spawn_status")!;

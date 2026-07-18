@@ -1406,6 +1406,7 @@ async fn ensure_capability_approval(
             },
         ),
         "tool" => ("toolCall".to_string(), format!("Grant the tool '{target}'")),
+        "clarification" => ("clarification".to_string(), target.to_string()),
         other => (
             "custom".to_string(),
             format!("Grant {other} access: '{target}'"),
@@ -1583,6 +1584,11 @@ async fn push_decisions_to_router(
             _ => continue, // still pending
         };
         let target = anns.get(REQ_TARGET_ANN).cloned().unwrap_or_default();
+        let reason = appr
+            .spec
+            .decision
+            .as_ref()
+            .and_then(|decision| decision.reason.clone());
         let url = format!(
             "{}/internal/access-requests/decision",
             base.trim_end_matches('/')
@@ -1590,7 +1596,12 @@ async fn push_decisions_to_router(
         let ok = http
             .post(&url)
             .bearer_auth(token)
-            .json(&json!({ "kind": kind, "target": target, "verdict": verdict }))
+            .json(&json!({
+                "kind": kind,
+                "target": target,
+                "verdict": verdict,
+                "reason": reason,
+            }))
             .send()
             .await
             .map(|r| r.status().is_success())
