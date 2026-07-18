@@ -1248,6 +1248,10 @@ fn team_memory_name(team: &str) -> String {
     format!("{team}-memory")
 }
 
+fn team_memory_scope(team: &str) -> String {
+    format!("team/{team}")
+}
+
 /// Ensure the team's shared Foundry memory exists (team-mode): ONE `KarsMemory`
 /// per team, **owned by the team** (so it lives for the team's lifecycle and is
 /// garbage-collected when the team is deleted), with a **shared scope**
@@ -1277,8 +1281,10 @@ async fn ensure_team_memory(client: &Client, ns: &str, team: &KarsTeam) {
             // A stable back-reference; the actual mount is driven per run by each
             // sandbox's memoryRef, so many runs share this one store.
             "sandboxRef": { "name": format!("{team_name}-principal") },
-            // SHARED scope: every run reads/writes team:<name>, not agent:<sandbox>.
-            "scope": format!("team:{team_name}"),
+            // SHARED scope: every run reads/writes team/<name>, not an
+            // agent-specific partition. `/` is accepted by Foundry Memory Store;
+            // `:` is deliberately rejected by the KarsMemory schema.
+            "scope": team_memory_scope(&team_name),
             // Delete the store's data when the team (and thus this CR) is deleted.
             "deleteOnSandboxDelete": true,
             "displayName": format!("{team_name} team knowledge-commons"),
@@ -2632,6 +2638,7 @@ mod tests {
     #[test]
     fn team_memory_name_is_stable() {
         assert_eq!(team_memory_name("repo-health"), "repo-health-memory");
+        assert_eq!(team_memory_scope("repo-health"), "team/repo-health");
     }
 
     #[test]
