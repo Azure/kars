@@ -411,12 +411,19 @@ let foundryProject: FoundryProjectInfo | null = null;
 let foundryInitialized = false;
 
 export function clarificationQuestion(response: string): string | null {
-  const lines = response
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const question = lines.at(-1) ?? "";
-  return question.endsWith("?") && question.length <= 280 ? question : null;
+  const questionEnd = response.lastIndexOf("?");
+  if (questionEnd < 0) return null;
+
+  const prefix = response.slice(0, questionEnd);
+  let questionStart = 0;
+  for (const boundary of prefix.matchAll(/\n|[.!?]\s+|:\s+|:\*{1,2}\s*/g)) {
+    questionStart = (boundary.index ?? 0) + boundary[0].length;
+  }
+  const question = response
+    .slice(questionStart, questionEnd + 1)
+    .trim()
+    .replace(/^[\s>*#_-]+/, "");
+  return question.length >= 3 && question.length <= 280 ? question : null;
 }
 
 async function waitForHumanClarification(

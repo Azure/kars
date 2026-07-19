@@ -969,6 +969,9 @@ describe("DEFAULT_CONFIG values", () => {
       const mod = await import("./index.js");
       expect(mod.clarificationQuestion("Context\nWhich country should this target?"))
         .toBe("Which country should this target?");
+      expect(mod.clarificationQuestion(
+        "**Question for you:** Which country will the pilot serve? Please let me know so I can tailor the recommendation.",
+      )).toBe("Which country will the pilot serve?");
       expect(mod.clarificationQuestion("# Report\nThe recommendation is complete."))
         .toBeNull();
       delete process.env.AGT_SKIP_INIT;
