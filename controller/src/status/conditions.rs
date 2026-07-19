@@ -137,6 +137,7 @@ pub mod reason {
     pub const FAILED: &str = "Failed";
     pub const SPEC_INVALID: &str = "SpecInvalid";
     pub const DEPENDENCY_MISSING: &str = "DependencyMissing";
+    pub const DEPLOYMENT_FAILED: &str = "DeploymentFailed";
     pub const TIMED_OUT: &str = "TimedOut";
     /// Phase 2 S8 — `OverlayMode`: operator's upstream `Sandbox` CR
     /// owns the Pod; kars provides the governance overlay only.

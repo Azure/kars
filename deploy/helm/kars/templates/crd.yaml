@@ -732,7 +732,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: ["Pending", "Creating", "Running", "Failed", "Terminating", "Degraded"]
+                  enum: ["Pending", "Creating", "Running", "Suspended", "Overlay", "Failed", "Terminating", "Degraded"]
                 conditions:
                   type: array
                   items:

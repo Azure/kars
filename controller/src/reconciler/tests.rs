@@ -15,6 +15,8 @@ use super::*;
 use crate::crd::SandboxConfig;
 use crate::kars_task::GitWriteConfig;
 use crate::mcp_server::LocalObjectRef;
+use k8s_openapi::api::apps::v1::DeploymentCondition;
+use k8s_openapi::api::apps::v1::DeploymentStatus;
 
 #[test]
 fn standard_isolation_uses_runtime_default_seccomp() {
@@ -155,6 +157,85 @@ fn isolation_scheduling_confidential() {
     let (runtime, pool) = isolation_scheduling("confidential");
     assert_eq!(runtime, Some("kata-vm-isolation"));
     assert_eq!(pool, "sandbox-kata");
+}
+
+fn deployment_with_status(
+    generation: i64,
+    observed_generation: i64,
+    desired: i32,
+    ready: i32,
+) -> Deployment {
+    Deployment {
+        metadata: ObjectMeta {
+            generation: Some(generation),
+            ..Default::default()
+        },
+        status: Some(DeploymentStatus {
+            available_replicas: Some(ready),
+            observed_generation: Some(observed_generation),
+            ready_replicas: Some(ready),
+            replicas: Some(desired),
+            unavailable_replicas: Some(desired - ready),
+            updated_replicas: Some(ready),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn deployment_is_ready_when_rollout_is_complete() {
+    let deployment = deployment_with_status(3, 3, 1, 1);
+    assert!(deployment_is_ready(&deployment, 1));
+}
+
+#[test]
+fn deployment_is_not_ready_when_pod_is_unschedulable() {
+    let deployment = deployment_with_status(3, 3, 1, 0);
+    assert!(!deployment_is_ready(&deployment, 1));
+}
+
+#[test]
+fn deployment_is_not_ready_until_controller_observes_generation() {
+    let deployment = deployment_with_status(4, 3, 1, 1);
+    assert!(!deployment_is_ready(&deployment, 1));
+}
+
+#[test]
+fn scaled_down_deployment_is_ready_after_rollout() {
+    let deployment = deployment_with_status(4, 4, 0, 0);
+    assert!(deployment_is_ready(&deployment, 0));
+}
+
+#[test]
+fn deployment_progress_deadline_is_terminal_failure() {
+    let mut deployment = deployment_with_status(4, 4, 1, 0);
+    deployment.status.as_mut().unwrap().conditions = Some(vec![DeploymentCondition {
+        last_transition_time: None,
+        last_update_time: None,
+        message: Some("ReplicaSet did not progress".into()),
+        reason: Some("ProgressDeadlineExceeded".into()),
+        status: "False".into(),
+        type_: "Progressing".into(),
+    }]);
+    assert_eq!(
+        deployment_failure_message(&deployment).as_deref(),
+        Some("ProgressDeadlineExceeded: ReplicaSet did not progress")
+    );
+}
+
+#[test]
+fn stale_deployment_failure_is_ignored_until_generation_is_observed() {
+    let mut deployment = deployment_with_status(5, 4, 1, 0);
+    deployment.status.as_mut().unwrap().conditions = Some(vec![DeploymentCondition {
+        last_transition_time: None,
+        last_update_time: None,
+        message: Some("old rollout failed".into()),
+        reason: Some("ProgressDeadlineExceeded".into()),
+        status: "False".into(),
+        type_: "Progressing".into(),
+    }]);
+    assert!(deployment_failure_message(&deployment).is_none());
 }
 
 #[test]

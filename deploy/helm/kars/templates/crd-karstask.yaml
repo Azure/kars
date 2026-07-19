@@ -441,6 +441,7 @@ spec:
                   - `Idle` — governed but not launched (the default).
                   - `Launching` — a `KarsSandbox` has been materialized; awaiting it.
                   - `Running` — the sandbox reports Running.
+                  - `Suspended` — the sandbox completed an operator-requested scale-to-zero.
                   - `Degraded` — the sandbox degraded (e.g. no inference endpoint).
                 nullable: true
                 type: string
@@ -481,4 +482,3 @@ spec:
     storage: true
     subresources:
       status: {}
-

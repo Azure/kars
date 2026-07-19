@@ -96,8 +96,16 @@ fn default_model() -> (String, String) {
     let deployment = std::env::var("KARS_TASK_DEFAULT_MODEL")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("AZURE_OPENAI_DEPLOYMENT").ok().filter(|s| !s.is_empty()))
-        .or_else(|| std::env::var("DEFAULT_MODEL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("AZURE_OPENAI_DEPLOYMENT")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("DEFAULT_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
     let provider = std::env::var("KARS_TASK_DEFAULT_PROVIDER")
         .ok()
@@ -283,14 +291,17 @@ pub async fn materialize(
     // Backward compatibility for tasks authored before spec.blueprint.gitWrite.
     if blueprint.git_write.is_none()
         && let Some(repos) = task
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get("kars.azure.com/git-write-repos"))
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("kars.azure.com/git-write-repos"))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
     {
-        attribution.insert("kars.azure.com/git-write-repos".to_string(), repos.to_string());
+        attribution.insert(
+            "kars.azure.com/git-write-repos".to_string(),
+            repos.to_string(),
+        );
     }
     apply_dynamic(
         client,
@@ -409,10 +420,13 @@ fn map_sandbox_phase(sb_phase: &str) -> (String, String) {
             "Running".to_string(),
             "The governed agent is running in its sandbox.".to_string(),
         ),
+        "Suspended" => (
+            "Suspended".to_string(),
+            "The sandbox is suspended; no governed agent pod is running.".to_string(),
+        ),
         "Failed" | "Degraded" => (
             "Degraded".to_string(),
-            "Sandbox degraded. On a local cluster this is expected at the inference \
-             step — a real AI Foundry endpoint is required for the agent to run."
+            "Sandbox degraded; inspect its Ready and Degraded conditions for the cause."
                 .to_string(),
         ),
         "" | "Pending" | "Creating" => (
@@ -591,15 +605,23 @@ mod tests {
     }
 
     #[test]
-    fn degraded_phase_explains_inference_caveat() {
+    fn degraded_phase_uses_cause_neutral_detail() {
         let (phase, detail) = map_sandbox_phase("Degraded");
         assert_eq!(phase, "Degraded");
-        assert!(detail.contains("Foundry"));
+        assert!(detail.contains("inspect"));
+        assert!(!detail.contains("Foundry"));
     }
 
     #[test]
     fn running_phase_maps_through() {
         let (phase, _) = map_sandbox_phase("Running");
         assert_eq!(phase, "Running");
+    }
+
+    #[test]
+    fn suspended_phase_maps_honestly() {
+        let (phase, detail) = map_sandbox_phase("Suspended");
+        assert_eq!(phase, "Suspended");
+        assert!(detail.contains("no governed agent pod"));
     }
 }

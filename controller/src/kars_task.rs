@@ -584,7 +584,12 @@ pub fn effective_tool_policy(spec: &KarsTaskSpec) -> Option<&str> {
         .as_ref()
         .and_then(|b| b.tool_policy.as_deref())
         .filter(|s| !s.is_empty())
-        .or_else(|| spec.envelope.tool_policy_ref.as_ref().map(|r| r.name.as_str()))
+        .or_else(|| {
+            spec.envelope
+                .tool_policy_ref
+                .as_ref()
+                .map(|r| r.name.as_str())
+        })
 }
 
 /// The *effective* egress allow-list a task runs under: the blueprint's egress
@@ -602,9 +607,9 @@ pub fn effective_egress(spec: &KarsTaskSpec) -> &[TaskEgress] {
 /// A parent entry with no port (any port) covers a child entry on the same
 /// host with any port; otherwise host + port must match exactly.
 fn egress_covers(parent: &[TaskEgress], child: &TaskEgress) -> bool {
-    parent.iter().any(|p| {
-        p.host == child.host && (p.port.is_none() || p.port == child.port)
-    })
+    parent
+        .iter()
+        .any(|p| p.host == child.host && (p.port.is_none() || p.port == child.port))
 }
 
 /// Full capability-attenuation check over the whole task spec: the numeric +
@@ -692,6 +697,7 @@ pub struct KarsTaskStatus {
     /// - `Idle` — governed but not launched (the default).
     /// - `Launching` — a `KarsSandbox` has been materialized; awaiting it.
     /// - `Running` — the sandbox reports Running.
+    /// - `Suspended` — the sandbox completed an operator-requested scale-to-zero.
     /// - `Degraded` — the sandbox degraded (e.g. no inference endpoint).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_phase: Option<String>,
@@ -1017,7 +1023,10 @@ mod tests {
     }
 
     fn eg(host: &str, port: Option<u16>) -> TaskEgress {
-        TaskEgress { host: host.into(), port }
+        TaskEgress {
+            host: host.into(),
+            port,
+        }
     }
 
     /// A child envelope that strictly attenuates `parent_envelope()` on every
@@ -1029,7 +1038,9 @@ mod tests {
                 tokens: Some(100_000),
                 usd_micros: Some(5_000_000),
             }),
-            tool_policy_ref: Some(LocalObjectRef { name: "strict-tools".into() }),
+            tool_policy_ref: Some(LocalObjectRef {
+                name: "strict-tools".into(),
+            }),
             egress_allowlist_ref: None,
             delegation_depth: 2,
             authority_ceiling: 4,
@@ -1082,7 +1093,10 @@ mod tests {
             vec![eg("api.github.com", Some(443))],
         );
         let v = spec_attenuation_violations(&bad, &parent);
-        assert!(v.iter().any(|x| matches!(x, EnvelopeViolation::EgressNotSubset { .. })));
+        assert!(
+            v.iter()
+                .any(|x| matches!(x, EnvelopeViolation::EgressNotSubset { .. }))
+        );
     }
 
     #[test]
@@ -1093,7 +1107,10 @@ mod tests {
         let v = spec_attenuation_violations(&bad, &parent);
         assert!(v.iter().any(|x| matches!(
             x,
-            EnvelopeViolation::PolicyMismatch { axis: PolicyAxis::ToolPolicy, .. }
+            EnvelopeViolation::PolicyMismatch {
+                axis: PolicyAxis::ToolPolicy,
+                ..
+            }
         )));
     }
 }

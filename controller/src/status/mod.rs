@@ -18,6 +18,326 @@ use crate::crd::KarsSandbox;
 use kube::ResourceExt;
 use serde_json::{Value, json};
 
+/// Build the status patch for a sandbox whose resources exist but whose
+/// Deployment has not completed its rollout.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn build_creating_status_patch(
+    sandbox: &KarsSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+) -> Value {
+    build_creating_status_patch_with_extras(sandbox, sandbox_ns, runtime_kind, &[])
+}
+
+pub fn build_creating_status_patch_with_extras(
+    sandbox: &KarsSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+    extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
+) -> Value {
+    let name = sandbox.name_any();
+    let generation = sandbox.metadata.generation;
+    let prior_conditions = sandbox
+        .status
+        .as_ref()
+        .map(|s| s.conditions.as_slice())
+        .unwrap_or(&[]);
+    let ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_READY),
+        conditions::TYPE_READY,
+        conditions::status::FALSE,
+        conditions::reason::CREATING,
+        "sandbox Deployment is not ready",
+        generation,
+    );
+    let progressing = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
+        conditions::TYPE_PROGRESSING,
+        conditions::status::TRUE,
+        conditions::reason::CREATING,
+        "waiting for sandbox Deployment rollout",
+        generation,
+    );
+    let runtime_ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_RUNTIME_READY),
+        conditions::TYPE_RUNTIME_READY,
+        conditions::status::TRUE,
+        conditions::reason::RECONCILED,
+        &format!("runtime adapter `{runtime_kind}` reconciled"),
+        generation,
+    );
+
+    let mut conditions_vec = vec![ready, progressing, runtime_ready];
+    for extra in extra_conditions {
+        if let Some(slot) = conditions_vec.iter_mut().find(|c| c.type_ == extra.type_) {
+            *slot = extra.clone();
+        } else {
+            conditions_vec.push(extra.clone());
+        }
+    }
+
+    let mut status_obj = json!({
+        "status": {
+            "phase": phase::PHASE_SANDBOX_CREATING,
+            "namespace": sandbox_ns,
+            "sandboxPod": format!("{name}-*"),
+            "inferenceEndpoint": "https://kars-inference-router.kars-system.svc.cluster.local:8443",
+            "observedGeneration": generation,
+            "runtimeKind": runtime_kind,
+            "conditions": conditions_vec,
+        }
+    });
+    if let Some(existing) = sandbox.status.as_ref()
+        && let Some(agent_id) = existing.foundry_agent_id.as_ref()
+    {
+        status_obj["status"]["foundryAgentId"] = json!(agent_id);
+    }
+    status_obj
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn creating_status_matches(
+    sandbox: &KarsSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+) -> bool {
+    creating_status_matches_with_extras(sandbox, sandbox_ns, runtime_kind, &[])
+}
+
+pub fn creating_status_matches_with_extras(
+    sandbox: &KarsSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+    extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
+) -> bool {
+    let Some(status) = sandbox.status.as_ref() else {
+        return false;
+    };
+    if status.phase.as_deref() != Some(phase::PHASE_SANDBOX_CREATING)
+        || status.namespace.as_deref() != Some(sandbox_ns)
+        || status.observed_generation != sandbox.metadata.generation
+        || status.runtime_kind.as_deref() != Some(runtime_kind)
+    {
+        return false;
+    }
+    let condition_matches = |type_: &str, expected_status: &str| {
+        status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == type_)
+            .is_some_and(|c| c.status == expected_status)
+    };
+    if !condition_matches(conditions::TYPE_READY, conditions::status::FALSE)
+        || !condition_matches(conditions::TYPE_PROGRESSING, conditions::status::TRUE)
+        || !condition_matches(conditions::TYPE_RUNTIME_READY, conditions::status::TRUE)
+    {
+        return false;
+    }
+    extra_conditions.iter().all(|extra| {
+        status
+            .conditions
+            .iter()
+            .any(|c| c.type_ == extra.type_ && c.status == extra.status && c.reason == extra.reason)
+    })
+}
+
+pub fn build_suspended_status_patch_with_extras(
+    sandbox: &KarsSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+    extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
+) -> Value {
+    let name = sandbox.name_any();
+    let generation = sandbox.metadata.generation;
+    let prior_conditions = sandbox
+        .status
+        .as_ref()
+        .map(|s| s.conditions.as_slice())
+        .unwrap_or(&[]);
+    let ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_READY),
+        conditions::TYPE_READY,
+        conditions::status::FALSE,
+        conditions::reason::SUSPENDED_BY_SPEC,
+        "sandbox is suspended; no agent pod is serving",
+        generation,
+    );
+    let progressing = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
+        conditions::TYPE_PROGRESSING,
+        conditions::status::FALSE,
+        conditions::reason::SUSPENDED_BY_SPEC,
+        "sandbox Deployment completed scale-to-zero",
+        generation,
+    );
+    let runtime_ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_RUNTIME_READY),
+        conditions::TYPE_RUNTIME_READY,
+        conditions::status::TRUE,
+        conditions::reason::RECONCILED,
+        &format!("runtime adapter `{runtime_kind}` reconciled"),
+        generation,
+    );
+    let mut conditions_vec = vec![ready, progressing, runtime_ready];
+    for extra in extra_conditions {
+        if let Some(slot) = conditions_vec.iter_mut().find(|c| c.type_ == extra.type_) {
+            *slot = extra.clone();
+        } else {
+            conditions_vec.push(extra.clone());
+        }
+    }
+    let mut status_obj = json!({
+        "status": {
+            "phase": phase::PHASE_SANDBOX_SUSPENDED,
+            "namespace": sandbox_ns,
+            "sandboxPod": format!("{name}-*"),
+            "inferenceEndpoint": "https://kars-inference-router.kars-system.svc.cluster.local:8443",
+            "observedGeneration": generation,
+            "runtimeKind": runtime_kind,
+            "conditions": conditions_vec,
+        }
+    });
+    if let Some(existing) = sandbox.status.as_ref()
+        && let Some(agent_id) = existing.foundry_agent_id.as_ref()
+    {
+        status_obj["status"]["foundryAgentId"] = json!(agent_id);
+    }
+    status_obj
+}
+
+pub fn suspended_status_matches_with_extras(
+    sandbox: &KarsSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+    extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
+) -> bool {
+    let Some(status) = sandbox.status.as_ref() else {
+        return false;
+    };
+    if status.phase.as_deref() != Some(phase::PHASE_SANDBOX_SUSPENDED)
+        || status.namespace.as_deref() != Some(sandbox_ns)
+        || status.observed_generation != sandbox.metadata.generation
+        || status.runtime_kind.as_deref() != Some(runtime_kind)
+    {
+        return false;
+    }
+    let condition_matches = |type_: &str, expected_status: &str| {
+        status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == type_)
+            .is_some_and(|c| c.status == expected_status)
+    };
+    condition_matches(conditions::TYPE_READY, conditions::status::FALSE)
+        && condition_matches(conditions::TYPE_PROGRESSING, conditions::status::FALSE)
+        && condition_matches(conditions::TYPE_RUNTIME_READY, conditions::status::TRUE)
+        && extra_conditions.iter().all(|extra| {
+            status.conditions.iter().any(|c| {
+                c.type_ == extra.type_ && c.status == extra.status && c.reason == extra.reason
+            })
+        })
+}
+
+pub fn build_deployment_failed_status_patch_with_extras(
+    sandbox: &KarsSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+    message: &str,
+    extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
+) -> Value {
+    let name = sandbox.name_any();
+    let generation = sandbox.metadata.generation;
+    let prior_conditions = sandbox
+        .status
+        .as_ref()
+        .map(|s| s.conditions.as_slice())
+        .unwrap_or(&[]);
+    let degraded = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_DEGRADED),
+        conditions::TYPE_DEGRADED,
+        conditions::status::TRUE,
+        conditions::reason::DEPLOYMENT_FAILED,
+        message,
+        generation,
+    );
+    let ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_READY),
+        conditions::TYPE_READY,
+        conditions::status::FALSE,
+        conditions::reason::DEPLOYMENT_FAILED,
+        message,
+        generation,
+    );
+    let progressing = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
+        conditions::TYPE_PROGRESSING,
+        conditions::status::FALSE,
+        conditions::reason::DEPLOYMENT_FAILED,
+        message,
+        generation,
+    );
+    let runtime_ready = conditions::preserve_transition_time(
+        conditions::find(prior_conditions, conditions::TYPE_RUNTIME_READY),
+        conditions::TYPE_RUNTIME_READY,
+        conditions::status::TRUE,
+        conditions::reason::RECONCILED,
+        &format!("runtime adapter `{runtime_kind}` reconciled"),
+        generation,
+    );
+    let mut conditions_vec = vec![degraded, ready, progressing, runtime_ready];
+    for extra in extra_conditions {
+        if let Some(slot) = conditions_vec.iter_mut().find(|c| c.type_ == extra.type_) {
+            *slot = extra.clone();
+        } else {
+            conditions_vec.push(extra.clone());
+        }
+    }
+    let mut status_obj = json!({
+        "status": {
+            "phase": phase::PHASE_DEGRADED,
+            "namespace": sandbox_ns,
+            "sandboxPod": format!("{name}-*"),
+            "inferenceEndpoint": "https://kars-inference-router.kars-system.svc.cluster.local:8443",
+            "observedGeneration": generation,
+            "runtimeKind": runtime_kind,
+            "conditions": conditions_vec,
+        }
+    });
+    if let Some(existing) = sandbox.status.as_ref()
+        && let Some(agent_id) = existing.foundry_agent_id.as_ref()
+    {
+        status_obj["status"]["foundryAgentId"] = json!(agent_id);
+    }
+    status_obj
+}
+
+pub fn deployment_failed_status_matches_with_extras(
+    sandbox: &KarsSandbox,
+    sandbox_ns: &str,
+    runtime_kind: &str,
+    message: &str,
+    extra_conditions: &[k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition],
+) -> bool {
+    let Some(status) = sandbox.status.as_ref() else {
+        return false;
+    };
+    status.phase.as_deref() == Some(phase::PHASE_DEGRADED)
+        && status.namespace.as_deref() == Some(sandbox_ns)
+        && status.observed_generation == sandbox.metadata.generation
+        && status.runtime_kind.as_deref() == Some(runtime_kind)
+        && status.conditions.iter().any(|c| {
+            c.type_ == conditions::TYPE_DEGRADED
+                && c.status == conditions::status::TRUE
+                && c.reason == conditions::reason::DEPLOYMENT_FAILED
+                && c.message == message
+        })
+        && extra_conditions.iter().all(|extra| {
+            status.conditions.iter().any(|c| {
+                c.type_ == extra.type_ && c.status == extra.status && c.reason == extra.reason
+            })
+        })
+}
+
 /// Build the `status` patch for a `KarsSandbox` that has reached the
 /// Running phase. Includes `observedGeneration` (per KEP-1623 status
 /// semantics) and a Ready=True condition whose `lastTransitionTime` is
@@ -644,6 +964,125 @@ mod tests {
                 .contains("OpenClaw"),
             "RuntimeReady message must reference the runtime kind"
         );
+    }
+
+    #[test]
+    fn creating_patch_emits_not_ready_and_progressing_conditions() {
+        let sb = new_sandbox(Some(7), None);
+        let patch = build_creating_status_patch(&sb, "kars-demo", "OpenClaw");
+        let st = &patch["status"];
+        assert_eq!(st["phase"], "Creating");
+        assert_eq!(st["observedGeneration"], 7);
+        let conds = st["conditions"].as_array().expect("conditions array");
+        let ready = conds.iter().find(|c| c["type"] == "Ready").expect("Ready");
+        assert_eq!(ready["status"], "False");
+        assert_eq!(ready["reason"], "Creating");
+        let progressing = conds
+            .iter()
+            .find(|c| c["type"] == "Progressing")
+            .expect("Progressing");
+        assert_eq!(progressing["status"], "True");
+        assert_eq!(progressing["reason"], "Creating");
+        let runtime_ready = conds
+            .iter()
+            .find(|c| c["type"] == "RuntimeReady")
+            .expect("RuntimeReady");
+        assert_eq!(runtime_ready["status"], "True");
+    }
+
+    #[test]
+    fn creating_status_matches_settled_creating_status() {
+        let prior = KarsSandboxStatus {
+            phase: Some("Creating".into()),
+            namespace: Some("kars-demo".into()),
+            observed_generation: Some(1),
+            runtime_kind: Some("OpenClaw".into()),
+            conditions: vec![
+                conditions::new_condition(
+                    conditions::TYPE_READY,
+                    conditions::status::FALSE,
+                    conditions::reason::CREATING,
+                    "waiting",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_PROGRESSING,
+                    conditions::status::TRUE,
+                    conditions::reason::CREATING,
+                    "waiting",
+                    Some(1),
+                ),
+                conditions::new_condition(
+                    conditions::TYPE_RUNTIME_READY,
+                    conditions::status::TRUE,
+                    conditions::reason::RECONCILED,
+                    "ok",
+                    Some(1),
+                ),
+            ],
+            ..Default::default()
+        };
+        let sb = new_sandbox(Some(1), Some(prior));
+        assert!(creating_status_matches(&sb, "kars-demo", "OpenClaw"));
+        assert!(!running_status_matches(&sb, "kars-demo", "OpenClaw"));
+    }
+
+    #[test]
+    fn suspended_patch_is_not_ready_or_progressing() {
+        let sb = new_sandbox(Some(7), None);
+        let suspended = conditions::new_condition(
+            conditions::TYPE_SUSPENDED,
+            conditions::status::TRUE,
+            conditions::reason::SUSPENDED_BY_SPEC,
+            "paused",
+            Some(7),
+        );
+        let patch =
+            build_suspended_status_patch_with_extras(&sb, "kars-demo", "OpenClaw", &[suspended]);
+        assert_eq!(patch["status"]["phase"], "Suspended");
+        let conds = patch["status"]["conditions"]
+            .as_array()
+            .expect("conditions array");
+        let ready = conds.iter().find(|c| c["type"] == "Ready").expect("Ready");
+        assert_eq!(ready["status"], "False");
+        let progressing = conds
+            .iter()
+            .find(|c| c["type"] == "Progressing")
+            .expect("Progressing");
+        assert_eq!(progressing["status"], "False");
+        let suspended = conds
+            .iter()
+            .find(|c| c["type"] == "Suspended")
+            .expect("Suspended");
+        assert_eq!(suspended["status"], "True");
+    }
+
+    #[test]
+    fn deployment_failure_match_requires_current_message() {
+        let patch = build_deployment_failed_status_patch_with_extras(
+            &new_sandbox(Some(1), None),
+            "kars-demo",
+            "OpenClaw",
+            "FailedCreate: quota exhausted",
+            &[],
+        );
+        let status: KarsSandboxStatus =
+            serde_json::from_value(patch["status"].clone()).expect("valid status");
+        let sb = new_sandbox(Some(1), Some(status));
+        assert!(deployment_failed_status_matches_with_extras(
+            &sb,
+            "kars-demo",
+            "OpenClaw",
+            "FailedCreate: quota exhausted",
+            &[],
+        ));
+        assert!(!deployment_failed_status_matches_with_extras(
+            &sb,
+            "kars-demo",
+            "OpenClaw",
+            "ProgressDeadlineExceeded: rollout stalled",
+            &[],
+        ));
     }
 
     #[test]

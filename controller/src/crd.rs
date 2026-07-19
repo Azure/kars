@@ -1154,7 +1154,7 @@ impl Default for GovernanceConfig {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsSandboxStatus {
-    /// Pending | Creating | Running | Failed | Terminating
+    /// Pending | Creating | Running | Suspended | Failed | Terminating
     pub phase: Option<String>,
     pub sandbox_pod: Option<String>,
     pub namespace: Option<String>,

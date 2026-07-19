@@ -80,6 +80,15 @@ pub const PHASE_READY: &str = "Ready";
 /// its sandbox and is waiting for that sandbox to report Running.
 pub const PHASE_SANDBOX_LAUNCHING: &str = "Launching";
 
+/// `.status.phase = "Creating"` — `KarsSandbox` resources have been
+/// reconciled, but the owned Deployment has not completed its rollout.
+/// `KarsTask` maps this phase to [`PHASE_SANDBOX_LAUNCHING`].
+pub const PHASE_SANDBOX_CREATING: &str = "Creating";
+
+/// `.status.phase = "Suspended"` — the sandbox Deployment has completed
+/// an operator-requested scale-to-zero and no agent pod is serving.
+pub const PHASE_SANDBOX_SUSPENDED: &str = "Suspended";
+
 /// `.status.phase = "Running"` — `KarsSandbox`-specific terminal
 /// phase indicating the sandbox Deployment is rolled out and the
 /// pod is serving. Distinct from [`PHASE_READY`] because

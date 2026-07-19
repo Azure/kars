@@ -1756,9 +1756,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 arr.push(v);
             }
         }
-        let _ = sandbox_api
+        sandbox_api
             .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
-            .await;
+            .await?;
         return Ok(Action::requeue(crate::backoff::requeue_secs_with_jitter(
             60,
         )));
@@ -1834,9 +1834,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "AgentIdentityProvisioningFailed",
                 reason,
             );
-            let _ = sandbox_api
+            sandbox_api
                 .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_obj))
-                .await;
+                .await?;
             return Ok(Action::requeue(crate::backoff::requeue_secs_with_jitter(
                 *retry_after_secs,
             )));
@@ -1850,6 +1850,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // (governance ConfigMap + mesh ingress NetworkPolicy) intentionally
     // still run — they form the *overlay* that kars layers on top
     // of the upstream Pod.
+    let suspended_by_spec = spec.suspended.unwrap_or(false);
+    let mut deployment_ready = overlay_mode;
+    let mut deployment_failure = None;
     'deployment_block: {
         if overlay_mode {
             break 'deployment_block;
@@ -1859,7 +1862,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // a graceful resume. We still walk the rest of this block so
         // image / env / volume drift is reflected on the suspended
         // Deployment (so resume picks up the latest spec).
-        let suspended_by_spec = spec.suspended.unwrap_or(false);
         let desired_replicas: i64 = if suspended_by_spec { 0 } else { 1 };
 
         // S10.A2: image now comes from the runtime plan (already
@@ -3765,13 +3767,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             }
         }))?;
-        deploy_api
+        let applied_deployment = deploy_api
             .patch(
                 &name,
                 &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
                 &Patch::Apply(deployment),
             )
             .await?;
+        deployment_ready = deployment_is_ready(&applied_deployment, desired_replicas);
+        deployment_failure = deployment_failure_message(&applied_deployment);
     } // end 'deployment_block
 
     // ── Step 4b: Azure Services RBAC annotations ─────────────────────────
@@ -4128,7 +4132,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // prior reason=Active and drop the condition from extras,
         // which causes the next status patch to omit it — silently
         // erasing the operator's view of "this CR was un-suspended".
-        let suspended_by_spec = spec.suspended.unwrap_or(false);
         let prior_conditions_for_susp = sandbox
             .status
             .as_ref()
@@ -4162,20 +4165,69 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             ));
         }
 
-        if !crate::status::running_status_matches_with_extras(
-            &sandbox,
-            &sandbox_ns,
-            runtime_kind_str,
-            &extras,
-        ) {
-            let sandbox_api: Api<KarsSandbox> =
-                Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-            let status_obj = crate::status::build_running_status_patch_with_extras(
+        let status_matches = if deployment_failure.is_some() {
+            crate::status::deployment_failed_status_matches_with_extras(
+                &sandbox,
+                &sandbox_ns,
+                runtime_kind_str,
+                deployment_failure.as_deref().expect("checked above"),
+                &extras,
+            )
+        } else if suspended_by_spec && deployment_ready {
+            crate::status::suspended_status_matches_with_extras(
                 &sandbox,
                 &sandbox_ns,
                 runtime_kind_str,
                 &extras,
-            );
+            )
+        } else if deployment_ready {
+            crate::status::running_status_matches_with_extras(
+                &sandbox,
+                &sandbox_ns,
+                runtime_kind_str,
+                &extras,
+            )
+        } else {
+            crate::status::creating_status_matches_with_extras(
+                &sandbox,
+                &sandbox_ns,
+                runtime_kind_str,
+                &extras,
+            )
+        };
+        if !status_matches {
+            let sandbox_api: Api<KarsSandbox> =
+                Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+            let status_obj = if let Some(message) = deployment_failure.as_deref() {
+                crate::status::build_deployment_failed_status_patch_with_extras(
+                    &sandbox,
+                    &sandbox_ns,
+                    runtime_kind_str,
+                    message,
+                    &extras,
+                )
+            } else if suspended_by_spec && deployment_ready {
+                crate::status::build_suspended_status_patch_with_extras(
+                    &sandbox,
+                    &sandbox_ns,
+                    runtime_kind_str,
+                    &extras,
+                )
+            } else if deployment_ready {
+                crate::status::build_running_status_patch_with_extras(
+                    &sandbox,
+                    &sandbox_ns,
+                    runtime_kind_str,
+                    &extras,
+                )
+            } else {
+                crate::status::build_creating_status_patch_with_extras(
+                    &sandbox,
+                    &sandbox_ns,
+                    runtime_kind_str,
+                    &extras,
+                )
+            };
             // Log failures instead of swallowing them. Silent failures
             // here cause `kubectl get karssandbox` to show empty
             // `.status` despite a fully-functional pod — confused
@@ -4190,9 +4242,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     sandbox = %name,
                     namespace = %sandbox.namespace().unwrap_or_default(),
                     runtime_kind = %runtime_kind_str,
+                    deployment_ready,
                     error = %e,
-                    "KarsSandbox running-status patch failed; .status will remain stale until the next reconcile"
+                    "KarsSandbox status patch failed; .status will remain stale until the next reconcile"
                 );
+                return Err(e.into());
             }
         } else {
             crate::metrics::record_status_patch_skip("KarsSandbox");
@@ -4200,7 +4254,57 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(Duration::from_secs(300)))
+    Ok(Action::requeue(Duration::from_secs(
+        if deployment_failure.is_some() {
+            60
+        } else if deployment_ready {
+            300
+        } else {
+            10
+        },
+    )))
+}
+
+fn deployment_is_ready(deployment: &Deployment, desired_replicas: i64) -> bool {
+    let Ok(desired_replicas) = i32::try_from(desired_replicas) else {
+        return false;
+    };
+    let Some(status) = deployment.status.as_ref() else {
+        return false;
+    };
+    if status.observed_generation.unwrap_or_default()
+        < deployment.metadata.generation.unwrap_or_default()
+    {
+        return false;
+    }
+    status.replicas.unwrap_or_default() == desired_replicas
+        && status.updated_replicas.unwrap_or_default() == desired_replicas
+        && status.ready_replicas.unwrap_or_default() == desired_replicas
+        && status.available_replicas.unwrap_or_default() == desired_replicas
+        && status.unavailable_replicas.unwrap_or_default() == 0
+}
+
+fn deployment_failure_message(deployment: &Deployment) -> Option<String> {
+    let status = deployment.status.as_ref()?;
+    if status.observed_generation.unwrap_or_default()
+        < deployment.metadata.generation.unwrap_or_default()
+    {
+        return None;
+    }
+    status.conditions.as_ref()?.iter().find_map(|condition| {
+        let failed = (condition.type_ == "Progressing"
+            && condition.status == "False"
+            && condition.reason.as_deref() == Some("ProgressDeadlineExceeded"))
+            || (condition.type_ == "ReplicaFailure" && condition.status == "True");
+        failed.then(|| {
+            let reason = condition.reason.as_deref().unwrap_or("DeploymentFailure");
+            let message = condition
+                .message
+                .as_deref()
+                .unwrap_or("Deployment rollout failed");
+            format!("{reason}: {message}")
+        })
+    })
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.
