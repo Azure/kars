@@ -1180,10 +1180,17 @@ async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, exe
     push_decisions_to_router(client, ns, task, &http, &base, &token).await;
 
     // (a) Blocked egress attempts → egress-kind approvals.
+    let run_started_unix = run_started_unix(task);
     if let Some(entries) =
         fetch_json_entries(&http, &base, "/internal/egress/blocked", &token).await
     {
         for e in entries {
+            let last_seen_unix = e.get("last_seen_unix").and_then(serde_json::Value::as_u64);
+            if run_started_unix
+                .is_some_and(|started| last_seen_unix.is_some_and(|last_seen| last_seen < started))
+            {
+                continue;
+            }
             let host = e.get("host").and_then(|v| v.as_str()).unwrap_or("").trim();
             let port = e.get("port").and_then(|v| v.as_u64()).unwrap_or(443) as u16;
             if host.is_empty() {
@@ -1237,6 +1244,12 @@ async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, exe
             }
         }
     }
+}
+
+fn run_started_unix(task: &KarsTask) -> Option<u64> {
+    let nonce = task.annotations().get("kars.azure.com/run-requested")?;
+    let nanos = nonce.strip_prefix("run-")?.parse::<u128>().ok()?;
+    u64::try_from(nanos / 1_000_000_000).ok()
 }
 
 /// GET a `/internal/*` router surface and return its `entries` array, if any.
@@ -1728,6 +1741,26 @@ mod tests {
         status.execution_phase = None;
         status.phase = Some(PHASE_PENDING.into());
         assert_eq!(requeue_for_status(&status), REQUEUE_PENDING);
+    }
+
+    #[test]
+    fn run_start_time_is_derived_from_nonce_nanoseconds() {
+        let mut task = task_with(3, 3, 2);
+        task.annotations_mut().insert(
+            "kars.azure.com/run-requested".into(),
+            "run-1784504805123456789".into(),
+        );
+        assert_eq!(run_started_unix(&task), Some(1_784_504_805));
+    }
+
+    #[test]
+    fn malformed_run_nonce_has_no_start_time() {
+        let mut task = task_with(3, 3, 2);
+        task.annotations_mut().insert(
+            "kars.azure.com/run-requested".into(),
+            "run-not-a-timestamp".into(),
+        );
+        assert_eq!(run_started_unix(&task), None);
     }
 
     #[test]
