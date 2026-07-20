@@ -1193,7 +1193,7 @@ async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, exe
             }
             let host = e.get("host").and_then(|v| v.as_str()).unwrap_or("").trim();
             let port = e.get("port").and_then(|v| v.as_u64()).unwrap_or(443) as u16;
-            if host.is_empty() {
+            if host.is_empty() || is_runtime_bootstrap_host(host) {
                 continue;
             }
             ensure_egress_approval(
@@ -1256,6 +1256,10 @@ fn run_started_unix(task: &KarsTask) -> Option<u64> {
     (1_000_000_000..10_000_000_000)
         .contains(&seconds)
         .then_some(seconds)
+}
+
+fn is_runtime_bootstrap_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("registry.npmjs.org")
 }
 
 /// GET a `/internal/*` router surface and return its `entries` array, if any.
@@ -1777,6 +1781,13 @@ mod tests {
             "cncf-release-watch-run-1784505483".into(),
         );
         assert_eq!(run_started_unix(&task), Some(1_784_505_483));
+    }
+
+    #[test]
+    fn passive_npm_probe_is_not_a_mission_approval() {
+        assert!(is_runtime_bootstrap_host("registry.npmjs.org"));
+        assert!(is_runtime_bootstrap_host("REGISTRY.NPMJS.ORG"));
+        assert!(!is_runtime_bootstrap_host("api.github.com"));
     }
 
     #[test]
