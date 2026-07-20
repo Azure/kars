@@ -32,7 +32,7 @@ use futures::StreamExt;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{
     Api, Client, ResourceExt,
-    api::{ListParams, Patch, PatchParams},
+    api::{ListParams, Patch, PatchParams, PostParams},
     runtime::Controller,
     runtime::controller::Action,
 };
@@ -42,7 +42,9 @@ use std::time::Duration;
 
 use crate::kars_profile::KarsProfile;
 use crate::kars_skill::KarsSkill;
-use crate::kars_task::{KarsTask, KarsTaskSpec, TaskBlueprint, TaskEnvelope, TaskExecution};
+use crate::kars_task::{
+    KarsTask, KarsTaskSpec, TaskBlueprint, TaskEgress, TaskEnvelope, TaskExecution,
+};
 use crate::kars_team::{KarsTeam, KarsTeamStatus, TeamRole};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::phase::{PHASE_ACTIVE, PHASE_DEGRADED, PHASE_HIBERNATING, PHASE_READY};
@@ -989,6 +991,7 @@ async fn process_egress_grants(client: &Client, ns: &str, team: &KarsTeam) {
         return;
     };
     const APPLIED: &str = "kars.azure.com/egress-applied";
+    let mut grants = Vec::new();
     for appr in list.items {
         let owned = appr.metadata.owner_references.as_ref().is_some_and(|refs| {
             refs.iter().any(|r| {
@@ -1022,60 +1025,92 @@ async fn process_egress_grants(client: &Client, ns: &str, team: &KarsTeam) {
             .annotations()
             .get("kars.azure.com/req-port")
             .and_then(|p| p.parse().ok());
-        // Read the team's current blueprint egress, append the host (idempotent),
-        // and merge-patch it back — future runs' sandboxes inherit the allowlist.
-        let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
-        let mut egress: Vec<serde_json::Value> = team
-            .spec
-            .blueprint
-            .as_ref()
-            .map(|b| {
-                b.egress
-                    .iter()
-                    .map(|e| match e.port {
-                        Some(p) => json!({ "host": e.host, "port": p }),
-                        None => json!({ "host": e.host }),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let already = egress
-            .iter()
-            .any(|e| e.get("host").and_then(|h| h.as_str()) == Some(host.as_str()));
-        if !already {
-            egress.push(match port {
-                Some(p) => json!({ "host": host.clone(), "port": p }),
-                None => json!({ "host": host.clone() }),
-            });
-        }
-        let name = appr.name_any();
-        let team_patch = json!({ "spec": { "blueprint": { "egress": egress } } });
-        if let Err(error) = teams
-            .patch(
-                &team_name,
-                &PatchParams::default(),
-                &Patch::Merge(team_patch),
-            )
+        grants.push((appr.name_any(), TaskEgress { host, port }));
+    }
+
+    if grants.is_empty() {
+        return;
+    }
+
+    let destinations: Vec<TaskEgress> = grants.iter().map(|(_, grant)| grant.clone()).collect();
+    if let Err(error) = merge_team_egress(client, ns, &team_name, &destinations).await {
+        tracing::warn!(
+            team = %team_name,
+            %error,
+            "failed to apply approved team egress"
+        );
+        return;
+    }
+
+    for (name, destination) in grants {
+        tracing::info!(
+            team = %team_name,
+            host = %destination.host,
+            "agent-requested egress approved — active run granted and team blueprint updated"
+        );
+        let patch = json!({ "metadata": { "annotations": { APPLIED: "true" } } });
+        if let Err(error) = approvals
+            .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
             .await
         {
             tracing::warn!(
                 team = %team_name,
                 approval = %name,
                 %error,
-                "failed to apply approved team egress"
+                "team egress was applied but the approval could not be marked applied"
             );
-            continue;
         }
-        tracing::info!(
-            team = %team_name,
-            %host,
-            "agent-requested egress approved — active run granted and team blueprint updated"
-        );
-        let patch = json!({ "metadata": { "annotations": { APPLIED: "true" } } });
-        let _ = approvals
-            .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
-            .await;
     }
+}
+
+const TEAM_EGRESS_UPDATE_RETRIES: usize = 5;
+
+/// Merge all approved destinations into one fresh KarsTeam snapshot and replace
+/// it with optimistic concurrency. A reconcile can observe several approvals at
+/// once, while other reconcilers or users may edit the launch package in
+/// parallel; patching each host from the original snapshot loses earlier hosts.
+async fn merge_team_egress(
+    client: &Client,
+    ns: &str,
+    team_name: &str,
+    grants: &[TaskEgress],
+) -> Result<()> {
+    let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+    for _ in 0..TEAM_EGRESS_UPDATE_RETRIES {
+        let mut current = teams.get(team_name).await?;
+        let blueprint = current
+            .spec
+            .blueprint
+            .get_or_insert_with(TaskBlueprint::default);
+        if !merge_egress_destinations(&mut blueprint.egress, grants) {
+            return Ok(());
+        }
+
+        match teams
+            .replace(team_name, &PostParams::default(), &current)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(kube::Error::Api(response)) if response.code == 409 => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    anyhow::bail!("team egress update exhausted {TEAM_EGRESS_UPDATE_RETRIES} optimistic retries")
+}
+
+fn merge_egress_destinations(current: &mut Vec<TaskEgress>, grants: &[TaskEgress]) -> bool {
+    let mut changed = false;
+    for grant in grants {
+        let exists = current
+            .iter()
+            .any(|entry| entry.host == grant.host && entry.port == grant.port);
+        if !exists {
+            current.push(grant.clone());
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// and is `Ready`. Returns `Some(reason)` when a capability is missing/not
@@ -2336,6 +2371,58 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(bp.tool_policy.as_deref(), Some("my-strict-policy"));
+    }
+
+    #[test]
+    fn approved_egress_batch_merges_without_lost_destinations() {
+        let mut current = vec![TaskEgress {
+            host: "api.github.com".into(),
+            port: Some(443),
+        }];
+        let grants = vec![
+            TaskEgress {
+                host: "pypi.org".into(),
+                port: Some(443),
+            },
+            TaskEgress {
+                host: "github.com".into(),
+                port: Some(443),
+            },
+            TaskEgress {
+                host: "files.pythonhosted.org".into(),
+                port: Some(443),
+            },
+        ];
+
+        assert!(merge_egress_destinations(&mut current, &grants));
+        assert_eq!(current.len(), 4);
+        for grant in grants {
+            assert!(
+                current
+                    .iter()
+                    .any(|entry| entry.host == grant.host && entry.port == grant.port)
+            );
+        }
+    }
+
+    #[test]
+    fn approved_egress_merge_is_idempotent_and_port_specific() {
+        let mut current = vec![TaskEgress {
+            host: "example.com".into(),
+            port: Some(443),
+        }];
+        let same = [TaskEgress {
+            host: "example.com".into(),
+            port: Some(443),
+        }];
+        assert!(!merge_egress_destinations(&mut current, &same));
+
+        let different_port = [TaskEgress {
+            host: "example.com".into(),
+            port: Some(8443),
+        }];
+        assert!(merge_egress_destinations(&mut current, &different_port));
+        assert_eq!(current.len(), 2);
     }
 
     #[test]
