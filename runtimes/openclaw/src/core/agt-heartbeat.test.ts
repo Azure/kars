@@ -69,6 +69,31 @@ describe("startTaskProgressHeartbeat", () => {
     cancel();
   });
 
+  it("reports structured child progress immediately", () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const heartbeat = startTaskProgressHeartbeat(
+      "did:mesh:parent",
+      { send },
+      "sub-agent-x",
+      "assignment-1",
+      log,
+    );
+    heartbeat.report("child_progress", {
+      child_task_id: "child-1",
+      child_role: "researcher",
+    });
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][1]).toMatchObject({
+      type: "task_progress",
+      in_reply_to_id: "assignment-1",
+      stage: "child_progress",
+      child_task_id: "child-1",
+      child_role: "researcher",
+    });
+    heartbeat();
+  });
+
   it("stops firing after cancel()", () => {
     const send = vi.fn().mockResolvedValue(undefined);
     const cancel = startTaskProgressHeartbeat(

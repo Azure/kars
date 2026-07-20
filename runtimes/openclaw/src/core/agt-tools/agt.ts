@@ -197,6 +197,10 @@ export interface AgtToolsDeps {
    * absent, the blocking tool falls back to a single immediate read.
    */
   waitForInbox?: (timeoutMs: number) => Promise<boolean>;
+  reportTaskProgress?: (
+    stage: string,
+    details?: Record<string, unknown>,
+  ) => void;
 }
 
 export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
@@ -965,6 +969,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             content_digest: assignmentDigest,
             content_preview: evidencePreview(msgContent),
           });
+          deps.reportTaskProgress?.("child_assigned", {
+            child_task_id: messageId,
+            child_role: originalAgentName,
+            child_agent: agentName,
+          });
 
           // Auto-wait for reply: poll agtInbox for a response from this agent.
           // The relay layer does NOT surface "agent identity is dead" — it happily
@@ -1070,6 +1079,13 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                   `elapsed=${lastProgressElapsed ?? "?"}s, ` +
                   `progress_pings=${progressDrained}) — extending idle wait`,
                 );
+                deps.reportTaskProgress?.("child_progress", {
+                  child_task_id: messageId,
+                  child_role: originalAgentName,
+                  child_agent: agentName,
+                  child_stage: lastProgressStage ?? "executing",
+                  child_elapsed_seconds: lastProgressElapsed,
+                });
               }
               await new Promise((r) => setTimeout(r, pollIntervalMs));
             }
@@ -1106,6 +1122,12 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               reply_preview: evidencePreview(replyContent),
               elapsed_ms: Date.now() - overallStart,
             });
+            deps.reportTaskProgress?.("child_handback", {
+              child_task_id: messageId,
+              child_role: originalAgentName,
+              child_agent: agentName,
+              outcome: "success",
+            });
             // Parent rates sub-agent — only meaningful for long-lived sub-agents
             // whose reputation will be queried again. Short-lived ones will die
             // and their score is lost, but the audit trail remains.
@@ -1125,6 +1147,13 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               outcome: "failed",
               reason: leaseFailureReason,
               elapsed_ms: Date.now() - overallStart,
+            });
+            deps.reportTaskProgress?.("child_lease_expired", {
+              child_task_id: messageId,
+              child_role: originalAgentName,
+              child_agent: agentName,
+              outcome: "failed",
+              reason: leaseFailureReason,
             });
           }
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };

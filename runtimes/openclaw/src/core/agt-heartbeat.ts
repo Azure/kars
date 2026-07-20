@@ -36,6 +36,9 @@ interface InboxEntry {
   message_type?: string;
 }
 type MeshLogger = { info: (m: string) => void; warn: (m: string) => void };
+export type TaskProgressHeartbeat = (() => void) & {
+  report: (stage: string, details?: Record<string, unknown>) => void;
+};
 
 /**
  * Post a completed mesh session record to the AGT registry so reputation /
@@ -152,12 +155,15 @@ export function startTaskProgressHeartbeat(
   assignmentId: string,
   log: MeshLogger,
   intervalMs: number = 20_000,
-): () => void {
+): TaskProgressHeartbeat {
   const startedAt = Date.now();
   let tick = 0;
   let cancelled = false;
 
-  const fire = (stage: "started" | "executing"): void => {
+  const fire = (
+    stage: string,
+    details: Record<string, unknown> = {},
+  ): void => {
     if (cancelled || !meshClient) return;
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     try {
@@ -171,6 +177,7 @@ export function startTaskProgressHeartbeat(
         elapsed_seconds: elapsedSec,
         from_agent: fromAgent,
         timestamp: new Date().toISOString(),
+        ...details,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       }).catch((e: any) => {
         // Best-effort heartbeat — log once at debug-equivalent then swallow.
@@ -194,11 +201,13 @@ export function startTaskProgressHeartbeat(
   // wrapper task finishes its finally block runs the cancel returned below.
   if (typeof timer.unref === "function") timer.unref();
 
-  return () => {
+  const cancel = (() => {
     if (cancelled) return;
     cancelled = true;
     clearInterval(timer);
-  };
+  }) as TaskProgressHeartbeat;
+  cancel.report = (stage, details = {}) => fire(stage, details);
+  return cancel;
 }
 
 /**

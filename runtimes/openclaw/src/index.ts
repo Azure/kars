@@ -166,6 +166,9 @@ let agtInitialized = false; // Module-level guard (supplemented by process-level
 
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
 const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string; message_type?: string; read_at?: string }> = [];
+let activeTaskProgressHeartbeat: ((() => void) & {
+  report?: (stage: string, details?: Record<string, unknown>) => void;
+}) | null = null;
 
 // Inbox + gateway diagnostics. Surface in kars_mesh_inbox responses so
 // the LLM (and operators triaging "inbox empty" reports) can distinguish:
@@ -1210,6 +1213,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             (message?.message_id as string) || reqId,
             log,
           );
+          activeTaskProgressHeartbeat = cancelHeartbeat;
           // Snapshot the router telemetry cursor so we can read back exactly the
           // events this task generates (the router observes every model call the
           // native agent makes).
@@ -1252,6 +1256,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               llmResponse = extractNativeDeliverable(llmResponse);
             }
           } finally {
+            if (activeTaskProgressHeartbeat === cancelHeartbeat) {
+              activeTaskProgressHeartbeat = null;
+            }
             cancelHeartbeat();
           }
 
@@ -3192,6 +3199,9 @@ const azureClawPlugin = definePluginEntry({
       runHandoffOrchestration: _runHandoffOrchestration,
       recordMeshSession,
       waitForInbox,
+      reportTaskProgress: (stage, details) => {
+        activeTaskProgressHeartbeat?.report?.(stage, details);
+      },
     });
 
     // ── HTTP fetch + Foundry tool registrations (S15.f.8) ──────────────
