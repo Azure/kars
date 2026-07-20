@@ -426,6 +426,21 @@ export function clarificationQuestion(response: string): string | null {
   return question.length >= 3 && question.length <= 280 ? question : null;
 }
 
+export function egressApprovalHost(task: string, response: string): string | null {
+  if (!/egress\s+(?:access\s+)?approval|requested\s+egress/i.test(response)) {
+    return null;
+  }
+  const url = task.match(/https?:\/\/[^\s<>"')\]]+/i)?.[0];
+  if (url) {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      // Fall through to the response's explicit host.
+    }
+  }
+  return response.match(/`([a-z0-9.-]+\.[a-z]{2,})`/i)?.[1] ?? null;
+}
+
 async function waitForHumanClarification(
   question: string,
   context: string,
@@ -474,6 +489,33 @@ async function waitForHumanClarification(
   }
   log.warn(`Clarification remained pending for 20 minutes: ${question}`);
   return null;
+}
+
+async function waitForEgressApproval(
+  host: string,
+  log: { info: (message: string) => void; warn: (message: string) => void },
+): Promise<boolean> {
+  await _routerCall("POST", "/v1/access-request", {
+    kind: "egress",
+    target: host,
+    port: 443,
+    reason: `The mission requires ${host}:443 to complete its objective.`,
+  });
+  log.info(`Egress approval requested for ${host}:443`);
+  const deadline = Date.now() + 20 * 60_000;
+  while (Date.now() < deadline) {
+    const response = await _routerCall("GET", "/v1/access-requests");
+    const requests = Array.isArray(response?.requests) ? response.requests : [];
+    const request = requests.find(
+      (candidate: any) =>
+        candidate?.kind === "egress" && candidate?.target === host,
+    );
+    if (request?.status === "approved") return true;
+    if (request?.status === "denied") return false;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  log.warn(`Egress approval remained pending for 20 minutes: ${host}:443`);
+  return false;
 }
 
 // delegateToNativeAgent — extracted to core/agt-task-delegate.ts in S15.f.2.
@@ -1190,6 +1232,15 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 );
                 llmResponse = extractNativeDeliverable(llmResponse);
               }
+            }
+            const egressHost = egressApprovalHost(taskText, llmResponse);
+            if (egressHost && await waitForEgressApproval(egressHost, log)) {
+              llmResponse = await delegateToNativeAgent(
+                `${taskText}\n\nScoped egress approval is now active for ${egressHost}:443. Retry the required network call and complete the original task. Do not return another approval request.`,
+                fromName,
+                log,
+              );
+              llmResponse = extractNativeDeliverable(llmResponse);
             }
           } finally {
             cancelHeartbeat();

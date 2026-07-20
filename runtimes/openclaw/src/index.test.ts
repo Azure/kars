@@ -978,6 +978,14 @@ describe("DEFAULT_CONFIG values", () => {
         .toBe(true);
       expect(mod.memoryStoreNeedsProvisioning({ id: "shared-store" }))
         .toBe(false);
+      expect(mod.egressApprovalHost(
+        "Fetch https://www.iana.org/time-zones and summarize it.",
+        "I requested egress approval for `iana.org` and will wait.",
+      )).toBe("www.iana.org");
+      expect(mod.egressApprovalHost(
+        "Write an internal memo.",
+        "The memo is complete.",
+      )).toBeNull();
       delete process.env.AGT_SKIP_INIT;
     });
   });
