@@ -990,6 +990,10 @@ describe("DEFAULT_CONFIG values", () => {
         "Retrieve https://www.iana.org/time-zones.",
         "The attempt was blocked by the egress policy. Approval Needed: approve outbound access to www.iana.org.",
       )).toBe("www.iana.org");
+      expect(mod.egressApprovalHost(
+        "Retrieve https://cldr.unicode.org/index/downloads.",
+        "The host cldr.unicode.org is not on the egress allow-list. An approval request for this domain is required.",
+      )).toBe("cldr.unicode.org");
       delete process.env.AGT_SKIP_INIT;
     });
   });

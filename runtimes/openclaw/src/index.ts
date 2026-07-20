@@ -427,10 +427,12 @@ export function clarificationQuestion(response: string): string | null {
 }
 
 export function egressApprovalHost(task: string, response: string): string | null {
-  if (
-    !/egress\s+(?:access\s+)?approval|requested\s+egress|blocked\s+by\s+the\s+egress\s+policy|approval\s+needed[\s\S]{0,160}outbound\s+access/i
-      .test(response)
-  ) {
+  const describesNetworkBlock =
+    /egress|outbound\s+access|network\s+boundary|allow.?list/i.test(response);
+  const asksForApproval =
+    /approv|action\s+needed|request(?:ed)?\s+(?:access|for\s+this\s+domain)/i
+      .test(response);
+  if (!describesNetworkBlock || !asksForApproval) {
     return null;
   }
   const url = task.match(/https?:\/\/[^\s<>"')\]]+/i)?.[0];
