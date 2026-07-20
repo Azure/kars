@@ -367,17 +367,9 @@ async fn reconcile_retention(
             .get("finishedAt")
             .cloned()
             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-        let status_patch = json!({
-            "apiVersion": "kars.azure.com/v1alpha1",
-            "kind": "KarsTask",
-            "status": { "deliveredAt": delivered_at },
-        });
+        let status_patch = json!({ "status": { "deliveredAt": delivered_at } });
         tasks
-            .patch_status(
-                name,
-                &PatchParams::apply(FIELD_MANAGER).force(),
-                &Patch::Apply(status_patch),
-            )
+            .patch_status(name, &PatchParams::default(), &Patch::Merge(status_patch))
             .await?;
         tracing::debug!(karstask = %name, ns = %ns, "retention: stamped deliveredAt");
         // Requeue promptly so the TTL check (below, on the NEXT reconcile) can
@@ -647,13 +639,7 @@ async fn reconcile_execution(
     } else {
         // Not launched (or not Ready): ensure no sandbox lingers from a prior
         // launch, and report Idle.
-        if task
-            .status
-            .as_ref()
-            .and_then(|s| s.sandbox_ref.as_ref())
-            .is_some()
-            && let Err(e) = crate::kars_task_execution::teardown(client, ns, task).await
-        {
+        if let Err(e) = crate::kars_task_execution::teardown(client, ns, task).await {
             tracing::warn!(karstask = %task.name_any(), ns = %ns, error = %e, "KarsTask execution teardown failed");
         }
         status.execution_phase = Some("Idle".to_string());
