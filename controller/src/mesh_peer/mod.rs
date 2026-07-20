@@ -1699,7 +1699,7 @@ async fn handle_peer_message(
             elapsed_seconds,
             child_task_id,
             child_role,
-            outcome: _,
+            outcome,
             reason,
             ..
         } => {
@@ -1715,6 +1715,7 @@ async fn handle_peer_message(
                     stage: stage.clone(),
                     child_task_id,
                     child_role,
+                    outcome,
                     message: reason,
                 },
             )

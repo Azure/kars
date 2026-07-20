@@ -37,6 +37,7 @@ use sha2::Digest;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Duration;
 
 const RUN_REQUESTED_ANNOTATION: &str = "kars.azure.com/run-requested";
@@ -86,6 +87,11 @@ fn inflight() -> &'static StdMutex<HashSet<String>> {
     INFLIGHT.get_or_init(|| StdMutex::new(HashSet::new()))
 }
 
+fn assignment_ledger_write_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
 /// Outcome of awaiting a single mesh task delivery.
 enum DeliveryOutcome {
     /// The agent returned its terminal `task_response`.
@@ -110,6 +116,7 @@ pub(super) struct ProgressUpdate {
     pub stage: Option<String>,
     pub child_task_id: Option<String>,
     pub child_role: Option<String>,
+    pub outcome: Option<String>,
     pub message: Option<String>,
 }
 
@@ -1237,6 +1244,7 @@ async fn persist_assignment_transition(
     stage: Option<&str>,
     message: Option<&str>,
 ) -> Result<()> {
+    let _write_guard = assignment_ledger_write_lock().lock().await;
     let api = assignment_api(state, &pending.namespace);
     let current = api
         .get(&pending.task_name)
@@ -1310,20 +1318,88 @@ async fn persist_assignment_progress(
     worker_did: &str,
     update: ProgressUpdate,
 ) -> Result<()> {
+    let _write_guard = assignment_ledger_write_lock().lock().await;
     let api = assignment_api(state, &pending.namespace);
+    let current = api
+        .get(&pending.task_name)
+        .await
+        .context("read KarsTask assignment progress ledger")?;
+    let status = current
+        .data
+        .get("status")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let mut events = status
+        .get("assignmentEvents")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut sequence = status
+        .get("assignmentSequence")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    let assignment_terminal = status
+        .get("assignment")
+        .and_then(|assignment| assignment.get("state"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|state| matches!(state, "Completed" | "Failed" | "Cancelled"));
     let now = Utc::now().to_rfc3339();
+    let child_state = child_assignment_state(update.stage.as_deref());
+    let should_append_child_event = update.child_task_id.as_ref().is_some_and(|child_task_id| {
+        events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.get("childTaskId").and_then(serde_json::Value::as_str) == Some(child_task_id)
+            })
+            .is_none_or(|event| {
+                event.get("stage").and_then(serde_json::Value::as_str) != update.stage.as_deref()
+                    || event.get("outcome").and_then(serde_json::Value::as_str)
+                        != update.outcome.as_deref()
+            })
+    });
+    if should_append_child_event {
+        sequence += 1;
+        events.push(json!({
+            "sequence": sequence,
+            "eventId": format!("{}:{sequence}", pending.task_id),
+            "taskId": pending.task_id,
+            "eventType": "child_progress",
+            "state": child_state,
+            "at": now,
+            "workerDid": worker_did,
+            "stage": update.stage,
+            "childTaskId": update.child_task_id,
+            "childRole": update.child_role,
+            "outcome": update.outcome,
+            "message": update.message,
+        }));
+        if events.len() > 200 {
+            events.drain(..events.len() - 200);
+        }
+    }
+    let assignment = if assignment_terminal {
+        status
+            .get("assignment")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({
+            "taskId": pending.task_id,
+            "state": "Running",
+            "workerDid": worker_did,
+            "stage": update.stage,
+            "childTaskId": update.child_task_id,
+            "childRole": update.child_role,
+            "lastProgressAt": now,
+            "error": update.message,
+        })
+    };
     let patch = json!({
         "status": {
-            "assignment": {
-                "taskId": pending.task_id,
-                "state": "Running",
-                "workerDid": worker_did,
-                "stage": update.stage,
-                "childTaskId": update.child_task_id,
-                "childRole": update.child_role,
-                "lastProgressAt": now,
-                "error": update.message,
-            }
+            "assignment": assignment,
+            "assignmentEvents": events,
+            "assignmentSequence": sequence,
         }
     });
     api.patch_status(
@@ -1334,6 +1410,15 @@ async fn persist_assignment_progress(
     .await
     .context("patch KarsTask assignment progress")?;
     Ok(())
+}
+
+fn child_assignment_state(stage: Option<&str>) -> &'static str {
+    match stage {
+        Some("child_assigned") => "Assigned",
+        Some("child_handback") => "Completed",
+        Some("child_lease_expired") => "Failed",
+        _ => "Running",
+    }
 }
 
 /// Stamp `kars.azure.com/run-ack: <nonce>` once the objective has been
@@ -1493,7 +1578,10 @@ async fn handle_transient_miss(
 
 #[cfg(test)]
 mod tests {
-    use super::{assignment_lease_active, is_substantive_deliverable, select_newest_agent_did};
+    use super::{
+        assignment_lease_active, child_assignment_state, is_substantive_deliverable,
+        select_newest_agent_did,
+    };
     use kube::api::DynamicObject;
     use serde_json::json;
 
@@ -1507,6 +1595,17 @@ mod tests {
         assert!(is_substantive_deliverable(
             "Completed the review with evidence and a ship recommendation."
         ));
+    }
+
+    #[test]
+    fn child_progress_stages_map_to_durable_states() {
+        assert_eq!(child_assignment_state(Some("child_assigned")), "Assigned");
+        assert_eq!(child_assignment_state(Some("child_progress")), "Running");
+        assert_eq!(child_assignment_state(Some("child_handback")), "Completed");
+        assert_eq!(
+            child_assignment_state(Some("child_lease_expired")),
+            "Failed"
+        );
     }
 
     #[test]
