@@ -1248,8 +1248,14 @@ async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, exe
 
 fn run_started_unix(task: &KarsTask) -> Option<u64> {
     let nonce = task.annotations().get("kars.azure.com/run-requested")?;
-    let nanos = nonce.strip_prefix("run-")?.parse::<u128>().ok()?;
-    u64::try_from(nanos / 1_000_000_000).ok()
+    if let Some(raw_nanos) = nonce.strip_prefix("run-") {
+        let nanos = raw_nanos.parse::<u128>().ok()?;
+        return u64::try_from(nanos / 1_000_000_000).ok();
+    }
+    let seconds = nonce.rsplit('-').next()?.parse::<u64>().ok()?;
+    (1_000_000_000..10_000_000_000)
+        .contains(&seconds)
+        .then_some(seconds)
 }
 
 /// GET a `/internal/*` router surface and return its `entries` array, if any.
@@ -1761,6 +1767,16 @@ mod tests {
             "run-not-a-timestamp".into(),
         );
         assert_eq!(run_started_unix(&task), None);
+    }
+
+    #[test]
+    fn team_run_start_time_uses_trailing_unix_seconds() {
+        let mut task = task_with(3, 3, 2);
+        task.annotations_mut().insert(
+            "kars.azure.com/run-requested".into(),
+            "cncf-release-watch-run-1784505483".into(),
+        );
+        assert_eq!(run_started_unix(&task), Some(1_784_505_483));
     }
 
     #[test]
