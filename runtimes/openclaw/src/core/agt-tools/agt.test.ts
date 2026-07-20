@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgtInboxEntry } from "../agt-handoff.js";
-import { isReplyForAssignment } from "./agt.js";
+import { isReplyForAssignment, isTaskProgressMessage } from "./agt.js";
 
 function message(content: unknown, messageType?: string): AgtInboxEntry {
   return {
@@ -29,6 +29,28 @@ describe("assignment reply correlation", () => {
         "did:mesh:worker",
         "worker",
         "assignment-1",
+      ),
+    ).toBe(false);
+  });
+
+  it("classifies progress before generic auxiliary cleanup", () => {
+    expect(
+      isTaskProgressMessage(
+        message({
+          type: "task_progress",
+          in_reply_to_id: "assignment-1",
+          stage: "executing",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isTaskProgressMessage(
+        message("working", "task_progress"),
+      ),
+    ).toBe(true);
+    expect(
+      isTaskProgressMessage(
+        message({ type: "file_transfer" }),
       ),
     ).toBe(false);
   });

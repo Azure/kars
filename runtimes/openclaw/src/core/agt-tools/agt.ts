@@ -121,6 +121,11 @@ function isAuxiliaryMeshMessage(message: AgtInboxEntry): boolean {
   return typeof parsed?.type === "string" && AUXILIARY_MESH_TYPES.has(parsed.type);
 }
 
+export function isTaskProgressMessage(message: AgtInboxEntry): boolean {
+  if (message.message_type === "task_progress") return true;
+  return parsedMessageContent(message)?.type === "task_progress";
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyApi = any;
 
@@ -1011,7 +1016,8 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                 const m = agtInbox[i];
                 if (
                   (m.from_amid === targetAmid || m.from_agent === agentName) &&
-                  isAuxiliaryMeshMessage(m)
+                  isAuxiliaryMeshMessage(m) &&
+                  !isTaskProgressMessage(m)
                 ) {
                   agtInbox.splice(i, 1);
                   drained++;
@@ -1027,18 +1033,21 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               for (let i = agtInbox.length - 1; i >= 0; i--) {
                 const m = agtInbox[i];
                 if (m.from_amid !== targetAmid && m.from_agent !== agentName) continue;
-                let isProgress = m.message_type === "task_progress";
                 let parsed: any = null;
                 if (typeof m.content === "string") {
                   try {
                     parsed = JSON.parse(m.content);
-                    if (parsed?.type === "task_progress") isProgress = true;
                   } catch { /* not JSON */ }
                 } else if (typeof m.content === "object" && m.content !== null) {
                   parsed = m.content;
-                  if (parsed?.type === "task_progress") isProgress = true;
                 }
-                if (!isProgress) continue;
+                if (!isTaskProgressMessage(m)) continue;
+                if (
+                  typeof parsed?.in_reply_to_id === "string" &&
+                  parsed.in_reply_to_id !== messageId
+                ) {
+                  continue;
+                }
                 if (parsed) {
                   lastProgressStage = String(parsed.stage ?? "");
                   if (typeof parsed.elapsed_seconds === "number") {

@@ -1177,7 +1177,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           return;
         }
 
-        const reqId = (message?.request_id as string) || crypto.randomUUID();
+        const reqId =
+          (message?.request_id as string) ||
+          (message?.message_id as string) ||
+          crypto.randomUUID();
         // Mark before the first request-scoped evidence event so the complete
         // assignment -> handback record is harvested with this task only.
         const harvestMarker = await createHarvestMarker();
@@ -1204,6 +1207,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             fromAmid,
             agtMeshClient,
             agtSandboxName,
+            (message?.message_id as string) || reqId,
             log,
           );
           // Snapshot the router telemetry cursor so we can read back exactly the

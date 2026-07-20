@@ -25,6 +25,7 @@ describe("startTaskProgressHeartbeat", () => {
       "did:mesh:parent",
       { send },
       "sub-agent-x",
+      "assignment-1",
       log,
     );
 
@@ -34,6 +35,8 @@ describe("startTaskProgressHeartbeat", () => {
     expect(msg.type).toBe("task_progress");
     expect(msg.stage).toBe("started");
     expect(msg.from_agent).toBe("sub-agent-x");
+    expect(msg.in_reply_to_id).toBe("assignment-1");
+    expect(msg.task_id).toBe("assignment-1");
     expect(msg.tick).toBe(0);
     expect(typeof msg.elapsed_seconds).toBe("number");
     expect(typeof msg.timestamp).toBe("string");
@@ -47,6 +50,7 @@ describe("startTaskProgressHeartbeat", () => {
       "did:mesh:parent",
       { send },
       "sub-agent-x",
+      "assignment-1",
       log,
       5_000, // 5s for the test
     );
@@ -71,6 +75,7 @@ describe("startTaskProgressHeartbeat", () => {
       "did:mesh:parent",
       { send },
       "sub-agent-x",
+      "assignment-1",
       log,
       5_000,
     );
@@ -87,6 +92,7 @@ describe("startTaskProgressHeartbeat", () => {
       "did:mesh:parent",
       null,
       "sub-agent-x",
+      "assignment-1",
       log,
       5_000,
     );
@@ -106,6 +112,7 @@ describe("startTaskProgressHeartbeat", () => {
       "did:mesh:parent",
       { send },
       "sub-agent-x",
+      "assignment-1",
       log,
       5_000,
     );
@@ -127,6 +134,7 @@ describe("startTaskProgressHeartbeat", () => {
       "did:mesh:parent",
       { send },
       "sub-agent-x",
+      "assignment-1",
       log,
       5_000,
     );

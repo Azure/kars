@@ -149,6 +149,7 @@ export function startTaskProgressHeartbeat(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   meshClient: { send: (amid: string, msg: any) => Promise<unknown> } | null,
   fromAgent: string,
+  assignmentId: string,
   log: MeshLogger,
   intervalMs: number = 20_000,
 ): () => void {
@@ -162,6 +163,9 @@ export function startTaskProgressHeartbeat(
     try {
       meshClient.send(originatorAmid, {
         type: "task_progress",
+        message_id: `progress-${assignmentId}-${tick}`,
+        in_reply_to_id: assignmentId,
+        task_id: assignmentId,
         stage,
         tick,
         elapsed_seconds: elapsedSec,
