@@ -280,6 +280,19 @@ async fn api_handler(
                     );
                 }
             }
+            match pr_delivery_gate(&state, &owner_repo, pr, &token).await {
+                Ok(()) => {}
+                Err(MergeGateError::Blocked(reason)) => {
+                    tracing::warn!(repo = %owner_repo, pr, %reason, "gh-api proxy denied merge: delivery gate not satisfied");
+                    return deny(StatusCode::FORBIDDEN, &reason);
+                }
+                Err(MergeGateError::Unavailable) => {
+                    return deny(
+                        StatusCode::BAD_GATEWAY,
+                        "could not verify PR mergeability and CI state before merge",
+                    );
+                }
+            }
         }
     }
     let Ok(auth) = HeaderValue::from_str(&format!("Bearer {token}")) else {
@@ -379,6 +392,7 @@ fn review_states_permit_merge(states: &[String]) -> bool {
     if decisive.is_empty() {
         return false; // no review at all → block
     }
+
     // Block if the most recent decisive review (APPROVED/CHANGES_REQUESTED)
     // requested changes. (GitHub returns reviews in chronological order.)
     let last_decisive = decisive
@@ -388,6 +402,137 @@ fn review_states_permit_merge(states: &[String]) -> bool {
     !last_decisive
         .map(|s| **s == "CHANGES_REQUESTED")
         .unwrap_or(false)
+}
+
+enum MergeGateError {
+    Blocked(String),
+    Unavailable,
+}
+
+async fn github_json(state: &AppState, url: &str, token: &str) -> Result<serde_json::Value, ()> {
+    let response = state
+        .client
+        .get(url)
+        .bearer_auth(token)
+        .header(axum::http::header::USER_AGENT, "kars-inference-router")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|_| ())?;
+    if !response.status().is_success() {
+        return Err(());
+    }
+    response.json().await.map_err(|_| ())
+}
+
+async fn pr_delivery_gate(
+    state: &AppState,
+    owner_repo: &str,
+    pr: u64,
+    token: &str,
+) -> Result<(), MergeGateError> {
+    let pull = github_json(
+        state,
+        &format!("{GITHUB_API}/repos/{owner_repo}/pulls/{pr}"),
+        token,
+    )
+    .await
+    .map_err(|_| MergeGateError::Unavailable)?;
+    let sha = pull
+        .get("head")
+        .and_then(|head| head.get("sha"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or(MergeGateError::Unavailable)?;
+    let check_runs = github_json(
+        state,
+        &format!("{GITHUB_API}/repos/{owner_repo}/commits/{sha}/check-runs?per_page=100"),
+        token,
+    )
+    .await
+    .map_err(|_| MergeGateError::Unavailable)?;
+    let status = github_json(
+        state,
+        &format!("{GITHUB_API}/repos/{owner_repo}/commits/{sha}/status"),
+        token,
+    )
+    .await
+    .map_err(|_| MergeGateError::Unavailable)?;
+
+    match merge_evidence_issue(&pull, &check_runs, &status) {
+        Some(reason) => Err(MergeGateError::Blocked(reason)),
+        None => Ok(()),
+    }
+}
+
+fn merge_evidence_issue(
+    pull: &serde_json::Value,
+    check_runs: &serde_json::Value,
+    status: &serde_json::Value,
+) -> Option<String> {
+    if pull.get("draft").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Some("merge blocked: the pull request is still a draft".into());
+    }
+    match pull.get("mergeable").and_then(serde_json::Value::as_bool) {
+        Some(true) => {}
+        Some(false) => return Some("merge blocked: GitHub reports merge conflicts".into()),
+        None => return Some("merge blocked: GitHub has not determined mergeability yet".into()),
+    }
+    let mergeable_state = pull
+        .get("mergeable_state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    if mergeable_state != "clean" {
+        return Some(format!(
+            "merge blocked: branch/check state is '{mergeable_state}', not clean and up to date"
+        ));
+    }
+
+    let runs = check_runs
+        .get("check_runs")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let statuses = status
+        .get("statuses")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if runs.is_empty() && statuses.is_empty() {
+        return Some(
+            "merge blocked: no CI or status-check evidence exists for the head commit".into(),
+        );
+    }
+    for run in runs {
+        let name = run
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unnamed check");
+        if run.get("status").and_then(serde_json::Value::as_str) != Some("completed") {
+            return Some(format!("merge blocked: check '{name}' is not completed"));
+        }
+        let conclusion = run
+            .get("conclusion")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        if !matches!(conclusion, "success" | "neutral" | "skipped") {
+            return Some(format!(
+                "merge blocked: check '{name}' concluded '{conclusion}'"
+            ));
+        }
+    }
+    if !statuses.is_empty()
+        && status.get("state").and_then(serde_json::Value::as_str) != Some("success")
+    {
+        let state = status
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        return Some(format!(
+            "merge blocked: combined legacy commit status is '{state}'"
+        ));
+    }
+    None
 }
 
 /// True for the "merge a pull request" API call —
@@ -522,5 +667,84 @@ mod tests {
             "CHANGES_REQUESTED",
             "COMMENTED"
         ])));
+    }
+
+    fn clean_pull() -> serde_json::Value {
+        serde_json::json!({
+            "draft": false,
+            "mergeable": true,
+            "mergeable_state": "clean"
+        })
+    }
+
+    fn successful_checks() -> serde_json::Value {
+        serde_json::json!({
+            "check_runs": [
+                {"name": "test", "status": "completed", "conclusion": "success"},
+                {"name": "lint", "status": "completed", "conclusion": "neutral"}
+            ]
+        })
+    }
+
+    #[test]
+    fn delivery_gate_requires_green_ci_evidence() {
+        assert!(
+            merge_evidence_issue(
+                &clean_pull(),
+                &successful_checks(),
+                &serde_json::json!({"state": "success", "statuses": []})
+            )
+            .is_none()
+        );
+        assert!(
+            merge_evidence_issue(
+                &clean_pull(),
+                &serde_json::json!({"check_runs": []}),
+                &serde_json::json!({"state": "pending", "statuses": []})
+            )
+            .unwrap()
+            .contains("no CI")
+        );
+    }
+
+    #[test]
+    fn delivery_gate_blocks_pending_failed_and_dirty_changes() {
+        let pending = serde_json::json!({
+            "check_runs": [{"name": "test", "status": "in_progress", "conclusion": null}]
+        });
+        assert!(
+            merge_evidence_issue(
+                &clean_pull(),
+                &pending,
+                &serde_json::json!({"state": "success", "statuses": []})
+            )
+            .unwrap()
+            .contains("not completed")
+        );
+
+        let failed = serde_json::json!({
+            "check_runs": [{"name": "test", "status": "completed", "conclusion": "failure"}]
+        });
+        assert!(
+            merge_evidence_issue(
+                &clean_pull(),
+                &failed,
+                &serde_json::json!({"state": "success", "statuses": []})
+            )
+            .unwrap()
+            .contains("failure")
+        );
+
+        let mut dirty = clean_pull();
+        dirty["mergeable_state"] = serde_json::json!("behind");
+        assert!(
+            merge_evidence_issue(
+                &dirty,
+                &successful_checks(),
+                &serde_json::json!({"state": "success", "statuses": []})
+            )
+            .unwrap()
+            .contains("not clean")
+        );
     }
 }
