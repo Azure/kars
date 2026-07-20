@@ -106,6 +106,7 @@ pub(super) struct PendingAssignmentProgress {
 
 #[derive(Default)]
 pub(super) struct ProgressUpdate {
+    pub task_id: Option<String>,
     pub stage: Option<String>,
     pub child_task_id: Option<String>,
     pub child_role: Option<String>,
@@ -121,9 +122,26 @@ pub(super) async fn touch_progress(
     agent_did: &str,
     update: ProgressUpdate,
 ) -> bool {
-    let pending = state.pending_progress.lock().await.get(agent_did).cloned();
-    let Some(pending) = pending else {
-        return false;
+    let pending = match state.pending_progress.lock().await.get(agent_did).cloned() {
+        Some(pending) => pending,
+        None => {
+            let Some(task_id) = update.task_id.as_deref() else {
+                return false;
+            };
+            let Ok(Some(task)) = find_task_by_nonce(state, task_id).await else {
+                return false;
+            };
+            PendingAssignmentProgress {
+                clock: Arc::new(AtomicI64::new(Utc::now().timestamp_millis())),
+                namespace: task
+                    .metadata
+                    .namespace
+                    .clone()
+                    .unwrap_or_else(|| "kars-system".into()),
+                task_name: task.metadata.name.clone().unwrap_or_default(),
+                task_id: task_id.to_string(),
+            }
+        }
     };
     pending
         .clock
@@ -181,10 +199,14 @@ pub(super) async fn watch_run_requests(state: Arc<MeshPeerState>) {
             if requested == completed {
                 continue;
             }
+            if assignment_lease_active(&task, &requested) {
+                continue;
+            }
             let name = task.metadata.name.clone().unwrap_or_default();
             if name.is_empty() {
                 continue;
             }
+
             // Claim this task for the life of the delivery so the next poll
             // tick doesn't re-dispatch it. Recover from a poisoned mutex instead
             // of panicking — a panic here aborts the watch task permanently
@@ -218,6 +240,34 @@ pub(super) async fn watch_run_requests(state: Arc<MeshPeerState>) {
             });
         }
     }
+}
+
+fn assignment_lease_active(task: &DynamicObject, requested: &str) -> bool {
+    let Some(assignment) = task
+        .data
+        .get("status")
+        .and_then(|status| status.get("assignment"))
+    else {
+        return false;
+    };
+    if assignment.get("taskId").and_then(serde_json::Value::as_str) != Some(requested) {
+        return false;
+    }
+    if !matches!(
+        assignment.get("state").and_then(serde_json::Value::as_str),
+        Some("Assigned" | "Running")
+    ) {
+        return false;
+    }
+    let Some(last_progress) = assignment
+        .get("lastProgressAt")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return false;
+    };
+    let age = Utc::now().signed_duration_since(last_progress.with_timezone(&Utc));
+    age.num_seconds() < assignment_lease_ttl_secs()
 }
 
 /// Deliver one KarsTask's objective to its running agent over the mesh and
@@ -687,7 +737,13 @@ pub(super) async fn resolve_pending(
         None => {
             if let Some(task_id) = task_id {
                 match find_task_by_nonce(state, &task_id).await {
-                    Ok(Some((namespace, task_name))) => {
+                    Ok(Some(task)) => {
+                        let namespace = task
+                            .metadata
+                            .namespace
+                            .clone()
+                            .unwrap_or_else(|| "kars-system".into());
+                        let task_name = task.metadata.name.clone().unwrap_or_default();
                         let pending = PendingAssignmentProgress {
                             clock: Arc::new(AtomicI64::new(Utc::now().timestamp_millis())),
                             namespace,
@@ -712,6 +768,26 @@ pub(super) async fn resolve_pending(
                                 "late task_response could not update assignment ledger"
                             );
                         } else {
+                            if let Err(error) = persist_late_reply(
+                                state,
+                                &task,
+                                from_amid,
+                                &task_id,
+                                &content,
+                                artifact_count,
+                                &trace,
+                                telemetry.as_ref(),
+                                ok,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    task = %task_name,
+                                    task_id = %task_id,
+                                    error = %format!("{error:#}"),
+                                    "late task_response ledger updated but deliverable reconciliation failed"
+                                );
+                            }
                             tracing::info!(
                                 task = %task_name,
                                 task_id = %task_id,
@@ -746,30 +822,94 @@ pub(super) async fn resolve_pending(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn persist_late_reply(
+    state: &Arc<MeshPeerState>,
+    task: &DynamicObject,
+    from_amid: &str,
+    task_id: &str,
+    content: &str,
+    artifact_count: usize,
+    trace: &[serde_json::Value],
+    telemetry: Option<&RunTelemetry>,
+    ok: bool,
+) -> Result<()> {
+    let name = task.metadata.name.clone().unwrap_or_default();
+    let namespace = task
+        .metadata
+        .namespace
+        .clone()
+        .unwrap_or_else(|| "kars-system".into());
+    let objective = task
+        .data
+        .get("spec")
+        .and_then(|spec| spec.get("objective"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let annotations = task.metadata.annotations.clone().unwrap_or_default();
+    let owning_team = annotations.get("kars.azure.com/team").map(String::as_str);
+    let owner_sub = annotations
+        .get("kars.azure.com/owner-sub")
+        .map(String::as_str);
+    let owner_name = annotations
+        .get("kars.azure.com/owner-name")
+        .map(String::as_str);
+    let blueprint = task.data.get("spec").and_then(|spec| spec.get("blueprint"));
+    let model = blueprint
+        .and_then(|value| value.get("model"))
+        .and_then(|value| value.get("deployment"))
+        .and_then(serde_json::Value::as_str);
+    let harness = blueprint
+        .and_then(|value| value.get("runtime"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("OpenClaw");
+    let artifacts = drain_artifacts(state, from_amid, artifact_count).await;
+    let persisted_artifacts = if artifacts.is_empty() {
+        std::collections::BTreeSet::new()
+    } else {
+        write_mission_artifacts(state, &name, &artifacts)
+            .await
+            .unwrap_or_default()
+    };
+    write_mission_output(
+        state,
+        &name,
+        &objective,
+        content,
+        ok && is_substantive_deliverable(content),
+        &artifacts,
+        &persisted_artifacts,
+        artifact_count,
+        owning_team,
+        owner_sub,
+        owner_name,
+        telemetry,
+        model,
+        harness,
+    )
+    .await?;
+    if !trace.is_empty() {
+        write_mission_trace(state, &name, trace).await?;
+    }
+    mark_completed(state, &namespace, &name, task_id).await?;
+    Ok(())
+}
+
 async fn find_task_by_nonce(
     state: &Arc<MeshPeerState>,
     task_id: &str,
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<DynamicObject>> {
     let tasks = karstask_api(state)
         .list(&ListParams::default())
         .await
         .context("list KarsTasks for late handback")?;
-    Ok(tasks.into_iter().find_map(|task| {
-        let matches = task
-            .metadata
+    Ok(tasks.into_iter().find(|task| {
+        task.metadata
             .annotations
             .as_ref()
             .and_then(|annotations| annotations.get(RUN_REQUESTED_ANNOTATION))
-            .is_some_and(|requested| requested == task_id);
-        if !matches {
-            return None;
-        }
-        Some((
-            task.metadata
-                .namespace
-                .unwrap_or_else(|| "kars-system".into()),
-            task.metadata.name.unwrap_or_default(),
-        ))
+            .is_some_and(|requested| requested == task_id)
     }))
 }
 
@@ -1371,7 +1511,8 @@ async fn handle_transient_miss(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_substantive_deliverable, select_newest_agent_did};
+    use super::{assignment_lease_active, is_substantive_deliverable, select_newest_agent_did};
+    use kube::api::DynamicObject;
     use serde_json::json;
 
     #[test]
@@ -1402,6 +1543,43 @@ mod tests {
         assert!(is_substantive_deliverable(
             "Completed the review with evidence and a ship recommendation."
         ));
+    }
+
+    #[test]
+    fn durable_assignment_lease_blocks_duplicate_dispatch() {
+        let task: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsTask",
+            "metadata": {"name": "run"},
+            "status": {
+                "assignment": {
+                    "taskId": "run-1",
+                    "state": "Running",
+                    "lastProgressAt": chrono::Utc::now().to_rfc3339()
+                }
+            }
+        }))
+        .expect("dynamic task");
+        assert!(assignment_lease_active(&task, "run-1"));
+        assert!(!assignment_lease_active(&task, "run-2"));
+    }
+
+    #[test]
+    fn stale_assignment_lease_allows_reconciliation() {
+        let task: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsTask",
+            "metadata": {"name": "run"},
+            "status": {
+                "assignment": {
+                    "taskId": "run-1",
+                    "state": "Running",
+                    "lastProgressAt": "2000-01-01T00:00:00Z"
+                }
+            }
+        }))
+        .expect("dynamic task");
+        assert!(!assignment_lease_active(&task, "run-1"));
     }
 
     #[test]

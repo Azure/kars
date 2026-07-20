@@ -1690,6 +1690,8 @@ async fn handle_peer_message(
             );
         }
         FederationMessage::TaskProgress {
+            in_reply_to,
+            task_id,
             stage,
             tick,
             elapsed_seconds,
@@ -1707,6 +1709,7 @@ async fn handle_peer_message(
                 state,
                 from_amid,
                 task_delivery::ProgressUpdate {
+                    task_id: task_id.or(in_reply_to),
                     stage: stage.clone(),
                     child_task_id,
                     child_role,
