@@ -1249,13 +1249,13 @@ fn team_memory_name(team: &str) -> String {
 }
 
 fn team_memory_scope(team: &str) -> String {
-    format!("team/{team}")
+    format!("team_{team}")
 }
 
 /// Ensure the team's shared Foundry memory exists (team-mode): ONE `KarsMemory`
 /// per team, **owned by the team** (so it lives for the team's lifecycle and is
 /// garbage-collected when the team is deleted), with a **shared scope**
-/// `team:<name>` so every run reads/writes the SAME partition — a knowledge-
+/// `team_<name>` so every run reads/writes the SAME partition — a knowledge-
 /// commons persisted across runs, not per-sandbox scratch. The Foundry store
 /// auto-creates on first agent use. No-op when Foundry isn't connected (teams
 /// then fall back to the ConfigMap commons).
@@ -1281,9 +1281,9 @@ async fn ensure_team_memory(client: &Client, ns: &str, team: &KarsTeam) {
             // A stable back-reference; the actual mount is driven per run by each
             // sandbox's memoryRef, so many runs share this one store.
             "sandboxRef": { "name": format!("{team_name}-principal") },
-            // SHARED scope: every run reads/writes team/<name>, not an
-            // agent-specific partition. `/` is accepted by Foundry Memory Store;
-            // `:` is deliberately rejected by the KarsMemory schema.
+            // SHARED scope: every run reads/writes team_<name>, not an
+            // agent-specific partition. Foundry accepts alphanumerics, `-`,
+            // and `_`; both `/` and `:` are rejected.
             "scope": team_memory_scope(&team_name),
             // Delete the store's data when the team (and thus this CR) is deleted.
             "deleteOnSandboxDelete": true,
@@ -2638,7 +2638,7 @@ mod tests {
     #[test]
     fn team_memory_name_is_stable() {
         assert_eq!(team_memory_name("repo-health"), "repo-health-memory");
-        assert_eq!(team_memory_scope("repo-health"), "team/repo-health");
+        assert_eq!(team_memory_scope("repo-health"), "team_repo-health");
     }
 
     #[test]
