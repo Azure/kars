@@ -1669,10 +1669,9 @@ if [ -n "${OFFLOAD_TIMEOUT_MINUTES:-}" ] && [ "$OFFLOAD_TIMEOUT_MINUTES" != "0" 
       idle=$(( now - last ))
       if [ "$idle" -ge "$OFFLOAD_IDLE_SECONDS" ]; then
         echo "[kars] ⏰ Offload idle ${idle}s ≥ ${OFFLOAD_IDLE_SECONDS}s — shutting down"
-        # Killing the foreground `tail -f` child unblocks PID 1 bash,
-        # which then hits the trap below and exits the container.
-        # The tail PID is written to /tmp/offload-tail.pid by the main script
-        # below; reading it here avoids a fork-time variable race.
+        # Killing the tracked critical process unblocks PID 1's supervision
+        # loop, which then exits the container. The PID is written below;
+        # reading it here avoids a fork-time variable race.
         tpid=$(cat /tmp/offload-tail.pid 2>/dev/null || true)
         if [ -n "$tpid" ]; then
           kill -TERM "$tpid" 2>/dev/null || true
@@ -1705,14 +1704,21 @@ HTTPS_PROXY="http://127.0.0.1:8444" HTTP_PROXY="http://127.0.0.1:8444" \
   OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
 GATEWAY_PID=$!
 
-# Wait for gateway to be ready
+# Wait for gateway to be ready.
+GATEWAY_READY=false
 for i in $(seq 1 10); do
   if curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1; then
     echo "[kars] Gateway running (PID: $GATEWAY_PID)"
+    GATEWAY_READY=true
     break
   fi
   sleep 0.5
 done
+if [ "$GATEWAY_READY" != "true" ]; then
+  echo "[kars] ERROR: OpenClaw gateway did not become ready" >&2
+  cat /tmp/gateway.log >&2 2>/dev/null || true
+  exit 1
+fi
 
 # Start the node host — provides shell/exec/filesystem tools to the agent.
 # Without this, the agent only has plugin tools (kars) and no local execution.
@@ -1746,6 +1752,12 @@ HOME=/tmp/node-host-home OPENCLAW_STATE_DIR=/tmp/node-host-home/.openclaw \
 NODE_PID=$!
 echo "[kars] Node host starting (PID: $NODE_PID)"
 
+# Surface the critical-process logs in the container stream. Previously both
+# processes redirected to private /tmp files while PID 1 tailed /dev/null, so a
+# crashed gateway looked Ready and the controller waited on a dead mesh peer.
+tail -n +1 -F /tmp/gateway.log /tmp/node-host.log 2>/dev/null &
+LOG_TAIL_PID=$!
+
 # Exec approvals are disabled via openclaw.json config (tools.exec.security=full).
 # AGT governance is the sole policy authority — no need for OpenClaw's exec approval layer.
 
@@ -1755,15 +1767,20 @@ echo "[kars] Node host starting (PID: $NODE_PID)"
 #   - The plugin's mesh connection stays alive as long as the gateway runs.
 #   - delegateToNativeAgent spawns openclaw agent sessions on the SAME gateway (no conflicts).
 
-# Keep the container alive — don't use exec (it would kill the gateway)
-# Instead, wait forever while keeping the gateway backgrounded.
-# We track the tail PID so the idle-watcher above can SIGTERM it and unblock
-# bash PID 1. Without this, `kill 1` is swallowed and the container never dies.
-tail -f /dev/null &
-IDLE_TAIL_PID=$!
+# Keep PID 1 alive only while both critical OpenClaw processes are alive. The
+# idle watcher terminates the gateway PID to unblock this loop during normal
+# offload teardown.
+IDLE_TAIL_PID=$GATEWAY_PID
 echo "$IDLE_TAIL_PID" > /tmp/offload-tail.pid
-# Trap SIGTERM so docker stop / kubectl delete terminate cleanly.
-# (For offload sandboxes the idle watcher also installs a trap earlier, but
-# this covers non-offload sandboxes too.)
-trap 'kill -TERM "$IDLE_TAIL_PID" 2>/dev/null || true; exit 0' TERM INT
-wait "$IDLE_TAIL_PID"
+trap 'kill -TERM "$GATEWAY_PID" "$NODE_PID" "$LOG_TAIL_PID" 2>/dev/null || true; exit 0' TERM INT
+while kill -0 "$GATEWAY_PID" 2>/dev/null && kill -0 "$NODE_PID" 2>/dev/null; do
+  sleep 2
+done
+if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+  echo "[kars] ERROR: OpenClaw gateway exited; terminating unhealthy sandbox" >&2
+else
+  echo "[kars] ERROR: OpenClaw node host exited; terminating unhealthy sandbox" >&2
+fi
+kill -TERM "$GATEWAY_PID" "$NODE_PID" "$LOG_TAIL_PID" 2>/dev/null || true
+wait "$GATEWAY_PID" "$NODE_PID" "$LOG_TAIL_PID" 2>/dev/null || true
+exit 1
