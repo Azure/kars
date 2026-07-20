@@ -1151,6 +1151,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       // Falls back to processTaskWithTools (per-tool AGT gating) if native agent fails.
       if (message?.type === "task_request" && fromAmid && agtMeshClient) {
         const taskContent = message?.content || content;
+        const assignmentId =
+          (message?.message_id as string) ||
+          (message?.request_id as string) ||
+          crypto.randomUUID();
 
         // AGT policy: evaluate task:execute before dispatching to native agent
         const evalData = await evaluateAGTPolicy("task:execute", {
@@ -1162,7 +1166,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           try {
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
-              in_reply_to_id: message?.message_id,
+              in_reply_to_id: assignmentId,
               content: `Task denied by AGT governance: ${evalData.reason}`,
               ok: false,
               from_agent: agtSandboxName,
@@ -1180,10 +1184,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           return;
         }
 
-        const reqId =
-          (message?.request_id as string) ||
-          (message?.message_id as string) ||
-          crypto.randomUUID();
+        const reqId = assignmentId;
         // Mark before the first request-scoped evidence event so the complete
         // assignment -> handback record is harvested with this task only.
         const harvestMarker = await createHarvestMarker();
@@ -1210,7 +1211,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             fromAmid,
             agtMeshClient,
             agtSandboxName,
-            (message?.message_id as string) || reqId,
+            assignmentId,
             log,
           );
           activeTaskProgressHeartbeat = cancelHeartbeat;
@@ -1337,7 +1338,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // real execution trace + token telemetry for the audit record.
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
-            in_reply_to_id: message?.message_id,
+            in_reply_to_id: assignmentId,
             content: latin1Safe(llmResponse),
             ok: true,
             artifacts: artifactManifest,
@@ -1350,7 +1351,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               tool_calls: toolCalls,
             },
             from_agent: agtSandboxName,
-            in_reply_to: latin1Safe(taskContent),
             timestamp: new Date().toISOString(),
           });
           log.info(
@@ -1373,7 +1373,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           try {
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
-              in_reply_to_id: message?.message_id,
+              in_reply_to_id: assignmentId,
               content: latin1Safe(`Error processing task: ${replyErr.message}`),
               ok: false,
               from_agent: agtSandboxName,

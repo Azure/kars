@@ -453,6 +453,7 @@ async fn deliver_for_task(
         &agent_did,
         FederationMessage::TaskRequest {
             content: objective.clone(),
+            message_id: Some(nonce.to_string()),
             request_id: Some(nonce.to_string()),
             timestamp: Some(Utc::now().to_rfc3339()),
         },

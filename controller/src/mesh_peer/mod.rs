@@ -582,6 +582,8 @@ enum FederationMessage {
     TaskRequest {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<String>,
@@ -2009,5 +2011,18 @@ mod tests {
             }
             _ => panic!("Wrong variant — task_response must parse"),
         }
+    }
+
+    #[test]
+    fn task_request_carries_one_assignment_id() {
+        let message = FederationMessage::TaskRequest {
+            content: "work".into(),
+            message_id: Some("run-1".into()),
+            request_id: Some("run-1".into()),
+            timestamp: Some("t".into()),
+        };
+        let wire = serde_json::to_value(message).expect("serialize task request");
+        assert_eq!(wire["message_id"], "run-1");
+        assert_eq!(wire["request_id"], "run-1");
     }
 }
