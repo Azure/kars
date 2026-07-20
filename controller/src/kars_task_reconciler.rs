@@ -334,10 +334,10 @@ fn requeue_for_status(status: &KarsTaskStatus) -> Duration {
 }
 
 /// Retention TTL check/enforcement, run at the top of every reconcile (after
-/// the finalizer is ensured). Returns `Some(action)` when the retention path
-/// handled this reconcile (either just stamped `deliveredAt` or deleted the
-/// task) — the caller should return early in that case. Returns `None` to let
-/// the normal envelope/execution reconcile proceed unmodified.
+/// the finalizer is ensured). Returns `Some(action)` only when this reconcile
+/// must stop (a fresh deliveredAt stamp needs one prompt reread, or the task was
+/// deleted). A delivered task that is not yet TTL-expired still proceeds through
+/// normal execution reconciliation so `launch=false` tears down its sandbox.
 async fn reconcile_retention(
     task: &KarsTask,
     tasks: &Api<KarsTask>,
@@ -396,12 +396,7 @@ async fn reconcile_retention(
     }
     let age = chrono::Utc::now().signed_duration_since(delivered_ts.with_timezone(&chrono::Utc));
     if age.num_seconds() < effective_ttl {
-        // Not yet due — requeue for exactly when it WILL be due, so a task
-        // near its TTL boundary doesn't linger an extra REQUEUE_OK cycle.
-        let remaining = (effective_ttl - age.num_seconds()).max(1) as u64;
-        return Ok(Some(Action::requeue(Duration::from_secs(
-            remaining.min(3600),
-        ))));
+        return Ok(None);
     }
     tracing::info!(
         karstask = %name,
