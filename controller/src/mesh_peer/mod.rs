@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::Duration;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 mod agt_wire;
@@ -592,7 +592,7 @@ enum FederationMessage {
     #[serde(rename = "task_response")]
     TaskResponse {
         content: String,
-        #[serde(default)]
+        #[serde(default, alias = "in_reply_to_id")]
         in_reply_to: Option<String>,
         #[serde(default)]
         from_agent: Option<String>,
@@ -631,6 +631,12 @@ enum FederationMessage {
     #[serde(rename = "task_progress")]
     TaskProgress {
         #[serde(default)]
+        message_id: Option<String>,
+        #[serde(default, alias = "in_reply_to_id")]
+        in_reply_to: Option<String>,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
         stage: Option<String>,
         #[serde(default)]
         tick: Option<i64>,
@@ -638,6 +644,18 @@ enum FederationMessage {
         elapsed_seconds: Option<i64>,
         #[serde(default)]
         from_agent: Option<String>,
+        #[serde(default)]
+        child_task_id: Option<String>,
+        #[serde(default)]
+        child_role: Option<String>,
+        #[serde(default)]
+        child_agent: Option<String>,
+        #[serde(default)]
+        child_stage: Option<String>,
+        #[serde(default)]
+        outcome: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
         #[serde(default)]
         timestamp: Option<String>,
     },
@@ -766,7 +784,11 @@ struct MeshPeerState {
     /// task that legitimately runs many minutes) stay alive, while a genuinely
     /// stuck agent that stops ticking still times out. Empty unless a mesh task
     /// is in flight.
-    pending_progress: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicI64>>>>,
+    pending_progress: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, task_delivery::PendingAssignmentProgress>,
+        >,
+    >,
 }
 
 /// The payload delivered to a waiting mesh task: the agent's text reply plus
@@ -1607,6 +1629,7 @@ async fn handle_peer_message(
         }
         FederationMessage::TaskResponse {
             content,
+            in_reply_to,
             artifacts,
             trace,
             telemetry,
@@ -1624,6 +1647,7 @@ async fn handle_peer_message(
             task_delivery::resolve_pending(
                 state,
                 from_amid,
+                in_reply_to,
                 content,
                 artifacts.len(),
                 trace,
@@ -1669,13 +1693,27 @@ async fn handle_peer_message(
             stage,
             tick,
             elapsed_seconds,
+            child_task_id,
+            child_role,
+            outcome: _,
+            reason,
             ..
         } => {
             // Keep-alive: bump the in-flight delivery's last-activity clock so
             // the idle timeout (in `task_delivery`) doesn't kill a run that is
             // actively working. No result is carried; the terminal
             // `task_response` is what resolves the delivery.
-            let bumped = task_delivery::touch_progress(state, from_amid).await;
+            let bumped = task_delivery::touch_progress(
+                state,
+                from_amid,
+                task_delivery::ProgressUpdate {
+                    stage: stage.clone(),
+                    child_task_id,
+                    child_role,
+                    message: reason,
+                },
+            )
+            .await;
             tracing::debug!(
                 from = %from_amid,
                 stage = stage.as_deref().unwrap_or("executing"),
@@ -1925,20 +1963,26 @@ mod tests {
     /// wire shape the runtime sends.
     #[test]
     fn task_progress_deserializes_from_runtime_wire_shape() {
-        let wire = r#"{"type":"task_progress","stage":"executing","tick":3,"elapsed_seconds":60,"from_agent":"landscape-watch-run-1","timestamp":"2026-06-29T21:47:27.557Z"}"#;
+        let wire = r#"{"type":"task_progress","message_id":"progress-run-1-3","in_reply_to_id":"run-1","task_id":"run-1","stage":"child_progress","tick":3,"elapsed_seconds":60,"from_agent":"landscape-watch-run-1","child_task_id":"child-7","child_role":"researcher","child_stage":"executing","timestamp":"2026-06-29T21:47:27.557Z"}"#;
         let decoded: FederationMessage = serde_json::from_str(wire).unwrap();
         match decoded {
             FederationMessage::TaskProgress {
+                in_reply_to,
                 stage,
                 tick,
                 elapsed_seconds,
                 from_agent,
+                child_task_id,
+                child_role,
                 ..
             } => {
-                assert_eq!(stage.as_deref(), Some("executing"));
+                assert_eq!(in_reply_to.as_deref(), Some("run-1"));
+                assert_eq!(stage.as_deref(), Some("child_progress"));
                 assert_eq!(tick, Some(3));
                 assert_eq!(elapsed_seconds, Some(60));
                 assert_eq!(from_agent.as_deref(), Some("landscape-watch-run-1"));
+                assert_eq!(child_task_id.as_deref(), Some("child-7"));
+                assert_eq!(child_role.as_deref(), Some("researcher"));
             }
             _ => panic!("Wrong variant — task_progress must parse"),
         }
@@ -1949,5 +1993,18 @@ mod tests {
             serde_json::from_str::<FederationMessage>(minimal).unwrap(),
             FederationMessage::TaskProgress { .. }
         ));
+    }
+
+    #[test]
+    fn task_response_accepts_runtime_correlation_field() {
+        let wire =
+            r#"{"type":"task_response","in_reply_to_id":"run-1","content":"done","ok":true}"#;
+        let decoded: FederationMessage = serde_json::from_str(wire).unwrap();
+        match decoded {
+            FederationMessage::TaskResponse { in_reply_to, .. } => {
+                assert_eq!(in_reply_to.as_deref(), Some("run-1"));
+            }
+            _ => panic!("Wrong variant — task_response must parse"),
+        }
     }
 }

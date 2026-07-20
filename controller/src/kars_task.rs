@@ -666,6 +666,50 @@ pub struct TaskBudget {
 /// `KarsTask.status`.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskAssignmentStatus {
+    pub task_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_did: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskAssignmentEvent {
+    pub sequence: i64,
+    pub event_id: String,
+    pub task_id: String,
+    pub event_type: String,
+    pub state: String,
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_did: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct KarsTaskStatus {
     /// One of: `Pending`, `Ready`, `Degraded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -718,6 +762,18 @@ pub struct KarsTaskStatus {
     /// `deliveredAt` is still in flight and is never auto-deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<String>,
+
+    /// Durable root-assignment snapshot updated by the mesh delivery path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment: Option<TaskAssignmentStatus>,
+
+    /// Bounded append-only assignment transition ledger. The controller retains
+    /// the newest 200 events; sequence remains monotonic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignment_events: Vec<TaskAssignmentEvent>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_sequence: Option<i64>,
 }
 
 #[cfg(test)]

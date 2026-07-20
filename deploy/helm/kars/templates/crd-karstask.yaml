@@ -1,3 +1,4 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -374,9 +375,91 @@ spec:
               reason: FieldValueInvalid
               rule: '!has(self.blueprint) || !has(self.blueprint.egress) || size(self.blueprint.egress) <= 32'
           status:
-            description: '`KarsTask.status`.'
             nullable: true
             properties:
+              assignment:
+                description: Durable root-assignment snapshot updated by the mesh delivery path.
+                nullable: true
+                properties:
+                  childRole:
+                    nullable: true
+                    type: string
+                  childTaskId:
+                    nullable: true
+                    type: string
+                  completedAt:
+                    nullable: true
+                    type: string
+                  error:
+                    nullable: true
+                    type: string
+                  lastProgressAt:
+                    nullable: true
+                    type: string
+                  stage:
+                    nullable: true
+                    type: string
+                  state:
+                    type: string
+                  taskId:
+                    type: string
+                  workerDid:
+                    nullable: true
+                    type: string
+                required:
+                - state
+                - taskId
+                type: object
+              assignmentEvents:
+                description: |-
+                  Bounded append-only assignment transition ledger. The controller retains
+                  the newest 200 events; sequence remains monotonic.
+                items:
+                  properties:
+                    at:
+                      type: string
+                    childRole:
+                      nullable: true
+                      type: string
+                    childTaskId:
+                      nullable: true
+                      type: string
+                    eventId:
+                      type: string
+                    eventType:
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    outcome:
+                      nullable: true
+                      type: string
+                    sequence:
+                      format: int64
+                      type: integer
+                    stage:
+                      nullable: true
+                      type: string
+                    state:
+                      type: string
+                    taskId:
+                      type: string
+                    workerDid:
+                      nullable: true
+                      type: string
+                  required:
+                  - at
+                  - eventId
+                  - eventType
+                  - sequence
+                  - state
+                  - taskId
+                  type: object
+                type: array
+              assignmentSequence:
+                format: int64
+                nullable: true
+                type: integer
               conditions:
                 description: |-
                   Standard K8s conditions. `Ready` is set `True` once the envelope has
@@ -482,3 +565,4 @@ spec:
     storage: true
     subresources:
       status: {}
+

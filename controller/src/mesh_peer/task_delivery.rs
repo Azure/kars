@@ -96,18 +96,47 @@ enum DeliveryOutcome {
     IdleTimeout,
 }
 
+#[derive(Clone)]
+pub(super) struct PendingAssignmentProgress {
+    pub clock: Arc<AtomicI64>,
+    pub namespace: String,
+    pub task_name: String,
+    pub task_id: String,
+}
+
+#[derive(Default)]
+pub(super) struct ProgressUpdate {
+    pub stage: Option<String>,
+    pub child_task_id: Option<String>,
+    pub child_role: Option<String>,
+    pub message: Option<String>,
+}
+
 /// Bump the last-activity clock for the in-flight delivery to `agent_did`,
 /// called from the inbound `task_progress` handler. Returns true when a
 /// delivery to that DID is currently tracked (the heartbeat was meaningful);
 /// false when none is in flight (a late or duplicate tick).
-pub(super) async fn touch_progress(state: &Arc<MeshPeerState>, agent_did: &str) -> bool {
-    let guard = state.pending_progress.lock().await;
-    if let Some(clock) = guard.get(agent_did) {
-        clock.store(Utc::now().timestamp_millis(), Ordering::Release);
-        true
-    } else {
-        false
+pub(super) async fn touch_progress(
+    state: &Arc<MeshPeerState>,
+    agent_did: &str,
+    update: ProgressUpdate,
+) -> bool {
+    let pending = state.pending_progress.lock().await.get(agent_did).cloned();
+    let Some(pending) = pending else {
+        return false;
+    };
+    pending
+        .clock
+        .store(Utc::now().timestamp_millis(), Ordering::Release);
+    if let Err(error) = persist_assignment_progress(state, &pending, agent_did, update).await {
+        tracing::warn!(
+            task = %pending.task_name,
+            task_id = %pending.task_id,
+            error = %format!("{error:#}"),
+            "failed to persist assignment progress"
+        );
     }
+    true
 }
 
 fn karstask_api(state: &MeshPeerState) -> Api<DynamicObject> {
@@ -344,6 +373,28 @@ async fn deliver_for_task(
         .insert(agent_did.clone(), tx);
     // Clear any stale artifact buffer for this DID from a prior run.
     state.pending_artifacts.lock().await.remove(&agent_did);
+    let last_activity = Arc::new(AtomicI64::new(Utc::now().timestamp_millis()));
+    let pending_progress = PendingAssignmentProgress {
+        clock: last_activity.clone(),
+        namespace: namespace.clone(),
+        task_name: name.clone(),
+        task_id: nonce.to_string(),
+    };
+    state
+        .pending_progress
+        .lock()
+        .await
+        .insert(agent_did.clone(), pending_progress.clone());
+    persist_assignment_transition(
+        state,
+        &pending_progress,
+        &agent_did,
+        "assigned",
+        "Assigned",
+        None,
+        None,
+    )
+    .await?;
 
     let epoch = state.leader_epoch.load(Ordering::Acquire);
     let send_result = enqueue_outbound(
@@ -358,6 +409,7 @@ async fn deliver_for_task(
     );
     if let Err(e) = send_result {
         state.pending_tasks.lock().await.remove(&agent_did);
+        state.pending_progress.lock().await.remove(&agent_did);
         return Err(e).context("failed to enqueue task_request");
     }
 
@@ -368,6 +420,16 @@ async fn deliver_for_task(
     if let Err(e) = mark_ack(state, &namespace, &name, nonce).await {
         tracing::warn!(task = %name, err = %format!("{e:#}"), "failed to stamp run-ack (delivery continues)");
     }
+    persist_assignment_transition(
+        state,
+        &pending_progress,
+        &agent_did,
+        "acknowledged",
+        "Running",
+        Some("assigned"),
+        None,
+    )
+    .await?;
 
     // Await the agent's task_response, using an IDLE timeout that resets on
     // every `task_progress` heartbeat. The agent ticks ~every 20s while it
@@ -375,13 +437,6 @@ async fn deliver_for_task(
     // ceiling); only an agent that goes silent for `IDLE_TIMEOUT_SECS` — or one
     // that exceeds `ABS_MAX_SECS` overall — is reaped. Register the activity
     // clock before sending so a fast first heartbeat can't race it.
-    let last_activity = Arc::new(AtomicI64::new(Utc::now().timestamp_millis()));
-    state
-        .pending_progress
-        .lock()
-        .await
-        .insert(agent_did.clone(), last_activity.clone());
-
     let lease_ttl_secs = assignment_lease_ttl_secs();
     let mut rx = rx;
     let outcome = loop {
@@ -434,6 +489,24 @@ async fn deliver_for_task(
     // buffered set to reach the manifest count before flushing.
     let artifacts = drain_artifacts(state, &agent_did, artifact_count).await;
     let deliverable_ok = ok && is_substantive_deliverable(&content);
+    persist_assignment_transition(
+        state,
+        &pending_progress,
+        &agent_did,
+        if deliverable_ok { "handback" } else { "failed" },
+        if deliverable_ok {
+            "Completed"
+        } else {
+            "Failed"
+        },
+        Some(if deliverable_ok {
+            "completed"
+        } else {
+            "failed"
+        }),
+        (!deliverable_ok).then_some(content.as_str()),
+    )
+    .await?;
 
     let persisted_artifacts = if artifacts.is_empty() {
         std::collections::BTreeSet::new()
@@ -588,6 +661,7 @@ pub(super) async fn buffer_artifact(
 pub(super) async fn resolve_pending(
     state: &Arc<MeshPeerState>,
     from_amid: &str,
+    task_id: Option<String>,
     content: String,
     artifact_count: usize,
     trace: Vec<serde_json::Value>,
@@ -611,9 +685,92 @@ pub(super) async fn resolve_pending(
             }
         }
         None => {
-            tracing::debug!(from = %from_amid, "task_response with no pending delivery — ignoring");
+            if let Some(task_id) = task_id {
+                match find_task_by_nonce(state, &task_id).await {
+                    Ok(Some((namespace, task_name))) => {
+                        let pending = PendingAssignmentProgress {
+                            clock: Arc::new(AtomicI64::new(Utc::now().timestamp_millis())),
+                            namespace,
+                            task_name: task_name.clone(),
+                            task_id: task_id.clone(),
+                        };
+                        if let Err(error) = persist_assignment_transition(
+                            state,
+                            &pending,
+                            from_amid,
+                            if ok { "late_handback" } else { "late_failure" },
+                            if ok { "Completed" } else { "Failed" },
+                            Some("late_handback"),
+                            (!ok).then_some(content.as_str()),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                task = %task_name,
+                                task_id = %task_id,
+                                error = %format!("{error:#}"),
+                                "late task_response could not update assignment ledger"
+                            );
+                        } else {
+                            tracing::info!(
+                                task = %task_name,
+                                task_id = %task_id,
+                                from = %from_amid,
+                                "late task_response reconciled into durable assignment ledger"
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            from = %from_amid,
+                            "late task_response has no matching KarsTask"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            from = %from_amid,
+                            error = %format!("{error:#}"),
+                            "failed to resolve late task_response"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    from = %from_amid,
+                    "task_response with no pending delivery or task correlation"
+                );
+            }
         }
     }
+}
+
+async fn find_task_by_nonce(
+    state: &Arc<MeshPeerState>,
+    task_id: &str,
+) -> Result<Option<(String, String)>> {
+    let tasks = karstask_api(state)
+        .list(&ListParams::default())
+        .await
+        .context("list KarsTasks for late handback")?;
+    Ok(tasks.into_iter().find_map(|task| {
+        let matches = task
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(RUN_REQUESTED_ANNOTATION))
+            .is_some_and(|requested| requested == task_id);
+        if !matches {
+            return None;
+        }
+        Some((
+            task.metadata
+                .namespace
+                .unwrap_or_else(|| "kars-system".into()),
+            task.metadata.name.unwrap_or_default(),
+        ))
+    }))
 }
 
 /// Query the AGT registry for the agent registered under `sandbox` and return
@@ -935,6 +1092,125 @@ async fn write_mission_trace(
     )
     .await
     .context("write mission-trace ConfigMap")?;
+    Ok(())
+}
+
+fn assignment_api(state: &MeshPeerState, namespace: &str) -> Api<DynamicObject> {
+    let api_resource = kube::api::ApiResource {
+        group: "kars.azure.com".into(),
+        version: "v1alpha1".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: "KarsTask".into(),
+        plural: "karstasks".into(),
+    };
+    Api::namespaced_with(state.client.clone(), namespace, &api_resource)
+}
+
+async fn persist_assignment_transition(
+    state: &Arc<MeshPeerState>,
+    pending: &PendingAssignmentProgress,
+    worker_did: &str,
+    event_type: &str,
+    assignment_state: &str,
+    stage: Option<&str>,
+    message: Option<&str>,
+) -> Result<()> {
+    let api = assignment_api(state, &pending.namespace);
+    let current = api
+        .get(&pending.task_name)
+        .await
+        .context("read KarsTask assignment ledger")?;
+    let status = current
+        .data
+        .get("status")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let mut events = status
+        .get("assignmentEvents")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let sequence = status
+        .get("assignmentSequence")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default()
+        + 1;
+    let now = Utc::now().to_rfc3339();
+    let child_task_id = None::<String>;
+    let child_role = None::<String>;
+    events.push(json!({
+        "sequence": sequence,
+        "eventId": format!("{}:{sequence}", pending.task_id),
+        "taskId": pending.task_id,
+        "eventType": event_type,
+        "state": assignment_state,
+        "at": now,
+        "workerDid": worker_did,
+        "stage": stage,
+        "childTaskId": child_task_id,
+        "childRole": child_role,
+        "outcome": if assignment_state == "Completed" { Some("success") } else { None::<&str> },
+        "message": message,
+    }));
+    if events.len() > 200 {
+        events.drain(..events.len() - 200);
+    }
+    let completed_at =
+        matches!(assignment_state, "Completed" | "Failed" | "Cancelled").then_some(now.clone());
+    let patch = json!({
+        "status": {
+            "assignment": {
+                "taskId": pending.task_id,
+                "state": assignment_state,
+                "workerDid": worker_did,
+                "stage": stage,
+                "lastProgressAt": now,
+                "completedAt": completed_at,
+                "error": if assignment_state == "Failed" { message } else { None::<&str> },
+            },
+            "assignmentEvents": events,
+            "assignmentSequence": sequence,
+        }
+    });
+    api.patch_status(
+        &pending.task_name,
+        &PatchParams::default(),
+        &Patch::Merge(patch),
+    )
+    .await
+    .context("patch KarsTask assignment transition")?;
+    Ok(())
+}
+
+async fn persist_assignment_progress(
+    state: &Arc<MeshPeerState>,
+    pending: &PendingAssignmentProgress,
+    worker_did: &str,
+    update: ProgressUpdate,
+) -> Result<()> {
+    let api = assignment_api(state, &pending.namespace);
+    let now = Utc::now().to_rfc3339();
+    let patch = json!({
+        "status": {
+            "assignment": {
+                "taskId": pending.task_id,
+                "state": "Running",
+                "workerDid": worker_did,
+                "stage": update.stage,
+                "childTaskId": update.child_task_id,
+                "childRole": update.child_role,
+                "lastProgressAt": now,
+                "error": update.message,
+            }
+        }
+    });
+    api.patch_status(
+        &pending.task_name,
+        &PatchParams::default(),
+        &Patch::Merge(patch),
+    )
+    .await
+    .context("patch KarsTask assignment progress")?;
     Ok(())
 }
 
