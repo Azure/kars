@@ -946,21 +946,28 @@ async fn foundry_proxy(
     } else {
         "https://cognitiveservices.azure.com"
     };
-    let token = match state.auth.get_token(audience).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Foundry proxy auth failed: {e}");
-            return errors::openai(
-                StatusCode::BAD_GATEWAY,
-                format!("Auth error: {e}"),
-                errors::AUTH_ERROR,
-            )
-            .into_response();
+    let provider_api_key = is_foundry_project
+        .then(|| state.config.resolve_provider("foundry"))
+        .flatten()
+        .and_then(|provider| provider.api_key);
+    let use_api_key_header =
+        provider_api_key.is_some() || is_azure_openai && state.auth.is_api_key_mode();
+    let token = if let Some(key) = provider_api_key {
+        key
+    } else {
+        match state.auth.get_token(audience).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Foundry proxy auth failed: {e}");
+                return errors::openai(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Auth error: {e}"),
+                    errors::AUTH_ERROR,
+                )
+                .into_response();
+            }
         }
     };
-
-    // For Azure OpenAI endpoints with API key auth (dev mode), use api-key header
-    let use_api_key_header = is_azure_openai && state.auth.is_api_key_mode();
 
     // Build upstream request — strip sandbox headers, inject auth
     let mut upstream_headers = HeaderMap::new();

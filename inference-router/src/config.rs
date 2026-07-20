@@ -428,6 +428,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_foundry_provider_api_key() {
+        let vars = vec![
+            (
+                "KARS_PROVIDER_FOUNDRY_ENDPOINT".to_string(),
+                "https://contoso.services.ai.azure.com/api/projects/x".to_string(),
+            ),
+            (
+                "KARS_PROVIDER_FOUNDRY_API_KEY".to_string(),
+                "foundry-key".to_string(),
+            ),
+        ];
+        let providers = parse_providers_from_env(vars.into_iter());
+        let p = providers.get("foundry").expect("parsed");
+        assert_eq!(p.api_key.as_deref(), Some("foundry-key"));
+    }
+
+    #[test]
     fn ignores_empty_provider_env_values() {
         let vars = vec![("KARS_PROVIDER_FOUNDRY_ENDPOINT".to_string(), "".to_string())];
         let providers = parse_providers_from_env(vars.into_iter());
