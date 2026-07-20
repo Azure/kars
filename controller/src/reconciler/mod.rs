@@ -3114,14 +3114,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // `/internal/policy-status` so the `kars_memory_reconciler` can
         // close the §3 Ready ⇔ router-echo loop.
         //
-        // The agent container does NOT need this mount: memory is a
-        // router-owned capability. Both runtime plugins (OpenClaw and
-        // Hermes) are thin clients — they forward `foundry.memory`
-        // intent to the router's platform MCP server and the router
-        // resolves the store name + scope from this binding, applies the
-        // Memory Store REST contract, auto-provisions, and retries. The
-        // agent process therefore carries no Foundry contract knowledge
-        // and never reads `binding.json` directly.
+        // The binding contains store metadata only (no credential). Mount it
+        // into both containers: the router resolves platform-MCP memory calls,
+        // while runtime startup/recall hooks use the same canonical store and
+        // scope before forwarding their data-plane requests through the router.
         //
         // Failure mode: source missing → mount omitted, router boots
         // without a binding loaded (digest absent in
@@ -3141,6 +3137,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 .await
                 {
                     Ok(governance_mounts::MirrorOutcome::Mirrored) => {
+                        governance_mounts::inject_configmap_mount(
+                            &mut pod_spec,
+                            agent_container_name,
+                            &mem_cm,
+                            "claw-memory-binding",
+                            governance_mounts::paths::MEMORY_BINDING_DIR,
+                            None,
+                        );
                         governance_mounts::inject_configmap_mount(
                             &mut pod_spec,
                             "inference-router",
