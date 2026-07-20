@@ -986,6 +986,10 @@ describe("DEFAULT_CONFIG values", () => {
         "Write an internal memo.",
         "The memo is complete.",
       )).toBeNull();
+      expect(mod.egressApprovalHost(
+        "Retrieve https://www.iana.org/time-zones.",
+        "The attempt was blocked by the egress policy. Approval Needed: approve outbound access to www.iana.org.",
+      )).toBe("www.iana.org");
       delete process.env.AGT_SKIP_INIT;
     });
   });

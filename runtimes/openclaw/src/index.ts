@@ -427,7 +427,10 @@ export function clarificationQuestion(response: string): string | null {
 }
 
 export function egressApprovalHost(task: string, response: string): string | null {
-  if (!/egress\s+(?:access\s+)?approval|requested\s+egress/i.test(response)) {
+  if (
+    !/egress\s+(?:access\s+)?approval|requested\s+egress|blocked\s+by\s+the\s+egress\s+policy|approval\s+needed[\s\S]{0,160}outbound\s+access/i
+      .test(response)
+  ) {
     return null;
   }
   const url = task.match(/https?:\/\/[^\s<>"')\]]+/i)?.[0];
