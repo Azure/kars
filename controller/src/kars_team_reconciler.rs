@@ -1764,7 +1764,9 @@ async fn harvest_and_retire_runs(
         // Do NOT deposit a (redundant) commons entry or count it as a delivery —
         // the standing team stays quiet instead of emitting a report every
         // interval when nothing happened.
-        if is_no_change(output) {
+        let no_change = is_no_change(output);
+        let successful = ok && (no_change || (did_work && !output.trim().is_empty()));
+        if no_change {
             stats.quiet += 1;
         } else if did_work && ok && !output.trim().is_empty() {
             stats.succeeded += 1;
@@ -1821,17 +1823,17 @@ async fn harvest_and_retire_runs(
             let _ = tasks
                 .patch(&run, &PatchParams::default(), &Patch::Merge(retire))
                 .await;
-            // A backlog task bound to this run is now complete — advance it to
-            // `done` so the team picks up the next pending task (and the queue
-            // never deadlocks on a task whose run already finished, even on a
-            // failed/timed-out delivery).
-            let _ = crate::team_tasks::mark_done_for_run(
-                client,
-                &team_name,
-                &run,
-                &Utc::now().to_rfc3339(),
-            )
-            .await;
+            if successful {
+                let _ = crate::team_tasks::mark_done_for_run(
+                    client,
+                    &team_name,
+                    &run,
+                    &Utc::now().to_rfc3339(),
+                )
+                .await;
+            } else {
+                let _ = crate::team_tasks::requeue_for_run(client, &team_name, &run).await;
+            }
         } else if launched {
             stats.active += 1;
         }

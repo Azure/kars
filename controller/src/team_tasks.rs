@@ -180,18 +180,50 @@ pub async fn mark_done_for_run(
     now: &str,
 ) -> Result<bool, kube::Error> {
     let mut tasks = read_tasks(client, team).await;
-    let mut changed = false;
-    for t in tasks.iter_mut() {
-        if t.status == "active" && t.run.as_deref() == Some(run) {
-            t.status = "done".into();
-            t.done_at = Some(now.to_string());
-            changed = true;
-        }
-    }
+    let changed = mark_done(&mut tasks, run, now);
     if changed {
         write_tasks(client, team, &tasks).await?;
     }
     Ok(changed)
+}
+
+/// Requeue the `active` backlog task bound to a failed run. The failed run stays
+/// linked in its own durable evidence, while the work item returns to `pending`
+/// for an explicit Run now or the next cadence tick.
+pub async fn requeue_for_run(client: &Client, team: &str, run: &str) -> Result<bool, kube::Error> {
+    let mut tasks = read_tasks(client, team).await;
+    let changed = requeue_run(&mut tasks, run);
+    if changed {
+        write_tasks(client, team, &tasks).await?;
+    }
+    Ok(changed)
+}
+
+fn mark_done(tasks: &mut [TeamTask], run: &str, now: &str) -> bool {
+    let mut changed = false;
+    for task in tasks {
+        if task.status == "active" && task.run.as_deref() == Some(run) {
+            task.status = "done".into();
+            task.done_at = Some(now.to_string());
+            task.stuck_since = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn requeue_run(tasks: &mut [TeamTask], run: &str) -> bool {
+    let mut changed = false;
+    for task in tasks {
+        if task.status == "active" && task.run.as_deref() == Some(run) {
+            task.status = "pending".into();
+            task.run = None;
+            task.done_at = None;
+            task.stuck_since = None;
+            changed = true;
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -224,11 +256,34 @@ mod tests {
     #[test]
     fn has_active_detects_in_flight() {
         assert!(has_active(&[t("a", "active", Some("run-1"))]));
-        assert!(!has_active(&[t("a", "pending", None), t("b", "done", None)]));
+        assert!(!has_active(&[
+            t("a", "pending", None),
+            t("b", "done", None)
+        ]));
     }
 
     #[test]
     fn tasks_cm_name_is_stable() {
         assert_eq!(tasks_cm_name("finance"), "kars-team-tasks-finance");
+    }
+
+    #[test]
+    fn successful_run_completes_backlog_task() {
+        let mut tasks = vec![t("a", "active", Some("run-1"))];
+        assert!(mark_done(&mut tasks, "run-1", "2026-07-20T12:00:00Z"));
+        assert_eq!(tasks[0].status, "done");
+        assert_eq!(tasks[0].done_at.as_deref(), Some("2026-07-20T12:00:00Z"));
+        assert!(tasks[0].stuck_since.is_none());
+    }
+
+    #[test]
+    fn failed_run_requeues_backlog_task() {
+        let mut tasks = vec![t("a", "active", Some("run-1"))];
+        tasks[0].stuck_since = Some("2026-07-20T11:00:00Z".into());
+        assert!(requeue_run(&mut tasks, "run-1"));
+        assert_eq!(tasks[0].status, "pending");
+        assert!(tasks[0].run.is_none());
+        assert!(tasks[0].done_at.is_none());
+        assert!(tasks[0].stuck_since.is_none());
     }
 }
