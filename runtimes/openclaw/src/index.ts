@@ -2605,27 +2605,37 @@ let memorySyncToolCount = 0;
 let memorySyncBuffer: string[] = [];
 let memorySyncInFlight = false;
 
+export function memoryStoreNeedsProvisioning(response: unknown): boolean {
+  return !response ||
+    typeof response !== "object" ||
+    "error" in response;
+}
+
 async function ensureMemoryStore(store: string): Promise<void> {
   const apiVer = "api-version=2025-11-15-preview";
+  let existing: unknown = null;
   try {
-    await _routerCall("GET", `/memory_stores/${store}?${apiVer}`);
+    existing = await _routerCall("GET", `/memory_stores/${store}?${apiVer}`);
   } catch {
-    const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
-    await _routerCall("POST", `/memory_stores?${apiVer}`, {
-      name: store,
-      description: `Persistent memory for agent ${store.replace("memory-", "")}`,
-      definition: {
-        kind: "default",
-        chat_model: chatModel,
-        embedding_model: "text-embedding-3-small",
-        options: {
-          user_profile_enabled: true,
-          user_profile_details: "Store user preferences, decisions, and project context",
-          chat_summary_enabled: true,
-        },
-      },
-    });
+    // Network/proxy failures use the same provisioning attempt as a 404 body.
   }
+  if (!memoryStoreNeedsProvisioning(existing)) return;
+
+  const chatModel = process.env.OPENCLAW_MODEL || "gpt-4.1";
+  await _routerCall("POST", `/memory_stores?${apiVer}`, {
+    name: store,
+    description: `Persistent memory for agent ${store.replace("memory-", "")}`,
+    definition: {
+      kind: "default",
+      chat_model: chatModel,
+      embedding_model: "text-embedding-3-small",
+      options: {
+        user_profile_enabled: true,
+        user_profile_details: "Store user preferences, decisions, and project context",
+        chat_summary_enabled: true,
+      },
+    },
+  });
 }
 
 async function syncToFoundryMemory(

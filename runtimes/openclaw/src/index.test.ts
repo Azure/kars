@@ -974,6 +974,10 @@ describe("DEFAULT_CONFIG values", () => {
       )).toBe("Which country will the pilot serve?");
       expect(mod.clarificationQuestion("# Report\nThe recommendation is complete."))
         .toBeNull();
+      expect(mod.memoryStoreNeedsProvisioning({ error: { code: "not_found" } }))
+        .toBe(true);
+      expect(mod.memoryStoreNeedsProvisioning({ id: "shared-store" }))
+        .toBe(false);
       delete process.env.AGT_SKIP_INIT;
     });
   });
