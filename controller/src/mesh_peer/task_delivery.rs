@@ -52,12 +52,6 @@ const RUN_ACK_ANNOTATION: &str = "kars.azure.com/run-ack";
 /// a run whose agent wasn't ready yet is retried a bounded number of times
 /// rather than recorded as a permanent timeout on the first miss.
 const RUN_ATTEMPTS_ANNOTATION: &str = "kars.azure.com/run-attempts";
-/// Post-dispatch idle timeout retries are tracked independently from agent
-/// warm-up. Reusing the warm-up budget here made a 6-minute startup allowance
-/// turn into hours of repeated 180-second idle waits.
-const RUN_TIMEOUT_ATTEMPTS_ANNOTATION: &str = "kars.azure.com/run-timeout-attempts";
-const MAX_TIMEOUT_RETRIES: u32 = 3;
-
 /// A fresh AKS sandbox can take several minutes to pull images and join the mesh.
 /// Keep the local/kind default robust while allowing operators to tune the
 /// bounded warm-up budget.
@@ -76,16 +70,17 @@ fn max_delivery_attempts() -> u32 {
 /// agent that has truly gone silent trips it. Terminal-timeout runs are retired
 /// (not counted as active), so a slow run never permanently freezes the team's
 /// ticks.
-const IDLE_TIMEOUT_SECS: i64 = 180;
-/// Absolute ceiling on a single delivery regardless of heartbeats. Bounds a
-/// runaway agent that keeps ticking forever but never returns a result.
-const ABS_MAX_SECS: u64 = 1800;
+fn assignment_lease_ttl_secs() -> i64 {
+    std::env::var("KARS_ASSIGNMENT_LEASE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(|value| value.clamp(30, 300))
+        .unwrap_or(90)
+}
 const POLL_INTERVAL_SECS: u64 = 5;
 
 /// Process-local set of KarsTasks currently being delivered, so the 5s poll
-/// loop never double-dispatches a task whose delivery is still in flight (a
-/// delivery can take up to `ABS_MAX_SECS`). Single-leader, so a plain
-/// in-memory guard is sufficient and avoids annotation churn.
+/// loop never double-dispatches a task whose delivery is still in flight.
 fn inflight() -> &'static StdMutex<HashSet<String>> {
     static INFLIGHT: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
     INFLIGHT.get_or_init(|| StdMutex::new(HashSet::new()))
@@ -97,10 +92,8 @@ enum DeliveryOutcome {
     Reply(TaskReply),
     /// The oneshot channel closed before any reply (waiter dropped).
     ChannelClosed,
-    /// No `task_progress`/`task_response` for `IDLE_TIMEOUT_SECS`.
+    /// No `task_progress`/`task_response` before the progress lease expired.
     IdleTimeout,
-    /// The delivery exceeded `ABS_MAX_SECS` overall despite heartbeats.
-    AbsoluteTimeout,
 }
 
 /// Bump the last-activity clock for the in-flight delivery to `agent_did`,
@@ -318,14 +311,6 @@ async fn deliver_for_task(
         .and_then(|a| a.get(RUN_ATTEMPTS_ANNOTATION))
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
-    let timeout_attempts = task
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(RUN_TIMEOUT_ATTEMPTS_ANNOTATION))
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0);
-
     // Discover the running agent's mesh DID from the registry. The runtime
     // adapter registers under the sandbox name as a capability — harness
     // neutral, same discovery the Bridge BFF uses. A freshly-launched sandbox
@@ -397,7 +382,7 @@ async fn deliver_for_task(
         .await
         .insert(agent_did.clone(), last_activity.clone());
 
-    let started = tokio::time::Instant::now();
+    let lease_ttl_secs = assignment_lease_ttl_secs();
     let mut rx = rx;
     let outcome = loop {
         match tokio::time::timeout(Duration::from_secs(POLL_INTERVAL_SECS), &mut rx).await {
@@ -405,11 +390,8 @@ async fn deliver_for_task(
             Ok(Err(_)) => break DeliveryOutcome::ChannelClosed,
             Err(_) => {
                 let idle_ms = Utc::now().timestamp_millis() - last_activity.load(Ordering::Acquire);
-                if idle_ms >= IDLE_TIMEOUT_SECS * 1000 {
+                if idle_ms >= lease_ttl_secs * 1000 {
                     break DeliveryOutcome::IdleTimeout;
-                }
-                if started.elapsed().as_secs() >= ABS_MAX_SECS {
-                    break DeliveryOutcome::AbsoluteTimeout;
                 }
             }
         }
@@ -417,14 +399,13 @@ async fn deliver_for_task(
     // Stop tracking liveness for this delivery regardless of outcome.
     state.pending_progress.lock().await.remove(&agent_did);
 
-    let (content, artifact_count, trace, telemetry, ok, transient) = match outcome {
+    let (content, artifact_count, trace, telemetry, ok) = match outcome {
         DeliveryOutcome::Reply(reply) => (
             reply.content,
             reply.artifact_count,
             reply.trace,
             reply.telemetry,
             reply.ok,
-            false,
         ),
         DeliveryOutcome::ChannelClosed => (
             "mesh task delivery channel closed before a reply arrived".to_string(),
@@ -432,57 +413,21 @@ async fn deliver_for_task(
             Vec::new(),
             None,
             false,
-            true,
         ),
         DeliveryOutcome::IdleTimeout => {
             // Drop the stale waiter so a late reply isn't misattributed.
             state.pending_tasks.lock().await.remove(&agent_did);
             (
                 format!(
-                    "timed out after {IDLE_TIMEOUT_SECS}s with no progress heartbeat from the agent"
+                    "assignment progress lease expired after {lease_ttl_secs}s without renewal"
                 ),
                 0,
                 Vec::new(),
                 None,
                 false,
-                true,
-            )
-        }
-        DeliveryOutcome::AbsoluteTimeout => {
-            state.pending_tasks.lock().await.remove(&agent_did);
-            (
-                format!("exceeded the {ABS_MAX_SECS}s maximum run time before returning a result"),
-                0,
-                Vec::new(),
-                None,
-                false,
-                false,
             )
         }
     };
-
-    // A transient miss (the agent wasn't ready to reply) is retried on the next
-    // poll until the warm-up budget is exhausted — only then is it recorded as a
-    // terminal timeout. This is what makes an auto-launched standing-operation
-    // run reliable: the run-request can be stamped at launch without racing the
-    // sandbox's mesh warm-up.
-    if transient && timeout_attempts < MAX_TIMEOUT_RETRIES {
-        bump_attempt_annotation(
-            state,
-            &namespace,
-            &name,
-            RUN_TIMEOUT_ATTEMPTS_ANNOTATION,
-            timeout_attempts + 1,
-        )
-        .await?;
-        tracing::info!(
-            task = %name,
-            attempt = timeout_attempts + 1,
-            max = MAX_TIMEOUT_RETRIES,
-            "task-delivery: agent went idle — retrying within timeout budget"
-        );
-        return Ok(());
-    }
 
     // The artifact `file_transfer` frames are independent relay messages; a few
     // may still be in flight when the task_response lands. Wait briefly for the
@@ -572,13 +517,11 @@ fn is_substantive_deliverable(output: &str) -> bool {
     .iter()
     .any(|sentinel| {
         first_meaningful.starts_with(sentinel)
-            || sentinel
-                .strip_suffix("]]")
-                .is_some_and(|open| {
-                    first_meaningful
-                        .strip_prefix(open)
-                        .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
-                })
+            || sentinel.strip_suffix("]]").is_some_and(|open| {
+                first_meaningful
+                    .strip_prefix(open)
+                    .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+            })
     })
 }
 

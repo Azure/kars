@@ -981,22 +981,26 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // sequences no longer time out at a fixed 60s. A hard ceiling
           // bounds the total wait absolutely — even continuous heartbeats
           // cannot keep a stuck tool call running forever.
-          const idleTimeoutMs = 180_000;      // reset on each task_progress
-          const hardCeilingMs = 600_000;      // absolute upper bound (10 min)
+          const leaseTimeoutMs = Math.min(
+            300_000,
+            Math.max(
+              30_000,
+              Number(process.env.KARS_ASSIGNMENT_LEASE_TTL_MS ?? 90_000),
+            ),
+          );
           const pollIntervalMs = 500;
           let replyContent: string | null = null;
-          let retriedAfterTimeout = false;
+          let leaseFailureReason: string | null = null;
           const overallStart = Date.now();
 
-          // eslint-disable-next-line no-constant-condition
-          while (true) {
+          {
             let replyWaitStart = Date.now();
-            log.info(`AGT relay: waiting up to ${idleTimeoutMs / 1000}s idle / ${hardCeilingMs / 1000}s total for reply from '${agentName}'...`);
+            log.info(
+              `AGT relay: waiting on progress lease ` +
+              `(${leaseTimeoutMs / 1000}s TTL) for reply from '${agentName}'...`,
+            );
 
-            while (
-              Date.now() - replyWaitStart < idleTimeoutMs &&
-              Date.now() - overallStart < hardCeilingMs
-            ) {
+            while (Date.now() - replyWaitStart < leaseTimeoutMs) {
               // Check inbox for a reply from this target, skipping protocol messages
               const replyIdx = agtInbox.findIndex((message) =>
                 isReplyForAssignment(message, targetAmid!, agentName, messageId)
@@ -1070,53 +1074,20 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               await new Promise((r) => setTimeout(r, pollIntervalMs));
             }
 
-            if (replyContent !== null) break;
-            if (retriedAfterTimeout) break;
-            retriedAfterTimeout = true;
-
-            // Reply timed out — the registered AMID may belong to a recycled pod.
-            // Force-invalidate cache, re-resolve via registry, and if the AMID
-            // changed, resend exactly once. This recovers from the rolling-deploy
-            // race where parent's discovery happened during the gap between old
-            // pod terminating and new pod re-registering its identity.
-            const previousAmid = targetAmid!;
-            log.warn(`AGT relay: no reply from '${agentName}' within ${idleTimeoutMs / 1000}s idle (or ${hardCeilingMs / 1000}s ceiling) — clearing cache and re-discovering (target may have been recycled during a rollout)`);
-            nameToAmid.delete(agentName);
-            amidToName.delete(previousAmid);
-            let freshAmid: string | undefined;
-            try {
-              freshAmid = await resolveAmidByName(agentName);
-            } catch (e: any) {
-              log.warn(`AGT relay: re-discover failed: ${e?.message || e}`);
+            if (replyContent === null) {
+              const probe = await probeSubAgentAlive(agentName);
+              leaseFailureReason = probe?.alive === false
+                ? probe.reason ?? `worker entered terminal phase ${probe.phase ?? "unknown"}`
+                : `worker progress lease expired after ${leaseTimeoutMs / 1000}s without renewal`;
+              log.warn(
+                `AGT relay: assignment ${messageId} for '${agentName}' failed: ` +
+                leaseFailureReason,
+              );
             }
-            if (!freshAmid) {
-              log.info(`AGT relay: re-discovery returned no AMID — giving up retry`);
-              break;
-            }
-            if (freshAmid === previousAmid) {
-              log.info(`AGT relay: re-discovery returned same AMID — peer is genuinely silent, giving up retry`);
-              break;
-            }
-            log.info(`AGT relay: target AMID changed ${previousAmid.slice(0, 12)}... → ${freshAmid.slice(0, 12)}..., resending after rollout race`);
-            targetAmid = freshAmid;
-            try {
-              await meshSend(deps.meshClient(), targetAmid, {
-                type: "task_request",
-                message_id: messageId,
-                content: msgContent,
-                from_agent: process.env.SANDBOX_NAME || "unknown",
-                timestamp: new Date().toISOString(),
-              }, log);
-              log.info(`AGT relay: resent to '${agentName}' (${targetAmid.slice(0, 12)}...) after rollout-aware re-discover`);
-            } catch (e: any) {
-              log.warn(`AGT relay: resend after timeout failed: ${e?.message || e}`);
-              break;
-            }
-            // Loop back to wait for reply on the fresh identity.
           }
 
           const result: any = {
-            status: replyContent ? "delivered_and_replied" : "delivered_via_agt_relay",
+            status: replyContent ? "delivered_and_replied" : "assignment_lease_expired",
             to_agent: agentName,
             to_amid: targetAmid,
             from_amid: deps.identity().amid,
@@ -1145,13 +1116,14 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
             } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
           } else {
-            result.note = "No reply within timeout — use kars_mesh_inbox to check later.";
+            result.error = leaseFailureReason ?? "worker progress lease expired";
             appendCollaborationEvent({
-              event: "handback_missing",
+              event: "assignment_lease_expired",
               member: originalAgentName,
               mesh_name: agentName,
               message_id: messageId,
-              outcome: "timeout",
+              outcome: "failed",
+              reason: leaseFailureReason,
               elapsed_ms: Date.now() - overallStart,
             });
           }
