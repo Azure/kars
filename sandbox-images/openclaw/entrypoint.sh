@@ -12,6 +12,11 @@
 
 set -e
 
+# Runtime dependency resolution must remain image-local. Every bundled plugin
+# dependency is staged during the image build; if that contract regresses, fail
+# locally instead of turning an npm fallback into a misleading egress approval.
+export npm_config_offline=true
+
 # Make pre-staged OpenClaw bundled-runtime-deps discoverable at runtime.
 #
 # Background. The base image bakes all bundled channel/plugin deps into
