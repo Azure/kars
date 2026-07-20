@@ -331,6 +331,7 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
     if run_now {
+        let mut consumed = false;
         if !paused && active_runs < MAX_CONCURRENT_RUNS && cap_gate.is_none() && !budget_exhausted {
             let canonical = format!("{name}-run-{}", now.timestamp());
             if tasks.get_opt(&canonical).await.ok().flatten().is_none() {
@@ -354,15 +355,28 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 last_generated = Some(canonical.clone());
                 last_run_at = Some(now.to_rfc3339());
             }
+            consumed = true;
+        } else {
+            tracing::info!(
+                team = %name,
+                paused,
+                active_runs,
+                capability_gate = cap_gate.as_deref().unwrap_or("none"),
+                budget_exhausted,
+                "Run now remains armed until the team is ready to mint"
+            );
         }
-        // Clear the trigger regardless of whether we minted (a gated-out request
-        // shouldn't stay armed forever) so "Run now" is a single-shot request.
-        let mut ann = serde_json::Map::new();
-        ann.insert(RUN_NOW_ANNOTATION.to_string(), serde_json::Value::Null);
-        let clear = json!({ "metadata": { "annotations": ann } });
-        let _ = teams
-            .patch(&name, &PatchParams::default(), &Patch::Merge(clear))
-            .await;
+        // Consume the trigger only after a run exists for this request. Transient
+        // readiness, concurrency, or budget gates must not silently drop the
+        // user's Run now action.
+        if consumed {
+            let mut ann = serde_json::Map::new();
+            ann.insert(RUN_NOW_ANNOTATION.to_string(), serde_json::Value::Null);
+            let clear = json!({ "metadata": { "annotations": ann } });
+            let _ = teams
+                .patch(&name, &PatchParams::default(), &Patch::Merge(clear))
+                .await;
+        }
     }
 
     // Kickoff run: a team with NO cadence still does one INITIAL run when it is
