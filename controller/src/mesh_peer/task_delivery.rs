@@ -402,7 +402,7 @@ async fn deliver_for_task(
     // neutral, same discovery the Bridge BFF uses. A freshly-launched sandbox
     // may not be on the mesh yet; treat that as a transient miss and retry on
     // the next poll until the warm-up budget is exhausted (then record it).
-    let agent_did = match discover_agent_did(&sandbox).await {
+    let mut agent_did = match discover_agent_did(&sandbox).await {
         Some(did) => did,
         None => {
             return handle_transient_miss(
@@ -503,6 +503,84 @@ async fn deliver_for_task(
             Ok(Err(_)) => break DeliveryOutcome::ChannelClosed,
             Err(_) => {
                 let idle_ms = Utc::now().timestamp_millis() - last_activity.load(Ordering::Acquire);
+                if idle_ms >= 15_000
+                    && let Some(discovered_did) = discover_agent_did(&sandbox).await
+                    && discovered_did != agent_did
+                {
+                    let progress = pending_progress.clone();
+                    state
+                        .pending_progress
+                        .lock()
+                        .await
+                        .insert(discovered_did.clone(), progress);
+                    let rerouted = {
+                        let mut pending = state.pending_tasks.lock().await;
+                        if let Some(sender) = pending.remove(&agent_did) {
+                            pending.insert(discovered_did.clone(), sender);
+                            match enqueue_outbound(
+                                state,
+                                epoch,
+                                &discovered_did,
+                                FederationMessage::TaskRequest {
+                                    content: objective.clone(),
+                                    message_id: Some(nonce.to_string()),
+                                    request_id: Some(nonce.to_string()),
+                                    timestamp: Some(Utc::now().to_rfc3339()),
+                                },
+                            ) {
+                                Ok(()) => true,
+                                Err(error) => {
+                                    if let Some(sender) = pending.remove(&discovered_did) {
+                                        pending.insert(agent_did.clone(), sender);
+                                    }
+                                    tracing::warn!(
+                                        task = %name,
+                                        old_worker = %agent_did,
+                                        new_worker = %discovered_did,
+                                        %error,
+                                        "failed to reroute assignment after worker identity changed"
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    if rerouted {
+                        state.pending_progress.lock().await.remove(&agent_did);
+                        state.pending_artifacts.lock().await.remove(&agent_did);
+                        state.pending_artifacts.lock().await.remove(&discovered_did);
+                        tracing::info!(
+                            task = %name,
+                            old_worker = %agent_did,
+                            new_worker = %discovered_did,
+                            task_id = %nonce,
+                            "rerouted silent assignment to replacement worker DID"
+                        );
+                        if let Err(error) = persist_assignment_transition(
+                            state,
+                            &pending_progress,
+                            &discovered_did,
+                            "rerouted",
+                            "Assigned",
+                            Some("worker_replaced"),
+                            Some("sandbox worker restarted; assignment rerouted with the same task ID"),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                task = %name,
+                                %error,
+                                "assignment rerouted but durable reroute transition could not be recorded"
+                            );
+                        }
+                        agent_did = discovered_did;
+                        last_activity.store(Utc::now().timestamp_millis(), Ordering::Release);
+                        continue;
+                    }
+                    state.pending_progress.lock().await.remove(&discovered_did);
+                }
                 if idle_ms >= lease_ttl_secs * 1000 {
                     break DeliveryOutcome::IdleTimeout;
                 }
@@ -727,6 +805,21 @@ pub(super) async fn resolve_pending(
             if let Some(task_id) = task_id {
                 match find_task_by_nonce(state, &task_id).await {
                     Ok(Some(task)) => {
+                        if !reply_matches_current_worker(&task, from_amid) {
+                            tracing::warn!(
+                                task = %task.metadata.name.clone().unwrap_or_default(),
+                                task_id = %task_id,
+                                from = %from_amid,
+                                current_worker = ?task
+                                    .data
+                                    .get("status")
+                                    .and_then(|status| status.get("assignment"))
+                                    .and_then(|assignment| assignment.get("workerDid"))
+                                    .and_then(serde_json::Value::as_str),
+                                "dropping late task_response from superseded worker"
+                            );
+                            return;
+                        }
                         let namespace = task
                             .metadata
                             .namespace
@@ -785,6 +878,7 @@ pub(super) async fn resolve_pending(
                             );
                         }
                     }
+
                     Ok(None) => {
                         tracing::warn!(
                             task_id = %task_id,
@@ -809,6 +903,15 @@ pub(super) async fn resolve_pending(
             }
         }
     }
+}
+
+fn reply_matches_current_worker(task: &DynamicObject, from_amid: &str) -> bool {
+    task.data
+        .get("status")
+        .and_then(|status| status.get("assignment"))
+        .and_then(|assignment| assignment.get("workerDid"))
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|worker| worker == from_amid)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1580,7 +1683,7 @@ async fn handle_transient_miss(
 mod tests {
     use super::{
         assignment_lease_active, child_assignment_state, is_substantive_deliverable,
-        select_newest_agent_did,
+        reply_matches_current_worker, select_newest_agent_did,
     };
     use kube::api::DynamicObject;
     use serde_json::json;
@@ -1606,6 +1709,25 @@ mod tests {
             child_assignment_state(Some("child_lease_expired")),
             "Failed"
         );
+    }
+
+    #[test]
+    fn superseded_worker_cannot_reconcile_a_late_reply() {
+        let task: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsTask",
+            "metadata": {"name": "run"},
+            "status": {
+                "assignment": {
+                    "taskId": "run-1",
+                    "state": "Assigned",
+                    "workerDid": "did:mesh:replacement"
+                }
+            }
+        }))
+        .expect("dynamic task");
+        assert!(reply_matches_current_worker(&task, "did:mesh:replacement"));
+        assert!(!reply_matches_current_worker(&task, "did:mesh:retired"));
     }
 
     #[test]
