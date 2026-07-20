@@ -53,6 +53,11 @@ void routerCallStrict; void parentTrustedAmids; void getCachedAmid;
 
 // Agent-facing logical child name → parent-scoped mesh/registry name.
 const spawnedMeshNames = new Map<string, string>();
+const terminalMeshAssignments = new Map<string, {
+  outcome: "success" | "failed";
+  reason: string;
+  at: string;
+}>();
 
 // 2-arg wrapper around the canonical resolveAmidByName(name, routerUrl, opts?).
 // Kept local so existing tool bodies don't have to thread routerUrl.
@@ -833,6 +838,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       let agentName = params.to_agent as string;
       let msgContent = params.content as string;
       const originalAgentName = agentName;
+      terminalMeshAssignments.delete(originalAgentName.toLowerCase());
       const assignmentDigest = evidenceDigest(msgContent);
 
       // OFFLOAD HARDENING: native agents in offload sandboxes may call this
@@ -1208,6 +1214,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             message_id: messageId,
           };
           if (replyContent) {
+            terminalMeshAssignments.set(originalAgentName.toLowerCase(), {
+              outcome: "success",
+              reason: "Handback already returned by kars_mesh_send.",
+              at: new Date().toISOString(),
+            });
             result.reply = replyContent;
             appendCollaborationEvent({
               event: "handback_received",
@@ -1235,6 +1246,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
             } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
           } else {
+            terminalMeshAssignments.set(originalAgentName.toLowerCase(), {
+              outcome: "failed",
+              reason: leaseFailureReason ?? "worker progress lease expired",
+              at: new Date().toISOString(),
+            });
             result.error = leaseFailureReason ?? "worker progress lease expired";
             appendCollaborationEvent({
               event: "assignment_lease_expired",
@@ -1554,7 +1570,8 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       "contents (or pass `mark_read=true` here to flag them as seen on the " +
       "way out). Internal protocol messages (handoff, file_transfer_ack, " +
       "task_progress) do NOT satisfy the wait — only content-bearing " +
-      "messages count.",
+      "messages count. A sender whose kars_mesh_send already returned a terminal " +
+      "success or failure is resolved immediately; do not retry terminal failures.",
     parameters: {
       type: "object",
       properties: {
@@ -1627,20 +1644,54 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           return out;
         };
 
+        const terminalForWanted = (): Record<string, {
+          outcome: "success" | "failed";
+          reason: string;
+          at: string;
+        }> => {
+          const terminal: Record<string, {
+            outcome: "success" | "failed";
+            reason: string;
+            at: string;
+          }> = {};
+          for (const wanted of wantedSet) {
+            const state = terminalMeshAssignments.get(wanted);
+            if (state) terminal[wanted] = state;
+          }
+          return terminal;
+        };
+        const unresolvedCount = (
+          matches: Map<string, string[]>,
+          terminal: Record<string, unknown>,
+        ): number => {
+          let unresolved = 0;
+          for (const wanted of wantedSet) {
+            if (!matches.has(wanted) && !terminal[wanted]) unresolved += 1;
+          }
+          return unresolved;
+        };
+
         let matches = computeMatches();
+        let terminal = terminalForWanted();
         const startedAt = Date.now();
-        if (matches.size < wantedSet.size && deps.waitForInbox) {
+        if (unresolvedCount(matches, terminal) > 0 && deps.waitForInbox) {
           const deadline = startedAt + timeoutSeconds * 1000;
-          while (matches.size < wantedSet.size && Date.now() < deadline) {
+          while (unresolvedCount(matches, terminal) > 0 && Date.now() < deadline) {
             const remaining = Math.max(1, deadline - Date.now());
             const woke = await deps.waitForInbox(remaining);
             matches = computeMatches();
+            terminal = terminalForWanted();
             if (!woke) break;
           }
         }
 
         const missing: string[] = [];
-        for (const wanted of wantedSet) if (!matches.has(wanted)) missing.push(wanted);
+        for (const wanted of wantedSet) {
+          if (!matches.has(wanted) && !terminal[wanted]) missing.push(wanted);
+        }
+        const terminalFailures = Object.fromEntries(
+          Object.entries(terminal).filter(([, state]) => state.outcome === "failed"),
+        );
 
         // Optionally flip read_at for matched entries.
         let markedRead = 0;
@@ -1667,16 +1718,24 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         for (const [sender, ids] of matches) matchedSummary[sender] = ids;
 
         return { content: [{ type: "text", text: JSON.stringify({
-          status: missing.length === 0 ? "all_received" : "partial_timeout",
+          status: missing.length > 0
+            ? "partial_timeout"
+            : Object.keys(terminalFailures).length > 0
+              ? "resolved_with_failures"
+              : "all_received",
           requested_senders: wantedSenders,
           matched: matchedSummary,
+          terminal,
+          terminal_failures: terminalFailures,
           missing,
           mark_read: markReadOnResolve,
           marked_read_count: markedRead,
           waited_seconds: Math.round((Date.now() - startedAt) / 1000),
           timeout_seconds: timeoutSeconds,
-          note: missing.length === 0
-            ? "All requested senders have delivered. Call kars_mesh_inbox to read message contents."
+          note: Object.keys(terminalFailures).length > 0
+            ? "One or more senders ended in a terminal failure. Do not wait again; synthesize the available handbacks and explicitly report the failed roles."
+            : missing.length === 0
+              ? "All requested senders are resolved. Use the kars_mesh_send replies or call kars_mesh_inbox for unread message contents."
             : `Timeout: missing ${missing.join(", ")}. Call kars_mesh_inbox to inspect what did arrive, then either retry mesh_await for the missing senders, or proceed with partial input.`,
         }, null, 2) }] };
       } catch (e: any) {
