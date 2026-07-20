@@ -11,7 +11,7 @@
 
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{
-    Client,
+    Client, ResourceExt,
     api::{Api, Patch, PatchParams},
 };
 use serde::{Deserialize, Serialize};
@@ -144,9 +144,17 @@ pub async fn reset_stale_active_tasks(client: &Client, team: &str) -> Result<boo
         if t.status != "active" {
             continue;
         }
-        let run_exists = match &t.run {
-            Some(r) => runs.get_opt(r).await?.is_some(),
-            None => false,
+        let (run_exists, run_halted) = match &t.run {
+            Some(r) => match runs.get_opt(r).await? {
+                Some(run) => (
+                    true,
+                    run.annotations()
+                        .get("kars.azure.com/halted")
+                        .is_some_and(|decision| !decision.trim().is_empty()),
+                ),
+                None => (false, false),
+            },
+            None => (false, false),
         };
         let stuck_mins = t
             .stuck_since
@@ -154,7 +162,7 @@ pub async fn reset_stale_active_tasks(client: &Client, team: &str) -> Result<boo
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|s| (now - s.with_timezone(&chrono::Utc)).num_minutes())
             .unwrap_or(0);
-        if !run_exists || stuck_mins > STUCK_TASK_TIMEOUT_MINS {
+        if should_requeue(run_exists, run_halted, stuck_mins) {
             t.status = "pending".into();
             t.run = None;
             t.stuck_since = None;
@@ -169,6 +177,10 @@ pub async fn reset_stale_active_tasks(client: &Client, team: &str) -> Result<boo
         write_tasks(client, team, &tasks).await?;
     }
     Ok(changed)
+}
+
+fn should_requeue(run_exists: bool, run_halted: bool, stuck_mins: i64) -> bool {
+    !run_exists || run_halted || stuck_mins > STUCK_TASK_TIMEOUT_MINS
 }
 
 /// Mark the `active` task bound to `run` as `done`. No-op if none matches.
@@ -285,5 +297,11 @@ mod tests {
         assert!(tasks[0].run.is_none());
         assert!(tasks[0].done_at.is_none());
         assert!(tasks[0].stuck_since.is_none());
+    }
+
+    #[test]
+    fn halted_run_requeues_without_waiting_for_stale_timeout() {
+        assert!(should_requeue(true, true, 0));
+        assert!(!should_requeue(true, false, 0));
     }
 }
