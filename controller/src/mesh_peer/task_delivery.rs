@@ -627,26 +627,7 @@ fn is_substantive_deliverable(output: &str) -> bool {
     {
         return false;
     }
-    let first_meaningful = trimmed
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .trim_start_matches(|c: char| matches!(c, '#' | '*' | '_' | '`' | '-' | ' ' | '\t'));
-    ![
-        "[[NEEDS_CLARIFICATION]]",
-        "[[NEEDS_EGRESS]]",
-        "[[NEEDS_TIER]]",
-    ]
-    .iter()
-    .any(|sentinel| {
-        first_meaningful.starts_with(sentinel)
-            || sentinel.strip_suffix("]]").is_some_and(|open| {
-                first_meaningful
-                    .strip_prefix(open)
-                    .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
-            })
-    })
+    true
 }
 
 /// Wait up to a short window for the agent's `file_transfer` frames to land,
@@ -1517,29 +1498,11 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn aborted_and_human_blocked_outputs_are_not_successes() {
+    fn aborted_outputs_are_not_successes() {
         assert!(!is_substantive_deliverable("aborted"));
         assert!(!is_substantive_deliverable("Aborted: operator cancelled"));
         assert!(!is_substantive_deliverable(
             "Stopped before completing the task"
-        ));
-        assert!(!is_substantive_deliverable(
-            "[[NEEDS_CLARIFICATION]] Which environment?"
-        ));
-        assert!(!is_substantive_deliverable(
-            "[[NEEDS_EGRESS example.com:443 - fetch evidence]]"
-        ));
-        assert!(is_substantive_deliverable(
-            "Partial work\n[[NEEDS_EGRESS]] example.com:443 - fetch evidence"
-        ));
-        assert!(is_substantive_deliverable(
-            "# NORTHSTAR_TEAM_INCOMPLETE\nBackend reported `[[NEEDS_CLARIFICATION]] repo access` as evidence."
-        ));
-        assert!(is_substantive_deliverable(
-            "> [[NEEDS_CLARIFICATION]] quoted child question"
-        ));
-        assert!(!is_substantive_deliverable(
-            "- [[NEEDS_CLARIFICATION]] Which environment?"
         ));
         assert!(is_substantive_deliverable(
             "Completed the review with evidence and a ship recommendation."

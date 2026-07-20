@@ -9,7 +9,7 @@
 //! paths, headers, query strings, or payload data are ever stored.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Default capacity when the operator does not override.
@@ -55,6 +55,7 @@ pub struct BlockedBuffer {
     capacity: usize,
     rate_limit_window: Duration,
     rate_limit_per_source: u32,
+    access_requests: Mutex<Option<Arc<crate::access_request::AccessRequestBuffer>>>,
 }
 
 struct Inner {
@@ -79,7 +80,18 @@ impl BlockedBuffer {
             capacity: capacity.max(1),
             rate_limit_window,
             rate_limit_per_source,
+            access_requests: Mutex::new(None),
         }
+    }
+
+    pub fn bind_access_requests(
+        &self,
+        access_requests: Arc<crate::access_request::AccessRequestBuffer>,
+    ) {
+        let Ok(mut target) = self.access_requests.lock() else {
+            return;
+        };
+        *target = Some(access_requests);
     }
 
     /// Convenience constructor with the recommended defaults
@@ -96,7 +108,23 @@ impl BlockedBuffer {
     /// possible results. Hostname-only — never store paths, headers, or
     /// payload data.
     pub fn record(&self, source_sandbox: &str, host: &str, port: u16) -> RecordOutcome {
-        self.record_at(Instant::now(), unix_now(), source_sandbox, host, port)
+        let outcome = self.record_at(Instant::now(), unix_now(), source_sandbox, host, port);
+        if !matches!(
+            outcome,
+            RecordOutcome::Rejected | RecordOutcome::RateLimited
+        ) && !host.eq_ignore_ascii_case("registry.npmjs.org")
+            && let Ok(target) = self.access_requests.lock()
+            && let Some(requests) = target.as_ref()
+        {
+            requests.record(
+                "egress",
+                host,
+                "The network boundary blocked this destination while the task was running.",
+                None,
+                Some(port),
+            );
+        }
+        outcome
     }
 
     /// Testable record entry point — accepts an injected clock pair.
@@ -313,6 +341,30 @@ mod tests {
         assert_eq!(snap[0].port, 443);
         assert_eq!(snap[0].source_sandbox, "sb1");
         assert_eq!(snap[0].count, 1);
+    }
+
+    #[test]
+    fn blocked_egress_becomes_typed_access_request() {
+        let blocked = buf();
+        let requests = Arc::new(crate::access_request::AccessRequestBuffer::new(8));
+        blocked.bind_access_requests(requests.clone());
+        blocked.record("sb1", "api.example.com", 8443);
+
+        let entries = requests.snapshot(0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "egress");
+        assert_eq!(entries[0].target, "api.example.com");
+        assert_eq!(entries[0].port, Some(8443));
+        assert_eq!(entries[0].decision, None);
+    }
+
+    #[test]
+    fn passive_npm_probe_does_not_become_access_request() {
+        let blocked = buf();
+        let requests = Arc::new(crate::access_request::AccessRequestBuffer::new(8));
+        blocked.bind_access_requests(requests.clone());
+        blocked.record("sb1", "registry.npmjs.org", 443);
+        assert!(requests.snapshot(0).is_empty());
     }
 
     #[test]

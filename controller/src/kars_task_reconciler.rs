@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use crate::crd::KarsSandbox;
 use crate::kars_task::{KarsTask, KarsTaskStatus, TIER_MAX, TIER_MIN};
+use crate::kars_team::KarsTeam;
 use crate::status::conditions::{self, TYPE_READY, reason as cond_reason, status as cond_status};
 use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
 
@@ -1085,12 +1086,15 @@ async fn process_task_promotion(client: &Client, ns: &str, task: &KarsTask) {
             // Merge-patch only the two envelope fields so the other envelope
             // settings are preserved (an SSA apply would drop unmanaged siblings).
             let patch = json!({
-                "spec": { "envelope": { "tier": target, "authorityCeiling": target } }
+                "spec": {
+                    "envelope": { "tier": target, "authorityCeiling": target },
+                    "requestedTier": null,
+                }
             });
             let _ = tasks
                 .patch(&task_name, &PatchParams::default(), &Patch::Merge(patch))
                 .await;
-            tracing::info!(karstask = %task_name, tier = target, "mission promotion approved — envelope widened");
+            tracing::info!(karstask = %task_name, tier = target, "mission promotion approved — envelope widened (requestedTier cleared)");
         }
         return;
     }
@@ -1214,6 +1218,12 @@ async fn process_access_requests(client: &Client, ns: &str, task: &KarsTask, exe
         fetch_json_entries(&http, &base, "/internal/access-requests", &token).await
     {
         for r in entries {
+            let last_seen_unix = r.get("last_seen_unix").and_then(serde_json::Value::as_u64);
+            if run_started_unix
+                .is_some_and(|started| last_seen_unix.is_some_and(|last_seen| last_seen < started))
+            {
+                continue;
+            }
             let kind = r.get("kind").and_then(|v| v.as_str()).unwrap_or("").trim();
             let target = r
                 .get("target")
@@ -1310,6 +1320,70 @@ fn task_owner_ref(task: &KarsTask) -> serde_json::Value {
     }])
 }
 
+async fn control_request_owner_ref(
+    client: &Client,
+    ns: &str,
+    task: &KarsTask,
+) -> serde_json::Value {
+    let team_name = task.annotations().get("kars.azure.com/team").cloned();
+    if let Some(team_name) = team_name {
+        let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+        if let Ok(Some(team)) = teams.get_opt(&team_name).await {
+            return json!([{
+                "apiVersion": "kars.azure.com/v1alpha1",
+                "kind": "KarsTeam",
+                "name": team.name_any(),
+                "uid": team.uid().unwrap_or_default(),
+                "controller": true,
+                "blockOwnerDeletion": true,
+            }]);
+        }
+    }
+    task_owner_ref(task)
+}
+
+async fn control_approval_owned_by_task_or_team(
+    client: &Client,
+    ns: &str,
+    task: &KarsTask,
+    approval: &crate::kars_approval::KarsApproval,
+) -> bool {
+    let Some(refs) = approval.metadata.owner_references.as_ref() else {
+        return false;
+    };
+    let task_name = task.name_any();
+    if refs.iter().any(|owner| {
+        owner.kind == "KarsTask"
+            && owner.name == task_name
+            && owner.controller == Some(true)
+            && task
+                .metadata
+                .uid
+                .as_ref()
+                .is_none_or(|uid| &owner.uid == uid)
+    }) {
+        return true;
+    }
+
+    let Some(team_name) = task.annotations().get("kars.azure.com/team") else {
+        return false;
+    };
+    let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+    let Ok(Some(team)) = teams.get_opt(team_name).await else {
+        return false;
+    };
+    refs.iter().any(|owner| {
+        owner.kind == "KarsTeam"
+            && owner.name == *team_name
+            && owner.controller == Some(true)
+            && team
+                .metadata
+                .uid
+                .as_ref()
+                .is_none_or(|uid| &owner.uid == uid)
+    })
+}
+
 fn task_owner_annotations(task: &KarsTask) -> serde_json::Map<String, serde_json::Value> {
     let mut annotations = serde_json::Map::new();
     for key in ["kars.azure.com/owner-sub", "kars.azure.com/owner-name"] {
@@ -1367,12 +1441,13 @@ async fn ensure_egress_approval(
     approval_annotations.insert(REQ_KIND_ANN.into(), json!("egress"));
     approval_annotations.insert(REQ_TARGET_ANN.into(), json!(host));
     approval_annotations.insert(REQ_PORT_ANN.into(), json!(port.to_string()));
+    let owner_references = control_request_owner_ref(client, ns, task).await;
     let appr = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsApproval",
         "metadata": {
             "name": name,
-            "ownerReferences": task_owner_ref(task),
+            "ownerReferences": owner_references,
             "labels": { "kars.azure.com/req-task": task_name, "kars.azure.com/req-kind": "egress" },
             "annotations": approval_annotations,
         },
@@ -1398,10 +1473,96 @@ async fn ensure_egress_approval(
         .await;
 }
 
+enum TypedTierScope {
+    Task(String),
+    Team(String),
+}
+
+impl TypedTierScope {
+    fn name(&self) -> &str {
+        match self {
+            Self::Task(name) | Self::Team(name) => name,
+        }
+    }
+}
+
+async fn typed_tier_scope(
+    client: &Client,
+    ns: &str,
+    task: &KarsTask,
+    target: i32,
+) -> Option<TypedTierScope> {
+    if !(crate::kars_task::TIER_MIN..=crate::kars_task::TIER_MAX).contains(&target) {
+        tracing::warn!(
+            karstask = %task.name_any(),
+            tier = target,
+            "ignoring typed tier request outside the supported range"
+        );
+        return None;
+    }
+
+    if let Some(team_name) = task.annotations().get("kars.azure.com/team") {
+        let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+        match teams.get_opt(team_name).await {
+            Ok(Some(_)) => return Some(TypedTierScope::Team(team_name.clone())),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    karstask = %task.name_any(),
+                    team = %team_name,
+                    tier = target,
+                    %error,
+                    "failed to resolve typed tier request owner"
+                );
+                return None;
+            }
+        }
+    }
+
+    Some(TypedTierScope::Task(task.name_any()))
+}
+
+async fn record_typed_tier_promotion(
+    client: &Client,
+    ns: &str,
+    task: &KarsTask,
+    scope: &TypedTierScope,
+    target: i32,
+) -> bool {
+    let patch = json!({ "spec": { "requestedTier": target } });
+    let result = match scope {
+        TypedTierScope::Task(task_name) => {
+            let tasks: Api<KarsTask> = Api::namespaced(client.clone(), ns);
+            tasks
+                .patch(task_name, &PatchParams::default(), &Patch::Merge(patch))
+                .await
+                .map(|_| ())
+        }
+        TypedTierScope::Team(team_name) => {
+            let teams: Api<KarsTeam> = Api::namespaced(client.clone(), ns);
+            teams
+                .patch(team_name, &PatchParams::default(), &Patch::Merge(patch))
+                .await
+                .map(|_| ())
+        }
+    };
+    if let Err(error) = result {
+        tracing::warn!(
+            karstask = %task.name_any(),
+            scope = %scope.name(),
+            tier = target,
+            %error,
+            "failed to record typed tier request"
+        );
+        return false;
+    }
+    true
+}
+
 /// Idempotently open a Pending `KarsApproval` for a non-egress capability
-/// (tool/skill/mcp/command/permission/tier). The controller cannot itself grant
-/// these mid-run, but surfacing them lets a human decide + the agent retry, and
-/// makes the missing capability visible instead of a silent failure.
+/// (tool/skill/mcp/command/permission/tier). Tier requests enter the existing
+/// task/team promotion state machine; other capability decisions are mirrored
+/// to the active run without pretending the controller materialized a grant.
 async fn ensure_capability_approval(
     client: &Client,
     ns: &str,
@@ -1413,13 +1574,28 @@ async fn ensure_capability_approval(
 ) {
     use crate::kars_approval::{ApprovalAction, KarsApproval};
     let task_name = task.name_any();
-    let key = format!("{kind}:{target}");
-    let name = format!("{task_name}-cap-{}", stable_suffix(&key));
-    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
-    if let Ok(Some(_)) = approvals.get_opt(&name).await {
-        ensure_task_approval_owner(&approvals, &name, task).await;
+    let promotion_scope = if kind == "tier" {
+        let Some(target_tier) = tier else {
+            tracing::warn!(karstask = %task_name, "ignoring typed tier request without a tier");
+            return;
+        };
+        typed_tier_scope(client, ns, task, target_tier).await
+    } else {
+        None
+    };
+    if kind == "tier" && promotion_scope.is_none() {
         return;
     }
+    let name = match (kind, tier, promotion_scope.as_ref()) {
+        ("tier", Some(target_tier), Some(scope)) => {
+            format!("{}-promote-t{target_tier}", scope.name())
+        }
+        _ => {
+            let key = format!("{kind}:{target}");
+            format!("{task_name}-cap-{}", stable_suffix(&key))
+        }
+    };
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
     let (approval_kind, summary) = match kind {
         "tier" => (
             "tierRaise".to_string(),
@@ -1443,12 +1619,13 @@ async fn ensure_capability_approval(
     let mut approval_annotations = task_owner_annotations(task);
     approval_annotations.insert(REQ_KIND_ANN.into(), json!(kind));
     approval_annotations.insert(REQ_TARGET_ANN.into(), json!(target));
+    let owner_references = control_request_owner_ref(client, ns, task).await;
     let appr = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsApproval",
         "metadata": {
             "name": name,
-            "ownerReferences": task_owner_ref(task),
+            "ownerReferences": owner_references,
             "labels": { "kars.azure.com/req-task": task_name, "kars.azure.com/req-kind": kind },
             "annotations": approval_annotations,
         },
@@ -1462,13 +1639,26 @@ async fn ensure_capability_approval(
             },
         },
     });
-    let _ = approvals
+    if let Err(error) = approvals
         .patch(
             &name,
             &PatchParams::apply(FIELD_MANAGER).force(),
             &Patch::Apply(appr),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(
+            karstask = %task_name,
+            request_kind = %kind,
+            approval = %name,
+            %error,
+            "failed to create typed capability approval"
+        );
+        return;
+    }
+    if let (Some(scope), Some(target_tier)) = (promotion_scope.as_ref(), tier) {
+        record_typed_tier_promotion(client, ns, task, scope, target_tier).await;
+    }
 }
 
 /// For every `Approved` egress `KarsApproval` owned by this task that hasn't yet
@@ -1504,12 +1694,7 @@ async fn consume_approved_egress(client: &Client, ns: &str, task: &KarsTask, san
         if !approved {
             continue;
         }
-        // Forgery guard: only honor an approval this task actually owns.
-        let owned = appr.metadata.owner_references.as_ref().is_some_and(|refs| {
-            refs.iter()
-                .any(|r| r.kind == "KarsTask" && r.name == task_name && r.controller == Some(true))
-        });
-        if !owned {
+        if !control_approval_owned_by_task_or_team(client, ns, task, &appr).await {
             continue;
         }
         // Already materialised?
@@ -1577,6 +1762,19 @@ async fn consume_approved_egress(client: &Client, ns: &str, task: &KarsTask, san
 /// to the sandbox router, so the agent's `GET /v1/access-requests` poll shows
 /// the outcome and it can proceed (or stop) instead of blindly retrying. Each
 /// decision is pushed exactly once (stamped with `REQ_PUSHED_ANN`).
+fn approved_request_is_materialized(
+    kind: &str,
+    requested_tier: Option<i32>,
+    task_tier: i32,
+    egress_granted: bool,
+) -> bool {
+    match kind {
+        "egress" => egress_granted,
+        "tier" => requested_tier.is_some_and(|target| task_tier >= target),
+        _ => true,
+    }
+}
+
 async fn push_decisions_to_router(
     client: &Client,
     ns: &str,
@@ -1593,6 +1791,9 @@ async fn push_decisions_to_router(
         return;
     };
     for appr in list.items {
+        if !control_approval_owned_by_task_or_team(client, ns, task, &appr).await {
+            continue;
+        }
         let anns = appr.metadata.annotations.clone().unwrap_or_default();
         if anns.get(REQ_PUSHED_ANN).is_some() {
             continue; // already mirrored
@@ -1606,6 +1807,16 @@ async fn push_decisions_to_router(
             Some(PHASE_DENIED) => "denied",
             _ => continue, // still pending
         };
+        if verdict == "approved"
+            && !approved_request_is_materialized(
+                kind,
+                appr.spec.action.requested_tier,
+                task.spec.envelope.tier,
+                anns.get(REQ_GRANTED_ANN).is_some(),
+            )
+        {
+            continue;
+        }
         let target = anns.get(REQ_TARGET_ANN).cloned().unwrap_or_default();
         let reason = appr
             .spec
@@ -1737,6 +1948,15 @@ mod tests {
         );
         t.metadata.namespace = Some("default".into());
         t
+    }
+
+    #[test]
+    fn approved_typed_controls_wait_for_materialized_authority() {
+        assert!(!approved_request_is_materialized("egress", None, 1, false));
+        assert!(approved_request_is_materialized("egress", None, 1, true));
+        assert!(!approved_request_is_materialized("tier", Some(4), 3, false));
+        assert!(approved_request_is_materialized("tier", Some(4), 4, false));
+        assert!(approved_request_is_materialized("tool", None, 1, false));
     }
 
     #[test]

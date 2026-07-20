@@ -340,6 +340,10 @@ impl AppState {
         )
         .await;
 
+        let blocked_egress = Arc::new(BlockedBuffer::with_defaults());
+        let access_requests = Arc::new(crate::access_request::AccessRequestBuffer::default());
+        blocked_egress.bind_access_requests(access_requests.clone());
+
         Ok(Self {
             auth: Arc::new(WorkloadIdentityAuth::new()),
             copilot: Arc::new(CopilotTokenCache::from_env()),
@@ -351,8 +355,8 @@ impl AppState {
             signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,
             governance,
             blocklist,
-            blocked_egress: Arc::new(BlockedBuffer::with_defaults()),
-            access_requests: Arc::new(crate::access_request::AccessRequestBuffer::default()),
+            blocked_egress,
+            access_requests,
             git_write: crate::git_write::GitWriteConfig::from_env().map(Arc::new),
             sandbox_name: Arc::new(sandbox_name),
             task_telemetry: Arc::new(crate::task_telemetry::TaskTelemetry::new()),

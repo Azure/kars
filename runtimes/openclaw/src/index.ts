@@ -413,103 +413,11 @@ import { registerOpenClawCommands } from "./core/commands/openclaw.js";
 let foundryProject: FoundryProjectInfo | null = null;
 let foundryInitialized = false;
 
-export function clarificationQuestion(response: string): string | null {
-  const questionEnd = response.lastIndexOf("?");
-  if (questionEnd < 0) return null;
-
-  const prefix = response.slice(0, questionEnd);
-  let questionStart = 0;
-  for (const boundary of prefix.matchAll(/\n|[.!?]\s+|:\s+|:\*{1,2}\s*/g)) {
-    questionStart = (boundary.index ?? 0) + boundary[0].length;
-  }
-  const question = response
-    .slice(questionStart, questionEnd + 1)
-    .trim()
-    .replace(/^[\s>*#_-]+/, "");
-  return question.length >= 3 && question.length <= 280 ? question : null;
-}
-
-export function egressApprovalHost(task: string, response: string): string | null {
-  const describesNetworkBlock =
-    /egress|outbound\s+access|network\s+boundary|allow.?list/i.test(response);
-  const asksForApproval =
-    /approv|action\s+needed|request(?:ed)?\s+(?:access|for\s+this\s+domain)/i
-      .test(response);
-  if (!describesNetworkBlock || !asksForApproval) {
-    return null;
-  }
-  const url = task.match(/https?:\/\/[^\s<>"')\]]+/i)?.[0];
-  if (url) {
-    try {
-      return new URL(url).hostname;
-    } catch {
-      // Fall through to the response's explicit host.
-    }
-  }
-  return response.match(/`([a-z0-9.-]+\.[a-z]{2,})`/i)?.[1] ?? null;
-}
-
-async function waitForHumanClarification(
-  question: string,
-  context: string,
-  log: { info: (message: string) => void; warn: (message: string) => void },
-): Promise<string | null> {
-  await _routerCall("POST", "/v1/access-request", {
-    kind: "clarification",
-    target: question,
-    reason: context.slice(0, 512),
-  });
-  appendCollaborationEvent({
-    event: "clarification_requested",
-    question,
-    context: context.slice(0, 512),
-  });
-  log.info(`Clarification requested from the owning human: ${question}`);
-  const deadline = Date.now() + 20 * 60_000;
-  while (Date.now() < deadline) {
-    const response = await _routerCall("GET", "/v1/access-requests");
-    const requests = Array.isArray(response?.requests) ? response.requests : [];
-    const request = requests.find(
-      (candidate: any) =>
-        candidate?.kind === "clarification" && candidate?.target === question,
-    );
-    if (request?.status === "approved") {
-      const answer = typeof request.decision_reason === "string"
-        ? request.decision_reason.trim()
-        : "";
-      appendCollaborationEvent({
-        event: "clarification_resolved",
-        question,
-        outcome: "approved",
-        answer_digest: evidenceDigest(answer),
-      });
-      return answer || "(approved without a written answer)";
-    }
-    if (request?.status === "denied") {
-      appendCollaborationEvent({
-        event: "clarification_resolved",
-        question,
-        outcome: "denied",
-      });
-      return null;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-  }
-  log.warn(`Clarification remained pending for 20 minutes: ${question}`);
-  return null;
-}
-
 async function waitForEgressApproval(
   host: string,
   log: { info: (message: string) => void; warn: (message: string) => void },
 ): Promise<boolean> {
-  await _routerCall("POST", "/v1/access-request", {
-    kind: "egress",
-    target: host,
-    port: 443,
-    reason: `The mission requires ${host}:443 to complete its objective.`,
-  });
-  log.info(`Egress approval requested for ${host}:443`);
+  log.info(`Waiting for typed egress decision for ${host}`);
   const deadline = Date.now() + 20 * 60_000;
   while (Date.now() < deadline) {
     const response = await _routerCall("GET", "/v1/access-requests");
@@ -524,6 +432,18 @@ async function waitForEgressApproval(
   }
   log.warn(`Egress approval remained pending for 20 minutes: ${host}:443`);
   return false;
+}
+
+async function pendingTypedEgressHost(): Promise<string | null> {
+  const response = await _routerCall("GET", "/v1/access-requests");
+  const requests = Array.isArray(response?.requests) ? response.requests : [];
+  const request = requests.find(
+    (candidate: any) =>
+      candidate?.kind === "egress" &&
+      candidate?.status === "pending" &&
+      typeof candidate?.target === "string",
+  );
+  return request?.target ?? null;
 }
 
 // delegateToNativeAgent — extracted to core/agt-task-delegate.ts in S15.f.2.
@@ -1229,25 +1149,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               log,
             );
             llmResponse = extractNativeDeliverable(llmResponse);
-            const question = taskText.includes("kars_ask_human")
-              ? clarificationQuestion(llmResponse)
-              : null;
-            if (question) {
-              const answer = await waitForHumanClarification(
-                question,
-                "The mission explicitly required a human answer before completion.",
-                log,
-              );
-              if (answer) {
-                llmResponse = await delegateToNativeAgent(
-                  `${taskText}\n\nHuman clarification received:\nQuestion: ${question}\nAnswer: ${answer}\n\nContinue the original task now. Do not ask the question again.`,
-                  fromName,
-                  log,
-                );
-                llmResponse = extractNativeDeliverable(llmResponse);
-              }
-            }
-            const egressHost = egressApprovalHost(taskText, llmResponse);
+            const egressHost = await pendingTypedEgressHost();
             if (egressHost && await waitForEgressApproval(egressHost, log)) {
               llmResponse = await delegateToNativeAgent(
                 `${taskText}\n\nScoped egress approval is now active for ${egressHost}:443. Retry the required network call and complete the original task. Do not return another approval request.`,

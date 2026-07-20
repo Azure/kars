@@ -259,7 +259,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   api.registerTool({
     name: "kars_ask_human",
     label: "Ask Human",
-    description: "Pause the current governed run and ask the owning human one clarification question. The question appears on the mission/team page and in the Bridge inbox. Waits for the approved answer and returns it to this SAME run, so continue the task after it resolves. Use this instead of guessing or ending with a NEEDS_CLARIFICATION sentinel.",
+    description: "Pause the current governed run and ask the owning human one clarification question. The question appears on the mission/team page and in the Bridge inbox. Waits for the approved answer and returns it to this SAME run, so continue the task after it resolves. Never encode the request in prose.",
     parameters: {
       type: "object",
       properties: {
@@ -360,6 +360,103 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           }],
         };
       }
+    },
+  });
+
+  api.registerTool({
+    name: "kars_request_access",
+    label: "Request Governed Access",
+    description: "Pause the current run and request a typed governed capability from the owning human. Use for egress, tier, tool, skill, MCP, command, or permission needs. The request appears in Bridge and this call waits for the decision; continue the SAME run only after approval.",
+    parameters: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["egress", "tier", "tool", "skill", "mcp", "command", "permission"],
+        },
+        target: {
+          type: "string",
+          description: "Concrete host/capability name. Empty only for a tier request.",
+        },
+        reason: {
+          type: "string",
+          description: "Why this access is required to complete the current task.",
+        },
+        port: { type: "integer", description: "Egress port; defaults to 443." },
+        tier: { type: "integer", description: "Requested autonomy tier (1-5)." },
+      },
+      required: ["kind", "reason"],
+    },
+    async execute(_id: string, params: Record<string, unknown>) {
+      const kind = String(params.kind ?? "").trim();
+      const target = String(params.target ?? "").trim().slice(0, 280);
+      const reason = String(params.reason ?? "").trim().slice(0, 512);
+      const port = typeof params.port === "number" ? params.port : undefined;
+      const tier = typeof params.tier === "number" ? params.tier : undefined;
+      const invalidTier =
+        kind === "tier" &&
+        (tier === undefined || !Number.isInteger(tier) || tier < 1 || tier > 5);
+      if (!kind || !reason || (kind !== "tier" && !target) || invalidTier) {
+        return {
+          content: [{
+            type: "text",
+            text: safeJson({
+              error: invalidTier
+                ? "tier requests require an integer tier from 1 through 5"
+                : "kind, reason, and target (except tier) are required",
+            }),
+          }],
+        };
+      }
+      await routerCall("POST", "/v1/access-request", {
+        kind,
+        target,
+        reason,
+        port,
+        tier,
+      });
+      appendCollaborationEvent({
+        event: "access_requested",
+        kind,
+        target,
+        reason,
+      });
+      const deadline = Date.now() + 20 * 60_000;
+      while (Date.now() < deadline) {
+        const response = await routerCall("GET", "/v1/access-requests");
+        const requests = Array.isArray(response?.requests) ? response.requests : [];
+        const request = requests.find(
+          (candidate: any) =>
+            candidate?.kind === kind && candidate?.target === target,
+        );
+        if (request?.status === "approved" || request?.status === "denied") {
+          appendCollaborationEvent({
+            event: "access_resolved",
+            kind,
+            target,
+            outcome: request.status,
+          });
+          return {
+            content: [{
+              type: "text",
+              text: safeJson({
+                status: request.status,
+                kind,
+                target,
+                decision_reason: request.decision_reason ?? null,
+              }),
+            }],
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+      return {
+        content: [{
+          type: "text",
+          text: safeJson({ status: "lease_expired", kind, target }),
+        }],
+        isError: true,
+      };
     },
   });
 

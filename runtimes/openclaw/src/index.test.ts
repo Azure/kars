@@ -193,6 +193,22 @@ describe("plugin.register() — tool definitions", () => {
     expect(tool.description).toContain("SAME run");
   });
 
+  it("registers typed governed access with bounded tier semantics", () => {
+    const tool = tools.get("kars_request_access")!;
+    expect(tool).toBeDefined();
+    expect(tool.parameters.properties.kind.enum).toEqual([
+      "egress",
+      "tier",
+      "tool",
+      "skill",
+      "mcp",
+      "command",
+      "permission",
+    ]);
+    expect(tool.parameters.properties.tier.description).toContain("1-5");
+    expect(tool.description).toContain("SAME run");
+  });
+
   it("registers kars_spawn_status tool", () => {
     expect(tools.has("kars_spawn_status")).toBe(true);
     const tool = tools.get("kars_spawn_status")!;
@@ -963,37 +979,14 @@ describe("DEFAULT_CONFIG values", () => {
     delete process.env.AGT_SKIP_INIT;
   });
 
-  describe("clarification fallback", () => {
-    it("recognizes a concise final question without misreading a report", async () => {
+  describe("Foundry memory provisioning", () => {
+    it("recognizes not-found envelopes", async () => {
       process.env.AGT_SKIP_INIT = "1";
       const mod = await import("./index.js");
-      expect(mod.clarificationQuestion("Context\nWhich country should this target?"))
-        .toBe("Which country should this target?");
-      expect(mod.clarificationQuestion(
-        "**Question for you:** Which country will the pilot serve? Please let me know so I can tailor the recommendation.",
-      )).toBe("Which country will the pilot serve?");
-      expect(mod.clarificationQuestion("# Report\nThe recommendation is complete."))
-        .toBeNull();
       expect(mod.memoryStoreNeedsProvisioning({ error: { code: "not_found" } }))
         .toBe(true);
       expect(mod.memoryStoreNeedsProvisioning({ id: "shared-store" }))
         .toBe(false);
-      expect(mod.egressApprovalHost(
-        "Fetch https://www.iana.org/time-zones and summarize it.",
-        "I requested egress approval for `iana.org` and will wait.",
-      )).toBe("www.iana.org");
-      expect(mod.egressApprovalHost(
-        "Write an internal memo.",
-        "The memo is complete.",
-      )).toBeNull();
-      expect(mod.egressApprovalHost(
-        "Retrieve https://www.iana.org/time-zones.",
-        "The attempt was blocked by the egress policy. Approval Needed: approve outbound access to www.iana.org.",
-      )).toBe("www.iana.org");
-      expect(mod.egressApprovalHost(
-        "Retrieve https://cldr.unicode.org/index/downloads.",
-        "The host cldr.unicode.org is not on the egress allow-list. An approval request for this domain is required.",
-      )).toBe("cldr.unicode.org");
       delete process.env.AGT_SKIP_INIT;
     });
   });
